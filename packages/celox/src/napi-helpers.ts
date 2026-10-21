@@ -106,6 +106,7 @@ export interface NapiOptimizeOptions {
 }
 
 export interface NapiOptions {
+	plusargs?: string[];
 	fourState?: boolean;
 	vcd?: string;
 	optLevel?: string;
@@ -358,6 +359,10 @@ export function buildNapiOpts(
 	const napiOpts: NapiOptions = {};
 	let hasOpt = false;
 
+	if (options.plusargs) {
+		napiOpts.plusargs = options.plusargs;
+		hasOpt = true;
+	}
 	if (options.fourState) {
 		napiOpts.fourState = options.fourState;
 		hasOpt = true;

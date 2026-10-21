@@ -59,6 +59,7 @@ pub struct ProcessModel<A> {
     pub slots: ProcessSlots<A>,
     pub waits: Vec<Vec<TermModel<A>>>,
     pub nbas: Vec<NbaSite<A>>,
+    pub host_requests: Vec<crate::HostRequestSite<A>>,
 }
 
 /// One term of a wait site.
@@ -98,6 +99,7 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
                 slots: *slots,
                 waits: Vec::new(),
                 nbas: Vec::new(),
+                host_requests: Vec::new(),
             })
             .collect();
         for site in &schema.wait_sites {
@@ -114,6 +116,9 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
         }
         for site in &schema.nba_sites {
             processes[site.process].nbas.push(site.clone());
+        }
+        for site in &schema.host_request_sites {
+            processes[site.process].host_requests.push(site.clone());
         }
         let waited = schema
             .wait_sites

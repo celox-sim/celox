@@ -305,9 +305,6 @@ fn validate_scope(
             if !selected(port.tokens) {
                 continue;
             }
-            if port.default.is_some() {
-                return Err(unsupported("ANSI port default value"));
-            }
             if port
                 .data_type
                 .is_some_and(|id| matches!(native.data_type(id).kind, DataTypeKind::Enum { .. }))

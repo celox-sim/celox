@@ -27,8 +27,14 @@ pub mod syntax;
 pub mod system_functions;
 pub mod typecheck;
 
-pub use ast::interfaces::{InterfacePrototype, interface_prototypes, interface_prototypes_for};
-pub use ast::interfaces::{NativeInterfacePlan, plan_interfaces};
+pub use ast::interfaces::{
+    InterfaceMemberPath, InterfaceMemberPaths, NativeInterfacePlan, plan_interfaces,
+    plan_interfaces_with_member_paths,
+};
+pub use ast::interfaces::{
+    InterfacePrototype, interface_prototypes, interface_prototypes_for,
+    interface_prototypes_with_options,
+};
 pub use ast::packages::Packages;
 pub use ast::{ModuleInterface, ModuleInterfaces};
 pub use ir::Ir;
@@ -37,6 +43,12 @@ pub use parsed::ParsedSource;
 /// Internal marker used to defer division-by-zero state handling until the
 /// simulator's two-state/four-state mode is known.
 pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
+
+/// Options for recoverable language compatibility checks.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnalysisOptions {
+    pub allow_mixed_timescales: bool,
+}
 
 /// Errors reported by the SystemVerilog analyzer.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -226,6 +238,15 @@ pub fn generated_time_declarations(
     roots: Option<&[&str]>,
 ) -> Result<String, AnalyzerError> {
     ast::generated_time_declarations(sources, roots)
+}
+
+/// Generate timing declarations using the selected compatibility policy.
+pub fn generated_time_declarations_with_options(
+    sources: &[(&str, &Path)],
+    roots: Option<&[&str]>,
+    options: AnalysisOptions,
+) -> Result<String, AnalyzerError> {
+    ast::timescales::generated_source_declarations(sources, roots, options.allow_mixed_timescales)
 }
 
 /// Parse and analyze a SystemVerilog source string.

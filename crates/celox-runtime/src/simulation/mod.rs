@@ -189,15 +189,62 @@ impl<B: SimBackend> SimulationState<B> {
         match self.step_time(executor, limit) {
             Ok(time) => Ok(time),
             Err(Halt::Finish) => {
-                // The waveform records the state at the finish.
-                executor.finish_timed_step(self.scheduler.time);
-                self.finish(executor);
+                self.finalize_terminal(executor)?;
                 Ok(Some(self.scheduler.time))
             }
             // The time slot goes on when the simulation continues.
             Err(Halt::Stop) => Ok(Some(self.scheduler.time)),
-            Err(Halt::Error(error)) => Err(error),
+            Err(Halt::Error(error)) => {
+                // Preserve the primary runtime failure even if diagnostic
+                // waveform output also fails. This does not resume processes.
+                let _ = self.finish_timed_boundary(executor, self.scheduler.time);
+                let _ = executor.flush_output();
+                Err(error)
+            }
         }
+    }
+
+    /// Complete a boundary reached from an entry point that returns runtime
+    /// errors rather than scheduler control halts.
+    fn finish_timed_boundary<E>(
+        &mut self,
+        executor: &mut E,
+        time: u64,
+    ) -> Result<(), SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        match executor.try_finish_timed_step(time) {
+            Ok(()) => Ok(()),
+            Err(Halt::Error(error)) => Err(error),
+            Err(Halt::Finish) => {
+                self.finish_checked(executor)?;
+                Ok(())
+            }
+            Err(Halt::Stop) => {
+                self.stopped = true;
+                Ok(())
+            }
+        }
+    }
+
+    fn finish_checked<E>(&mut self, executor: &mut E) -> Result<(), SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        self.finished = true;
+        executor.try_freeze()
+    }
+
+    /// Once $finish is consumed, output errors must not make execution resumable.
+    pub fn finalize_terminal<E>(&mut self, executor: &mut E) -> Result<(), SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        self.finished = true;
+        let output = self.finish_timed_boundary(executor, self.scheduler.time);
+        let frozen = executor.try_freeze();
+        output.and(frozen)
     }
 
     /// End the simulation where it is.
@@ -241,16 +288,21 @@ impl<B: SimBackend> SimulationState<B> {
         self.slot_passes = 0;
         match self.step_round(executor, time, Vec::new(), Vec::new(), true) {
             Ok(()) => {
-                executor.finish_timed_step(time);
+                self.finish_timed_boundary(executor, time)?;
                 Ok(Some(time))
             }
             Err(Halt::Finish) => {
-                executor.finish_timed_step(time);
-                self.finish(executor);
+                self.finalize_terminal(executor)?;
                 Ok(Some(self.scheduler.time))
             }
             Err(Halt::Stop) => Ok(Some(self.scheduler.time)),
-            Err(Halt::Error(error)) => Err(error),
+            Err(Halt::Error(error)) => {
+                // Preserve the primary runtime failure even if diagnostic
+                // waveform output also fails. This does not resume processes.
+                let _ = self.finish_timed_boundary(executor, self.scheduler.time);
+                let _ = executor.flush_output();
+                Err(error)
+            }
         }
     }
 

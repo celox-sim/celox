@@ -524,6 +524,7 @@ impl ScopeSymbols {
                         rename.r#type(port.r#type.clone()),
                         port.is_net,
                     )
+                    .with_default(port.default.clone().map(|value| rename.const_expr(value)))
                 })
                 .collect(),
             signals: self
@@ -990,6 +991,11 @@ impl Renamer<'_> {
     pub fn subroutine(&self, subroutine: Subroutine) -> Subroutine {
         Subroutine {
             name: self.name(&subroutine.name),
+            automatic_locals: subroutine
+                .automatic_locals
+                .into_iter()
+                .map(|name| self.name(&name))
+                .collect(),
             params: subroutine
                 .params
                 .into_iter()

@@ -26,12 +26,24 @@ export function batchPullRequestNumbers(metadata) {
 // Mergify's queue lands stack members on the stack root, while each member
 // targets the head branch of the member below it. Resolve that root through
 // the `Depends-On:` chain, matching the queue's own stack recognition.
+export function stackDependency(repository, body) {
+  const marker =
+    /^Depends-On: (?:#([1-9]\d*)|https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/([1-9]\d*))\s*$/m.exec(body ?? "");
+  if (
+    !marker ||
+    (marker[2] && marker[2].toLowerCase() !== repository.toLowerCase())
+  )
+    return null;
+  const number = Number(marker[1] ?? marker[3]);
+  return Number.isSafeInteger(number) ? number : null;
+}
+
 export async function stackRootRef(repository, pull, api = githubJson) {
   for (let depth = 0; depth < 20; depth++) {
     const ref = pull.base?.ref;
-    const below = /^Depends-On: #(\d+)\s*$/m.exec(pull.body ?? "");
+    const below = stackDependency(repository, pull.body);
     if (!ref?.startsWith("stack/") || !below) return ref;
-    pull = await api(`/repos/${repository}/pulls/${below[1]}`);
+    pull = await api(`/repos/${repository}/pulls/${below}`);
     if (pull.head?.ref !== ref || pull.head?.repo?.full_name !== repository)
       return ref;
   }

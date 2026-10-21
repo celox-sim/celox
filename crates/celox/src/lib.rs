@@ -144,6 +144,12 @@ mod host_api {
             self.write(signal, |backend| backend.set_wide(signal, val));
         }
 
+        /// Read the current stored payload and X/Z mask without evaluating
+        /// combinational logic. Includes earlier writes in this `modify` call.
+        pub fn get_four_state(&self, signal: crate::SignalRef) -> (crate::BigUint, crate::BigUint) {
+            self.backend.get_four_state(signal)
+        }
+
         pub fn set_four_state(
             &mut self,
             signal: crate::SignalRef,
@@ -220,3 +226,9 @@ pub use simulator::{
 
 #[cfg(test)]
 mod flatting_tests;
+
+mod diagnostic_policy;
+pub use diagnostic_policy::{DiagnosticLevel, DiagnosticPolicy};
+
+mod signal_access;
+pub use signal_access::SignalAccessOptions;

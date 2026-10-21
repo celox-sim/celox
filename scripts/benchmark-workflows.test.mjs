@@ -155,3 +155,13 @@ test("failed manual validation and cancellation cannot start expensive jobs", ()
     assert.equal(runs(name, "schedule", "master", {}, "skipped", true), false, name);
   }
 });
+
+
+test("profiling reuse rejects pre-CLI artifacts before capture", () => {
+  const arm = job(heliodor, "arm64-linux-boot-full");
+  const check = arm.slice(arm.indexOf("- name: Validate reused ARM64 profiling runner"), arm.indexOf("- name: Prepare ARM64 profiling"));
+  assert.match(check, /if: inputs.arm64_profile && inputs.arm64_profile_run_id != ''/);
+  assert.match(check, /if \[\[ ! -f target\/release\/celox \]\]/);
+  assert.match(check, /predates the celox run CLI/);
+  assert.match(check, /exit 1/);
+});

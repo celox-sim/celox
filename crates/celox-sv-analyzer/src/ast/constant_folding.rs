@@ -407,13 +407,24 @@ fn constant_with_folded_selections_with_lookup(
             then_expr: Box::new(convert(then_expr)?),
             else_expr: Box::new(convert(else_expr)?),
         }),
-        Expr::Call { callee, args, .. } => Some(ConstExpr::call(
-            state,
-            callee.clone(),
-            args.iter()
-                .map(|arg| convert(arg.as_ref()?))
-                .collect::<Option<Vec<_>>>()?,
-        )),
+        Expr::Call { callee, args, .. } => {
+            // Materialize a constant function's self-determined return type
+            // before the enclosing selection/arithmetic receives its context.
+            if let Some(literal) =
+                const_functions::eval_expression_literal(&state.const_functions, expr, const_env)
+            {
+                return Some(ConstExpr::Literal(
+                    typecheck::format_integral_literal_binary(&literal),
+                ));
+            }
+            Some(ConstExpr::call(
+                state,
+                callee.clone(),
+                args.iter()
+                    .map(|arg| convert(arg.as_ref()?))
+                    .collect::<Option<Vec<_>>>()?,
+            ))
+        }
         _ => expr_to_const(state, expr.clone()),
     }
 }

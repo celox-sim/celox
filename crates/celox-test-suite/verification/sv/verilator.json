@@ -9,6 +9,7 @@
     "verilator/operators.json",
     "verilator/packed_structs.json",
     "verilator/procedural.json",
+    "verilator/random_plusargs.json",
     "verilator/review_regressions.json",
     "verilator/synthesizable.json",
     "verilator/system_functions.json",

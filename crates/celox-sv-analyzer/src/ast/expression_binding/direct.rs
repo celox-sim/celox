@@ -296,10 +296,14 @@ pub(in crate::ast) fn bind_value(
                         continue;
                     }
                     ExprKind::Literal(text) => {
-                        if typecheck::integral_literal_type_metadata(text).is_none() {
-                            return Err(unsupported("primary literal"));
+                        if let Some(packed) = packed_string_literal(text) {
+                            values.push(Expr::Literal(packed));
+                        } else {
+                            if typecheck::integral_literal_type_metadata(text).is_none() {
+                                return Err(unsupported("primary literal"));
+                            }
+                            values.push(Expr::Literal(text.clone()));
                         }
-                        values.push(Expr::Literal(text.clone()));
                         continue;
                     }
                     ExprKind::Name(name) if !name.spelling.starts_with('$') => {
@@ -463,7 +467,7 @@ pub(in crate::ast) fn bind_value(
                             }
                             if function.is_effectful() && args.iter().filter_map(|arg| arg.value).any(|id| {
                                 matches!(&native.expression(ungroup(id, native)).kind, ExprKind::Literal(text)
-                                    if typecheck::integral_literal_type_metadata(text).is_none())
+                                    if typecheck::integral_literal_type_metadata(text).is_none() && packed_string_literal(text).is_none())
                             }) {
                                 return Err(unsupported(format!("integral argument of `{name}`")));
                             }
@@ -718,6 +722,10 @@ pub(in crate::ast) fn bind_value(
                                 function,
                                 SystemFunction::Urandom
                                     | SystemFunction::Random
+                                    | SystemFunction::DistUniform
+                                    | SystemFunction::TestPlusargs
+                                    | SystemFunction::ValuePlusargs
+                                    | SystemFunction::Fopen
                                     | SystemFunction::UrandomRange
                             ) {
                                 for (position, arg) in operands.iter().enumerate() {
@@ -742,7 +750,9 @@ pub(in crate::ast) fn bind_value(
                                     {
                                         return Err(AnalyzerError::InvalidSystemTfCall {
                                             name: name.clone(),
-                                            detail: "seed must be an integral variable".into(),
+                                            detail:
+                                                "output/inout argument must be an integral variable"
+                                                    .into(),
                                         });
                                     }
                                 }
@@ -1111,4 +1121,103 @@ pub(in crate::ast) fn selected_lvalue(
         )?
     };
     Ok(lvalue)
+}
+
+/// String literals in integral contexts are unsigned packed arrays of bytes
+/// (IEEE 1800-2023 5.9). Keep the semantic IR integral, including escapes.
+fn packed_string_literal(text: &str) -> Option<String> {
+    let text = if let Some(text) = text.strip_prefix("\"\"\"") {
+        text.strip_suffix("\"\"\"")?
+    } else {
+        text.strip_prefix('"')?.strip_suffix('"')?
+    };
+    let mut input = text.bytes().peekable();
+    let mut bytes = Vec::new();
+    while let Some(byte) = input.next() {
+        if byte != b'\\' {
+            bytes.push(byte);
+            continue;
+        }
+        let escaped = input.next()?;
+        let value = match escaped {
+            b'n' => b'\n',
+            b't' => b'\t',
+            b'v' => 11,
+            b'f' => 12,
+            b'a' => 7,
+            b'\\' => b'\\',
+            b'"' => b'"',
+            b'\n' => continue,
+            b'\r' if input.peek() == Some(&b'\n') => {
+                input.next();
+                continue;
+            }
+            b'0'..=b'7' => {
+                let mut value = escaped - b'0';
+                for _ in 0..2 {
+                    if let Some(&digit @ b'0'..=b'7') = input.peek() {
+                        input.next();
+                        value = value.wrapping_mul(8).wrapping_add(digit - b'0');
+                    } else {
+                        break;
+                    }
+                }
+                value
+            }
+            b'x' => {
+                let mut value = 0u8;
+                let mut count = 0;
+                for _ in 0..2 {
+                    if let Some(digit) = input.peek().and_then(|byte| (*byte as char).to_digit(16))
+                    {
+                        input.next();
+                        value = value * 16 + digit as u8;
+                        count += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if count == 0 {
+                    return None;
+                }
+                value
+            }
+            other => other,
+        };
+        bytes.push(value);
+    }
+    let width = (bytes.len() * 8).max(8);
+    Some(format!(
+        "{}'h{}",
+        width,
+        num_bigint::BigUint::from_bytes_be(&bytes).to_str_radix(16)
+    ))
+}
+
+#[cfg(test)]
+mod string_literal_tests {
+    use super::packed_string_literal;
+
+    #[test]
+    fn packed_string_literal_triple_delimiters_preserve_content() {
+        assert_eq!(packed_string_literal("\"\"\"\"\"\""), Some("8'h0".into()));
+        assert_eq!(
+            packed_string_literal("\"\"\"A\"B\nC\"\"\""),
+            Some("40'h4122420a43".into())
+        );
+        assert_eq!(
+            packed_string_literal("\"\"\"A\r\nB\"\"\""),
+            Some("32'h410d0a42".into())
+        );
+    }
+
+    #[test]
+    fn packed_string_literal_escaped_newlines_ignore_lf_and_crlf() {
+        for delimiter in ["\"", "\"\"\""] {
+            for newline in ["\n", "\r\n"] {
+                let literal = format!("{delimiter}ab\\{newline}cd{delimiter}");
+                assert_eq!(packed_string_literal(&literal), Some("32'h61626364".into()));
+            }
+        }
+    }
 }

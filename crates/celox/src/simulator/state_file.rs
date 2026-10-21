@@ -245,6 +245,7 @@ impl<B: SimBackend> Simulator<B> {
     /// Combinational values are settled first, so the file shows the values
     /// a read would return.
     pub fn save_state(&mut self) -> Result<StateFile, StateError> {
+        self.check_host_checkpoint_support()?;
         if !self.testbench_strings.is_empty() {
             return Err(StateError::TestbenchStrings);
         }

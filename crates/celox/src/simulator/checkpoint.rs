@@ -123,6 +123,12 @@ pub enum CheckpointError {
         "checkpoints are not supported for designs with external components, whose state Celox cannot capture"
     )]
     ExternalComponents,
+    /// Source-driven files and waveform controls have host state that is
+    /// not represented in the saved HDL memory image.
+    #[error(
+        "checkpoints and state files are not supported for designs with SystemVerilog file I/O or VCD control tasks"
+    )]
+    ExternalSystemTasks,
     #[error("the checkpoint was taken from a different design")]
     DesignMismatch,
     /// A time-based simulation dumps VCD output at every step, so it cannot
@@ -147,6 +153,7 @@ impl<B: SimBackend> Simulator<B> {
     /// Inputs written since the last evaluation are part of the saved state;
     /// combinational logic is settled again after a restore.
     pub fn checkpoint(&self) -> Result<Checkpoint, CheckpointError> {
+        self.check_host_checkpoint_support()?;
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents);
         }
@@ -187,11 +194,30 @@ impl<B: SimBackend> Simulator<B> {
 
     /// Check every precondition of [`Self::restore`] without changing state.
     pub(crate) fn validate_restore(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
+        self.check_host_checkpoint_support()?;
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents);
         }
         if !checkpoint.image.matches(self.state_fingerprint()) {
             return Err(CheckpointError::DesignMismatch);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_host_checkpoint_support(&self) -> Result<(), CheckpointError> {
+        if self
+            .program
+            .runtime_schema
+            .host_request_sites
+            .iter()
+            .any(|site| {
+                matches!(
+                    site.kind,
+                    celox_design::HostRequestKind::FileIo | celox_design::HostRequestKind::Vcd
+                )
+            })
+        {
+            return Err(CheckpointError::ExternalSystemTasks);
         }
         Ok(())
     }

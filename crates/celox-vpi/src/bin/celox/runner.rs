@@ -12,7 +12,7 @@ use celox::{
     OptLevel, OptimizeOptions, Simulator, SirPass, TestResult, TieredExecutionStats,
     TieredExecutionTier, TieredPromotionStatus,
 };
-use clap::{Parser, ValueEnum};
+use clap::{Args, ValueEnum};
 use veryl_metadata::Metadata;
 
 #[cfg(any(
@@ -20,24 +20,20 @@ use veryl_metadata::Metadata;
     feature = "arm64-codegen",
     target_arch = "aarch64"
 ))]
-#[path = "heliodor/build_cache.rs"]
+#[path = "runner/build_cache.rs"]
 mod build_cache;
 
-#[derive(Parser)]
-#[command(about = "Run a Heliodor test with Celox and report split benchmark timing")]
-struct Cli {
-    #[arg(long)]
-    project: PathBuf,
-    #[arg(long)]
-    test: String,
-    #[arg(long = "source-file")]
-    source_files: Vec<PathBuf>,
-    #[arg(long, value_enum, ignore_case = true, default_value = "o2")]
-    opt_level: OptimizationLevel,
+// Structured records share the benchmark protocol; normal runs print only design output.
+macro_rules! report {
+    ($enabled:expr, $($args:tt)*) => { if $enabled { println!($($args)*); } };
+}
+
+#[derive(Args, Default)]
+pub(super) struct ExecutionArgs {
     #[arg(long, value_enum, default_value = "native")]
-    backend: Backend,
+    pub backend: Backend,
     #[arg(long)]
-    four_state: bool,
+    pub four_state: bool,
     #[arg(long)]
     compile_only: bool,
     /// Write a pointer-free native image during compile-only mode.
@@ -45,15 +41,13 @@ struct Cli {
     native_image_output: Option<PathBuf>,
     /// Load a pointer-free native image instead of generating machine code.
     #[arg(long, value_name = "PATH")]
-    native_image_input: Option<PathBuf>,
+    pub native_image_input: Option<PathBuf>,
     /// Reuse native compilation artifacts from this trusted local directory.
     #[arg(long, value_name = "DIR")]
     build_cache_dir: Option<PathBuf>,
-    #[arg(long, value_parser = parse_positive_u64)]
-    tick_limit: Option<u64>,
     #[arg(long)]
     dump_ir_dir: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "compile_only")]
     dump_ir_and_run: bool,
     #[arg(long = "native-profile-block", value_parser = parse_native_profile_block)]
     native_profile_blocks: Vec<celox::NativeProfileBlock>,
@@ -65,17 +59,51 @@ struct Cli {
     x86_slp: Option<OnOff>,
     /// Simulation threads, including the calling thread.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=64))]
-    threads: u32,
+    pub threads: u32,
+    /// Emit machine-readable CELOX_* timing, configuration and result records.
+    #[arg(long)]
+    report: bool,
+    /// Require the tiered backend to adopt and execute generated code.
+    #[arg(long, requires = "report")]
+    require_compiled: bool,
+    /// Run without the default scheduler step/tick limit.
+    #[arg(long, conflicts_with = "max_steps")]
+    pub unlimited: bool,
     /// Partition every phase with independent work instead of only the
     /// phases with an estimated speedup.
     #[arg(long)]
     always_partition: bool,
 }
 
+impl ExecutionArgs {
+    #[cfg(feature = "systemverilog")]
+    pub(super) fn validate_sv(&self) -> Result<(), String> {
+        if self.compile_only
+            || self.native_image_input.is_some()
+            || self.native_image_output.is_some()
+            || self.build_cache_dir.is_some()
+            || self.dump_ir_dir.is_some()
+            || self.dump_ir_and_run
+            || !self.native_profile_blocks.is_empty()
+            || !self.pass_overrides.is_empty()
+            || self.native_memory_width.is_some()
+            || self.x86_slp.is_some()
+            || self.always_partition
+            || self.report
+            || self.require_compiled
+        {
+            return Err("compilation artifacts, codegen tuning and --report currently require a Veryl testbench".into());
+        }
+        Ok(())
+    }
+}
+
 struct Options {
+    report: bool,
+    require_compiled: bool,
+    design: super::project::Design,
     project: PathBuf,
     test: String,
-    source_files: Vec<PathBuf>,
     opt_level: OptLevel,
     backend: Backend,
     four_state: bool,
@@ -95,12 +123,12 @@ struct Options {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum CeloxHeliodorError {
+pub(super) enum RunError {
     #[error(transparent)]
     Metadata(#[from] veryl_metadata::MetadataError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error("Celox build failed: {source}")]
+    #[error("compilation failed:\n{source}")]
     Build {
         #[from]
         #[source]
@@ -117,35 +145,20 @@ enum CeloxHeliodorError {
     InvalidConfiguration { message: &'static str },
     #[error("{artifact} trace was not captured")]
     MissingTrace { artifact: &'static str },
-    #[error("no initial block found — this module is not a native testbench")]
+    #[error("selected module has no native testbench; select a #[test] module with --top")]
     MissingInitialBlock,
     #[error("{message}")]
     TestFailed { message: String },
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum Backend {
+#[derive(Clone, Copy, Default, PartialEq, ValueEnum)]
+pub(super) enum Backend {
+    #[default]
     Native,
     Cranelift,
     Interpreter,
+    Wasm,
     Tiered,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum OptimizationLevel {
-    O0,
-    O1,
-    O2,
-}
-
-impl From<OptimizationLevel> for OptLevel {
-    fn from(value: OptimizationLevel) -> Self {
-        match value {
-            OptimizationLevel::O0 => Self::O0,
-            OptimizationLevel::O1 => Self::O1,
-            OptimizationLevel::O2 => Self::O2,
-        }
-    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -160,40 +173,36 @@ impl Backend {
             Backend::Native => "native",
             Backend::Cranelift => "cranelift",
             Backend::Interpreter => "interpreter",
+            Backend::Wasm => "wasm",
             Backend::Tiered => "tiered",
         }
     }
 }
 
-fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("off")),
-        )
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .init();
-    if let Err(e) = run() {
-        let _ = writeln!(std::io::stderr().lock(), "error: {e}");
-        std::process::exit(1);
-    }
-}
-
-fn run() -> Result<(), CeloxHeliodorError> {
-    let cli = Cli::parse();
-    let opts = Options {
-        project: cli.project,
-        test: cli.test,
-        source_files: cli.source_files,
-        opt_level: cli.opt_level.into(),
+pub(super) fn run(
+    cli: ExecutionArgs,
+    design: super::project::Design,
+    max_steps: u64,
+) -> Result<(), RunError> {
+    let mut opts = Options {
+        report: cli.report,
+        require_compiled: cli.require_compiled,
+        project: design.project_root.clone().unwrap_or_else(|| {
+            design
+                .sources
+                .first()
+                .cloned()
+                .unwrap_or_else(|| PathBuf::from("."))
+        }),
+        test: design.top.clone(),
+        opt_level: design.opt_level.unwrap_or(OptLevel::O2),
         backend: cli.backend,
         four_state: cli.four_state,
         compile_only: cli.compile_only,
         native_image_output: cli.native_image_output,
         native_image_input: cli.native_image_input,
         build_cache_dir: cli.build_cache_dir,
-        tick_limit: cli.tick_limit,
+        tick_limit: (!cli.unlimited).then_some(max_steps),
         dump_ir_dir: cli.dump_ir_dir,
         dump_ir_and_run: cli.dump_ir_and_run,
         native_profile_blocks: cli.native_profile_blocks,
@@ -217,55 +226,61 @@ fn run() -> Result<(), CeloxHeliodorError> {
             ))),
         threads: cli.threads,
         always_partition: cli.always_partition,
+        design,
     };
+    if opts.require_compiled && opts.backend != Backend::Tiered {
+        return Err(RunError::InvalidConfiguration {
+            message: "--require-compiled requires --backend tiered",
+        });
+    }
     if opts.build_cache_dir.is_some()
         && (!matches!(opts.backend, Backend::Native)
             || opts.native_image_input.is_some()
             || opts.dump_ir_dir.is_some())
     {
-        return Err(CeloxHeliodorError::InvalidConfiguration {
+        return Err(RunError::InvalidConfiguration {
             message: "--build-cache-dir requires --backend native and cannot be combined with --native-image-input or --dump-ir-dir",
         });
     }
     if opts.native_image_output.is_some() && !opts.compile_only {
-        return Err(CeloxHeliodorError::InvalidConfiguration {
+        return Err(RunError::InvalidConfiguration {
             message: "--native-image-output requires --compile-only",
         });
     }
     if opts.compile_only && matches!(opts.backend, Backend::Interpreter | Backend::Tiered) {
-        return Err(CeloxHeliodorError::InvalidConfiguration {
+        return Err(RunError::InvalidConfiguration {
             message: "--compile-only requires a compiled backend",
         });
     }
     if opts.native_image_input.is_some() && opts.compile_only {
-        return Err(CeloxHeliodorError::InvalidConfiguration {
+        return Err(RunError::InvalidConfiguration {
             message: "--native-image-input cannot be used with --compile-only",
         });
     }
     if opts.native_image_input.is_some() && opts.native_image_output.is_some() {
-        return Err(CeloxHeliodorError::InvalidConfiguration {
+        return Err(RunError::InvalidConfiguration {
             message: "--native-image-input and --native-image-output are mutually exclusive",
         });
     }
     if (opts.native_image_input.is_some() || opts.native_image_output.is_some())
         && !matches!(opts.backend, Backend::Native)
     {
-        return Err(CeloxHeliodorError::InvalidConfiguration {
+        return Err(RunError::InvalidConfiguration {
             message: "native image options require --backend native",
         });
     }
     if opts.native_image_input.is_some() && opts.dump_ir_dir.is_some() {
-        return Err(CeloxHeliodorError::InvalidConfiguration {
+        return Err(RunError::InvalidConfiguration {
             message: "--native-image-input cannot be combined with --dump-ir-dir",
         });
     }
     if !opts.native_profile_blocks.is_empty() && opts.dump_ir_dir.is_none() {
-        return Err(CeloxHeliodorError::InvalidConfiguration {
+        return Err(RunError::InvalidConfiguration {
             message: "--native-profile-block requires --dump-ir-dir",
         });
     }
     if opts.dump_ir_and_run && opts.dump_ir_dir.is_none() {
-        return Err(CeloxHeliodorError::InvalidConfiguration {
+        return Err(RunError::InvalidConfiguration {
             message: "--dump-ir-and-run requires --dump-ir-dir",
         });
     }
@@ -274,19 +289,19 @@ fn run() -> Result<(), CeloxHeliodorError> {
         all(target_arch = "aarch64", feature = "x86_64-codegen")
     ))]
     if opts.dump_ir_and_run {
-        return Err(CeloxHeliodorError::InvalidConfiguration {
+        return Err(RunError::InvalidConfiguration {
             message: "--dump-ir-and-run is unavailable during cross-codegen",
         });
     }
     #[cfg(all(target_arch = "x86_64", feature = "arm64-codegen"))]
     if matches!(opts.backend, Backend::Native) && !opts.compile_only {
-        return Err(CeloxHeliodorError::InvalidConfiguration {
+        return Err(RunError::InvalidConfiguration {
             message: "AArch64 cross-codegen requires --compile-only on an x86-64 host",
         });
     }
     #[cfg(all(target_arch = "aarch64", feature = "x86_64-codegen"))]
     if matches!(opts.backend, Backend::Native) && !opts.compile_only {
-        return Err(CeloxHeliodorError::InvalidConfiguration {
+        return Err(RunError::InvalidConfiguration {
             message: "x86-64 cross-codegen requires --compile-only on an AArch64 host",
         });
     }
@@ -296,7 +311,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
         target_arch = "aarch64"
     )))]
     if matches!(opts.backend, Backend::Native) {
-        return Err(CeloxHeliodorError::InvalidConfiguration {
+        return Err(RunError::InvalidConfiguration {
             message: "the custom native backend is unavailable on this target",
         });
     }
@@ -330,6 +345,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
             image.try_map_paths(|path| {
                 Ok::<_, std::io::Error>(build_cache::bind_path(path, &root))
             })?;
+            opts.four_state = image.four_state();
             Some(image)
         }
         None => None,
@@ -348,9 +364,13 @@ fn run() -> Result<(), CeloxHeliodorError> {
         // sources at all.
         (Vec::new(), None)
     } else {
-        let (sources, metadata) = load_sources(&opts.project, &opts.source_files)?;
-        (sources, Some(metadata))
+        load_sources(&opts.design)?
     };
+    if opts.build_cache_dir.is_some() && metadata.is_none() {
+        return Err(RunError::InvalidConfiguration {
+            message: "--build-cache-dir requires a Veryl.toml project",
+        });
+    }
     let source_refs: Vec<(&str, &Path)> = sources
         .iter()
         .map(|(source, path)| (source.as_str(), path.as_path()))
@@ -360,8 +380,12 @@ fn run() -> Result<(), CeloxHeliodorError> {
         feature = "arm64-codegen",
         target_arch = "aarch64"
     ))]
-    let project_root = metadata.as_ref().map(Metadata::project_path);
-    println!(
+    let project_root = metadata
+        .as_ref()
+        .map(Metadata::project_path)
+        .unwrap_or(std::env::current_dir()?);
+    report!(
+        opts.report,
         "CELOX_TEST_CONFIG test={} backend={} opt_level={} four_state={} compile_only={}",
         opts.test,
         opts.backend.as_str(),
@@ -371,9 +395,11 @@ fn run() -> Result<(), CeloxHeliodorError> {
     );
     // A separate record keeps the single-thread config line unchanged.
     if opts.threads > 1 {
-        println!(
+        report!(
+            opts.report,
             "CELOX_TEST_THREADS test={} threads={}",
-            opts.test, opts.threads
+            opts.test,
+            opts.threads
         );
     }
 
@@ -384,16 +410,15 @@ fn run() -> Result<(), CeloxHeliodorError> {
         target_arch = "aarch64"
     ))]
     let build_cache = opts.build_cache_dir.as_ref().and_then(|dir| {
-        match build_cache::BuildCache::new(
-            dir,
-            &opts,
-            &sources,
-            metadata.as_ref().expect("cache uses sources"),
-        ) {
+        match build_cache::BuildCache::new(dir, &opts, &sources, metadata.as_ref()?) {
             Ok(cache) => Some(cache),
             Err(error) => {
                 let _ = writeln!(std::io::stderr().lock(), "build cache disabled: {error}");
-                println!("CELOX_BUILD_CACHE test={} status=bypass", opts.test);
+                report!(
+                    opts.report,
+                    "CELOX_BUILD_CACHE test={} status=bypass",
+                    opts.test
+                );
                 None
             }
         }
@@ -405,7 +430,8 @@ fn run() -> Result<(), CeloxHeliodorError> {
     ))]
     if let Some(cache) = &build_cache {
         native_image = cache.load();
-        println!(
+        report!(
+            opts.report,
             "CELOX_BUILD_CACHE test={} status={} path={}",
             opts.test,
             if native_image.is_some() {
@@ -426,9 +452,12 @@ fn run() -> Result<(), CeloxHeliodorError> {
         .opt_level(opts.opt_level)
         .optimize_options(optimize_options)
         .x86_slp(opts.x86_slp)
+        .diagnostic_policy(opts.design.diagnostics.clone())
+        .signal_access(opts.design.signal_access.clone())
         .four_state(opts.four_state)
         .threads(opts.threads as usize)
         .diagnostics_from_env();
+    builder = opts.design.apply_parameters(builder);
     if opts.always_partition {
         builder = builder.parallel_partition(celox::ParallelPartition::Always);
     }
@@ -444,7 +473,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
     }
     if let Some(output_dir) = opts.dump_ir_dir {
         if !matches!(opts.backend, Backend::Native) {
-            return Err(CeloxHeliodorError::InvalidConfiguration {
+            return Err(RunError::InvalidConfiguration {
                 message: "--dump-ir-dir is only supported with --backend native",
             });
         }
@@ -475,12 +504,11 @@ fn run() -> Result<(), CeloxHeliodorError> {
                 }
                 build_cache::write_relative_image(
                     compiled.program_image(),
-                    project_root
-                        .as_ref()
-                        .expect("image export uses project sources"),
+                    &project_root,
                     output_path,
                 )?;
-                println!(
+                report!(
+                    opts.report,
                     "CELOX_NATIVE_IMAGE test={} mode=generated path={}",
                     opts.test,
                     output_path.display()
@@ -509,37 +537,35 @@ fn run() -> Result<(), CeloxHeliodorError> {
                     sir_path.display()
                 );
             }
-            let _pre_optimized_sir = pre_optimized_sir.ok_or(CeloxHeliodorError::MissingTrace {
+            let _pre_optimized_sir = pre_optimized_sir.ok_or(RunError::MissingTrace {
                 artifact: "pre-optimized SIR",
             })?;
-            let _sir = sir.ok_or(CeloxHeliodorError::MissingTrace {
+            let _sir = sir.ok_or(RunError::MissingTrace {
                 artifact: "post-optimized SIR",
             })?;
-            let native_sir =
-                trace
-                    .native_optimized_sir
-                    .take()
-                    .ok_or(CeloxHeliodorError::MissingTrace {
-                        artifact: "native optimized SIR",
-                    })?;
+            let native_sir = trace
+                .native_optimized_sir
+                .take()
+                .ok_or(RunError::MissingTrace {
+                    artifact: "native optimized SIR",
+                })?;
             let mir = trace
                 .mir
                 .take()
-                .ok_or(CeloxHeliodorError::MissingTrace { artifact: "MIR" })?;
+                .ok_or(RunError::MissingTrace { artifact: "MIR" })?;
             let reactive_graph =
                 trace
                     .reactive_event_graph
                     .take()
-                    .ok_or(CeloxHeliodorError::MissingTrace {
+                    .ok_or(RunError::MissingTrace {
                         artifact: "reactive event graph",
                     })?;
-            let state_layout =
-                trace
-                    .native_state_layout
-                    .take()
-                    .ok_or(CeloxHeliodorError::MissingTrace {
-                        artifact: "native state-layout analysis",
-                    })?;
+            let state_layout = trace
+                .native_state_layout
+                .take()
+                .ok_or(RunError::MissingTrace {
+                    artifact: "native state-layout analysis",
+                })?;
             let native_sir_path = output_dir.join("native_optimized.sir");
             let mir_path = output_dir.join("mir.txt");
             let reactive_graph_path = output_dir.join("reactive_event_graph.txt");
@@ -586,13 +612,15 @@ fn run() -> Result<(), CeloxHeliodorError> {
             ));
             if opts.dump_ir_and_run {
                 let mut sim = compiled.initialize()?;
-                let testbench = compile_initial_testbench(&sim)
-                    .ok_or(CeloxHeliodorError::MissingInitialBlock)?;
+                let testbench =
+                    compile_initial_testbench(&sim).ok_or(RunError::MissingInitialBlock)?;
                 #[cfg(any(
                     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
                     all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
                 ))]
-                sim.start_native_execution_timing();
+                if opts.report {
+                    sim.start_native_execution_timing();
+                }
                 let execute_cpu_start = process_cpu_time();
                 let execute_start = Instant::now();
                 let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
@@ -608,42 +636,52 @@ fn run() -> Result<(), CeloxHeliodorError> {
                 ))]
                 let jit_execute_elapsed = sim
                     .finish_native_execution_timing()
-                    .expect("native execution timing was started")
-                    .elapsed();
+                    .map(|timing| timing.elapsed());
                 #[cfg(not(any(
                     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
                     all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
                 )))]
-                let jit_execute_elapsed = Duration::ZERO;
+                let jit_execute_elapsed = None;
                 let execute_elapsed = execute_start.elapsed();
                 let execute_cpu_elapsed = process_cpu_time()
                     .zip(execute_cpu_start)
                     .map(|(end, start)| end.saturating_sub(start));
                 print_celox_timing(
+                    opts.report,
                     &opts.test,
                     compile_elapsed,
                     execute_elapsed,
-                    Some(jit_execute_elapsed),
+                    jit_execute_elapsed,
                     execute_cpu_elapsed,
                 );
                 if opts.tick_limit.is_some() {
-                    println!(
+                    report!(
+                        opts.report,
                         "CELOX_TEST_TICK_LIMIT test={} ticks={} reached={}",
-                        opts.test, ticks, tick_limit_reached
+                        opts.test,
+                        ticks,
+                        tick_limit_reached
                     );
                 }
                 let elapsed = total_start.elapsed();
                 return match result {
                     TestResult::Pass if tick_limit_reached => {
-                        println!(
+                        report!(
+                            opts.report,
                             "CELOX_TEST_RESULT test={} status=tick-limit elapsed_ns={}",
                             opts.test,
                             elapsed.as_nanos()
                         );
-                        Ok(())
+                        Err(RunError::TestFailed {
+                            message: format!(
+                                "simulation reached --max-steps {} testbench ticks before completion",
+                                opts.tick_limit.unwrap()
+                            ),
+                        })
                     }
                     TestResult::Pass => {
-                        println!(
+                        report!(
+                            opts.report,
                             "CELOX_TEST_RESULT test={} status=pass elapsed_ns={}",
                             opts.test,
                             elapsed.as_nanos()
@@ -651,16 +689,18 @@ fn run() -> Result<(), CeloxHeliodorError> {
                         Ok(())
                     }
                     TestResult::Fail(message) => {
-                        println!(
+                        report!(
+                            opts.report,
                             "CELOX_TEST_RESULT test={} status=fail elapsed_ns={}",
                             opts.test,
                             elapsed.as_nanos()
                         );
-                        Err(CeloxHeliodorError::TestFailed { message })
+                        Err(RunError::TestFailed { message })
                     }
                 };
             }
-            println!(
+            report!(
+                opts.report,
                 "CELOX_TEST_RESULT test={} status=trace-only elapsed_ns={}",
                 opts.test,
                 total_start.elapsed().as_nanos()
@@ -687,10 +727,15 @@ fn run() -> Result<(), CeloxHeliodorError> {
                                 .compile_native()
                         });
                     let compiled = compiled?;
+                    super::report_warnings(compiled.warnings())
+                        .map_err(|message| RunError::TestFailed { message })?;
                     cache.store(compiled.program_image(), &dependencies);
                     compiled.into_program_image()
                 } else {
-                    builder.compile_native()?.into_program_image()
+                    let compiled = builder.compile_native()?;
+                    super::report_warnings(compiled.warnings())
+                        .map_err(|message| RunError::TestFailed { message })?;
+                    compiled.into_program_image()
                 };
                 if let Some(output_path) = &opts.native_image_output {
                     if let Some(parent) = output_path
@@ -699,14 +744,9 @@ fn run() -> Result<(), CeloxHeliodorError> {
                     {
                         fs::create_dir_all(parent)?;
                     }
-                    build_cache::write_relative_image(
-                        &image,
-                        project_root
-                            .as_ref()
-                            .expect("image export uses project sources"),
-                        output_path,
-                    )?;
-                    println!(
+                    build_cache::write_relative_image(&image, &project_root, output_path)?;
+                    report!(
+                        opts.report,
                         "CELOX_NATIVE_IMAGE test={} mode=generated path={}",
                         opts.test,
                         output_path.display()
@@ -719,6 +759,9 @@ fn run() -> Result<(), CeloxHeliodorError> {
                 target_arch = "aarch64"
             )))]
             Backend::Native => unreachable!("native backend availability checked above"),
+            Backend::Wasm => {
+                builder.build_wasm()?;
+            }
             Backend::Cranelift => {
                 let _sim = builder.build_cranelift()?;
             }
@@ -729,13 +772,15 @@ fn run() -> Result<(), CeloxHeliodorError> {
         let compile_elapsed = compile_start.elapsed();
         let elapsed = total_start.elapsed();
         print_celox_timing(
+            opts.report,
             &opts.test,
             compile_elapsed,
             Duration::ZERO,
             matches!(opts.backend, Backend::Native).then_some(Duration::ZERO),
             None,
         );
-        println!(
+        report!(
+            opts.report,
             "CELOX_TEST_RESULT test={} status=compile-only elapsed_ns={}",
             opts.test,
             elapsed.as_nanos()
@@ -763,7 +808,8 @@ fn run() -> Result<(), CeloxHeliodorError> {
         Backend::Native => {
             let mut sim = if let Some(image) = native_image.take() {
                 if let Some(image_path) = &opts.native_image_input {
-                    println!(
+                    report!(
+                        opts.report,
                         "CELOX_NATIVE_IMAGE test={} mode=loaded path={}",
                         opts.test,
                         image_path.display()
@@ -783,10 +829,13 @@ fn run() -> Result<(), CeloxHeliodorError> {
             } else {
                 builder.build_native()?
             };
-            let testbench =
-                compile_initial_testbench(&sim).ok_or(CeloxHeliodorError::MissingInitialBlock)?;
+            super::report_warnings(sim.warnings())
+                .map_err(|message| RunError::TestFailed { message })?;
+            let testbench = compile_initial_testbench(&sim).ok_or(RunError::MissingInitialBlock)?;
             let compile_elapsed = compile_start.elapsed();
-            sim.start_native_execution_timing();
+            if opts.report {
+                sim.start_native_execution_timing();
+            }
             let execute_cpu_start = process_cpu_time();
             let execute_start = Instant::now();
             let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
@@ -797,15 +846,14 @@ fn run() -> Result<(), CeloxHeliodorError> {
             };
             let jit_execute_elapsed = sim
                 .finish_native_execution_timing()
-                .expect("native execution timing was started")
-                .elapsed();
+                .map(|timing| timing.elapsed());
             (
                 result,
                 ticks,
                 tick_limit_reached,
                 compile_elapsed,
                 execute_start.elapsed(),
-                Some(jit_execute_elapsed),
+                jit_execute_elapsed,
                 process_cpu_time()
                     .zip(execute_cpu_start)
                     .map(|(end, start)| end.saturating_sub(start)),
@@ -821,8 +869,9 @@ fn run() -> Result<(), CeloxHeliodorError> {
         Backend::Native => unreachable!("native backend availability checked above"),
         Backend::Cranelift => {
             let mut sim = builder.build_cranelift()?;
-            let testbench =
-                compile_initial_testbench(&sim).ok_or(CeloxHeliodorError::MissingInitialBlock)?;
+            super::report_warnings(sim.warnings())
+                .map_err(|message| RunError::TestFailed { message })?;
+            let testbench = compile_initial_testbench(&sim).ok_or(RunError::MissingInitialBlock)?;
             let compile_elapsed = compile_start.elapsed();
             let execute_cpu_start = process_cpu_time();
             let execute_start = Instant::now();
@@ -849,8 +898,38 @@ fn run() -> Result<(), CeloxHeliodorError> {
         }
         Backend::Interpreter => {
             let mut sim = builder.build_interpreter()?;
-            let testbench =
-                compile_initial_testbench(&sim).ok_or(CeloxHeliodorError::MissingInitialBlock)?;
+            super::report_warnings(sim.warnings())
+                .map_err(|message| RunError::TestFailed { message })?;
+            let testbench = compile_initial_testbench(&sim).ok_or(RunError::MissingInitialBlock)?;
+            let compile_elapsed = compile_start.elapsed();
+            let execute_cpu_start = process_cpu_time();
+            let execute_start = Instant::now();
+            let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
+                let limited = run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
+                (limited.result, limited.ticks, limited.tick_limit_reached)
+            } else {
+                (run_compiled_testbench(&mut sim, &testbench), 0, false)
+            };
+            (
+                result,
+                ticks,
+                tick_limit_reached,
+                compile_elapsed,
+                execute_start.elapsed(),
+                None,
+                process_cpu_time()
+                    .zip(execute_cpu_start)
+                    .map(|(end, start)| end.saturating_sub(start)),
+                None,
+                None,
+                None,
+            )
+        }
+        Backend::Wasm => {
+            let mut sim = builder.build_wasm()?;
+            super::report_warnings(sim.warnings())
+                .map_err(|message| RunError::TestFailed { message })?;
+            let testbench = compile_initial_testbench(&sim).ok_or(RunError::MissingInitialBlock)?;
             let compile_elapsed = compile_start.elapsed();
             let execute_cpu_start = process_cpu_time();
             let execute_start = Instant::now();
@@ -877,14 +956,17 @@ fn run() -> Result<(), CeloxHeliodorError> {
         }
         Backend::Tiered => {
             let mut sim = builder.build_tiered()?;
-            let testbench =
-                compile_initial_testbench(&sim).ok_or(CeloxHeliodorError::MissingInitialBlock)?;
+            super::report_warnings(sim.warnings())
+                .map_err(|message| RunError::TestFailed { message })?;
+            let testbench = compile_initial_testbench(&sim).ok_or(RunError::MissingInitialBlock)?;
             // `build_tiered` returns after constructing the interpreter and
             // starting code generation. The execution interval therefore
             // includes the background compile and promotion, which is the
             // end-to-end latency tiered execution is intended to improve.
             let compile_elapsed = compile_start.elapsed();
-            sim.start_tiered_execution_timing();
+            if opts.report {
+                sim.start_tiered_execution_timing();
+            }
             let execute_cpu_start = process_cpu_time();
             let execute_start = Instant::now();
             let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
@@ -917,6 +999,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
     };
     let elapsed = total_start.elapsed();
     print_celox_timing(
+        opts.report,
         &opts.test,
         compile_elapsed,
         execute_elapsed,
@@ -924,8 +1007,9 @@ fn run() -> Result<(), CeloxHeliodorError> {
         execute_cpu_elapsed,
     );
     if let Some(stats) = tiered_stats {
-        print_tiered_stats(&opts.test, stats, tiered_promotion_elapsed);
-        if !tick_limit_reached
+        print_tiered_stats(opts.report, &opts.test, stats, tiered_promotion_elapsed);
+        if opts.require_compiled
+            && !tick_limit_reached
             && (stats.tier != TieredExecutionTier::Compiled
                 || stats.promotion != TieredPromotionStatus::Promoted
                 || stats.compiled_evaluations == 0
@@ -934,34 +1018,45 @@ fn run() -> Result<(), CeloxHeliodorError> {
             let detail = tiered_promotion_error
                 .as_deref()
                 .unwrap_or("the compiled tier was not adopted and exercised");
-            println!(
+            report!(
+                opts.report,
                 "CELOX_TEST_RESULT test={} status=fail elapsed_ns={}",
                 opts.test,
                 elapsed.as_nanos()
             );
-            return Err(CeloxHeliodorError::TestFailed {
-                message: format!("tiered JIT benchmark did not exercise generated code: {detail}"),
+            return Err(RunError::TestFailed {
+                message: format!("tiered execution did not exercise generated code: {detail}"),
             });
         }
     }
     if opts.tick_limit.is_some() {
-        println!(
+        report!(
+            opts.report,
             "CELOX_TEST_TICK_LIMIT test={} ticks={} reached={}",
-            opts.test, ticks, tick_limit_reached
+            opts.test,
+            ticks,
+            tick_limit_reached
         );
     }
 
     match result {
         TestResult::Pass if tick_limit_reached => {
-            println!(
+            report!(
+                opts.report,
                 "CELOX_TEST_RESULT test={} status=tick-limit elapsed_ns={}",
                 opts.test,
                 elapsed.as_nanos()
             );
-            Ok(())
+            Err(RunError::TestFailed {
+                message: format!(
+                    "simulation reached --max-steps {} testbench ticks before completion",
+                    opts.tick_limit.unwrap()
+                ),
+            })
         }
         TestResult::Pass => {
-            println!(
+            report!(
+                opts.report,
                 "CELOX_TEST_RESULT test={} status=pass elapsed_ns={}",
                 opts.test,
                 elapsed.as_nanos()
@@ -969,17 +1064,19 @@ fn run() -> Result<(), CeloxHeliodorError> {
             Ok(())
         }
         TestResult::Fail(message) => {
-            println!(
+            report!(
+                opts.report,
                 "CELOX_TEST_RESULT test={} status=fail elapsed_ns={}",
                 opts.test,
                 elapsed.as_nanos()
             );
-            Err(CeloxHeliodorError::TestFailed { message })
+            Err(RunError::TestFailed { message })
         }
     }
 }
 
 fn print_tiered_stats(
+    report: bool,
     test: &str,
     stats: TieredExecutionStats,
     promotion_elapsed: Option<Duration>,
@@ -1003,7 +1100,8 @@ fn print_tiered_stats(
     let promotion_elapsed_ns = promotion_elapsed
         .map(|elapsed| elapsed.as_nanos().to_string())
         .unwrap_or_else(|| "NA".to_string());
-    println!(
+    report!(
+        report,
         "CELOX_TIERED_STATS test={test} tier={tier} promotion={promotion} interpreted_evaluations={} compiled_evaluations={} promoted_after_interpreted_evaluations={promoted_after} promotion_elapsed_ns={promotion_elapsed_ns} safe_point_polls={} split_apply_deferrals={} threshold_deferrals={}",
         stats.interpreted_evaluations,
         stats.compiled_evaluations,
@@ -1014,6 +1112,7 @@ fn print_tiered_stats(
 }
 
 fn print_celox_timing(
+    report: bool,
     test: &str,
     compile_elapsed: Duration,
     execute_elapsed: Duration,
@@ -1024,14 +1123,16 @@ fn print_celox_timing(
         .map(|elapsed| elapsed.as_nanos().to_string())
         .unwrap_or_else(|| "NA".to_string());
     if let Some(execute_cpu_elapsed) = execute_cpu_elapsed {
-        println!(
+        report!(
+            report,
             "CELOX_TEST_TIMING test={test} compile_ns={} execute_ns={} jit_execute_ns={jit_execute_ns} execute_cpu_ns={}",
             compile_elapsed.as_nanos(),
             execute_elapsed.as_nanos(),
             execute_cpu_elapsed.as_nanos()
         );
     } else {
-        println!(
+        report!(
+            report,
             "CELOX_TEST_TIMING test={test} compile_ns={} execute_ns={} jit_execute_ns={jit_execute_ns}",
             compile_elapsed.as_nanos(),
             execute_elapsed.as_nanos()
@@ -1061,14 +1162,6 @@ fn process_cpu_time() -> Option<Duration> {
 
 #[derive(Debug, thiserror::Error)]
 enum CliValueError {
-    #[error("invalid positive integer: {value}")]
-    InvalidPositiveInteger {
-        value: String,
-        #[source]
-        source: std::num::ParseIntError,
-    },
-    #[error("value must be greater than zero")]
-    NonPositiveInteger,
     #[error("invalid native memory width: {value}")]
     InvalidNativeMemoryWidth { value: String },
     #[error("invalid native profile block: {value}")]
@@ -1089,20 +1182,6 @@ enum CliValueError {
     InvalidPassOverride { value: String },
     #[error("unknown SIR pass: {name}")]
     UnknownSirPass { name: String },
-}
-
-fn parse_positive_u64(value: &str) -> Result<u64, CliValueError> {
-    let parsed = value
-        .parse::<u64>()
-        .map_err(|source| CliValueError::InvalidPositiveInteger {
-            value: value.to_owned(),
-            source,
-        })?;
-    if parsed == 0 {
-        Err(CliValueError::NonPositiveInteger)
-    } else {
-        Ok(parsed)
-    }
 }
 
 fn parse_native_memory_width(value: &str) -> Result<usize, CliValueError> {
@@ -1170,79 +1249,42 @@ fn parse_pass_override(value: &str) -> Result<(bool, SirPass), CliValueError> {
 }
 
 fn load_sources(
-    project_path: &Path,
-    source_files: &[PathBuf],
-) -> Result<(Vec<(String, PathBuf)>, Metadata), CeloxHeliodorError> {
-    let toml_path = Metadata::search_from(project_path)?;
-    let mut metadata = Metadata::load(&toml_path)?;
-    let paths: Vec<PathBuf> = if source_files.is_empty() {
-        metadata
-            .paths::<&str>(&[], false, false)?
-            .into_iter()
-            .filter(|path| !path.example)
-            .map(|path| path.src)
-            .collect()
-    } else {
-        source_files
-            .iter()
-            .map(|path| {
-                if path.is_absolute() {
-                    path.clone()
-                } else {
-                    project_path.join(path)
+    design: &super::project::Design,
+) -> Result<(Vec<(String, PathBuf)>, Option<Metadata>), RunError> {
+    let entry = design
+        .project_root
+        .as_deref()
+        .or_else(|| design.sources.first().map(PathBuf::as_path))
+        .unwrap_or(Path::new("."));
+    let metadata = Metadata::search_from(entry)
+        .ok()
+        .map(|path| Metadata::load(&path))
+        .transpose()?;
+    let mut paths = design.sources.clone();
+    if design.project_root.is_none() {
+        if let Some(mut metadata) = metadata.clone() {
+            for path in metadata.paths::<&Path>(&[], false, true)? {
+                if !paths
+                    .iter()
+                    .any(|p| p.canonicalize().ok().as_ref() == Some(&path.src))
+                {
+                    paths.push(path.src);
                 }
-            })
-            .collect()
-    };
-    let mut sources = Vec::with_capacity(paths.len());
-    for path in paths {
-        let content = fs::read_to_string(&path)?;
-        sources.push((content, path));
-    }
-    Ok((sources, metadata))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::error::Error as _;
-
-    use clap::Parser;
-
-    use super::{Cli, CliValueError, OptimizationLevel, parse_positive_u64};
-
-    #[test]
-    fn numeric_parser_preserves_parse_error_source() {
-        let error = parse_positive_u64("not-a-number").unwrap_err();
-
-        assert!(matches!(
-            &error,
-            CliValueError::InvalidPositiveInteger { .. }
-        ));
-        assert!(error.source().unwrap().is::<std::num::ParseIntError>());
-    }
-
-    #[test]
-    fn opt_level_is_case_insensitive() {
-        for (value, expected) in [
-            ("O0", OptimizationLevel::O0),
-            ("o0", OptimizationLevel::O0),
-            ("O1", OptimizationLevel::O1),
-            ("o1", OptimizationLevel::O1),
-            ("O2", OptimizationLevel::O2),
-            ("o2", OptimizationLevel::O2),
-        ] {
-            let cli = Cli::try_parse_from([
-                "celox-heliodor",
-                "--project",
-                ".",
-                "--test",
-                "test_soc_linux_boot",
-                "--opt-level",
-                value,
-            ])
-            .unwrap();
-
-            assert_eq!(cli.opt_level, expected);
+            }
         }
     }
+    let sources = paths
+        .into_iter()
+        .map(|path| {
+            fs::read_to_string(&path)
+                .map_err(|error| {
+                    std::io::Error::new(
+                        error.kind(),
+                        format!("failed to read {}: {error}", path.display()),
+                    )
+                })
+                .map(|source| (source, path))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok((sources, metadata))
 }

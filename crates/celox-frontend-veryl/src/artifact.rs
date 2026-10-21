@@ -607,6 +607,7 @@ pub(crate) fn project_module_with_ids(
             counter_slots: Vec::new(),
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
+            host_request_sites: Vec::new(),
             time_slot: None,
         },
         ids,

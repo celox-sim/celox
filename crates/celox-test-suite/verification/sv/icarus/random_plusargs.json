@@ -1,0 +1,27 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "Icarus rejects the shortint seed at startup with \"$dist_uniform's seed must be an integer/time variable or a register.\" IEEE 1800-2023 20.14.2 permits an integral seed variable; shortint is integral. Celox passes the unchanged width-conversion case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_runtime_limitation",
+        "evidence": [
+          "verification/repros/sv_dist_uniform_seed_width.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_dist_uniform_seed_width",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "execute",
+        "reason": "Icarus rejects the shortint seed at startup with \"$dist_uniform's seed must be an integer/time variable or a register.\" IEEE 1800-2023 20.14.2 permits an integral seed variable; shortint is integral. Celox passes the unchanged width-conversion case.",
+        "upstream": []
+      },
+      "name": "random_plusargs::dist_uniform_converts_wide_and_signed_seeds_to_int_formals",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

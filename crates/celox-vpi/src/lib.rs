@@ -50,6 +50,9 @@ pub const VPI_X: i32 = 3;
 pub const VPI_ITERATOR: i32 = 27;
 pub const VPI_CONSTANT: i32 = 7;
 pub const VPI_MODULE: i32 = 32;
+pub const VPI_PARAMETER: i32 = 41;
+pub const VPI_CONST_TYPE: i32 = 40;
+pub const VPI_BINARY_CONST: i32 = 3;
 pub const VPI_NET: i32 = 36;
 pub const VPI_PORT: i32 = 44;
 pub const VPI_REG: i32 = 48;
@@ -723,29 +726,33 @@ pub unsafe extern "C" fn vpi_iterate(kind: i32, reference: VpiHandle) -> VpiHand
                         .collect()
                 })
                 .unwrap_or_default(),
-            (VPI_PORT | VPI_REG | VPI_NET | VPI_VARIABLES, Some(ObjectRef::Scope(id))) => {
-                reflection
-                    .scope(id)
-                    .map(|scope| {
-                        scope
-                            .signals
-                            .iter()
-                            .copied()
-                            .filter(|signal_id| {
-                                let signal = reflection.signal(*signal_id).unwrap();
-                                match kind {
-                                    VPI_PORT => signal.direction != SignalDirection::Internal,
-                                    VPI_REG => true,
-                                    VPI_VARIABLES => signal.direction == SignalDirection::Internal,
-                                    VPI_NET => false,
-                                    _ => false,
-                                }
-                            })
-                            .map(ObjectRef::Signal)
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            }
+            (
+                VPI_PORT | VPI_REG | VPI_NET | VPI_VARIABLES | VPI_PARAMETER,
+                Some(ObjectRef::Scope(id)),
+            ) => reflection
+                .scope(id)
+                .map(|scope| {
+                    scope
+                        .signals
+                        .iter()
+                        .copied()
+                        .filter(|signal_id| {
+                            let signal = reflection.signal(*signal_id).unwrap();
+                            if signal.is_parameter {
+                                return kind == VPI_PARAMETER;
+                            }
+                            match kind {
+                                VPI_PORT => signal.direction != SignalDirection::Internal,
+                                VPI_REG => true,
+                                VPI_VARIABLES => signal.direction == SignalDirection::Internal,
+                                VPI_NET => false,
+                                _ => false,
+                            }
+                        })
+                        .map(ObjectRef::Signal)
+                        .collect()
+                })
+                .unwrap_or_default(),
             _ => Vec::new(),
         }
     })
@@ -784,7 +791,18 @@ pub unsafe extern "C" fn vpi_scan(iterator: VpiHandle) -> VpiHandle {
 fn object_type(object: ObjectRef) -> i32 {
     match object {
         ObjectRef::Scope(_) => VPI_MODULE,
-        ObjectRef::Signal(_) => VPI_REG,
+        ObjectRef::Signal(id) => with_runtime(|runtime| {
+            if runtime
+                .reflection()
+                .signal(id)
+                .is_some_and(|signal| signal.is_parameter)
+            {
+                VPI_PARAMETER
+            } else {
+                VPI_REG
+            }
+        })
+        .unwrap_or(VPI_REG),
     }
 }
 
@@ -836,6 +854,13 @@ pub unsafe extern "C" fn vpi_get(property: i32, reference: VpiHandle) -> i32 {
         })
         .unwrap_or(0),
         VPI_TYPE => object_type(object),
+        VPI_CONST_TYPE => {
+            if object_type(object) == VPI_PARAMETER {
+                VPI_BINARY_CONST
+            } else {
+                0
+            }
+        }
         VPI_TOP_MODULE => i32::from(object == ObjectRef::Scope(ReflectionScopeId(0))),
         VPI_SIZE | VPI_SCALAR | VPI_VECTOR | VPI_DIRECTION | VPI_SIGNED => {
             with_runtime(|runtime| {
@@ -1220,6 +1245,16 @@ pub unsafe extern "C" fn vpi_put_value(
     let Some(ObjectRef::Signal(id)) = (unsafe { object_ref(reference) }) else {
         return ptr::null_mut();
     };
+    if with_runtime(|runtime| {
+        runtime
+            .reflection()
+            .signal(id)
+            .is_some_and(|signal| signal.is_parameter)
+    })
+    .unwrap_or(false)
+    {
+        return ptr::null_mut();
+    }
     let identity = with_runtime(|runtime| runtime.signal_identity(id)).flatten();
     let Some(identity) = identity else {
         return ptr::null_mut();

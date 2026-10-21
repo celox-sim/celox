@@ -130,22 +130,28 @@ pub struct NbaSiteRefs {
 /// Control slots and sites of one process kernel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessRefs {
+    /// A converted edge procedure starts by registering its event control
+    /// before scheduled time-zero inputs are applied.
+    pub starts_with_event_wait: bool,
     pub status: SignalRef,
     pub delay: SignalRef,
     /// Wait sites by local index: their terms.
     pub wait_sites: Vec<Vec<TermRefs>>,
     /// Nonblocking sites by local index.
     pub nba_sites: Vec<NbaSiteRefs>,
+    pub host_requests: Vec<celox_design::HostRequestSite<SignalRef>>,
 }
 
 impl ProcessRefs {
     /// A process without wait or nonblocking sites.
     pub fn new(status: SignalRef, delay: SignalRef) -> Self {
         Self {
+            starts_with_event_wait: false,
             status,
             delay,
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
+            host_requests: Vec::new(),
         }
     }
 }

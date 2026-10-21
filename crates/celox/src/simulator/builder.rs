@@ -176,6 +176,20 @@ pub(super) fn elaborate_parameterized_module(
         .map(|(name, value)| (resource_table::insert_str(name), value.clone()))
         .collect();
 
+    for name in values.keys() {
+        if !property
+            .parameters
+            .iter()
+            .any(|parameter| parameter.name == *name)
+        {
+            return Err(ParserError::illegal_context(
+                "top-level parameter override",
+                format!("unknown top-level parameter override `{name}`"),
+                Some(&top_token),
+            ));
+        }
+    }
+
     // push_override expects expressions that have already been evaluated in
     // the formal parameter type (as get_overridden_params does for HDL insts).
     // Resolve the header in declaration order so dependent widths/defaults see
@@ -290,6 +304,7 @@ fn analyze(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    diagnostic_policy: &crate::DiagnosticPolicy,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     preserve_element_storage_layout: bool,
     recover_comb_loops: bool,
@@ -301,6 +316,8 @@ fn analyze(
     Vec<FrontendDiagnostic>,
     Vec<CompilationWarning>,
 ) {
+    #[cfg(not(feature = "systemverilog"))]
+    let _ = diagnostic_policy;
     symbol_table::clear();
     attribute_table::clear();
 
@@ -378,10 +395,11 @@ fn analyze(
         let references = super::mixed::referenced_sv_components(
             authored_parsers.iter().map(|parser| &parser.veryl),
         );
-        let contracts = celox_frontend_sv::interface_signatures_for(
+        let contracts = celox_frontend_sv::interface_signatures_for_with_options(
             sv_sources,
             Some(&references),
             &mut sv_probe_warnings,
+            diagnostic_policy.sv_options(),
         )
         .map_err(|error| match error {
             celox_frontend_sv::FrontendError::Analyzer(error) => parser::sv_analysis_error(error),
@@ -594,6 +612,7 @@ fn analyze(
                         trace_out,
                         optimize_options,
                         diagnostics,
+                        diagnostic_policy,
                         preserve_element_storage_layout,
                         testbench_random_seed,
                         component_libraries,
@@ -759,6 +778,7 @@ pub fn compile_to_sir_with_file_dependencies(
         param_overrides,
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
+        &crate::DiagnosticPolicy::default(),
         &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
@@ -874,6 +894,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
     reset_type: Option<ResetType>,
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    diagnostic_policy: &crate::DiagnosticPolicy,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
@@ -906,6 +927,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
         &[],
         optimize_options,
         diagnostics,
+        diagnostic_policy,
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
@@ -965,6 +987,7 @@ fn compile_to_sir_with_layout_mode(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    diagnostic_policy: &crate::DiagnosticPolicy,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
@@ -987,6 +1010,7 @@ fn compile_to_sir_with_layout_mode(
         param_overrides,
         optimize_options,
         diagnostics,
+        diagnostic_policy,
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
@@ -1062,7 +1086,9 @@ pub fn compile_sv_to_sir(
         param_overrides,
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
+        &crate::DiagnosticPolicy::default(),
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
+        &[],
     )
 }
 
@@ -1089,7 +1115,9 @@ fn compile_sv_to_sir_with_layout_mode(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    diagnostic_policy: &crate::DiagnosticPolicy,
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+    force_signals: &[String],
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let metadata = metadata.unwrap_or_else(|| Metadata::create_default("prj").unwrap());
     let mut build_config = BuildConfig::from(&metadata.build);
@@ -1113,11 +1141,13 @@ fn compile_sv_to_sir_with_layout_mode(
         trace_out,
         optimize_options,
         diagnostics,
+        diagnostic_policy,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         metadata.test.seed,
         component_libraries,
         component_file_base,
         &mut sv_warnings,
+        force_signals,
     );
     let warnings = sv_warnings
         .into_iter()
@@ -1218,6 +1248,7 @@ pub fn compile_mixed_to_sir_with_file_dependencies(
         param_overrides,
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
+        &crate::DiagnosticPolicy::default(),
         &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
@@ -1250,6 +1281,7 @@ fn compile_mixed_to_sir_with_layout_mode(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    diagnostic_policy: &crate::DiagnosticPolicy,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
@@ -1272,6 +1304,7 @@ fn compile_mixed_to_sir_with_layout_mode(
         param_overrides,
         optimize_options,
         diagnostics,
+        diagnostic_policy,
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
@@ -1334,12 +1367,20 @@ fn compile_hdl_to_sir_with_layout_mode(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    diagnostic_policy: &crate::DiagnosticPolicy,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
+    force_signals: &[String],
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    if !force_signals.is_empty() && !sources.is_empty() {
+        return Err(crate::CodegenError::message(
+            "force_signals currently require pure SystemVerilog sources",
+        )
+        .into());
+    }
     #[cfg(not(feature = "systemverilog"))]
     {
         debug_assert!(sv_sources.is_empty());
@@ -1357,6 +1398,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             param_overrides,
             optimize_options,
             diagnostics,
+            diagnostic_policy,
             injected_manifests,
             layout_mode,
             recover_comb_loops,
@@ -1380,6 +1422,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             param_overrides,
             optimize_options,
             diagnostics,
+            diagnostic_policy,
             injected_manifests,
             layout_mode,
             recover_comb_loops,
@@ -1400,7 +1443,9 @@ fn compile_hdl_to_sir_with_layout_mode(
             param_overrides,
             optimize_options,
             diagnostics,
+            diagnostic_policy,
             layout_mode,
+            force_signals,
         ),
         (false, false) => compile_mixed_to_sir_with_layout_mode(
             sources,
@@ -1417,6 +1462,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             param_overrides,
             optimize_options,
             diagnostics,
+            diagnostic_policy,
             injected_manifests,
             layout_mode,
             recover_comb_loops,
@@ -1469,12 +1515,15 @@ mod host {
         pub x86_options: crate::backend::X86BackendOptions,
         pub trace: crate::debug::TraceOptions,
         pub diagnostics: crate::RuntimeDiagnostics,
+        pub diagnostic_policy: crate::DiagnosticPolicy,
         /// When true, JIT-compiled functions emit trigger detection code for
         /// edge-based event discovery. Only needed by [`crate::Simulation`].
         pub emit_triggers: bool,
         /// Emit the additional combinational entries needed to reapply foreign
         /// force overrides between procedural store boundaries.
         pub native_force_support: bool,
+        /// Explicit hierarchical observation and native force targets.
+        pub signal_access: crate::SignalAccessOptions,
         /// Dead store elimination policy.
         pub dead_store_policy: DeadStorePolicy,
         /// When the tiered backend adopts background-compiled code.
@@ -1484,6 +1533,8 @@ mod host {
         pub allow_always_ff_function_effects: bool,
         /// Where the C functions of DPI-C imports are found.
         pub dpi: crate::DpiSymbols,
+        /// Ordered command-line arguments for SystemVerilog plusargs queries.
+        pub plusargs: Vec<String>,
     }
 
     /// A code-generated native program that has not been loaded into
@@ -1507,6 +1558,39 @@ mod host {
         injected_components: crate::InjectedComponents,
     }
 
+    fn validate_untimed_host_requests(
+        program: &crate::ir::RuntimeProgram,
+    ) -> Result<(), SimulatorError> {
+        if program
+            .runtime_schema
+            .host_request_sites
+            .iter()
+            .any(|site| site.kind == celox_design::HostRequestKind::Vcd)
+        {
+            return Err(SimulatorError::from(crate::RuntimeErrorCode::Runtime {
+                message: "source VCD controls require Simulation; Simulator does not execute initial process kernels".into(),
+                signals: Vec::new(),
+            }));
+        }
+        if program
+            .runtime_schema
+            .processes
+            .iter()
+            .any(|slots| slots.requires_timed_simulation)
+            || program
+                .runtime_schema
+                .host_request_sites
+                .iter()
+                .any(|site| site.requires_timed_simulation)
+        {
+            return Err(SimulatorError::from(crate::RuntimeErrorCode::Runtime {
+                message: "edge procedures using system file I/O, plusargs, or VCD controls require Simulation; Simulator does not execute scheduled process kernels".into(),
+                signals: Vec::new(),
+            }));
+        }
+        Ok(())
+    }
+
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
@@ -1520,10 +1604,18 @@ mod host {
         vcd_path: Option<std::path::PathBuf>,
         injected_components: crate::InjectedComponents,
     ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
+        validate_untimed_host_requests(&program)?;
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
-        if let Some(path) = vcd_path {
+        sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+        let source_vcd = sim
+            .program
+            .runtime_schema
+            .host_request_sites
+            .iter()
+            .any(|site| site.kind == celox_design::HostRequestKind::Vcd);
+        if vcd_path.is_some() || source_vcd {
             if sim.layout().unpacked_arrays.values().any(|array| {
                 !array.element_width.is_multiple_of(8)
                     || array.element_stride != array.element_width / 8
@@ -1533,6 +1625,8 @@ mod host {
                 ))
                 .with_warnings(std::mem::take(&mut sim.warnings)));
             }
+        }
+        if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::VcdWriter::new_with_time_precision(
                 path,
@@ -1623,6 +1717,17 @@ mod host {
             self.image
         }
 
+        /// Consume the compilation without initializing executable memory,
+        /// retaining both the native artifact and its compilation warnings.
+        pub fn into_program_image_and_warnings(
+            self,
+        ) -> (
+            crate::backend::native::NativeProgramImage,
+            Vec<CompilationWarning>,
+        ) {
+            (self.image, self.warnings)
+        }
+
         /// Write the generated native image as a standalone binary container.
         pub fn write_image(
             &self,
@@ -1669,12 +1774,15 @@ mod host {
                 x86_options: crate::backend::X86BackendOptions::default(),
                 trace: Default::default(),
                 diagnostics: Default::default(),
+                diagnostic_policy: Default::default(),
                 emit_triggers: false,
                 native_force_support: false,
+                signal_access: crate::SignalAccessOptions::default(),
                 dead_store_policy: DeadStorePolicy::Off,
                 tier_promotion: TierPromotion::Always,
                 allow_always_ff_function_effects: false,
                 dpi: crate::DpiSymbols::default(),
+                plusargs: Vec::new(),
             }
         }
     }
@@ -1806,6 +1914,17 @@ mod host {
         #[cfg(test)]
         pub(crate) fn emit_triggers(mut self) -> Self {
             self.options.emit_triggers = true;
+            self
+        }
+
+        /// Set the ordered arguments queried by `$test$plusargs` and
+        /// `$value$plusargs`. A leading `+` is optional on each argument.
+        /// Queries currently require a timed procedural process, such as an
+        /// `initial` block executed by [`crate::Simulation`]. Value queries
+        /// support integral conversions and `%s` into packed integral targets;
+        /// real conversions and dynamic strings are unsupported.
+        pub fn plusargs(mut self, arguments: impl IntoIterator<Item = impl Into<String>>) -> Self {
+            self.options.plusargs = arguments.into_iter().map(Into::into).collect();
             self
         }
 
@@ -2045,6 +2164,14 @@ mod host {
             self
         }
 
+        /// Declare hierarchical observation and native force targets.
+        /// This preserves the requested optimization level. Force targets currently
+        /// require a pure SystemVerilog design and the native backend.
+        pub fn signal_access(mut self, options: crate::SignalAccessOptions) -> Self {
+            self.options.signal_access = options;
+            self
+        }
+
         /// Mark a signal as externally observable (live) for dead store elimination.
         pub fn live_signal(
             mut self,
@@ -2061,7 +2188,13 @@ mod host {
             self
         }
 
-        /// Configure diagnostics explicitly for this build.
+        /// Override recoverable compilation diagnostic severities.
+        pub fn diagnostic_policy(mut self, policy: crate::DiagnosticPolicy) -> Self {
+            self.options.diagnostic_policy = policy;
+            self
+        }
+
+        /// Configure runtime and optimizer diagnostics explicitly for this build.
         pub fn diagnostics(mut self, diagnostics: crate::DiagnosticsOptions) -> Self {
             self.options.diagnostics = diagnostics.runtime;
             self.options.optimize_options.diagnostics = diagnostics.sir;
@@ -2384,7 +2517,7 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let compile_start = phase_timing.then(crate::timing::now);
             let injected_manifests = self.injected_components.manifests();
-            let (program, mut warnings) = if let Some(artifact) = &self.frontend_artifact {
+            let compiled = if let Some(artifact) = &self.frontend_artifact {
                 if self.sources.is_empty() {
                     compile_frontend_to_sir_with_layout_mode(
                         artifact,
@@ -2396,7 +2529,7 @@ mod host {
                         &self.options.optimize_options,
                         &self.options.diagnostics,
                         layout_mode,
-                    )?
+                    )
                 } else {
                     compile_frontend_testbench_to_sir_with_layout_mode(
                         artifact,
@@ -2412,12 +2545,13 @@ mod host {
                         self.reset_type,
                         &self.options.optimize_options,
                         &self.options.diagnostics,
+                        &self.options.diagnostic_policy,
                         &injected_manifests,
                         layout_mode,
                         !self.options.native_force_support,
                         self.options.allow_always_ff_function_effects,
                         &self.file_dependencies,
-                    )?
+                    )
                 }
             } else {
                 compile_hdl_to_sir_with_layout_mode(
@@ -2435,28 +2569,47 @@ mod host {
                     &self.param_overrides,
                     &self.options.optimize_options,
                     &self.options.diagnostics,
+                    &self.options.diagnostic_policy,
                     &injected_manifests,
                     layout_mode,
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
                     &self.file_dependencies,
-                )?
+                    &self.options.signal_access.force_signals,
+                )
             };
+            let (program, mut warnings) = compiled
+                .map_err(|error| error.apply_diagnostic_policy(&self.options.diagnostic_policy))?;
+            self.options.diagnostic_policy.apply(&mut warnings)?;
             if let Some(start) = compile_start {
                 tracing::debug!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
             }
 
+            // A source request can originate in an include or mixed-language
+            // child. Decide from the elaborated schema before physical layout.
+            let vcd_recording = self.vcd_path.is_some()
+                || program
+                    .runtime_schema
+                    .host_request_sites
+                    .iter()
+                    .any(|site| site.kind == celox_design::HostRequestKind::Vcd);
+            let layout_mode = if vcd_recording {
+                crate::backend::memory_layout::MemoryLayoutMode::Packed
+            } else {
+                layout_mode
+            };
             // Build memory layout (consumes semantic layout requirements).
             let layout_start = phase_timing.then(crate::timing::now);
             let mut laid_out =
                 program.into_laid_out_with_mode(self.options.four_state, layout_mode);
-            if self.vcd_path.is_some() {
+            if vcd_recording {
                 laid_out.enable_vcd_tracking();
             }
             if let Some(start) = layout_start {
                 tracing::debug!("[phase-timing] build_layout: {:?}", start.elapsed());
             }
 
+            validate_signal_access(&laid_out, &self.options.signal_access)?;
             if self.options.dead_store_policy != DeadStorePolicy::Off {
                 let dse_start = phase_timing.then(crate::timing::now);
                 run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
@@ -2515,6 +2668,7 @@ mod host {
 
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+            validate_untimed_host_requests(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2545,6 +2699,7 @@ mod host {
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
+            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -2582,6 +2737,7 @@ mod host {
 
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+            validate_untimed_host_requests(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2597,6 +2753,7 @@ mod host {
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
+            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -2638,6 +2795,7 @@ mod host {
                     vcd_recording,
                 ))?
             };
+            validate_untimed_host_requests(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2652,6 +2810,7 @@ mod host {
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
+            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -2706,6 +2865,7 @@ mod host {
                     vcd_recording,
                 ))?
             };
+            validate_untimed_host_requests(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2721,6 +2881,7 @@ mod host {
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
+            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -2754,6 +2915,7 @@ mod host {
                 .into_laid_out_program(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 )?;
+            validate_untimed_host_requests(laid_out.runtime())?;
             if let Some(start) = sir_start {
                 tracing::debug!(
                     "[phase-timing] into_laid_out_program total: {:?}",
@@ -2797,6 +2959,7 @@ mod host {
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                     Some(&mut trace),
                 )?;
+            validate_untimed_host_requests(laid_out.runtime())?;
             if let Some(start) = sir_start {
                 tracing::debug!(
                     "[phase-timing] into_laid_out_program total: {:?}",
@@ -2922,12 +3085,14 @@ mod host {
         ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+            validate_untimed_host_requests(laid_out.runtime())?;
             let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)
                 .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             let mut sim =
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
+            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -3033,6 +3198,7 @@ mod host {
                         self.reset_type,
                         &self.options.optimize_options,
                         &self.options.diagnostics,
+                        &self.options.diagnostic_policy,
                         &injected_manifests,
                         layout_mode,
                         !self.options.native_force_support,
@@ -3056,21 +3222,39 @@ mod host {
                     &self.param_overrides,
                     &self.options.optimize_options,
                     &self.options.diagnostics,
+                    &self.options.diagnostic_policy,
                     &injected_manifests,
                     layout_mode,
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
                     &self.file_dependencies,
+                    &self.options.signal_access.force_signals,
                 )
             };
 
+            let program_res = program_res
+                .map_err(|error| error.apply_diagnostic_policy(&self.options.diagnostic_policy));
             let sim_res = program_res.and_then(|(program, mut warnings)| {
+                self.options.diagnostic_policy.apply(&mut warnings)?;
+                let vcd_recording = self.vcd_path.is_some()
+                    || program
+                        .runtime_schema
+                        .host_request_sites
+                        .iter()
+                        .any(|site| site.kind == celox_design::HostRequestKind::Vcd);
+                let layout_mode = if vcd_recording {
+                    crate::backend::memory_layout::MemoryLayoutMode::Packed
+                } else {
+                    layout_mode
+                };
                 let mut laid_out =
                     program.into_laid_out_with_mode(self.options.four_state, layout_mode);
-                if self.vcd_path.is_some() {
+                validate_untimed_host_requests(laid_out.runtime())?;
+                if vcd_recording {
                     laid_out.enable_vcd_tracking();
                 }
 
+                validate_signal_access(&laid_out, &self.options.signal_access)?;
                 if self.options.dead_store_policy != DeadStorePolicy::Off {
                     run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
                 }
@@ -3109,6 +3293,7 @@ mod host {
                 sim.components
                     .set_injected(self.injected_components.clone());
                 sim.diagnostics = self.options.diagnostics.clone();
+                sim.plusargs = celox_runtime::plusargs::Plusargs(self.options.plusargs.clone());
                 sim.apply_initial_values();
                 sim.modify(|_| {}).map_err(|error| {
                     SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
@@ -3284,6 +3469,17 @@ mod host {
             )
         }
 
+        /// Builds a timed simulation that starts interpreted and adopts compiled
+        /// code at a scheduler safe point once background compilation completes.
+        pub fn build_tiered(
+            self,
+        ) -> Result<crate::Simulation<crate::backend::TieredBackend>, SimulatorError> {
+            let layout = crate::backend::tiered::tiered_layout_mode(self.vcd_path.is_some());
+            self.build_with_backend(layout, |program, options| {
+                Ok(crate::backend::TieredBackend::new(program, options))
+            })
+        }
+
         fn build_with_backend<B: crate::SimBackend>(
             mut self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
@@ -3306,6 +3502,7 @@ mod host {
             );
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
+            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -3327,6 +3524,84 @@ mod host {
         }
     }
 
+    fn validate_signal_access(
+        program: &LaidOutProgram,
+        access: &crate::SignalAccessOptions,
+    ) -> Result<(), SimulatorError> {
+        for path in access.live_signals.iter().chain(&access.force_signals) {
+            if program.hierarchical_signal_addr(path).is_none() {
+                return Err(crate::CodegenError::message(format!(
+                    "unknown or ambiguous signal `{path}`"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn typed_vcd_selections_survive_native_image_roundtrip() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("native.vcd");
+        let source = format!(
+            r#"
+            package p; logic state=1; endpackage
+            module Child(output logic \state.value ); initial \state.value = 1; endmodule
+            module Top #(parameter int INDEX=1) (output logic [1:0] bus, output logic \literal[0] );
+                Child u[0:1](bus);
+                logic package_use;
+                assign package_use=p::state;
+                assign \literal[0] = 0;
+                initial begin $dumpfile("{}");
+                    $dumpvars(0, Top.u[INDEX].\state.value , p::state, \literal[0] );
+                end
+            endmodule"#,
+            path.display()
+        );
+        let (program, warnings, options, _, _) = crate::Simulation::from_sv_sources(
+            vec![(&source, std::path::Path::new("native-vcd.sv"))],
+            "Top",
+        )
+        .into_laid_out_program(crate::MemoryLayoutMode::Packed)
+        .unwrap();
+        let image =
+            crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
+        let image =
+            crate::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+                .unwrap();
+        let runtime = image.runtime_program();
+        assert!(
+            runtime
+                .runtime_schema
+                .host_request_sites
+                .iter()
+                .flat_map(|site| &site.strings)
+                .any(|path| path.contains("\0local\0"))
+        );
+        // SAFETY: the image was compiled from this test's trusted source.
+        let backend = unsafe { crate::backend::native::NativeBackend::from_image(image) }.unwrap();
+        let mut simulator =
+            crate::Simulator::with_backend_and_program_for_simulation(backend, runtime, warnings);
+        simulator.apply_initial_values();
+        simulator.modify(|_| {}).unwrap();
+        let mut simulation = crate::Simulation::new(simulator);
+        simulation.run_until(1).unwrap();
+        simulation.flush_vcd().unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(text.matches("$var wire ").count(), 3, "{text}");
+        assert!(text.contains("Top.u[1]"), "{text}");
+        assert!(text.contains("\\state.value"), "{text}");
+        assert!(text.contains("\\literal[0]"), "{text}");
+    }
+
     /// Resolve user-specified `(instance_path, var_path)` to `AbsoluteAddr` and run DSE.
     fn run_dead_store_elimination(
         program: &mut LaidOutProgram,
@@ -3335,14 +3610,41 @@ mod host {
     ) {
         use crate::HashSet;
         let mut externally_live = HashSet::default();
+        if program
+            .runtime_schema
+            .host_request_sites
+            .iter()
+            .any(|site| site.kind == celox_design::HostRequestKind::Vcd)
+        {
+            // A runtime hierarchy selection may observe every authored object.
+            externally_live.extend(
+                program
+                    .design
+                    .instances()
+                    .flat_map(|instance| instance.state_addresses().iter().copied()),
+            );
+        }
 
         // Native testbench expressions bypass SIR and read simulator memory
         // directly. Their inputs are therefore external DSE roots just like
         // signals named with `live_signal()`.
         externally_live.extend(program.runtime_schema.testbench_read_roots.iter().copied());
 
-        // User-specified live signals
         let mut listed = HashSet::default();
+        for path in options
+            .signal_access
+            .live_signals
+            .iter()
+            .chain(&options.signal_access.force_signals)
+        {
+            let addr = program
+                .hierarchical_signal_addr(path)
+                .expect("validated signal path");
+            externally_live.insert(addr);
+            listed.insert(addr);
+        }
+
+        // User-specified live signals
         for (inst_path, var_path) in live_signals {
             let inst_refs: Vec<(&str, usize)> =
                 inst_path.iter().map(|(s, i)| (s.as_str(), *i)).collect();

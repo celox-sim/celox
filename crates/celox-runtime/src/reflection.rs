@@ -32,6 +32,8 @@ pub struct ReflectionScope {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReflectionSignal {
+    /// An elaboration constant exposed as a read-only VPI parameter.
+    pub is_parameter: bool,
     pub name: String,
     pub full_name: String,
     pub parent: ReflectionScopeId,

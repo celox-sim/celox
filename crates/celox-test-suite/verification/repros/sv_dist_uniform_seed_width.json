@@ -1,0 +1,24 @@
+{
+  "standard": "IEEE 1800-2023 20.14.2 (Distribution functions)",
+  "case": "random_plusargs::dist_uniform_converts_wide_and_signed_seeds_to_int_formals",
+  "source": "\n    module Top(input logic clk, output logic ok);\n      longint wide;\n      shortint narrow;\n      int reference_seed, a, b, c;\n      always_ff @(posedge clk) begin\n        wide = 64'h12345678ffffffff; narrow = -1; reference_seed = -1;\n        a = $dist_uniform(wide, -100, 100);\n        b = $dist_uniform(narrow, -100, 100);\n        c = $dist_uniform(reference_seed, -100, 100);\n        ok = a == b && b == c && wide[31:0] == reference_seed;\n        ok &= narrow == reference_seed[15:0];\n      end\n    endmodule\n  ",
+  "expected": "ok = 1 after the rising edge; the integer seed formal truncates or sign-extends the input and copies the updated seed back to its declared width.",
+  "celox": "The unchanged shared case passes native, native-parallel, Cranelift, Cranelift-parallel and Wasmtime.",
+  "verilator": {
+    "version": "Verilator 5.052",
+    "phase": "compile",
+    "status": "compile_error",
+    "detail": [
+      "Vdut___024root__0.cpp:146:43: error: cannot bind non-const lvalue reference of type \u2018IData&\u2019 {aka \u2018unsigned int&\u2019} to an rvalue of type \u2018IData\u2019 {aka \u2018unsigned int\u2019}",
+      "Vdut___024root__0.cpp:148:56: error: cannot bind non-const lvalue reference of type \u2018IData&\u2019 {aka \u2018unsigned int&\u2019} to an rvalue of type \u2018IData\u2019 {aka \u2018unsigned int\u2019}"
+    ],
+    "note": "Generated calls pass a cast or sign-extension temporary to VL_DIST_UNIFORM(IData&), which requires an lvalue."
+  },
+  "icarus": {
+    "version": "Icarus Verilog 13.0",
+    "phase": "execute",
+    "status": "runtime_error",
+    "detail": "ERROR: <case>/source_0.sv:9: $dist_uniform's seed must be an integer/time variable or a register."
+  },
+  "review": "Clause 20.14.2 permits an integral seed variable and describes inout seed updating. longint and shortint are integral types. These are narrowly retained external-tool limitations for new executable coverage; no baseline summary or unrelated evidence is refreshed."
+}

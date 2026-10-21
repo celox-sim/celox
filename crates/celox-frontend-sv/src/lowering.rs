@@ -55,6 +55,11 @@ pub enum FrontendError {
     Lowering(#[from] ParserError),
 }
 
+// These names cannot be authored as unescaped SV identifiers and are hidden
+// from the source-facing hierarchy. The runtime image records their addresses.
+const FORCE_ENABLE: &str = "@force-enable:";
+const FORCE_VALUE: &str = "@force-value:";
+
 #[derive(Clone)]
 struct SvVariable {
     path: Vec<String>,
@@ -69,6 +74,8 @@ struct SvVariable {
     source: Option<SourceLocation>,
     /// A procedural local or a lowering temporary: not addressable by name.
     hidden: bool,
+    /// Compiler-generated external override slot: (target, is_enable).
+    force_control: Option<(SourceVarId, bool)>,
 }
 
 impl SvVariable {
@@ -97,7 +104,7 @@ impl SvVariable {
     /// A hidden variable other than the time slot, whose value the lowered
     /// code computes. The time slot is state the scheduler writes.
     fn is_scratch(&self) -> bool {
-        self.hidden && self.path != [TIME_SLOT]
+        self.hidden && self.path != [TIME_SLOT] && self.force_control.is_none()
     }
 }
 
@@ -121,7 +128,7 @@ pub(crate) struct LoweredSvModule {
 #[derive(Clone)]
 struct AnalyzedSvModule {
     name: String,
-    interface_ports: HashSet<String>,
+    interface_member_paths: HashMap<String, sv::InterfaceMemberPath>,
     source: std::rc::Rc<sv::ParsedSource>,
     implicit_nets_allowed: bool,
     /// The positional interface of every module in all sources, used to bind
@@ -135,6 +142,7 @@ struct AnalyzedSvModule {
 pub(crate) struct LoweredSvInstance {
     pub module_name: String,
     pub instance_name: String,
+    pub force_signals: Vec<String>,
     pub parameter_overrides: Vec<LoweredSvParameterOverride>,
     pub port_connections: Vec<LoweredSvPortConnection>,
     /// For an element of an instance array: its position in declaration order
@@ -163,6 +171,7 @@ pub(crate) struct LoweredSvPortConnection {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct LoweredSvModuleKey {
     pub name: String,
+    pub force_signals: Vec<String>,
     pub parameter_overrides: Vec<LoweredSvParameterOverride>,
 }
 
@@ -170,6 +179,7 @@ impl LoweredSvModuleKey {
     pub fn base(name: String) -> Self {
         Self {
             name,
+            force_signals: Vec::new(),
             parameter_overrides: Vec::new(),
         }
     }
@@ -179,6 +189,7 @@ impl LoweredSvModuleKey {
         parameter_overrides.sort_by(|left, right| left.name.cmp(&right.name));
         Self {
             name: instance.module_name.clone(),
+            force_signals: instance.force_signals.clone(),
             parameter_overrides,
         }
     }
@@ -187,6 +198,7 @@ impl LoweredSvModuleKey {
 fn analyze_sources(
     sources: &[(&str, &Path)],
     roots: &[&str],
+    analysis_options: sv::AnalysisOptions,
 ) -> Result<HashMap<String, AnalyzedSvModule>, sv::AnalyzerError> {
     analyze_sources_with_requests(
         sources,
@@ -194,6 +206,7 @@ fn analyze_sources(
         &[],
         &[],
         Some(roots),
+        analysis_options,
     )
     .map(|(modules, _)| modules)
 }
@@ -225,8 +238,18 @@ pub fn interface_signatures_for(
     names: Option<&HashSet<String>>,
     warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<Vec<InterfaceSignature>, FrontendError> {
+    interface_signatures_for_with_options(sources, names, warnings, sv::AnalysisOptions::default())
+}
+
+/// Probe interface signatures with explicit language compatibility options.
+pub fn interface_signatures_for_with_options(
+    sources: &[(&str, &Path)],
+    names: Option<&HashSet<String>>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+) -> Result<Vec<InterfaceSignature>, FrontendError> {
     let mut found = Vec::new();
-    let signatures = interface_signatures_collecting(sources, names, &mut found);
+    let signatures = interface_signatures_collecting(sources, names, &mut found, analysis_options);
     append_error_warnings(&signatures, &mut found);
     crate::warning::append_unique_warnings(sources, warnings, found);
     signatures
@@ -245,8 +268,9 @@ fn interface_signatures_collecting(
     sources: &[(&str, &Path)],
     names: Option<&HashSet<String>>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    analysis_options: sv::AnalysisOptions,
 ) -> Result<Vec<InterfaceSignature>, FrontendError> {
-    let prototypes = sv::interface_prototypes_for(sources, names)?;
+    let prototypes = sv::interface_prototypes_with_options(sources, names, analysis_options)?;
     if prototypes.is_empty() {
         return Ok(Vec::new());
     }
@@ -254,7 +278,7 @@ fn interface_signatures_collecting(
         .into_iter()
         .map(|prototype| {
             warnings.extend(crate::warning::analyzer_warnings(&prototype.warnings));
-            let lowered = lower_module(&prototype.module, false, true, false, warnings)?;
+            let lowered = lower_module(&prototype.module, false, true, false, warnings, &[])?;
             Ok(InterfaceSignature {
                 name: prototype.name,
                 module: lowered.source,
@@ -321,6 +345,7 @@ fn analyze_sources_with_requests(
     declarations: &[(&str, &Path)],
     requests: &[SvModuleRequest],
     roots: Option<&[&str]>,
+    analysis_options: sv::AnalysisOptions,
 ) -> Result<(HashMap<String, AnalyzedSvModule>, HashMap<String, String>), sv::AnalyzerError> {
     if !declarations.is_empty() {
         for (code, path) in sources {
@@ -347,7 +372,11 @@ fn analyze_sources_with_requests(
             .collect::<Vec<_>>()
     });
     let time_declarations = if declarations.iter().any(|(code, _)| !code.is_empty()) {
-        sv::generated_time_declarations(sources, selected_roots.as_deref())?
+        sv::generated_time_declarations_with_options(
+            sources,
+            selected_roots.as_deref(),
+            analysis_options,
+        )?
     } else {
         String::new()
     };
@@ -372,7 +401,8 @@ fn analyze_sources_with_requests(
             )
         })
         .collect::<Vec<_>>();
-    let elaboration = sv::plan_interfaces(sources, &bindings)?;
+    let (elaboration, interface_member_paths) =
+        sv::plan_interfaces_with_member_paths(sources, &bindings)?;
     let root_names = elaboration.root_names.clone();
     let mut modules = HashMap::default();
     let sources: Vec<_> = sources
@@ -433,9 +463,13 @@ fn analyze_sources_with_requests(
                         .unwrap_or(root)
                 })
                 .collect::<Vec<_>>();
-            sv::ParsedSource::analyze_packages_with_roots(&parsed, &roots)?
+            sv::ParsedSource::analyze_packages_with_options(
+                &parsed,
+                Some(&roots),
+                analysis_options,
+            )?
         }
-        None => sv::ParsedSource::analyze_packages(&parsed)?,
+        None => sv::ParsedSource::analyze_packages_with_options(&parsed, None, analysis_options)?,
     };
     packages.set_interface_plan(elaboration.clone());
     let packages = std::rc::Rc::new(packages);
@@ -465,10 +499,9 @@ fn analyze_sources_with_requests(
             modules.insert(
                 name,
                 AnalyzedSvModule {
-                    interface_ports: elaboration
-                        .modules
+                    interface_member_paths: interface_member_paths
                         .get(&module_name)
-                        .map(|plan| plan.ports.iter().map(|port| port.name.clone()).collect())
+                        .cloned()
                         .unwrap_or_default(),
                     implicit_nets_allowed: implicit_net_permissions
                         .get(
@@ -752,7 +785,7 @@ fn lower_package_states(
         .into_iter()
         .enumerate()
         .map(|(index, module)| {
-            let mut lowered = lower_module(module, four_state, true, ff_parts, warnings)?;
+            let mut lowered = lower_module(module, four_state, true, ff_parts, warnings, &[])?;
             lowered.sim_module.time_precision = Some(
                 celox_design::TimePrecision::try_from(packages.global_time_precision())
                     .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
@@ -1103,6 +1136,15 @@ fn local_driver_ranges(
         body_driver_ranges(&mut drivers, process.body(), driver_id, &scan);
         driver_id += 1;
     }
+    // Ordinary always processes with timing (including edge processes
+    // converted after timed-task classification) retain their driver identity.
+    // One-shot initial blocks and declaration initializers are not drivers.
+    for process in module.initial_processes().iter().filter(|p| p.repeats()) {
+        if condition_is_active(process.condition(), constants, parameter_types) {
+            body_driver_ranges(&mut drivers, process.body(), driver_id, &scan);
+        }
+        driver_id += 1;
+    }
     drivers
 }
 
@@ -1146,7 +1188,9 @@ fn initial_driver_ranges(
     };
     let mut drivers = Vec::new();
     for (driver_id, process) in module.initial_processes().iter().enumerate() {
-        if condition_is_active(process.condition(), constants, parameter_types) {
+        if !process.is_scheduled_edge()
+            && condition_is_active(process.condition(), constants, parameter_types)
+        {
             body_driver_ranges(&mut drivers, process.body(), driver_id, &scan);
         }
     }
@@ -1234,6 +1278,34 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
     requests: &[SvModuleRequest],
     warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ExternalHierarchy, FrontendError> {
+    prepare_external_hierarchy_with_foreign_resolver_with_options(
+        sources,
+        root_names,
+        foreign,
+        declarations,
+        four_state,
+        resolver,
+        top_parameters,
+        requests,
+        warnings,
+        sv::AnalysisOptions::default(),
+    )
+}
+
+/// Prepare a mixed hierarchy with explicit language compatibility options.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_external_hierarchy_with_foreign_resolver_with_options(
+    sources: &[(&str, &Path)],
+    root_names: &HashSet<String>,
+    foreign: &ExternalHierarchy,
+    declarations: &[(&str, &Path)],
+    four_state: bool,
+    resolver: Option<&mut ForeignModuleResolver<'_>>,
+    top_parameters: Option<(&str, &[(String, u64)])>,
+    requests: &[SvModuleRequest],
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+) -> Result<ExternalHierarchy, FrontendError> {
     let mut found = Vec::new();
     let hierarchy = prepare_external_hierarchy_collecting(
         sources,
@@ -1245,6 +1317,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
         top_parameters,
         requests,
         &mut found,
+        analysis_options,
     );
     append_error_warnings(&hierarchy, &mut found);
     crate::warning::append_unique_warnings(sources, warnings, found);
@@ -1262,6 +1335,7 @@ fn prepare_external_hierarchy_collecting(
     top_parameters: Option<(&str, &[(String, u64)])>,
     requests: &[SvModuleRequest],
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    analysis_options: sv::AnalysisOptions,
 ) -> Result<ExternalHierarchy, FrontendError> {
     let (analyzed, bound_names) = analyze_sources_with_requests(
         sources,
@@ -1269,6 +1343,7 @@ fn prepare_external_hierarchy_collecting(
         declarations,
         requests,
         Some(&root_names.iter().map(String::as_str).collect::<Vec<_>>()),
+        analysis_options,
     )?;
     package_warnings(&analyzed, warnings);
     let dummy = sv::ParsedSource::parse(
@@ -1307,6 +1382,7 @@ fn prepare_external_hierarchy_collecting(
                         type_kind: variable.metadata.type_kind,
                         source: variable.source.clone(),
                         hidden: !variable.module_affiliated,
+                        force_control: None,
                     },
                 )
             })
@@ -1603,25 +1679,9 @@ fn prepare_external_hierarchy_collecting(
             }
         }
     }
-    // Structured paths carry the original interface port identity to foreign
-    // consumers. Ordinary identifiers containing '$' remain a single segment.
     for (key, id) in &module_ids {
-        let Some(base) = analyzed.get(&key.name) else {
-            continue;
-        };
-        for port in &lowered_modules[id].port_order {
-            let variable = modules
-                .get_mut(id)
-                .unwrap()
-                .sim_module
-                .variables
-                .get_mut(port)
-                .unwrap();
-            if let Some((root, member)) = variable.path[0].split_once('$')
-                && base.interface_ports.contains(root)
-            {
-                variable.path = vec![root.to_string(), member.to_string()];
-            }
+        if let Some(base) = analyzed.get(&key.name) {
+            restore_interface_member_paths(&mut modules.get_mut(id).unwrap().sim_module, base);
         }
     }
     Ok(ExternalHierarchy {
@@ -1652,8 +1712,7 @@ pub fn schedule_sources(
     trace: Option<&mut FrontendTrace>,
     warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
-    let mut found = Vec::new();
-    let scheduled = schedule_sources_collecting(
+    schedule_sources_with_options(
         sources,
         top,
         parameter_overrides,
@@ -1663,15 +1722,14 @@ pub fn schedule_sources(
         parallel,
         trace_options,
         trace,
-        &mut found,
-    );
-    append_error_warnings(&scheduled, &mut found);
-    crate::warning::append_unique_warnings(sources, warnings, found);
-    scheduled
+        warnings,
+        sv::AnalysisOptions::default(),
+    )
 }
 
+/// Schedule a design with explicit language compatibility options.
 #[allow(clippy::too_many_arguments)]
-fn schedule_sources_collecting(
+pub fn schedule_sources_with_options(
     sources: &[(&str, &Path)],
     top: &str,
     parameter_overrides: &[(String, u64)],
@@ -1688,18 +1746,149 @@ fn schedule_sources_collecting(
     parallel: &celox_frontend_core::ParallelScheduleOptions,
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
-    warnings: &mut Vec<crate::warning::PendingWarning>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
-    let analyzed = analyze_sources(sources, &[top])?;
+    schedule_sources_with_force_signals(
+        sources,
+        top,
+        parameter_overrides,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_options,
+        trace,
+        warnings,
+        analysis_options,
+        &[],
+    )
+}
+
+/// Schedule with explicitly forceable signal names. Only these objects receive
+/// external override inputs; unrelated logic retains its normal optimization.
+#[allow(clippy::too_many_arguments)]
+pub fn schedule_sources_with_force_signals(
+    sources: &[(&str, &Path)],
+    top: &str,
+    parameter_overrides: &[(String, u64)],
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
+    trace_options: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+    force_signals: &[String],
+) -> Result<ScheduledRtlOutput, FrontendError> {
+    let parameters = parameter_overrides
+        .iter()
+        .map(|(name, value)| (name.clone(), sv::ir::ConstExpr::Literal(value.to_string())))
+        .collect::<Vec<_>>();
+    schedule_sources_with_parameter_expressions(
+        sources,
+        top,
+        &parameters,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_options,
+        trace,
+        warnings,
+        analysis_options,
+        force_signals,
+    )
+}
+
+/// Schedule a design with typed SV constant expressions as top parameters.
+#[allow(clippy::too_many_arguments)]
+pub fn schedule_sources_with_parameter_expressions(
+    sources: &[(&str, &Path)],
+    top: &str,
+    parameter_overrides: &[(String, sv::ir::ConstExpr)],
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
+    trace_options: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+    force_signals: &[String],
+) -> Result<ScheduledRtlOutput, FrontendError> {
+    let mut found = Vec::new();
+    let scheduled = schedule_sources_collecting(
+        sources,
+        top,
+        parameter_overrides,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_options,
+        trace,
+        &mut found,
+        analysis_options,
+        force_signals,
+    );
+    append_error_warnings(&scheduled, &mut found);
+    crate::warning::append_unique_warnings(sources, warnings, found);
+    scheduled
+}
+
+#[allow(clippy::too_many_arguments)]
+fn schedule_sources_collecting(
+    sources: &[(&str, &Path)],
+    top: &str,
+    parameter_overrides: &[(String, sv::ir::ConstExpr)],
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
+    trace_options: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+    analysis_options: sv::AnalysisOptions,
+    force_signals: &[String],
+) -> Result<ScheduledRtlOutput, FrontendError> {
+    let analyzed = analyze_sources(sources, &[top], analysis_options)?;
     package_warnings(&analyzed, warnings);
     let top = top.to_string();
     let root_key = LoweredSvModuleKey {
         name: top.clone(),
+        force_signals: force_signals
+            .iter()
+            .filter_map(|path| path.strip_prefix(&format!("{top}.")))
+            .map(str::to_string)
+            .collect(),
         parameter_overrides: parameter_overrides
             .iter()
             .map(|(name, value)| LoweredSvParameterOverride {
                 name: name.clone(),
-                value: Some(sv::ir::ConstExpr::Literal(value.to_string())),
+                value: Some(value.clone()),
                 bound_type: None,
                 bound_pattern: None,
             })
@@ -1811,6 +2000,9 @@ fn schedule_sources_collecting(
             .map(|(&module_id, lowered)| (module_id, lowered)),
         &package_states,
     )?;
+    for (key, id) in &module_ids {
+        restore_interface_member_paths(modules.get_mut(id).unwrap(), &analyzed[&key.name]);
+    }
     let symbolic = SymbolicRtl {
         modules,
         module_names,
@@ -1828,6 +2020,30 @@ fn schedule_sources_collecting(
         trace,
     )
     .map_err(FrontendError::from)
+}
+
+// Use elaboration provenance rather than treating every '$' as a separator:
+// legal authored identifiers may themselves contain '$'.
+fn restore_interface_member_paths(module: &mut SimModule, source: &AnalyzedSvModule) {
+    for variable in module.variables.values_mut() {
+        variable.path = variable
+            .path
+            .iter()
+            .flat_map(|segment| {
+                source
+                    .interface_member_paths
+                    .get(segment)
+                    .and_then(|path| path.restore(segment))
+                    .or_else(|| {
+                        source
+                            .interface_member_paths
+                            .values()
+                            .find_map(|path| path.restore(segment))
+                    })
+                    .unwrap_or_else(|| vec![segment.clone()])
+            })
+            .collect();
+    }
 }
 
 fn sv_specialization_limit_error(name: String) -> ParserError {
@@ -1917,13 +2133,42 @@ fn specialize_module(
         .iter()
         .find(|candidate| candidate.name() == module.name)
         .ok_or_else(|| sv::AnalyzerError::Unsupported(format!("module `{}`", module.name)))?;
+    let local_forces = key
+        .force_signals
+        .iter()
+        .map(|path| {
+            module
+                .interface_member_paths
+                .iter()
+                .find(|(_, segments)| segments.segments.join(".") == *path)
+                .map_or_else(|| path.clone(), |(flat, _)| flat.clone())
+        })
+        .collect::<Vec<_>>();
     let mut lowered = lower_module(
         specialized,
         four_state,
         module.implicit_nets_allowed,
         ff_parts,
         warnings,
+        &local_forces,
     )?;
+    for instance in &mut lowered.instances {
+        let name = if let Some((index, _)) = instance.array_element {
+            format!(
+                "{}[{}]",
+                instance.instance_name,
+                instance.array_index_base + index
+            )
+        } else {
+            instance.instance_name.clone()
+        };
+        let prefix = format!("{name}.");
+        instance.force_signals = key
+            .force_signals
+            .iter()
+            .filter_map(|path| path.strip_prefix(&prefix).map(str::to_string))
+            .collect();
+    }
     lowered.sim_module.time_precision = Some(
         celox_design::TimePrecision::try_from(module.packages.global_time_precision())
             .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
@@ -1955,6 +2200,7 @@ fn lower_module(
     implicit_nets_allowed: bool,
     ff_parts: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    force_signals: &[String],
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     lower_module_with_overrides(
         module,
@@ -1963,7 +2209,63 @@ fn lower_module(
         implicit_nets_allowed,
         ff_parts,
         warnings,
+        force_signals,
     )
+}
+
+fn needs_host_request(
+    module: &sv::ir::Module,
+    body: &[sv::ir::Stmt],
+    visited: &mut HashSet<String>,
+) -> bool {
+    let mut found = false;
+    let mut calls = Vec::new();
+    for stmt in body {
+        stmt.walk(&mut |stmt| {
+            if let sv::ir::Stmt::SystemTask { task, .. } = stmt {
+                found |= task.is_host_request();
+            }
+            procedural::stmt_calls(stmt, &mut calls);
+        });
+    }
+    if found {
+        return true;
+    }
+    while let Some((callee, args)) = calls.pop() {
+        match callee {
+            sv::ir::Callee::System(function) if function.is_host_request() => return true,
+            sv::ir::Callee::Subroutine(name) => {
+                let Some(subroutine) = module.subroutines().iter().find(|sub| sub.name == name)
+                else {
+                    continue;
+                };
+                // Different calls can select different defaults, even when the
+                // subroutine body has already been inspected.
+                let omitted: Vec<_> = (0..subroutine.params.len())
+                    .map(|position| matches!(args.get(position), None | Some(None)))
+                    .collect();
+                if visited.insert(format!("defaults:{name}:{omitted:?}")) {
+                    procedural::default_calls(subroutine, &args, &mut calls);
+                }
+                if visited.insert(format!("body:{name}"))
+                    && needs_host_request(module, &subroutine.body, visited)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// An edge signal's role and the clock of the declaring process. Keep these
+/// together when host requests move a process out of the retained FF list.
+struct FfEventRole {
+    signal: String,
+    kind: DomainKind,
+    clock: String,
+    clock_kind: DomainKind,
 }
 
 /// `ff_parts` additionally keeps every `always_ff` process as an
@@ -1975,7 +2277,40 @@ fn lower_module_with_overrides(
     implicit_nets_allowed: bool,
     ff_parts: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    force_signals: &[String],
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
+    let mut ff_event_roles = Vec::new();
+    for process in module.ff_processes() {
+        let clock = clock_event_from_ff_process(process)
+            .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".into()))?;
+        for event in process.events() {
+            let kind = match (event.signal() == clock.signal(), event.edge()) {
+                (true, sv::ir::FfEdge::Pos) => DomainKind::ClockPosedge,
+                (true, sv::ir::FfEdge::Neg) => DomainKind::ClockNegedge,
+                (false, sv::ir::FfEdge::Pos) => DomainKind::ResetAsyncHigh,
+                (false, sv::ir::FfEdge::Neg) => DomainKind::ResetAsyncLow,
+            };
+            ff_event_roles.push(FfEventRole {
+                signal: event.signal().to_string(),
+                kind,
+                clock: clock.signal().to_string(),
+                clock_kind: match clock.edge() {
+                    sv::ir::FfEdge::Pos => DomainKind::ClockPosedge,
+                    sv::ir::FfEdge::Neg => DomainKind::ClockNegedge,
+                },
+            });
+        }
+    }
+    let scheduled = module
+        .ff_processes()
+        .iter()
+        .any(|process| needs_host_request(module, process.body(), &mut HashSet::default()))
+        .then(|| {
+            module.clone().schedule_edge_processes(|process| {
+                needs_host_request(module, process.body(), &mut HashSet::default())
+            })
+        });
+    let module = scheduled.as_ref().unwrap_or(module);
     let mut package_variables = Vec::new();
     let name = module.name().to_string();
     let mut next_id = SourceVarId::default();
@@ -2023,10 +2358,42 @@ fn lower_module_with_overrides(
             type_kind: type_info.type_kind,
             source: None,
             hidden: false,
+            force_control: None,
         };
         name_to_id.insert(port.name().to_string(), id);
         port_order.push(id);
-        if port.is_net() || type_info.is_4state {
+        if let Some(default) = port.default() {
+            if !variable.array_dims.is_empty() {
+                warnings.push((
+                    crate::FrontendWarningKind::UnpackedPortDefault {
+                        module: name.clone(),
+                        port: port.name().to_string(),
+                    },
+                    None,
+                ));
+            }
+            let literal = sv::typecheck::context_size_const_integral_literal(
+                default,
+                &constants,
+                &parameter_types,
+                type_info.width,
+                type_info.signed,
+            )
+            .ok_or_else(|| {
+                sv::AnalyzerError::Unsupported(format!(
+                    "nonconstant input port default `{}`",
+                    port.name()
+                ))
+            })?;
+            initial_memory_values.push(InitialStateValue {
+                address: id,
+                data: InitialStateData::Packed {
+                    value: literal.value,
+                    mask: literal.mask,
+                    written_mask: (BigUint::from(1u8) << type_info.width) - BigUint::from(1u8),
+                },
+            });
+        } else if port.is_net() || type_info.is_4state {
             let written_mask = (BigUint::from(1u8) << type_info.width) - BigUint::from(1u8);
             let value = if port.is_net() {
                 BigUint::default()
@@ -2071,6 +2438,7 @@ fn lower_module_with_overrides(
             type_kind: type_info.type_kind,
             source: None,
             hidden: false,
+            force_control: None,
         };
         name_to_id.insert(signal.name().to_string(), id);
         // The package's object has its own default value.
@@ -2091,6 +2459,107 @@ fn lower_module_with_overrides(
             });
         }
         variables.insert(id, variable);
+    }
+
+    // Retain integral parameters for external observation, without adding them
+    // to name_to_id: HDL expressions must still fold parameter references as
+    // constants rather than introduce runtime loads.
+    for parameter in module.parameters() {
+        let Some(width) = parameter.resolved_width().filter(|width| *width > 0) else {
+            continue;
+        };
+        let signed = parameter.resolved_signed().unwrap_or(false);
+        let expr = parameter.value().cloned().or_else(|| {
+            constants
+                .get(parameter.name())
+                .copied()
+                .map(const_expr_from_i128)
+        });
+        let Some(literal) = expr.and_then(|expr| {
+            sv::typecheck::context_size_const_integral_literal(
+                &expr,
+                &constants,
+                &parameter_types,
+                width,
+                signed,
+            )
+        }) else {
+            continue;
+        };
+        let id = next_var_id(&mut next_id);
+        let written_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        initial_memory_values.push(InitialStateValue {
+            address: id,
+            data: InitialStateData::Packed {
+                value: literal.value,
+                mask: literal.mask,
+                written_mask,
+            },
+        });
+        variables.insert(
+            id,
+            SvVariable {
+                path: vec![parameter.name().to_string()],
+                width,
+                signed,
+                is_4state: true,
+                packed_ranges: vec![(width as i128 - 1, 0)],
+                array_dims: Vec::new(),
+                domain_kind: DomainKind::Other,
+                kind: VariableKind::Parameter,
+                type_kind: PortTypeKind::Logic,
+                source: None,
+                hidden: false,
+                force_control: None,
+            },
+        );
+    }
+
+    let forceable = variables
+        .iter()
+        .filter_map(|(&id, var)| {
+            if var.kind == VariableKind::Parameter {
+                return None;
+            }
+            let name = &var.path[0];
+            force_signals.iter().any(|path| name == path).then_some(id)
+        })
+        .collect::<Vec<_>>();
+    for id in forceable {
+        let target = variables[&id].clone();
+        // Whole packed variables only. Array elements require a separately
+        // specified addressing contract rather than a guessed flat offset.
+        if !target.array_dims.is_empty() {
+            continue;
+        }
+        for (prefix, width, is_4state) in [
+            (FORCE_ENABLE, 1, false),
+            (FORCE_VALUE, target.width, target.is_4state),
+        ] {
+            let control_name = format!("{prefix}{}", target.path[0]);
+            if name_to_id.contains_key(&control_name) {
+                return Err(sv::AnalyzerError::Unsupported(format!(
+                    "signal `{control_name}` conflicts with a compiler force control"
+                )));
+            }
+            let mut control = target.clone();
+            control.force_control = Some((id, prefix == FORCE_ENABLE));
+            control.path = vec![control_name.clone()];
+            control.width = width;
+            control.signed = false;
+            control.is_4state = is_4state;
+            control.kind = VariableKind::Variable;
+            control.hidden = true;
+            control.packed_ranges = vec![(width as i128 - 1, 0)];
+            control.type_kind = if is_4state {
+                PortTypeKind::Logic
+            } else {
+                PortTypeKind::Bit
+            };
+            let control_id = next_var_id(&mut next_id);
+            variables.insert(control_id, control);
+            name_to_id.insert(control_name, control_id);
+        }
     }
 
     if !cfg!(feature = "dpi") && !module.dpi_imports().is_empty() {
@@ -2129,7 +2598,7 @@ fn lower_module_with_overrides(
             four_state,
             warnings,
         );
-        let blocks = lower_ff_processes(module, &mut pm, ff_parts)?;
+        let blocks = lower_ff_processes(module, &mut pm, ff_parts, &ff_event_roles)?;
         (
             blocks,
             std::mem::take(&mut pm.runtime_event_sites),
@@ -2138,18 +2607,20 @@ fn lower_module_with_overrides(
         )
     };
     mark_ff_event_domains(&event_vars, &mut variables);
-    let (initial_values, processes, wait_sites, nba_sites) = lower_initial_processes(
-        module,
-        &mut variables,
-        &mut name_to_id,
-        &constants,
-        &parameter_types,
-        four_state,
-        &mut runtime_event_sites,
-        &mut runtime_errors,
-        &mut extern_functions,
-        warnings,
-    )?;
+
+    let (initial_values, processes, wait_sites, nba_sites, host_request_sites) =
+        lower_initial_processes(
+            module,
+            &mut variables,
+            &mut name_to_id,
+            &constants,
+            &parameter_types,
+            four_state,
+            &mut runtime_event_sites,
+            &mut runtime_errors,
+            &mut extern_functions,
+            warnings,
+        )?;
     initial_memory_values.extend(initial_values);
 
     let shared_variables = variables
@@ -2198,6 +2669,7 @@ fn lower_module_with_overrides(
             instances.push(LoweredSvInstance {
                 module_name: instance.module_name().to_string(),
                 instance_name: instance.name().to_string(),
+                force_signals: Vec::new(),
                 parameter_overrides: lower_parameter_overrides(
                     instance,
                     &constants,
@@ -2249,6 +2721,7 @@ fn lower_module_with_overrides(
             counter_slots: Vec::new(),
             wait_sites,
             nba_sites,
+            host_request_sites,
             time_slot: name_to_id.get(TIME_SLOT).copied(),
         },
         variables,
@@ -2981,11 +3454,12 @@ fn lower_initial_processes(
         Vec<SymbolicProcess>,
         Vec<WaitSite<SourceVarId>>,
         Vec<NbaSite<SourceVarId>>,
+        Vec<celox_design::HostRequestSite<SourceVarId>>,
     ),
     sv::AnalyzerError,
 > {
     if module.initial_processes().is_empty() {
-        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
     let mut values = Vec::new();
     let mut runtime = Vec::new();
@@ -3040,7 +3514,7 @@ fn lower_initial_processes(
         }
     }
     if runtime.is_empty() {
-        return Ok((values, Vec::new(), Vec::new(), Vec::new()));
+        return Ok((values, Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
 
     let mut next_id = SourceVarId(
@@ -3050,8 +3524,10 @@ fn lower_initial_processes(
             .max()
             .unwrap_or_default(),
     );
-    let slots: Vec<_> = (0..runtime.len())
-        .map(|index| {
+    let slots: Vec<_> = runtime
+        .iter()
+        .enumerate()
+        .map(|(index, (process, _))| {
             let mut declare = |slot: &str, width: usize| {
                 let id = next_var_id(&mut next_id);
                 variables.insert(
@@ -3069,11 +3545,13 @@ fn lower_initial_processes(
                         source: None,
                         // Control slots are not signals of the design.
                         hidden: true,
+                        force_control: None,
                     },
                 );
                 id
             };
             ProcessSlots {
+                requires_timed_simulation: process.is_scheduled_edge(),
                 resume: declare("resume", PROCESS_RESUME_WIDTH),
                 status: declare("status", PROCESS_STATUS_WIDTH),
                 delay: declare("delay", PROCESS_DELAY_WIDTH),
@@ -3097,6 +3575,7 @@ fn lower_initial_processes(
     pm.extern_functions = std::mem::take(extern_functions);
     let mut wait_sites = Vec::new();
     let mut nba_sites = Vec::new();
+    let mut host_request_sites = Vec::new();
     let processes = runtime
         .into_iter()
         .zip(slots)
@@ -3109,6 +3588,14 @@ fn lower_initial_processes(
             )?;
             wait_sites.extend(kernel.wait_sites);
             nba_sites.extend(kernel.nba_sites);
+            host_request_sites.extend(kernel.host_request_sites.into_iter().map(|mut site| {
+                site.process = index;
+                // Repeating ordinary always processes also execute only in
+                // the timed scheduler. Keep this site requirement separate
+                // from the converted-FF startup marker on ProcessSlots.
+                site.requires_timed_simulation = process.repeats();
+                site
+            }));
             Ok(SymbolicProcess {
                 kernel: kernel.unit,
                 slots,
@@ -3118,7 +3605,13 @@ fn lower_initial_processes(
     *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);
-    Ok((values, processes?, wait_sites, nba_sites))
+    Ok((
+        values,
+        processes?,
+        wait_sites,
+        nba_sites,
+        host_request_sites,
+    ))
 }
 
 fn lower_comb_processes(
@@ -3400,6 +3893,7 @@ fn ensure_parent_output_signals(
             type_kind: PortTypeKind::Logic,
             source: None,
             hidden: false,
+            force_control: None,
         };
         parent
             .variables
@@ -3557,6 +4051,39 @@ fn build_instance_glue(
                         ),
                     )?;
                     (expr, sources, source_ids)
+                } else if let Some(default) = child
+                    .source
+                    .ports()
+                    .iter()
+                    .find(|port| port.name() == formal)
+                    .and_then(|port| port.default())
+                {
+                    // IEEE 1800-2023 23.2.2.4: defaults belong to the child's
+                    // parameter scope, and apply only to omitted connections.
+                    let literal = sv::typecheck::context_size_const_integral_literal(
+                        default,
+                        &child.constants,
+                        &child.parameter_types,
+                        width,
+                        child_var.signed,
+                    )
+                    .ok_or_else(|| {
+                        ParserError::illegal_context(
+                            "systemverilog input port default",
+                            formal.clone(),
+                            None,
+                        )
+                    })?;
+                    (
+                        arena.alloc(SLTNode::Constant(
+                            literal.value,
+                            literal.mask,
+                            width,
+                            child_var.signed,
+                        ))?,
+                        HashSet::default(),
+                        Vec::new(),
+                    )
                 } else {
                     let unknown_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
                     (
@@ -4030,7 +4557,9 @@ fn lower_glue_parent_expr(
                         )?
                     };
                 let width = celox_slt::get_width(node, arena);
-                nodes.push((node, width));
+                if width != 0 {
+                    nodes.push((node, width));
+                }
                 sources.extend(part_sources);
                 source_ids.extend(part_source_ids);
             }
@@ -4557,6 +5086,23 @@ struct SvSignalType {
     type_kind: PortTypeKind,
 }
 
+fn unpacked_range_bounds(
+    range: &sv::ir::UnpackedRange,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<(i128, i128)> {
+    // User constant functions belong to the analyzer session, which has
+    // ended by lowering. Retain its evaluated bounds as a fallback while
+    // keeping the symbolic declaration contract available to other consumers.
+    sv::typecheck::eval_const_expr_with_types(range.left(), constants, parameter_types)
+        .zip(sv::typecheck::eval_const_expr_with_types(
+            range.right(),
+            constants,
+            parameter_types,
+        ))
+        .or_else(|| range.resolved_bounds())
+}
+
 fn signal_type_from_sv(
     typ: &sv::ir::Type,
     constants: &HashMap<String, i128>,
@@ -4591,16 +5137,7 @@ fn signal_type_from_sv(
         .unpacked_ranges()
         .iter()
         .map(|range| {
-            let left = sv::typecheck::eval_const_expr_with_types(
-                range.left(),
-                constants,
-                parameter_types,
-            )?;
-            let right = sv::typecheck::eval_const_expr_with_types(
-                range.right(),
-                constants,
-                parameter_types,
-            )?;
+            let (left, right) = unpacked_range_bounds(range, constants, parameter_types)?;
             usize::try_from(left.abs_diff(right))
                 .ok()
                 .and_then(|width| width.checked_add(1))
@@ -4954,8 +5491,12 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         SystemFunction::Time
         | SystemFunction::Stime
         | SystemFunction::Random
+        | SystemFunction::DistUniform
+        | SystemFunction::TestPlusargs
+        | SystemFunction::ValuePlusargs
         | SystemFunction::Urandom
         | SystemFunction::UrandomRange
+        | SystemFunction::Fopen
         | SystemFunction::Timeunit
         | SystemFunction::Timeprecision
         | SystemFunction::Isunbounded
@@ -5205,7 +5746,9 @@ fn lower_expr_with_context(
                     None,
                 )?;
                 let width = celox_slt::get_width(node, arena);
-                nodes.push((node, width));
+                if width != 0 {
+                    nodes.push((node, width));
+                }
                 sources.extend(part_sources);
             }
             Some((arena.alloc(SLTNode::Concat(nodes)).ok()?, sources))
@@ -6622,6 +7165,7 @@ fn lower_ff_processes(
     module: &sv::ir::Module,
     pm: &mut procedural::ProcModule<'_>,
     ff_parts: bool,
+    ff_event_roles: &[FfEventRole],
 ) -> Result<SvFfBlocks, sv::AnalyzerError> {
     let mut parallel_ff_parts = HashMap::<_, Vec<_>>::default();
     let mut eval_only_ff_blocks = HashMap::default();
@@ -6670,7 +7214,43 @@ fn lower_ff_processes(
         }
         process_events.push(events);
     }
-    let mut event_vars = FfEventVars::new(process_events.iter().flatten().copied());
+    // Select primary roles globally before creating copies for retained FFs.
+    // Scheduled processes still contribute clock/reset roles and must satisfy
+    // the same one-bit event restriction, even though they use wait sites.
+    let global_events = ff_event_roles
+        .iter()
+        .map(|role| {
+            let id = pm
+                .id(&role.signal)
+                .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".into()))?;
+            if pm
+                .variables
+                .get(&id)
+                .is_some_and(|variable| variable.width != 1)
+            {
+                return Err(sv::AnalyzerError::Unsupported(
+                    "multi-bit always_ff event signal".into(),
+                ));
+            }
+            Ok((id, role.kind))
+        })
+        .collect::<Result<Vec<_>, sv::AnalyzerError>>()?;
+    let mut event_vars = FfEventVars::new(global_events.into_iter());
+    // Reflection must retain associations from scheduled host processes too.
+    // Resolve sensed roles just as retained FF trigger sets do, including aliases
+    // when one authored signal has more than one clock/reset role.
+    for role in ff_event_roles {
+        if matches!(
+            role.kind,
+            DomainKind::ResetAsyncHigh | DomainKind::ResetAsyncLow
+        ) {
+            let reset = pm.id(&role.signal).expect("validated FF event signal");
+            let clock = pm.id(&role.clock).expect("validated FF clock signal");
+            let reset = event_vars.sensed(pm, reset, role.kind);
+            let clock = event_vars.sensed(pm, clock, role.clock_kind);
+            reset_clock_map.entry(reset).or_insert(clock);
+        }
+    }
 
     let random_seeds = process_random_seeds(module);
     for ((index, process), events) in module.ff_processes().iter().enumerate().zip(process_events) {

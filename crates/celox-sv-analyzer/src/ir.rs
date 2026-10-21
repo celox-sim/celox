@@ -7,7 +7,7 @@ pub use crate::procedural::{
     CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, SourceSpan, StmtBase, SystemTaskArg,
 };
 pub use crate::system_functions::{
-    ArrayQuery, Callee, MemoryFormat, Radix, Severity, SystemFunction, SystemTask,
+    ArrayQuery, Callee, MemoryFormat, Radix, Severity, SystemFunction, SystemTask, VcdTask,
 };
 
 /// A procedural statement of the analyzed IR.
@@ -73,6 +73,51 @@ pub struct Module {
 }
 
 impl Module {
+    /// Represent selected edge procedures as scheduled processes. A host
+    /// request must finish synchronously before the following statement runs.
+    pub fn schedule_edge_processes(mut self, mut select: impl FnMut(&FfProcess) -> bool) -> Self {
+        let mut retained = Vec::new();
+        for process in std::mem::take(&mut self.ff_processes) {
+            if !select(&process) {
+                retained.push(process);
+                continue;
+            }
+            let mut body = vec![Stmt::WaitEvent(
+                process
+                    .events
+                    .iter()
+                    .map(|event| EventItem {
+                        edge: match event.edge {
+                            FfEdge::Pos => EventEdge::Pos,
+                            FfEdge::Neg => EventEdge::Neg,
+                        },
+                        expr: Expr::Ident(event.signal.clone()),
+                    })
+                    .collect(),
+            )];
+            body.extend(process.body);
+            self.initial_processes.push(InitialProcess {
+                creation_order: process.creation_order,
+                scheduled_edge: true,
+                condition: None,
+                body: vec![Stmt::Loop {
+                    kind: LoopKind::Forever,
+                    init: Vec::new(),
+                    condition: None,
+                    step: Vec::new(),
+                    body,
+                }],
+                initializer: false,
+                synthetic: false,
+                repeats: true,
+            });
+        }
+        self.ff_processes = retained;
+        self.initial_processes
+            .sort_by_key(|process| (!process.initializer, process.creation_order));
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: ModuleId,
@@ -283,6 +328,7 @@ pub struct Port {
     direction: PortDirection,
     r#type: Type,
     is_net: bool,
+    default: Option<ConstExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,6 +385,7 @@ impl Port {
             direction,
             r#type,
             is_net,
+            default: None,
         }
     }
 
@@ -356,6 +403,15 @@ impl Port {
 
     pub fn is_net(&self) -> bool {
         self.is_net
+    }
+
+    pub(crate) fn with_default(mut self, default: Option<ConstExpr>) -> Self {
+        self.default = default;
+        self
+    }
+
+    pub fn default(&self) -> Option<&ConstExpr> {
+        self.default.as_ref()
     }
 }
 
@@ -630,12 +686,21 @@ fn convert_type(
     let unpacked_ranges: Vec<_> = r#type
         .unpacked_ranges()
         .iter()
-        .map(|range| UnpackedRange::new(range.left().clone().into(), range.right().clone().into()))
+        .map(|range| {
+            let left = range.left().clone().into();
+            let right = range.right().clone().into();
+            let resolved_bounds = typecheck::eval_const_expr_in_env(&left, constants)
+                .zip(typecheck::eval_const_expr_in_env(&right, constants));
+            UnpackedRange {
+                left,
+                right,
+                resolved_bounds,
+            }
+        })
         .collect();
     let packed_width = typecheck::resolve_packed_width_in_env(&packed_ranges, constants);
     let unpacked_width = unpacked_ranges.iter().try_fold(1usize, |acc, range| {
-        let left = typecheck::eval_const_expr_in_env(range.left(), constants)?;
-        let right = typecheck::eval_const_expr_in_env(range.right(), constants)?;
+        let (left, right) = range.resolved_bounds()?;
         let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
         acc.checked_mul(width)
     });
@@ -664,11 +729,15 @@ pub struct PackedRange {
 pub struct UnpackedRange {
     left: ConstExpr,
     right: ConstExpr,
+    resolved_bounds: Option<(i128, i128)>,
 }
 
 impl UnpackedRange {
-    pub(crate) fn new(left: ConstExpr, right: ConstExpr) -> Self {
-        Self { left, right }
+    /// Bounds evaluated in the declaring scope, including its constant
+    /// functions. The original expressions remain available for contracts
+    /// that must be specialized again with different parameters.
+    pub fn resolved_bounds(&self) -> Option<(i128, i128)> {
+        self.resolved_bounds
     }
 
     pub fn left(&self) -> &ConstExpr {
@@ -921,6 +990,7 @@ impl FfProcess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialProcess {
     creation_order: usize,
+    scheduled_edge: bool,
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
     initializer: bool,
@@ -930,6 +1000,11 @@ pub struct InitialProcess {
 }
 
 impl InitialProcess {
+    /// This process represents an edge procedure requiring host services.
+    pub fn is_scheduled_edge(&self) -> bool {
+        self.scheduled_edge
+    }
+
     /// Position among elaborated module items, shared across process kinds.
     pub fn creation_order(&self) -> usize {
         self.creation_order
@@ -938,6 +1013,7 @@ impl InitialProcess {
     pub(crate) fn new(condition: Option<ConstExpr>, body: Vec<Stmt>, initializer: bool) -> Self {
         Self {
             creation_order: 0,
+            scheduled_edge: false,
             condition,
             body,
             initializer,

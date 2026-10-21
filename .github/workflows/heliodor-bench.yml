@@ -211,6 +211,15 @@ jobs:
           run-id: ${{ inputs.arm64_profile_run_id }}
           github-token: ${{ github.token }}
 
+      - name: Validate reused ARM64 profiling runner
+        if: inputs.arm64_profile && inputs.arm64_profile_run_id != ''
+        shell: bash
+        run: |
+          if [[ ! -f target/release/celox ]]; then
+            echo "::error::This profiling artifact predates the celox run CLI. Leave arm64_profile_run_id empty to build a compatible runner; legacy artifacts remain supported as comparison baselines."
+            exit 1
+          fi
+
       - name: Prepare ARM64 profiling
         if: inputs.arm64_profile
         shell: bash
@@ -252,7 +261,13 @@ jobs:
           source scripts/run-heliodor-bench.sh
           trap cleanup_heliodor_fallback EXIT
           prepare
-          baseline_runner="$GITHUB_WORKSPACE/target/heliodor-arm64/baseline-runners/celox-heliodor"
+          baseline_runner="$GITHUB_WORKSPACE/target/heliodor-arm64/baseline-runners/celox"
+          baseline_args=(run --report --unlimited --top test_soc_linux_boot)
+          # Retained comparison artifacts may predate the CLI migration.
+          if [[ ! -f "$baseline_runner" ]]; then
+            baseline_runner="$GITHUB_WORKSPACE/target/heliodor-arm64/baseline-runners/celox-heliodor"
+            baseline_args=(--test test_soc_linux_boot)
+          fi
           veryl_runner="$GITHUB_WORKSPACE/target/heliodor-arm64/baseline-runners/veryl-heliodor"
           veryl_cache="$GITHUB_WORKSPACE/target/heliodor-arm64/compare-veryl-cache"
           chmod +x "$baseline_runner" "$CELOX_RUNNER_BIN"
@@ -280,7 +295,9 @@ jobs:
                   timeout 1200 "$veryl_runner" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
                   "${args[@]}" > "$log" 2>&1
               else
-                timeout 1200 "$runner" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
+                cli_args=(run --report --unlimited --top test_soc_linux_boot)
+                if [[ "$label" == baseline ]]; then cli_args=("${baseline_args[@]}"); fi
+                timeout 1200 "$runner" "${cli_args[@]}" --project "$HELIODOR_DIR" \
                   --backend native --opt-level o2 "${args[@]}" > "$log" 2>&1
               fi
               echo "comparison=$label round=$comparison_round"
@@ -301,7 +318,7 @@ jobs:
           for source in "${sources[@]}"; do args+=(--source-file "$source"); done
           cd "$HELIODOR_DIR"
           "$PERF_BIN" record -e cpu-clock:u -F 997 -o "$HELIODOR_RESULTS_DIR/perf.data" -- \
-            timeout 1200 "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
+            timeout 1200 "$CELOX_RUNNER_BIN" run --report --unlimited --project "$HELIODOR_DIR" --top test_soc_linux_boot \
             --backend native --opt-level o2 "${args[@]}" \
             --dump-ir-dir "$HELIODOR_RESULTS_DIR/profile-ir" --dump-ir-and-run \
             > "$HELIODOR_RESULTS_DIR/profile-linux.log" 2>&1
@@ -321,7 +338,7 @@ jobs:
           name: heliodor-arm64-profiling-runners
           retention-days: 7
           path: |
-            target/release/celox-heliodor
+            target/release/celox
             target/release/veryl-heliodor
 
       - name: Upload nightly ARM64 Linux boot results

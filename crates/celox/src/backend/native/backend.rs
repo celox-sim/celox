@@ -378,7 +378,15 @@ struct NativeRuntimeOptions {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct NativeForceBinding {
+    pub signal: celox_runtime::ReflectionSignalId,
+    pub enabled: SignalRef,
+    pub value: SignalRef,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct NativeRuntimeSchema {
+    pub(super) force_bindings: Vec<NativeForceBinding>,
     pub(crate) runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     pub(crate) runtime_event_sites: Vec<RuntimeEventSite>,
     /// Extern functions the code calls, resolved when the image is attached.
@@ -395,6 +403,7 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) watches: Vec<celox_design::EventWatch<AbsoluteAddr>>,
     pub(crate) wait_sites: Vec<celox_design::WaitSite<AbsoluteAddr>>,
     pub(crate) nba_sites: Vec<celox_design::NbaSite<AbsoluteAddr>>,
+    pub(crate) host_request_sites: Vec<celox_design::HostRequestSite<AbsoluteAddr>>,
     pub(crate) active_commits: Vec<AbsoluteAddr>,
     pub(crate) time_slots: Vec<AbsoluteAddr>,
 }
@@ -474,7 +483,7 @@ impl NativeProgramImage {
     }
 
     /// Whether the image's generated code and state layout use four-state data.
-    pub(crate) fn four_state(&self) -> bool {
+    pub fn four_state(&self) -> bool {
         self.options.four_state
     }
 
@@ -506,6 +515,7 @@ impl NativeProgramImage {
                 watches: self.runtime_schema.watches.clone(),
                 wait_sites: self.runtime_schema.wait_sites.clone(),
                 nba_sites: self.runtime_schema.nba_sites.clone(),
+                host_request_sites: self.runtime_schema.host_request_sites.clone(),
                 active_commits: self.runtime_schema.active_commits.clone(),
                 time_slots: self.runtime_schema.time_slots.clone(),
             },
@@ -520,6 +530,35 @@ impl NativeProgramImage {
         self.reflection
             .validate()
             .map_err(|error| format!("invalid design reflection: {error}"))?;
+        for binding in &self.runtime_schema.force_bindings {
+            let target = self
+                .reflection
+                .signal(binding.signal)
+                .ok_or("force target is not a reflected signal")?;
+            if binding.enabled.width != 1
+                || binding.enabled.is_4state
+                || binding.value.width != target.signal.width
+            {
+                return Err("invalid force control shape".into());
+            }
+            for control in [binding.enabled, binding.value] {
+                if control.array_layout.is_some() {
+                    return Err("force controls must be packed".into());
+                }
+                let size = control
+                    .width
+                    .div_ceil(8)
+                    .checked_mul(if control.is_4state { 2 } else { 1 })
+                    .ok_or("force control size overflows")?;
+                if control
+                    .offset
+                    .checked_add(size)
+                    .is_none_or(|end| end > self.native_memory_size)
+                {
+                    return Err("force control exceeds native memory".into());
+                }
+            }
+        }
         if self.code.is_empty() {
             return Err("code image is empty".into());
         }
@@ -636,6 +675,85 @@ impl NativeProgramImage {
 // ────────────────────────────────────────────────────────────────
 // Compilation
 // ────────────────────────────────────────────────────────────────
+
+fn build_force_bindings(
+    program: &crate::ir::RuntimeProgram,
+    layout: &crate::backend::MemoryLayout,
+    paths: &[String],
+) -> Result<Vec<NativeForceBinding>, SimulatorError> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let reflection = program.build_design_reflection(layout);
+    let signal_ref = |addr: &AbsoluteAddr| SignalRef {
+        offset: layout.offsets[addr],
+        width: layout.widths[addr],
+        is_4state: layout.is_4states[addr],
+        array_layout: None,
+    };
+    let mut result = Vec::new();
+    for path in paths {
+        let (index, target) = reflection
+            .signals()
+            .iter()
+            .enumerate()
+            .find(|(_, signal)| signal.full_name == *path)
+            .ok_or_else(|| {
+                codegen_err(CodegenError::message(format!(
+                    "unknown force signal `{path}`"
+                )))
+            })?;
+        if !target.unpacked_dims.is_empty() || target.domain_kind != celox_design::DomainKind::Other
+        {
+            return Err(codegen_err(CodegenError::message(format!(
+                "force signal `{path}` must be a packed non-clock variable"
+            ))));
+        }
+        let mut found = false;
+        for instance in program.design.instances() {
+            for address in instance.state_addresses() {
+                let var = program.design.variable(address).unwrap();
+                if instance.resolves_path_to(&var.path, *address)
+                    && var.path.len() > 1
+                    && var.var_kind.is_port()
+                    && layout.offsets[address] == target.signal.offset
+                {
+                    return Err(codegen_message(format!(
+                        "force signal `{path}` is a structured port alias; select the owning interface variable"
+                    )));
+                }
+                if layout.offsets[address] != target.signal.offset
+                    || layout.widths[address] != target.signal.width
+                {
+                    continue;
+                }
+                let flat_name = var.path.join("$");
+                let control = |prefix: &str| {
+                    instance.state_addresses().iter().find(|addr| {
+                        program.design.variable(addr).unwrap().path
+                            == [format!("{prefix}{flat_name}")]
+                    })
+                };
+                if let (Some(enabled), Some(value)) =
+                    (control("@force-enable:"), control("@force-value:"))
+                {
+                    result.push(NativeForceBinding {
+                        signal: celox_runtime::ReflectionSignalId(index as u32),
+                        enabled: signal_ref(enabled),
+                        value: signal_ref(value),
+                    });
+                    found = true;
+                }
+            }
+        }
+        if !found {
+            return Err(codegen_err(CodegenError::message(format!(
+                "no force instrumentation for `{path}`"
+            ))));
+        }
+    }
+    Ok(result)
+}
 
 fn codegen_err(error: CodegenError) -> SimulatorError {
     error.into()
@@ -1801,6 +1919,8 @@ fn compile_program(
 ) -> Result<(NativeProgramImage, Option<NativeCodegenTrace>), SimulatorError> {
     let sir = laid_out;
     let layout = laid_out.layout();
+    let force_bindings =
+        build_force_bindings(sir.runtime(), layout, &options.signal_access.force_signals)?;
     let (compile_tasks, task_bindings) = collect_ff_compile_tasks(sir);
     let comb_blocks = sir
         .sir
@@ -1964,7 +2084,8 @@ fn compile_program(
     // A foreign-interface image can request per-unit entries so force/release
     // can reapply overrides between procedural store boundaries. Ordinary
     // images do not compile or retain this duplicate combinational code.
-    let force_store_boundaries = options.optimize_options.opt_level() == crate::OptLevel::O0;
+    let force_store_boundaries =
+        options.native_force_support && options.optimize_options.opt_level() == crate::OptLevel::O0;
     let comb_runtime_units = if options.native_force_support {
         sir.sir
             .eval_comb
@@ -2265,6 +2386,7 @@ fn compile_program(
             design: sir.runtime().design.clone(),
             testbench: sir.runtime().testbench.clone(),
             runtime_schema: NativeRuntimeSchema {
+                force_bindings,
                 runtime_errors: sir.runtime().runtime_schema.runtime_errors.clone(),
                 runtime_event_sites: sir.runtime().runtime_schema.runtime_event_sites.clone(),
                 extern_functions: sir.runtime().runtime_schema.extern_functions.clone(),
@@ -2290,6 +2412,7 @@ fn compile_program(
                 watches: sir.runtime().runtime_schema.watches.clone(),
                 wait_sites: sir.runtime().runtime_schema.wait_sites.clone(),
                 nba_sites: sir.runtime().runtime_schema.nba_sites.clone(),
+                host_request_sites: sir.runtime().runtime_schema.host_request_sites.clone(),
                 active_commits: sir.runtime().runtime_schema.active_commits.clone(),
                 time_slots: sir.runtime().runtime_schema.time_slots.clone(),
             },

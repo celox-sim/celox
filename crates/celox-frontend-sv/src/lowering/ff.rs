@@ -9,6 +9,8 @@
 //! Expressions are lowered through SLT, which keeps their width and
 //! four-state semantics identical to the combinational lowering.
 
+mod file_io;
+
 use super::procedural::*;
 use super::*;
 use celox_design::{CounterKind, NbaSite, WaitSite};
@@ -66,6 +68,7 @@ pub(super) struct Ff<'p, 'a> {
     wait_sites: Vec<WaitSite<SourceVarId>>,
     /// The nonblocking assignment sites of the process, by local index.
     nba_sites: Vec<NbaSite<SourceVarId>>,
+    host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
     direct: bool,
 }
 
@@ -114,6 +117,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             process: 0,
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
+            host_request_sites: Vec::new(),
         }
     }
 
@@ -344,7 +348,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         } else {
             expr
         };
-        let expr = self.propagate(&expr);
+        let expr = force_reads(&self.propagate(&expr), self.m);
         if let (sv::ir::Expr::Literal(literal), Some((width, _))) = (&expr, context)
             && let Some(fill) = unbased_fill_literal(literal)
         {
@@ -815,6 +819,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         Ok(match expr {
             Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fopen),
+                args,
+                ..
+            } => self.fopen(args)?,
+            Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Urandom),
                 args,
                 ..
@@ -830,6 +839,20 @@ impl<'p, 'a> Ff<'p, 'a> {
                 args,
                 ..
             } => self.urandom_range(args)?,
+            Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
+                        function @ (sv::ir::SystemFunction::TestPlusargs
+                        | sv::ir::SystemFunction::ValuePlusargs),
+                    ),
+                args,
+                ..
+            } => self.plusargs(*function, args)?,
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::DistUniform),
+                args,
+                ..
+            } => self.dist_uniform(args)?,
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Random),
                 args,
@@ -1105,6 +1128,82 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.random = Some((id, name));
         }
         self.random.clone().expect("a process RNG")
+    }
+
+    fn vcd_task(
+        &mut self,
+        operation: sv::ir::VcdTask,
+        args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+    ) -> Result<(), sv::AnalyzerError> {
+        use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue};
+        use sv::ir::VcdTask;
+        if self.kernel.is_none() {
+            return Err(unsupported("VCD tasks require a timed process"));
+        }
+        let mut values = Vec::new();
+        let mut strings = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            if operation == VcdTask::Vars
+                && index == 0
+                && matches!(arg, sv::ir::SystemTaskArg::Empty)
+            {
+                continue;
+            }
+            if operation == VcdTask::Vars && index > 0 {
+                let sv::ir::SystemTaskArg::Str(name) = arg else {
+                    return Err(unsupported("$dumpvars module or variable selection"));
+                };
+                strings.push(name.clone());
+                continue;
+            }
+            let (reg, signed, is_string) = match arg {
+                sv::ir::SystemTaskArg::Expr(expr) => {
+                    (self.eval(expr, None)?, self.expr_signed(expr), false)
+                }
+                sv::ir::SystemTaskArg::Str(text) if operation == VcdTask::File => {
+                    let bytes = unescape(text).into_bytes();
+                    let width = (bytes.len() * 8).max(8);
+                    let value = bytes.iter().fold(BigUint::zero(), |value, byte| {
+                        (value << 8u32) | BigUint::from(*byte)
+                    });
+                    let reg = self.b.alloc_bit(width, false);
+                    self.b.emit(SIRInstruction::Imm(reg, SIRValue::new(value)));
+                    (reg, false, true)
+                }
+                _ => {
+                    return Err(unsupported(
+                        "VCD argument must be an integral value or filename string",
+                    ));
+                }
+            };
+            let width = self.b.register(&reg).width();
+            let is_4state = matches!(self.b.register(&reg), RegisterType::Logic { .. });
+            let (id, _) = self.m.temp("vcd_argument", width, signed, is_4state);
+            self.store(id, SIROffset::Static(0), width, reg);
+            values.push(HostRequestValue {
+                id,
+                width,
+                signed,
+                is_string,
+            });
+        }
+        let local_site = self
+            .host_request_sites
+            .iter()
+            .filter(|site| site.kind == HostRequestKind::Vcd)
+            .count() as u32;
+        self.host_request_sites.push(HostRequestSite {
+            process: self.process,
+            kind: HostRequestKind::Vcd,
+            requires_timed_simulation: false,
+            operation: operation as u32,
+            args: values,
+            results: Vec::new(),
+            strings,
+        });
+        self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Vcd, local_site))
+            .map_err(|error| unsupported(error.to_string()))?;
+        Ok(())
     }
 
     /// The seed of this process's `$random` calls without a seed argument.
@@ -1390,7 +1489,331 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok(result)
     }
 
+    /// Annex N's uniform transform, represented as an exact rational. The
+    /// largest product has 79 bits, so 96-bit temporaries avoid overflow.
+    fn dist_uniform(
+        &mut self,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp as B, Expr as E};
+        let seed = args
+            .first()
+            .and_then(Option::as_ref)
+            .ok_or_else(|| unsupported("seed of `$dist_uniform`"))?;
+        let (lvalues, seed_read) = self.capture_system_actual(seed)?;
+        let seed_width = self
+            .m
+            .comparison_width(&seed_read, &seed_read)
+            .ok_or_else(|| unsupported("integral seed of `$dist_uniform`"))?;
+        let seed_signed = self.expr_signed(seed);
+        let original = self
+            .host_hidden(
+                "dist_original_seed",
+                &seed_read,
+                seed_width,
+                seed_signed,
+                true,
+            )?
+            .1;
+        let mut bound = |index| -> Result<E, sv::AnalyzerError> {
+            let value = self.hoist(
+                args.get(index)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| unsupported("bounds of `$dist_uniform`"))?,
+            )?;
+            let value = E::Resize {
+                expr: Box::new(value),
+                width: 32,
+                signed: true,
+            };
+            self.hidden("dist_bound", &value, true)
+        };
+        let start = bound(1)?;
+        let end = bound(2)?;
+        let current = self.int_formal(original.clone());
+        let current = self.hidden("dist_old_seed", &current, false)?;
+        // The distribution's inout formal is int. Only the final copyout
+        // writes the caller's actual, whose selector was captured once.
+        let formal = self.hidden("dist_seed_formal", &current, true)?;
+        let full = self.random(Some(&formal))?;
+        let next = E::Binary {
+            left: Box::new(E::Binary {
+                left: Box::new(E::Mux {
+                    condition: Box::new(E::Binary {
+                        left: Box::new(current.clone()),
+                        op: B::Eq,
+                        right: Box::new(E::Literal("32'd0".into())),
+                    }),
+                    then_expr: Box::new(E::Literal("32'd259341593".into())),
+                    else_expr: Box::new(current.clone()),
+                }),
+                op: B::Mul,
+                right: Box::new(E::Literal("32'd69069".into())),
+            }),
+            op: B::Add,
+            right: Box::new(E::Literal("32'd1".into())),
+        };
+        let next = self.hidden("dist_next_seed", &next, false)?;
+        let lit = |n: i128| {
+            if n < 0 {
+                E::Unary {
+                    op: sv::ir::UnaryOp::Minus,
+                    expr: Box::new(E::Literal(format!("96'sd{}", -n))),
+                }
+            } else {
+                E::Literal(format!("96'sd{n}"))
+            }
+        };
+        let bin = |left, op, right| E::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let wide = |value| E::Resize {
+            expr: Box::new(value),
+            width: 96,
+            signed: true,
+        };
+        let mux = |condition, then_expr, else_expr| E::Mux {
+            condition: Box::new(condition),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        };
+        let start = wide(start);
+        let end = wide(end);
+        let invalid = bin(start.clone(), B::Ge, end.clone());
+        // If end is INT_MAX, Annex N shifts the lower bound down by one,
+        // and adds one after the uniform transform.
+        let shifted = bin(end.clone(), B::Eq, lit(i32::MAX as i128));
+        let shifted_value = mux(shifted.clone(), lit(1), lit(0));
+        let a = bin(start.clone(), B::Sub, shifted_value.clone());
+        let span = bin(bin(end.clone(), B::Sub, start.clone()), B::Add, lit(1));
+        // Extract the 23-bit mantissa before converting to signed wide
+        // arithmetic. Widening the raw seed as signed would sign-extend its
+        // high bit, and a logical shift would then retain those high ones.
+        let m = wide(E::Resize {
+            expr: Box::new(bin(next, B::Shr, E::Literal("32'd9".into()))),
+            width: 32,
+            signed: false,
+        });
+        let fraction = bin(
+            bin(m.clone(), B::Mul, lit(8_388_608)),
+            B::Add,
+            bin(lit(8_388_608), B::Add, m),
+        );
+        let denominator = lit(1i128 << 46);
+        let numerator = bin(
+            bin(a, B::Mul, denominator.clone()),
+            B::Add,
+            bin(span, B::Mul, fraction),
+        );
+        let numerator = bin(
+            numerator,
+            B::Add,
+            bin(shifted_value, B::Mul, denominator.clone()),
+        );
+        let numerator = self
+            .host_hidden("dist_numerator", &numerator, 96, true, false)?
+            .1;
+        let negative_integral = bin(
+            bin(numerator.clone(), B::Lt, lit(0)),
+            B::LogicAnd,
+            bin(
+                bin(numerator.clone(), B::BitAnd, lit((1i128 << 46) - 1)),
+                B::Eq,
+                lit(0),
+            ),
+        );
+        let value = bin(
+            bin(numerator, B::Sar, lit(46)),
+            B::Sub,
+            mux(negative_integral, lit(1), lit(0)),
+        );
+        let value = self.host_hidden("dist_value", &value, 96, true, false)?.1;
+        let value = mux(
+            bin(value.clone(), B::Lt, start.clone()),
+            start.clone(),
+            mux(bin(value.clone(), B::Gt, end.clone()), end.clone(), value),
+        );
+        let is_full = bin(
+            bin(start.clone(), B::Eq, lit(i32::MIN as i128)),
+            B::LogicAnd,
+            bin(end, B::Eq, lit(i32::MAX as i128)),
+        );
+        let value = mux(invalid.clone(), start, mux(is_full, wide(full), value));
+        // A degenerate/reversed interval returns start without consuming seed.
+        let next = E::Resize {
+            expr: Box::new(formal),
+            width: seed_width,
+            signed: true,
+        };
+        let restored = mux(invalid, original, next);
+        match lvalues.as_slice() {
+            [lvalue] => self.assign(lvalue, &restored)?,
+            parts => self.assign_concat(parts, &restored)?,
+        }
+        Ok(E::Resize {
+            expr: Box::new(value),
+            width: 32,
+            signed: true,
+        })
+    }
+
+    /// Capture an inout/output actual's reference before reading or writing
+    /// it, including selectors changed by the call or by other selectors.
+    fn capture_system_actual(
+        &mut self,
+        expr: &sv::ir::Expr,
+    ) -> Result<(Vec<sv::ir::LValue>, sv::ir::Expr), sv::AnalyzerError> {
+        use sv::ir::{Expr, LValue};
+        let parts =
+            lvalue_from_expr(expr).ok_or_else(|| unsupported("integral output/inout actual"))?;
+        let signed = self.expr_signed(expr);
+        let mut captured = Vec::new();
+        for part in parts {
+            let part = self.hoist_lvalue(&part)?;
+            captured.push(self.freeze_lvalue(part)?);
+        }
+        let reads = captured
+            .iter()
+            .map(|part| match part {
+                LValue::Ident(name) => Expr::Ident(name.clone()),
+                LValue::Select { name, msb, lsb, .. } => Expr::Select {
+                    expr: Box::new(Expr::Ident(name.clone())),
+                    msb: msb.clone(),
+                    lsb: lsb.clone(),
+                    signed,
+                },
+            })
+            .collect::<Vec<_>>();
+        let read = if reads.len() == 1 {
+            reads.into_iter().next().unwrap()
+        } else {
+            Expr::Concat(reads)
+        };
+        Ok((captured, read))
+    }
+
+    fn host_hidden(
+        &mut self,
+        purpose: &str,
+        expr: &sv::ir::Expr,
+        width: usize,
+        signed: bool,
+        four_state: bool,
+    ) -> Result<(SourceVarId, sv::ir::Expr), sv::AnalyzerError> {
+        let value = self.eval(expr, Some((width, signed)))?;
+        let (id, name) = self.m.temp(purpose, width, signed, four_state);
+        self.store(id, SIROffset::Static(0), width, value);
+        Ok((id, sv::ir::Expr::Ident(name)))
+    }
+
+    fn plusargs(
+        &mut self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue};
+        use sv::ir::Expr;
+        if self.kernel.is_none() {
+            return Err(unsupported(format!(
+                "{} outside a timed process",
+                function.name()
+            )));
+        }
+        let query = self.hoist(
+            args.first()
+                .and_then(Option::as_ref)
+                .ok_or_else(|| unsupported("plusargs query"))?,
+        )?;
+        let width = self
+            .m
+            .comparison_width(&query, &query)
+            .ok_or_else(|| unsupported("packed plusargs query"))?;
+        let (query_id, _) = self.host_hidden("plusargs_query", &query, width, false, true)?;
+        let value_query = function == sv::ir::SystemFunction::ValuePlusargs;
+        let mut results = Vec::new();
+        let (ret_id, ret_name) = self.m.temp("plusargs_result", 32, true, false);
+        results.push(HostRequestValue {
+            id: ret_id,
+            width: 32,
+            signed: true,
+            is_string: false,
+        });
+        let target = if value_query {
+            let expr = args
+                .get(1)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| unsupported("plusargs destination"))?;
+            let (lvalues, captured) = self.capture_system_actual(expr)?;
+            let width = self
+                .m
+                .comparison_width(expr, expr)
+                .ok_or_else(|| unsupported("integral plusargs destination"))?;
+            let (id, result) = self.host_hidden("plusargs_value", &captured, width, false, true)?;
+            results.push(HostRequestValue {
+                id,
+                width,
+                signed: false,
+                is_string: false,
+            });
+            Some((lvalues, result))
+        } else {
+            None
+        };
+        let site = self
+            .host_request_sites
+            .iter()
+            .filter(|site| site.kind == HostRequestKind::Plusargs)
+            .count() as u32;
+        self.host_request_sites.push(HostRequestSite {
+            process: 0,
+            kind: HostRequestKind::Plusargs,
+            requires_timed_simulation: false,
+            operation: u32::from(value_query),
+            args: vec![HostRequestValue {
+                id: query_id,
+                width,
+                signed: false,
+                is_string: true,
+            }],
+            results,
+            strings: Vec::new(),
+        });
+        self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Plusargs, site))
+            .map_err(kernel_error)?;
+        if let Some((lvalues, result)) = target {
+            match lvalues.as_slice() {
+                [lvalue] => self.assign(lvalue, &result)?,
+                parts => self.assign_concat(parts, &result)?,
+            }
+        }
+        Ok(Expr::Ident(ret_name))
+    }
+
     fn store(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
+        let value = if let Some((enabled, forced)) = self.m.force_controls(id) {
+            let condition = self.b.alloc_bit(1, false);
+            self.b.emit(SIRInstruction::Load(
+                condition,
+                stable(enabled),
+                SIROffset::Static(0),
+                1,
+            ));
+            let replacement = self.b.alloc_reg(self.b.register(&value).clone());
+            self.b.emit(SIRInstruction::Load(
+                replacement,
+                stable(forced),
+                offset.clone(),
+                width,
+            ));
+            let selected = self.b.alloc_reg(self.b.register(&value).clone());
+            self.b
+                .emit(SIRInstruction::Mux(selected, condition, replacement, value));
+            selected
+        } else {
+            value
+        };
         let target = self.target(id);
         self.b.emit(SIRInstruction::Store(
             target,
@@ -1882,6 +2305,18 @@ impl<'p, 'a> Ff<'p, 'a> {
     }
 
     fn exec(&mut self, stmt: &sv::ir::Stmt) -> Result<bool, sv::AnalyzerError> {
+        if matches!(
+            stmt,
+            sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::Wait(_)
+        ) && (self.kernel.is_none()
+            || self.active_calls.iter().any(|name| {
+                self.m
+                    .subroutine(name)
+                    .is_some_and(|subroutine| !subroutine.is_task)
+            }))
+        {
+            return Err(unsupported("timed task call outside a suspendable process"));
+        }
         match stmt {
             sv::ir::Stmt::Assign {
                 lhs,
@@ -2049,6 +2484,19 @@ impl<'p, 'a> Ff<'p, 'a> {
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
         site: Option<&sv::ir::SourceSpan>,
     ) -> Result<bool, sv::AnalyzerError> {
+        if let sv::ir::SystemTask::Vcd(operation) = task {
+            self.vcd_task(operation, args)?;
+            return Ok(true);
+        }
+        if matches!(
+            task,
+            sv::ir::SystemTask::Fclose
+                | sv::ir::SystemTask::Fdisplay(_)
+                | sv::ir::SystemTask::Fwrite(_)
+                | sv::ir::SystemTask::Writemem(_)
+        ) {
+            return self.file_task(task, args);
+        }
         if let sv::ir::SystemTask::Readmem(format) = task {
             let mut addresses = [None, None];
             for (slot, arg) in addresses.iter_mut().zip(args.iter().skip(2)) {
@@ -2647,6 +3095,38 @@ impl<'p, 'a> Ff<'p, 'a> {
                 "function call `{name}` with too many arguments"
             )));
         }
+        // Each inlined automatic task activation owns persistent storage, so
+        // another process can enter the same task while this one is suspended.
+        // Static formals/locals deliberately keep their module-wide addresses.
+        let mut activation = Vec::new();
+        if self.kernel.is_some() && subroutine.is_task {
+            for name in &subroutine.automatic_locals {
+                let original = self
+                    .m
+                    .id(name)
+                    .ok_or_else(|| unsupported(format!("task local `{name}`")))?;
+                let variable = self.m.var(original).clone();
+                let (copy, copy_name) = self.m.temp(
+                    "task_local",
+                    variable.width,
+                    variable.signed,
+                    variable.is_4state,
+                );
+                self.m.variables.insert(
+                    copy,
+                    SvVariable {
+                        path: vec![copy_name],
+                        ..variable
+                    },
+                );
+                if let Some(width) = self.element_widths.get(&stable(original)).copied() {
+                    self.element_widths.insert(stable(copy), width);
+                    self.element_widths.insert(working(copy), width);
+                }
+                self.m.name_to_id.insert(name.clone(), copy);
+                activation.push((name.clone(), original));
+            }
+        }
         // Evaluate every input before any formal is written: an argument may
         // read a formal of an enclosing call of another subroutine.
         let mut outputs = Vec::new();
@@ -2698,7 +3178,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                         .map_err(slt_error)?;
                 }
                 inputs.push((id, self.lower_slt(&arena, node)?));
-            } else {
+            } else if self.kernel.is_none()
+                || !subroutine.is_task
+                || subroutine.automatic_locals.contains(&param.name)
+            {
                 let value = self.default_reg(id);
                 inputs.push((id, value));
             }
@@ -2738,6 +3221,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let parts = lvalues;
                 self.assign_concat(&parts, &sv::ir::Expr::Ident(formal))?;
             }
+        }
+        for (name, original) in activation {
+            self.m.name_to_id.insert(name, original);
         }
         Ok(subroutine.return_var.clone())
     }
@@ -3295,6 +3781,7 @@ impl Ff<'_, '_> {
             unit,
             wait_sites: self.wait_sites,
             nba_sites: self.nba_sites,
+            host_request_sites: self.host_request_sites,
         })
     }
 
@@ -3561,6 +4048,23 @@ impl Ff<'_, '_> {
         let mut names = HashSet::default();
         expr_idents(condition, &mut names);
         subroutine_reads(self.m, condition, &mut names);
+        // Static task formals can change when another caller copies arguments
+        // in, but hidden local storage has no observable change counters yet.
+        // Do not compile a wait that would silently miss that wakeup, including
+        // dependencies read indirectly by a function in the condition.
+        if self.m.subroutines.values().any(|subroutine| {
+            subroutine.is_task
+                && subroutine.params.iter().any(|param| {
+                    !subroutine.automatic_locals.contains(&param.name)
+                        && names.iter().any(|name| {
+                            self.m.id(name).is_some_and(|id| {
+                                self.m.is_hidden(id) && Some(id) == self.m.id(&param.name)
+                            })
+                        })
+                })
+        }) {
+            return Err(unsupported("wait condition reading a static task argument"));
+        }
         let mut ids: Vec<_> = names
             .iter()
             .filter_map(|name| self.m.id(name))
@@ -3654,6 +4158,7 @@ pub(super) struct KernelUnit {
     pub unit: ExecutionUnit<Addr>,
     pub wait_sites: Vec<WaitSite<SourceVarId>>,
     pub nba_sites: Vec<NbaSite<SourceVarId>>,
+    pub host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
 }
 
 /// Iterations, as a power of two, between the yields of a kernel loop that
@@ -3861,6 +4366,93 @@ fn substitute_overlay(
         Expr::Concat(parts) => Expr::Concat(parts.iter().map(go).collect()),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count: substitute_overlay_const(count, overlay),
+            parts: parts.iter().map(go).collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(go(expr)),
+            width: *width,
+            signed: *signed,
+        },
+        Expr::Unary { op, expr } => Expr::Unary {
+            op: *op,
+            expr: Box::new(go(expr)),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: Box::new(go(left)),
+            op: *op,
+            right: Box::new(go(right)),
+        },
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expr::Mux {
+            condition: Box::new(go(condition)),
+            then_expr: Box::new(go(then_expr)),
+            else_expr: Box::new(go(else_expr)),
+        },
+        Expr::Call {
+            callee,
+            args,
+            arg_order,
+        } => Expr::Call {
+            arg_order: arg_order.clone(),
+            callee: callee.clone(),
+            args: args.iter().map(|arg| arg.as_ref().map(go)).collect(),
+        },
+        Expr::Inside { expr, items } => Expr::Inside {
+            expr: Box::new(go(expr)),
+            items: items
+                .iter()
+                .map(|item| item.map(&mut |operand| go(operand)))
+                .collect(),
+        },
+    }
+}
+
+fn force_reads(expr: &sv::ir::Expr, m: &ProcModule<'_>) -> sv::ir::Expr {
+    if m.forceable.is_empty() {
+        return expr.clone();
+    }
+    use sv::ir::Expr;
+    let go = |expr: &Expr| force_reads(expr, m);
+    match expr {
+        Expr::Ident(name) => {
+            if let Some(id) = m.id(name)
+                && let Some((enabled, forced)) = m.force_controls(id)
+            {
+                Expr::Resize {
+                    width: m.var(id).width,
+                    signed: m.var(id).signed,
+                    expr: Box::new(Expr::Mux {
+                        condition: Box::new(Expr::Ident(m.var(enabled).path[0].clone())),
+                        then_expr: Box::new(Expr::Ident(m.var(forced).path[0].clone())),
+                        else_expr: Box::new(expr.clone()),
+                    }),
+                }
+            } else {
+                expr.clone()
+            }
+        }
+        Expr::Literal(_) => expr.clone(),
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
+            expr: Box::new(go(expr)),
+            msb: msb.clone(),
+            lsb: lsb.clone(),
+            signed: *signed,
+        },
+        Expr::Concat(parts) => Expr::Concat(parts.iter().map(go).collect()),
+        Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
+            count: count.clone(),
             parts: parts.iter().map(go).collect(),
         },
         Expr::Resize {

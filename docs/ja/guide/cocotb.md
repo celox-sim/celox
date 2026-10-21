@@ -30,10 +30,10 @@ target/release/celox run src/types.sv src/Dut.sv test/Top.sv --top Top
 target/release/celox run test/Top.veryl --top Top
 ```
 
-SVは`.sv`または`.v`をコンパイル順に指定します。4値シミュレーションを使い、
+SVは`.sv`または`.v`をコンパイル順に指定します。既定では2値シミュレーションを使い（`--four-state`でX/Zを扱う4値に切り替え）、
 `$finish`または実行待ちイベントがなくなるまで実行します。
 Verylはプロジェクト内の1ファイルを指定すると、`Veryl.toml`から
-ソースと依存関係を収集します。単独のVerylファイルも使用できます。
+ソースと依存関係を収集します。単独のVerylファイルも使用でき、Verylも既定は2値です。
 `--top`にはnative testbenchのモジュール名を指定します。
 既存のnative testbench実行器を使うため、initialブロックの末尾への到達でも完了します。
 
@@ -52,6 +52,116 @@ SVではスケジューラのステップ数、Verylではtestbenchのtick数で
 Verylでは完了前にtick上限に達すると失敗します。
 コンパイルや1ステップ・tick内の処理時間は制限しないため、実時間の制限が必要な場合は
 外部のタイムアウト機能を使ってください。1回の実行で言語を混在させることはできません。
+
+両言語とも`--backend native|tiered|interpreter|cranelift|wasm`で実行方式を選べます（既定native）。
+tieredはインタープリターで開始し、待機中のイベントを保ちながら生成コードへ移行します。
+両言語とも`--threads N`（1〜64、既定1）で並列度を指定できます。
+`--unlimited`で実行ステップ・tick数の上限を解除します。
+
+```sh
+celox run test/Top.sv --top Top --backend tiered --threads 4
+celox run --project /path/to/veryl-project --top smoke --backend tiered --threads 4
+celox run test/Top.veryl --top Top --four-state
+celox run --project /path/to/veryl-project --top smoke --report --unlimited
+```
+
+Veryl用の`--report`は設定・コンパイル時間・実行時間・tiered昇格統計・結果を
+機械可読な`CELOX_*`レコードとして標準出力に出します。通常実行では出しません。
+Heliodorベンチも専用Celoxバイナリではなく、このCLIを呼びます。
+`--report --backend tiered --require-compiled`では生成コードの実行を必須にできます。
+通常の短いtiered実行はインタープリターのまま終了しても成功です。
+
+`--project`は`celox.toml`のほか、Verylプロジェクトディレクトリや`Veryl.toml`を受け取ります。
+`--source-file PATH`はプロジェクトからの相対パスでVerylソースを選択します（複数指定可）。
+native用の`--build-cache-dir DIR`はVeryl.tomlプロジェクトのコンパイルをキャッシュし、
+`--compile-only --native-image-output FILE`でイメージを書き出し、
+`--native-image-input FILE`でHDLソースなしに実行できます。
+`--dump-ir-dir DIR`でIRを保存し、`--dump-ir-and-run`でそのまま実行できます。
+
+
+## 複数ファイルのプロジェクトを管理する
+
+共通の入力と名前付きターゲットを`celox.toml`に保存できます。
+
+```toml
+sources = ["rtl/pkg.sv"]
+filelists = ["rtl/design.f"]
+include_dirs = ["include"]
+default_target = "smoke"
+
+[defines]
+SIMULATION = "1"
+
+[diagnostics]
+mixed_timescale = "warn"
+
+[targets.smoke]
+sources = ["test/Tb.sv"]
+top = "Tb"
+opt_level = "O1"
+max_steps = 1000000
+
+[targets.dut]
+top = "Dut"
+```
+
+`run`と`vpi build`は同じソース一覧、includeディレクトリ、マクロ、topを読みます。
+
+```sh
+celox run --target smoke
+celox vpi build --target dut -o build/dut-sim
+celox run --project /path/to/celox.toml --target smoke
+```
+
+ソースや`-f`を指定しない場合、または`--target`を指定した場合は、現在のディレクトリから
+親方向へ`celox.toml`を探索します。`--project FILE`で直接指定することもできます。
+TOML内の相対パスは、ターゲット内も含めてTOMLのあるディレクトリを基準にします。
+ソースや`-f`だけを指定した場合は、近くのTOMLを自動では読みません。
+
+ターゲットはルート設定を継承します。ソースの順序は、ルートの`sources`、
+ルートの`filelists`、ターゲットの`sources`、ターゲットの`filelists`、
+CLIのソースと`-f`（引数に指定した順）の順です。各一覧内の順序を保持します。
+includeディレクトリも同じ階層順で追加します。マクロは実行全体に適用し、
+後の定義が優先されます。CLIの`-D`は最後に適用します。TOMLのマクロ値は文字列です。
+設定されたマクロは各ソースに適用し、HDL内のマクロ定義は既存のファイル単位のスコープに従います。
+`--top`は選択されたtopを上書きし、`run`の`-O`と`--max-steps`はターゲット・ルートの
+実行設定を上書きします。VPIビルドは既存のforce対応コンパイル設定を使用します。
+
+`--target`を省略すると、`default_target`、ルートの`top`、唯一のターゲットの順に選びます。
+複数ターゲットがあり既定値もない場合は`--target`が必要です。
+単独の`.veryl`エントリーファイルをプロジェクトに指定することもでき、
+Veryl側のソース探索には引き続き`Veryl.toml`を使います。
+
+コンパイル時の診断レベルは `[diagnostics]` で設定でき、`[targets.NAME.diagnostics]`、両コマンドの `--diagnostic CODE=allow|warn|error` の順に上書きできます。CLI オプションは繰り返し指定できます。緩和時の動作と使用例は [診断設定](./celox-toml.md#diagnostics) を参照してください。
+
+### ファイル一覧を直接使う
+
+```sh
+celox run -f test/all.f --top Tb
+celox vpi build -f rtl/design.f --top Dut -o build/dut-sim
+```
+
+`.f`には空白区切りのソースパスを記述し、別の一覧やプリプロセッサ設定も指定できます。
+
+```text
+# 相対パスはこのファイルの場所を基準にします。
+../rtl/pkg.sv
+-f ../rtl/design.f
++incdir+../include
++define+SIMULATION=1
+"../test/with spaces/Tb.sv"
+```
+
+対応するオプションは`-f FILE`、`-I DIR`/`-IDIR`、
+`-D NAME[=VALUE]`/`-DNAME[=VALUE]`、`+incdir+DIR[+DIR...]`、
+`+define+NAME[=VALUE][+NAME[=VALUE]...]`です。値のないマクロは`1`になります。
+パスには引用符やバックスラッシュのエスケープを使えます。
+トークンの先頭にある`#`・`//`による行コメントと、`/* ... */`コメントに対応します。
+ネストした一覧の相対パスは、それぞれの一覧があるディレクトリを基準にします。
+環境変数・ワイルドカード・シェルの展開は行いません。
+未対応オプション、未知のTOMLフィールド、一覧の循環参照はエラーにします。
+CLIからも`-I`/`--include-dir`と`-D`/`--define`を直接指定できます。
+include・マクロ指定にはSV入力と`--features systemverilog`によるビルドが必要です。
 
 ## 設計をコンパイルする
 

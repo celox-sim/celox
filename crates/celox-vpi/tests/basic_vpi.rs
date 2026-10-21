@@ -8,6 +8,143 @@ use celox::{NativeProgramInstance, SimBackend, Simulator};
 use celox_vpi::*;
 
 static VPI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static LONG_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
+static LONG_CALLBACK_DELAY: AtomicUsize = AtomicUsize::new(1);
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn systemverilog_parameters_are_typed_read_only_objects_at_o2() {
+    let _serial = lock_vpi();
+    let source = "module Top #(parameter WIDTH=8, parameter signed NEG=-3,
+        parameter logic [64:0] WIDE=65'h10000000000000001,
+        parameter logic [3:0] FOUR=4'b10xz)(output logic [7:0] y);
+        assign y=WIDTH; endmodule";
+    let simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("params.sv"))], "Top")
+            .param("WIDTH", 9)
+            .four_state(true)
+            .opt_level(celox::OptLevel::O2)
+            .build()
+            .unwrap();
+    let _session = install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ))
+    .unwrap();
+    unsafe {
+        for (name, expected) in [
+            (c"Top.WIDTH", "00000000000000000000000000001001"),
+            (c"Top.NEG", "11111111111111111111111111111101"),
+            (
+                c"Top.WIDE",
+                "10000000000000000000000000000000000000000000000000000000000000001",
+            ),
+            (c"Top.FOUR", "10xz"),
+        ] {
+            let handle = vpi_handle_by_name(name.as_ptr(), ptr::null_mut());
+            assert!(!handle.is_null(), "{name:?}");
+            assert_eq!(vpi_get(VPI_TYPE, handle), VPI_PARAMETER);
+            assert_eq!(vpi_get(VPI_CONST_TYPE, handle), VPI_BINARY_CONST);
+            let mut value = VpiValue {
+                format: VPI_BIN_STR_VAL,
+                value: VpiValueData { integer: 0 },
+            };
+            vpi_get_value(handle, &mut value);
+            assert_eq!(CStr::from_ptr(value.value.str_).to_str().unwrap(), expected);
+            let replacement = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: 0 },
+            };
+            vpi_put_value(handle, &replacement, ptr::null(), VPI_NO_DELAY);
+            vpi_get_value(handle, &mut value);
+            assert_eq!(CStr::from_ptr(value.value.str_).to_str().unwrap(), expected);
+            vpi_free_object(handle);
+        }
+        let top = vpi_handle_by_name(c"Top".as_ptr(), ptr::null_mut());
+        let iterator = vpi_iterate(VPI_PARAMETER, top);
+        let mut count = 0;
+        loop {
+            let parameter = vpi_scan(iterator);
+            if parameter.is_null() {
+                break;
+            }
+            count += 1;
+            vpi_free_object(parameter);
+        }
+        assert_eq!(count, 4);
+        vpi_free_object(top);
+    }
+    clear_runtime();
+}
+
+unsafe extern "C" fn reschedule_long_callback(data: *mut VpiCbData) -> i32 {
+    let count = LONG_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+    let delay = LONG_CALLBACK_DELAY.load(Ordering::SeqCst);
+    if delay != 0 && count == 500_010 {
+        vpi_control(VPI_FINISH);
+        return 0;
+    }
+    let mut time = VpiTime {
+        type_: VPI_SIM_TIME,
+        low: delay as u32,
+        ..VpiTime::default()
+    };
+    // Safety: dispatch owns readable callback data, and registration copies time.
+    let next = unsafe {
+        VpiCbData {
+            time: &mut time,
+            ..*data
+        }
+    };
+    unsafe {
+        vpi_register_cb(&next);
+    }
+    0
+}
+
+#[test]
+fn callback_iteration_limit_only_bounds_nonadvancing_time() {
+    let _serial = lock_vpi();
+    for delay in [1, 0] {
+        let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+        let _session = install_runtime(trusted_instance(
+            simulator.shared_code().program_image().clone(),
+        ))
+        .unwrap();
+        LONG_CALLBACK_COUNT.store(0, Ordering::SeqCst);
+        LONG_CALLBACK_DELAY.store(delay, Ordering::SeqCst);
+        let mut time = VpiTime {
+            type_: VPI_SIM_TIME,
+            low: delay as u32,
+            ..VpiTime::default()
+        };
+        let callback = VpiCbData {
+            reason: CB_AFTER_DELAY,
+            cb_rtn: Some(reschedule_long_callback),
+            obj: ptr::null_mut(),
+            time: &mut time,
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        unsafe {
+            assert!(!vpi_register_cb(&callback).is_null());
+        }
+        let result = run_callbacks_result();
+        if delay != 0 {
+            assert!(result.unwrap());
+            assert_eq!(LONG_CALLBACK_COUNT.load(Ordering::SeqCst), 500_010);
+            assert_eq!(celox_vpi_current_time(), 500_010);
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("without advancing time")
+            );
+        }
+        clear_runtime();
+    }
+}
 
 fn lock_vpi() -> std::sync::MutexGuard<'static, ()> {
     VPI_TEST_LOCK
@@ -366,7 +503,21 @@ fn compile_time_objects_are_not_exposed_as_writable_registers() {
     .unwrap();
 
     unsafe {
-        assert!(vpi_handle_by_name(c"Top.WIDTH".as_ptr(), ptr::null_mut()).is_null());
+        let width = vpi_handle_by_name(c"Top.WIDTH".as_ptr(), ptr::null_mut());
+        assert!(!width.is_null());
+        assert_eq!(vpi_get(VPI_TYPE, width), VPI_PARAMETER);
+        let replacement = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        assert!(vpi_put_value(width, &replacement, ptr::null(), VPI_NO_DELAY).is_null());
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        vpi_get_value(width, &mut value);
+        assert_eq!(value.value.integer, 8);
+        vpi_free_object(width);
         assert!(vpi_handle_by_name(c"Top.BIAS".as_ptr(), ptr::null_mut()).is_null());
         let output = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
         assert!(!output.is_null());
@@ -2802,5 +2953,138 @@ fn callback_teardown_keeps_its_host_selected_until_dispatch_returns() {
         };
         assert_eq!(vpi_get_vlog_info(&mut info), 0);
         assert!(info.argv.is_null());
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn interface_members_are_navigable_after_native_image_round_trip() {
+    let _serial = lock_vpi();
+    let source = r#"
+        interface Axis;
+            logic [7:0] data, cost$usd;
+            logic valid, ready;
+            modport sink(input data, valid, output ready);
+        endinterface
+        module Child(Axis.sink s_axis, output logic [7:0] y);
+            assign s_axis.ready = 1;
+            assign y = s_axis.valid ? s_axis.data + 1 : 0;
+        endmodule
+        module Top(output logic [7:0] y);
+            Axis s_axis(), s$axis(), lanes[2](), shifted[-1:1]();
+            assign lanes[0].data=8'h34;
+            assign lanes[1].data=8'h56;
+            assign shifted[-1].data=8'h78;
+            logic [7:0] cash$flow;
+            assign cash$flow = 3;
+            Child uut(s_axis, y);
+        endmodule
+    "#;
+    let simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("axis.sv"))], "Top")
+            .native_force_support(true)
+            .four_state(true)
+            .build_native()
+            .unwrap();
+    let container = simulator
+        .shared_code()
+        .program_image()
+        .to_container_bytes()
+        .unwrap();
+    let runtime = unsafe { NativeProgramInstance::from_attached_bytes(&container) }.unwrap();
+    drop(simulator);
+    let _session = install_runtime(runtime).unwrap();
+    unsafe {
+        let top = vpi_handle_by_name(c"Top".as_ptr(), ptr::null_mut());
+        for (name, expected) in [
+            (c"Top.lanes[0].data", 0x34),
+            (c"Top.lanes[1].data", 0x56),
+            (c"Top.shifted[-1].data", 0x78),
+        ] {
+            let member = vpi_handle_by_name(name.as_ptr(), ptr::null_mut());
+            assert!(!member.is_null(), "{name:?}");
+            let mut value = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: 0 },
+            };
+            vpi_get_value(member, &mut value);
+            assert_eq!(value.value.integer, expected);
+            vpi_free_object(member);
+        }
+        let bus = vpi_handle_by_name(c"s_axis".as_ptr(), top);
+        assert!(!bus.is_null(), "the declared interface must have a scope");
+        let data = vpi_handle_by_name(c"data".as_ptr(), bus);
+        let valid = vpi_handle_by_name(c"valid".as_ptr(), bus);
+        let ready = vpi_handle_by_name(c"ready".as_ptr(), bus);
+        assert!(!data.is_null() && !valid.is_null() && !ready.is_null());
+        assert_eq!(CStr::from_ptr(vpi_get_str(VPI_NAME, data)), c"data");
+        assert_eq!(
+            CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, data)),
+            c"Top.s_axis.data"
+        );
+        assert_eq!(vpi_get(VPI_SIZE, data), 8);
+        let parent = vpi_handle(VPI_SCOPE, data);
+        assert_eq!(
+            CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, parent)),
+            c"Top.s_axis"
+        );
+        let child_data = vpi_handle_by_name(c"Top.uut.s_axis.data".as_ptr(), ptr::null_mut());
+        assert!(
+            !child_data.is_null(),
+            "interface ports must retain their paths too"
+        );
+        put_int(data, 41);
+        put_int(valid, 1);
+        let y = vpi_handle_by_name(c"y".as_ptr(), top);
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        vpi_get_value(y, &mut value);
+        assert_eq!(value.value.integer, 42);
+        vpi_get_value(child_data, &mut value);
+        assert_eq!(
+            value.value.integer, 41,
+            "child member alias must see the deposited value"
+        );
+        let members = vpi_iterate(VPI_REG, bus);
+        let mut names = Vec::new();
+        loop {
+            let member = vpi_scan(members);
+            if member.is_null() {
+                break;
+            }
+            names.push(
+                CStr::from_ptr(vpi_get_str(VPI_NAME, member))
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+            vpi_free_object(member);
+        }
+        names.sort();
+        assert_eq!(names, ["cost$usd", "data", "ready", "valid"]);
+        let dollar_member = vpi_handle_by_name(c"cost$usd".as_ptr(), bus);
+        let dollar_interface = vpi_handle_by_name(c"Top.s$axis.data".as_ptr(), ptr::null_mut());
+        let dollar_signal = vpi_handle_by_name(c"Top.cash$flow".as_ptr(), ptr::null_mut());
+        assert!(
+            !dollar_member.is_null() && !dollar_interface.is_null() && !dollar_signal.is_null()
+        );
+        assert!(vpi_handle_by_name(c"Top.cash".as_ptr(), ptr::null_mut()).is_null());
+        for handle in [
+            top,
+            bus,
+            data,
+            valid,
+            ready,
+            parent,
+            child_data,
+            y,
+            dollar_member,
+            dollar_interface,
+            dollar_signal,
+        ] {
+            vpi_free_object(handle);
+        }
     }
 }

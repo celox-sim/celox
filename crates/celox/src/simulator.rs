@@ -32,6 +32,7 @@ pub use state_file::{StateError, StateMismatch, StateSchema};
 
 #[cfg(feature = "host-runtime")]
 mod host {
+    mod file_io;
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -57,6 +58,19 @@ mod host {
         pad_veryl_field,
     };
     use num_bigint::BigUint;
+
+    #[derive(Default)]
+    pub(crate) struct SvVcdControl {
+        pub path: Option<std::path::PathBuf>,
+        pub started: Option<u64>,
+        pub pending: bool,
+        pub selections: Vec<crate::VcdSignalDesc>,
+        pub external_selections: Vec<(usize, celox_runtime::VcdExternalSignalDesc)>,
+        pub source_writer: bool,
+        pub active_external_indices: Vec<usize>,
+        pub limit: u64,
+        pub suspended: bool,
+    }
 
     /// Hierarchical instance tree with resolved signals.
     #[derive(Debug, Clone)]
@@ -102,10 +116,13 @@ mod host {
         pub(crate) backend: B,
         /// Dynamic testbench strings, keyed by the bound variable location.
         pub(crate) testbench_strings: celox_testbench::TestbenchStrings,
+        file_io: celox_runtime::file_io::FileIo,
+        pending_host_events: Arc<std::sync::Mutex<PendingRuntimeEvents>>,
         pub(crate) program: RuntimeProgram,
         /// The program's scheduling facts.
         pub(crate) schedule: celox_design::schedule::ScheduleModel<crate::AbsoluteAddr>,
         pub(crate) vcd_writer: Option<crate::VcdWriter>,
+        pub(crate) sv_vcd: SvVcdControl,
         pub(crate) dirty: bool,
         pub(crate) warnings: Vec<CompilationWarning>,
         pub(crate) components: crate::component::ComponentRuntime,
@@ -119,6 +136,7 @@ mod host {
         /// State objects as state files name them, built on first use.
         pub(super) state_schema: std::sync::OnceLock<Arc<state_file::StateSchema>>,
         pub(crate) diagnostics: crate::RuntimeDiagnostics,
+        pub(crate) plusargs: celox_runtime::plusargs::Plusargs,
         tick_timing_ticks: u64,
         tick_timing_eval_apply_ns: u64,
         tick_timing_eval_comb_ns: u64,
@@ -187,6 +205,7 @@ mod host {
         buffer: Arc<RuntimeEventBuffer>,
         layout: MemoryLayout,
         sites: Vec<RuntimeEventSite>,
+        pending_host_events: Arc<std::sync::Mutex<PendingRuntimeEvents>>,
         read_seq: u64,
         shared_read_seq: Arc<AtomicU64>,
         active: Arc<AtomicBool>,
@@ -198,6 +217,8 @@ mod host {
         }
 
         pub fn drain_with_context(&mut self, ctx: RuntimeFormatContext<'_>) -> Vec<RuntimeEvent> {
+            let mut pending = self.pending_host_events.lock().unwrap();
+            self.read_seq = self.shared_read_seq.load(Ordering::Acquire);
             let events = drain_raw_runtime_events_from_buffer(
                 &self.buffer,
                 &self.layout,
@@ -205,6 +226,9 @@ mod host {
                 &mut self.read_seq,
             );
             self.shared_read_seq.store(self.read_seq, Ordering::Release);
+            pending.extend(events, self.layout.runtime_event_capacity);
+            let events = pending.drain();
+            drop(pending);
             events
                 .into_iter()
                 .filter_map(|raw| render_raw_runtime_event(raw, &self.sites, ctx))
@@ -214,7 +238,6 @@ mod host {
 
     impl Drop for RuntimeEventDrain {
         fn drop(&mut self) {
-            self.shared_read_seq.store(self.read_seq, Ordering::Release);
             self.active.store(false, Ordering::Release);
         }
     }
@@ -236,6 +259,10 @@ mod host {
 
     #[derive(Clone)]
     enum RawRuntimeEvent {
+        Host {
+            site: Box<RuntimeEventSite>,
+            args: Vec<RuntimeEventArgValue>,
+        },
         Event {
             site_id: usize,
             args: Vec<RuntimeEventArgValue>,
@@ -243,6 +270,50 @@ mod host {
         Missed {
             count: u64,
         },
+    }
+
+    /// A bounded continuation of the backend ring. Records remain unformatted
+    /// until the eventual consumer supplies its scope/time context.
+    #[derive(Default)]
+    struct PendingRuntimeEvents {
+        events: std::collections::VecDeque<RawRuntimeEvent>,
+        missed: u64,
+    }
+
+    impl PendingRuntimeEvents {
+        fn extend(&mut self, events: impl IntoIterator<Item = RawRuntimeEvent>, capacity: usize) {
+            for event in events {
+                self.push(event, capacity);
+            }
+        }
+
+        fn push(&mut self, event: RawRuntimeEvent, capacity: usize) {
+            if let RawRuntimeEvent::Missed { count } = event {
+                // Ring overwrite means every older pending record also lies
+                // outside the latest `capacity` records of the combined stream.
+                self.missed += count + self.events.len() as u64;
+                self.events.clear();
+            } else if capacity == 0 {
+                self.missed += 1;
+            } else {
+                if self.events.len() == capacity {
+                    self.events.pop_front();
+                    self.missed += 1;
+                }
+                self.events.push_back(event);
+            }
+        }
+
+        fn drain(&mut self) -> Vec<RawRuntimeEvent> {
+            let mut events = Vec::with_capacity(self.events.len() + usize::from(self.missed > 0));
+            if self.missed > 0 {
+                events.push(RawRuntimeEvent::Missed {
+                    count: std::mem::take(&mut self.missed),
+                });
+            }
+            events.extend(self.events.drain(..));
+            events
+        }
     }
 
     fn runtime_event_words_to_biguint(words: &[u64], width: usize) -> BigUint {
@@ -468,17 +539,25 @@ mod host {
         match raw {
             RawRuntimeEvent::Missed { count } => Some(RuntimeEvent::Missed { count }),
             RawRuntimeEvent::Event { site_id, args } => {
-                let site = sites.get(site_id)?;
-                let message = render_runtime_event_message(site, &args, ctx);
-                Some(match site.kind {
-                    RuntimeEventKind::Display => RuntimeEvent::Display { message },
-                    RuntimeEventKind::Write => RuntimeEvent::Write { message },
-                    RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
-                    RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
-                    RuntimeEventKind::Finish => RuntimeEvent::Finish,
-                    RuntimeEventKind::Stop => RuntimeEvent::Stop,
-                })
+                Some(render_runtime_event(sites.get(site_id)?, &args, ctx))
             }
+            RawRuntimeEvent::Host { site, args } => Some(render_runtime_event(&site, &args, ctx)),
+        }
+    }
+
+    fn render_runtime_event(
+        site: &RuntimeEventSite,
+        args: &[RuntimeEventArgValue],
+        ctx: RuntimeFormatContext<'_>,
+    ) -> RuntimeEvent {
+        let message = render_runtime_event_message(site, args, ctx);
+        match site.kind {
+            RuntimeEventKind::Display => RuntimeEvent::Display { message },
+            RuntimeEventKind::Write => RuntimeEvent::Write { message },
+            RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
+            RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
+            RuntimeEventKind::Finish => RuntimeEvent::Finish,
+            RuntimeEventKind::Stop => RuntimeEvent::Stop,
         }
     }
 
@@ -723,9 +802,12 @@ mod host {
                 program,
                 schedule,
                 vcd_writer: None,
+                sv_vcd: SvVcdControl::default(),
                 dirty: false,
                 warnings,
                 testbench_strings: Default::default(),
+                file_io: Default::default(),
+                pending_host_events: Default::default(),
                 components: Default::default(),
                 component_simulation: None,
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
@@ -735,6 +817,7 @@ mod host {
                 checkpoint_fingerprint: std::sync::OnceLock::new(),
                 state_schema: std::sync::OnceLock::new(),
                 diagnostics: crate::RuntimeDiagnostics::default(),
+                plusargs: celox_runtime::plusargs::Plusargs::default(),
                 tick_timing_ticks: 0,
                 tick_timing_eval_apply_ns: 0,
                 tick_timing_eval_comb_ns: 0,
@@ -813,6 +896,58 @@ mod host {
             self.program
                 .design
                 .restore_initial_state(initial_memory_values);
+        }
+
+        pub(crate) fn run_plusargs_request(
+            &mut self,
+            site: &celox_design::HostRequestSite<SignalRef>,
+            _timestamp: u64,
+        ) -> Result<(), celox_runtime::Halt> {
+            let query_signal = site.args[0].id;
+            let (query_value, query_mask) = self.backend.get_four_state(query_signal);
+            if query_mask != BigUint::default() {
+                return Err(celox_runtime::Halt::Error(
+                    crate::RuntimeErrorCode::Runtime {
+                        message: "plusargs query contains X or Z bits".into(),
+                        signals: Vec::new(),
+                    },
+                ));
+            }
+            let query = query_value.to_bytes_be();
+            let query = query
+                .iter()
+                .position(|byte| *byte != 0)
+                .map_or(&[][..], |start| &query[start..]);
+            let matched = if site.operation == 0 {
+                self.plusargs.test(query)
+            } else {
+                let target = site.results[1].id;
+                match self
+                    .plusargs
+                    .value(query, target.width)
+                    .map_err(|message| {
+                        celox_runtime::Halt::Error(crate::RuntimeErrorCode::Runtime {
+                            message,
+                            signals: Vec::new(),
+                        })
+                    })? {
+                    Some((value, mask)) => {
+                        if self.backend.layout().four_state && target.is_4state {
+                            self.backend.set_four_state(target, value, mask);
+                        } else {
+                            let width_mask =
+                                (BigUint::from(1u8) << target.width) - BigUint::from(1u8);
+                            self.backend
+                                .set_wide(target, value & (&width_mask ^ (mask & &width_mask)));
+                        }
+                        true
+                    }
+                    None => false,
+                }
+            };
+            self.backend
+                .set_wide(site.results[0].id, BigUint::from(u8::from(matched)));
+            Ok(())
         }
 
         pub(crate) fn apply_testbench_memory_writes(
@@ -949,11 +1084,15 @@ mod host {
             &mut self,
             ctx: RuntimeFormatContext<'_>,
         ) -> Vec<RuntimeEvent> {
-            if self.runtime_event_read_seq.load(Ordering::Acquire) == self.runtime_event_write_seq()
-            {
-                return Vec::new();
-            }
-            self.collect_backend_runtime_events()
+            let queue = Arc::clone(&self.pending_host_events);
+            let mut pending = queue.lock().unwrap();
+            pending.extend(
+                self.collect_backend_runtime_events(),
+                self.backend.layout().runtime_event_capacity,
+            );
+            let events = pending.drain();
+            drop(pending);
+            events
                 .into_iter()
                 .filter_map(|raw| {
                     render_raw_runtime_event(
@@ -963,6 +1102,24 @@ mod host {
                     )
                 })
                 .collect()
+        }
+
+        fn queue_host_runtime_event(
+            &mut self,
+            site: RuntimeEventSite,
+            args: Vec<RuntimeEventArgValue>,
+        ) {
+            let queue = Arc::clone(&self.pending_host_events);
+            let mut pending = queue.lock().unwrap();
+            let capacity = self.backend.layout().runtime_event_capacity;
+            pending.extend(self.collect_backend_runtime_events(), capacity);
+            pending.push(
+                RawRuntimeEvent::Host {
+                    site: Box::new(site),
+                    args,
+                },
+                capacity,
+            );
         }
 
         fn collect_backend_runtime_events(&mut self) -> Vec<RawRuntimeEvent> {
@@ -1075,6 +1232,7 @@ mod host {
                 buffer,
                 layout: self.backend.layout().clone(),
                 sites: self.program.runtime_schema.runtime_event_sites.clone(),
+                pending_host_events: Arc::clone(&self.pending_host_events),
                 read_seq: self.runtime_event_read_seq.load(Ordering::Acquire),
                 shared_read_seq: Arc::clone(&self.runtime_event_read_seq),
                 active: Arc::clone(&self.runtime_event_drain_active),
@@ -1094,6 +1252,11 @@ mod host {
         /// Returns warnings emitted during compilation.
         pub fn warnings(&self) -> &[CompilationWarning] {
             &self.warnings
+        }
+
+        /// Consume the simulator and return its compilation diagnostics.
+        pub fn into_warnings(self) -> Vec<CompilationWarning> {
+            self.warnings
         }
 
         /// Captures the current state of all signals and writes them to the VCD file.
@@ -1118,7 +1281,7 @@ mod host {
                 self.eval_comb_checked().map_err(DumpError::Runtime)?;
                 self.dirty = false;
             }
-            let component_traces = self.components.trace_values();
+            let component_traces = self.vcd_external_values();
             if let Some(ref mut writer) = self.vcd_writer {
                 writer
                     .dump_backend(timestamp, &mut self.backend, &component_traces)
@@ -1137,6 +1300,19 @@ mod host {
                 .is_some_and(|last| timestamp < last);
             if !rewound {
                 self.dump(timestamp);
+            }
+        }
+
+        pub(crate) fn try_dump_unless_rewound(&mut self, timestamp: u64) -> Result<(), DumpError> {
+            let rewound = self
+                .vcd_writer
+                .as_ref()
+                .and_then(|writer| writer.last_timestamp())
+                .is_some_and(|last| timestamp < last);
+            if rewound {
+                Ok(())
+            } else {
+                self.try_dump(timestamp)
             }
         }
 

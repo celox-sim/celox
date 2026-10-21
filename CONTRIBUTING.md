@@ -152,7 +152,8 @@ See [Mergify priorities](https://docs.mergify.com/merge-queue/priority/) and
 [Mergify stacks](https://docs.mergify.com/merge-queue/stacks/) (`stack/*`
 heads pushed by `mergify stack push --no-github-native`) use the `changes`
 queue. A member above the bottom targets the branch below it and carries a
-`Depends-On: #N` marker; the queue accepts it on that basis and lands the whole
+`Depends-On: #N` or same-repository `Depends-On: https://github.com/OWNER/REPO/pull/N`
+marker; the queue accepts it on that basis and lands the whole
 chain on the stack root, bottom-up. Queueing the top member queues every member
 below it. The batch validator resolves each member's root through the same
 marker chain, so a stack branch without it is still refused.
@@ -289,6 +290,7 @@ Local validation uses the behavior-based matrix above.
 | Daily at 01:47 UTC (10:47 JST) | `bench.yml` measures Rust, Verilator, and TypeScript on one host and publishes master history. Manual dispatch supports branch measurements. |
 | Daily at 02:17 UTC (11:17 JST) | `codspeed.yml` measures compile time on the default branch using CPU simulation. Execution failures and CodSpeed performance-check failures open or update a branch issue; the next healthy run closes it. Manual dispatch supports branch measurements. PRs, merge groups, and pushes do not run CodSpeed. |
 | Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs do not run this workflow; its tooling tests run in `Lint & Format` with the other script tests. |
+| Every daily/manual full CI run | Run the pinned upstream `common_cells` Gray code SV TB through `celox run --project`, plus an assertion negative control. Logs are retained for 14 days and failures feed the Full CI issue. See [the reproduction instructions](conformance/common-cells/README.md). |
 | Every full CI run | Run every shared Veryl and SystemVerilog case against both Verilator and Icarus, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
 | Affected pull requests and merge groups; daily at 03:41 UTC (12:41 JST); on demand | `lydite-checks.yml` owns Lydite Rust tests, proof, conformance, editor, and mutation gates. Unrelated changes skip these jobs, and Celox changes skip the bridge. Daily and manual runs enable all lanes and report failures in an issue. |
 | On demand | Dispatch `ci.yml` on the desired branch to run full CI and external comparisons, regardless of its diff. |

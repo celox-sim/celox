@@ -920,6 +920,92 @@ pub(crate) fn host_bits(value: &HostValue) -> Option<(num_bigint::BigUint, u32)>
 mod tests {
     use super::*;
 
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn source_vcd_filters_injected_component_trace_descriptors_and_values() {
+        use std::sync::Arc;
+        struct EmptyModel;
+        impl InjectedComponentHandler for EmptyModel {
+            fn call(&self, _: InjectedCall) -> Result<InjectedResult, String> {
+                Ok(InjectedResult::default())
+            }
+        }
+        for (levels, target, expected_model, expected_other) in [
+            (0, "Top.value", false, false),
+            (0, "Top.other.state", false, true),
+            (1, "Top", false, false),
+            (0, "Top", true, true),
+            (1, "Top.other", false, true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("component.vcd");
+            let source = format!(
+                r#"module Top(output logic value);
+                timeunit 1ps; timeprecision 1ps;
+                initial begin $dumpfile("{}"); $dumpvars({levels}, {target}); value=1;
+                    #1 $dumpall; #1 $dumpoff; #1 $dumpon; end
+                endmodule"#,
+                path.display()
+            );
+            let mut simulation = crate::Simulation::from_sv_sources(
+                vec![(&source, std::path::Path::new("vcd.sv"))],
+                "Top",
+            )
+            .build_interpreter()
+            .unwrap();
+            let mut definitions = InjectedComponents::new();
+            definitions
+                .insert("model", r#"{"kind":"method_only"}"#, Arc::new(EmptyModel))
+                .unwrap();
+            for (name, value) in [("model", 1u64), ("other", 42u64)] {
+                let mut host = HostContext::new();
+                host.label = name.into();
+                let instance = ExternalInstance::create_injected(
+                    definitions.get("model").unwrap().clone(),
+                    &mut host,
+                )
+                .unwrap();
+                host.trace_vars.push(host::HostTraceVar {
+                    name: "state".into(),
+                    width: 8,
+                    words: vec![value],
+                });
+                simulation
+                    .simulator
+                    .components
+                    .components
+                    .push(LiveComponent {
+                        name: name.into(),
+                        instance,
+                        host,
+                        inputs: Vec::new(),
+                        outputs: Vec::new(),
+                        events: Vec::new(),
+                        fire_count: 0,
+                    });
+            }
+            simulation.run_until(4).unwrap();
+            simulation.flush_vcd().unwrap();
+            let text = std::fs::read_to_string(path).unwrap();
+            assert_eq!(
+                text.contains("$scope module Top.model $end"),
+                expected_model,
+                "{target}: {text}"
+            );
+            assert_eq!(
+                text.contains("$scope module Top.other $end"),
+                expected_other,
+                "{target}: {text}"
+            );
+            if expected_other {
+                assert!(
+                    text.contains("b101010 "),
+                    "wrong external value subset for {target}: {text}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn manifest_without_parameters_rejects_supplied_parameter() {
         let manifest = veryl_metadata::ComponentManifest::parse(r#"{"kind":"method_only"}"#)

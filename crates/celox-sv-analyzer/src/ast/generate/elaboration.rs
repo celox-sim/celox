@@ -393,7 +393,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         }
         let index_ref = index.as_ref().map(|(name, value)| (name.as_str(), *value));
         let functions = scope.block_imports().install_constant_functions();
-        let aliases = scope.block_imports().type_aliases(self.module_aliases);
+        let aliases = scope.type_aliases(self.module_aliases);
         let outer = std::mem::replace(&mut self.aliases, aliases);
         contexts.0.push(Context {
             outer,
