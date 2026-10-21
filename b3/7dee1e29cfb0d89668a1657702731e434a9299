@@ -1,1 +1,3 @@
 Replay after correcting the lower PR coverage statement; source tree unchanged.
+
+Make the packed-element test work with cocotb 2.0.1 and 2.1.0 by checking packed values and widths instead of a version-specific handle class; also replay the lower CI fix.
