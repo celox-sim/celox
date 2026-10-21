@@ -496,6 +496,39 @@
   (assert_eq d 3)
   (assert_eq sampled 2 "the register samples the value before the edge's update"))
 
+(case staged_nonblocking_updates_keep_their_order
+  (source "staged_nba.sv" #"
+      module Top(output logic [7:0] last, count, early, two_sites, stim_seen, sampled);
+        logic [7:0] x = 8'd0, n = 8'd0, y = 8'd0, stim = 8'd0, r = 8'd0;
+        logic clk = 1'b0;
+        always #5 clk = ~clk;
+        initial begin
+          #1;
+          for (int i = 0; i < 3; i++) x <= 8'(i + 4);
+          repeat (2) n <= n + 8'd1;
+          for (int i = 0; i < 2; i++)
+            if (i == 1) y <= 8'd1;
+            else y <= 8'd2;
+          #0 early = x;
+        end
+        initial forever @(posedge clk) stim <= stim + 8'd3;
+        always_ff @(posedge clk) r <= stim;
+        assign last = x;
+        assign count = n;
+        assign two_sites = y;
+        assign stim_seen = stim;
+        assign sampled = r;
+      endmodule"#)
+  (top Top)
+  (run_until 1)
+  (assert_eq early 0 "a staged update lands after the inactive region")
+  (assert_eq last 6 "the last update of one site in a time slot wins")
+  (assert_eq count 1 "each update reads the value before the slot's updates")
+  (assert_eq two_sites 1 "updates of two sites land in the order they were issued")
+  (run_until 26)
+  (assert_eq stim_seen 9)
+  (assert_eq sampled 6 "the register samples the value before the edge's update"))
+
 (case nonblocking_ff_stores_remain_pending_during_inactive_work
   (source "nonblocking.sv" #"module Top(output bit [7:0] q, observed, derived_seen);
       bit clk; wire [7:0] derived=q+1;
