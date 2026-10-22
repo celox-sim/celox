@@ -1493,6 +1493,40 @@
     }
   },
   {
+    "id": "sv_icarus_expression_event_sample",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 wakes a process that writes an operand of an event expression and then waits on it (a = 1; @(a ^ b);). IEEE 1800-2023 9.4.2 synchronizes the statement with a value change of the expression; the write happened before the event control executed. Verilator 5.052 agrees with the expected value.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_expression_event_sample_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::event_controls_sample_the_expression_when_they_begin"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_implicit_event_in_process",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects @* in an initial forever (\"Unsupported: Event control with implicit sensitivity (@*) in this context\"), which IEEE 1800-2023 9.4.2.2 permits in any procedural timing control statement. Icarus 13.0 passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_implicit_event_in_process_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::implicit_event_controls_in_processes_wait_on_their_reads"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_dist_uniform_seed_width",
     "category": "simulator_compile_limitation",
     "phase": "compile",
