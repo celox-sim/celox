@@ -8,6 +8,7 @@ mod nba;
 mod persist;
 mod process;
 mod round;
+mod stats;
 mod time;
 mod wait;
 
@@ -19,7 +20,8 @@ use celox_design::CounterKind;
 pub(crate) use batch::{edge_level, event_level};
 pub use host::{HostBoundary, HostWatch, SimulationExecutor, UnitExecutor};
 pub use nba::NbaUpdate;
-pub use persist::{ScheduleParts, SimulationSnapshot};
+pub use persist::{ScheduleKey, ScheduleParts, SimulationSnapshot};
+pub use stats::{KernelSchedule, SchedulerMode, SchedulerStats};
 pub use wait::{Baseline, Waiter, Waiters};
 
 use self::round::Round;
@@ -82,6 +84,38 @@ struct Suspended<B: SimBackend> {
     levels: Vec<u8>,
 }
 
+/// Sees the steps of [`SimulationState::run_until_observed`] and
+/// [`SimulationState::step_until_observed`].
+pub trait StepObserver<E: SimulationExecutor> {
+    /// Called before a step, with the state it starts from.
+    fn before_step(&mut self, state: &SimulationState<E::Backend>, executor: &mut E);
+
+    /// Called after a step to at most `limit` that returned `result`. An
+    /// error replaces the step's result.
+    fn after_step(
+        &mut self,
+        state: &SimulationState<E::Backend>,
+        executor: &mut E,
+        limit: u64,
+        result: &Result<Option<u64>, SimulatorErrorCode>,
+    ) -> Result<(), SimulatorErrorCode>;
+}
+
+/// No observer.
+impl<E: SimulationExecutor> StepObserver<E> for () {
+    fn before_step(&mut self, _: &SimulationState<E::Backend>, _: &mut E) {}
+
+    fn after_step(
+        &mut self,
+        _: &SimulationState<E::Backend>,
+        _: &mut E,
+        _: u64,
+        _: &Result<Option<u64>, SimulatorErrorCode>,
+    ) -> Result<(), SimulatorErrorCode> {
+        Ok(())
+    }
+}
+
 /// Backend-independent state and execution rules for timed simulation.
 pub struct SimulationState<B: SimBackend> {
     scheduler: Scheduler<B>,
@@ -118,6 +152,8 @@ pub struct SimulationState<B: SimBackend> {
     return_budget: u64,
     /// Rounds and process-phase passes the current time slot has run.
     slot_passes: u64,
+    /// The loop that runs time slots, and the slots each loop ran.
+    stats: SchedulerStats,
 }
 
 impl<B: SimBackend> SimulationState<B> {
@@ -169,7 +205,12 @@ impl<B: SimBackend> SimulationState<B> {
             round_budget: SLOT_ROUND_BUDGET,
             return_budget: SLOT_RETURN_BUDGET,
             slot_passes: 0,
+            stats: SchedulerStats::default(),
         };
+        state.stats.kernels = vec![
+            KernelSchedule::Reference("the design has no compiled scheduler");
+            state.model.processes.len()
+        ];
         state.synchronize_event_values(backend);
         state
     }
@@ -213,6 +254,92 @@ impl<B: SimBackend> SimulationState<B> {
                 Err(error)
             }
         }
+    }
+
+    /// Run every time slot with work up to and including `end`, then move
+    /// to `end`. A target before the current time changes nothing. Returns
+    /// whether the simulation is at `end` afterwards; it is not when a
+    /// process stopped it (`$stop`) or finished it on the way.
+    pub fn run_until<E>(&mut self, executor: &mut E, end: u64) -> Result<bool, SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        self.run_until_observed(executor, end, &mut ())
+    }
+
+    /// [`Self::run_until`], showing every step to `observer`.
+    pub fn run_until_observed<E, O>(
+        &mut self,
+        executor: &mut E,
+        end: u64,
+        observer: &mut O,
+    ) -> Result<bool, SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+        O: StepObserver<E>,
+    {
+        if end < self.scheduler.time {
+            // Time only moves forward. Moving the timestamp back while the
+            // design keeps the state it reached would leave the two
+            // describing different moments, so an earlier target is a no-op.
+            return Ok(false);
+        }
+        while let Some(next_time) = self.next_event_time() {
+            if next_time > end {
+                break;
+            }
+            self.step_until_observed(executor, end, observer)?;
+            if self.stopped {
+                return Ok(false);
+            }
+        }
+        if self.finished {
+            return Ok(false);
+        }
+        self.advance_time(executor.backend_mut(), end);
+        Ok(true)
+    }
+
+    /// Select the loop that runs time slots.
+    pub fn set_scheduler_mode(&mut self, mode: SchedulerMode) {
+        self.stats.mode = mode;
+    }
+
+    /// The loop that runs time slots, what it ran and how each process
+    /// kernel is scheduled.
+    pub fn scheduler_stats(&self) -> &SchedulerStats {
+        &self.stats
+    }
+
+    /// [`Self::step_until`], showing the step to `observer`. An error of
+    /// the observer replaces the step's result.
+    pub fn step_until_observed<E, O>(
+        &mut self,
+        executor: &mut E,
+        limit: u64,
+        observer: &mut O,
+    ) -> Result<Option<u64>, SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+        O: StepObserver<E>,
+    {
+        observer.before_step(self, executor);
+        let result = self.step_until(executor, limit);
+        observer.after_step(self, executor, limit, &result)?;
+        result
+    }
+
+    /// Whether the host changed state that the next step settles at the
+    /// current time first.
+    pub fn host_pending(&self) -> bool {
+        self.host_pending
+    }
+
+    /// Set whether the next step settles host changes at the current time
+    /// first, as when copying another simulation's state.
+    #[doc(hidden)]
+    pub fn set_host_pending(&mut self, pending: bool) {
+        self.host_pending = pending;
     }
 
     /// Complete a boundary reached from an entry point that returns runtime
