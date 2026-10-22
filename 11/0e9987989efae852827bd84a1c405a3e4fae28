@@ -1,0 +1,1 @@
+Fix the three P1 findings and P2 key disambiguation from the initial review. Add regression coverage for typed/deferred patterns, mixed-state members, packed struct arrays, module/interface inputs, aggregate defaults and nominal type identity; rerun the full SV suite and Taxi frontend audit.
