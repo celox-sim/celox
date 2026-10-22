@@ -1,0 +1,1 @@
+Address P2 differential heap comparison: compare object properties, RNG state and future allocation handles. Reproduced omissions before fixing; heap tests 16, differential scheduler tests 5, differential class tests 110 and affected lint pass.
