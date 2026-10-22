@@ -938,7 +938,8 @@ fn declare_hidden(
 }
 
 /// Declare counter objects for `candidates` among the variables of a module
-/// and return them. Candidates that are not [`watchable`] are skipped.
+/// and return them. Candidates that are no state of the module, or are
+/// unpacked arrays, are skipped (see `watchable`).
 pub fn declare_counter_slots(
     variables: &mut SymbolicVariables,
     candidates: impl IntoIterator<Item = crate::SourceVarId>,
@@ -974,7 +975,7 @@ pub fn declare_counter_slots(
 /// Declare the [`PendingSlots`] of `streams` among the variables of a
 /// module and return them. A stream is a signal and, for nonblocking writes
 /// staged apart from blocking ones, its staging value and mask. Streams of
-/// signals that are not [`watchable`] are skipped.
+/// signals that are not watchable (see `watchable`) are skipped.
 pub fn declare_pending_slots(
     variables: &mut SymbolicVariables,
     streams: impl IntoIterator<
