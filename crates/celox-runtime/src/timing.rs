@@ -9,7 +9,7 @@
 //! that writes it counts each occurrence, and a wait on it compares
 //! counters instead.
 
-use celox_design::CounterKind;
+use celox_design::{CounterKind, NbaPosition};
 use num_bigint::BigUint;
 
 pub use crate::simulation::{Baseline, HostWatch, NbaUpdate, Waiter, Waiters};
@@ -123,7 +123,7 @@ pub struct NbaSiteRefs {
     pub lsb: usize,
     pub width: usize,
     pub value: SignalRef,
-    pub offset: Option<SignalRef>,
+    pub position: Option<NbaPosition<SignalRef>>,
     pub pending: Option<SignalRef>,
 }
 

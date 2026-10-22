@@ -183,7 +183,9 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                         lsb: site.lsb,
                         width: site.width,
                         value: resolve(&site.value),
-                        offset: site.offset.as_ref().map(resolve),
+                        position: site
+                            .position
+                            .map(|position| position.map(|id| resolve(&id))),
                         pending: site.pending.as_ref().map(resolve),
                     })
                     .collect(),

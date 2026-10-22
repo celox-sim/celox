@@ -1425,7 +1425,7 @@ fn lower_statements(
                     lsb: target.lsb(),
                     width: target.width(),
                     value: staged,
-                    offset: None,
+                    position: None,
                     pending,
                 };
                 kernel.nonblocking(index, &site, |builder| {

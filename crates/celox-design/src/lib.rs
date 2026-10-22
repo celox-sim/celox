@@ -641,9 +641,9 @@ pub struct NbaSite<A> {
     /// Staging object of `width` bits holding the assigned value, with the
     /// target's state representation.
     pub value: A,
-    /// Two-state staging object holding a bit offset added to `lsb`, for an
-    /// assignment whose position is computed at run time.
-    pub offset: Option<A>,
+    /// For an assignment whose position is computed at run time, the
+    /// staging objects of the position.
+    pub position: Option<NbaPosition<A>>,
     /// One-bit flag of a site whose destination has no other writer in the
     /// design (no other nonblocking site, no store of any unit, not a
     /// top-level port) and whose update order nothing observes (no wait,
@@ -667,8 +667,28 @@ impl<A: Copy> NbaSite<A> {
             lsb: self.lsb,
             width: self.width,
             value: map(self.value),
-            offset: self.offset.map(&mut map),
+            position: self.position.map(|position| position.map(&mut map)),
             pending: self.pending.map(&mut map),
+        }
+    }
+}
+
+/// The run-time position of a nonblocking assignment: two-state staging
+/// objects holding a bit offset added to the site's `lsb` and the number of
+/// bits written there, the low bits of the value and at most the site's
+/// `width`. Zero bits write nothing, as for a position outside the target
+/// or one with an unknown bit (IEEE 1800-2023 7.4.6, 11.5.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NbaPosition<A> {
+    pub offset: A,
+    pub width: A,
+}
+
+impl<A: Copy> NbaPosition<A> {
+    pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> NbaPosition<B> {
+        NbaPosition {
+            offset: map(self.offset),
+            width: map(self.width),
         }
     }
 }
