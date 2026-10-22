@@ -104,6 +104,10 @@ pub(super) fn expr_static_width(
             ..
         } => Some(op.result_type().0),
         Expr::Call {
+            callee: Callee::Object(op),
+            ..
+        } => Some(op.result_type().0),
+        Expr::Call {
             callee: Callee::Subroutine(name),
             ..
         } => packed_dimensions

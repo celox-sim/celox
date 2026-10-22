@@ -302,15 +302,23 @@ fn collect_testbench_heap<B: SimBackend>(
         return;
     }
     let slots = sim.handle_slots();
-    let saved_roots: Vec<celox_heap::Handle> = private_signals
+    let saved_roots: Vec<celox_heap::Root> = private_signals
         .iter()
         .enumerate()
-        .filter(|(_, signal)| slots.binary_search(&signal.offset).is_ok())
-        .flat_map(|(index, signal)| {
+        .filter_map(|(index, signal)| {
+            let slot = slots
+                .binary_search_by_key(&signal.offset, |&(offset, _)| offset)
+                .ok()?;
+            Some((index, signal, slots[slot].1))
+        })
+        .flat_map(|(index, signal, kind)| {
             let elements = signal.width / celox_design::HANDLE_WIDTH;
             locals.iter().flat_map(move |process| {
                 let digits = process[index].0.to_u32_digits();
-                (0..elements).map(move |element| digits.get(element).copied().unwrap_or(0))
+                (0..elements).map(move |element| celox_heap::Root {
+                    kind,
+                    handle: digits.get(element).copied().unwrap_or(0),
+                })
             })
         })
         .collect();

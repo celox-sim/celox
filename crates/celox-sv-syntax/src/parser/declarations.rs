@@ -251,7 +251,9 @@ impl Parser<'_> {
                 && blocked_subroutines == 0
                 && matches!(self.peek(), "function" | "task")
             {
+                let keyword = self.at;
                 let id = self.subroutine(prototype)?;
+                self.class_method(keyword, id);
                 prototype = false;
                 Some(BodyItemKind::Subroutine(id))
             } else if root
@@ -393,6 +395,9 @@ impl Parser<'_> {
             }
             self.at += 1;
             if closing && let Some((start, category, items)) = captured.pop() {
+                if category == "class" {
+                    self.finish_class();
+                }
                 if let Some((_, _, parent)) = captured.last_mut() {
                     parent.push(super::generate::Builder::node(
                         self,
@@ -747,6 +752,7 @@ impl Parser<'_> {
                 let assigns = self.assign_statements.len();
                 let start = self.at;
                 let id = self.subroutine(frame.prototype)?;
+                self.class_method(start, id);
                 frame.unit.subroutines.push(id);
                 frame.record(self, start, BodyItemKind::Subroutine(id))?;
                 frame.unit.parameter_declarations.extend(
@@ -1031,6 +1037,7 @@ impl Parser<'_> {
             let semicolon = word == ";";
             self.at += 1;
             if closing_class {
+                self.finish_class();
                 let class = frame
                     .classes
                     .pop()

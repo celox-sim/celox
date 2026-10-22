@@ -44,6 +44,9 @@ pub enum StateError {
     /// that matching code keeps compiling.
     #[error("state files do not support dynamic testbench strings; use a checkpoint instead")]
     TestbenchStrings,
+    /// A variable holds a class object, which state files cannot record.
+    #[error("state files do not record class objects; `{0}` holds one, use a checkpoint instead")]
+    Objects(String),
 }
 
 /// Differences between a state file and the design it is loaded into.
@@ -110,6 +113,8 @@ struct NamedObject {
     /// Whether the elements are string handles, which a file records as
     /// references to its strings section.
     strings: bool,
+    /// Whether the elements are object handles, which a file cannot record.
+    objects: bool,
 }
 
 /// The state objects of a built design, with the paths and roles that state
@@ -126,7 +131,9 @@ pub struct StateSchema {
 
 impl StateSchema {
     /// Save the value of every state object of `backend` as last evaluated.
-    pub fn capture<B: SimBackend>(&self, backend: &B) -> StateFile {
+    ///
+    /// Fails if a variable holds a class object.
+    pub fn capture<B: SimBackend>(&self, backend: &B) -> Result<StateFile, StateError> {
         let heap = backend.heap();
         let mut strings = Vec::new();
         let mut file_ids: HashMap<celox_heap::Handle, u32> = HashMap::default();
@@ -160,6 +167,9 @@ impl StateSchema {
         // Number strings by first use in path order, so equal states save
         // equal files.
         for (object, named) in objects.iter_mut().zip(&self.objects) {
+            if named.objects && object.value.iter().any(|&byte| byte != 0) {
+                return Err(StateError::Objects(named.path.clone()));
+            }
             if !named.strings {
                 continue;
             }
@@ -182,12 +192,12 @@ impl StateSchema {
                 element.copy_from_slice(&id.to_le_bytes());
             }
         }
-        StateFile {
+        Ok(StateFile {
             four_state: self.four_state,
             objects,
             schedule: None,
             strings,
-        }
+        })
     }
 
     /// Write the state saved in `file` into `backend`, matching objects by
@@ -301,7 +311,7 @@ impl<B: SimBackend> Simulator<B> {
             self.eval_comb_checked().map_err(StateError::Runtime)?;
             self.dirty = false;
         }
-        Ok(self.state_schema().capture(&self.backend))
+        self.state_schema().capture(&self.backend)
     }
 
     /// Load the state saved in `file`, matching objects by path.
@@ -399,6 +409,9 @@ impl<B: SimBackend> Simulator<B> {
                     },
                     strings: self.program.design.state_objects.get(address).is_some_and(
                         |metadata| metadata.value_kind == celox_design::ValueKind::StrRef,
+                    ),
+                    objects: self.program.design.state_objects.get(address).is_some_and(
+                        |metadata| metadata.value_kind == celox_design::ValueKind::ObjRef,
                     ),
                 });
             }

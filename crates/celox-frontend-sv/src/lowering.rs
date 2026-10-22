@@ -68,8 +68,9 @@ const EVENT_PREFIX: &str = "$event[";
 #[derive(Clone)]
 struct SvVariable {
     float: Option<celox_sir::FloatPrecision>,
-    /// A `string`: each element is a heap handle.
-    string: bool,
+    /// What each element holds: packed bits, or a heap handle of a string
+    /// or a class object.
+    value_kind: celox_design::ValueKind,
     path: Vec<String>,
     width: usize,
     signed: bool,
@@ -95,7 +96,7 @@ fn reads_string_variable(
     names: &HashMap<String, SourceVarId>,
 ) -> bool {
     matches!(expr, sv::ir::Expr::Ident(name)
-        if names.get(name).and_then(|id| variables.get(id)).is_some_and(|v| v.string))
+        if names.get(name).and_then(|id| variables.get(id)).is_some_and(|v| v.value_kind == celox_design::ValueKind::StrRef))
 }
 
 impl SvVariable {
@@ -110,11 +111,7 @@ impl SvVariable {
                 kind: self.domain_kind,
                 type_kind: self.type_kind,
                 array_dims: self.array_dims.clone(),
-                value_kind: if self.string {
-                    celox_design::ValueKind::StrRef
-                } else {
-                    celox_design::ValueKind::Bits
-                },
+                value_kind: self.value_kind,
             },
             unpacked_ranges: self.unpacked_ranges.clone(),
             packed_dims: self
@@ -1165,7 +1162,7 @@ impl DriverScan<'_> {
                     }
                     continue;
                 }
-                sv::ir::Callee::String(_) => continue,
+                sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             let Some(subroutine) = self
@@ -1549,7 +1546,7 @@ fn prepare_external_hierarchy_collecting(
                     SvVariable {
                         float: None,
 
-                        string: false,
+                        value_kind: celox_design::ValueKind::Bits,
                         path: vec![variable.path.join("$")],
                         width: variable.metadata.width,
                         signed: variable.signed,
@@ -2773,7 +2770,7 @@ fn lower_module_with_overrides(
         let variable = SvVariable {
             float: type_info.float,
 
-            string: type_info.string,
+            value_kind: type_info.value_kind,
             path,
             width: type_info.width,
             signed: type_info.signed,
@@ -2857,7 +2854,7 @@ fn lower_module_with_overrides(
         let variable = SvVariable {
             float: type_info.float,
 
-            string: type_info.string,
+            value_kind: type_info.value_kind,
             path,
             width: type_info.width,
             signed: type_info.signed,
@@ -2933,7 +2930,7 @@ fn lower_module_with_overrides(
             SvVariable {
                 float: None,
 
-                string: false,
+                value_kind: celox_design::ValueKind::Bits,
                 path: vec![parameter.name().to_string()],
                 width,
                 signed,
@@ -4061,7 +4058,7 @@ fn lower_initial_processes(
                     SvVariable {
                         float: None,
 
-                        string: false,
+                        value_kind: celox_design::ValueKind::Bits,
                         path: vec![format!("$initial[{index}]"), slot.to_string()],
                         width,
                         signed: false,
@@ -4463,7 +4460,7 @@ fn ensure_parent_output_signals(
         let variable = SvVariable {
             float: None,
 
-            string: false,
+            value_kind: celox_design::ValueKind::Bits,
             path: vec![actual.to_string()],
             width: 1,
             signed: false,
@@ -5771,7 +5768,7 @@ fn signal_kind_from_port_direction(
 
 struct SvSignalType {
     float: Option<celox_sir::FloatPrecision>,
-    string: bool,
+    value_kind: celox_design::ValueKind,
     width: usize,
     signed: bool,
     is_4state: bool,
@@ -5860,8 +5857,11 @@ fn signal_type_from_sv(
         sv::ir::TypeKind::Shortreal => Some(celox_sir::FloatPrecision::F32),
         _ => None,
     };
-    let is_4state =
-        float.is_none() && !matches!(typ.kind(), sv::ir::TypeKind::Bit | sv::ir::TypeKind::String);
+    let is_4state = float.is_none()
+        && !matches!(
+            typ.kind(),
+            sv::ir::TypeKind::Bit | sv::ir::TypeKind::String | sv::ir::TypeKind::Object
+        );
     let packed_ranges = typ
         .packed_ranges()
         .iter()
@@ -5886,10 +5886,14 @@ fn signal_type_from_sv(
         sv::ir::TypeKind::Logic | sv::ir::TypeKind::Reg | sv::ir::TypeKind::Implicit => {
             PortTypeKind::Logic
         }
-        sv::ir::TypeKind::String => PortTypeKind::Other,
+        sv::ir::TypeKind::String | sv::ir::TypeKind::Object => PortTypeKind::Other,
     };
-    let string = typ.kind() == sv::ir::TypeKind::String;
-    if string && !array_dims.is_empty() {
+    let value_kind = match typ.kind() {
+        sv::ir::TypeKind::String => celox_design::ValueKind::StrRef,
+        sv::ir::TypeKind::Object => celox_design::ValueKind::ObjRef,
+        _ => celox_design::ValueKind::Bits,
+    };
+    if value_kind == celox_design::ValueKind::StrRef && !array_dims.is_empty() {
         // Selects of such an array would need to tell element selects from
         // character selects.
         return Err(sv::AnalyzerError::Unsupported(
@@ -5898,7 +5902,7 @@ fn signal_type_from_sv(
     }
     Ok(SvSignalType {
         float,
-        string,
+        value_kind,
         width,
         signed,
         is_4state,

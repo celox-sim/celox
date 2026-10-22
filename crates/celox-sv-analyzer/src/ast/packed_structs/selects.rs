@@ -59,6 +59,7 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
             randomizable: true,
             real: false,
             string: false,
+            class: None,
             packed: function_packed_dimension_widths(&r#type.packed_ranges),
             unpacked: Vec::new(),
             signed: r#type.is_signed,
