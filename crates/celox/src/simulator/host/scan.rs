@@ -45,9 +45,12 @@ impl<B: SimBackend> Simulator<B> {
                 .iter()
                 .position(|byte| *byte != 0)
                 .map_or(&[][..], |index| &format[index..]);
-            let widths = site.results[1..]
+            let destinations = site.results[1..]
                 .iter()
-                .map(|value| value.width)
+                .map(|value| celox_runtime::scan::Destination {
+                    width: value.width,
+                    float_precision: value.float_precision,
+                })
                 .collect::<Vec<_>>();
             let outcome = if site.operation == 0 {
                 // Packed strings are right-aligned; leading zero padding is
@@ -57,16 +60,21 @@ impl<B: SimBackend> Simulator<B> {
                     .iter()
                     .position(|byte| *byte != 0)
                     .map_or(&[][..], |index| &source[index..]);
-                celox_runtime::scan::scan(&mut SliceInput::new(source), format, &widths, true)
+                celox_runtime::scan::scan_typed(
+                    &mut SliceInput::new(source),
+                    format,
+                    &destinations,
+                    true,
+                )
             } else {
                 let descriptor = source.to_u32().unwrap_or_default();
-                celox_runtime::scan::scan(
+                celox_runtime::scan::scan_typed(
                     &mut FileInput {
                         files: &mut self.file_io,
                         descriptor,
                     },
                     format,
-                    &widths,
+                    &destinations,
                     false,
                 )
             }

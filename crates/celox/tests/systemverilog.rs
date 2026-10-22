@@ -232,3 +232,6 @@ fn simulates_systemverilog_always_ff() {
 
 #[path = "frontends/systemverilog/floating_point.rs"]
 mod floating_point;
+
+#[path = "frontends/systemverilog/real_extensions.rs"]
+mod real_extensions;

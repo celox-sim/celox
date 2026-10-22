@@ -56,10 +56,21 @@ impl Ff<'_, '_> {
                 .as_ref()
                 .ok_or_else(|| unsupported("omitted scan destination"))?;
             let (lvalues, _) = self.capture_system_actual(argument)?;
-            let width=self.m.comparison_width(argument,argument).ok_or_else(||unsupported("scan destination must be an integral variable; string/real outputs are unsupported"))?;
-            let (id, name) = self.m.temp("scan_value", width, false, true);
+            let precision = match lvalues.as_slice() {
+                [one] => self.m.id(one.name()).and_then(|id| self.m.var(id).float),
+                _ => None,
+            };
+            let width = if let Some(precision) = precision {
+                precision.width()
+            } else {
+                self.m.comparison_width(argument, argument).ok_or_else(|| {
+                    unsupported("scan destination must be an integral, real or shortreal variable")
+                })?
+            };
+            let (id, name) = self.m.temp("scan_value", width, false, precision.is_none());
+            self.m.variables.get_mut(&id).expect("scan temporary").float = precision;
             results.push(HostRequestValue {
-                float_precision: None,
+                float_precision: precision,
                 id,
                 width,
                 signed: false,
