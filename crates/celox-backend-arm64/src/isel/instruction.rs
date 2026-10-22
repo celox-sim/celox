@@ -1993,6 +1993,11 @@ pub(super) fn lower_instruction(
 
         SIRInstruction::Binary(dst, lhs, op, rhs) => {
             if let BinaryOp::Float { op, precision } = op {
+                if extern_call::lower_native_float_binary(
+                    ctx, block, *dst, *lhs, *rhs, *op, *precision,
+                ) {
+                    return;
+                }
                 extern_call::lower_float(
                     ctx,
                     block,
@@ -2793,6 +2798,9 @@ pub(super) fn lower_instruction(
 
         SIRInstruction::Unary(dst, op, src) => {
             if let UnaryOp::Float { op, precision } = op {
+                if extern_call::lower_native_float_unary(ctx, block, *dst, *src, *op, *precision) {
+                    return;
+                }
                 extern_call::lower_float(
                     ctx,
                     block,

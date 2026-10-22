@@ -123,7 +123,7 @@ fn float_helpers_preserve_live_registers_and_narrow_mux_results() {
                     .flat_map(|block| &block.insts)
                     .filter(|inst| matches!(inst, MInst::CallExtern { .. }))
                     .count(),
-                3
+                1
             );
             let allocation = regalloc::run_regalloc(&mut function).unwrap();
             assert!(
@@ -164,6 +164,188 @@ fn float_helpers_preserve_live_registers_and_narrow_mux_results() {
                 4,
                 "{strategy:?} {four_state} narrow rounded mux"
             );
+        }
+    }
+}
+
+#[test]
+fn scalar_float_mir_executes_without_helper_for_ieee_edges() {
+    use celox_design::{eval_float_binary, eval_float_unary};
+    let binary = [
+        F::Add,
+        F::Sub,
+        F::Mul,
+        F::Div,
+        F::Eq,
+        F::Ne,
+        F::Lt,
+        F::Le,
+        F::Gt,
+        F::Ge,
+    ];
+    for precision in [P::F32, P::F64] {
+        let width = precision.width();
+        let unary = [
+            U::Neg,
+            U::ToBool,
+            U::Convert { to: P::F32 },
+            U::Convert { to: P::F64 },
+        ];
+        for four_state in [false, true] {
+            let abs = AbsoluteAddr {
+                instance_id: InstanceId(0),
+                var_id: VarId::default(),
+            };
+            let addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, abs);
+            let mut layout = empty_layout();
+            const BASE: usize = 64;
+            let slots = 2 + binary.len() + unary.len();
+            layout.four_state = four_state;
+            layout.offsets.insert(abs, BASE);
+            layout.widths.insert(abs, slots * 64);
+            layout.is_4states.insert(abs, false);
+            layout.total_size = BASE + slots * 8;
+            layout.merged_total_size = layout.total_size;
+            layout.scratch_base_offset = layout.total_size;
+            let bit = |width| RegisterType::Bit {
+                width,
+                signed: false,
+            };
+            let mut types = [(RegisterId(0), bit(width)), (RegisterId(1), bit(width))]
+                .into_iter()
+                .collect::<HashMap<_, _>>();
+            let mut instructions = vec![
+                SIRInstruction::Load(RegisterId(0), addr, SIROffset::Static(0), width),
+                SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(64), width),
+            ];
+            for (index, op) in binary.iter().copied().enumerate() {
+                let reg = RegisterId(index + 2);
+                let result_width = if index >= 4 { 1 } else { width };
+                types.insert(reg, bit(result_width));
+                instructions.push(SIRInstruction::Binary(
+                    reg,
+                    RegisterId(0),
+                    BinaryOp::Float { op, precision },
+                    RegisterId(1),
+                ));
+                instructions.push(SIRInstruction::Store(
+                    addr,
+                    SIROffset::Static((index + 2) * 64),
+                    result_width,
+                    reg,
+                    vec![],
+                    vec![],
+                ));
+            }
+            for (index, op) in unary.iter().copied().enumerate() {
+                let slot = index + 2 + binary.len();
+                let reg = RegisterId(slot);
+                let result_width = match op {
+                    U::ToBool => 1,
+                    U::Convert { to } => to.width(),
+                    _ => width,
+                };
+                types.insert(reg, bit(result_width));
+                instructions.push(SIRInstruction::Unary(
+                    reg,
+                    UnaryOp::Float { op, precision },
+                    RegisterId(0),
+                ));
+                instructions.push(SIRInstruction::Store(
+                    addr,
+                    SIROffset::Static(slot * 64),
+                    result_width,
+                    reg,
+                    vec![],
+                    vec![],
+                ));
+            }
+            let unit = ExecutionUnit {
+                entry_block_id: SirBlockId(0),
+                register_map: types,
+                blocks: [(
+                    SirBlockId(0),
+                    BasicBlock {
+                        id: SirBlockId(0),
+                        params: vec![],
+                        instructions,
+                        terminator: SIRTerminator::Return,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            };
+            unit.verify();
+            let mut function = lower_execution_unit(&unit, &layout, four_state);
+            mir_legalize::legalize(&mut function);
+            mir_opt::optimize(&mut function);
+            assert_eq!(
+                function
+                    .blocks
+                    .iter()
+                    .flat_map(|b| &b.insts)
+                    .filter(|i| matches!(i, MInst::FloatBinary { .. }))
+                    .count(),
+                binary.len()
+            );
+            assert!(
+                !function
+                    .blocks
+                    .iter()
+                    .flat_map(|b| &b.insts)
+                    .any(|i| matches!(i, MInst::CallExtern { .. }))
+            );
+            let allocation = regalloc::run_regalloc(&mut function).unwrap();
+            mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
+            let emitted = emit::emit(
+                &function,
+                &allocation.assignment,
+                allocation.spill_frame_size,
+            )
+            .unwrap();
+            let jit = JitCode::new(&emitted.code).unwrap();
+            let payload = |x: f64| match precision {
+                P::F32 => (x as f32).to_bits() as u64,
+                P::F64 => x.to_bits(),
+            };
+            let mut values = [
+                0.0,
+                -0.0,
+                1.5,
+                -2.25,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NAN,
+            ]
+            .map(payload)
+            .to_vec();
+            values.extend(match precision {
+                P::F32 => vec![1, 0x7f7fffff, 0x7fc12345],
+                P::F64 => vec![1, 0x7fefffffffffffff, 0x7ff8123456789abc],
+            });
+            for &a in &values {
+                for &b in &values {
+                    let mut memory = vec![0u8; emitted.required_state_size as usize];
+                    memory[BASE..BASE + 8].copy_from_slice(&a.to_le_bytes());
+                    memory[BASE + 8..BASE + 16].copy_from_slice(&b.to_le_bytes());
+                    // No extern-function header: a hidden helper call would crash.
+                    assert_eq!(unsafe { jit.call(&mut memory) }, 0);
+                    for (index, expected) in binary
+                        .iter()
+                        .map(|&op| eval_float_binary(op, precision, a, b))
+                        .chain(unary.iter().map(|&op| eval_float_unary(op, precision, a)))
+                        .enumerate()
+                    {
+                        let offset = BASE + (index + 2) * 8;
+                        let actual =
+                            u64::from_le_bytes(memory[offset..offset + 8].try_into().unwrap());
+                        assert_eq!(
+                            actual, expected,
+                            "{precision:?} four_state={four_state} op={index} a={a:x} b={b:x}"
+                        );
+                    }
+                }
+            }
         }
     }
 }

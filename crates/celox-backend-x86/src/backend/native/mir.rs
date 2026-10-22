@@ -702,6 +702,21 @@ pub const SPARSE_SUMMARY_GROUP: usize = 4;
 /// handles x86-64's 2-operand constraint by inserting mov when needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MInst {
+    /// Scalar IEEE operation on raw GPR payloads. Emission uses XMM0/XMM1;
+    /// their clobbers are visible to vector allocation and spill caching.
+    FloatBinary {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+        op: celox_sir::FloatBinaryOp,
+        precision: celox_sir::FloatPrecision,
+    },
+    FloatUnary {
+        dst: VReg,
+        src: VReg,
+        op: celox_sir::FloatUnaryOp,
+        precision: celox_sir::FloatPrecision,
+    },
     /// Explicit target-specific SIMD instruction with its own register class.
     X86Simd(X86SimdInst),
 
@@ -1112,6 +1127,19 @@ pub enum MInst {
 impl fmt::Display for MInst {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            MInst::FloatBinary {
+                dst,
+                lhs,
+                rhs,
+                op,
+                precision,
+            } => write!(f, "{dst} = fp.{op:?}.{precision:?} {lhs}, {rhs}"),
+            MInst::FloatUnary {
+                dst,
+                src,
+                op,
+                precision,
+            } => write!(f, "{dst} = fp.{op:?}.{precision:?} {src}"),
             MInst::X86Simd(X86SimdInst::Scratch128 { dst }) => {
                 write!(f, "{dst} = x86.scratch.v128")
             }
@@ -1511,7 +1539,9 @@ impl MInst {
     /// Returns the destination VReg, if any.
     pub fn def(&self) -> Option<VReg> {
         match self {
-            MInst::Mov { dst, .. }
+            MInst::FloatBinary { dst, .. }
+            | MInst::FloatUnary { dst, .. }
+            | MInst::Mov { dst, .. }
             | MInst::Mov32 { dst, .. }
             | MInst::LoadImm { dst, .. }
             | MInst::Scratch { dst }
@@ -1601,7 +1631,9 @@ impl MInst {
     /// silently omit a defining opcode while still compiling successfully.
     pub fn def_mut(&mut self) -> Option<&mut VReg> {
         match self {
-            MInst::Mov { dst, .. }
+            MInst::FloatBinary { dst, .. }
+            | MInst::FloatUnary { dst, .. }
+            | MInst::Mov { dst, .. }
             | MInst::Mov32 { dst, .. }
             | MInst::LoadImm { dst, .. }
             | MInst::Scratch { dst }
@@ -1688,7 +1720,9 @@ impl MInst {
     /// Returns the VRegs used by this instruction (max 3, no heap allocation).
     pub fn uses(&self) -> Uses {
         match self {
-            MInst::Mov { src, .. } | MInst::Mov32 { src, .. } => Uses::one(*src),
+            MInst::FloatUnary { src, .. } | MInst::Mov { src, .. } | MInst::Mov32 { src, .. } => {
+                Uses::one(*src)
+            }
             MInst::X86Simd(X86SimdInst::Pack128 { low, high, .. }) => Uses::two(*low, *high),
             MInst::LoadImm { .. }
             | MInst::X86Simd(X86SimdInst::Scratch128 { .. })
@@ -1732,7 +1766,8 @@ impl MInst {
             MInst::ReleaseStorePtrIndexed {
                 ptr, index, src, ..
             } => Uses::three(*ptr, *index, *src),
-            MInst::Add { lhs, rhs, .. }
+            MInst::FloatBinary { lhs, rhs, .. }
+            | MInst::Add { lhs, rhs, .. }
             | MInst::Add32 { lhs, rhs, .. }
             | MInst::Sub { lhs, rhs, .. }
             | MInst::Sub32 { lhs, rhs, .. }
@@ -1824,7 +1859,7 @@ impl MInst {
     /// Replace all occurrences of `old` with `new` in the use operands.
     pub fn rewrite_use(&mut self, old: VReg, new: VReg) {
         match self {
-            MInst::Mov { src, .. } | MInst::Mov32 { src, .. } => {
+            MInst::FloatUnary { src, .. } | MInst::Mov { src, .. } | MInst::Mov32 { src, .. } => {
                 if *src == old {
                     *src = new;
                 }
@@ -1930,7 +1965,8 @@ impl MInst {
                     *src = new;
                 }
             }
-            MInst::Add { lhs, rhs, .. }
+            MInst::FloatBinary { lhs, rhs, .. }
+            | MInst::Add { lhs, rhs, .. }
             | MInst::Add32 { lhs, rhs, .. }
             | MInst::Sub { lhs, rhs, .. }
             | MInst::Sub32 { lhs, rhs, .. }
