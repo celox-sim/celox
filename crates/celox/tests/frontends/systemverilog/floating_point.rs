@@ -1,6 +1,8 @@
 use super::*;
 
 sv_backends! {
+    fn real_math_runtime_functions(sim) { @case "real_math::runtime_functions"; }
+    fn real_math_constant_functions(sim) { @case "real_math::constant_functions"; }
     fn real_arithmetic_and_rounding(sim) { @case "floating_point::real_arithmetic_and_rounding"; }
     fn real_bits_and_comparisons(sim) { @case "floating_point::real_bits_and_comparisons"; }
     fn shortreal_storage_precision(sim) { @case "floating_point::shortreal_storage_precision"; }

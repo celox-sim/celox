@@ -12,6 +12,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("realtime.vtest"),
     },
     Group {
+        file: "src/sv/cases/real_math.vtest",
+        text: include_str!("real_math.vtest"),
+    },
+    Group {
         file: "src/sv/cases/aggregate_regressions.vtest",
         text: include_str!("aggregate_regressions.vtest"),
     },

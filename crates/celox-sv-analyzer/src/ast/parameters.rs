@@ -544,7 +544,17 @@ pub(super) fn parameters_from_native_with_environment(
             has_declared_type,
             is_local,
         );
-        parameter.floating = native_prefix.floating();
+        parameter.floating = native_prefix.floating().or_else(|| {
+            if has_declared_type {
+                return None;
+            }
+            let expanded = substitute_expr_idents(
+                const_expr_to_expr(parameter.value()?.clone()),
+                &environment.literals,
+            );
+            let expr = expr_to_const(&syntax_tree.state, expanded)?;
+            typecheck::const_expr_has_real_type(&expr.into()).then_some(TypeKind::Real)
+        });
         parameter.packed_ranges = parameter_ranges.clone();
         parameter.members = parameter_members.clone();
         parameter.signed_element_depth = parameter_signed_element_depth;
@@ -1822,54 +1832,21 @@ pub(super) fn real_literal(
     constants: &HashMap<String, i128>,
     literals: &HashMap<String, Expr>,
 ) -> Option<Expr> {
-    fn evaluate(
-        expr: &ConstExpr,
-        constants: &HashMap<String, i128>,
-        literals: &HashMap<String, Expr>,
-    ) -> Option<f64> {
-        match expr {
-            ConstExpr::Literal(text) => text.replace('_', "").parse::<f64>().ok().or_else(|| {
-                typecheck::parse_integral_literal(text)
-                    .and_then(|_| eval_ast_const_expr(&AnalysisState::default(), expr, constants))
-                    .map(|value| value as f64)
-            }),
-            ConstExpr::Ident(name) => {
-                if let Some(Expr::Literal(text)) = literals.get(name) {
-                    text.parse::<f64>().ok()
-                } else {
-                    constants.get(name).map(|value| *value as f64)
-                }
-            }
-            ConstExpr::Unary {
-                op: UnaryOp::Plus,
-                expr,
-            } => evaluate(expr, constants, literals),
-            ConstExpr::Unary {
-                op: UnaryOp::Minus,
-                expr,
-            } => Some(-evaluate(expr, constants, literals)?),
-            ConstExpr::Binary { left, op, right } => {
-                let a = evaluate(left, constants, literals)?;
-                let b = evaluate(right, constants, literals)?;
-                Some(match op {
-                    BinaryOp::Add => a + b,
-                    BinaryOp::Sub => a - b,
-                    BinaryOp::Mul => a * b,
-                    BinaryOp::Div => a / b,
-                    BinaryOp::Pow => a.powf(b),
-                    _ => return None,
-                })
-            }
-            _ => None,
-        }
-    }
-    let value = evaluate(expr, constants, literals)?;
+    let expanded = substitute_expr_idents(const_expr_to_expr(expr.clone()), literals);
+    let expr = expr_to_const(&AnalysisState::default(), expanded)?;
+    let value = typecheck::eval_real_const_expr(&expr.into(), constants)?;
     let value = if kind == TypeKind::Shortreal {
         f64::from(value as f32)
     } else {
         value
     };
-    value
-        .is_finite()
-        .then(|| Expr::Literal(format!("{value:?}")))
+    Some(if value.is_finite() {
+        Expr::Literal(format!("{value:?}"))
+    } else {
+        Expr::Call {
+            callee: Callee::System(SystemFunction::Bitstoreal),
+            args: vec![Some(Expr::Literal(format!("64'h{:x}", value.to_bits())))],
+            arg_order: Vec::new(),
+        }
+    })
 }
