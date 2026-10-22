@@ -526,3 +526,188 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "3 6\n100 200\n"))
+
+(case methods_called_through_interface_class_handles
+  (source "class.sv" #"
+module Top(output bit done);
+    interface class Shape;
+        pure virtual function int area(int scale);
+    endclass
+    interface class Named;
+        pure virtual function int id();
+    endclass
+    interface class Polygon extends Shape;
+        pure virtual function int sides();
+    endclass
+    class Rectangle;
+        int w = 2;
+        virtual function int area(int scale);
+            return w * scale;
+        endfunction
+    endclass
+    class Square extends Rectangle implements Polygon, Named;
+        virtual function int area(int scale);
+            return w * w * scale;
+        endfunction
+        virtual function int sides();
+            return 4;
+        endfunction
+        virtual function int id();
+            return 7;
+        endfunction
+    endclass
+    class Label implements Named;
+        virtual function int id();
+            return 9;
+        endfunction
+    endclass
+    Square square;
+    Label label;
+    Shape shape;
+    Named names[2];
+    Polygon polygon;
+    initial begin
+        square = new;
+        label = new;
+        shape = square;
+        polygon = square;
+        names[0] = square;
+        names[1] = label;
+        $display("%0d %0d", shape.area(3), polygon.sides());
+        $display("%0d %0d", names[0].id(), names[1].id());
+        shape = polygon;
+        $display("%0d %0d", shape.area(1), shape == null);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "12 4\n7 9\n4 0\n"))
+
+(case inherited_methods_of_extended_interface_classes
+  (source "class.sv" #"
+module Top(output bit done);
+    interface class Named;
+        pure virtual function int id();
+    endclass
+    interface class Shape;
+        pure virtual function int sides();
+    endclass
+    interface class NamedShape extends Named, Shape;
+        pure virtual function int area();
+    endclass
+    class Triangle implements NamedShape;
+        virtual function int id();
+            return 3;
+        endfunction
+        virtual function int sides();
+            return 3;
+        endfunction
+        virtual function int area();
+            return 6;
+        endfunction
+    endclass
+    Triangle triangle;
+    NamedShape shape;
+    initial begin
+        triangle = new;
+        shape = triangle;
+        $display("%0d %0d %0d", shape.id(), shape.sides(), shape.area());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "3 3 6\n"))
+
+(case casts_of_class_handles
+  (source "class.sv" #"
+module Top(output bit done);
+    class Animal;
+        virtual function int legs();
+            return 0;
+        endfunction
+    endclass
+    class Dog extends Animal;
+        virtual function int legs();
+            return 4;
+        endfunction
+    endclass
+    class Puppy extends Dog;
+    endclass
+    class Rock;
+    endclass
+    Animal animal;
+    Dog dog;
+    Rock rock;
+    int ok;
+    initial begin
+        animal = Puppy::new;
+        ok = $cast(dog, animal);
+        $display("%0d %0d", ok, dog.legs());
+        animal = new;
+        ok = $cast(dog, animal);
+        $display("%0d %0d", ok, dog.legs());
+        animal = null;
+        ok = $cast(dog, animal);
+        $display("%0d %0d", ok, dog == null);
+        dog = new;
+        ok = $cast(animal, dog);
+        $display("%0d %0d", ok, animal.legs());
+        if (!$cast(rock, dog))
+            $display("rock");
+        ok = $cast(dog, null);
+        $display("%0d %0d", ok, dog == null);
+        animal = Dog::new;
+        $cast(dog, animal);
+        $display("%0d", dog.legs());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 4\n0 4\n1 1\n1 4\nrock\n1 1\n4\n"))
+
+(case casts_from_interface_class_handles
+  (source "class.sv" #"
+module Top(output bit done);
+    interface class Named;
+        pure virtual function int id();
+    endclass
+    interface class Sized;
+        pure virtual function int size();
+    endclass
+    class Box implements Named, Sized;
+        virtual function int id();
+            return 1;
+        endfunction
+        virtual function int size();
+            return 8;
+        endfunction
+    endclass
+    class Tag implements Named;
+        virtual function int id();
+            return 2;
+        endfunction
+    endclass
+    Box box;
+    Named named;
+    Sized sized;
+    int ok;
+    initial begin
+        box = new;
+        named = box;
+        ok = $cast(sized, named);
+        $display("%0d %0d", ok, sized.size());
+        box = null;
+        ok = $cast(box, named);
+        $display("%0d %0d", ok, box.id());
+        named = Tag::new;
+        ok = $cast(sized, named);
+        $display("%0d %0d", ok, sized.size());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 8\n1 1\n0 8\n"))

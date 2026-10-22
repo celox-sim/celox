@@ -9,8 +9,8 @@
     "unexpected_accept": 0,
     "mismatch": 21,
     "emission_error": 0,
-    "compile_error": 17,
-    "runtime_error": 1,
+    "compile_error": 18,
+    "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
   },
@@ -408,6 +408,22 @@
       "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: Internal Error: <case>/source_0.sv:12:11: ../V3Ast.h:1113: AstNode is not of expected type, but instead has type 'MEMBERSEL'\n   12 |         n.name.itoa(42);\n      |           ^~~~\n                        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n",
       "expectation": "Simulation",
       "name": "class::string_methods_on_properties",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n",
+      "expectation": "Simulation",
+      "name": "class::casts_from_interface_class_handles",
+      "phase": "execute",
+      "status": "runtime_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:28:51: Class method 'sides' not found in class 'NamedShape'\n                                : ... note: In instance 'celox_suite_tb.dut'\n   28 |         $display(\"%0d %0d %0d\", shape.id(), shape.sides(), shape.area());\n      |                                                   ^~~~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "class::inherited_methods_of_extended_interface_classes",
       "phase": "compile",
       "status": "compile_error"
     }

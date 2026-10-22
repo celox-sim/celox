@@ -1523,8 +1523,8 @@ chapter-8/8.26.4--illegal_forward_def_implements.sv	2state	pass
 chapter-8/8.26.4--illegal_forward_def_implements.sv	4state	pass
 chapter-8/8.26.4--illegal_implements_parameter.sv	2state	pass
 chapter-8/8.26.4--illegal_implements_parameter.sv	4state	pass
-chapter-8/8.26.5--cast_between_interface_classes.sv	2state	fail
-chapter-8/8.26.5--cast_between_interface_classes.sv	4state	fail
+chapter-8/8.26.5--cast_between_interface_classes.sv	2state	pass
+chapter-8/8.26.5--cast_between_interface_classes.sv	4state	pass
 chapter-8/8.26.5--implemented_class_handle.sv	2state	pass
 chapter-8/8.26.5--implemented_class_handle.sv	4state	pass
 chapter-8/8.26.5--invalid_interface_instantiation.sv	2state	pass

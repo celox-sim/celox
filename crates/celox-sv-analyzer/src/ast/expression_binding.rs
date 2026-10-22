@@ -15,8 +15,10 @@ pub(super) use direct::{
 };
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
 pub(super) use objects::{
-    Receiver as ObjectReceiver, constructor as object_constructor, method as object_method,
-    property as object_property, receiver as object_receiver, this as object_this,
+    Cast as ObjectCast, Receiver as ObjectReceiver, cast as object_cast,
+    check_assignment as check_handle_assignment, constructor as object_constructor,
+    method as object_method, property as object_property, receiver as object_receiver,
+    this as object_this,
 };
 pub(super) use strings::{
     call as string_call, method as string_method, native_string, to_string as string_operand,
@@ -56,10 +58,13 @@ pub(super) fn expression(
             .and_then(|shape| shape.class.as_deref()),
         LValue::Select { .. } => None,
     };
-    if let Some(class) = class
-        && let Some(call) = objects::constructor(tree, root, native, dimensions, class)?
-    {
-        return Ok(call);
+    if let Some(class) = class {
+        if let Some(call) = objects::constructor(tree, root, native, dimensions, class)? {
+            return Ok(call);
+        }
+        objects::check_assignment(tree, root, native, dimensions, class, || {
+            "assignment".to_owned()
+        })?;
     }
     let value = bind_value(root, native, tree, dimensions, shape)?;
     // A string literal or integral value assigned to a string becomes its
