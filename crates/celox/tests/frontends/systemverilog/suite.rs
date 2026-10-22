@@ -1,6 +1,6 @@
 //! Runs SystemVerilog suite cases on the Celox backends.
 
-use celox::{BigUint, RuntimeEvent, SimBackend, Simulation, Simulator};
+use celox::{BigUint, RuntimeEvent, SchedulerMode, SimBackend, Simulation, Simulator};
 use celox_test_suite::{Backend, CompilationRejected, Design, Result, SignalPath};
 
 struct CeloxBackend<B: SimBackend>(Simulator<B>);
@@ -233,6 +233,19 @@ impl<B: SimBackend> Backend for CeloxBackend<B> {
     }
 }
 
+/// The scheduler mode of timed cases: `CELOX_SCHEDULER` set to
+/// `reference`, `compiled` or `differential`, by default the library's.
+#[allow(clippy::disallowed_methods)] // Opt-in test configuration is environment-driven.
+fn scheduler_mode() -> SchedulerMode {
+    match std::env::var("CELOX_SCHEDULER").as_deref() {
+        Ok("reference") => SchedulerMode::Reference,
+        Ok("compiled") => SchedulerMode::Compiled,
+        Ok("differential") => SchedulerMode::Differential,
+        Ok(other) => panic!("unknown CELOX_SCHEDULER mode `{other}`"),
+        Err(_) => SchedulerMode::default(),
+    }
+}
+
 fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
     celox_test_suite::validate_timed_design(design)?;
     let sources = design
@@ -243,6 +256,7 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
     if design.timed {
         let builder = design.parameters.iter().fold(
             Simulation::from_sv_sources(sources, &design.top)
+                .scheduler_mode(scheduler_mode())
                 .four_state(design.four_state)
                 .allow_inferred_latches(design.allow_inferred_latches),
             |builder, (name, value)| builder.param(name, *value),

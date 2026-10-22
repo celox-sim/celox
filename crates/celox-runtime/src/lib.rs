@@ -35,8 +35,8 @@ pub use reflection::{
 };
 pub use schedule::{ResolvedSchedule, host_watch};
 pub use simulation::{
-    EventInfo, HostBoundary, ScheduleParts, SimulationExecutor, SimulationSnapshot,
-    SimulationState, UnitExecutor,
+    EventInfo, HostBoundary, KernelSchedule, ScheduleKey, ScheduleParts, SchedulerMode,
+    SchedulerStats, SimulationExecutor, SimulationSnapshot, SimulationState, UnitExecutor,
 };
 pub use state_file::{
     BaselineRecord, NbaRecord, ProcessRecord, ScheduleRecord, ScheduledEvent, StateDifference,

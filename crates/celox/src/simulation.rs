@@ -11,6 +11,7 @@ use celox_runtime::{
     UnitExecutor, host_watch,
 };
 
+mod differential;
 mod vcd_tasks;
 
 /// Saved state of a [`Simulation`], created by [`Simulation::checkpoint`]:
@@ -64,6 +65,9 @@ impl<B: SimBackend> std::fmt::Debug for SimulationCheckpoint<B> {
 pub struct Simulation<B: SimBackend = crate::DefaultBackend> {
     pub(crate) simulator: Simulator<B>,
     pub(crate) state: SimulationState<B>,
+    /// The reference simulation every step is checked against in
+    /// [`crate::SchedulerMode::Differential`].
+    shadow: Option<Box<Simulation<B>>>,
 }
 
 impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
@@ -316,7 +320,11 @@ impl<B: SimBackend> Simulation<B> {
         simulator.finish_sites = simulator.schedule.finish_sites;
         simulator.skip_runtime_finish();
         state.initialize_declarations(&mut simulator)?;
-        Ok(Self { simulator, state })
+        Ok(Self {
+            simulator,
+            state,
+            shadow: None,
+        })
     }
 
     /// Returns warnings emitted during compilation.
@@ -528,13 +536,18 @@ impl<B: SimBackend> Simulation<B> {
     /// Returns the new simulation time, the current time when only host
     /// writes were settled, or None if nothing was to do.
     pub fn step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
-        self.state.step(&mut self.simulator)
+        self.step_until(u64::MAX)
     }
 
     /// [`Self::step`] that, after settling host writes at the current time,
     /// does not advance past `end_time`.
     fn step_until(&mut self, end_time: u64) -> Result<Option<u64>, RuntimeErrorCode> {
-        self.state.step_until(&mut self.simulator, end_time)
+        let Some(mut shadow) = self.shadow.take() else {
+            return self.state.step_until(&mut self.simulator, end_time);
+        };
+        let result = self.differential_step_until(&mut shadow, end_time);
+        self.shadow = Some(shadow);
+        result
     }
 
     /// Advance time and run until `end_time` (inclusive).
@@ -543,26 +556,14 @@ impl<B: SimBackend> Simulation<B> {
     /// slot of the stop, with [`Self::is_stopped`] set; calling this again
     /// continues.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
-        if end_time < self.state.time() {
-            // Time only moves forward. Moving the timestamp back while the
-            // design keeps the state it reached would leave the two describing
-            // different moments, so an earlier target is a no-op.
+        let reached = if self.shadow.is_some() {
+            self.run_until_checked(end_time)?
+        } else {
+            self.state.run_until(&mut self.simulator, end_time)?
+        };
+        if !reached {
             return Ok(());
         }
-        while let Some(next_time) = self.state.next_event_time() {
-            if next_time > end_time {
-                break;
-            }
-            self.step_until(end_time)?;
-            if self.state.is_stopped() {
-                return Ok(());
-            }
-        }
-        if self.state.is_finished() {
-            return Ok(());
-        }
-        self.state
-            .advance_time(&mut self.simulator.backend, end_time);
         if let Err(error) = self.simulator.try_dump_unless_rewound(end_time) {
             if matches!(&error, crate::simulator::DumpError::Runtime(_)) {
                 self.flush_error_output();
@@ -570,6 +571,28 @@ impl<B: SimBackend> Simulation<B> {
             return Err(vcd_dump_runtime_error(error));
         }
         Ok(())
+    }
+
+    /// [`SimulationState::run_until`] one checked step at a time.
+    fn run_until_checked(&mut self, end_time: u64) -> Result<bool, RuntimeErrorCode> {
+        if end_time < self.state.time() {
+            return Ok(false);
+        }
+        while let Some(next_time) = self.state.next_event_time() {
+            if next_time > end_time {
+                break;
+            }
+            self.step_until(end_time)?;
+            if self.state.is_stopped() {
+                return Ok(false);
+            }
+        }
+        if self.state.is_finished() {
+            return Ok(false);
+        }
+        self.state
+            .advance_time(&mut self.simulator.backend, end_time);
+        Ok(true)
     }
 
     /// Like [`Self::run_until`], but takes at most `max_steps` steps.

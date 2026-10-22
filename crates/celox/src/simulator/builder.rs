@@ -1697,6 +1697,9 @@ mod host {
         pub dpi: crate::DpiSymbols,
         /// Ordered command-line arguments for SystemVerilog plusargs queries.
         pub plusargs: Vec<String>,
+        /// The loop that runs the time slots of a [`crate::Simulation`].
+        #[doc(hidden)]
+        pub scheduler: crate::SchedulerMode,
     }
 
     /// A code-generated native program that has not been loaded into
@@ -1929,6 +1932,7 @@ mod host {
                 allow_inferred_latches: false,
                 dpi: crate::DpiSymbols::default(),
                 plusargs: Vec::new(),
+                scheduler: crate::SchedulerMode::default(),
             }
         }
     }
@@ -3614,6 +3618,15 @@ mod host {
             }
         }
 
+        /// Select the loop that runs time slots. A test option:
+        /// [`crate::SchedulerMode::Differential`] compiles the design twice
+        /// and checks every step against a shadow simulation.
+        #[doc(hidden)]
+        pub fn scheduler_mode(mut self, mode: crate::SchedulerMode) -> Self {
+            self.options.scheduler = mode;
+            self
+        }
+
         /// Compiles the design using the host's default backend.
         pub fn build(self) -> Result<crate::Simulation, SimulatorError> {
             #[cfg(any(
@@ -3701,23 +3714,64 @@ mod host {
         fn build_with_backend<B: crate::SimBackend>(
             mut self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
-            compile: impl FnOnce(
-                &crate::ir::LaidOutProgram,
-                &SimulatorOptions,
-            ) -> Result<B, SimulatorError>,
+            compile: impl Fn(&crate::ir::LaidOutProgram, &SimulatorOptions) -> Result<B, SimulatorError>,
         ) -> Result<crate::Simulation<B>, SimulatorError> {
             self.options.emit_triggers = true;
             let (laid_out, mut warnings, options, vcd_path, injected_components) =
                 self.into_laid_out_program(layout_mode)?;
             let backend = compile(&laid_out, &options)
                 .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
-            // Initial kernels must keep their time-zero gates until the timed
-            // scheduler starts them; ordinary Simulator builders release them.
-            let mut sim = Simulator::with_backend_and_program_for_simulation(
+            let shadow = if options.scheduler == crate::SchedulerMode::Differential
+                && injected_components.definitions.is_empty()
+            {
+                let mut shadow_options = options.clone();
+                shadow_options.trace = Default::default();
+                shadow_options.scheduler = crate::SchedulerMode::Reference;
+                let backend = compile(&laid_out, &shadow_options)?;
+                let shadow = Self::start_simulation(
+                    backend,
+                    laid_out.runtime.clone(),
+                    Vec::new(),
+                    &shadow_options,
+                    None,
+                    Default::default(),
+                )?;
+                // Host state outside the memory image, such as open files,
+                // cannot be shared with a shadow.
+                shadow
+                    .simulator
+                    .check_host_checkpoint_support()
+                    .is_ok()
+                    .then(|| Box::new(shadow))
+            } else {
+                None
+            };
+            let mut simulation = Self::start_simulation(
                 backend,
                 laid_out.into_runtime(),
                 warnings,
-            );
+                &options,
+                vcd_path,
+                injected_components,
+            )?;
+            simulation.set_shadow(shadow);
+            Ok(simulation)
+        }
+
+        /// Initialize a timed simulation of `program` compiled into
+        /// `backend`.
+        fn start_simulation<B: crate::SimBackend>(
+            backend: B,
+            program: crate::ir::RuntimeProgram,
+            warnings: Vec<CompilationWarning>,
+            options: &SimulatorOptions,
+            vcd_path: Option<std::path::PathBuf>,
+            injected_components: crate::InjectedComponents,
+        ) -> Result<crate::Simulation<B>, SimulatorError> {
+            // Initial kernels must keep their time-zero gates until the timed
+            // scheduler starts them; ordinary Simulator builders release them.
+            let mut sim =
+                Simulator::with_backend_and_program_for_simulation(backend, program, warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
@@ -3751,6 +3805,7 @@ mod host {
             match crate::Simulation::try_new(sim) {
                 Ok(mut simulation) => {
                     simulation.simulator.warnings = warnings;
+                    simulation.state.set_scheduler_mode(options.scheduler);
                     Ok(simulation)
                 }
                 Err(error) => Err(SimulatorError::from(error).with_warnings(warnings)),

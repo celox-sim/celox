@@ -4285,10 +4285,12 @@ impl Ff<'_, '_> {
         self.exec_block(body)?;
         let mut kernel = self.kernel.take().expect("lowering a process kernel");
         std::mem::swap(&mut self.b, kernel.builder());
+        let slots = kernel.slots();
         let mut unit = kernel.build();
         prune_unreachable_blocks(&mut unit);
         Ok(KernelUnit {
             unit,
+            slots,
             wait_sites: self.wait_sites,
             nba_sites: self.nba_sites,
             host_request_sites: self.host_request_sites,
@@ -4431,6 +4433,9 @@ impl Ff<'_, '_> {
         ticks_per_unit: u64,
         ticks_per_precision: u64,
     ) -> Result<(), sv::AnalyzerError> {
+        // Only integral constants are recorded; a real delay counts as
+        // variable.
+        let mut constant = None;
         let (mut delay, ticks_per_step) = match self.m.expr_float_precision(amount) {
             Some(precision) => (
                 self.real_delay(amount, precision, ticks_per_unit / ticks_per_precision)?,
@@ -4438,6 +4443,13 @@ impl Ff<'_, '_> {
             ),
             None => {
                 let signed = self.expr_signed(amount);
+                constant = self
+                    .eval_const(amount)?
+                    .filter(|(value, width)| {
+                        !(signed && *width > 0 && value.bit(*width as u64 - 1))
+                    })
+                    .and_then(|(value, _)| u64::try_from(&value).ok())
+                    .and_then(|value| value.checked_mul(ticks_per_unit));
                 let mut arena = SLTNodeArena::new();
                 let node = self.expr_slt(amount, None, &mut arena)?;
                 let original = self.lower_slt(&arena, node)?;
@@ -4486,7 +4498,7 @@ impl Ff<'_, '_> {
             ));
             delay = product;
         }
-        self.with_kernel(|kernel| kernel.inactive_delay(delay))
+        self.with_kernel(|kernel| kernel.inactive_delay(delay, constant))
             .map_err(kernel_error)
     }
 
@@ -4846,6 +4858,7 @@ impl Ff<'_, '_> {
 /// The kernel of a process and its wait and nonblocking assignment sites.
 pub(super) struct KernelUnit {
     pub unit: ExecutionUnit<Addr>,
+    pub slots: ProcessSlots<SourceVarId>,
     pub wait_sites: Vec<WaitSite<SourceVarId>>,
     pub nba_sites: Vec<NbaSite<SourceVarId>>,
     pub host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
