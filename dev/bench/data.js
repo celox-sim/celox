@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792654552527,
+  "lastUpdate": 1792655373255,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -397842,6 +397842,37 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-tiered-aarch64/heliodor_suite_66_smp_linux_boot_2hart_end_to_end",
             "unit": "ms",
             "value": 1031830.531561
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "cd28ccde6129d829ef9641769bfb036c90ef580c",
+          "message": "chore(deps): update rust crate libc to v0.2.191 (#1583)",
+          "timestamp": "2026-10-20T00:36:22Z",
+          "url": "https://github.com/celox-sim/celox/commit/cd28ccde6129d829ef9641769bfb036c90ef580c"
+        },
+        "date": 1792655373255,
+        "cpu": "Neoverse-N2",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_suite_66_smp_linux_boot_4hart_compilation",
+            "unit": "ms",
+            "value": 415818.080365
+          },
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_suite_66_smp_linux_boot_4hart_execution",
+            "unit": "ms",
+            "value": 6425751.580944
           }
         ]
       }
