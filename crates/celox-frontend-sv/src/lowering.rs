@@ -4282,7 +4282,7 @@ fn lower_comb_processes(
                 let mut targets: Vec<_> = paths
                     .iter()
                     .filter_map(|path| match &path.target {
-                        LogicPathTarget::Var(target) => Some(target.id),
+                        LogicPathTarget::Var(target) => Some(*target),
                         _ => None,
                     })
                     .collect();
@@ -4410,7 +4410,7 @@ fn lower_comb_alternative(
     pm: &mut procedural::ProcModule<'_>,
     process: &sv::ir::CombProcess,
     random_seed: u32,
-    targets: Vec<SourceVarId>,
+    targets: Vec<VarAtomBase<SourceVarId>>,
     arena: &mut SLTNodeArena<SourceVarId>,
 ) -> Option<(Vec<LogicPath<SourceVarId>>, CombAlternative)> {
     let checkpoint = pm.checkpoint();
@@ -8125,9 +8125,9 @@ impl FfEventVars {
 }
 
 /// A signal a flip-flop evaluation writes and, for nonblocking writes staged
-/// apart from blocking ones, its staging value and mask; see
+/// apart from blocking ones, its staging value; see
 /// `celox_frontend_core::watch::PendingSlots`.
-type FfWriteStream = (SourceVarId, Option<(SourceVarId, SourceVarId)>);
+type FfWriteStream = (SourceVarId, Option<SourceVarId>);
 
 /// The write streams one execution of the flip-flop evaluation `eval` may
 /// write twice. `staged` lists its staged variables as (variable, value,
@@ -8148,7 +8148,7 @@ fn repeated_ff_writes(
     .into_iter()
     .filter_map(
         |id| match staged.iter().find(|&&(_, value, _)| value == id) {
-            Some(&(signal, value, mask)) => Some((signal, Some((value, mask)))),
+            Some(&(signal, value, _)) => Some((signal, Some(value))),
             None if staged.iter().any(|&(_, _, mask)| mask == id) => None,
             None => Some((id, None)),
         },

@@ -487,54 +487,46 @@ pub fn instrument_writes<A: Clone>(
 /// of the signal there, applied in issue order (IEEE 1800-2023 4.5,
 /// 10.4.2): `y <= 0; y <= 1;` is two updates. Counting at the writes would
 /// wake a waiter before the commit, and counting at the commit alone sees
-/// only the final value. So the evaluation keeps its first written value
-/// and counts the occurrences between later writes as pending; the commit
-/// adds the occurrence from the published value to the first one, and the
-/// pending ones.
+/// only the final value.
+///
+/// So the writes go to a private copy of the stream (`value`) as well, and
+/// `covered` marks the bits written so far. A write that changes covered
+/// bits is an occurrence whatever the published value is: it marks its bits
+/// in `changed`, and an edge of the least significant bit counts in `rises`
+/// or `falls`. A write of uncovered bits compares with the value the commit
+/// publishes over, so `first` keeps the value it wrote there. A commit
+/// counts, in the bits it publishes, the occurrence from the published value
+/// to `first` and the held ones, and releases those bits.
+///
+/// A waiter compares a counter only with the value it saw, so the commit
+/// counts one change for all the changes it releases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PendingSlots<A> {
     pub signal: A,
     /// For the nonblocking writes of a variable the process also writes by
-    /// blocking assignments: the staging value and mask they go to.
-    /// Otherwise the writes go to the signal's next state.
-    pub staged: Option<StagedSlots<A>>,
-    /// The value after the first write, and whether there was one.
+    /// blocking assignments: the staging value they go to. Otherwise the
+    /// writes go to the signal's next state.
+    pub staged: Option<A>,
+    pub value: A,
+    pub covered: A,
     pub first: A,
-    pub has_first: A,
-    pub changes: A,
+    pub changed: A,
+    /// The bits of the write being counted.
+    pub written: A,
     pub rises: A,
     pub falls: A,
 }
 
-/// The staging objects of [`PendingSlots`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StagedSlots<A> {
-    pub value: A,
-    pub mask: A,
-    /// The mask after the first write: the bits the first value holds.
-    pub first_mask: A,
-}
-
 impl<A: Copy> PendingSlots<A> {
-    pub fn pending(&self, kind: CounterKind) -> A {
-        match kind {
-            CounterKind::Changes => self.changes,
-            CounterKind::Rises => self.rises,
-            CounterKind::Falls => self.falls,
-        }
-    }
-
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> PendingSlots<B> {
         PendingSlots {
             signal: map(self.signal),
-            staged: self.staged.map(|staged| StagedSlots {
-                value: map(staged.value),
-                mask: map(staged.mask),
-                first_mask: map(staged.first_mask),
-            }),
+            staged: self.staged.map(&mut map),
+            value: map(self.value),
+            covered: map(self.covered),
             first: map(self.first),
-            has_first: map(self.has_first),
-            changes: map(self.changes),
+            changed: map(self.changed),
+            written: map(self.written),
             rises: map(self.rises),
             falls: map(self.falls),
         }
@@ -546,43 +538,45 @@ impl<A: Copy> PendingSlots<A> {
 pub struct PendingCode<A> {
     /// The signal's stable state and its counters.
     pub watch: WatchCode<A>,
-    /// The signal's next state.
-    pub next: A,
-    pub staged: Option<StagedSlots<A>>,
+    /// Where the writes go: the signal's next state, or its staging value.
+    pub write: A,
+    /// Whether `write` is a staging value, which a store to the signal
+    /// publishes.
+    pub staged: bool,
+    pub value: A,
+    pub covered: A,
     pub first: A,
-    pub has_first: A,
-    pub pending: Vec<(CounterKind, A)>,
+    pub changed: A,
+    pub written: A,
+    /// The held edges of the least significant bit.
+    pub edges: Vec<(CounterKind, A)>,
 }
 
 /// What an instruction of a flip-flop unit does to a [`PendingCode`]
 /// stream.
 enum PendingRole {
-    /// A write of the evaluation; `marks` for a store to the staging mask.
-    Write { marks: bool },
+    /// A write of the evaluation.
+    Write,
     /// The publication.
     Release,
 }
 
 impl<A: PartialEq> PendingCode<A> {
     fn role(&self, instruction: &SIRInstruction<A>) -> Option<PendingRole> {
-        match (instruction, &self.staged) {
-            (SIRInstruction::Store(address, ..), None) => {
-                (*address == self.next).then_some(PendingRole::Write { marks: false })
+        match instruction {
+            SIRInstruction::Store(address, ..) if *address == self.write => {
+                Some(PendingRole::Write)
             }
-            (SIRInstruction::Store(address, ..), Some(staged)) => {
-                if *address == staged.value {
-                    Some(PendingRole::Write { marks: false })
-                } else if *address == staged.mask {
-                    Some(PendingRole::Write { marks: true })
-                } else {
-                    (*address == self.watch.signal).then_some(PendingRole::Release)
-                }
+            SIRInstruction::Store(address, ..) if self.staged && *address == self.watch.signal => {
+                Some(PendingRole::Release)
             }
             // A seed copies the stable state into the next state; it is
             // not a write.
-            (SIRInstruction::Commit(source, destination, ..), None) => (*source == self.next
-                && *destination == self.watch.signal)
-                .then_some(PendingRole::Release),
+            SIRInstruction::Commit(source, destination, ..)
+                if !self.staged && *source == self.write && *destination == self.watch.signal =>
+            {
+                Some(PendingRole::Release)
+            }
             _ => None,
         }
     }
@@ -605,6 +599,16 @@ fn store<A: Clone>(b: &mut SIRBuilder<A>, address: &A, width: usize, value: Regi
         Vec::new(),
         Vec::new(),
     ));
+}
+
+fn mask<A>(b: &mut SIRBuilder<A>, bits: &num_bigint::BigUint, width: usize) -> RegisterId {
+    let mask = b.alloc_bit(width, false);
+    b.emit(SIRInstruction::Imm(mask, SIRValue::new(bits.clone())));
+    mask
+}
+
+fn ones(width: usize) -> num_bigint::BigUint {
+    (num_bigint::BigUint::from(1u8) << width) - 1u8
 }
 
 /// `base` with the bits `mask` marks taken from `value`.
@@ -631,131 +635,171 @@ fn overlay<A>(
     merged
 }
 
-/// The value the writes of `code` have produced so far: the next state, or
-/// for a staged stream the next state with the staged bits replaced, as the
-/// NBA merge will publish it.
-fn pending_view<A: Clone>(b: &mut SIRBuilder<A>, code: &PendingCode<A>) -> RegisterId {
-    let (width, four_state) = (code.watch.width, code.watch.four_state);
-    let next = load(b, &code.next, width, four_state);
-    let Some(staged) = &code.staged else {
-        return next;
-    };
-    let value = load(b, &staged.value, width, four_state);
-    let mask = load(b, &staged.mask, width, false);
-    overlay(b, next, value, mask, width, four_state)
+/// `lhs & !rhs`, both masks.
+fn and_not<A>(b: &mut SIRBuilder<A>, lhs: RegisterId, rhs: RegisterId, width: usize) -> RegisterId {
+    let inverted = b.alloc_bit(width, false);
+    b.emit(SIRInstruction::Unary(
+        inverted,
+        celox_design::UnaryOp::BitNot,
+        rhs,
+    ));
+    let result = b.alloc_bit(width, false);
+    b.emit(SIRInstruction::Binary(result, lhs, BinaryOp::And, inverted));
+    result
 }
 
-/// Emit `write`, a write of the evaluation to the stream of `code`, and
-/// keep its occurrence: the first write is remembered, a later one counts
-/// as pending.
+/// Emit `write`, a store of the evaluation to the stream of `code`, and
+/// keep its occurrence (see [`PendingSlots`]).
 fn emit_pending_write<A: Clone>(
     b: &mut SIRBuilder<A>,
     code: &PendingCode<A>,
     write: SIRInstruction<A>,
-    marks: bool,
 ) {
     let (width, four_state) = (code.watch.width, code.watch.four_state);
-    let old = pending_view(b, code);
-    let old_lsb = lsb(b, old, width, four_state);
+    let SIRInstruction::Store(_, offset, bits, source, ..) = &write else {
+        unreachable!("a write of a stream is a store");
+    };
+    let (offset, bits, source) = (offset.clone(), *bits, *source);
+    let old = load(b, &code.value, width, four_state);
+    let covered = load(b, &code.covered, width, false);
     b.emit(write);
-    let new = pending_view(b, code);
-    let new_lsb = lsb(b, new, width, four_state);
-    let has_first = load(b, &code.has_first, 1, false);
-    for &(kind, ref pending) in &code.pending {
-        let occurred = occurrence(b, kind, (old, old_lsb), (new, new_lsb), width, four_state);
-        let held = binary(b, occurred, BinaryOp::And, has_first);
-        bump(b, pending, held);
-    }
-    // A staged value takes effect where its mask is marked, and the
-    // evaluation clears the mask before its body: the first write of a
-    // staged stream is the first mark.
-    if code.staged.is_some() && !marks {
-        return;
-    }
-    let none = b.alloc_bit(1, false);
-    b.emit(SIRInstruction::Unary(
-        none,
-        celox_design::UnaryOp::LogicNot,
-        has_first,
+    // The write applied to the private copy, and the bits it writes.
+    b.emit(SIRInstruction::Store(
+        code.value.clone(),
+        offset.clone(),
+        bits,
+        source,
+        Vec::new(),
+        Vec::new(),
     ));
-    let (first, set) = match &code.staged {
-        None => (new, none),
-        Some(staged) => {
-            let mask = load(b, &staged.mask, width, false);
-            let zero = constant(b, 0, width, false);
-            let marked = binary(b, mask, BinaryOp::NeCase, zero);
-            let set = binary(b, none, BinaryOp::And, marked);
-            let previous = load(b, &staged.first_mask, width, false);
-            let first_mask = b.alloc_bit(width, false);
-            b.emit(SIRInstruction::Mux(first_mask, set, mask, previous));
-            store(b, &staged.first_mask, width, first_mask);
-            (load(b, &staged.value, width, four_state), set)
-        }
-    };
-    let previous = load(b, &code.first, width, four_state);
-    let kept = value_register(b, width, four_state);
-    b.emit(SIRInstruction::Mux(kept, set, first, previous));
-    store(b, &code.first, width, kept);
-    let started = binary(b, has_first, BinaryOp::Or, set);
-    store(b, &code.has_first, 1, started);
-}
-
-/// After the publication of the stream of `code`, count its occurrences:
-/// the one from `published`, the signal's value before the publication, to
-/// the first written value in the bits the publication writes (`mask`), and
-/// the pending ones. The stream is then empty.
-fn emit_release<A: Clone>(
-    b: &mut SIRBuilder<A>,
-    code: &PendingCode<A>,
-    published: RegisterId,
-    written: &num_bigint::BigUint,
-) {
-    let (width, four_state) = (code.watch.width, code.watch.four_state);
-    let has_first = load(b, &code.has_first, 1, false);
-    let first = load(b, &code.first, width, four_state);
-    let mask = match &code.staged {
-        Some(staged) => load(b, &staged.first_mask, width, false),
-        None => {
-            let mask = b.alloc_bit(width, false);
-            b.emit(SIRInstruction::Imm(mask, SIRValue::new(written.clone())));
-            mask
-        }
-    };
-    let first = overlay(b, published, first, mask, width, four_state);
-    let published_lsb = lsb(b, published, width, four_state);
-    let first_lsb = lsb(b, first, width, four_state);
-    for &(kind, ref pending) in &code.pending {
-        let Some((_, counter)) = code.watch.counters.iter().find(|(k, _)| *k == kind) else {
-            continue;
-        };
+    let none = mask(b, &num_bigint::BigUint::default(), width);
+    store(b, &code.written, width, none);
+    let all = mask(b, &ones(bits), bits);
+    b.emit(SIRInstruction::Store(
+        code.written.clone(),
+        offset,
+        bits,
+        all,
+        Vec::new(),
+        Vec::new(),
+    ));
+    let written = load(b, &code.written, width, false);
+    let new = load(b, &code.value, width, four_state);
+    // The covered bits before the write, on a fixed background.
+    let background = constant(b, 0, width, four_state);
+    let before = overlay(b, background, old, covered, width, four_state);
+    let after = overlay(b, background, new, covered, width, four_state);
+    let changed = binary(b, before, BinaryOp::NeCase, after);
+    let marked = load(b, &code.changed, width, false);
+    let with_write = b.alloc_bit(width, false);
+    b.emit(SIRInstruction::Binary(
+        with_write,
+        marked,
+        BinaryOp::Or,
+        written,
+    ));
+    let next_marked = b.alloc_bit(width, false);
+    b.emit(SIRInstruction::Mux(
+        next_marked,
+        changed,
+        with_write,
+        marked,
+    ));
+    store(b, &code.changed, width, next_marked);
+    let before_lsb = lsb(b, before, width, four_state);
+    let after_lsb = lsb(b, after, width, four_state);
+    for &(kind, ref held) in &code.edges {
         let occurred = occurrence(
             b,
             kind,
-            (published, published_lsb),
+            (before, before_lsb),
+            (after, after_lsb),
+            width,
+            four_state,
+        );
+        bump(b, held, occurred);
+    }
+    // The bits the write covers first keep its value.
+    let fresh = and_not(b, written, covered, width);
+    let first = load(b, &code.first, width, four_state);
+    let first = overlay(b, first, new, fresh, width, four_state);
+    store(b, &code.first, width, first);
+    let now_covered = b.alloc_bit(width, false);
+    b.emit(SIRInstruction::Binary(
+        now_covered,
+        covered,
+        BinaryOp::Or,
+        written,
+    ));
+    store(b, &code.covered, width, now_covered);
+}
+
+/// After a publication of the stream of `code` in the bits `published`
+/// writes, count their occurrences: the one from `before`, the signal's
+/// value before the publication, to the first written values, the held
+/// changes, and with the least significant bit its held edges. Those bits
+/// of the stream are then empty.
+fn emit_release<A: Clone>(
+    b: &mut SIRBuilder<A>,
+    code: &PendingCode<A>,
+    before: RegisterId,
+    published: &num_bigint::BigUint,
+) {
+    let (width, four_state) = (code.watch.width, code.watch.four_state);
+    let bits = mask(b, published, width);
+    let covered = load(b, &code.covered, width, false);
+    let released = b.alloc_bit(width, false);
+    b.emit(SIRInstruction::Binary(
+        released,
+        covered,
+        BinaryOp::And,
+        bits,
+    ));
+    let first = load(b, &code.first, width, four_state);
+    let first = overlay(b, before, first, released, width, four_state);
+    let before_lsb = lsb(b, before, width, four_state);
+    let first_lsb = lsb(b, first, width, four_state);
+    let lsb_released = published.bit(0);
+    for (kind, counter) in &code.watch.counters {
+        let occurred = occurrence(
+            b,
+            *kind,
+            (before, before_lsb),
             (first, first_lsb),
             width,
             four_state,
         );
-        let counted = binary(b, occurred, BinaryOp::And, has_first);
-        bump(b, counter, counted);
+        if *kind == CounterKind::Changes {
+            let marked = load(b, &code.changed, width, false);
+            let held = b.alloc_bit(width, false);
+            b.emit(SIRInstruction::Binary(held, marked, BinaryOp::And, bits));
+            let none = mask(b, &num_bigint::BigUint::default(), width);
+            let held = binary(b, held, BinaryOp::Ne, none);
+            let occurred = binary(b, occurred, BinaryOp::Or, held);
+            bump(b, counter, occurred);
+            continue;
+        }
+        bump(b, counter, occurred);
+        let Some((_, held)) = code.edges.iter().find(|(k, _)| k == kind) else {
+            continue;
+        };
+        if !lsb_released {
+            continue;
+        }
         let total = load(b, counter, EVENT_COUNTER_WIDTH, false);
-        let held = load(b, pending, EVENT_COUNTER_WIDTH, false);
+        let pending = load(b, held, EVENT_COUNTER_WIDTH, false);
         let sum = b.alloc_bit(EVENT_COUNTER_WIDTH, false);
-        b.emit(SIRInstruction::Binary(sum, total, BinaryOp::Add, held));
+        b.emit(SIRInstruction::Binary(sum, total, BinaryOp::Add, pending));
         store(b, counter, EVENT_COUNTER_WIDTH, sum);
+        let zero = b.alloc_bit(EVENT_COUNTER_WIDTH, false);
+        b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        store(b, held, EVENT_COUNTER_WIDTH, zero);
     }
-    emit_clear(b, code);
-}
-
-/// Empty the stream of `code`.
-fn emit_clear<A: Clone>(b: &mut SIRBuilder<A>, code: &PendingCode<A>) {
-    let zero = constant(b, 0, 1, false);
-    store(b, &code.has_first, 1, zero);
-    let zero = b.alloc_bit(EVENT_COUNTER_WIDTH, false);
-    b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
-    for (_, pending) in &code.pending {
-        store(b, pending, EVENT_COUNTER_WIDTH, zero);
-    }
+    let remaining = and_not(b, covered, bits, width);
+    store(b, &code.covered, width, remaining);
+    let marked = load(b, &code.changed, width, false);
+    let remaining = and_not(b, marked, bits, width);
+    store(b, &code.changed, width, remaining);
 }
 
 /// The instructions `emit` builds, with registers from `next_register` on.
@@ -777,9 +821,9 @@ fn emitted<A>(
 }
 
 /// Instrument the writes and publications of a flip-flop unit for the
-/// streams of `codes` (see [`PendingSlots`]). A unit that writes a stream
-/// starts it empty, so an evaluation that was superseded before its commit
-/// leaves nothing behind.
+/// streams of `codes` (see [`PendingSlots`]). The units of one evaluation,
+/// such as the parts of a parallel build, share a stream: each publication
+/// releases only the bits it publishes.
 pub fn instrument_pending<A: Clone + PartialEq>(
     unit: &mut ExecutionUnit<A>,
     codes: &[PendingCode<A>],
@@ -793,7 +837,6 @@ pub fn instrument_pending<A: Clone + PartialEq>(
         .map(|id| id.0 + 1)
         .max()
         .unwrap_or(0);
-    let mut started = vec![false; codes.len()];
     let mut blocks: Vec<_> = unit.blocks.keys().copied().collect();
     blocks.sort_unstable();
     for id in blocks {
@@ -811,8 +854,8 @@ pub fn instrument_pending<A: Clone + PartialEq>(
         if roles.iter().all(Option::is_none) {
             continue;
         }
-        // The bits each stream's commits in this block publish, and where
-        // its last publication is.
+        // The bits each stream's publications in this block write, and
+        // where its last publication is.
         let mut written = vec![num_bigint::BigUint::default(); codes.len()];
         let mut last = vec![None; codes.len()];
         for (position, (instruction, role)) in block.instructions.iter().zip(&roles).enumerate() {
@@ -820,12 +863,11 @@ pub fn instrument_pending<A: Clone + PartialEq>(
                 continue;
             };
             last[*index] = Some(position);
-            let width = codes[*index].watch.width;
             let range = match instruction {
                 SIRInstruction::Commit(_, _, SIROffset::Static(lsb), bits, _) => {
-                    ((num_bigint::BigUint::from(1u8) << *bits) - 1u8) << *lsb
+                    ones(*bits) << *lsb
                 }
-                _ => (num_bigint::BigUint::from(1u8) << width) - 1u8,
+                _ => ones(codes[*index].watch.width),
             };
             written[*index] |= range;
         }
@@ -838,10 +880,9 @@ pub fn instrument_pending<A: Clone + PartialEq>(
         {
             match role {
                 None => instructions.push(instruction),
-                Some((index, PendingRole::Write { marks })) => {
-                    started[index] = true;
+                Some((index, PendingRole::Write)) => {
                     instructions.extend(emitted(&mut unit.register_map, &mut next_register, |b| {
-                        emit_pending_write(b, &codes[index], instruction, marks)
+                        emit_pending_write(b, &codes[index], instruction)
                     }));
                 }
                 Some((index, PendingRole::Release)) => {
@@ -874,18 +915,6 @@ pub fn instrument_pending<A: Clone + PartialEq>(
         }
         block.instructions = instructions;
     }
-    let mut entry = Vec::new();
-    for (code, _) in codes.iter().zip(&started).filter(|(_, started)| **started) {
-        entry.extend(emitted(&mut unit.register_map, &mut next_register, |b| {
-            emit_clear(b, code)
-        }));
-    }
-    let block = unit
-        .blocks
-        .get_mut(&unit.entry_block_id)
-        .expect("the entry block");
-    entry.append(&mut block.instructions);
-    block.instructions = entry;
 }
 
 type SymbolicVariables =
@@ -974,16 +1003,11 @@ pub fn declare_counter_slots(
 
 /// Declare the [`PendingSlots`] of `streams` among the variables of a
 /// module and return them. A stream is a signal and, for nonblocking writes
-/// staged apart from blocking ones, its staging value and mask. Streams of
-/// signals that are not watchable (see `watchable`) are skipped.
+/// staged apart from blocking ones, its staging value. Streams of signals
+/// that are not watchable (see `watchable`) are skipped.
 pub fn declare_pending_slots(
     variables: &mut SymbolicVariables,
-    streams: impl IntoIterator<
-        Item = (
-            crate::SourceVarId,
-            Option<(crate::SourceVarId, crate::SourceVarId)>,
-        ),
-    >,
+    streams: impl IntoIterator<Item = (crate::SourceVarId, Option<crate::SourceVarId>)>,
 ) -> Vec<PendingSlots<crate::SourceVarId>> {
     let mut streams: Vec<_> = streams
         .into_iter()
@@ -1013,14 +1037,12 @@ pub fn declare_pending_slots(
             };
             PendingSlots {
                 signal,
-                staged: staged.map(|(value, mask)| StagedSlots {
-                    value,
-                    mask,
-                    first_mask: hidden("first_mask", width, false),
-                }),
+                staged,
+                value: hidden("value", width, is_4state),
+                covered: hidden("covered", width, false),
                 first: hidden("first", width, is_4state),
-                has_first: hidden("has_first", 1, false),
-                changes: hidden("changes", EVENT_COUNTER_WIDTH, false),
+                changed: hidden("changed", width, false),
+                written: hidden("written", width, false),
                 rises: hidden("rises", EVENT_COUNTER_WIDTH, false),
                 falls: hidden("falls", EVENT_COUNTER_WIDTH, false),
             }

@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, fmt};
 use celox_design::{
     CounterSlots, ExternFunction, InitialStateValue, ModuleId, NbaSite, ProcessSlots,
     RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, TriggerSet,
-    VariableMetadata, WaitSite,
+    VarAtomBase, VariableMetadata, WaitSite,
 };
 use celox_sir::ExecutionUnit;
 use celox_slt::{CombObserver, FfAccessSummary, GlueBlockBase, LogicPath, SLTNodeArena};
@@ -77,8 +77,9 @@ pub struct SplitCommit<A> {
 pub struct CombAlternative {
     /// The `process` of the unit's paths.
     pub process: SourceVarId,
-    /// The variables the symbolic definitions write.
-    pub targets: Vec<SourceVarId>,
+    /// The ranges the symbolic definitions write; other drivers may write
+    /// the other bits of the same variables.
+    pub targets: Vec<VarAtomBase<SourceVarId>>,
     /// The variables the unit may store twice in one execution.
     pub candidates: Vec<SourceVarId>,
 }

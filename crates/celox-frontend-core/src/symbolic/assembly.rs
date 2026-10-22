@@ -3640,7 +3640,8 @@ fn counted_signals(
 
 /// Keep, for every instance of a process in `comb_alternatives`, either
 /// its imperative unit, when a variable it may store twice is `counted`, or
-/// its symbolic definitions, and remove the other form from `comb_blocks`.
+/// its symbolic definitions, and remove the paths of the other form from
+/// `comb_blocks`. Paths of other drivers of the same variables stay.
 fn choose_comb_alternatives(
     bindings: &PackageBindings,
     instance_modules: &HashMap<InstanceId, ModuleId>,
@@ -3658,7 +3659,10 @@ fn choose_comb_alternatives(
                 .iter()
                 .any(|&candidate| counted.contains_key(&locate(candidate)))
             {
-                symbolic.extend(alternative.targets.iter().map(|&target| locate(target)));
+                symbolic.extend(alternative.targets.iter().map(|target| VarAtomBase {
+                    id: locate(target.id),
+                    access: target.access,
+                }));
             } else {
                 imperative.insert(locate(alternative.process));
             }
@@ -3668,7 +3672,7 @@ fn choose_comb_alternatives(
         return;
     }
     comb_blocks.retain(|path| match &path.target {
-        LogicPathTarget::Var(target) => !symbolic.contains(&target.id),
+        LogicPathTarget::Var(target) => !symbolic.contains(target),
         LogicPathTarget::Process { process, .. } => !imperative.contains(process),
         LogicPathTarget::CombCaptureEvent { .. } => true,
     });
@@ -3755,18 +3759,17 @@ fn instrument_counted_signals<'u>(
         .filter_map(|slots| {
             Some(crate::watch::PendingCode {
                 watch: watch(slots.signal)?,
-                next: working(slots.signal),
-                staged: slots.staged.map(|staged| crate::watch::StagedSlots {
-                    value: working(staged.value),
-                    mask: working(staged.mask),
-                    first_mask: stable(staged.first_mask),
-                }),
+                write: working(slots.staged.unwrap_or(slots.signal)),
+                staged: slots.staged.is_some(),
+                value: stable(slots.value),
+                covered: stable(slots.covered),
                 first: stable(slots.first),
-                has_first: stable(slots.has_first),
-                pending: CounterKind::ALL
-                    .into_iter()
-                    .map(|kind| (kind, stable(slots.pending(kind))))
-                    .collect(),
+                changed: stable(slots.changed),
+                written: stable(slots.written),
+                edges: vec![
+                    (CounterKind::Rises, stable(slots.rises)),
+                    (CounterKind::Falls, stable(slots.falls)),
+                ],
             })
         })
         .collect();
