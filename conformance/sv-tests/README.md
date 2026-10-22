@@ -134,6 +134,9 @@ in 4state. No passing case regresses. The `12.7.3--foreach`, `12.7.4--while` and
 which is rejected because its element and character selects are not yet told
 apart.
 
+The `$realtime` extension updates two expectation rows: the `20.3--realtime`
+probe now passes elaboration in both state modes.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.

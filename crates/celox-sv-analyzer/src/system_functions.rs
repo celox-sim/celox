@@ -28,6 +28,8 @@ pub enum SystemFunction {
     Time,
     /// `$stime` (20.3.2).
     Stime,
+    /// Real simulation time in the calling scope (20.3.3).
+    Realtime,
     /// `$timeunit` (20.4.2).
     Timeunit,
     /// `$timeprecision` (20.4.2).
@@ -144,6 +146,7 @@ impl SystemFunction {
             Self::Bitstoshortreal => "$bitstoshortreal",
             Self::Time => "$time",
             Self::Stime => "$stime",
+            Self::Realtime => "$realtime",
             Self::Timeunit => "$timeunit",
             Self::Timeprecision => "$timeprecision",
             Self::Signed => "$signed",
@@ -247,7 +250,7 @@ impl SystemFunction {
     /// or it returns the simulation time. Such a call is not a constant
     /// expression, and a process evaluates it where it runs.
     pub fn reads_simulation_state(self) -> bool {
-        self.is_effectful() || matches!(self, Self::Time | Self::Stime)
+        self.is_effectful() || matches!(self, Self::Time | Self::Stime | Self::Realtime)
     }
 
     /// Whether the call writes argument `position` back, as `$random(seed)`
@@ -304,7 +307,7 @@ impl SystemFunction {
             | Self::Feof => Some((32, true)),
             Self::Urandom | Self::UrandomRange | Self::Stime | Self::Fopen => Some((32, false)),
             Self::Rtoi => Some((32, true)),
-            Self::Itor | Self::Bitstoreal | Self::Realtobits => Some((64, false)),
+            Self::Itor | Self::Bitstoreal | Self::Realtobits | Self::Realtime => Some((64, false)),
             Self::Shortrealtobits | Self::Bitstoshortreal => Some((32, false)),
             Self::Time => Some((64, false)),
             Self::Signed
@@ -791,7 +794,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     // 20.3 Simulation time system functions
     function(SystemFunction::Time, 0, Some(0)),
     function(SystemFunction::Stime, 0, Some(0)),
-    unsupported("$realtime", Function),
+    function(SystemFunction::Realtime, 0, Some(0)),
     // 20.4 Timescale system tasks and system functions
     task(SystemTask::Printtimescale, ProceduralAndInitial, 0, Some(1)),
     unsupported("$timeformat", Task),

@@ -703,8 +703,8 @@ chapter-20/20.2--finish.sv	2state	pass
 chapter-20/20.2--finish.sv	4state	pass
 chapter-20/20.2--stop.sv	2state	pass
 chapter-20/20.2--stop.sv	4state	pass
-chapter-20/20.3--realtime.sv	2state	fail
-chapter-20/20.3--realtime.sv	4state	fail
+chapter-20/20.3--realtime.sv	2state	pass
+chapter-20/20.3--realtime.sv	4state	pass
 chapter-20/20.3--stime.sv	2state	pass
 chapter-20/20.3--stime.sv	4state	pass
 chapter-20/20.3--time.sv	2state	pass
