@@ -1872,3 +1872,91 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (top Top)
   (run_to_finish)
   (expect_output "child=1\n"))
+
+; A process whose intermediate writes are counted drives only some bits of
+; its variable; the other bits keep their own drivers.
+(case intermediate_combinational_writes_keep_other_drivers
+  (source "drivers.sv" #"
+                module Top;
+                    logic a = 0, b = 0, e = 0, c, d;
+                    logic [7:0] y, z;
+                    int n, m;
+                    assign y[7:4] = 4'hA;
+                    always_comb begin y[3:0] = 0; if (a) y[3:0] = 1; c = b; end
+                    always_comb begin z[3:0] = 0; if (a) z[3:0] = 1; d = b; end
+                    always_comb z[7:4] = {4{e}};
+                    initial #1 forever begin @(y); n++; end
+                    initial #1 forever begin @(z); m++; end
+                    initial begin
+                        #2 a = 1;
+                        // While a is 1, each change of b rewrites y and z
+                        // 1 -> 0 -> 1 in their low bits.
+                        #1 b = 1;
+                        #1 e = 1;
+                        #1 $display("y=%h z=%h n=%0d m=%0d", y, z, n, m);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=a1 z=f1 n=2 m=3\n"))
+
+; One process pulses y[0] back to its value, and processes of the same clock
+; write the other bits of y unchanged. A parallel build evaluates every
+; process before any commits; the pulse still counts.
+(case parallel_flip_flop_parts_keep_pulses
+  (source "parts.sv" #"
+                module Top;
+                    bit clk;
+                    bit [2:0] y = 3'b001;
+                    bit [63:0] p, q, r, s;
+                    int n, f;
+                    always_ff @(posedge clk) y[2] <= y[2];
+                    always_ff @(posedge clk) begin y[0] <= 0; y[0] <= 1; end
+                    always_ff @(posedge clk) y[1] <= y[1];
+                    // Independent work, so that a parallel build splits the
+                    // processes into parts.
+                    always_ff @(posedge clk) p <= p * 64'd7 + (p >> 3) + 64'd1;
+                    always_ff @(posedge clk) q <= q * 64'd11 + (q >> 5) + 64'd3;
+                    always_ff @(posedge clk) r <= r * 64'd13 + (r >> 7) + 64'd5;
+                    always_ff @(posedge clk) s <= s * 64'd17 + (s >> 9) + 64'd9;
+                    initial forever begin @(y); n++; end
+                    initial forever begin @(negedge y); f++; end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("y=%b n=%0d f=%0d", y, n, f);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=001 n=2 f=2\n"))
+
+; The nonblocking updates apply after the blocking value was published:
+; y[0] <= 1 rises from the final blocking value 0, not from the 1 it held
+; when the update was issued. The blocking writes only fall, so the waiter
+; sees the rise in the NBA region.
+(case staged_nonblocking_writes_follow_later_blocking_writes
+  (source "staged_order.sv" #"
+                module Top;
+                    bit clk;
+                    bit [1:0] y = 2'b01;
+                    int r;
+                    always @(posedge clk) begin y[1] <= 0; y[0] <= 1; y = 2'b00; end
+                    initial forever begin @(posedge y); r++; end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("y=%b r=%0d", y, r);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=01 r=2\n"))

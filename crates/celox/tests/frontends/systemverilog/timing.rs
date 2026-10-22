@@ -152,6 +152,9 @@ timed_cases! {
     fn intermediate_edge_process_writes_wake_waiters = "timing::intermediate_edge_process_writes_wake_waiters";
     fn staged_nonblocking_writes_wake_waiters = "timing::staged_nonblocking_writes_wake_waiters";
     fn child_port_pulses_reach_waiters_settled = "timing::child_port_pulses_reach_waiters_settled";
+    fn intermediate_combinational_writes_keep_other_drivers = "timing::intermediate_combinational_writes_keep_other_drivers";
+    fn parallel_flip_flop_parts_keep_pulses = "timing::parallel_flip_flop_parts_keep_pulses";
+    fn staged_nonblocking_writes_follow_later_blocking_writes = "timing::staged_nonblocking_writes_follow_later_blocking_writes";
 }
 
 #[test]

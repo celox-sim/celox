@@ -70,6 +70,75 @@
         "exit_code": 0,
         "output": "y=3 z=3\n<repro>/probe.sv:8: $finish called at 6 (1s)\n"
       }
+    },
+    {
+      "name": "other_drivers",
+      "note": "The suite case intermediate_combinational_writes_keep_other_drivers.",
+      "source": "module Top;\n  logic a = 0, b = 0, e = 0, c, d;\n  logic [7:0] y, z;\n  int n, m;\n  assign y[7:4] = 4'hA;\n  always_comb begin y[3:0] = 0; if (a) y[3:0] = 1; c = b; end\n  always_comb begin z[3:0] = 0; if (a) z[3:0] = 1; d = b; end\n  always_comb z[7:4] = {4{e}};\n  initial #1 forever begin @(y); n++; end\n  initial #1 forever begin @(z); m++; end\n  initial begin #2 a = 1; #1 b = 1; #1 e = 1; #1 $display(\"y=%h z=%h n=%0d m=%0d\", y, z, n, m); $finish; end\nendmodule\n",
+      "verilator_compile": {
+        "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "verilator_run": {
+        "command": "<repro>/obj/VTop",
+        "exit_code": 0,
+        "output": "y=a1 z=f1 n=1 m=2\n- <repro>/probe.sv:11: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 5ps; walltime 0.000 s; speed 196.711 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+      },
+      "icarus_compile": {
+        "command": "iverilog -g2012 -s Top -o <repro>/probe.vvp <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "icarus_run": {
+        "command": "vvp <repro>/probe.vvp",
+        "exit_code": 0,
+        "output": "y=a1 z=f1 n=2 m=3\n<repro>/probe.sv:11: $finish called at 5 (1s)\n"
+      }
+    },
+    {
+      "name": "parallel_parts",
+      "note": "The suite case parallel_flip_flop_parts_keep_pulses.",
+      "source": "module Top;\n  bit clk;\n  bit [2:0] y = 3'b001;\n  bit [63:0] p, q, r, s;\n  int n, f;\n  always_ff @(posedge clk) y[2] <= y[2];\n  always_ff @(posedge clk) begin y[0] <= 0; y[0] <= 1; end\n  always_ff @(posedge clk) y[1] <= y[1];\n  always_ff @(posedge clk) p <= p * 64'd7 + (p >> 3) + 64'd1;\n  always_ff @(posedge clk) q <= q * 64'd11 + (q >> 5) + 64'd3;\n  always_ff @(posedge clk) r <= r * 64'd13 + (r >> 7) + 64'd5;\n  always_ff @(posedge clk) s <= s * 64'd17 + (s >> 9) + 64'd9;\n  initial forever begin @(y); n++; end\n  initial forever begin @(negedge y); f++; end\n  initial begin #1 clk = 1; #1 clk = 0; #1 clk = 1; #1 $display(\"y=%b n=%0d f=%0d\", y, n, f); $finish; end\nendmodule\n",
+      "verilator_compile": {
+        "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "verilator_run": {
+        "command": "<repro>/obj/VTop",
+        "exit_code": 0,
+        "output": "y=001 n=0 f=0\n- <repro>/probe.sv:15: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ps; walltime 0.000 s; speed 171.821 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+      },
+      "icarus_compile": {
+        "command": "iverilog -g2012 -s Top -o <repro>/probe.vvp <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "icarus_run": {
+        "command": "vvp <repro>/probe.vvp",
+        "exit_code": 0,
+        "output": "y=001 n=2 f=2\n<repro>/probe.sv:15: $finish called at 4 (1s)\n"
+      }
+    },
+    {
+      "name": "staged_order",
+      "note": "The suite case staged_nonblocking_writes_follow_later_blocking_writes.",
+      "source": "module Top;\n  bit clk;\n  bit [1:0] y = 2'b01;\n  int r;\n  always @(posedge clk) begin y[1] <= 0; y[0] <= 1; y = 2'b00; end\n  initial forever begin @(posedge y); r++; end\n  initial begin #1 clk = 1; #1 clk = 0; #1 clk = 1; #1 $display(\"y=%b r=%0d\", y, r); $finish; end\nendmodule\n",
+      "verilator_compile": {
+        "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "verilator_run": {
+        "command": "<repro>/obj/VTop",
+        "exit_code": 0,
+        "output": "y=01 r=0\n- <repro>/probe.sv:7: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ps; walltime 0.000 s; speed 185.675 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+      },
+      "icarus_compile": {
+        "command": "iverilog -g2012 -s Top -o <repro>/probe.vvp <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "icarus_run": {
+        "command": "vvp <repro>/probe.vvp",
+        "exit_code": 0,
+        "output": "y=01 r=2\n<repro>/probe.sv:7: $finish called at 4 (1s)\n"
+      }
     }
   ]
 }
