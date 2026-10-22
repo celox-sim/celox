@@ -6204,6 +6204,7 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         | SystemFunction::Bitstoshortreal
         | SystemFunction::Time
         | SystemFunction::Stime
+        | SystemFunction::Realtime
         | SystemFunction::Random
         | SystemFunction::DistUniform
         | SystemFunction::DistNormal
