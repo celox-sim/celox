@@ -59,6 +59,15 @@ timed_cases! {
     fn time_calls_in_child_port_actuals = "timing::time_calls_in_child_port_actuals";
     fn time_literal_delays_accept_all_units = "timing::time_literal_delays_accept_all_units";
     fn delays_resume_initial_blocks_at_later_times = "timing::delays_resume_initial_blocks_at_later_times";
+    fn zero_delay_process_ends_a_pulse_after_its_edge_triggers = "timing::zero_delay_process_ends_a_pulse_after_its_edge_triggers";
+    fn edge_waits_count_generated_clock_edges_in_any_declaration_order = "timing::edge_waits_count_generated_clock_edges_in_any_declaration_order";
+    fn delay_process_nonblocking_updates_reach_later_edges = "timing::delay_process_nonblocking_updates_reach_later_edges";
+    fn variable_delay_clock_changes_its_period = "timing::variable_delay_clock_changes_its_period";
+    fn asynchronous_reset_driven_by_a_delay_process = "timing::asynchronous_reset_driven_by_a_delay_process";
+    fn generated_clocks_with_a_common_edge_sample_each_other = "timing::generated_clocks_with_a_common_edge_sample_each_other";
+    fn script_writes_between_runs_reach_generated_clock_domains = "timing::script_writes_between_runs_reach_generated_clock_domains";
+    fn edge_waits_on_script_inputs_next_to_a_generated_clock = "timing::edge_waits_on_script_inputs_next_to_a_generated_clock";
+    fn finish_from_a_delay_process_between_clock_edges = "timing::finish_from_a_delay_process_between_clock_edges";
     fn always_with_a_delay_generates_a_clock = "timing::always_with_a_delay_generates_a_clock";
     fn edge_waits_resume_before_the_registers_of_that_edge_update = "timing::edge_waits_resume_before_the_registers_of_that_edge_update";
     fn any_change_waits_wake_on_every_value_change = "timing::any_change_waits_wake_on_every_value_change";

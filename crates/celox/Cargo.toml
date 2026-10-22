@@ -137,6 +137,11 @@ path = "examples/sv_tests.rs"
 required-features = ["systemverilog"]
 
 [[example]]
+name = "sched_bench"
+path = "examples/sched_bench.rs"
+required-features = ["systemverilog"]
+
+[[example]]
 name = "frontend_binary"
 path = "examples/frontend_binary.rs"
 required-features = ["host-runtime"]
