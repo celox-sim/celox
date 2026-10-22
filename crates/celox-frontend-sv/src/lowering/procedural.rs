@@ -291,6 +291,68 @@ impl<'a> ProcModule<'a> {
         false
     }
 
+    /// Whether `always @(items) body` is `always @* body`: no item has an edge
+    /// or a select, the items name exactly the variables the implicit event
+    /// expression of `body` has (IEEE 1800-2023 9.4.2.2), and the body neither
+    /// suspends nor makes a nonblocking assignment, directly or in a call.
+    pub fn is_implicit_event_list(
+        &self,
+        items: &[sv::ir::EventItem],
+        body: &[sv::ir::Stmt],
+    ) -> bool {
+        let mut listed = HashSet::default();
+        for item in items {
+            let sv::ir::Expr::Ident(name) = &item.expr else {
+                return false;
+            };
+            let Some(id) = self.id(name).filter(|id| !self.is_hidden(*id)) else {
+                return false;
+            };
+            listed.insert(VarAtomBase::new(id, 0, self.var(id).width - 1));
+        }
+        !self.suspends_or_defers(body) && listed == self.implicit_reads(body, false)
+    }
+
+    fn suspends_or_defers(&self, body: &[sv::ir::Stmt]) -> bool {
+        let mut found = false;
+        let mut calls = Vec::new();
+        let mut visit = |stmt: &sv::ir::Stmt, calls: &mut Vec<_>| {
+            found |= matches!(
+                stmt,
+                sv::ir::Stmt::Delay { .. }
+                    | sv::ir::Stmt::WaitEvent(_)
+                    | sv::ir::Stmt::Wait(_)
+                    | sv::ir::Stmt::Assign {
+                        nonblocking: true,
+                        ..
+                    }
+                    | sv::ir::Stmt::AssignConcat {
+                        nonblocking: true,
+                        ..
+                    }
+            );
+            stmt_calls(stmt, calls);
+        };
+        for stmt in body {
+            stmt.walk(&mut |stmt| visit(stmt, &mut calls));
+        }
+        let mut visited = HashSet::default();
+        while let Some((callee, args)) = calls.pop() {
+            let sv::ir::Callee::Subroutine(name) = callee else {
+                continue;
+            };
+            if let Some(subroutine) = self.subroutine(&name) {
+                default_calls(subroutine, &args, &mut calls);
+                if visited.insert(name) {
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| visit(stmt, &mut calls));
+                    }
+                }
+            }
+        }
+        found
+    }
+
     /// Syntactic implicit sensitivity, including branches that constant folding
     /// will remove. `always @*` sees arguments; `always_comb` also sees function bodies.
     pub fn implicit_reads(

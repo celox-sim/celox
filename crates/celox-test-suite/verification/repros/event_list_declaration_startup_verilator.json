@@ -1,0 +1,39 @@
+{
+  "schema_version": 3,
+  "suite_version": "0.11.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "timing::explicit_list_of_every_read_waits_for_a_change at 191:3: assert_eq y: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "timing::explicit_list_of_every_read_waits_for_a_change",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "timing::list_with_an_extra_signal_wakes_on_it at 236:3: expect_output: expected [115, 117, 109, 61, 51, 10, 115, 117, 109, 61, 51, 10], got [115, 117, 109, 61, 48, 10, 115, 117, 109, 61, 51, 10, 115, 117, 109, 61, 51, 10]",
+      "expectation": "Simulation",
+      "name": "timing::list_with_an_extra_signal_wakes_on_it",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "standard": "IEEE 1800-2023 6.8 initializes static declarations before initial/always procedures start; 9.4.2 makes an event control wait for a value change of its expressions. Declaration-initialized a, b, c do not trigger these processes, so y keeps the value its initial procedure wrote and nothing is displayed until a later change of a.",
+  "adapter_free": {
+    "source": "verification/repros/event_list_declaration_startup.sv",
+    "verilator_command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <build-dir> event_list_declaration_startup.sv",
+    "verilator_output": "sum=0\n[1] %Fatal: event_list_declaration_startup.sv:10: Assertion failed in Top: declarations do not trigger event list process",
+    "icarus_command": "iverilog -g2012 -s Top -o <output> event_list_declaration_startup.sv; vvp <output>",
+    "icarus_version": "Icarus Verilog version 13.0",
+    "icarus_output": "sum=3\nevent_list_declaration_startup.sv:13: $finish called at 2 (1s)"
+  }
+}
