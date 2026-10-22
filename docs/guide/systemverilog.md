@@ -61,8 +61,9 @@ compilation unit; choose the top by its SystemVerilog module name.
 `Simulator::tick` drives the rising edge of the selected event. `Simulation`
 tracks time and runs scheduled edges. Constant initialization applies to both.
 `initial` blocks that read design state or call system tasks, processes with
-timing controls and `always` blocks with a sensitivity list other than `@*` run
-as processes and need `Simulation`; a `Simulator` does not run them
+timing controls and `always` blocks whose sensitivity list is neither `@*` nor
+[the variables they read](./systemverilog-reference#timing-controls) run as
+processes and need `Simulation`; a `Simulator` does not run them
 ([#1712](https://github.com/celox-sim/celox/issues/1712)).
 
 Use `.four_state(true)` on the builder when your test needs X/Z values. The

@@ -58,7 +58,8 @@ assert_eq!(sim.get(q), 1u8.into());
 `Simulator::tick` は指定イベントの立ち上がりエッジを駆動します。
 `Simulation` は時刻を管理し、スケジュールされたエッジを実行します。
 定数による初期化はどちらにも適用されます。デザインの状態を読む、またはシステムタスクを呼ぶ
-`initial` ブロック、タイミング制御を持つプロセス、`@*` 以外のセンシティビティリストを持つ
+`initial` ブロック、タイミング制御を持つプロセス、`@*` でも
+[文が読む変数](./systemverilog-reference#timing-controls)でもないセンシティビティリストを持つ
 `always` はプロセスとして実行するため `Simulation` が必要です。`Simulator` はこれらを実行しません
 （[#1712](https://github.com/celox-sim/celox/issues/1712)）。
 
