@@ -3650,7 +3650,7 @@ fn choose_comb_alternatives(
     comb_blocks: &mut Vec<LogicPath<AbsoluteAddr>>,
 ) {
     let mut imperative = HashSet::default();
-    let mut symbolic = HashSet::default();
+    let mut symbolic = HashMap::<AbsoluteAddr, Vec<_>>::default();
     for (&instance, module) in instance_modules {
         for alternative in &modules[module].comb_alternatives {
             let locate = |var_id| bindings.locate(instance, var_id);
@@ -3659,10 +3659,12 @@ fn choose_comb_alternatives(
                 .iter()
                 .any(|&candidate| counted.contains_key(&locate(candidate)))
             {
-                symbolic.extend(alternative.targets.iter().map(|target| VarAtomBase {
-                    id: locate(target.id),
-                    access: target.access,
-                }));
+                for target in &alternative.targets {
+                    symbolic
+                        .entry(locate(target.id))
+                        .or_default()
+                        .push(target.access);
+                }
             } else {
                 imperative.insert(locate(alternative.process));
             }
@@ -3671,8 +3673,14 @@ fn choose_comb_alternatives(
     if imperative.is_empty() && symbolic.is_empty() {
         return;
     }
+    // Flattening may have split a definition at the boundaries of its
+    // readers, so a path of the process is any piece of one of its ranges.
+    // No other driver writes those bits: the SV frontend rejects overlapping
+    // drivers (`validate_variable_driver_ranges`).
     comb_blocks.retain(|path| match &path.target {
-        LogicPathTarget::Var(target) => !symbolic.contains(target),
+        LogicPathTarget::Var(target) => !symbolic
+            .get(&target.id)
+            .is_some_and(|ranges| ranges.iter().any(|range| range.overlaps(&target.access))),
         LogicPathTarget::Process { process, .. } => !imperative.contains(process),
         LogicPathTarget::CombCaptureEvent { .. } => true,
     });

@@ -802,6 +802,29 @@ fn emit_release<A: Clone>(
     store(b, &code.changed, width, remaining);
 }
 
+/// Empty the bits `cleared` of the stream of `code`, with the held edges
+/// when they include the least significant bit.
+fn emit_clear<A: Clone>(
+    b: &mut SIRBuilder<A>,
+    code: &PendingCode<A>,
+    cleared: &num_bigint::BigUint,
+) {
+    let width = code.watch.width;
+    let bits = mask(b, cleared, width);
+    for address in [&code.covered, &code.changed] {
+        let held = load(b, address, width, false);
+        let remaining = and_not(b, held, bits, width);
+        store(b, address, width, remaining);
+    }
+    if cleared.bit(0) {
+        let zero = b.alloc_bit(EVENT_COUNTER_WIDTH, false);
+        b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        for (_, held) in &code.edges {
+            store(b, held, EVENT_COUNTER_WIDTH, zero);
+        }
+    }
+}
+
 /// The instructions `emit` builds, with registers from `next_register` on.
 fn emitted<A>(
     register_map: &mut impl Extend<(RegisterId, celox_sir::RegisterType)>,
@@ -824,6 +847,12 @@ fn emitted<A>(
 /// streams of `codes` (see [`PendingSlots`]). The units of one evaluation,
 /// such as the parts of a parallel build, share a stream: each publication
 /// releases only the bits it publishes.
+///
+/// A unit starts its own bits of a stream empty: the bits it seeds into the
+/// next state, or all of a staging value, which one process writes. An
+/// evaluation that a runtime error ended before its commit, and that the
+/// host then continues, leaves nothing behind for the next one, and other
+/// units of the same evaluation keep what they hold.
 pub fn instrument_pending<A: Clone + PartialEq>(
     unit: &mut ExecutionUnit<A>,
     codes: &[PendingCode<A>],
@@ -915,6 +944,42 @@ pub fn instrument_pending<A: Clone + PartialEq>(
         }
         block.instructions = instructions;
     }
+    let mut entry = Vec::new();
+    for code in codes {
+        let cleared = owned_bits(unit, code);
+        if cleared != num_bigint::BigUint::default() {
+            entry.extend(emitted(&mut unit.register_map, &mut next_register, |b| {
+                emit_clear(b, code, &cleared)
+            }));
+        }
+    }
+    let block = unit
+        .blocks
+        .get_mut(&unit.entry_block_id)
+        .expect("the entry block");
+    entry.append(&mut block.instructions);
+    block.instructions = entry;
+}
+
+/// The bits of the stream of `code` that `unit` owns: the bits it seeds
+/// from the signal into the next state, or the whole staging value if it
+/// writes it.
+fn owned_bits<A: PartialEq>(unit: &ExecutionUnit<A>, code: &PendingCode<A>) -> num_bigint::BigUint {
+    let mut owned = num_bigint::BigUint::default();
+    for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
+        match instruction {
+            SIRInstruction::Store(address, ..) if code.staged && *address == code.write => {
+                return ones(code.watch.width);
+            }
+            SIRInstruction::Commit(source, destination, SIROffset::Static(lsb), bits, _)
+                if !code.staged && *source == code.watch.signal && *destination == code.write =>
+            {
+                owned |= ones(*bits) << *lsb;
+            }
+            _ => {}
+        }
+    }
+    owned
 }
 
 type SymbolicVariables =
