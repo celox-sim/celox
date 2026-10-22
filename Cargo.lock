@@ -617,6 +617,7 @@ version = "0.11.0"
 dependencies = [
  "celox-design",
  "celox-frontend-core",
+ "celox-heap",
  "celox-sir",
  "celox-slt",
  "celox-sv-analyzer",
@@ -701,6 +702,7 @@ version = "0.11.0"
 dependencies = [
  "bit-set",
  "celox-design",
+ "celox-heap",
  "celox-state-layout",
  "celox-testbench",
  "chrono",

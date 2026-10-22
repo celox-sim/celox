@@ -65,6 +65,7 @@ fn pattern_value(
         let (_, _, count) = dimension_bounds(state, &dimension.left, &dimension.right, dims)?;
         let element = VariableDimensions {
             real: false,
+            string: false,
             unpacked: rest.to_vec(),
             ..shape.clone()
         };

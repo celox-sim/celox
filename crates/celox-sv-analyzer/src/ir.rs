@@ -7,7 +7,8 @@ pub use crate::procedural::{
     CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, SourceSpan, StmtBase, SystemTaskArg,
 };
 pub use crate::system_functions::{
-    ArrayQuery, Callee, MemoryFormat, Radix, Severity, SystemFunction, SystemTask, VcdTask,
+    ArrayQuery, Callee, MemoryFormat, Radix, Severity, StringOp, SystemFunction, SystemTask,
+    VcdTask,
 };
 
 /// A procedural statement of the analyzed IR.
@@ -652,6 +653,8 @@ impl Type {
 pub enum TypeKind {
     Real,
     Shortreal,
+    /// IEEE 1800-2023 6.16: a dynamically sized string, held as a heap handle.
+    String,
     Bit,
     Logic,
     Reg,
@@ -715,6 +718,7 @@ impl From<ast::TypeKind> for TypeKind {
         match kind {
             ast::TypeKind::Real => TypeKind::Real,
             ast::TypeKind::Shortreal => TypeKind::Shortreal,
+            ast::TypeKind::String => TypeKind::String,
             ast::TypeKind::Bit => TypeKind::Bit,
             ast::TypeKind::Logic => TypeKind::Logic,
             ast::TypeKind::Reg => TypeKind::Reg,

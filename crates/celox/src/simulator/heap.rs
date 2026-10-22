@@ -60,14 +60,27 @@ impl<B: SimBackend> Simulator<B> {
             .collect()
     }
 
+    /// Collect the heap between time slots, if enough was allocated. Runtime
+    /// events still in the backend's buffer are taken first, which reads
+    /// their string arguments.
+    pub(crate) fn heap_safepoint(&mut self) {
+        if self.heap_safepoints_blocked || !self.backend.heap().should_collect() {
+            return;
+        }
+        self.stash_runtime_events();
+        self.maybe_collect_heap([]);
+    }
+
     /// Collect the heap if enough was allocated since the last collection.
     /// State memory and `extra_roots` must hold every live handle: the
     /// caller runs this only where no copy of a handle is anywhere else.
     pub(crate) fn maybe_collect_heap(&mut self, extra_roots: impl IntoIterator<Item = Handle>) {
-        if !self.heap.should_collect() {
+        if !self.backend.heap().should_collect() {
             return;
         }
         let roots = self.handle_roots();
-        self.heap.collect(roots.into_iter().chain(extra_roots));
+        self.backend
+            .heap_mut()
+            .collect(roots.into_iter().chain(extra_roots));
     }
 }

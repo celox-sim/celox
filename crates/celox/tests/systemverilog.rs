@@ -132,6 +132,8 @@ mod procedural;
 mod review_regressions;
 #[path = "frontends/systemverilog/scan.rs"]
 mod scan;
+#[path = "frontends/systemverilog/string.rs"]
+mod string;
 #[path = "frontends/systemverilog/suite.rs"]
 mod suite;
 #[path = "frontends/systemverilog/synthesizable.rs"]

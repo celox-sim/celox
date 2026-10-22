@@ -12,6 +12,7 @@
     "icarus/procedural.json",
     "icarus/random_plusargs.json",
     "icarus/review_regressions.json",
+    "icarus/string.json",
     "icarus/synthesizable.json",
     "icarus/system_functions.json",
     "icarus/timing.json",

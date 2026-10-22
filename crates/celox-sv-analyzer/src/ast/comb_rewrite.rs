@@ -100,6 +100,10 @@ pub(super) fn expr_static_width(
             ..
         } => function.result_type().map(|(width, _)| width),
         Expr::Call {
+            callee: Callee::String(op),
+            ..
+        } => Some(op.result_type().0),
+        Expr::Call {
             callee: Callee::Subroutine(name),
             ..
         } => packed_dimensions

@@ -52,6 +52,7 @@ pub(super) fn selected_unpacked_shape(
         .filter(|rest| !rest.is_empty())?;
     Some(VariableDimensions {
         real: false,
+        string: false,
         unpacked: unpacked.to_vec(),
         ..shape.clone()
     })

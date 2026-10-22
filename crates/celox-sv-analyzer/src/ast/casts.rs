@@ -29,6 +29,8 @@ pub(super) enum RuntimeCastTarget {
     Real {
         short: bool,
     },
+    /// `string'(x)` (IEEE 1800-2023 6.24.1).
+    String,
     Zero(ExprType),
     Signing(bool),
     Integral {
@@ -53,6 +55,9 @@ pub(super) fn runtime_cast_target_expr(
 ) -> Converted<Expr> {
     let const_env = &packed_dimensions.const_env;
     let (target, numeric_size, two_state) = match target {
+        RuntimeCastTarget::String => {
+            return Ok(expression_binding::string_operand(expr, packed_dimensions));
+        }
         RuntimeCastTarget::Real { short } => {
             let call = |function, value| Expr::Call {
                 callee: Callee::System(function),
@@ -163,7 +168,9 @@ pub(super) fn cast_constant_target(
                 ..
             } => (target.width, numeric_size || target.signed),
             RuntimeCastTarget::Zero(target) => (target.width, target.signed),
-            RuntimeCastTarget::Signing(_) | RuntimeCastTarget::Real { .. } => return None,
+            RuntimeCastTarget::Signing(_)
+            | RuntimeCastTarget::Real { .. }
+            | RuntimeCastTarget::String => return None,
         };
         if width == 0 || width > 128 {
             return None;
@@ -211,7 +218,7 @@ pub(super) fn cast_constant_target(
         })?
     };
     let (target_type, numeric_size, two_state) = match target {
-        RuntimeCastTarget::Real { .. } => return None,
+        RuntimeCastTarget::Real { .. } | RuntimeCastTarget::String => return None,
         RuntimeCastTarget::Signing(signed) => (
             ExprType {
                 width: literal.width,

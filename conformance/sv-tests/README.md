@@ -123,6 +123,17 @@ in both state modes, updating twelve more expectation rows. The scanner probes
 retain failures caused by unsupported `final` constructs or internal data types;
 no scanner expectation is changed.
 
+The `string` implementation updates forty-two reviewed expectation rows: both
+state modes for `5.13-builtin-methods-strings`, `6.16--string`, the sixteen
+`6.16.*` method cases, `6.20.4--localparam_string`,
+`11.4.12.2--string_concat_op` and `11.4.12.2--string_repl_op` change from fail
+to pass. Each was simulated and its values checked, not only elaborated. Full
+official runs at the pinned revision report 507 passing cases in 2state and 509
+in 4state. No passing case regresses. The `12.7.3--foreach`, `12.7.4--while` and
+`12.7.5--dowhile` cases keep failing: they use an unpacked array of strings,
+which is rejected because its element and character selects are not yet told
+apart.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.
