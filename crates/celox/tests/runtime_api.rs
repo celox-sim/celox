@@ -1,4 +1,6 @@
-use celox::{AddrLookupError, BigUint, RuntimeErrorCode, RuntimeEvent, Simulator};
+use celox::{
+    AddrLookupError, BigUint, Report, RuntimeErrorCode, RuntimeEvent, Severity, Simulator,
+};
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -12,8 +14,8 @@ all_backends! {
 module Top { always_comb { $assert(1'd0, "site zero"); } }
 "#, "Top");
         assert!(matches!(sim.eval_comb(), Err(RuntimeErrorCode::Runtime { message, .. }) if message == "site zero"));
-        assert_eq!(sim.drain_runtime_events(), vec![RuntimeEvent::AssertFatal { message: b"site zero".to_vec() }]);
-        assert!(sim.drain_runtime_events().is_empty());
+        assert_eq!(bare(sim.drain_runtime_events()), vec![RuntimeEvent::Report(Report::new(Severity::Fatal, b"site zero".to_vec()))]);
+        assert!(bare(sim.drain_runtime_events()).is_empty());
     }
 
     fn drain_returns_fatal_after_two_display_sites(sim) {
@@ -29,12 +31,12 @@ module Top {
 }
 "#, "Top");
         assert!(matches!(sim.eval_comb(), Err(RuntimeErrorCode::Runtime { message, .. }) if message == "site two"));
-        assert_eq!(sim.drain_runtime_events(), vec![
+        assert_eq!(bare(sim.drain_runtime_events()), vec![
             RuntimeEvent::Display { message: b"first".to_vec() },
             RuntimeEvent::Display { message: b"second".to_vec() },
-            RuntimeEvent::AssertFatal { message: b"site two".to_vec() },
+            RuntimeEvent::Report(Report::new(Severity::Fatal, b"site two".to_vec())),
         ]);
-        assert!(sim.drain_runtime_events().is_empty());
+        assert!(bare(sim.drain_runtime_events()).is_empty());
     }
 
     fn drain_handle_keeps_fatal_records_from_all_input_mutations(sim) {
@@ -49,23 +51,23 @@ module Top (a: input logic<8>, w: input logic<128>) {
         let a = sim.signal("a");
         let w = sim.signal("w");
         sim.modify(|io| { io.set(a, 0u8); io.set(w, 0u8); }).unwrap();
-        sim.drain_runtime_events();
+        bare(sim.drain_runtime_events());
         let mut drain = sim.runtime_event_drain().expect("drain handle");
-        let fatal = vec![RuntimeEvent::AssertFatal { message: b"input fatal".to_vec() }];
+        let fatal = vec![RuntimeEvent::Report(Report::new(Severity::Fatal, b"input fatal".to_vec()))];
 
         sim.set(a, 1u8);
-        assert_eq!(drain.drain(), fatal);
-        assert!(drain.drain().is_empty());
+        assert_eq!(bare(drain.drain()), fatal);
+        assert!(bare(drain.drain()).is_empty());
         sim.set(a, 0u8);
         sim.set_wide(w, BigUint::from(1u8));
-        assert_eq!(drain.drain(), fatal);
+        assert_eq!(bare(drain.drain()), fatal);
         sim.set_wide(w, BigUint::from(0u8));
         sim.set_four_state(a, BigUint::from(1u8), BigUint::from(0u8));
-        assert_eq!(drain.drain(), fatal);
+        assert_eq!(bare(drain.drain()), fatal);
         sim.set(a, 0u8);
         sim.modify(|io| io.set(a, 1u8)).unwrap();
-        assert_eq!(drain.drain(), fatal);
-        assert!(drain.drain().is_empty());
+        assert_eq!(bare(drain.drain()), fatal);
+        assert!(bare(drain.drain()).is_empty());
     }
 
     fn drain_handle_keeps_fatal_record_after_checkpoint_restore(sim) {
@@ -78,16 +80,16 @@ module Top (a: input logic<8>) {
 "#, "Top");
         let a = sim.signal("a");
         sim.modify(|io| io.set(a, 0u8)).unwrap();
-        sim.drain_runtime_events();
+        bare(sim.drain_runtime_events());
         // Save the failing input before lazy evaluation captures its assertion.
         sim.set(a, 1u8);
         let checkpoint = sim.checkpoint().unwrap();
         sim.set(a, 0u8);
-        sim.drain_runtime_events();
+        bare(sim.drain_runtime_events());
         let mut drain = sim.runtime_event_drain().expect("drain handle");
         sim.restore(&checkpoint).unwrap();
-        assert_eq!(drain.drain(), vec![RuntimeEvent::AssertFatal { message: b"restored fatal".to_vec() }]);
-        assert!(drain.drain().is_empty());
+        assert_eq!(bare(drain.drain()), vec![RuntimeEvent::Report(Report::new(Severity::Fatal, b"restored fatal".to_vec()))]);
+        assert!(bare(drain.drain()).is_empty());
     }
 
     fn try_event_rejects_signals_without_events(sim) {
@@ -132,11 +134,11 @@ module Top {
 }
 "#, "Top");
 
-        assert_eq!(sim.drain_runtime_events(), vec![
+        assert_eq!(bare(sim.drain_runtime_events()), vec![
             celox::RuntimeEvent::Display { message: b"before".to_vec() },
-            celox::RuntimeEvent::AssertFatal { message: b"initial fatal".to_vec() },
+            celox::RuntimeEvent::Report(celox::Report::new(celox::Severity::Fatal, b"initial fatal".to_vec())),
         ]);
-        assert!(sim.drain_runtime_events().is_empty());
+        assert!(bare(sim.drain_runtime_events()).is_empty());
     }
 
     fn drain_runtime_events_with_context_returns_comb_fatal_after_modify(sim) {
@@ -151,17 +153,31 @@ module Top (a: input logic<8>, y: output logic<8>) {
 }
 "#, "Top");
 
-        sim.drain_runtime_events();
+        bare(sim.drain_runtime_events());
         let a = sim.signal("a");
         sim.modify(|io| io.set(a, 1u8)).unwrap();
-        assert_eq!(sim.drain_runtime_events_with_context(celox::RuntimeFormatContext {
+        assert_eq!(bare(sim.drain_runtime_events_with_context(celox::RuntimeFormatContext {
             scope: Some("host.Top"),
             ..Default::default()
-        }), vec![celox::RuntimeEvent::AssertFatal { message: b"fatal host.Top".to_vec() }]);
-        assert!(sim.drain_runtime_events().is_empty());
+        })), vec![celox::RuntimeEvent::Report(celox::Report::new(celox::Severity::Fatal, b"fatal host.Top".to_vec()))]);
+        assert!(bare(sim.drain_runtime_events()).is_empty());
         sim.modify(|io| io.set(a, 2u8)).unwrap();
-        assert_eq!(sim.drain_runtime_events(), vec![
+        assert_eq!(bare(sim.drain_runtime_events()), vec![
             celox::RuntimeEvent::Display { message: b"after".to_vec() },
         ]);
     }
+}
+
+/// The drained events without the time, scope, location and assertion of
+/// their reports, which these tests do not check.
+fn bare(events: Vec<celox::RuntimeEvent>) -> Vec<celox::RuntimeEvent> {
+    events
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Report(report) => {
+                celox::RuntimeEvent::Report(celox::Report::new(report.severity, report.message))
+            }
+            event => event,
+        })
+        .collect()
 }

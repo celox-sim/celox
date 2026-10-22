@@ -1180,7 +1180,7 @@ pub(super) enum SystemTaskKind {
     /// `$finish` and `$stop`, with their event kind.
     Control(RuntimeEventKind),
     /// `$error`, `$warning`, `$info`: a message, then execution continues.
-    Message,
+    Message(Severity),
     /// `$fatal`: a message, then the simulation ends with an error.
     Fatal,
     /// Veryl's assertion calls: eagerly evaluate every argument, then report
@@ -1190,11 +1190,24 @@ pub(super) enum SystemTaskKind {
 
 impl SystemTaskKind {
     pub(super) fn is_fatal(&self) -> bool {
-        matches!(
-            self,
-            Self::Fatal | Self::Assertion(RuntimeEventKind::AssertFatal)
-        )
+        self.event_kind().is_fatal()
     }
+
+    pub(super) fn event_kind(&self) -> RuntimeEventKind {
+        match *self {
+            Self::Print(kind, _) | Self::Control(kind) | Self::Assertion(kind) => kind,
+            Self::Message(severity) => RuntimeEventKind::Report(severity),
+            Self::Fatal => RuntimeEventKind::Report(Severity::Fatal),
+        }
+    }
+}
+
+/// Where a report is written, from the span of its task call.
+pub(super) fn report_location(site: Option<&sv::ir::SourceSpan>) -> Option<ReportLocation> {
+    site.map(|site| ReportLocation {
+        file: site.logical_path.display().to_string(),
+        line: site.line,
+    })
 }
 
 /// How a task reports, for the tasks that report: `$readmemh`/`$readmemb`
@@ -1209,10 +1222,16 @@ pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKin
         SystemTask::Write(radix) => SystemTaskKind::Print(RuntimeEventKind::Write, radix.letter()),
         SystemTask::Finish => SystemTaskKind::Control(RuntimeEventKind::Finish),
         SystemTask::Stop => SystemTaskKind::Control(RuntimeEventKind::Stop),
-        SystemTask::Severity(_) => SystemTaskKind::Message,
+        SystemTask::Severity(severity) => SystemTaskKind::Message(match severity {
+            sv::ir::Severity::Error => Severity::Error,
+            sv::ir::Severity::Warning => Severity::Warning,
+            sv::ir::Severity::Info => Severity::Info,
+        }),
         SystemTask::Fatal => SystemTaskKind::Fatal,
-        SystemTask::Assert => SystemTaskKind::Assertion(RuntimeEventKind::AssertFatal),
-        SystemTask::AssertContinue => SystemTaskKind::Assertion(RuntimeEventKind::AssertContinue),
+        SystemTask::Assert => SystemTaskKind::Assertion(RuntimeEventKind::Report(Severity::Fatal)),
+        SystemTask::AssertContinue => {
+            SystemTaskKind::Assertion(RuntimeEventKind::Report(Severity::Error))
+        }
         SystemTask::Readmem(_)
         | SystemTask::Writemem(_)
         | SystemTask::Fclose

@@ -63,13 +63,16 @@ enum Job {
     AssertionThen {
         condition: Expr,
         keyword: String,
+        assertion: celox_design::AssertionSite,
+        span: Option<crate::procedural::SourceSpan>,
         failure: Option<StatementId>,
         start: usize,
     },
     AssertionFinish {
         condition: Expr,
         then_body: Vec<Stmt>,
-        default_failure: Option<String>,
+        assertion: celox_design::AssertionSite,
+        default_failure: Option<(String, Option<crate::procedural::SourceSpan>)>,
         start: usize,
     },
 }
@@ -238,9 +241,24 @@ impl BodyBuilder<'_, '_, '_> {
                         failure,
                     } => {
                         let condition = self.native_assertion_condition(keyword, header)?;
+                        let statement = native.statement(id);
                         jobs.push(Job::AssertionThen {
                             condition,
                             keyword: keyword.clone(),
+                            assertion: celox_design::AssertionSite {
+                                label: statement
+                                    .label
+                                    .as_ref()
+                                    .map(|label| label.value().to_owned()),
+                                directive: match keyword.as_str() {
+                                    "assume" => celox_design::AssertionDirective::Assume,
+                                    "cover" => celox_design::AssertionDirective::Cover,
+                                    _ => celox_design::AssertionDirective::Assert,
+                                },
+                                deferral: celox_design::AssertionDeferral::None,
+                                outcome: celox_design::AssertionOutcome::Fail,
+                            },
+                            span: super::source_span(statement.tokens, self.tree),
                             failure: *failure,
                             start: output.len(),
                         });
@@ -267,6 +285,8 @@ impl BodyBuilder<'_, '_, '_> {
                 Job::AssertionThen {
                     condition,
                     keyword,
+                    assertion,
+                    span,
                     failure,
                     start,
                 } => {
@@ -274,8 +294,9 @@ impl BodyBuilder<'_, '_, '_> {
                     jobs.push(Job::AssertionFinish {
                         condition,
                         then_body,
+                        assertion,
                         default_failure: if failure.is_none() && keyword != "cover" {
-                            Some(keyword)
+                            Some((keyword, span))
                         } else {
                             None
                         },
@@ -287,14 +308,25 @@ impl BodyBuilder<'_, '_, '_> {
                 }
                 Job::AssertionFinish {
                     condition,
-                    then_body,
+                    mut then_body,
+                    assertion,
                     default_failure,
                     start,
                 } => {
                     let mut else_body = output.split_off(start);
-                    if let Some(keyword) = default_failure {
-                        else_body = assertion_failure(&keyword);
+                    if let Some((keyword, span)) = default_failure {
+                        else_body = assertion_failure(&keyword, span);
                     }
+                    attribute_reports(
+                        &mut then_body,
+                        &assertion,
+                        celox_design::AssertionOutcome::Pass,
+                    );
+                    attribute_reports(
+                        &mut else_body,
+                        &assertion,
+                        celox_design::AssertionOutcome::Fail,
+                    );
                     output.push(Stmt::If {
                         condition,
                         then_body,

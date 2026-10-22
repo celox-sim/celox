@@ -1242,6 +1242,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             let error = Stmt::SystemTask {
                 task: SystemTask::Severity(system_functions::Severity::Error),
                 site: source_span(declarations.expression(root).tokens, self.tree),
+                assertion: None,
                 args: vec![SystemTaskArg::Str(
                     "$cast of a class handle to an incompatible class".into(),
                 )],
@@ -1282,6 +1283,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 return Ok(vec![Stmt::SystemTask {
                     task: SystemTask::Display(system_functions::Radix::Decimal),
                     site: source_span(declarations.expression(root).tokens, self.tree),
+                    assertion: None,
                     args: vec![SystemTaskArg::Str(timescales::print_message(
                         root,
                         self.tree,
@@ -1353,6 +1355,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             task,
             args,
             site: source_span(declarations.expression(root).tokens, self.tree),
+            assertion: None,
         }])
     }
 
@@ -1554,12 +1557,40 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
 }
 
 /// The default failure action of a native immediate assertion.
-fn assertion_failure(keyword: &str) -> Vec<Stmt> {
+/// The default fail action of an `assert` or `assume`: a call to `$error`
+/// at the assertion (IEEE 1800-2023 20.10).
+fn assertion_failure(keyword: &str, site: Option<crate::procedural::SourceSpan>) -> Vec<Stmt> {
     vec![Stmt::SystemTask {
         task: SystemTask::Severity(system_functions::Severity::Error),
         args: vec![SystemTaskArg::Str(format!("{keyword} failed"))],
-        site: None,
+        site,
+        assertion: None,
     }]
+}
+
+/// Attribute the severity tasks of an assertion's action block to it. Tasks
+/// in subroutines the block calls are not attributed, and the tasks of a
+/// nested assertion keep its own attribution.
+fn attribute_reports(
+    body: &mut [Stmt],
+    assertion: &celox_design::AssertionSite,
+    outcome: celox_design::AssertionOutcome,
+) {
+    for stmt in body {
+        stmt.walk_mut(&mut |stmt| {
+            if let Stmt::SystemTask {
+                task: SystemTask::Severity(_) | SystemTask::Fatal,
+                assertion: attributed @ None,
+                ..
+            } = stmt
+            {
+                *attributed = Some(celox_design::AssertionSite {
+                    outcome,
+                    ..assertion.clone()
+                });
+            }
+        });
+    }
 }
 
 /// The declared arguments of a task or function: `(name, direction, type,
@@ -2980,7 +3011,10 @@ pub(super) fn source_span(
             current.start = current.start.min(span.start);
             current.end = current.end.max(span.end);
         } else {
+            let (logical_path, line, _) = native.sources.logical_location(span);
             result = Some(crate::procedural::SourceSpan {
+                logical_path: logical_path.to_owned(),
+                line,
                 path,
                 start: span.start,
                 end: span.end,

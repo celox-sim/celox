@@ -299,7 +299,7 @@ const sim = Simulator.fromSource(SOURCE, "Adder", {
 
 ### HDL output bytes
 
-Rust runtime events (`RuntimeEvent::{Display, Write, AssertContinue, AssertFatal}`)
+Rust runtime events (`RuntimeEvent::{Display, Write}` and the `message` of `RuntimeEvent::Report`)
 and detailed testbench assertion messages return `Vec<u8>`. JavaScript
 `runTest`, `runTestFromProject`, and `runTestWithFrontendArtifact` return
 assertion messages as `Uint8Array`. `%s` and `%c` may contain non-UTF-8 bytes or
