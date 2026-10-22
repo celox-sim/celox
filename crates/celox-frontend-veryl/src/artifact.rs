@@ -373,6 +373,16 @@ fn map_observer(
             .collect::<Result<_, _>>()?,
         loop_runner: observer.loop_runner.map(&mut map_node).transpose()?,
         sensitivity: map_atoms(&observer.sensitivity),
+        sensitivity_counters: observer
+            .sensitivity_counters
+            .iter()
+            .map(|(atom, counter)| {
+                (
+                    VarAtomBase::new(ids[&atom.id], atom.access.lsb, atom.access.msb),
+                    ids[counter],
+                )
+            })
+            .collect(),
         local_inputs: observer
             .local_inputs
             .iter()

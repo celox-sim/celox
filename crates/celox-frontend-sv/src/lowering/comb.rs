@@ -3595,6 +3595,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             args: captured,
             loop_runner: None,
             sensitivity: Vec::new(),
+            sensitivity_counters: Vec::new(),
             local_inputs,
             observed_inputs: observed
                 .into_iter()
