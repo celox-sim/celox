@@ -175,16 +175,16 @@ jobs:
           cargo doc --locked --no-deps "${args[@]}"
 
       - uses: pnpm/action-setup@v6
-        if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true'
+        if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.scripts == 'true'
 
       - uses: actions/setup-node@v7
-        if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true'
+        if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.scripts == 'true'
         with:
           node-version: 24
           cache: pnpm
 
       - name: Install dependencies
-        if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true'
+        if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.scripts == 'true'
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Biome check
