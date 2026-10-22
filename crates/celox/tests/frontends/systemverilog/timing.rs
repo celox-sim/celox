@@ -330,3 +330,156 @@ fn event_expressions_with_effects_are_rejected() {
         assert!(error.contains(construct), "{event}: {error}");
     }
 }
+
+/// Timing features Celox does not implement yet are rejected with a message
+/// naming the construct and its tracking issue, instead of being ignored.
+/// The comments name the issue that implements a feature when the message
+/// still points to the roadmap.
+#[test]
+fn unimplemented_timing_features_are_rejected() {
+    for (body, construct, issue) in [
+        ("bit a; initial @(a iff a);", "iff-qualified event", 1444),
+        ("initial fork #1; join", "fork-join block", 88),
+        ("initial fork #1; join_none", "fork-join block", 88),
+        // #1711 names the construct.
+        (
+            "event e; initial -> e;",
+            "unsupported internal data type",
+            88,
+        ),
+        (
+            "bit a, b; initial a = #1 b;",
+            "intra-assignment timing control",
+            88,
+        ),
+        (
+            "bit a, b; initial a <= #1 b;",
+            "intra-assignment timing control",
+            88,
+        ),
+        (
+            "bit a, b, c; initial a = @(posedge c) b;",
+            "intra-assignment timing control",
+            88,
+        ),
+        ("initial wait fork;", "wait fork statement", 88),
+        // #1711 names the construct.
+        ("initial disable fork;", "disable statement", 88),
+        (
+            "bit a; task t(input bit x); wait (a ^ x); endtask initial t(0);",
+            "wait condition reading a static task argument",
+            88,
+        ),
+        (
+            "bit a; task t(input bit x); @(a ^ x); endtask initial t(0);",
+            "event expression reading a static task argument",
+            88,
+        ),
+        (
+            "bit a; function automatic bit f(); a = ~a; return a; endfunction initial @(f());",
+            "impure call `f` in an event expression",
+            88,
+        ),
+        (
+            "bit q; task t(); int s = 1; #1 q = s; endtask initial t();",
+            "static local in a timed task",
+            88,
+        ),
+        (
+            "bit a, y; assign #1 y = a;",
+            "delayed continuous assignment",
+            444,
+        ),
+        // #1708: a plain `always` that is not a flip-flop runs as a process.
+        (
+            "bit [3:0] v; int n; always @(posedge v[0]) n++;",
+            "always_ff event expression",
+            464,
+        ),
+        (
+            "bit [3:0] v; int n; always @(posedge v) n++;",
+            "multi-bit always_ff event signal",
+            88,
+        ),
+        (
+            "bit a, b; int n; always @(posedge a or posedge b) n <= n + 1;",
+            "always_ff event control",
+            88,
+        ),
+        // #1709
+        (
+            "bit [7:0] m[4]; initial #1 m[1] <= 5;",
+            "nonblocking assignment to an unpacked array in a process",
+            88,
+        ),
+        (
+            "bit [3:0] q; int i = 2; initial #1 q[i] <= 1;",
+            "nonblocking assignment with a run-time position in a process",
+            88,
+        ),
+        (
+            "bit [3:0] q; initial #1 q[5] <= 1;",
+            "nonblocking assignment outside its target",
+            88,
+        ),
+        // #1710
+        (
+            "bit q; task t(); #1 q = 1; endtask always @* t();",
+            "timed task call in a combinational process",
+            88,
+        ),
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("unimplemented.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("`{body}` must be rejected"))
+        .to_string();
+        // The report wraps long lines behind a `│` gutter.
+        let error = error
+            .split(|c: char| c.is_whitespace() || c == '│')
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            error.contains(&format!("[tracking issue #{issue}]"))
+                && error.contains(&format!("Unsupported SystemVerilog construct: {construct}")),
+            "{body}: {error}"
+        );
+    }
+}
+
+/// Only `initial` and `always` processes may suspend (IEEE 1800-2023
+/// 9.2.2.2, 9.2.2.4 and 13.4); a timing control elsewhere is an error.
+#[test]
+fn timing_controls_outside_suspendable_processes_are_rejected() {
+    for (body, construct) in [
+        (
+            "bit a, y; always_comb begin #1 y = a; end",
+            "delay control in an always_comb or always_ff body",
+        ),
+        (
+            "bit clk, a, q; always_ff @(posedge clk) begin @(a); q <= a; end",
+            "event control in an always_comb or always_ff body",
+        ),
+        // #1711 reports this as illegal rather than unsupported.
+        (
+            "bit a; function automatic bit f(); #1; return a; endfunction",
+            "delay control in a subroutine",
+        ),
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("outside.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("`{body}` must be rejected"))
+        .to_string();
+        assert!(error.contains(construct), "{body}: {error}");
+    }
+}

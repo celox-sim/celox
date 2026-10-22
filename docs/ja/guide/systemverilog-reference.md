@@ -41,12 +41,29 @@ outline: [2, 3]
 | 文 | `if` / `else`、`case`、`casez`、`casex`、`case ... inside`、`unique` / `priority`、`for`、`while`、`do ... while`、`repeat`、`forever`、`foreach`（反復回数が定数なら展開し、そうでなければ実行時に実行）、`break` / `continue` / `return`、即時アサーション |
 | 関数 | `input` / `output` / `inout` 引数を持てる `function` と、`task`。`return`、または関数名への代入で値を返す。ローカル変数と `localparam`、部分選択や複合的な代入先への代入。呼び出しはインライン展開。定数式（パラメータ、範囲）の中の定数引数による呼び出しはエラボレーション時に評価 |
 
+### タイミング制御 {#timing-controls}
+
+時間を持つ `Simulation` では、`initial` と通常の `always` のプロセスが中断できます。
+
+| 制御 | 対応範囲 |
+| --- | --- |
+| `#delay` | 整数の遅延、`#(min:typ:max)`（typ の値）、[時間リテラル](#time-literal-delays)。X / Z の遅延は 0 として扱う |
+| `@(...)` | 変数、`posedge` / `negedge` / `edge`、`or` または `,` で並べた項目、ビット選択・部分選択・実行時添字の選択、pure な関数呼び出しを含む任意の式、文が読む変数を待つ `@*` / `@(*)` |
+| `wait (condition)` | 任意の条件。X / Z の条件は偽として扱う |
+| 代入 | ブロッキング代入とノンブロッキング代入。ノンブロッキング代入はそのタイムスロットの NBA 領域で反映 |
+
+`always @(a or b)` のように `@*` 以外のセンシティビティリストを持つ `always` も
+プロセスとして実行します。`Simulator` はプロセスを実行しないため、そこではこのプロセス抜きで
+シミュレーションされます。`Simulation` を使うか、`always @*` / `always_comb` で記述してください
+（[#1712](https://github.com/celox-sim/celox/issues/1712)）。
+
 ### 時間待ちを含む task
 
 `initial` と通常の `always` から、`#delay`・`@(event)`・`wait (condition)` を
 含む task を呼び出せます。task のネストも可能です。呼び出しは呼び出し元の状態機械に
 インライン展開されます。エッジ待ちの `always` は task の完了後に次のエッジを待ちます。
-function・`always_comb`・`always @*`・`always_ff` からの時間待ち task 呼び出しは拒否します。
+function・`always_comb`・`always_ff` からの時間待ち task 呼び出しは拒否します。
+`always @*` からの呼び出しも現在は拒否します（[#1710](https://github.com/celox-sim/celox/issues/1710)）。
 
 automatic な引数とローカル変数は呼び出しごとに独立し、中断中も保持されます。
 module 内の static task の引数は共有されます。input／inout は呼び出し時にコピーされ、output／inout は
@@ -67,11 +84,11 @@ package／`$unit` の static 引数を持つ時間待ち task と、static task 
 `with` 制約、class メソッド、enum 変数、unpacked 配列、net、定数、
 select・連結式の引数は未対応として拒否します。
 
-### 時間リテラルによる遅延
+### 時間リテラルによる遅延 {#time-literal-delays}
 
 遅延制御の時間リテラルは `#5ns`、`#(2.75ns)`、`#40ps` など、`fs` から `s` の6単位に
 対応します。宣言スコープの時間精度で丸めてから scheduler の tick に変換します
-（5.8、3.14.1）。実数の算術式は引き続き未対応です。
+（5.8、3.14.1）。実数の遅延はまだ未対応です（[#1707](https://github.com/celox-sim/celox/issues/1707)）。
 
 ### 組み込み関数とタスク
 
@@ -97,15 +114,23 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 - interface のポート、`inout` / `ref` / 式を使う modport、virtual interface など。
   interface 自体と入れ子の interface は対応しています。型パラメータはインスタンスごとに解決し、modport ポート経由でも伝搬します。
   再帰する特殊化と64段を超える入れ子は拒否します。細かな制約は[英語版の一覧](/guide/systemverilog-reference#interface-restrictions)を参照してください。
-- 振る舞い記述・検証向けの構文：`final`、代入内のタイミング制御、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
-  named event、`fork` / `join`、並行アサーション、`force` / `release`。
-- `always_latch` 内のノンブロッキング代入（[#431](https://github.com/celox-sim/celox/issues/431)）。対応するラッチではブロッキング代入を使用してください。`@*` 以外のレベルセンシティブなセンシティビティリストは未対応です。
+- 振る舞い記述・検証向けの構文：`final`、代入内のタイミング制御（`a = #1 b`）、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
+  named event と `->`、`fork` / `join`、`wait fork` / `disable fork`、並行アサーション、`force` / `release`。
+- プロセス内のタイミング制御：`iff` 修飾（[#1444](https://github.com/celox-sim/celox/issues/1444)）、
+  実数の遅延（[#1707](https://github.com/celox-sim/celox/issues/1707)）、package スコープの遅延値
+  （[#1710](https://github.com/celox-sim/celox/issues/1710)）、イベント式内の impure な関数呼び出し、
+  static task 引数を読む `wait` 条件とイベント式。プロセス内のノンブロッキング代入は、
+  unpacked 配列の要素、実行時に決まる位置、代入先の範囲外の定数位置をまだ代入先にできません
+  （[#1709](https://github.com/celox-sim/celox/issues/1709)）。
+- `always_latch` 内のノンブロッキング代入（[#431](https://github.com/celox-sim/celox/issues/431)）。対応するラッチではブロッキング代入を使用してください。
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
 - 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、soft packed union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、文字列、`real`。
 - 順序回路のプロセス：イベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）と単純な信号以外のエッジ
-  オペランド（[#464](https://github.com/celox-sim/celox/issues/464)）。
+  オペランド（[#464](https://github.com/celox-sim/celox/issues/464)）。このようなエッジ、複数ビットのエッジ信号、リセットを持たない
+  複数のエッジを持つ通常の `always` も、プロセスとして実行できるようになるまで拒否します
+  （[#1708](https://github.com/celox-sim/celox/issues/1708)）。
 - 組み合わせ回路のプロセス：`always_comb` 内のノンブロッキング代入（[#453](https://github.com/celox-sim/celox/issues/453)）。
 - ループ：手続き的なループの展開は 10,000 回までです。反復回数が実行時に決まる組み合わせ
   回路のループは、カウンタ形式の `for` である必要があります。loop-generate は 10,000 回を
@@ -215,6 +240,24 @@ Rust の `.allow_inferred_latches(true)` と JavaScript の `allowInferredLatche
 後者は呼び出した関数本体の読み取りも含みますが、task 呼び出しは引数の式だけが
 感度に寄与します（IEEE 1800-2023 9.4.2.2、9.2.2.2.1）。
 ノンブロッキング代入（`<=`）には NBA スケジューリングが必要であり、推論を許可しても未対応です。
+
+### イベント待ちとレベル待ち {#timing-semantics}
+
+- イベント制御は、開始した後に起きた変化を待ちます（IEEE 1800-2023 9.4.2）。
+  `a = 1; @(a ^ b);` の `a` への書き込みはこの待ちのイベントにならず、
+  その後に `a` か `b` が変化したときに再開します。
+  Icarus 13.0 は先の書き込みで起床し、Verilator 5.052 は Celox と同じ結果になります。
+- 複数ビットの式の `posedge` / `negedge` は最下位ビットで判定します（Table 9-2）。
+  `@(posedge v)` は `v[3]` を無視し、`@(posedge v[3])` は `v[3]` に従います。
+  X / Z を経由する遷移も同表に従い、`0` から `x` は `posedge` です。
+- 継続代入、組み合わせ回路のプロセス、イベント式は、書き込んだプロセスがタイミング制御に
+  達するか終了した時点でその書き込みを参照します。`b = 1; a = 1;` の後でも `a ^ b` は
+  変化しておらず、パルス `a = 1; a = 0;` は `@(a)` を起こしますが `@(a ^ b)` は起こしません。
+  パルスを見せるには書き込みの間に `#0` を入れてください。この順序は IEEE 1800-2023 4.7 で
+  許されています。Icarus は書き込みごとに式を評価します。
+- `always_comb`、エッジで起動する `always`、`always_ff` の1回の評価の中で書いてから上書きした値
+  （`y = 0; if (a) y = 1;` など）は、まだ待ち側から見えません
+  （[#1706](https://github.com/celox-sim/celox/issues/1706)）。`always @*` ではすでに見えます。
 
 ### 変数の寿命
 
