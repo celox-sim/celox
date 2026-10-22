@@ -291,6 +291,11 @@ impl Item {
             } else {
                 self.parameter_literals(&dimensions.parameter_values).into()
             };
+        if !self.shadowed.is_empty() || !self.names.is_empty() {
+            local
+                .array_parameter_values
+                .retain(|name, _| !self.shadowed.contains(name) && !self.names.contains_key(name));
+        }
         // Ordinary module items keep the module's function bindings. Rewriting
         // every function body for every item costs O(items * function size).
         if !self.shadowed.is_empty() || !self.names.is_empty() {

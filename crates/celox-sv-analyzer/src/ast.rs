@@ -933,6 +933,32 @@ impl Module {
         }
         packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
         packed_dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
+        // Array parameters retain a constant value as well as their signal layout.
+        // Bind their values in declaration order before child parameter arguments.
+        for process in &imported.initial_processes {
+            for statement in &process.body {
+                if let Stmt::Assign {
+                    lhs: LValue::Ident(name),
+                    rhs,
+                    ..
+                } = statement
+                {
+                    packed_dimensions
+                        .array_parameter_values
+                        .insert(name.clone(), rhs.clone());
+                }
+            }
+        }
+        let mut array_initial_processes = Vec::new();
+        for parameter in &array_parameters {
+            let process = parameter.initial_process(syntax_tree, &packed_dimensions)?;
+            if let Stmt::Assign { rhs, .. } = &process.body[0] {
+                packed_dimensions
+                    .array_parameter_values
+                    .insert(parameter.signal.name.clone(), rhs.clone());
+            }
+            array_initial_processes.push(process);
+        }
         let mut instances =
             instances_from_scope(syntax_tree, &const_env, &packed_dimensions, interfaces)?;
         let mut instance_names = HashSet::default();
@@ -1108,11 +1134,7 @@ impl Module {
                 )?;
                 comb_processes.extend(imported.comb_processes.iter().cloned());
                 ff_processes.extend(imported.ff_processes.iter().cloned());
-                let mut initial_processes = Vec::new();
-                for parameter in &array_parameters {
-                    initial_processes
-                        .push(parameter.initial_process(syntax_tree, &packed_dimensions)?);
-                }
+                let mut initial_processes = array_initial_processes;
                 initial_processes.extend(imported.initial_processes.iter().cloned());
                 initial_processes.extend(procedural::initial_processes_from_scope(
                     syntax_tree,
@@ -2645,6 +2667,8 @@ struct PackedDimensions {
     function_return_types: HashMap<String, FunctionReturnMetadata>,
     functions: Arc<HashMap<String, Function>>,
     parameter_values: SharedMap<Expr>,
+    /// Constant array initializers for binding child parameter values.
+    array_parameter_values: SharedMap<Expr>,
     expression_signedness: ScopedMap<bool>,
     constant_indexed_base: bool,
     /// The current lexical scope has already collected its visible declarations.
@@ -2671,6 +2695,7 @@ impl PackedDimensions {
             function_return_types: HashMap::default(),
             functions: Arc::default(),
             parameter_values: SharedMap::default(),
+            array_parameter_values: SharedMap::default(),
             expression_signedness: ScopedMap::default(),
             constant_indexed_base: false,
             scope_types_complete: false,
