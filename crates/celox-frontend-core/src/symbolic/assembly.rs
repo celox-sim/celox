@@ -549,6 +549,7 @@ fn scheduler_source_locations(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn schedule_symbolic_rtl(
     symbolic: SymbolicRtl,
     fused_ff_factory: Option<&dyn FusedFfLoweringFactory>,
@@ -564,7 +565,45 @@ pub fn schedule_symbolic_rtl(
     four_state: bool,
     parallel: &ParallelScheduleOptions,
     trace_opts: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+) -> Result<ScheduledRtlOutput, ParserError> {
+    schedule_symbolic_rtl_reporting_loops(
+        symbolic,
+        fused_ff_factory,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_opts,
+        trace,
+        &mut Vec::new(),
+    )
+}
+
+/// A range a block of a combinational loop writes, in the module that
+/// declares it.
+pub type LoopMember = (ModuleId, VarAtomBase<SourceVarId>);
+
+/// [`schedule_symbolic_rtl`], which also reports the ranges the blocks of a
+/// combinational loop write when the scheduler rejects one.
+#[allow(clippy::too_many_arguments)]
+pub fn schedule_symbolic_rtl_reporting_loops(
+    symbolic: SymbolicRtl,
+    fused_ff_factory: Option<&dyn FusedFfLoweringFactory>,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &ParallelScheduleOptions,
+    trace_opts: &FrontendTraceOptions,
     mut trace: Option<&mut FrontendTrace>,
+    loop_members: &mut Vec<LoopMember>,
 ) -> Result<ScheduledRtlOutput, ParserError> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT_SOURCE_PROGRAM: AtomicU64 = AtomicU64::new(1);
@@ -1153,6 +1192,15 @@ pub fn schedule_symbolic_rtl(
                 package_instances: package_instances.values().copied().collect(),
             };
             let source_locations = scheduler_source_locations(&error, &modules, &instance_modules);
+            if let SchedulerError::CombinationalLoop { blocks } = &error {
+                loop_members.extend(blocks.iter().filter_map(|block| {
+                    let var = block.target.var()?;
+                    Some((
+                        *instance_modules.get(&var.id.instance_id)?,
+                        VarAtomBase::new(var.id.var_id, var.access.lsb, var.access.msb),
+                    ))
+                }));
+            }
             let mut target_arena = SLTNodeArena::new();
             let error = error.map_addr(&global_arena, &mut target_arena, &|addr| {
                 frontend_lookup.get_path(addr)

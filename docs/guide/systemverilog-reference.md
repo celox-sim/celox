@@ -54,10 +54,16 @@ In a timed `Simulation`, `initial` and plain `always` processes can suspend:
 | `wait (condition)` | any condition; an X or Z condition counts as false |
 | Assignments | blocking and nonblocking; nonblocking updates take effect in the NBA region of the time slot |
 
-An `always` with a sensitivity list other than `@*`, such as
-`always @(a or b)`, runs as a process too. A `Simulator` runs no processes,
-so such a design simulates without them there; use `Simulation`, or write
-`always @*` or `always_comb` ([#1712](https://github.com/celox-sim/celox/issues/1712)).
+An `always` whose sensitivity list names exactly the variables its statement
+reads, as `@*` would (IEEE 1800-2023 9.4.2.2), simulates like `always @*` in
+both `Simulator` and `Simulation`: `always @(a or b) y = a + b;` or
+`always @(b, a) y = a + b;`. The statement must not contain a timing control
+or a nonblocking assignment. Any other sensitivity list without edges runs as
+a process: `always @(a) y = a + b;` leaves `y` unchanged when only `b`
+changes. So does a list that, as `always @*`, would close a combinational
+loop with other logic. A `Simulator` runs no processes, so such a design simulates without them there;
+use `Simulation`, or write `always @*` or `always_comb`
+([#1712](https://github.com/celox-sim/celox/issues/1712)).
 
 ### Timed task calls
 
