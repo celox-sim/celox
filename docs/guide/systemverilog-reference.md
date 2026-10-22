@@ -30,7 +30,7 @@ synthesis and is tested at the design level.
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Strings | `string` variables, function arguments and results: assignment of strings, string literals and casts (`string'(x)`), `==`, `!=` and ordering comparisons, concatenation and replication (with a run-time count), character reads and writes (`s[i]`), and the methods `len`, `getc`, `putc`, `toupper`, `tolower`, `compare`, `icompare`, `substr`, `atoi` / `atohex` / `atooct` / `atobin` and `itoa` / `hextoa` / `octtoa` / `bintoa`; `%s` and format-less display of string values. See [strings](#strings) |
-| Classes | classes declared in a module: properties of 2-state integral types up to 64 bits, `string` and class handle types, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and non-virtual methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; static properties and methods; `C::` scope resolution of static members and `C::new`. See [classes](#classes) |
+| Classes | classes declared in a module: properties of 2-state integral types up to 64 bits, `string` and class handle types, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles. See [classes](#classes) |
 | Parameters | integral parameters and overrides preserving widths beyond 128 bits and X/Z values, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 
 ### Processes and control flow
@@ -128,7 +128,7 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Class features beyond those [listed](#classes): virtual method calls, abstract and interface classes, classes declared in packages, parameterized classes, named constructor arguments, shallow copies (`new h`), and properties that are 4-state, `real`, arrays or wider than 64 bits. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
+- Class features beyond those [listed](#classes): method calls through an interface class handle, `$cast`, classes declared in packages, parameterized classes, named constructor arguments, shallow copies (`new h`), and properties that are 4-state, `real`, arrays or wider than 64 bits. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
 - Behavioral and verification constructs: `final`, intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events and `->`, `fork` / `join`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
@@ -229,8 +229,14 @@ object call into the runtime. Objects that no variable or other object refers
 to are collected between time slots and after each `tick`. A method is called
 with the object it was called on, so it can be a function or a task, and
 calls are bound to the method of the variable's class (IEEE 1800-2023 8.6).
-Reading or writing a property or calling a method through `null` is a runtime
-error.
+A call of a virtual method runs the override of the object's class instead,
+except `super.m(...)`, which runs the base's implementation (8.15, 8.20); it
+selects the override by the class of the object, so it costs one more call
+into the runtime. Reading or writing a property or calling a method through
+`null` is a runtime error. Constructing an abstract class and a class that
+leaves a pure virtual method unimplemented are rejected (8.21). A class that
+implements an interface class implements each of its methods with the same
+return type, or, if it is abstract, re-declares it pure (8.26).
 
 A constructor calls the constructor of the base class first, with the
 arguments of `super.new(...)` or of the `extends` clause, then runs the

@@ -439,6 +439,16 @@ fn class_signatures(
         } else {
             return_type(subroutine, tree, context)?
         };
+        // A method that may be virtual also has a dispatcher (8.20).
+        if !method.qualifiers.is_static && subroutine.kind != SubroutineKind::Constructor {
+            publish_signature(
+                classes::Class::dispatcher_name(&class_name, &name(&subroutine.name)),
+                formals.clone(),
+                result.clone(),
+                tree,
+                context,
+            );
+        }
         publish_signature(
             classes::Class::subroutine_name(&class_name, &name(&subroutine.name)),
             formals,

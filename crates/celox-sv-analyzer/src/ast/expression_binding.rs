@@ -42,8 +42,21 @@ pub(super) fn expression(
         LValue::Ident(name) => dimensions.get(name),
         _ => None,
     };
-    // `new` creates an object of the variable's class (IEEE 1800-2023 8.7).
-    if let Some(class) = shape.and_then(|shape| shape.class.as_deref())
+    // `new` creates an object of the class of the variable or of the
+    // element of an array of handles (IEEE 1800-2023 8.7).
+    let class = match lhs {
+        LValue::Ident(_) => shape.and_then(|shape| shape.class.as_deref()),
+        LValue::Select {
+            name,
+            array_slice_width: None,
+            ..
+        } => dimensions
+            .get(name)
+            .filter(|shape| !shape.unpacked.is_empty())
+            .and_then(|shape| shape.class.as_deref()),
+        LValue::Select { .. } => None,
+    };
+    if let Some(class) = class
         && let Some(call) = objects::constructor(tree, root, native, dimensions, class)?
     {
         return Ok(call);

@@ -47,8 +47,19 @@ pub(super) struct Method {
     pub name: String,
     /// The class that declares the method.
     pub owner: String,
+    /// The definition, or the prototype of a pure virtual method.
     pub native: celox_sv_syntax::SubroutineId,
     pub qualifiers: celox_sv_syntax::ClassQualifiers,
+    /// Declared `virtual` here or in a base: a call through a handle runs
+    /// the override of the object's class (IEEE 1800-2023 8.20).
+    pub is_virtual: bool,
+}
+
+impl Method {
+    /// A pure virtual method, which has no implementation (8.21).
+    pub fn is_pure(&self) -> bool {
+        self.qualifiers.is_pure
+    }
 }
 
 /// A class with the layout of its objects.
@@ -58,6 +69,8 @@ pub(super) struct Class {
     /// Identifies the class at run time; stable across modules and runs.
     pub id: u32,
     pub base: Option<String>,
+    /// A `virtual class`, which cannot be constructed (IEEE 1800-2023 8.21).
+    pub is_abstract: bool,
     /// Properties of the class and its bases, bases first.
     pub properties: Vec<Property>,
     /// How many of `properties` the bases declare.
@@ -109,6 +122,40 @@ impl Class {
     /// its static property `method`.
     pub fn subroutine_name(owner: &str, method: &str) -> String {
         format!("{owner}::{method}")
+    }
+
+    /// The subroutine that calls the override of virtual method `method`
+    /// of `owner` for the class of its `this` (IEEE 1800-2023 8.20).
+    pub fn dispatcher_name(owner: &str, method: &str) -> String {
+        format!("{owner}::{method}$virtual")
+    }
+
+    /// The virtual methods the class itself declares, each with a
+    /// dispatcher.
+    pub fn dispatched_methods(&self) -> impl Iterator<Item = &Method> {
+        self.methods
+            .iter()
+            .filter(|method| method.owner == self.name && method.is_virtual)
+    }
+
+    /// Whether the class is `ancestor` or derives from it.
+    pub fn derives_from(
+        &self,
+        tree: &AnalysisContext<'_>,
+        ancestor: &str,
+        env: &HashMap<String, i128>,
+        aliases: &HashMap<String, Type>,
+    ) -> bool {
+        let mut class = Some(self.name.clone());
+        while let Some(name) = class {
+            if name == ancestor {
+                return true;
+            }
+            class = self::class(tree, &name, env, aliases)
+                .ok()
+                .and_then(|class| class.base.clone());
+        }
+        false
     }
 
     /// An allocation of an uninitialized object of the class.
@@ -330,12 +377,14 @@ pub(super) fn class(
     for method in &declaration.methods {
         let subroutine = native.subroutine(method.subroutine);
         let method_name = instances::normalize_identifier(&subroutine.name.spelling);
-        // A pure virtual method has no implementation to call; calls of
-        // virtual methods are rejected where they are bound.
-        if method.qualifiers.is_pure {
-            continue;
-        }
-        let native_id = if subroutine.prototype {
+        // A method overriding a virtual method is virtual (8.20).
+        let is_virtual = method.qualifiers.is_virtual
+            || methods
+                .iter()
+                .any(|known| known.name == method_name && known.is_virtual);
+        let native_id = if method.qualifiers.is_pure {
+            method.subroutine
+        } else if subroutine.prototype {
             out_of_block_definition(tree, name, &method_name).ok_or_else(|| {
                 unsupported(format!(
                     "extern method `{name}::{method_name}` without a body"
@@ -350,12 +399,55 @@ pub(super) fn class(
             owner: name.to_owned(),
             native: native_id,
             qualifiers: method.qualifiers,
+            is_virtual,
         });
+    }
+    // A method of an implemented interface class is virtual, and the class
+    // implements it with the same return type (8.26.2, 8.26.6.1). An
+    // abstract class may instead re-declare it pure (8.26.7).
+    let mut required = Vec::new();
+    for &interface in &declaration.interfaces {
+        interface_methods(tree, interface, env, aliases, &mut required)?;
+    }
+    for (method_name, prototype) in required {
+        match methods.iter_mut().find(|method| method.name == method_name) {
+            Some(method) => {
+                if !method.is_virtual && method.owner != name {
+                    return Err(unsupported(format!(
+                        "interface class method `{method_name}` implemented by a non-virtual method of a base class"
+                    )));
+                }
+                if return_type(tree, method.native, env, aliases)?
+                    != return_type(tree, prototype, env, aliases)?
+                {
+                    return Err(unsupported(format!(
+                        "method `{method_name}` of class `{name}` whose return type differs from its interface class"
+                    )));
+                }
+                method.is_virtual = true;
+            }
+            None => {
+                return Err(unsupported(format!(
+                    "class `{name}` that does not implement interface class method `{method_name}`"
+                )));
+            }
+        }
+    }
+    // A class that is not abstract implements every pure virtual method
+    // (8.21).
+    if !declaration.virtual_class
+        && let Some(method) = methods.iter().find(|method| method.is_pure())
+    {
+        return Err(unsupported(format!(
+            "class `{name}` that does not implement pure virtual method `{}`",
+            method.name
+        )));
     }
     let class = Rc::new(Class {
         name: name.to_owned(),
         id: class_id(name),
         base: base.map(|base| base.name.clone()),
+        is_abstract: declaration.virtual_class,
         properties,
         base_properties,
         statics,
@@ -367,6 +459,48 @@ pub(super) fn class(
         .borrow_mut()
         .insert(name.to_owned(), class.clone());
     Ok(class)
+}
+
+/// The methods that interface class type `interface` declares or inherits,
+/// with their prototypes, appended to `methods` (IEEE 1800-2023 8.26). A
+/// name that several interface classes declare appears once for each.
+fn interface_methods(
+    tree: &AnalysisContext<'_>,
+    interface: celox_sv_syntax::TypeId,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+    methods: &mut Vec<(String, celox_sv_syntax::SubroutineId)>,
+) -> Converted<()> {
+    let native = tree.declarations();
+    let name = type_binding::procedural_type(interface, native, tree, env, aliases)?
+        .and_then(|ty| ty.class.clone())
+        .ok_or_else(|| unsupported("implemented interface class type"))?;
+    let declaration = declaration(tree, &name)
+        .filter(|declaration| declaration.interface)
+        .ok_or_else(|| unsupported(format!("`implements` of `{name}`, not an interface class")))?;
+    for method in &declaration.methods {
+        let method_name =
+            instances::normalize_identifier(&native.subroutine(method.subroutine).name.spelling);
+        methods.push((method_name, method.subroutine));
+    }
+    for &base in &declaration.interfaces {
+        interface_methods(tree, base, env, aliases, methods)?;
+    }
+    Ok(())
+}
+
+/// The return type of subroutine `id`, `None` for a task or `void`.
+fn return_type(
+    tree: &AnalysisContext<'_>,
+    id: celox_sv_syntax::SubroutineId,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Converted<Option<Type>> {
+    let native = tree.declarations();
+    match native.subroutine(id).return_type {
+        Some(ty) => type_binding::procedural_type(ty, native, tree, env, aliases),
+        None => Ok(None),
+    }
 }
 
 /// The definition `function ... class::method` outside class `class`.
@@ -426,6 +560,47 @@ fn class_id(name: &str) -> u32 {
         (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
     });
     hash.max(1)
+}
+
+/// The overrides that dispatcher `Class::dispatcher_name(owner, method)`
+/// calls: each implementation of the method with the classes, deriving from
+/// `owner` and not abstract, whose objects run it.
+pub(super) fn dispatch_targets(
+    tree: &AnalysisContext<'_>,
+    owner: &str,
+    method: &str,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Converted<Vec<(String, Vec<u32>)>> {
+    let mut targets: Vec<(String, Vec<u32>)> = Vec::new();
+    let mut ids = HashMap::default();
+    for declaration in &tree.declarations().classes {
+        if declaration.interface || declaration.virtual_class {
+            continue;
+        }
+        let name = instances::normalize_identifier(&declaration.name.spelling);
+        // A class that cannot be laid out has no objects.
+        let Ok(class) = class(tree, &name, env, aliases) else {
+            continue;
+        };
+        if !class.derives_from(tree, owner, env, aliases) {
+            continue;
+        }
+        if let Some(other) = ids.insert(class.id, name.clone()) {
+            return Err(unsupported(format!(
+                "classes `{other}` and `{name}` with the same run-time identifier"
+            )));
+        }
+        let Some(implementation) = class.method(method) else {
+            continue;
+        };
+        let target = Class::subroutine_name(&implementation.owner, method);
+        match targets.iter_mut().find(|(known, _)| *known == target) {
+            Some((_, classes)) => classes.push(class.id),
+            None => targets.push((target, vec![class.id])),
+        }
+    }
+    Ok(targets)
 }
 
 /// A call of object operation `op`.

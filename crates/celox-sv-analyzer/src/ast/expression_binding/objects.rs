@@ -21,14 +21,26 @@ pub(in crate::ast) fn class(
 }
 
 /// The class of native expression `id` when it is an object handle, judged
-/// before it is bound: a handle variable, or a handle property.
+/// before it is bound: a handle variable, an element of an array of
+/// handles, or a handle property.
 pub(in crate::ast) fn native_class(
     tree: &AnalysisContext<'_>,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Option<String> {
-    if let ExprKind::Name(name) = &native.expression(ungroup(id, native)).kind {
+    let expression = native.expression(ungroup(id, native));
+    if let ExprKind::Select {
+        expression,
+        dimension,
+    } = &expression.kind
+        && matches!(dimension.kind, celox_sv_syntax::DimensionKind::Index(_))
+        && let ExprKind::Name(name) = &native.expression(ungroup(*expression, native)).kind
+    {
+        let ty = dimensions.get(&instances::normalize_identifier(&name.spelling))?;
+        return ty.class.clone().filter(|_| !ty.unpacked.is_empty());
+    }
+    if let ExprKind::Name(name) = &expression.kind {
         let name = instances::normalize_identifier(&name.spelling);
         if let Some(ty) = dimensions.get(&name) {
             return ty.class.clone();
@@ -214,20 +226,26 @@ pub(in crate::ast) enum Receiver {
 /// The method that native callee expression `id` names: through a handle
 /// (`h.m`), `this.m`, `super.m`, `C::m`, or unqualified inside a method.
 /// Returns the method's subroutine, its number of formals, and the object
-/// it is called on.
+/// it is called on. A virtual method is called through its dispatcher,
+/// except as `super.m`, which names the base's implementation (IEEE
+/// 1800-2023 8.15, 8.20).
 pub(in crate::ast) fn method(
     tree: &AnalysisContext<'_>,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<(String, usize, Receiver)>> {
+    let mut through_super = false;
     let (class_name, method_name, receiver) = match &native.expression(ungroup(id, native)).kind {
         ExprKind::Member {
             expression,
             separator,
             name,
         } if separator == "." => match native_class(tree, *expression, native, dimensions) {
-            Some(class) if is_super(*expression, native) => (class, name, Receiver::This),
+            Some(class) if is_super(*expression, native) => {
+                through_super = true;
+                (class, name, Receiver::This)
+            }
             Some(class) => (class, name, Receiver::Handle(*expression)),
             None => return Ok(None),
         },
@@ -265,8 +283,11 @@ pub(in crate::ast) fn method(
     let Some(method) = class.method(&method_name) else {
         return Ok(None);
     };
-    if method.qualifiers.is_virtual {
-        return Err(unsupported(format!("virtual method `{}`", method.name)));
+    if through_super && method.is_pure() {
+        return Err(unsupported(format!(
+            "pure virtual method `{}` called through `super`",
+            method.name
+        )));
     }
     let receiver = if method.qualifiers.is_static {
         Receiver::Static
@@ -292,11 +313,12 @@ pub(in crate::ast) fn method(
         .ports
         .as_ref()
         .map_or(0, Vec::len);
-    Ok(Some((
-        Class::subroutine_name(&method.owner, &method.name),
-        formals,
-        receiver,
-    )))
+    let subroutine = if method.is_virtual && !through_super && receiver != Receiver::Static {
+        Class::dispatcher_name(&method.owner, &method.name)
+    } else {
+        Class::subroutine_name(&method.owner, &method.name)
+    };
+    Ok(Some((subroutine, formals, receiver)))
 }
 
 /// The receiver of an unqualified method call inside a method.
@@ -339,6 +361,11 @@ pub(in crate::ast) fn constructor(
         _ => return Ok(None),
     };
     let class = class(tree, dimensions, &class_name)?;
+    if class.is_abstract {
+        return Err(unsupported(format!(
+            "object of abstract class `{class_name}`"
+        )));
+    }
     let formals = class.constructor_formals(native);
     let mut args = vec![Some(class.allocation())];
     for argument in arguments {

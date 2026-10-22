@@ -155,6 +155,7 @@ impl Parser<'_> {
         }
         let name = self.name()?;
         let mut base = None;
+        let mut interfaces = Vec::new();
         if self.eat("#") {
             let start = self.at;
             self.expect("(")?;
@@ -173,8 +174,9 @@ impl Parser<'_> {
         if self.eat("extends") {
             let data_type = self.class_base(interface)?;
             if interface {
+                interfaces.push(data_type);
                 while self.eat(",") {
-                    self.class_base(true)?;
+                    interfaces.push(self.class_base(true)?);
                 }
             } else {
                 let arguments = if self.peek() == "(" {
@@ -192,9 +194,9 @@ impl Parser<'_> {
             }
         }
         if !interface && self.eat("implements") {
-            self.class_base(true)?;
+            interfaces.push(self.class_base(true)?);
             while self.eat(",") {
-                self.class_base(true)?;
+                interfaces.push(self.class_base(true)?);
             }
         }
         self.expect(";")?;
@@ -203,6 +205,7 @@ impl Parser<'_> {
             virtual_class,
             interface,
             base,
+            interfaces,
             properties: Vec::new(),
             methods: Vec::new(),
             tokens: TokenRange { start, end: start },
