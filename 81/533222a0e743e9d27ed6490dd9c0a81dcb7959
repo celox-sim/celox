@@ -1,0 +1,1 @@
+Address the next operand-type review findings together: retain packed-array and conditional/function types, allow only assignment-compatible subarray items, and expand regression/reference coverage before revising PR #1772.
