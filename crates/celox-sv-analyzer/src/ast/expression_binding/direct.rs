@@ -233,16 +233,13 @@ enum Finish {
     /// A string operation on the bound children, see [`strings`].
     StringCall(StringOp),
     /// A read of property `property` of the object handle child.
-    ObjectLoad {
-        class: String,
-        property: String,
-    },
+    ObjectLoad(crate::ast::classes::Property),
     /// A call of method subroutine `name` with `formals` formals; the first
-    /// child is the receiver unless `this` passes the enclosing method's own.
+    /// child is the object handle when `receiver` is one.
     MethodCall {
         name: String,
         formals: usize,
-        this: bool,
+        receiver: objects::Receiver,
     },
 }
 
@@ -419,8 +416,10 @@ pub(in crate::ast) fn bind_value(
                         if args.len() > formals || args.iter().any(|arg| arg.name.is_some()) {
                             return Err(unsupported(format!("arguments of method `{name}`")));
                         }
-                        let mut children: Vec<_> =
-                            receiver.into_iter().map(|id| (id, None)).collect();
+                        let mut children = Vec::new();
+                        if let objects::Receiver::Handle(handle) = receiver {
+                            children.push((handle, None));
+                        }
                         for arg in args {
                             let Some(value) = arg.value else {
                                 return Err(unsupported(format!(
@@ -433,7 +432,7 @@ pub(in crate::ast) fn bind_value(
                             Finish::MethodCall {
                                 name,
                                 formals,
-                                this: receiver.is_none(),
+                                receiver,
                             },
                             children,
                         )
@@ -712,22 +711,20 @@ pub(in crate::ast) fn bind_value(
                             vec![(*expression, None), (index, None)],
                         )
                     }
-                    ExprKind::Member {
-                        expression,
-                        separator,
-                        name,
-                    } if separator == "."
-                        && objects::native_class(tree, *expression, native, dimensions)
-                            .is_some() =>
+                    ExprKind::Member { .. }
+                        if objects::property(tree, id, native, dimensions)?.is_some() =>
                     {
-                        (
-                            Finish::ObjectLoad {
-                                class: objects::native_class(tree, *expression, native, dimensions)
-                                    .expect("checked by the guard"),
-                                property: instances::normalize_identifier(&name.spelling),
-                            },
-                            vec![(*expression, None)],
-                        )
+                        let (property, receiver) = objects::property(tree, id, native, dimensions)?
+                            .expect("checked by the guard");
+                        match receiver {
+                            Some(receiver) => {
+                                (Finish::ObjectLoad(property), vec![(receiver, None)])
+                            }
+                            None => {
+                                values.push(objects::load(&property, objects::this()));
+                                continue;
+                            }
+                        }
                     }
                     ExprKind::Member { .. } | ExprKind::Select { .. } => {
                         values.push(selected_value(id, native, tree, dimensions)?);
@@ -893,22 +890,23 @@ pub(in crate::ast) fn bind_value(
                     Finish::StringCall(op) => {
                         strings::call(op, strings::operands(op, operands, dimensions))
                     }
-                    Finish::ObjectLoad { class, property } => {
+                    Finish::ObjectLoad(property) => {
                         let handle = operands.pop().ok_or_else(disagreement)?;
-                        objects::load(tree, dimensions, &class, &property, handle)?
+                        objects::load(&property, handle)
                     }
                     Finish::MethodCall {
                         name,
                         formals,
-                        this,
+                        receiver,
                     } => {
                         let mut args: Vec<Option<Expr>> = Vec::with_capacity(formals + 1);
-                        if this {
+                        if receiver == objects::Receiver::This {
                             args.push(Some(objects::this()));
                         }
+                        let handles = usize::from(receiver != objects::Receiver::Static);
                         args.extend(operands.into_iter().map(Some));
                         // Omitted trailing arguments take their defaults.
-                        args.resize(formals + 1, None);
+                        args.resize(formals + handles, None);
                         Expr::Call {
                             callee: Callee::Subroutine(name),
                             args,
@@ -1213,6 +1211,10 @@ fn path(
     tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<(Vec<String>, Option<String>)> {
+    // A static class property is a variable of the module.
+    if let Some(variable) = objects::static_property(tree, root, native, dimensions)? {
+        return Ok((vec![variable], None));
+    }
     let mut parts = Vec::new();
     let mut qualified = None;
     loop {

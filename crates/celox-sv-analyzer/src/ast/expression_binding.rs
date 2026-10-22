@@ -15,8 +15,8 @@ pub(super) use direct::{
 };
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
 pub(super) use objects::{
-    constructor as object_constructor, method as object_method, property as object_property,
-    receiver as object_receiver, this as object_this,
+    Receiver as ObjectReceiver, constructor as object_constructor, method as object_method,
+    property as object_property, receiver as object_receiver, this as object_this,
 };
 pub(super) use strings::{
     call as string_call, method as string_method, native_string, to_string as string_operand,

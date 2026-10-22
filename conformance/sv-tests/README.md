@@ -158,8 +158,19 @@ cases in 2state and 526 in 4state. No passing case regresses: classes that are
 declared but never constructed, interface classes and pure virtual methods are
 not lowered. `8.7--constructor` keeps failing because it initializes an
 implicitly static procedural variable without the `static` keyword, which IEEE
-1800-2023 6.21 requires. Inheritance with constructors, `super`, static members,
-virtual dispatch and parameterized classes stay unsupported.
+1800-2023 6.21 requires; `8.7--constructor_param` fails for the same reason.
+
+Base constructors, `super`, static members and `C::` scope resolution update
+eighteen more rows: both state modes for `8.7--constructor_super`,
+`8.8--typed_constructor`, `8.9--static_properties`, `8.10--static_methods`,
+`8.13--inheritance`, `8.14--override_member`, `8.15--super`,
+`8.17--constructor_const_arg` and `8.23--scope_resolution` change from fail to
+pass. Each was simulated and its displayed values checked, including the base
+method that a base-class handle calls in `8.14--override_member`. Full official
+runs at the pinned revision report 534 passing cases in 2state and 536 in
+4state, with no passing case regressing. Virtual dispatch, abstract and
+interface classes, classes in packages, parameterized classes and shallow copies
+stay unsupported.
 
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains

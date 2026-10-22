@@ -1865,6 +1865,23 @@
     }
   },
   {
+    "id": "sv_icarus_class_scope_resolution",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects class scope resolution with a syntax error: reading a static property (Counter::created), calling a static method (Counter::next()) and assigning a static property (Counter::last = \"set\"). IEEE 1800-2023 8.9, 8.10 and 8.23 define these accesses. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::static_properties_and_methods"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_class_property_string_methods",
     "category": "simulator_compile_limitation",
     "phase": "compile",

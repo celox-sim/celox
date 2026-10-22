@@ -28,6 +28,19 @@ pub(super) struct Property {
     pub initializer: Option<celox_sv_syntax::ExprId>,
 }
 
+/// A static property of a class: one variable of the module that declares
+/// the class, shared by all of its objects (IEEE 1800-2023 8.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StaticProperty {
+    pub name: String,
+    /// The class that declares the property.
+    pub owner: String,
+    pub r#type: Type,
+    /// The name of the variable that holds the property.
+    pub variable: String,
+    pub initializer: Option<celox_sv_syntax::ExprId>,
+}
+
 /// A method of a class.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Method {
@@ -47,6 +60,10 @@ pub(super) struct Class {
     pub base: Option<String>,
     /// Properties of the class and its bases, bases first.
     pub properties: Vec<Property>,
+    /// How many of `properties` the bases declare.
+    pub base_properties: usize,
+    /// Static properties of the class and its bases.
+    pub statics: Vec<StaticProperty>,
     /// Methods visible in the class, overrides replacing inherited ones.
     pub methods: Vec<Method>,
     /// Bytes of an object.
@@ -63,13 +80,57 @@ impl Class {
             .find(|property| property.name == name)
     }
 
+    pub fn static_property(&self, name: &str) -> Option<&StaticProperty> {
+        self.statics.iter().find(|property| property.name == name)
+    }
+
     pub fn method(&self, name: &str) -> Option<&Method> {
         self.methods.iter().find(|method| method.name == name)
     }
 
-    /// The subroutine name of `method` of `owner`.
+    /// The properties the class itself declares.
+    pub fn own_properties(&self) -> &[Property] {
+        &self.properties[self.base_properties..]
+    }
+
+    /// The number of formals of the constructor, which takes the handle of
+    /// the object it initializes before them.
+    pub fn constructor_formals(&self, native: &celox_sv_syntax::Declarations) -> usize {
+        self.method("new").map_or(0, |method| {
+            native
+                .subroutine(method.native)
+                .ports
+                .as_ref()
+                .map_or(0, Vec::len)
+        })
+    }
+
+    /// The subroutine name of `method` of `owner`, and the variable name of
+    /// its static property `method`.
     pub fn subroutine_name(owner: &str, method: &str) -> String {
         format!("{owner}::{method}")
+    }
+
+    /// An allocation of an uninitialized object of the class.
+    pub fn allocation(&self) -> Expr {
+        let handles = self
+            .properties
+            .iter()
+            .filter_map(|property| {
+                property
+                    .field
+                    .handle
+                    .map(|handle| (property.field.offset, handle))
+            })
+            .collect();
+        object_call(
+            ObjectOp::New {
+                class: self.id,
+                size: self.size,
+                handles,
+            },
+            Vec::new(),
+        )
     }
 }
 
@@ -110,11 +171,12 @@ pub(super) fn item_classes(
 
 /// The methods that class `name` implements, with their definitions: the
 /// method itself or, for an `extern` method, its out-of-block definition.
-/// A pure virtual method has none (IEEE 1800-2023 8.21).
+/// A pure virtual method has none (IEEE 1800-2023 8.21). Each comes with
+/// whether it is static.
 pub(super) fn declared_methods(
     tree: &AnalysisContext<'_>,
     name: &str,
-) -> Converted<Vec<celox_sv_syntax::SubroutineId>> {
+) -> Converted<Vec<(celox_sv_syntax::SubroutineId, bool)>> {
     let Some(declaration) = declaration(tree, name) else {
         return Ok(Vec::new());
     };
@@ -126,16 +188,53 @@ pub(super) fn declared_methods(
         .map(|method| {
             let subroutine = native.subroutine(method.subroutine);
             if !subroutine.prototype {
-                return Ok(method.subroutine);
+                return Ok((method.subroutine, method.qualifiers.is_static));
             }
             let method_name = instances::normalize_identifier(&subroutine.name.spelling);
-            out_of_block_definition(tree, name, &method_name).ok_or_else(|| {
-                unsupported(format!(
-                    "extern method `{name}::{method_name}` without a body"
-                ))
-            })
+            out_of_block_definition(tree, name, &method_name)
+                .map(|id| (id, method.qualifiers.is_static))
+                .ok_or_else(|| {
+                    unsupported(format!(
+                        "extern method `{name}::{method_name}` without a body"
+                    ))
+                })
         })
         .collect()
+}
+
+/// The static properties that the classes of body item `item` declare,
+/// which are variables of the module (IEEE 1800-2023 8.9). A class that
+/// cannot be laid out declares none here; its uses report why.
+pub(super) fn item_statics(
+    item: celox_sv_syntax::BodyItemId,
+    tree: &AnalysisContext<'_>,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Vec<StaticProperty> {
+    item_classes(item, tree)
+        .into_iter()
+        .filter_map(|name| {
+            let class = class(tree, &name, env, aliases).ok()?;
+            Some(
+                class
+                    .statics
+                    .iter()
+                    .filter(|property| property.owner == name)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .flatten()
+        .collect()
+}
+
+/// The arguments that the `extends` clause of class `name` passes to the
+/// constructor of its base (IEEE 1800-2023 8.17).
+pub(super) fn base_arguments<'a>(
+    tree: &'a AnalysisContext<'_>,
+    name: &str,
+) -> Option<&'a [celox_sv_syntax::Argument]> {
+    declaration(tree, name)?.base.as_ref()?.arguments.as_deref()
 }
 
 /// The handle type of class `name`, if it is a class.
@@ -179,11 +278,13 @@ pub(super) fn class(
         .as_ref()
         .map(|base| base.properties.clone())
         .unwrap_or_default();
+    let base_properties = properties.len();
+    let mut statics = base
+        .as_ref()
+        .map(|base| base.statics.clone())
+        .unwrap_or_default();
     let mut size = base.as_ref().map_or(0, |base| base.size);
     for property in &declaration.properties {
-        if property.qualifiers.is_static {
-            return Err(unsupported("static class property"));
-        }
         let ty = type_binding::procedural_type(
             property.declaration.data_type,
             native,
@@ -196,7 +297,19 @@ pub(super) fn class(
             if !variable.dimensions.is_empty() {
                 return Err(unsupported("class property with unpacked dimensions"));
             }
-            let name = instances::normalize_identifier(&variable.name.spelling);
+            let property_name = instances::normalize_identifier(&variable.name.spelling);
+            if property.qualifiers.is_static {
+                statics.retain(|known| known.name != property_name);
+                statics.push(StaticProperty {
+                    variable: Class::subroutine_name(name, &property_name),
+                    name: property_name,
+                    owner: name.to_owned(),
+                    r#type: ty.clone(),
+                    initializer: variable.value,
+                });
+                continue;
+            }
+            let name = property_name;
             let field = field(&tree.state, &ty, env, size)?;
             size = field.offset + field.bytes();
             properties.push(Property {
@@ -207,10 +320,13 @@ pub(super) fn class(
             });
         }
     }
+    // A constructor is not inherited: a class without one has an implicit
+    // constructor (IEEE 1800-2023 8.7).
     let mut methods = base
         .as_ref()
         .map(|base| base.methods.clone())
         .unwrap_or_default();
+    methods.retain(|method| method.name != "new");
     for method in &declaration.methods {
         let subroutine = native.subroutine(method.subroutine);
         let method_name = instances::normalize_identifier(&subroutine.name.spelling);
@@ -241,6 +357,8 @@ pub(super) fn class(
         id: class_id(name),
         base: base.map(|base| base.name.clone()),
         properties,
+        base_properties,
+        statics,
         methods,
         size: size.max(1),
     });

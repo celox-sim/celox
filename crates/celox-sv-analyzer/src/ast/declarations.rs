@@ -375,6 +375,11 @@ pub(super) fn signals_from_body_item(
             }
             values
         }
+        BodyItemKind::Unconverted { .. } => classes::item_statics(id, tree, env, aliases)
+            .into_iter()
+            .filter(|property| selected_name.is_none_or(|selected| selected == property.variable))
+            .map(|property| Signal::new(property.variable, property.r#type))
+            .collect(),
         _ => Vec::new(),
     };
     substitute_signal_local_constants(&mut declared, env);
