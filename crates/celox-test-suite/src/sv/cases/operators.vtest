@@ -1615,3 +1615,78 @@ endmodule
     (assert_eq all_set 0 "each declared bit contributes, including the partial last word"))
   (modify (set a ones))
   (assert_eq all_set 1))
+
+(case preserves_power_signedness_in_arithmetic
+  (source "power_signedness.sv" #"
+    module Top(input logic clk, input logic [12:0] diff,
+               input logic [19:0] integral, input logic [7:0] base,
+               input logic [3:0] exponent,
+               output logic [31:0] mul, div, signed_power, unsigned_power,
+               output logic signed [31:0] signed_mul,
+               output logic [21:0] sized_mul,
+               output logic [19:0] comb_mul, comb_div, ff_mul, ff_div,
+               output logic [1:0] ovf_mul, ovf_div);
+      // IEEE 1800-2023 11.6.1 / Table 11-21: the exponent is
+      // self-determined; the base determines the power's signedness.
+      assign mul = $signed(diff) * 2**2;
+      assign signed_mul = $signed(diff) * 2**2;
+      assign div = $signed(diff) / 2**4;
+      assign sized_mul = 22'($signed(diff) * 2**2);
+      assign signed_power = ($signed(base) ** exponent) / 2;
+      assign unsigned_power = (base ** $signed(exponent)) / 2;
+      always_comb begin
+        {ovf_mul, comb_mul} = $signed({1'b0, integral}) + 22'($signed(diff) * 2**2);
+        {ovf_div, comb_div} = $signed({1'b0, integral}) + 22'($signed(diff) / 2**4);
+      end
+      always_ff @(posedge clk) begin
+        ff_mul <= $signed({1'b0, integral}) + 22'($signed(diff) * 2**2);
+        ff_div <= $signed({1'b0, integral}) + 22'($signed(diff) / 2**4);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set clk 0) (set diff 7808) (set integral 446216)
+          (set base 253) (set exponent 3))
+  (assert_eq mul 0xfffffa00)
+  (assert_eq signed_mul 0xfffffa00)
+  (assert_eq div 0xffffffe8)
+  (assert_eq sized_mul 0x3ffa00)
+  (assert_eq signed_power 0xfffffff3)
+  (assert_eq unsigned_power 8097138)
+  (assert_eq comb_mul 444680)
+  (assert_eq comb_div 446192)
+  (assert_eq ovf_mul 0)
+  (assert_eq ovf_div 0)
+  (tick clk)
+  (assert_eq ff_mul 444680)
+  (assert_eq ff_div 446192)
+  (modify (set clk 0) (set diff 384) (set base 3))
+  (assert_eq mul 1536)
+  (assert_eq div 24)
+  (assert_eq signed_power 13)
+  (assert_eq unsigned_power 13)
+  (assert_eq comb_mul 447752)
+  (assert_eq comb_div 446240)
+  (tick clk)
+  (assert_eq ff_mul 447752)
+  (assert_eq ff_div 446240))
+
+(case preserves_power_signedness_in_four_state_arithmetic
+  (four_state)
+  (source "power_signedness_four_state.sv" #"
+    module Top(input logic [12:0] diff, input logic [3:0] exponent,
+               output logic [31:0] mul, div, dynamic_mul);
+      assign mul = $signed(diff) * 2**2;
+      assign div = $signed(diff) / 2**4;
+      assign dynamic_mul = $signed(diff) * (2 ** exponent);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set diff 7808) (set exponent 2))
+  (assert_eq mul 0xfffffa00)
+  (assert_eq div 0xffffffe8)
+  (assert_eq dynamic_mul 0xfffffa00)
+  (modify (set diff 8191) (set exponent 4))
+  (assert_eq mul 0xfffffffc)
+  (assert_eq div 0)
+  (assert_eq dynamic_mul 0xfffffff0))
