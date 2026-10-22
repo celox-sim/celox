@@ -54,6 +54,7 @@ impl<A> FfPart<A> {
 pub struct SymbolicProcess {
     pub kernel: ExecutionUnit<SymbolicRegionedAddr>,
     pub slots: ProcessSlots<SourceVarId>,
+    pub origin: celox_design::ProcessOrigin,
 }
 
 /// The commit of a trigger group's results, split by region.

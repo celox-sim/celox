@@ -34,9 +34,17 @@ fn run_and_build_share_project_target_and_cli_diagnostic_precedence() {
         "module Plain(output logic y); assign y = 1; endmodule",
     )
     .unwrap();
-    fs::write(project.path().join("top.sv"), "module Top(output logic y); timeunit 1ns / 1ps; Plain child(y); initial #1 $finish; endmodule").unwrap();
     fs::write(&config, "sources = ['plain.sv', 'top.sv']\ntop = 'Top'\n[diagnostics]\nmixed_timescale = 'error'\n[targets.compat.diagnostics]\nmixed_timescale = 'warn'\n").unwrap();
     for build in [false, true] {
+        // A VPI image runs no process.
+        let finish = if build { "" } else { "initial #1 $finish;" };
+        fs::write(
+            project.path().join("top.sv"),
+            format!(
+                "module Top(output logic y); timeunit 1ns / 1ps; Plain child(y); {finish} endmodule"
+            ),
+        )
+        .unwrap();
         let compile = |target: bool, overrides: &[&str], discover: bool| {
             let mut command = Command::new(env!("CARGO_BIN_EXE_celox"));
             if build {
@@ -151,9 +159,16 @@ fn aggregate_input_defaults_can_be_enabled_with_diagnostic_policy() {
 fn inferred_latch_uses_common_diagnostics_for_run_and_build() {
     let project = tempfile::tempdir().unwrap();
     let config = project.path().join("celox.toml");
-    fs::write(
-        project.path().join("top.sv"),
-        r#"module Top;
+    fs::write(&config, "sources = ['top.sv']\ntop = 'Top'\n[diagnostics]\ninferred_latch = 'error'\n[targets.compat.diagnostics]\ninferred_latch = 'warn'\n").unwrap();
+    for build in [false, true] {
+        // A VPI image runs no process.
+        let source = if build {
+            r#"module Top(input logic en, input logic [7:0] d, output logic [7:0] q);
+        timeunit 1ns / 1ps;
+        always_comb if (en) q = d;
+    endmodule"#
+        } else {
+            r#"module Top;
         timeunit 1ns / 1ps;
         logic en; logic [7:0] d, q;
         always_comb if (en) q = d;
@@ -164,11 +179,9 @@ fn inferred_latch_uses_common_diagnostics_for_run_and_build() {
             assert (q == 7) else $fatal(1, "closed latch");
             $finish;
         end
-    endmodule"#,
-    )
-    .unwrap();
-    fs::write(&config, "sources = ['top.sv']\ntop = 'Top'\n[diagnostics]\ninferred_latch = 'error'\n[targets.compat.diagnostics]\ninferred_latch = 'warn'\n").unwrap();
-    for build in [false, true] {
+    endmodule"#
+        };
+        fs::write(project.path().join("top.sv"), source).unwrap();
         let compile = |target: bool, overrides: &[&str]| {
             let mut command = Command::new(env!("CARGO_BIN_EXE_celox"));
             if build {

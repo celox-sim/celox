@@ -1691,10 +1691,14 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         );
         select_nba_paths(&mut timing, &staged, &mut processes);
     }
-    let (process_kernels, process_slots): (Vec<_>, Vec<_>) = processes
-        .into_iter()
-        .map(|process| (process.kernel, process.slots))
-        .unzip();
+    let mut process_kernels = Vec::with_capacity(processes.len());
+    let mut process_slots = Vec::with_capacity(processes.len());
+    let mut process_origins = Vec::with_capacity(processes.len());
+    for process in processes {
+        process_kernels.push(process.kernel);
+        process_slots.push(process.slots);
+        process_origins.push(process.origin);
+    }
     let TimingMetadata {
         wait_sites,
         nba_sites,
@@ -2034,6 +2038,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             dead_store_policy: Default::default(),
             live_signals: Default::default(),
             processes: process_slots,
+            process_origins,
             watches,
             wait_sites,
             nba_sites,
@@ -3087,6 +3092,10 @@ fn relocate_units(
                         &extern_function_map,
                     ),
                     slots: process.slots.map(|var_id| bindings.locate(*id, var_id)),
+                    origin: celox_design::ProcessOrigin {
+                        scope: Some(scope.clone()),
+                        ..process.origin.clone()
+                    },
                     key: (*id, index),
                 },
             ));
@@ -3214,6 +3223,7 @@ fn relocate_units(
 struct RelocatedProcess {
     kernel: ExecutionUnit<RegionedAbsoluteAddr>,
     slots: ProcessSlots<AbsoluteAddr>,
+    origin: celox_design::ProcessOrigin,
     /// The instance and the module-local index of the process.
     key: (InstanceId, usize),
 }

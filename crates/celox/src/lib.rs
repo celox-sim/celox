@@ -41,7 +41,7 @@ pub use backend::SimulatorErrorCode as RuntimeErrorCode;
 pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,
 };
-pub use celox_design::{DomainKind, ElaboratedDesign, EventTopology, RuntimeSchema};
+pub use celox_design::{DomainKind, ElaboratedDesign, EventTopology, ProcessOrigin, RuntimeSchema};
 pub use celox_frontend_core::FrontendArtifactError;
 pub use celox_frontend_sdk as frontend_sdk;
 pub use celox_frontend_sdk::FrontendArtifact;

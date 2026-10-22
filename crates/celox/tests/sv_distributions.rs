@@ -125,7 +125,7 @@ macro_rules! distribution_backends {
                 let error = celox::Simulator::from_sv_sources(
                     vec![(source, Path::new("distribution_initial.sv"))], "Top",
                 ).$backend().err().expect("untimed initial distribution accepted");
-                assert!(error.to_string().contains("distributions require Simulation"));
+                assert!(matches!(error.kind(), celox::SimulatorErrorKind::ProcessRequiresSimulation(_)), "{error}");
             }
 
             #[test]
@@ -137,7 +137,7 @@ macro_rules! distribution_backends {
                 let error = celox::Simulator::from_sv_sources(
                     vec![(source, Path::new("distribution_edge.sv"))], "Top",
                 ).$backend().err().expect("untimed distribution accepted");
-                assert!(error.to_string().contains("require Simulation"));
+                assert!(matches!(error.kind(), celox::SimulatorErrorKind::ProcessRequiresSimulation(_)), "{error}");
                 let mut sim = celox::Simulation::from_sv_sources(
                     vec![(source, Path::new("distribution_edge.sv"))], "Top",
                 ).$backend().unwrap();

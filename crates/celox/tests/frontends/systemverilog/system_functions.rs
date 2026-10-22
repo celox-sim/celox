@@ -60,33 +60,39 @@ fn veryl_assert_unknown_conditions_are_eager_on_interpreter() {
     }
 }
 
-const URANDOM_SKIPPED_INITIAL_SOURCE: &str = r#"
+const URANDOM_COMB_SOURCE: &str = r#"
     module Top(input int seed, output int unsigned value, reference);
-      initial $display("skipped initial");
       always_comb value = $urandom(seed);
       always_comb reference = $urandom(17);
     endmodule
 "#;
 
 #[test]
-fn urandom_comb_skipped_initials_work_on_interpreter_and_tiered() {
-    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+fn urandom_comb_runs_next_to_an_initial_process_on_interpreter_and_tiered() {
+    const SOURCE: &str = r#"
+        module Top(input int seed, output int unsigned value, reference);
+          initial $display("initial");
+          always_comb value = $urandom(seed);
+          always_comb reference = $urandom(17);
+        endmodule
+    "#;
+    fn check<B: celox::SimBackend>(mut sim: celox::Simulation<B>) {
+        sim.run_until(0).unwrap();
         let value = sim.signal("value");
         assert_ne!(sim.get(value), 0u8.into());
         let seed = sim.signal("seed");
         sim.modify(|io| io.set(seed, 17u8)).unwrap();
         assert_eq!(sim.get(value), sim.get(sim.signal("reference")));
-        assert!(sim.drain_runtime_events().is_empty());
+        assert_eq!(
+            sim.drain_runtime_events(),
+            vec![celox::RuntimeEvent::Display {
+                message: b"initial".to_vec()
+            }]
+        );
     }
     let builder = || {
-        Simulator::from_sv_sources(
-            vec![(
-                URANDOM_SKIPPED_INITIAL_SOURCE,
-                Path::new("random_skipped_initial.sv"),
-            )],
-            "Top",
-        )
-        .four_state(true)
+        celox::Simulation::from_sv_sources(vec![(SOURCE, Path::new("random_initial.sv"))], "Top")
+            .four_state(true)
     };
     check(builder().build_interpreter().unwrap());
     check(builder().build_tiered().unwrap());
@@ -142,9 +148,9 @@ sv_backends! {
         assert_eq!(sim.get(b), second);
     }
 
-    fn urandom_comb_runs_when_untimed_initials_are_skipped(sim) {
-        @setup { let source = URANDOM_SKIPPED_INITIAL_SOURCE; }
-        @build Simulator::from_sv_sources(vec![(source, Path::new("random_skipped_initial.sv"))], "Top").four_state(true);
+    fn urandom_comb_runs_untimed(sim) {
+        @setup { let source = URANDOM_COMB_SOURCE; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("random_comb.sv"))], "Top").four_state(true);
         let value = sim.signal("value");
         let seed = sim.signal("seed");
         assert_ne!(sim.get(value), 0u8.into());

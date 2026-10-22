@@ -18,6 +18,26 @@ pub struct SourceSpan {
     pub end: usize,
 }
 
+/// Where a process is written, for diagnostics about the process as a
+/// whole.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProcessSite {
+    /// The construct the process comes from: `initial`, `always`,
+    /// `always_ff`, or `declaration initializer`.
+    pub construct: &'static str,
+    pub path: std::path::PathBuf,
+    /// One-based physical line.
+    pub line: usize,
+    /// One-based byte column.
+    pub column: usize,
+}
+
+impl std::fmt::Display for ProcessSite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}:{}", self.path.display(), self.line, self.column)
+    }
+}
+
 /// One procedural statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StmtBase<E, L> {

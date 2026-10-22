@@ -75,7 +75,6 @@ impl Ff<'_, '_> {
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
             process: 0,
-            requires_timed_simulation: false,
             kind: HostRequestKind::FileIo,
             operation,
             args,

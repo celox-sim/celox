@@ -72,6 +72,21 @@ fn process_generated_clock_drives_registers() {
 }
 
 #[test]
+fn untimed_simulator_rejects_processes() {
+    let error = celox::Simulator::from_frontend(clocked_counter())
+        .build()
+        .map(|_| ())
+        .unwrap_err();
+    let celox::SimulatorErrorKind::ProcessRequiresSimulation(origin) = error.kind() else {
+        panic!("{error}");
+    };
+    assert_eq!(origin.construct, "process");
+    assert_eq!(origin.location, None);
+    assert_eq!(origin.scope.as_deref(), Some("ClockedCounter"));
+    assert!(error.to_string().contains("Simulation"), "{error}");
+}
+
+#[test]
 fn process_suspends_and_finishes() {
     let byte = ValueType::bits(8).unwrap();
     let mut module = ModuleBuilder::new("Sequence").unwrap();

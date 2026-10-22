@@ -115,6 +115,7 @@ pub(in crate::ast) fn classify<'a>(
         body.extend(process.body);
         processes.push(InitialProcess {
             creation_order: process.creation_order,
+            site: process.site.clone(),
             condition: None,
             body: vec![Stmt::Loop {
                 kind: LoopKind::Forever,

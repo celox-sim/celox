@@ -323,6 +323,11 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.warnings()
     }
 
+    /// Returns a reference to the compiled SIR program.
+    pub fn program(&self) -> &crate::ir::RuntimeProgram {
+        self.simulator.program()
+    }
+
     /// Save the design state, simulation time, clocks and pending events.
     pub fn checkpoint(&self) -> Result<SimulationCheckpoint<B>, CheckpointError> {
         if self.state.is_suspended() {
@@ -897,23 +902,16 @@ mod process_tests {
                     .unwrap(),
                 steps as u64,
             );
-            let image = builder(four_state, steps)
+            // A native image starts an untimed Simulator, which runs no
+            // process.
+            let error = builder(four_state, steps)
                 .compile_native()
-                .unwrap()
-                .into_program_image();
-            let image = crate::NativeProgramImage::from_container_bytes(
-                &image.to_container_bytes().unwrap(),
-            )
-            .unwrap();
-            check(
-                Simulation::new(
-                    Simulator::from_sources(Vec::new(), "Processes")
-                        .emit_triggers()
-                        .build_native_from_image(image)
-                        .unwrap(),
-                ),
-                steps as u64,
-            );
+                .map(|_| ())
+                .unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                crate::SimulatorErrorKind::ProcessRequiresSimulation(_)
+            ));
         }
     }
 
@@ -1437,7 +1435,7 @@ mod four_state_edge_tests {
     use num_bigint::BigUint;
 
     use super::Simulation;
-    use crate::{SimBackend, Simulator};
+    use crate::SimBackend;
 
     /// The levels of a clock walking all twelve changes between 0, 1, x and
     /// z (an Euler circuit from 0), as (value, mask), with the posedges and
@@ -1461,15 +1459,15 @@ mod four_state_edge_tests {
     macro_rules! on_every_backend {
         ($builder:expr, $check:ident) => {{
             let builder = || $builder.four_state(true).emit_triggers();
-            $check(Simulation::new(builder().build_interpreter().unwrap()));
-            $check(Simulation::new(builder().build_cranelift().unwrap()));
-            $check(Simulation::new(builder().build_wasm().unwrap()));
-            $check(Simulation::new(builder().build_tiered().unwrap()));
+            $check(builder().build_interpreter().unwrap());
+            $check(builder().build_cranelift().unwrap());
+            $check(builder().build_wasm().unwrap());
+            $check(builder().build_tiered().unwrap());
             #[cfg(any(
                 all(target_arch = "x86_64", not(feature = "arm64-codegen")),
                 all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
             ))]
-            $check(Simulation::new(builder().build_native().unwrap()));
+            $check(builder().build_native().unwrap());
         }};
     }
 
@@ -1631,7 +1629,7 @@ mod four_state_edge_tests {
                 );
             }
         }
-        on_every_backend!(Simulator::from_frontend(wait_design()), check);
+        on_every_backend!(Simulation::from_frontend(wait_design()), check);
     }
 
     #[test]
@@ -1643,7 +1641,7 @@ mod four_state_edge_tests {
                 assert_eq!(get(&mut sim, "neg"), neg.into(), "negedges at {time}");
             }
         }
-        on_every_backend!(Simulator::from_frontend(process_design()), check);
+        on_every_backend!(Simulation::from_frontend(process_design()), check);
     }
 
     const REGISTER_CLOCK: &str = r#"
@@ -1703,7 +1701,7 @@ module Top (
                 assert_eq!(get(&mut sim, "neg"), (neg + 1).into(), "negedges at {time}");
             }
         }
-        on_every_backend!(Simulator::builder(REGISTER_CLOCK, "Top"), check);
+        on_every_backend!(Simulation::builder(REGISTER_CLOCK, "Top"), check);
     }
 
     /// A clock computed combinationally from a register, `e ? a & b : 'z`,
@@ -1776,7 +1774,7 @@ module Top (
                 assert_eq!(get(&mut sim, "neg"), (neg + 1).into(), "negedges at {time}");
             }
         }
-        on_every_backend!(Simulator::builder(SOURCE, "Top"), check);
+        on_every_backend!(Simulation::builder(SOURCE, "Top"), check);
     }
 
     /// Asynchronous resets that are registers. An edge to x or z runs the
@@ -1863,7 +1861,7 @@ module Top (
                 assert_eq!(get(&mut sim, "hits_l"), hits.into(), "rl at {time}");
             }
         }
-        on_every_backend!(Simulator::builder(SOURCE, "Top"), check);
+        on_every_backend!(Simulation::builder(SOURCE, "Top"), check);
     }
 
     /// The edge baseline of a clock left at x survives a checkpoint: the
@@ -1892,6 +1890,6 @@ module Top (
             sim.run_until(15).unwrap();
             assert_eq!(get(&mut sim, "pos"), 1u8.into(), "after a state load");
         }
-        on_every_backend!(Simulator::builder(REGISTER_CLOCK, "Top"), check);
+        on_every_backend!(Simulation::builder(REGISTER_CLOCK, "Top"), check);
     }
 }
