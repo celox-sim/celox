@@ -209,6 +209,54 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Verilator 5.052 resets a static output-only function argument when an early return leaves it unassigned. IEEE 1800-2023 6.21/13.4.2 give function arguments static lifetime, and 13.5 copies output values to actuals on return. The standalone source returns 0 after a previous call assigned 37; Celox retains 37.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_static_function_lifetimes.json",
+          "verification/repros/sv_static_function_lifetimes.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_static_output_lifetime",
+        "observed_version": "Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 resets a static output-only function argument when an early return leaves it unassigned. IEEE 1800-2023 6.21/13.4.2 give function arguments static lifetime, and 13.5 copies output values to actuals on return. The standalone source returns 0 after a previous call assigned 37; Celox retains 37.",
+        "upstream": []
+      },
+      "name": "procedural::static_function_output_formals_keep_value",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Verilator 5.052 and Icarus 13.0 reset a static function result on calls that do not assign it (0 for bit, X for logic in Icarus). IEEE 1800-2023 13.4.1 declares an implicit result variable, and 6.21/13.4.2 give it static lifetime. The standalone source reproduces the reset without the suite adapters. Celox retains the previous value.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_static_function_lifetimes.json",
+          "verification/repros/sv_static_function_lifetimes.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_static_function_result_lifetime",
+        "observed_version": "Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 and Icarus 13.0 reset a static function result on calls that do not assign it (0 for bit, X for logic in Icarus). IEEE 1800-2023 13.4.1 declares an implicit result variable, and 6.21/13.4.2 give it static lifetime. The standalone source reproduces the reset without the suite adapters. Celox retains the previous value.",
+        "upstream": []
+      },
+      "name": "procedural::static_function_result_keeps_value_between_calls",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

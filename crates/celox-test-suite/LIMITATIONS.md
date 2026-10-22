@@ -356,6 +356,15 @@ The focused [Verilator](verification/repros/named_array_parameters_verilator.jso
 [Slang](verification/repros/named_array_parameters_slang.json) observations retain
 the failures and independent elaborated values.
 
+Static function lifetime cases expose resets of the implicit result in Verilator
+5.052 and Icarus 13.0, and of an output-only formal in Verilator. The expected
+retention follows IEEE 1800-2023 6.21, 13.4.1, 13.4.2 and 13.5. The
+[adapter-free source](verification/repros/sv_static_function_lifetimes.sv) and
+[focused observations](verification/repros/sv_static_function_lifetimes.json)
+record these differences. Icarus also rejects explicit static locals in automatic
+functions and output function arguments. Only the affected tool/case pairs are
+excluded; their original assertions remain available through `--include-ignored`.
+
 The new `$dist_uniform` seed-width case is excluded for Verilator 5.052 and
 Icarus 13.0. Verilator generates an invalid C++ reference binding for converted
 seed arguments; Icarus rejects the `shortint` seed at startup. IEEE 1800-2023

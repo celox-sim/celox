@@ -3167,6 +3167,11 @@ impl<'p, 'a> Comb<'p, 'a> {
             .subroutine(name)
             .cloned()
             .ok_or_else(|| unsupported(format!("call of `{name}`")))?;
+        // Symbolic execution cannot represent state shared by invocations.
+        // Fall back to Ff, including for runtime declaration initializers.
+        if !subroutine.persistent_locals.is_empty() {
+            return Err(unsupported("stateful function call"));
+        }
         if self.active_calls.iter().any(|active| active == name) {
             return Err(unsupported(format!("recursive call of `{name}`")));
         }

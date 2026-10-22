@@ -257,6 +257,9 @@ impl<'a> ProcModule<'a> {
                 sv::ir::Callee::Subroutine(name) => name,
             };
             if let Some(subroutine) = self.subroutine(&name) {
+                if !subroutine.persistent_locals.is_empty() {
+                    return true;
+                }
                 default_calls(subroutine, &args, &mut calls);
                 if visited.insert(name) {
                     for stmt in &subroutine.body {

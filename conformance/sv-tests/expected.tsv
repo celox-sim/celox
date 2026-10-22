@@ -271,8 +271,8 @@ chapter-13/13.4.2--function-automatic.sv	2state	pass
 chapter-13/13.4.2--function-automatic.sv	4state	pass
 chapter-13/13.4.2--function-recursive.sv	2state	fail
 chapter-13/13.4.2--function-recursive.sv	4state	fail
-chapter-13/13.4.2--function-static.sv	2state	fail
-chapter-13/13.4.2--function-static.sv	4state	fail
+chapter-13/13.4.2--function-static.sv	2state	pass
+chapter-13/13.4.2--function-static.sv	4state	pass
 chapter-13/13.4.3--const-function.sv	2state	pass
 chapter-13/13.4.3--const-function.sv	4state	pass
 chapter-13/13.4.4--fork-invalid.sv	2state	pass

@@ -309,6 +309,7 @@ impl ConstantFunctions {
                 sensitivity_body: Vec::new(),
                 is_task: false,
                 automatic_locals: Vec::new(),
+                persistent_locals: Vec::new(),
                 return_type: function.return_var.as_ref().map(|(_, ty)| ty.clone()),
                 return_var: function.return_var.as_ref().map(|(name, _)| name.clone()),
                 params: function
@@ -481,6 +482,8 @@ fn collect_module_constant_functions(
         subroutine_directions: &subroutine_directions,
         automatic: lifetimes::automatic_by_default(tree),
         statics: Vec::new(),
+        static_initializers: Vec::new(),
+        constant_evaluation: true,
     };
     let mut rejected = HashMap::default();
     let subroutines = match procedural::subroutines_with_symbolic_parameters(

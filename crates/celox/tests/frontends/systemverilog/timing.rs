@@ -657,3 +657,15 @@ fn narrow_nonblocking_updates_cover_staged_and_queued_sites() {
         assert!(!staged(name), "{name} queues its updates");
     }
 }
+
+sv_backends! {
+    fn static_function_storage_is_shared_between_processes(sim) {
+        @case "timing::static_function_storage_is_shared_between_processes";
+    }
+}
+
+sv_backends! {
+    fn static_function_readonly_initializer_calls_execute_once(sim) {
+        @case "timing::static_function_readonly_initializer_calls_execute_once";
+    }
+}

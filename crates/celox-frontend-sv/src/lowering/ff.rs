@@ -3529,9 +3529,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                         .map_err(slt_error)?;
                 }
                 inputs.push((id, self.lower_slt(&arena, node)?));
-            } else if self.kernel.is_none()
-                || !subroutine.is_task
-                || subroutine.automatic_locals.contains(&param.name)
+            } else if !subroutine.persistent_locals.contains(&param.name)
+                && (self.kernel.is_none()
+                    || !subroutine.is_task
+                    || subroutine.automatic_locals.contains(&param.name))
             {
                 let value = self.default_reg(id);
                 inputs.push((id, value));
@@ -3547,7 +3548,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .m
                 .id(return_var)
                 .ok_or_else(|| unsupported(format!("result of `{name}`")))?;
-            self.init_default(id);
+            if !subroutine.persistent_locals.contains(return_var) {
+                self.init_default(id);
+            }
         }
         let return_block = self.b.new_block();
         self.functions.push(FunctionBlocks {

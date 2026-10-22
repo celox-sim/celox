@@ -103,6 +103,13 @@ cases retain their verdicts. The pinned `real_bit_select_idx` input is rejected
 earlier for its undriven net, so a separate analyzer regression uses a driven
 input to check that real-valued indices themselves are rejected.
 
+Static function storage support updates the two rows for
+`13.4.2--function-static` from fail to pass in both state modes. The official
+runner selects elaboration for this probe: its local accumulator now has
+persistent storage rather than being rejected. Runtime retention is exercised
+by the shared static-function simulation cases. The full pinned run matches
+the reviewed expectations in both state modes.
+
 Blocking latch support changes ten expectation rows: `12.4--if`,
 `12.4.1--if_else_if`, and the three `12.4.2` priority/unique conditional probes
 now pass elaboration in both state modes. These sources use ordinary
