@@ -981,18 +981,21 @@ pub(super) fn indexed_select_bounds_values(
     // unsigned type or truncate a carry across the base expression's width.
     let Some(base_value) = eval_ast_const_expr(state, &base, &dimensions.const_env) else {
         // A procedural loop index is not constant while its body is bound.
-        // Keep the endpoints in declared coordinates so normal memory range
-        // flattening retains the element offset. Lowering can then unroll the
-        // loop before requiring a constant selection inside each memory word.
-        let memory_word = name
-            .and_then(|name| dimensions.get(name))
-            .is_some_and(|shape| {
-                !shape.unpacked.is_empty()
-                    && index_count == shape.unpacked.len()
-                    && shape.packed.len() == 1
-            });
+        // Keep the endpoints in declared coordinates so normal range flattening
+        // retains preceding unpacked and packed indices. Lowering can then unroll
+        // the loop before requiring a constant selection inside the selected word.
+        let selected_word = name.is_some_and(|name| {
+            if let Some(shape) = dimensions.get(name) {
+                index_count >= shape.unpacked.len()
+                    && index_count + 1 == shape.unpacked.len() + shape.packed.len()
+            } else {
+                index_count == 0
+                    && dimensions::parameter_type_from_const_env(&dimensions.const_env, name)
+                        .is_some_and(|ty| ty.width > 1)
+            }
+        });
         let ty = self_determined_type(state, &base, dimensions).filter(|ty| ty.0 <= 32);
-        let Some(ty) = ty.filter(|_| memory_word) else {
+        let Some(ty) = ty.filter(|_| selected_word) else {
             return Err(unsupported("indexed part-select start"));
         };
         let base = ConstExpr::Resize {
