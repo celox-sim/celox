@@ -18,7 +18,7 @@ pub(super) fn precision(
             Some(FP::F64)
         }
         E::Call {
-            callee: sv::ir::Callee::System(F::Bitstoreal | F::Itor),
+            callee: sv::ir::Callee::System(F::Bitstoreal | F::Itor | F::Realtime),
             ..
         } => Some(FP::F64),
         E::Call {

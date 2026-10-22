@@ -1,0 +1,48 @@
+(group realtime (category sequential))
+
+; IEEE 1800-2023 20.3.3: real result, rather than integer arithmetic.
+(case realtime_returns_real_in_timed_processes
+  (source "realtime.sv" #"
+module Top(input logic clk, input int a,
+           output logic [63:0] sampled, half_time, live,
+           output int integer_half);
+  always_ff @(posedge clk) begin
+    sampled = $realtobits($realtime());
+    half_time = $realtobits($realtime / 2);
+    integer_half = $time / 2;
+  end
+  always_comb live = $realtobits($realtime + a);
+endmodule
+"#)
+  (top Top)
+  (run_until 0)
+  (modify (set clk 0) (set a 0))
+  (run_until 3)
+  (modify (set clk 1) (set a 1))
+  (run_until 3)
+  (assert_eq sampled 0x4008000000000000)
+  (assert_eq half_time 0x3ff8000000000000)
+  (assert_eq integer_half 1)
+  (assert_eq live 0x4010000000000000)
+  (modify (set clk 0))
+  (run_until 5)
+  (modify (set clk 1) (set a 0))
+  (run_until 5)
+  (assert_eq sampled 0x4014000000000000)
+  (assert_eq half_time 0x4004000000000000)
+  (assert_eq integer_half 2)
+  (assert_eq live 0x4014000000000000))
+
+(case realtime_keeps_the_full_tick_counter
+  (source "wide_time.sv" #"
+module Top(input logic clk, output logic [63:0] sampled);
+  always_ff @(posedge clk) sampled = $realtobits($realtime);
+endmodule
+"#)
+  (top Top)
+  (run_until 0)
+  (modify (set clk 0))
+  (run_until 4294967297)
+  (modify (set clk 1))
+  (run_until 4294967297)
+  (assert_eq sampled 0x41f0000000100000))

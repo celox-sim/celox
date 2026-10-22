@@ -112,7 +112,7 @@ waits zero.
 | --- | --- |
 | System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | Random numbers | `$urandom`, `$urandom_range`, `$random` and `$dist_uniform` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
-| Simulation time | `$time` and `$stime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
+| Simulation time | `$time`, `$stime` and `$realtime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop`, `$exit` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | Runtime I/O | `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb`, and [VCD controls](./vcd#systemverilog-source-controls) in timed processes |
 | State | two-state and four-state simulation |
@@ -160,7 +160,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   ([#456](https://github.com/celox-sim/celox/issues/456)).
 - System tasks and functions: Celox knows every name IEEE 1800-2023
   defines, including the optional ones of its Annex D. One it does not support where it is called, such as
-  `$realtime` in an expression or `$fgets`, is
+  `$fgets`, is
   reported with its name wherever it is written, including in an unused
   parameter and in a function body. A `$` name that is not a system task or
   function, a call with the wrong number of arguments, an omitted argument
@@ -570,8 +570,12 @@ returns the time in the time unit of the scope that calls it, rounded to an
 integer, halves up (20.3.1); a package function uses its package's unit.
 `$stime` returns the low 32 bits of that value (20.3.2). Combinational logic
 reads the time when its inputs change, not when only the time does. A
-`Simulator`, which has no time, returns 0. `$realtime` waits for `real`
-support.
+`Simulator`, which has no time, returns 0. `$realtime` returns a `real` in
+the calling scope's time unit without integer rounding (20.3.3). For example,
+at 1.25 ns in a scope with a 1 ns time unit, `$realtime` returns 1.25 and
+`$time` returns 1. Real values have IEEE 754 double precision; large tick
+counts may lose precision when converted to `real`. Time queries follow the
+simulation clock when a checkpoint is restored.
 
 ## Random numbers {#random-numbers}
 

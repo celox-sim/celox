@@ -954,7 +954,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             Expr::Call {
                 callee:
                     sv::ir::Callee::System(
-                        function @ (sv::ir::SystemFunction::Time | sv::ir::SystemFunction::Stime),
+                        function @ (sv::ir::SystemFunction::Time
+                        | sv::ir::SystemFunction::Stime
+                        | sv::ir::SystemFunction::Realtime),
                     ),
                 args,
                 ..
@@ -1500,6 +1502,22 @@ impl<'p, 'a> Ff<'p, 'a> {
             right: Box::new(right),
         };
         let time = Expr::Ident(self.m.time_slot());
+        if function == sv::ir::SystemFunction::Realtime {
+            // 20.3.3 returns the fractional scope time. Convert the entire
+            // unsigned 64-bit tick counter, rather than the 32-bit $itor formal.
+            let real = |value| {
+                let call = |function, value| Expr::Call {
+                    callee: sv::ir::Callee::System(function),
+                    args: vec![Some(value)],
+                    arg_order: Vec::new(),
+                };
+                call(
+                    sv::ir::SystemFunction::Bitstoreal,
+                    call(sv::ir::SystemFunction::Realtobits, value),
+                )
+            };
+            return Ok(binary(real(time), BinaryOp::Div, real(divisor)));
+        }
         let time = if divisor == Expr::Literal("64'd1".into()) {
             time
         } else {

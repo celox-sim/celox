@@ -103,7 +103,7 @@ select・連結式の引数は未対応として拒否します。
 | --- | --- |
 | システム関数 | `$timeunit`、`$timeprecision`、`$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown`、`$isunbounded` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
 | 乱数 | `$urandom`、`$urandom_range`、`$random`、`$dist_uniform` はクロックで起動するプロセス、`always_comb`、`always @*`、`initial` とそれらから呼ぶサブルーチンで使用可能。`$urandom` の任意の整数式によるシード、`$random` のシード変数、プロセスごとに独立した乱数列 |
-| シミュレーション時刻 | `$time` と `$stime` はクロックで起動するプロセス、組合せプロセス、継続代入、`initial` とそれらから呼ぶサブルーチンで使用可能 |
+| シミュレーション時刻 | `$time`、`$stime`、`$realtime` はクロックで起動するプロセス、組合せプロセス、継続代入、`initial` とそれらから呼ぶサブルーチンで使用可能 |
 | システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`、`$exit`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 実行時 I/O | `$test$plusargs`、`$value$plusargs`、`$fopen`、`$fclose`、`$fdisplay` / `$fwrite` と基数指定形、`$writememh` / `$writememb`、[VCD 制御](./vcd#systemverilog-source-controls)。時間を持つプロセスで実行 |
 | 状態 | 2 値・4 値シミュレーション |
@@ -146,7 +146,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 - 式：ストリーミング連結（[#447](https://github.com/celox-sim/celox/issues/447)）、パラメータ式での
   リダクション演算子（[#456](https://github.com/celox-sim/celox/issues/456)）。
 - システムタスクとシステム関数：Celox は IEEE 1800-2023 が定義するすべての名前を、
-  附属書 D の任意のものも含めて知っています。呼び出した位置で対応していないもの（式の中の `$realtime`、`$fgets` など）は、
+  附属書 D の任意のものも含めて知っています。呼び出した位置で対応していないもの（`$fgets` など）は、
   使われていないパラメータや関数本体の中を含め、書かれた
   場所にかかわらず名前を示して報告します。システムタスクでもシステム関数でもない `$` 名、
   引数の数が誤っている呼び出し、既定値のない引数の省略、値として使ったタスクはエラーです。
@@ -448,7 +448,10 @@ interface型から解決します。generic interfaceポートとgenerate内の�
 パッケージの関数ではそのパッケージの時間単位を使います。`$stime` はその値の
 下位32ビットを返します（20.3.2）。組合せ回路は入力が変わったときに時刻を読み、
 時刻だけが進んでも評価し直しません。時刻を持たない `Simulator` では0を返します。
-`$realtime` は `real` 型への対応を待っています。
+`$realtime` は呼び出し元の時間単位で整数への丸めなしに `real` を返します（20.3.3）。
+たとえば時間単位が1 nsのスコープで1.25 ns時点では、`$realtime` は1.25、
+`$time` は1を返します。`real` は IEEE 754 倍精度のため、大きな時刻では
+変換時に精度を失う場合があります。checkpoint の復元後は復元した時刻を参照します。
 
 
 `$printtimescale` は IEEE1800-2023 20.4.2 の形式で時刻スコープを表示します。

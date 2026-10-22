@@ -266,7 +266,7 @@ pub(in crate::ast) fn bind_value(
                 }
                 let time_call = match &native.expression(id).kind {
                     ExprKind::Name(name)
-                        if matches!(name.spelling.as_str(), "$time" | "$stime") =>
+                        if matches!(name.spelling.as_str(), "$time" | "$stime" | "$realtime") =>
                     {
                         Some((name.spelling.clone(), &[][..]))
                     }
@@ -274,7 +274,7 @@ pub(in crate::ast) fn bind_value(
                         expression,
                         arguments,
                     } => call_name(&tree.state, *expression, native)
-                        .filter(|name| matches!(name.as_str(), "$time" | "$stime"))
+                        .filter(|name| matches!(name.as_str(), "$time" | "$stime" | "$realtime"))
                         .map(|name| (name, arguments.as_slice())),
                     _ => None,
                 };
@@ -1467,7 +1467,8 @@ pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> 
                 Callee::System(
                     SystemFunction::Bitstoreal
                     | SystemFunction::Bitstoshortreal
-                    | SystemFunction::Itor,
+                    | SystemFunction::Itor
+                    | SystemFunction::Realtime,
                 ),
             ..
         } => true,

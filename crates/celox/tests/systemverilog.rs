@@ -128,6 +128,8 @@ mod operators;
 mod packed_structs;
 #[path = "frontends/systemverilog/procedural.rs"]
 mod procedural;
+#[path = "frontends/systemverilog/realtime.rs"]
+mod realtime;
 #[path = "frontends/systemverilog/review_regressions.rs"]
 mod review_regressions;
 #[path = "frontends/systemverilog/scan.rs"]
