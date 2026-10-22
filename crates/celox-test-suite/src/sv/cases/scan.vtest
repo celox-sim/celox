@@ -55,3 +55,25 @@
   (top Top)
   (run_until 0)
   (assert_eq ok 1))
+
+
+(case sscanf_real_fields_width_and_suppression
+  (source "scan_real.sv" #"
+    module Top(output bit ok);
+      real a,b,c,keep; int n,number,eof,mismatch,partial;
+      initial begin
+        n=$sscanf(" -1.25e+2 .5 2.","%e%f%g",a,b,c);
+        ok=n==3 && a==-125.0 && b==0.5 && c==2.0;
+        n=$sscanf("1.25Q7","%4fQ%d",a,number);
+        ok &= n==2 && a==1.25 && number==7;
+        n=$sscanf("3.5e1,2.25","%*g,%f",b);
+        ok &= n==1 && b==2.25;
+        keep=9.5;eof=$sscanf("","%f",keep);mismatch=$sscanf("bad","%e",keep);
+        partial=$sscanf("8 1.5 bad","%d%g%f",number,a,keep);
+        ok &= eof==-1 && mismatch==0 && partial==2 && number==8 && a==1.5 && keep==9.5;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1))

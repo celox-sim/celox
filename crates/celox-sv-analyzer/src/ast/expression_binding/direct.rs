@@ -963,7 +963,14 @@ pub(in crate::ast) fn bind_value(
                                     | SystemFunction::ScopeRandomize
                             ) {
                                 for (position, arg) in operands.iter().enumerate() {
-                                    if expr_static_width(&tree.state, arg, dimensions).is_none()
+                                    let real_output = matches!(
+                                        function,
+                                        SystemFunction::Sscanf | SystemFunction::Fscanf
+                                    ) && position >= 2
+                                        && real_value(arg, dimensions);
+                                    if (!real_output
+                                        && expr_static_width(&tree.state, arg, dimensions)
+                                            .is_none())
                                         || args
                                             .get(position)
                                             .copied()
@@ -984,9 +991,15 @@ pub(in crate::ast) fn bind_value(
                                     {
                                         return Err(AnalyzerError::InvalidSystemTfCall {
                                             name: name.clone(),
-                                            detail:
+                                            detail: if matches!(
+                                                function,
+                                                SystemFunction::Sscanf | SystemFunction::Fscanf
+                                            ) {
+                                                "output argument must be a writable integral, real or shortreal variable".into()
+                                            } else {
                                                 "output/inout argument must be an integral variable"
-                                                    .into(),
+                                                    .into()
+                                            },
                                         });
                                     }
                                 }
