@@ -42,7 +42,8 @@ impl<B: SimBackend> SimulationState<B> {
     }
 
     /// Publish the queued and flagged nonblocking assignments of process
-    /// kernels (the NBA region, IEEE 1800-2023 4.5).
+    /// kernels (the NBA region, IEEE 1800-2023 4.5): the queued ones in
+    /// issue order, then the flagged ones.
     pub(super) fn publish_nba<E>(&mut self, executor: &mut E, round: &mut Round) -> bool
     where
         E: SimulationExecutor<Backend = B>,
@@ -51,15 +52,44 @@ impl<B: SimBackend> SimulationState<B> {
             return false;
         }
         round.nba_published = true;
-        let flagged = round.kernels_ran && self.model.has_pending_nba_sites;
-        if self.process_state.nba_queue.is_empty() && !flagged {
+        let flagged = if round.kernels_ran && self.model.has_pending_nba_sites {
+            let backend = executor.backend();
+            self.model
+                .processes
+                .iter()
+                .flat_map(|process| &process.nba_sites)
+                .filter_map(|site| site.pending)
+                .filter(|&pending| backend.get_as::<u8>(pending) != 0)
+                .count()
+        } else {
+            0
+        };
+        let mut queued = std::mem::take(&mut self.process_state.nba_queue);
+        if queued.is_empty() && flagged == 0 {
+            self.process_state.nba_queue = queued;
             return false;
         }
-        let mut updates = std::mem::take(&mut self.process_state.nba_queue);
-        if flagged {
-            let backend = executor.backend_mut();
-            for process in &self.model.processes {
-                for site in &process.nba_sites {
+        // Several updates may pulse an event signal: each is an update the
+        // event domains see, not only the final value.
+        let several = queued.len() + flagged > 1;
+        if several {
+            self.event_values(executor.backend(), &mut round.before);
+            round.transitions.clear();
+        }
+        for update in queued.drain(..) {
+            let new = NbaValue::Queued(&update.value);
+            self.publish_update(executor.backend_mut(), &update, new);
+            if several {
+                self.record_transitions(executor.backend(), round);
+            }
+        }
+        // Keep the queue's storage for the next time slot.
+        self.process_state.nba_queue = queued;
+        if flagged > 0 {
+            for process in 0..self.model.processes.len() {
+                for site in 0..self.model.processes[process].nba_sites.len() {
+                    let site = self.model.processes[process].nba_sites[site];
+                    let backend = executor.backend_mut();
                     let Some(pending) = site.pending else {
                         continue;
                     };
@@ -70,38 +100,17 @@ impl<B: SimBackend> SimulationState<B> {
                     let offset = site
                         .offset
                         .map_or(0, |offset| backend.get_as::<u64>(offset) as usize);
-                    updates.push(NbaUpdate {
+                    let update = NbaUpdate {
                         target: site.target,
                         lsb: site.lsb + offset,
                         width: site.width,
-                        value: read(backend, site.value),
-                    });
+                        value: Value::default(),
+                    };
+                    self.publish_update(backend, &update, NbaValue::Staged(site.value));
+                    if several {
+                        self.record_transitions(executor.backend(), round);
+                    }
                 }
-            }
-        }
-        if updates.is_empty() {
-            return false;
-        }
-        // Several updates may pulse an event signal: each is an update the
-        // event domains see, not only the final value.
-        let several = updates.len() > 1;
-        if several {
-            self.event_values(executor.backend(), &mut round.before);
-            round.transitions.clear();
-        }
-        for update in updates {
-            let backend = executor.backend_mut();
-            let merged = update.merge_into(&read(backend, update.target));
-            let target = update.target;
-            self.write_signal(backend, target, |backend| {
-                if target.is_4state {
-                    backend.set_four_state(target, merged.0, merged.1);
-                } else {
-                    backend.set_wide(target, merged.0);
-                }
-            });
-            if several {
-                self.record_transitions(executor.backend(), round);
             }
         }
         if several {
@@ -113,6 +122,55 @@ impl<B: SimBackend> SimulationState<B> {
         round.track_stable_edges = true;
         true
     }
+
+    /// Write `update`, whose value is `new`, into its target. An update
+    /// inside a target of at most 64 bits with one state plane is merged as
+    /// `u64`; any other as [`Value`].
+    fn publish_update(&mut self, backend: &mut B, update: &NbaUpdate, new: NbaValue<'_>) {
+        let target = update.target;
+        let narrow = |signal: SignalRef| {
+            signal.width <= 64
+                && signal.array_layout.is_none()
+                && !(self.four_state && signal.is_4state)
+        };
+        let inside = update.lsb + update.width <= target.width && narrow(target);
+        let new = match new {
+            NbaValue::Queued(value) if inside => Ok(value.0.iter_u64_digits().next().unwrap_or(0)),
+            NbaValue::Staged(value) if inside && narrow(value) => Ok(backend.get_as::<u64>(value)),
+            NbaValue::Queued(value) => Err(value.clone()),
+            NbaValue::Staged(value) => Err(read(backend, value)),
+        };
+        match new {
+            Ok(new) => {
+                let all = low_bits(target.width);
+                let old = backend.get_as::<u64>(target) & all;
+                let merged = update.merge_narrow(old, new);
+                self.write_signal(backend, target, |backend| backend.set(target, merged));
+            }
+            Err(value) => {
+                let merged = NbaUpdate { value, ..*update }.merge_into(&read(backend, target));
+                self.write_signal(backend, target, |backend| {
+                    if target.is_4state {
+                        backend.set_four_state(target, merged.0, merged.1);
+                    } else {
+                        backend.set_wide(target, merged.0);
+                    }
+                });
+            }
+        }
+    }
+}
+
+/// The value of a nonblocking update: queued, or staged in a site's value
+/// object.
+enum NbaValue<'a> {
+    Queued(&'a Value),
+    Staged(SignalRef),
+}
+
+/// The low `width` bits of a `u64`, for `width` up to 64.
+fn low_bits(width: usize) -> u64 {
+    u64::MAX >> (64 - width)
 }
 
 /// The working and sparse working state: the next-state values of
@@ -155,5 +213,50 @@ impl NbaUpdate {
             place(&target.0, &self.value.0),
             place(&target.1, &self.value.1),
         )
+    }
+
+    /// [`Self::merge_into`] for a target of at most 64 bits with one state
+    /// plane: the bits of the target's value `old` with `new` written in.
+    fn merge_narrow(&self, old: u64, new: u64) -> u64 {
+        let all = low_bits(self.target.width);
+        let range = (low_bits(self.width) << self.lsb) & all;
+        ((old & !range) | ((new << self.lsb) & range)) & all
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn narrow_merges_match_wide_merges() {
+        let patterns = [0u64, u64::MAX, 0xa5a5_5a5a_0f0f_f0f0, 0x8000_0000_0000_0001];
+        for target_width in [1, 7, 8, 9, 16, 33, 63, 64] {
+            for lsb in 0..target_width {
+                for width in 1..=target_width - lsb {
+                    for (old, new) in patterns.iter().zip(patterns.iter().rev()) {
+                        let all = low_bits(target_width);
+                        let update = NbaUpdate {
+                            target: SignalRef {
+                                offset: 0,
+                                width: target_width,
+                                is_4state: false,
+                                array_layout: None,
+                            },
+                            lsb,
+                            width,
+                            value: (BigUint::from(new & low_bits(width)), BigUint::default()),
+                        };
+                        let wide =
+                            update.merge_into(&(BigUint::from(old & all), BigUint::default()));
+                        assert_eq!(
+                            BigUint::from(update.merge_narrow(old & all, *new)),
+                            wide.0,
+                            "target {target_width}, lsb {lsb}, width {width}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

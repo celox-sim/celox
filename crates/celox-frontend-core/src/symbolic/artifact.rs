@@ -122,11 +122,41 @@ pub struct SimModule {
     /// Nonblocking sites of the module's processes; `process` indexes
     /// [`Self::processes`].
     pub nba_sites: Vec<NbaSite<SourceVarId>>,
+    /// Nonblocking sites whose kernel has both a staged and a queued path.
+    pub nba_switches: Vec<NbaSwitch<SourceVarId>>,
     /// Synchronous host operations of the module processes.
     pub host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
     /// The variable through which the module's code reads the simulation
     /// time; see `RuntimeSchema::time_slots`.
     pub time_slot: Option<SourceVarId>,
+}
+
+/// A nonblocking site whose kernel has two paths, as
+/// `ProcessKernelBuilder::nonblocking_switched` builds them. The staged path
+/// stages the value in the site's `value` and sets its `pending` flag; the
+/// queued path leaves the value in `queued` and returns to the runtime.
+/// Assembly keeps one path: the staged one only if nothing else writes the
+/// site's target and nothing can observe when the target is updated. For the
+/// queued path it makes `queued` the site's value and drops the flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NbaSwitch<A> {
+    /// The site's `value` object, which identifies the site.
+    pub value: A,
+    /// The one-bit variable whose load selects the path. It holds no state:
+    /// assembly replaces the selection by a jump.
+    pub switch: A,
+    /// The value object of the queued path.
+    pub queued: A,
+}
+
+impl<A> NbaSwitch<A> {
+    pub fn map<B>(&self, mut map: impl FnMut(&A) -> B) -> NbaSwitch<B> {
+        NbaSwitch {
+            value: map(&self.value),
+            switch: map(&self.switch),
+            queued: map(&self.queued),
+        }
+    }
 }
 
 /// The package variable a module variable denotes.

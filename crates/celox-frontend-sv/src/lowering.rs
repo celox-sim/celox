@@ -18,8 +18,8 @@ use celox_design::{
 };
 use celox_frontend_core::process::PROCESS_RESUME_WIDTH;
 use celox_frontend_core::symbolic::artifact::{
-    ExternalHierarchy, ExternalModule, PackageBinding, SimModule, SymbolicGlueAddr as GlueAddr,
-    SymbolicProcess, SymbolicRtl, SymbolicVariable,
+    ExternalHierarchy, ExternalModule, NbaSwitch, PackageBinding, SimModule,
+    SymbolicGlueAddr as GlueAddr, SymbolicProcess, SymbolicRtl, SymbolicVariable,
 };
 use celox_frontend_core::{
     FrontendTrace, FrontendTraceOptions, LoweringPhase, ParserError, ScheduledRtlOutput,
@@ -2892,6 +2892,7 @@ fn lower_module_with_overrides(
         processes,
         wait_sites,
         nba_sites,
+        nba_switches,
         host_request_sites,
         event_assignments,
     ) = lower_initial_processes(
@@ -3010,6 +3011,7 @@ fn lower_module_with_overrides(
             counter_slots: Vec::new(),
             wait_sites,
             nba_sites,
+            nba_switches,
             host_request_sites,
             time_slot: name_to_id.get(TIME_SLOT).copied(),
         },
@@ -3751,6 +3753,7 @@ fn lower_initial_processes(
         Vec<SymbolicProcess>,
         Vec<WaitSite<SourceVarId>>,
         Vec<NbaSite<SourceVarId>>,
+        Vec<NbaSwitch<SourceVarId>>,
         Vec<celox_design::HostRequestSite<SourceVarId>>,
         Vec<(SourceVarId, Vec<sv::ir::Stmt>)>,
     ),
@@ -3826,6 +3829,7 @@ fn lower_initial_processes(
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         ));
     }
 
@@ -3890,6 +3894,7 @@ fn lower_initial_processes(
     pm.extern_functions = std::mem::take(extern_functions);
     let mut wait_sites = Vec::new();
     let mut nba_sites = Vec::new();
+    let mut nba_switches = Vec::new();
     let mut host_request_sites = Vec::new();
     let processes = runtime
         .into_iter()
@@ -3903,6 +3908,7 @@ fn lower_initial_processes(
             )?;
             wait_sites.extend(kernel.wait_sites);
             nba_sites.extend(kernel.nba_sites);
+            nba_switches.extend(kernel.nba_switches);
             host_request_sites.extend(kernel.host_request_sites.into_iter().map(|mut site| {
                 site.process = index;
                 // Repeating ordinary always processes also execute only in
@@ -3927,6 +3933,7 @@ fn lower_initial_processes(
         processes?,
         wait_sites,
         nba_sites,
+        nba_switches,
         host_request_sites,
         std::mem::take(&mut pm.event_assignments),
     ))

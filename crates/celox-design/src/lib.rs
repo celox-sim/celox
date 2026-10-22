@@ -613,12 +613,13 @@ pub struct NbaSite<A> {
     /// Two-state staging object holding a bit offset added to `lsb`, for an
     /// assignment whose position is computed at run time.
     pub offset: Option<A>,
-    /// One-bit flag of a site whose destination receives no other
-    /// nonblocking assignment: a variable of the module with no other
-    /// nonblocking site in the module and no writer outside it (not a port,
-    /// not bound to a package variable, not the target of a hierarchical
-    /// reference). A frontend that cannot tell leaves it `None`, so the
-    /// assignment goes through the ordered queue.
+    /// One-bit flag of a site whose destination has no other writer in the
+    /// design (no other nonblocking site, no store of any unit, not a
+    /// top-level port) and whose update order nothing observes (no wait,
+    /// counter, event domain or combinational observer reads it, directly
+    /// or through combinational logic): publication places flagged updates
+    /// after the queued ones. Without the flag the assignment goes through
+    /// the ordered queue.
     ///
     /// The kernel stages the value and sets the flag without returning;
     /// publication commits flagged sites and clears the flags. A kernel

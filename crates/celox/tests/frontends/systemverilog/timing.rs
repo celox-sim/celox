@@ -80,6 +80,9 @@ timed_cases! {
     fn blocking_ff_stores_are_visible_before_inactive_work = "timing::blocking_ff_stores_are_visible_before_inactive_work";
     fn blocking_ff_clock_edges_trigger_their_domains_before_inactive_work = "timing::blocking_ff_clock_edges_trigger_their_domains_before_inactive_work";
     fn nonblocking_assignments_in_processes_update_in_the_nba_region = "timing::nonblocking_assignments_in_processes_update_in_the_nba_region";
+    fn staged_nonblocking_updates_keep_their_order = "timing::staged_nonblocking_updates_keep_their_order";
+    fn narrow_nonblocking_updates_keep_the_other_bits = "timing::narrow_nonblocking_updates_keep_the_other_bits";
+    fn four_state_nonblocking_updates_keep_unknown_bits = "timing::four_state_nonblocking_updates_keep_unknown_bits";
     fn nonblocking_ff_stores_remain_pending_during_inactive_work = "timing::nonblocking_ff_stores_remain_pending_during_inactive_work";
     fn mixed_ff_stores_keep_their_active_and_nba_values = "timing::mixed_ff_stores_keep_their_active_and_nba_values";
     fn printed_finish_notice_is_design_output = "timing::printed_finish_notice_is_design_output";
@@ -535,5 +538,107 @@ fn timing_controls_outside_suspendable_processes_are_rejected() {
         .unwrap_or_else(|| panic!("`{body}` must be rejected"))
         .to_string();
         assert!(error.contains(construct), "{body}: {error}");
+    }
+}
+
+/// A nonblocking site stages its value (`NbaSite::pending`) only if its
+/// target has no other writer and nothing observes the order of the
+/// updates in the NBA region: no wait reads the target, directly or through
+/// combinational logic, including the `$event` variable of an expression
+/// event. Every other site keeps the ordered queue.
+#[test]
+fn nonblocking_sites_stage_only_unobserved_targets_with_one_writer() {
+    let source = r#"
+        module Top(output logic [7:0] q, output bit seen_wait, seen_comb);
+            timeunit 1ps / 1ps;
+            logic [7:0] stim = 8'd0, blocking = 8'd0, r = 8'd0;
+            logic a = 1'b0, b = 1'b0, d = 1'b0, e = 1'b0, s = 1'b0, en = 1'b1, clk = 1'b0;
+            logic [7:0] hits = 8'd0;
+            wire c = d & ~e;
+            always #5 clk = ~clk;
+            initial forever @(posedge clk) stim <= stim + 8'd3;
+            always_ff @(posedge clk) r <= stim;
+            initial begin #2; a <= 1'b1; b <= 1'b1; d <= 1'b1; e <= 1'b1; end
+            initial begin #10; b <= 1'b1; e <= 1'b1; end
+            initial begin wait (a && !b); seen_wait = 1'b1; end
+            initial begin @(posedge c); seen_comb = 1'b1; end
+            initial forever @(posedge clk) s <= ~s;
+            initial forever @(posedge (s & en)) hits = hits + 8'd1;
+            initial begin #1; blocking <= 8'd1; #1 blocking = 8'd2; end
+            initial begin #1; q <= stim; end
+        endmodule
+    "#;
+    let simulator = celox::Simulator::from_sv_sources(
+        vec![(source, std::path::Path::new("staged_sites.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let program = simulator.program();
+    let mut staged: Vec<_> = ["stim", "blocking", "a", "b", "d", "e", "s", "q"]
+        .into_iter()
+        .filter(|name| {
+            let target = program.get_addr(&[], &[name]).unwrap();
+            program
+                .runtime_schema
+                .nba_sites
+                .iter()
+                .filter(|site| site.target == target)
+                .all(|site| site.pending.is_some())
+        })
+        .collect();
+    staged.sort_unstable();
+    assert_eq!(staged, ["stim"]);
+
+    // The observed sites keep the ordered queue, and behave as before any
+    // site could stage: Celox evaluates the waits after the region's
+    // updates, so neither sees `a && !b` or `c` hold between two of them.
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("staged_sites.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(26).unwrap();
+    assert_eq!(sim.get(sim.signal("seen_wait")), 0u8.into());
+    assert_eq!(sim.get(sim.signal("seen_comb")), 0u8.into());
+    assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+    assert_eq!(sim.get(sim.signal("stim")), 9u8.into());
+    assert_eq!(sim.get(sim.signal("r")), 6u8.into());
+    assert_eq!(sim.get(sim.signal("hits")), 2u8.into());
+}
+
+/// The narrow updates case covers staged and queued sites alike.
+#[test]
+fn narrow_nonblocking_updates_cover_staged_and_queued_sites() {
+    let design = celox_test_suite::sv::cases()
+        .find(|case| case.name == "timing::narrow_nonblocking_updates_keep_the_other_bits")
+        .unwrap()
+        .design();
+    let sources = design
+        .sources
+        .iter()
+        .map(|source| (source.text.as_str(), source.path.as_path()))
+        .collect::<Vec<_>>();
+    let simulator = celox::Simulator::from_sv_sources(sources, &design.top)
+        .build()
+        .unwrap();
+    let program = simulator.program();
+    let staged = |name: &str| {
+        let target = program.get_addr(&[], &[name]).unwrap();
+        let sites = program
+            .runtime_schema
+            .nba_sites
+            .iter()
+            .filter(|site| site.target == target)
+            .collect::<Vec<_>>();
+        assert!(!sites.is_empty(), "{name}");
+        sites.iter().all(|site| site.pending.is_some())
+    };
+    for name in ["p", "w", "x"] {
+        assert!(staged(name), "{name} stages its update");
+    }
+    for name in ["q", "v", "y"] {
+        assert!(!staged(name), "{name} queues its updates");
     }
 }

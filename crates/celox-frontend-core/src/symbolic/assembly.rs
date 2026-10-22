@@ -2,7 +2,8 @@ use num_bigint::BigUint;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::symbolic::artifact::{
-    FfPart, RelocationModule, SimModule, SplitCommit, SymbolicGlueAddr as GlueAddr, SymbolicRtl,
+    FfPart, NbaSwitch, RelocationModule, SimModule, SplitCommit, SymbolicGlueAddr as GlueAddr,
+    SymbolicRtl,
 };
 use crate::{
     FrontendLookup, FrontendTrace, FrontendTraceOptions, FusedSirOptimizationHints, HashMap,
@@ -18,8 +19,8 @@ use celox_design::{
     VariableMetadata, WaitSite,
 };
 use celox_sir::{
-    BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIRTerminator,
-    SirProgram,
+    BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIROffset,
+    SIRTerminator, SirProgram,
 };
 use celox_slt::{
     CombObserver, FfAccessSummary, LogicPath, LogicPathId, LogicPathTarget, NodeId, SLTNodeArena,
@@ -680,7 +681,7 @@ pub fn schedule_symbolic_rtl(
             &mut trace,
         )
     )?;
-    let timing = relocate_timing(bindings, &instance_modules, &modules, &processes);
+    let mut timing = relocate_timing(bindings, &instance_modules, &modules, &processes);
     let variables: HashMap<AbsoluteAddr, (usize, bool)> = instance_modules
         .iter()
         .flat_map(|(&instance, module)| {
@@ -1575,6 +1576,73 @@ pub fn schedule_symbolic_rtl(
             written_inputs: observer.written_inputs.clone(),
         })
         .collect();
+    // Nonblocking sites that can stage their value instead of queueing it
+    // (`NbaSite::pending`). Staged values are published after the queue,
+    // so a staged target must be one whose update order nothing observes:
+    // no wait, counter, event domain or comb observer reads it, directly or
+    // through combinational logic.
+    if !timing.nba_switches.is_empty() {
+        let observed = {
+            let mut observed: HashSet<AbsoluteAddr> = timing
+                .wait_sites
+                .iter()
+                .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal))
+                .chain(timing.counter_slots.iter().map(|slots| slots.signal))
+                .chain(
+                    clock_domains
+                        .iter()
+                        .flat_map(|(&alias, &canonical)| [alias, canonical]),
+                )
+                .chain(topological_clocks.iter().copied())
+                .chain(
+                    runtime_comb_observers
+                        .iter()
+                        .flat_map(|observer| observer.sensitivity.iter().map(|atom| atom.id)),
+                )
+                .collect();
+            for ffs in [
+                &eval_apply_ffs,
+                &eval_comb_apply_ffs,
+                &eval_only_ffs,
+                &apply_ffs,
+            ] {
+                observed.extend(ffs.keys().copied());
+            }
+            through_comb(observed, &comb_sources)
+        };
+        // The ports of the top module, which the host drives.
+        let top_ports: HashSet<AbsoluteAddr> = expanded
+            .get(&InstancePath(Vec::new()))
+            .map(|&root| {
+                modules[&instance_modules[&root]]
+                    .variables
+                    .iter()
+                    .filter(|(_, variable)| {
+                        matches!(
+                            variable.kind,
+                            crate::VariableKind::Input
+                                | crate::VariableKind::Output
+                                | crate::VariableKind::Inout
+                        )
+                    })
+                    .map(|(&var_id, _)| bindings.locate(root, var_id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let staged = staged_nba_sites(
+            &timing,
+            eval_comb
+                .iter()
+                .chain(eval_apply_ffs.values().flatten())
+                .chain(eval_comb_apply_ffs.values().flatten())
+                .chain(eval_only_ffs.values().flatten())
+                .chain(apply_ffs.values().flatten())
+                .chain(processes.iter().map(|process| &process.kernel)),
+            &top_ports,
+            &observed,
+        );
+        select_nba_paths(&mut timing, &staged, &mut processes);
+    }
     let (process_kernels, process_slots): (Vec<_>, Vec<_>) = processes
         .into_iter()
         .map(|process| (process.kernel, process.slots))
@@ -3104,6 +3172,7 @@ struct TimingMetadata {
     nba_sites: Vec<NbaSite<AbsoluteAddr>>,
     host_request_sites: Vec<HostRequestSite<AbsoluteAddr>>,
     time_slots: Vec<AbsoluteAddr>,
+    nba_switches: Vec<NbaSwitch<AbsoluteAddr>>,
 }
 
 /// For every combinational value, the variables it is computed from.
@@ -3239,6 +3308,156 @@ fn split_observed_commits<'k>(
     split
 }
 
+/// The switches of the switched nonblocking sites that may stage their
+/// value: the site's target has no other writer (no store or commit of any
+/// unit, no other nonblocking site, not a top-level port the host drives)
+/// and is not in `observed`.
+fn staged_nba_sites<'u>(
+    timing: &TimingMetadata,
+    units: impl Iterator<Item = &'u ExecutionUnit<RegionedAbsoluteAddr>>,
+    top_ports: &HashSet<AbsoluteAddr>,
+    observed: &HashSet<AbsoluteAddr>,
+) -> HashSet<AbsoluteAddr> {
+    let mut written = HashSet::default();
+    for unit in units {
+        for block in unit.blocks.values() {
+            for instruction in &block.instructions {
+                match instruction {
+                    SIRInstruction::Store(dst, ..) | SIRInstruction::Commit(_, dst, ..) => {
+                        written.insert(dst.absolute_addr());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut sites_per_target: HashMap<AbsoluteAddr, usize> = HashMap::default();
+    for site in &timing.nba_sites {
+        *sites_per_target.entry(site.target).or_default() += 1;
+    }
+    let targets: HashMap<AbsoluteAddr, AbsoluteAddr> = timing
+        .nba_sites
+        .iter()
+        .map(|site| (site.value, site.target))
+        .collect();
+    timing
+        .nba_switches
+        .iter()
+        .filter(|switch| {
+            let target = targets[&switch.value];
+            sites_per_target[&target] == 1
+                && !written.contains(&target)
+                && !top_ports.contains(&target)
+                && !observed.contains(&target)
+        })
+        .map(|switch| switch.switch)
+        .collect()
+}
+
+/// Keep one path of every switched nonblocking site: the staged one if its
+/// switch is in `staged`, otherwise the queued one, whose value object
+/// becomes the site's and which has no `pending` flag. The kernels select
+/// the path by a jump; the other path is removed.
+fn select_nba_paths(
+    timing: &mut TimingMetadata,
+    staged: &HashSet<AbsoluteAddr>,
+    processes: &mut [RelocatedProcess],
+) {
+    let switches: HashMap<AbsoluteAddr, NbaSwitch<AbsoluteAddr>> = timing
+        .nba_switches
+        .iter()
+        .map(|switch| (switch.value, *switch))
+        .collect();
+    for site in &mut timing.nba_sites {
+        let Some(switch) = switches.get(&site.value) else {
+            continue;
+        };
+        if !staged.contains(&switch.switch) {
+            site.value = switch.queued;
+            site.pending = None;
+        }
+    }
+    let selections: HashMap<AbsoluteAddr, bool> = switches
+        .values()
+        .map(|switch| (switch.switch, staged.contains(&switch.switch)))
+        .collect();
+    let mut folded = 0;
+    for process in processes {
+        folded += fold_nba_switches(&mut process.kernel, &selections);
+    }
+    assert_eq!(
+        folded,
+        selections.len(),
+        "every nonblocking switch selects its path once"
+    );
+}
+
+/// Replace each branch on a load of a switch in `selections` by a jump to
+/// the selected path and remove the blocks no longer reachable. Returns the
+/// number of branches replaced.
+fn fold_nba_switches(
+    unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    selections: &HashMap<AbsoluteAddr, bool>,
+) -> usize {
+    let mut folded = 0;
+    for block in unit.blocks.values_mut() {
+        let SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } = &block.terminator
+        else {
+            continue;
+        };
+        let Some((position, staged)) =
+            block
+                .instructions
+                .iter()
+                .enumerate()
+                .find_map(|(position, instruction)| match instruction {
+                    SIRInstruction::Load(register, addr, SIROffset::Static(0), 1)
+                        if register == cond =>
+                    {
+                        selections
+                            .get(&addr.absolute_addr())
+                            .map(|&staged| (position, staged))
+                    }
+                    _ => None,
+                })
+        else {
+            continue;
+        };
+        let (target, args) = if staged { true_block } else { false_block };
+        block.terminator = SIRTerminator::Jump(*target, args.clone());
+        block.instructions.remove(position);
+        folded += 1;
+    }
+    if folded > 0 {
+        let mut reachable = HashSet::default();
+        let mut pending = vec![unit.entry_block_id];
+        while let Some(id) = pending.pop() {
+            if !reachable.insert(id) {
+                continue;
+            }
+            match &unit.blocks[&id].terminator {
+                SIRTerminator::Jump(next, _) => pending.push(*next),
+                SIRTerminator::Branch {
+                    true_block,
+                    false_block,
+                    ..
+                } => pending.extend([true_block.0, false_block.0]),
+                SIRTerminator::Switch { cases, default, .. } => {
+                    pending.extend(cases.iter().map(|case| case.target));
+                    pending.push(*default);
+                }
+                SIRTerminator::Return | SIRTerminator::Error(_) => {}
+            }
+        }
+        unit.blocks.retain(|id, _| reachable.contains(id));
+    }
+    folded
+}
+
 /// Place the timing metadata of every instance. Sites name the global index
 /// of their process; a kernel numbers its sites in the order they appear
 /// here, which is the module's order.
@@ -3261,6 +3480,7 @@ fn relocate_timing(
         nba_sites: Vec::new(),
         host_request_sites: Vec::new(),
         time_slots: Vec::new(),
+        nba_switches: Vec::new(),
     };
     for (&instance, module) in instances {
         let module = &modules[module];
@@ -3292,6 +3512,12 @@ fn relocate_timing(
                     }),
             );
         metadata.time_slots.extend(module.time_slot.map(locate));
+        metadata.nba_switches.extend(
+            module
+                .nba_switches
+                .iter()
+                .map(|switch| switch.map(|&var| locate(var))),
+        );
     }
     metadata
 }
