@@ -148,6 +148,10 @@ timed_cases! {
     fn event_expressions_read_automatic_task_locals = "timing::event_expressions_read_automatic_task_locals";
     fn event_controls_sample_the_expression_when_they_begin = "timing::event_controls_sample_the_expression_when_they_begin";
     fn implicit_event_controls_in_processes_wait_on_their_reads = "timing::implicit_event_controls_in_processes_wait_on_their_reads";
+    fn intermediate_combinational_writes_wake_waiters = "timing::intermediate_combinational_writes_wake_waiters";
+    fn intermediate_edge_process_writes_wake_waiters = "timing::intermediate_edge_process_writes_wake_waiters";
+    fn staged_nonblocking_writes_wake_waiters = "timing::staged_nonblocking_writes_wake_waiters";
+    fn child_port_pulses_reach_waiters_settled = "timing::child_port_pulses_reach_waiters_settled";
 }
 
 #[test]

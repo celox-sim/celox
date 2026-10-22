@@ -1880,5 +1880,41 @@
         "class::string_methods_on_properties"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_intermediate_writes",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 wakes a process waiting on a variable only for the value an evaluation leaves: an always_comb or edge-triggered body that rewrites a variable 1 -> 0 -> 1, and nonblocking updates `y <= 0; y <= 1;` from 1, wake no waiter. IEEE 1800-2023 4.3 and 9.4.2 make every store an update event that triggers the waiter, and 10.4.2 applies nonblocking updates in issue order, each its own update. Standalone probes print the spec counts in Icarus 13.0 and 1 or 0 in Verilator.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_intermediate_writes_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::intermediate_combinational_writes_wake_waiters",
+        "timing::intermediate_edge_process_writes_wake_waiters",
+        "timing::staged_nonblocking_writes_wake_waiters"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_port_pulses",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 collapses a child's output port with the parent's net, so a waiter in the parent sees each value the child's always_comb writes inside one evaluation and counts 3 instead of 1. Both are conforming: the port is a continuous assignment (IEEE 1800-2023 23.3.3), evaluated after the child's process yields, and 4.7 leaves that order open. The case asserts the settled count, which Verilator 5.052 and Celox give.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_port_pulses_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::child_port_pulses_reach_waiters_settled"
+      ]
+    }
   }
 ]
