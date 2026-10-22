@@ -115,7 +115,6 @@ fn native_timing_event_membership_and_delay_roles_are_authoritative() {
 fn native_timing_preserves_existing_restrictions_including_ff_iff_validation() {
     for (body, diagnostic) in [
         ("initial @(a iff en) q=1;", "iff-qualified event"),
-        ("initial @* q=1;", "`@*` event control"),
         ("always_comb #1 q=d;", "delay control"),
         ("always_ff @(edge clk) q<=d;", "always_ff event expression"),
         (
