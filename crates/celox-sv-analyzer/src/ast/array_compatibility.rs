@@ -12,7 +12,7 @@ use typecheck::UnpackedArrayType;
 
 /// The type of an unpacked array of `shape`, or `None` when `shape` is not an
 /// unpacked array or its type cannot be resolved.
-fn unpacked_array_type(
+pub(super) fn unpacked_array_type(
     state: &AnalysisState,
     shape: &VariableDimensions,
     dims: &PackedDimensions,

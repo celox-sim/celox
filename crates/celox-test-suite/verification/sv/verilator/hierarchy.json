@@ -132,6 +132,76 @@
           "LIMITATIONS.md#systemverilog-suite"
         ]
       }
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator 5.052 reverses the elements when an ascending caller array overrides a descending unpacked parameter. IEEE 1800-2023 6.20.2 and 7.6 require assignment by left-to-right element order, independently of the bounds. Slang 12.0 elaborates Q[3:2] as [-3,-5] and [7,5], matching Celox; Verilator returns 0xfbfd instead of 0xfdfb.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/named_array_parameters_verilator.json",
+          "verification/repros/named_array_parameters_slang.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_array_parameter_bounds",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 reverses the elements when an ascending caller array overrides a descending unpacked parameter. IEEE 1800-2023 6.20.2 and 7.6 require assignment by left-to-right element order, independently of the bounds. Slang 12.0 elaborates Q[3:2] as [-3,-5] and [7,5], matching Celox; Verilator returns 0xfbfd instead of 0xfdfb.",
+        "upstream": []
+      },
+      "name": "hierarchy::named_array_parameters_follow_caller_specialization",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator 5.052 rejects Q[1] in a child parameter argument as nonconstant when Q is a multidimensional array parameter. IEEE 1800-2023 6.20.2 permits aggregate parameter values and constant member expressions. Slang 12.0 accepts the unchanged source and elaborates the child Q to [86,120], matching Celox.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/named_array_parameters_verilator.json",
+          "verification/repros/named_array_parameters_slang.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_array_parameter_subarray",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects Q[1] in a child parameter argument as nonconstant when Q is a multidimensional array parameter. IEEE 1800-2023 6.20.2 permits aggregate parameter values and constant member expressions. Slang 12.0 accepts the unchanged source and elaborates the child Q to [86,120], matching Celox.",
+        "upstream": []
+      },
+      "name": "hierarchy::named_array_parameters_forward_package_subarrays",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::named_array_parameters_forward_whole_values",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "hierarchy::named_array_parameters_keep_four_state_values",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }
