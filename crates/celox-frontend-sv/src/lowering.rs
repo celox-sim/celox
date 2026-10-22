@@ -8068,7 +8068,10 @@ fn sv_glue_expr_is_signed(
             ) && sv_glue_expr_is_signed(expr, variables, name_to_id, parameter_types)
         }
         sv::ir::Expr::Binary { left, op, right } => match op {
-            sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar => {
+            sv::ir::BinaryOp::Pow
+            | sv::ir::BinaryOp::Shl
+            | sv::ir::BinaryOp::Shr
+            | sv::ir::BinaryOp::Sar => {
                 sv_glue_expr_is_signed(left, variables, name_to_id, parameter_types)
             }
             sv::ir::BinaryOp::Add
@@ -8127,7 +8130,10 @@ fn sv_expr_is_signed_with_parameters(
             ) && sv_expr_is_signed_with_parameters(expr, variables, name_to_id, parameter_types)
         }
         sv::ir::Expr::Binary { left, op, right } => match op {
-            sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar => {
+            sv::ir::BinaryOp::Pow
+            | sv::ir::BinaryOp::Shl
+            | sv::ir::BinaryOp::Shr
+            | sv::ir::BinaryOp::Sar => {
                 sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types)
             }
             sv::ir::BinaryOp::Add
@@ -8495,6 +8501,34 @@ pub(crate) fn unsupported_sv_inout(path: String) -> ParserError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn power_signedness_follows_base_with_self_determined_exponent() {
+        let variables = HashMap::default();
+        let names = HashMap::default();
+        let parameters = HashMap::default();
+        for (base, exponent, signed) in [
+            ("2", "4'd2", true),
+            ("8'shfd", "4'd3", true),
+            ("8'd2", "2", false),
+        ] {
+            let expression = sv::ir::Expr::Binary {
+                left: Box::new(sv::ir::Expr::Literal(base.into())),
+                op: sv::ir::BinaryOp::Pow,
+                right: Box::new(sv::ir::Expr::Literal(exponent.into())),
+            };
+            assert_eq!(
+                sv_glue_expr_is_signed(&expression, &variables, &names, &parameters),
+                signed,
+                "port connection: {base} ** {exponent}"
+            );
+            assert_eq!(
+                sv_expr_is_signed_with_parameters(&expression, &variables, &names, &parameters),
+                signed,
+                "expression: {base} ** {exponent}"
+            );
+        }
+    }
 
     #[test]
     fn select_sources_adds_nested_offsets_and_keeps_computed_dependencies() {
