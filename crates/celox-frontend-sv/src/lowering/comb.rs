@@ -2183,6 +2183,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 task: sv::ir::SystemTask::Readmem(format),
                 args,
                 site,
+                ..
             } => {
                 self.readmem(&mut store, frames, *format, args, site.as_ref())?;
                 Ok(store)
@@ -2203,8 +2204,20 @@ impl<'p, 'a> Comb<'p, 'a> {
             sv::ir::Stmt::SystemTask { task, .. } if self.initial => Err(unsupported(format!(
                 "system task `{task}` inside an initial block"
             ))),
-            sv::ir::Stmt::SystemTask { task, args, .. } => {
-                self.system_task(&mut store, frames, *task, args)?;
+            sv::ir::Stmt::SystemTask {
+                task,
+                args,
+                site,
+                assertion,
+            } => {
+                self.system_task(
+                    &mut store,
+                    frames,
+                    *task,
+                    args,
+                    site.as_ref(),
+                    assertion.as_ref(),
+                )?;
                 Ok(store)
             }
         }
@@ -3456,6 +3469,8 @@ impl<'p, 'a> Comb<'p, 'a> {
         frames: &[Frame],
         task: sv::ir::SystemTask,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+        site: Option<&sv::ir::SourceSpan>,
+        assertion_site: Option<&celox_design::AssertionSite>,
     ) -> Result<(), sv::AnalyzerError> {
         let kind =
             system_task_kind(task).ok_or_else(|| unsupported(format!("system task `{task}`")))?;
@@ -3529,13 +3544,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             arg_widths.push(self.width(node));
             captured.push(self.capture(node)?);
         }
-        let event_kind = match &kind {
-            SystemTaskKind::Print(kind, _) => *kind,
-            SystemTaskKind::Control(kind) => *kind,
-            SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
-            SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,
-            SystemTaskKind::Assertion(kind) => *kind,
-        };
+        let event_kind = kind.event_kind();
         let condition = self.path_condition()?;
         let guard = if let Some(passed) = assertion {
             // An assertion fires only on failure and only on the active path.
@@ -3554,10 +3563,10 @@ impl<'p, 'a> Comb<'p, 'a> {
                     Some(node)
                 }
                 // Assertion sites fire when their guard is false.
-                (SystemTaskKind::Message | SystemTaskKind::Fatal, None) => {
+                (SystemTaskKind::Message(_) | SystemTaskKind::Fatal, None) => {
                     Some(self.constant(0, 1)?)
                 }
-                (SystemTaskKind::Message | SystemTaskKind::Fatal, Some((node, sources))) => {
+                (SystemTaskKind::Message(_) | SystemTaskKind::Fatal, Some((node, sources))) => {
                     observed.extend(sources);
                     Some(slt_not(self.arena, &mut self.consts, node)?)
                 }
@@ -3594,6 +3603,8 @@ impl<'p, 'a> Comb<'p, 'a> {
             template,
             sizing: DisplaySizing::Ieee,
             scope: None,
+            location: report_location(site),
+            assertion: assertion_site.cloned(),
             arg_widths,
             arg_signed,
             arg_is_string,
