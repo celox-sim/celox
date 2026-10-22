@@ -3,6 +3,17 @@ use super::*;
 // IEEE 1800-2023 11.5.1: the index operator and declaration direction
 // independently determine the endpoints of the selected range.
 sv_backends! {
+    fn procedural_loop_selects_constant_packed_bytes(sim) {
+        @case "indexed_select::procedural_loop_selects_constant_packed_bytes";
+    }
+
+    fn procedural_loop_selects_packed_words(sim) {
+        @case "indexed_select::procedural_loop_selects_packed_words";
+    }
+    fn procedural_loop_reads_packed_words_into_memory(sim) {
+        @case "indexed_select::procedural_loop_reads_packed_words_into_memory";
+    }
+
     fn procedural_loop_writes_memory_word_part_selects(sim) {
         @case "indexed_select::procedural_loop_writes_memory_word_part_selects";
     }
