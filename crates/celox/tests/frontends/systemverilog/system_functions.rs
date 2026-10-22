@@ -1827,8 +1827,8 @@ fn rejects_unknown_system_functions_in_every_context() {
 fn reports_where_a_known_system_function_is_not_supported() {
     let cases = [
         (
-            "system function `$realtime` in an expression",
-            "module Top(output logic [63:0] y); assign y = $realtime; endmodule",
+            "system function `$fgets` in an expression",
+            "module Top(output logic [63:0] y); assign y = $fgets(y, 0); endmodule",
         ),
         (
             "system function `$sqrt` in an expression",
