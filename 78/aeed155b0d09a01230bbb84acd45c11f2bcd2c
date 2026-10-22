@@ -1,0 +1,1 @@
+Fix constant aggregate type/sign loss and recursive packed-union defaults; unify constant/runtime operand metadata and retain the standard-mandated rejection of mismatched-bound defaults with independent evidence.
