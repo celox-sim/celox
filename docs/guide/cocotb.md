@@ -213,6 +213,12 @@ List package definitions before their consumers. It does not discover a
 must all be `.sv` files; for Veryl, pass one project entry file. The
 `celox-vpi-compile` binary accepts the same source list.
 
+cocotb drives the design, so the compiled executable runs no HDL process.
+Compilation fails for a design with an `initial` process, an ordinary `always`
+process or another procedure Celox runs as a process, and names the first one;
+constant `initial` blocks and declaration initializers still set initial
+values.
+
 ## Run cocotb
 
 Suppose `test/test_top.py` contains a cocotb test. Run the generated executable

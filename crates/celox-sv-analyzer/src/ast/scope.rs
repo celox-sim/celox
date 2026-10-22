@@ -328,6 +328,7 @@ impl ScopeSymbols {
                 .filter(|process| initializes(process, target))
                 .map(|process| InitialProcess {
                     creation_order: process.creation_order,
+                    site: process.site.clone(),
                     condition: process.condition.clone(),
                     body: process
                         .body
@@ -562,6 +563,7 @@ impl ScopeSymbols {
                 .iter()
                 .map(|process| InitialProcess {
                     creation_order: process.creation_order,
+                    site: process.site.clone(),
                     condition: process
                         .condition
                         .clone()

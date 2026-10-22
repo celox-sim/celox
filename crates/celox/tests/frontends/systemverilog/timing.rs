@@ -583,13 +583,13 @@ fn nonblocking_sites_stage_only_unobserved_targets_with_one_writer() {
             initial begin #1; q <= stim; end
         endmodule
     "#;
-    let simulator = celox::Simulator::from_sv_sources(
+    let simulation = celox::Simulation::from_sv_sources(
         vec![(source, std::path::Path::new("staged_sites.sv"))],
         "Top",
     )
     .build()
     .unwrap();
-    let program = simulator.program();
+    let program = simulation.program();
     let mut staged: Vec<_> = ["stim", "blocking", "a", "b", "d", "e", "s", "q"]
         .into_iter()
         .filter(|name| {
@@ -635,10 +635,10 @@ fn narrow_nonblocking_updates_cover_staged_and_queued_sites() {
         .iter()
         .map(|source| (source.text.as_str(), source.path.as_path()))
         .collect::<Vec<_>>();
-    let simulator = celox::Simulator::from_sv_sources(sources, &design.top)
+    let simulation = celox::Simulation::from_sv_sources(sources, &design.top)
         .build()
         .unwrap();
-    let program = simulator.program();
+    let program = simulation.program();
     let staged = |name: &str| {
         let target = program.get_addr(&[], &[name]).unwrap();
         let sites = program

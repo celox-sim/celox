@@ -1720,58 +1720,19 @@ mod host {
         injected_components: crate::InjectedComponents,
     }
 
-    fn validate_untimed_host_requests(
+    /// `Simulator` runs no process kernel, so a design with one would
+    /// simulate wrongly without any error.
+    fn validate_untimed_processes(
         program: &crate::ir::RuntimeProgram,
     ) -> Result<(), SimulatorError> {
-        if program
-            .runtime_schema
-            .host_request_sites
-            .iter()
-            .any(|site| site.kind == celox_design::HostRequestKind::Distribution)
-        {
-            return Err(SimulatorError::from(crate::RuntimeErrorCode::Runtime {
-                message: "probabilistic distributions require Simulation; Simulator does not execute scheduled process kernels".into(),
-                signals: Vec::new(),
-            }));
+        let schema = &program.runtime_schema;
+        if schema.processes.is_empty() {
+            return Ok(());
         }
-        if program
-            .runtime_schema
-            .host_request_sites
-            .iter()
-            .any(|site| site.kind == celox_design::HostRequestKind::Vcd)
-        {
-            return Err(SimulatorError::from(crate::RuntimeErrorCode::Runtime {
-                message: "source VCD controls require Simulation; Simulator does not execute initial process kernels".into(),
-                signals: Vec::new(),
-            }));
-        }
-        if program
-            .runtime_schema
-            .host_request_sites
-            .iter()
-            .any(|site| site.kind == celox_design::HostRequestKind::Scan)
-        {
-            return Err(SimulatorError::from(crate::RuntimeErrorCode::Runtime {
-                message:"formatted input requires Simulation; Simulator does not execute initial process kernels".into(),signals:Vec::new(),
-            }));
-        }
-        if program
-            .runtime_schema
-            .processes
-            .iter()
-            .any(|slots| slots.requires_timed_simulation)
-            || program
-                .runtime_schema
-                .host_request_sites
-                .iter()
-                .any(|site| site.requires_timed_simulation)
-        {
-            return Err(SimulatorError::from(crate::RuntimeErrorCode::Runtime {
-                message: "edge procedures using system file I/O, plusargs, or VCD controls require Simulation; Simulator does not execute scheduled process kernels".into(),
-                signals: Vec::new(),
-            }));
-        }
-        Ok(())
+        let origin = schema.process_origins.first().cloned().unwrap_or_default();
+        Err(SimulatorError::new(
+            SimulatorErrorKind::ProcessRequiresSimulation(origin),
+        ))
     }
 
     #[cfg(any(
@@ -1787,7 +1748,7 @@ mod host {
         vcd_path: Option<std::path::PathBuf>,
         injected_components: crate::InjectedComponents,
     ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
-        validate_untimed_host_requests(&program)?;
+        validate_untimed_processes(&program)?;
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
@@ -2906,7 +2867,7 @@ mod host {
 
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
-            validate_untimed_host_requests(laid_out.runtime())?;
+            validate_untimed_processes(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2975,7 +2936,7 @@ mod host {
 
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
-            validate_untimed_host_requests(laid_out.runtime())?;
+            validate_untimed_processes(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -3033,7 +2994,7 @@ mod host {
                     vcd_recording,
                 ))?
             };
-            validate_untimed_host_requests(laid_out.runtime())?;
+            validate_untimed_processes(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -3103,7 +3064,7 @@ mod host {
                     vcd_recording,
                 ))?
             };
-            validate_untimed_host_requests(laid_out.runtime())?;
+            validate_untimed_processes(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -3153,7 +3114,7 @@ mod host {
                 .into_laid_out_program(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 )?;
-            validate_untimed_host_requests(laid_out.runtime())?;
+            validate_untimed_processes(laid_out.runtime())?;
             if let Some(start) = sir_start {
                 tracing::debug!(
                     "[phase-timing] into_laid_out_program total: {:?}",
@@ -3197,7 +3158,7 @@ mod host {
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                     Some(&mut trace),
                 )?;
-            validate_untimed_host_requests(laid_out.runtime())?;
+            validate_untimed_processes(laid_out.runtime())?;
             if let Some(start) = sir_start {
                 tracing::debug!(
                     "[phase-timing] into_laid_out_program total: {:?}",
@@ -3323,7 +3284,7 @@ mod host {
         ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
-            validate_untimed_host_requests(laid_out.runtime())?;
+            validate_untimed_processes(laid_out.runtime())?;
             let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)
                 .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             let mut sim =
@@ -3503,7 +3464,7 @@ mod host {
                 };
                 let mut laid_out =
                     program.into_laid_out_with_mode(self.options.four_state, layout_mode);
-                validate_untimed_host_requests(laid_out.runtime())?;
+                validate_untimed_processes(laid_out.runtime())?;
                 if vcd_recording {
                     laid_out.enable_vcd_tracking();
                 }

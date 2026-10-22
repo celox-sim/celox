@@ -60,8 +60,10 @@ assert_eq!(sim.get(q), 1u8.into());
 定数による初期化はどちらにも適用されます。デザインの状態を読む、またはシステムタスクを呼ぶ
 `initial` ブロック、タイミング制御を持つプロセス、`@*` でも
 [文が読む変数](./systemverilog-reference#timing-controls)でもないセンシティビティリストを持つ
-`always` はプロセスとして実行するため `Simulation` が必要です。`Simulator` はこれらを実行しません
-（[#1712](https://github.com/celox-sim/celox/issues/1712)）。
+`always` はプロセスとして実行するため `Simulation` が必要です。`Simulator` はプロセスを実行しないため、
+このようなデザインでは `SimulatorErrorKind::ProcessRequiresSimulation` でビルドに失敗し、
+最初のプロセスとそのソース位置を示します。Veryl と混在する階層では
+`Simulation::from_sources(veryl).with_sv_sources(sv)` で `Simulation` を作成します。
 
 X/Z を扱う場合は builder に `.four_state(true)` を指定します。
 状態モデルは [4 値シミュレーション](./four-state)、時刻、`$stop`、メモリの読み込みなどは

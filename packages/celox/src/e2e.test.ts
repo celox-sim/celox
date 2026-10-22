@@ -353,6 +353,14 @@ describe("E2E: external frontend artifact", () => {
 		sim.dispose();
 	});
 
+	test("rejects a process in an untimed simulator", () => {
+		expect(() =>
+			Simulator.fromFrontendArtifact(FRONTEND_FINISH_ARTIFACT),
+		).toThrow(
+			/`process` in `Finisher` is a process, which Simulator does not run; build a Simulation instead/,
+		);
+	});
+
 	test("runs a Veryl native testbench against a frontend SDK design", () => {
 		const result = runTestWithFrontendArtifact(
 			FRONTEND_ADDER_ARTIFACT,

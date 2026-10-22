@@ -164,7 +164,9 @@ whenever a signal they read, and do not write, changes. Each write is visible
 as it happens, so `y = 0; if (a) y = 1;` pulses `y` when an input change re-runs
 the process; settling again with steady inputs does not re-run it.
 
-Processes run only in a timed `Simulation`. Each one is compiled into a
+Processes run only in a timed `Simulation`; building a `Simulator` for an
+artifact with processes fails with `SimulatorErrorKind::ProcessRequiresSimulation`.
+Each one is compiled into a
 resumable kernel that the simulation scheduler resumes when its delay expires
 or its wait is satisfied. Processes that resume at the same time run in
 declaration order. A time slot follows the regions of IEEE 1800-2023 4.5:

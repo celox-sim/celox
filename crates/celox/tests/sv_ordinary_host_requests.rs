@@ -20,7 +20,7 @@ macro_rules! ordinary_host_requests {
                     let error = celox::Simulator::from_sv_sources(
                         vec![(&source, Path::new("ordinary_host.sv"))], "Top",
                     ).$backend().err().expect("untimed edge host process was accepted");
-                    assert!(error.to_string().contains("require Simulation"), "{error}");
+                    assert!(matches!(error.kind(), celox::SimulatorErrorKind::ProcessRequiresSimulation(_)), "{error}");
                 }
             }
 
@@ -65,7 +65,7 @@ macro_rules! ordinary_host_requests {
                 let error = celox::Simulator::from_sv_sources(
                     vec![(source, Path::new("delayed_host.sv"))], "Top",
                 ).$backend().err().expect("untimed repeating host process was accepted");
-                assert!(error.to_string().contains("require Simulation"), "{error}");
+                assert!(matches!(error.kind(), celox::SimulatorErrorKind::ProcessRequiresSimulation(_)), "{error}");
                 let mut sim = celox::Simulation::from_sv_sources(
                     vec![(source, Path::new("delayed_host.sv"))], "Top",
                 ).plusargs(["+ON"]).$backend().unwrap();
@@ -78,13 +78,14 @@ macro_rules! ordinary_host_requests {
             }
 
             #[test]
-            fn one_shot_initial_host_keeps_existing_untimed_builder_boundary() {
+            fn one_shot_initial_host_requires_simulation() {
                 let source = r#"module Top(output int enabled);
                   initial enabled = $test$plusargs("ON");
                 endmodule"#;
-                celox::Simulator::from_sv_sources(
+                let error = celox::Simulator::from_sv_sources(
                     vec![(source, Path::new("initial_host.sv"))], "Top",
-                ).$backend().unwrap();
+                ).$backend().err().expect("untimed initial host process was accepted");
+                assert!(matches!(error.kind(), celox::SimulatorErrorKind::ProcessRequiresSimulation(_)), "{error}");
             }
         }
     };

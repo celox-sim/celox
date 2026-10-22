@@ -1722,6 +1722,11 @@ pub(super) fn initial_processes_from_scope(
             if !body.is_empty() {
                 initializers.push(InitialProcess {
                     creation_order,
+                    site: process_site(
+                        "declaration initializer",
+                        tree.declarations().body_item(item.id).tokens,
+                        tree,
+                    ),
                     condition: None,
                     body,
                     initializer: true,
@@ -1733,6 +1738,10 @@ pub(super) fn initial_processes_from_scope(
         }
         let Some(procedure) = item.procedure(tree.declarations())? else {
             continue;
+        };
+        let construct = match procedure.kind {
+            celox_sv_syntax::ProcedureKind::Initial => "initial",
+            _ => "always",
         };
         let repeats = match procedure.kind {
             celox_sv_syntax::ProcedureKind::Initial => false,
@@ -1772,6 +1781,11 @@ pub(super) fn initial_processes_from_scope(
         }
         processes.push(InitialProcess {
             creation_order,
+            site: process_site(
+                construct,
+                tree.declarations().body_item(item.id).tokens,
+                tree,
+            ),
             condition: None,
             body,
             initializer: false,
@@ -1798,6 +1812,29 @@ pub(super) fn written_names<'s>(stmts: impl IntoIterator<Item = &'s Stmt>) -> Ha
         });
     }
     names
+}
+
+/// Where the first token of a native token range was invoked.
+pub(super) fn process_site(
+    construct: &'static str,
+    tokens: celox_sv_syntax::TokenRange,
+    tree: &SyntaxTree,
+) -> Option<crate::procedural::ProcessSite> {
+    let native = tree.declarations();
+    let token = native
+        .tokens
+        .get(tokens.start..tokens.end)?
+        .iter()
+        .find(|token| !token.is_trivia())?;
+    let span = native.sources.invocation(token.origin);
+    let file = native.sources.file(span.file);
+    let (line, column) = file.line_column(span.start);
+    Some(crate::procedural::ProcessSite {
+        construct,
+        path: file.path.clone(),
+        line,
+        column,
+    })
 }
 
 /// Original invocation span of a native token range, when it belongs to one file.
