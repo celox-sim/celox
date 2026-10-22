@@ -1749,5 +1749,60 @@
         "hierarchy::named_array_parameters_keep_four_state_values"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_classes",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not support extern methods (\"sorry: External methods are not yet supported\") or string methods called on a class property (\"Can't find task itoa in class Named\") or comparisons of class handles (\"SORRY: Compare class handles not implemented\"), aborts on a failed assertion in dup_expr.cc while compiling objects_referring_to_objects, and crashes with a segmentation fault while compiling implicit_constructors_and_this. IEEE 1800-2023 8.4, 8.7, 8.8 and 8.24 define these constructs. Verilator passes all but the string-method case, see sv_verilator_class_property_string_methods.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::extern_methods_and_tasks",
+        "class::implicit_constructors_and_this",
+        "class::inherited_properties_and_methods",
+        "class::objects_referring_to_objects",
+        "class::string_methods_on_properties"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_nested_class_members",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 reads an empty string through a nested property path (kept.inner.text) after reporting \"sorry: Nested member path not yet supported for class properties\" for its assignment. IEEE 1800-2023 8.5 permits accessing a property of an object referred to by a property. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::objects_survive_heap_collections"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_class_property_string_methods",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 stops with an internal error (\"AstNode is not of expected type, but instead has type 'MEMBERSEL'\") on a string method called on a class property, n.name.itoa(42), which IEEE 1800-2023 6.16 and 8.5 permit. Icarus rejects the case too, see sv_icarus_classes.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::string_methods_on_properties"
+      ]
+    }
   }
 ]

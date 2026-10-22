@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+mod objects;
 pub mod ops;
+
+pub use objects::{Fault, NULL};
 
 /// A reference to a heap entry, as stored in state memory.
 pub type Handle = u32;
@@ -31,7 +34,37 @@ pub const EMPTY_STRING: Handle = 0;
 /// unless the live set is larger.
 const MIN_COLLECTION_INTERVAL: usize = 1024;
 
-/// Dynamic strings referenced by [`Handle`].
+/// What a handle refers to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HandleKind {
+    String,
+    Object,
+}
+
+/// A handle that a collection must keep alive, with what it refers to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Root {
+    pub kind: HandleKind,
+    pub handle: Handle,
+}
+
+impl Root {
+    pub fn string(handle: Handle) -> Self {
+        Self {
+            kind: HandleKind::String,
+            handle,
+        }
+    }
+
+    pub fn object(handle: Handle) -> Self {
+        Self {
+            kind: HandleKind::Object,
+            handle,
+        }
+    }
+}
+
+/// Dynamic strings and class objects referenced by [`Handle`].
 #[derive(Clone, Debug)]
 pub struct Heap {
     strings: HashMap<Handle, Arc<[u8]>>,
@@ -41,6 +74,11 @@ pub struct Heap {
     /// Mutable strings under construction, see [`ops`].
     buffers: Vec<Option<Vec<u8>>>,
     free_buffers: Vec<u64>,
+    objects: HashMap<Handle, objects::Object>,
+    /// The handle the next object gets.
+    next_object: Handle,
+    /// The first heap operation error since the runtime last checked.
+    fault: Option<Fault>,
     /// Entries below this handle are never collected.
     pinned: Handle,
     created: usize,
@@ -66,6 +104,9 @@ impl Heap {
             next: EMPTY_STRING + 1,
             buffers: Vec::new(),
             free_buffers: Vec::new(),
+            objects: HashMap::default(),
+            next_object: NULL + 1,
+            fault: None,
             pinned: 1,
             created: 0,
             live_after_collection: 1,
@@ -118,9 +159,18 @@ impl Heap {
         false
     }
 
-    /// Bytes of string contents, excluding allocator overhead.
+    /// Bytes of string contents and object properties, excluding allocator
+    /// overhead.
     pub fn content_size(&self) -> usize {
-        self.strings.values().map(|value| value.len()).sum()
+        self.strings
+            .values()
+            .map(|value| value.len())
+            .sum::<usize>()
+            + self
+                .objects
+                .values()
+                .map(objects::Object::size)
+                .sum::<usize>()
     }
 
     /// Whether enough entries were created since the last collection to make
@@ -130,24 +180,43 @@ impl Heap {
         self.created >= MIN_COLLECTION_INTERVAL.max(self.live_after_collection)
     }
 
-    /// Free every unpinned entry that no handle in `roots` refers to. Roots
-    /// that name no entry are ignored.
-    pub fn collect(&mut self, roots: impl IntoIterator<Item = Handle>) {
-        let marked: HashSet<Handle> = roots.into_iter().collect();
+    /// Free every unpinned entry that `roots` cannot reach through the
+    /// handle properties of objects. Roots that name no entry are ignored.
+    pub fn collect(&mut self, roots: impl IntoIterator<Item = Root>) {
+        let mut strings = HashSet::default();
+        let mut objects = HashSet::default();
+        let mut pending: Vec<Root> = roots.into_iter().collect();
+        while let Some(root) = pending.pop() {
+            match root.kind {
+                HandleKind::String => {
+                    strings.insert(root.handle);
+                }
+                HandleKind::Object => {
+                    if self.objects.contains_key(&root.handle) && objects.insert(root.handle) {
+                        pending.extend(
+                            self.handles_of(root.handle)
+                                .into_iter()
+                                .map(|(kind, handle)| Root { kind, handle }),
+                        );
+                    }
+                }
+            }
+        }
         let pinned = self.pinned;
         let lookup = &mut self.lookup;
         self.strings.retain(|handle, value| {
-            let live = *handle < pinned || marked.contains(handle);
+            let live = *handle < pinned || strings.contains(handle);
             if !live {
                 lookup.remove(value);
             }
             live
         });
+        self.objects.retain(|handle, _| objects.contains(handle));
         // No buffer outlives the kernel that built it.
         self.buffers.clear();
         self.free_buffers.clear();
         self.created = 0;
-        self.live_after_collection = self.len();
+        self.live_after_collection = self.len() + self.objects.len();
     }
 
     fn new_buffer(&mut self, bytes: Vec<u8>) -> u64 {
@@ -213,7 +282,7 @@ mod tests {
         let mut heap = Heap::new();
         let kept = heap.intern(b"kept");
         let dropped = heap.intern(b"dropped");
-        heap.collect([kept, 999]);
+        heap.collect([Root::string(kept), Root::string(999)]);
         assert_eq!(heap.string(kept), b"kept");
         assert!(!heap.contains(dropped));
         assert!(heap.contains(EMPTY_STRING));

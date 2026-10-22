@@ -874,7 +874,9 @@ impl<'a> Elaborator<'a, '_> {
                         value
                             .variables
                             .iter()
-                            .filter(|variable| type_binding::ordinary_variable(variable, native))
+                            .filter(|variable| {
+                                type_binding::ordinary_variable(variable, value.data_type, native)
+                            })
                             .map(|variable| (&variable.name, variable.dimensions.as_slice()))
                             .collect(),
                     ),
@@ -2060,6 +2062,7 @@ mod tests {
             dimensions: Some(2),
             signed: false,
             is_2state: false,
+            string: false,
         };
         let inner = FunctionReturnMetadata {
             arguments: None,
@@ -2068,6 +2071,7 @@ mod tests {
             dimensions: Some(1),
             signed: true,
             is_2state: true,
+            string: false,
         };
         let dimensions = PackedDimensions {
             function_return_types: [

@@ -110,6 +110,10 @@ pub(super) fn expr_signedness_with_return_types(
             ..
         } => Some(op.result_type().1),
         Expr::Call {
+            callee: Callee::Object(op),
+            ..
+        } => Some(op.result_type().1),
+        Expr::Call {
             callee: Callee::Subroutine(name),
             ..
         } => functions

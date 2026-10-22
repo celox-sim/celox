@@ -466,6 +466,7 @@ fn pattern_items(
             VariableDimensions {
                 real: false,
                 string: false,
+                class: None,
                 unpacked: rest.to_vec(),
                 ..shape.clone()
             },
@@ -488,6 +489,7 @@ fn pattern_items(
             VariableDimensions {
                 real: false,
                 string: false,
+                class: None,
                 packed: rest.to_vec(),
                 ..shape.clone()
             },
@@ -502,6 +504,7 @@ fn pattern_items(
                 randomizable: true,
                 real: false,
                 string: false,
+                class: None,
                 packed: Vec::new(),
                 unpacked: Vec::new(),
                 members: Vec::new(),

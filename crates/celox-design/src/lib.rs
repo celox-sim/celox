@@ -70,6 +70,8 @@ pub enum ValueKind {
     Bits,
     /// A handle of a string in the simulator's heap.
     StrRef,
+    /// A handle of a class object in the simulator's heap, `0` for `null`.
+    ObjRef,
 }
 
 impl ValueKind {

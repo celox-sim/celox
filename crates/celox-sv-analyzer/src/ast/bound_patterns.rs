@@ -164,6 +164,7 @@ impl Value {
             let shape = VariableDimensions {
                 real: false,
                 string: false,
+                class: None,
                 unpacked: rest.to_vec(),
                 ..shape.clone()
             };
@@ -227,6 +228,7 @@ impl BoundPattern {
                 VariableDimensions {
                     real: false,
                     string: false,
+                    class: None,
                     unpacked: rest.to_vec(),
                     ..shape.clone()
                 };
@@ -267,6 +269,7 @@ impl BoundPattern {
                 VariableDimensions {
                     real: false,
                     string: false,
+                    class: None,
                     packed: rest.to_vec(),
                     signed: shape.signed_element_depth == Some(1),
                     signed_element_depth: shape
@@ -293,6 +296,7 @@ impl BoundPattern {
                 VariableDimensions {
                     real: false,
                     string: false,
+                    class: None,
                     packed: Vec::new(),
                     signed: false,
                     signed_element_depth: None,
