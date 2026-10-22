@@ -3823,12 +3823,15 @@ mod host {
     #[test]
     fn extended_host_requests_survive_native_image_roundtrip() {
         let source = r#"module Top(output bit ok);
-            int seed, value, parsed, count;
+            int seed, value, parsed, count, real_count;
+            real fractional;
             initial begin
                 seed = 17;
                 value = $dist_normal(seed, 0, 10);
                 count = $sscanf("42", "%d", parsed);
-                ok = value == -4 && parsed == 42 && count == 1;
+                real_count = $sscanf("6.25", "%f", fractional);
+                ok = value == -4 && parsed == 42 && count == 1
+                    && real_count == 1 && $sqrt(fractional) == 2.5 && $realtime == 0.0;
             end
         endmodule"#;
         let (program, warnings, options, _, _) = crate::Simulation::from_sv_sources(

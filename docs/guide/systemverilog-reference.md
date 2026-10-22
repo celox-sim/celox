@@ -469,11 +469,17 @@ for input and positioning; multichannel descriptors support output and flush.
 ### Formatted input
 
 `$sscanf(source, format, outputs...)` and `$fscanf(fd, format, outputs...)`
-support integral `%d`, `%h`/`%x`, `%o`, `%b`, and `%c` conversions, numeric field widths,
-assignment suppression, literal matching and whitespace (IEEE 1800-2023
+support integral `%d`, `%h`/`%x`, `%o`, `%b`, and `%c` conversions and real
+`%e`/`%f`/`%g` conversions, numeric field widths, assignment suppression,
+literal matching and whitespace (IEEE 1800-2023
 21.3.4.3). Source and format can be string literals or packed integral values.
 The result counts assigned outputs; unmatched outputs retain their values.
-Real conversions, `%s` string outputs and `%t` time scaling are unsupported.
+Real conversions accept `real`, `realtime` and `shortreal` destinations, including
+signed decimal inputs with an optional decimal point and exponent. `shortreal`
+rounds directly to binary32; overflow produces signed infinity and negative zero
+is preserved. Incomplete signs or exponents fail without assigning the output.
+Integral conversions require integral destinations; real conversions require real
+destinations. `%s` string outputs and `%t` time scaling are unsupported.
 Both functions require timed `Simulation` execution. Pure `$sscanf` state can
 be checkpointed; `$fscanf` uses external file state and prevents checkpoints.
 

@@ -128,7 +128,6 @@ fn pure_sscanf_allows_checkpoint_and_untimed_build_is_rejected() {
 fn rejected_formats_are_explicit() {
     for (format, expected) in [
         ("%s", "string output"),
-        ("%f", "real output"),
         ("%t", "$timeformat"),
         ("%q", "unsupported scan conversion"),
     ] {
