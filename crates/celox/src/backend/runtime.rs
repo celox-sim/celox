@@ -124,6 +124,8 @@ pub struct JitBackend {
     memory: MemoryImage,
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
     comb_capture_enabled: Vec<u8>,
+    /// Boxed so the address in the state header survives moves.
+    heap: Box<celox_heap::Heap>,
     /// Cached from `shared.comb_func` to avoid Arc dereference on the hot path.
     comb_func: SimFunc,
     /// Worker threads for lane-partitioned kernels, started on first use.
@@ -738,6 +740,7 @@ impl JitBackend {
             memory,
             runtime_event_buffer,
             comb_capture_enabled,
+            heap: Default::default(),
             comb_func,
             lane_pool: None,
             lane_selectors: Default::default(),
@@ -758,6 +761,7 @@ impl JitBackend {
         memory: MemoryImage,
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
         comb_capture_enabled: Vec<u8>,
+        heap: Box<celox_heap::Heap>,
     ) -> Self {
         // A MemorySpilled compile plan extends the compiled layout with
         // backend scratch beyond the semantic state the interpreter owned.
@@ -774,6 +778,7 @@ impl JitBackend {
             memory,
             runtime_event_buffer,
             comb_capture_enabled,
+            heap,
             comb_func,
             lane_pool: None,
             lane_selectors: Default::default(),
@@ -781,6 +786,7 @@ impl JitBackend {
         // The state names the previous tier's extern function table; point it
         // at the one this code owns.
         backend.install_extern_functions();
+        backend.install_heap();
         backend
     }
 
@@ -798,6 +804,14 @@ impl JitBackend {
             self.comb_capture_enabled.as_ptr() as u64,
         );
         self.install_extern_functions();
+        self.install_heap();
+    }
+
+    fn install_heap(&mut self) {
+        self.memory.write_header_word(
+            celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET,
+            std::ptr::from_mut(&mut *self.heap) as u64,
+        );
     }
 
     fn install_extern_functions(&mut self) {
@@ -1414,6 +1428,14 @@ impl super::SimBackend for JitBackend {
 
     fn layout(&self) -> &super::MemoryLayout {
         self.layout()
+    }
+
+    fn heap(&self) -> &celox_heap::Heap {
+        &self.heap
+    }
+
+    fn heap_mut(&mut self) -> &mut celox_heap::Heap {
+        &mut self.heap
     }
 
     fn id_to_addr_slice(&self) -> &[AbsoluteAddr] {

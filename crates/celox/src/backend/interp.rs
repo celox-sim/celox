@@ -180,6 +180,8 @@ struct Machine<'a> {
     four_state: bool,
     /// Per-site enable bytes for comb capture events.
     comb_capture_enabled: &'a mut [u8],
+    /// The heap that heap helper calls operate on.
+    heap: &'a mut celox_heap::Heap,
     /// First-word snapshots of trigger-bearing objects taken at group entry,
     /// used by per-kind trigger edge detection.
     trigger_snapshots: &'a [((AbsoluteAddr, u32), u64)],
@@ -999,6 +1001,12 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
     }
 
     fn call_extern(&mut self, func: u32, args: &[u64]) -> Result<u64, InterpError> {
+        if func == celox_sir::extern_abi::HEAP_HELPER_ID {
+            let &[code, a, b, c] = args else {
+                unreachable!("the SIR verifier checks heap call arguments")
+            };
+            return Ok(self.heap.call(code, a, b, c));
+        }
         // SAFETY: the frontend gives each call the argument count of the
         // DPI-C import it links to.
         Ok(unsafe { self.extern_functions.call(func, args) })
@@ -1115,6 +1123,7 @@ fn run_units(
     extern_functions: &ExternFunctionTable,
     four_state: bool,
     comb_capture_enabled: &mut [u8],
+    heap: &mut celox_heap::Heap,
     units: &mut [PreparedUnit],
     trigger_addrs: &[(AbsoluteAddr, u32)],
     trigger_snapshots: &mut Vec<((AbsoluteAddr, u32), u64)>,
@@ -1135,6 +1144,7 @@ fn run_units(
                 extern_functions,
                 four_state,
                 comb_capture_enabled: &mut *comb_capture_enabled,
+                heap: &mut *heap,
                 trigger_snapshots,
                 emit_triggers,
             };
@@ -1156,6 +1166,7 @@ fn run_units(
             extern_functions,
             four_state,
             comb_capture_enabled: &mut *comb_capture_enabled,
+            heap: &mut *heap,
             trigger_snapshots,
             emit_triggers,
         };
@@ -1205,6 +1216,8 @@ pub struct InterpBackend {
     memory: MemoryImage,
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
     comb_capture_enabled: Vec<u8>,
+    /// Boxed so the address in the state header survives moves.
+    heap: Box<celox_heap::Heap>,
     event_map: HashMap<AbsoluteAddr, InterpEventRef>,
     eval_only_event_map: HashMap<AbsoluteAddr, InterpEventRef>,
     apply_event_map: HashMap<AbsoluteAddr, InterpEventRef>,
@@ -1416,6 +1429,7 @@ impl InterpBackend {
             memory,
             runtime_event_buffer,
             comb_capture_enabled,
+            heap: Default::default(),
             event_map,
             eval_only_event_map,
             apply_event_map,
@@ -1454,6 +1468,10 @@ impl InterpBackend {
             celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET,
             self.extern_functions.as_ptr() as u64,
         );
+        self.memory.write_header_word(
+            celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET,
+            std::ptr::from_mut(&mut *self.heap) as u64,
+        );
     }
 
     /// Returns the pre-computed 4-state initialization regions
@@ -1466,11 +1484,19 @@ impl InterpBackend {
     /// promotion. The returned memory image is byte-compatible with the
     /// compiled backends (same packed layout), and the event buffer `Arc`
     /// keeps its allocation so state-header pointers stay valid.
-    pub(crate) fn tier_transfer(&mut self) -> (MemoryImage, Arc<RuntimeEventBuffer>, Vec<u8>) {
+    pub(crate) fn tier_transfer(
+        &mut self,
+    ) -> (
+        MemoryImage,
+        Arc<RuntimeEventBuffer>,
+        Vec<u8>,
+        Box<celox_heap::Heap>,
+    ) {
         (
             std::mem::take(&mut self.memory),
             Arc::clone(&self.runtime_event_buffer),
             std::mem::take(&mut self.comb_capture_enabled),
+            std::mem::take(&mut self.heap),
         )
     }
 
@@ -1502,6 +1528,7 @@ impl SimBackend for InterpBackend {
             &self.extern_functions,
             self.four_state,
             &mut self.comb_capture_enabled,
+            &mut self.heap,
             &mut self.eval_comb_units,
             &self.comb_trigger_addrs,
             &mut self.trigger_snapshots,
@@ -1516,6 +1543,7 @@ impl SimBackend for InterpBackend {
             &self.extern_functions,
             self.four_state,
             &mut self.comb_capture_enabled,
+            &mut self.heap,
             self.eval_apply_units
                 .get_mut(&event.addr())
                 .expect("scheduled event missing from SIR program"),
@@ -1539,6 +1567,7 @@ impl SimBackend for InterpBackend {
             &self.extern_functions,
             self.four_state,
             &mut self.comb_capture_enabled,
+            &mut self.heap,
             units,
             &self.event_trigger_addrs[&event.addr()],
             &mut self.trigger_snapshots,
@@ -1553,6 +1582,7 @@ impl SimBackend for InterpBackend {
             &self.extern_functions,
             self.four_state,
             &mut self.comb_capture_enabled,
+            &mut self.heap,
             self.eval_only_units
                 .get_mut(&event.addr())
                 .expect("scheduled event missing from SIR program"),
@@ -1571,6 +1601,7 @@ impl SimBackend for InterpBackend {
             &self.extern_functions,
             self.four_state,
             &mut self.comb_capture_enabled,
+            &mut self.heap,
             self.apply_units
                 .get_mut(&event.addr())
                 .expect("scheduled event missing from SIR program"),
@@ -1595,6 +1626,7 @@ impl SimBackend for InterpBackend {
             &self.extern_functions,
             self.four_state,
             &mut self.comb_capture_enabled,
+            &mut self.heap,
             std::slice::from_mut(unit),
             &[],
             &mut self.trigger_snapshots,
@@ -1933,6 +1965,14 @@ impl SimBackend for InterpBackend {
 
     fn layout(&self) -> &MemoryLayout {
         &self.layout
+    }
+
+    fn heap(&self) -> &celox_heap::Heap {
+        &self.heap
+    }
+
+    fn heap_mut(&mut self) -> &mut celox_heap::Heap {
+        &mut self.heap
     }
 
     fn id_to_addr_slice(&self) -> &[AbsoluteAddr] {
