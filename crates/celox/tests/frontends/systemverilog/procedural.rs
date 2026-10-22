@@ -1,3 +1,5 @@
+use super::*;
+
 sv_backends! {
     fn constant_functions_inside_selected_parameter_initializers(sim) {
         @case "procedural::constant_functions_inside_selected_parameter_initializers";
@@ -113,5 +115,68 @@ sv_backends! {
 
     fn always_ff_reset_at_both_edges_and_as_a_clock(sim) {
         @case "procedural::always_ff_reset_at_both_edges_and_as_a_clock";
+    }
+}
+
+sv_backends! {
+    fn static_function_locals_share_storage_between_calls(sim) {
+        @case "procedural::static_function_locals_share_storage_between_calls";
+    }
+    fn static_function_result_keeps_value_between_calls(sim) {
+        @case "procedural::static_function_result_keeps_value_between_calls";
+    }
+    fn static_function_real_locals_and_results_keep_value(sim) {
+        @case "procedural::static_function_real_locals_and_results_keep_value";
+    }
+    fn static_function_output_formals_keep_value(sim) {
+        @case "procedural::static_function_output_formals_keep_value";
+    }
+}
+
+sv_backends! {
+    fn static_function_constant_calls_do_not_change_runtime_storage(sim) {
+        @case "procedural::static_function_constant_calls_do_not_change_runtime_storage";
+    }
+    fn static_function_package_storage_is_shared_between_calls(sim) {
+        @case "procedural::static_function_package_storage_is_shared_between_calls";
+    }
+}
+
+sv_backends! {
+    fn static_function_retained_arrays_and_instance_storage(sim) {
+        @case "procedural::static_function_retained_arrays_and_instance_storage";
+    }
+    fn static_function_four_state_result_retains_unknown_and_known_values(sim) {
+        @case "procedural::static_function_four_state_result_retains_unknown_and_known_values";
+    }
+    fn static_function_real_storage_restores_checkpoint(sim) {
+        @setup { let source = r#"
+            module Top(input bit clk, output logic [63:0] value);
+                function real step();
+                    static real saved = 0.25;
+                    saved += 0.5;
+                    return saved;
+                endfunction
+                always_ff @(posedge clk) value <= $realtobits(step());
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("static_checkpoint.sv"))], "Top").four_state(true);
+        let clk = sim.event("clk");
+        let value = sim.signal("value");
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(value), num_bigint::BigUint::from(0.75f64.to_bits()));
+        let checkpoint = sim.checkpoint().unwrap();
+        sim.tick(clk).unwrap();
+        let next = sim.get(value);
+        assert_eq!(next, num_bigint::BigUint::from(1.25f64.to_bits()));
+        sim.restore(&checkpoint).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(value), next);
+    }
+}
+
+sv_backends! {
+    fn static_function_wide_packed_storage_keeps_all_bits(sim) {
+        @case "procedural::static_function_wide_packed_storage_keeps_all_bits";
     }
 }

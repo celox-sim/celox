@@ -388,6 +388,7 @@ impl ScopeSymbols {
         for subroutine in &self.subroutines {
             names.extend(subroutine.params.iter().map(|param| param.name.clone()));
             names.extend(subroutine.return_var.clone());
+            names.extend(subroutine.persistent_locals.iter().cloned());
         }
         names.extend(self.constant_functions.local_names().cloned());
         names
@@ -995,6 +996,11 @@ impl Renamer<'_> {
             name: self.name(&subroutine.name),
             automatic_locals: subroutine
                 .automatic_locals
+                .into_iter()
+                .map(|name| self.name(&name))
+                .collect(),
+            persistent_locals: subroutine
+                .persistent_locals
                 .into_iter()
                 .map(|name| self.name(&name))
                 .collect(),

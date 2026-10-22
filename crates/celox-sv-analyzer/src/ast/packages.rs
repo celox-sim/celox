@@ -482,7 +482,7 @@ fn analyze_package_scope(
     // The names the package declares, from its syntax: an escaped name may
     // contain `::` itself.
     let own = imports::scope_names(tree)?;
-    let variables = package_variables(name, tree)?;
+    let mut variables = package_variables(name, tree)?;
     let mut module = Module::from_scope_with_parameter_overrides(
         tree,
         "",
@@ -493,6 +493,9 @@ fn analyze_package_scope(
         },
         Arc::new(imported),
     )?;
+    for subroutine in &module.subroutines {
+        variables.extend(subroutine.persistent_locals.iter().cloned());
+    }
     let mut symbols = module
         .symbols
         .take()

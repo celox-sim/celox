@@ -801,3 +801,200 @@
   (top Top)
   (assert_eq a 255)
   (assert_eq b 15))
+
+(case static_function_locals_share_storage_between_calls
+  (source "static_functions.sv" #"
+    module Top(input logic clk, output int first, second, paired);
+      function int next_value(input int step);
+        static int saved = 7;
+        saved += step;
+        return saved;
+      endfunction
+      always_ff @(posedge clk) begin
+        first <= next_value(1);
+        second <= next_value(2);
+        paired <= next_value(1) + next_value(1);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (tick clk)
+  (assert_eq first 8) (assert_eq second 10) (assert_eq paired 23)
+  (tick clk)
+  (assert_eq first 13) (assert_eq second 15) (assert_eq paired 33))
+
+(case static_function_result_keeps_value_between_calls
+  (source "static_result.sv" #"
+    module Top(input logic clk, input bit update, input bit [15:0] value,
+               output bit [15:0] result);
+      function static bit [15:0] saved(input bit write_value, input bit [15:0] new_value);
+        if (write_value) saved = new_value;
+      endfunction
+      always_ff @(posedge clk) result <= saved(update, value);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set update 0) (set value 23))
+  (tick clk) (assert_eq result 0)
+  (modify (set update 1))
+  (tick clk) (assert_eq result 23)
+  (modify (set update 0) (set value 91))
+  (tick clk) (assert_eq result 23)
+  (tick clk) (assert_eq result 23)
+  (modify (set update 1))
+  (tick clk) (assert_eq result 91))
+
+(case static_function_real_locals_and_results_keep_value
+  (source "static_real.sv" #"
+    module Top(input logic clk, input bit update, output logic [63:0] running, cached);
+      function automatic real accumulate();
+        static real saved = 0.5;
+        automatic real increment = 1.5;
+        saved += increment;
+        return saved;
+      endfunction
+      function static real remember(input bit enable, input real value);
+        if (enable) remember = value;
+      endfunction
+      always_ff @(posedge clk) begin
+        running <= $realtobits(accumulate());
+        cached <= $realtobits(remember(update, 1.25));
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set update 0))
+  (tick clk)
+  (assert_eq running 0x4000000000000000) (assert_eq cached 0)
+  (modify (set update 1))
+  (tick clk)
+  (assert_eq running 0x400c000000000000) (assert_eq cached 0x3ff4000000000000)
+  (modify (set update 0))
+  (tick clk)
+  (assert_eq running 0x4014000000000000) (assert_eq cached 0x3ff4000000000000))
+
+(case static_function_output_formals_keep_value
+  (source "static_output.sv" #"
+    module Top(input logic clk, input bit update, input int value, output int result);
+      function void remember(input bit enable, input int new_value, output int saved);
+        if (!enable) return;
+        saved = new_value;
+      endfunction
+      always_ff @(posedge clk) remember(update, value, result);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set update 1) (set value 37))
+  (tick clk) (assert_eq result 37)
+  (modify (set update 0) (set value 91))
+  (tick clk) (assert_eq result 37)
+  (modify (set update 1))
+  (tick clk) (assert_eq result 91))
+
+(case static_function_constant_calls_do_not_change_runtime_storage
+  (source "static_constant.sv" #"
+    module Top #(parameter int A=next_value(), B=next_value()) (input logic clk, output int value);
+      function int next_value();
+        static int saved = 7;
+        saved++;
+        return saved;
+      endfunction
+      always_ff @(posedge clk) value <= next_value() + A + B;
+    endmodule
+  "#)
+  (top Top)
+  (tick clk) (assert_eq value 24)
+  (tick clk) (assert_eq value 25))
+
+(case static_function_package_storage_is_shared_between_calls
+  (source "static_package.sv" #"
+    package counters;
+      function int next_value(input int amount);
+        static int saved = 3;
+        saved += amount;
+        return saved;
+      endfunction
+    endpackage
+    module Child(input logic clk, output int first, second);
+      always_ff @(posedge clk) begin
+        first <= counters::next_value(2);
+        second <= counters::next_value(3);
+      end
+    endmodule
+    module Top(input logic clk, output int first, second);
+      Child a(clk, first, second);
+    endmodule
+  "#)
+  (top Top)
+  (tick clk) (assert_eq first 5) (assert_eq second 8)
+  (tick clk) (assert_eq first 10) (assert_eq second 13))
+
+(case static_function_retained_arrays_and_instance_storage
+  (source "static_array.sv" #"
+    module Child(input logic clk, input bit update, input bit index,
+                 input bit [63:0] value, output bit [63:0] result);
+      function bit [63:0] remember(input bit enable, input bit slot, input bit [63:0] data);
+        static bit [63:0] entries [0:1];
+        if (enable) entries[slot] = data;
+        return entries[slot];
+      endfunction
+      always_ff @(posedge clk) result <= remember(update, index, value);
+    endmodule
+    module Top(input logic first_clk, second_clk, input bit update, index,
+               input bit [63:0] value, output bit [63:0] first, second);
+      Child a(first_clk, update, index, value, first);
+      Child b(second_clk, update, index, value, second);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set update 1) (set index 0) (set value 0x8000000000000003))
+  (tick first_clk) (assert_eq first 0x8000000000000003)
+  (modify (set update 0))
+  (tick second_clk) (assert_eq second 0)
+  (tick first_clk) (assert_eq first 0x8000000000000003)
+  (modify (set update 1) (set index 1) (set value 0x8000000000000005))
+  (tick first_clk) (assert_eq first 0x8000000000000005)
+  (modify (set update 0) (set index 0))
+  (tick first_clk) (assert_eq first 0x8000000000000003))
+
+(case static_function_four_state_result_retains_unknown_and_known_values
+  (source "static_four_state.sv" #"
+    module Top(input logic selector, output logic result, unknown_value);
+      function logic remember(input logic value);
+        case (value)
+          1'b0: remember = 0;
+          1'b1: remember = 1;
+        endcase
+      endfunction
+      assign result = remember(selector);
+      assign unknown_value = $isunknown(result);
+    endmodule
+  "#)
+  (top Top)
+  (four_state)
+  (modify (set selector 1'bx)) (assert_eq unknown_value 1)
+  (modify (set selector 0)) (assert_eq result 0) (assert_eq unknown_value 0)
+  (modify (set selector 1)) (assert_eq result 1)
+  (modify (set selector 1'bx)) (assert_eq result 1) (assert_eq unknown_value 0)
+  (modify (set selector 1'bz)) (assert_eq result 1))
+
+(case static_function_wide_packed_storage_keeps_all_bits
+  (source "static_wide.sv" #"
+    module Top(input logic clk, input bit update, input bit [980:0] value,
+               output bit [980:0] result);
+      function bit [980:0] remember(input bit enable, input bit [980:0] data);
+        static bit [980:0] saved;
+        if (enable) saved = data;
+        return saved;
+      endfunction
+      always_ff @(posedge clk) result <= remember(update, value);
+    endmodule
+  "#)
+  (top Top)
+  (let wide (| (<< 1 980) 0x0123456789abcdef))
+  (modify (set update 1) (set value wide))
+  (tick clk) (assert_eq result wide)
+  (modify (set update 0) (set value 0))
+  (tick clk) (assert_eq result wide)
+  (modify (set update 1))
+  (tick clk) (assert_eq result 0))

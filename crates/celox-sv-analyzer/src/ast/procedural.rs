@@ -46,6 +46,10 @@ pub(super) struct BodyState<'a> {
     /// The locals declared with a static lifetime: their unique names and
     /// types.
     pub statics: Vec<(String, Type)>,
+    /// Function static declarations initialized once at time zero.
+    pub static_initializers: Vec<Stmt>,
+    /// Constant calls get a fresh frame, even for static declarations (13.4.3).
+    pub constant_evaluation: bool,
 }
 
 /// Converts the statements of one procedural body.
@@ -1774,6 +1778,7 @@ pub(super) fn lower_subroutine(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut lowered_params = Vec::new();
+    let mut formal_types = HashMap::default();
     // A method receives the handle of its object first, and a constructor
     // returns the handle of the object it creates.
     let this = handle.clone().filter(|_| !constructor).map(|handle| {
@@ -1791,6 +1796,7 @@ pub(super) fn lower_subroutine(
         .collect::<Vec<_>>();
     for ((source, direction, r#type, _), default) in this.into_iter().chain(params).zip(defaults) {
         let name = builder.declare(&source, r#type.clone());
+        formal_types.insert(name.clone(), scoped_type(r#type.clone(), declaration_env));
         lowered_params.push(SubroutineParam {
             name,
             source_name: source,
@@ -1811,6 +1817,9 @@ pub(super) fn lower_subroutine(
             r#type.clone(),
         )
     });
+    if let (Some(name), Some(ty)) = (&return_var, &return_type) {
+        formal_types.insert(name.clone(), scoped_type(ty.clone(), declaration_env));
+    }
     let parameter_locals_end = builder.state.locals.len();
     let mut body = match (class, &return_var) {
         (Some(class), Some(this)) if constructor => builder.constructor_prologue(class, this)?,
@@ -1818,13 +1827,13 @@ pub(super) fn lower_subroutine(
     };
     body.extend(builder.native_body(&native.items, &native.authored_statements)?);
     builder.pop_scope();
-    let statics: HashSet<String> = builder
+    let static_types: HashMap<String, Type> = builder
         .state
         .statics
         .split_off(first_static)
         .into_iter()
-        .map(|(name, _)| name)
         .collect();
+    let statics = static_types.keys().cloned().collect::<HashSet<_>>();
     // A constructor's `return;` returns the object (IEEE 1800-2023 8.7).
     if return_var.is_some() && !constructor {
         let mut expressionless = false;
@@ -1853,6 +1862,7 @@ pub(super) fn lower_subroutine(
             })
             .map(|(_, local)| local.name.clone())
             .collect(),
+        persistent_locals: Vec::new(),
         return_type: return_type.map(|r#type| {
             crate::ir::Type::from_ast(
                 scoped_type(r#type, declaration_env),
@@ -1886,22 +1896,84 @@ pub(super) fn lower_subroutine(
             );
         }
     }
-    lifetimes::check_subroutine_statics(
-        &tree.state,
-        &subroutine,
-        &builder.dims.const_env,
-        builder.state.locals,
-        &statics,
-        builder.state.subroutine_directions,
-    )?;
-    if !builder.automatic {
-        lifetimes::check_static_result(
+    if subroutine.is_task {
+        lifetimes::check_subroutine_statics(
             &tree.state,
+            &subroutine,
             &builder.dims.const_env,
             builder.state.locals,
-            &subroutine,
+            &statics,
             builder.state.subroutine_directions,
         )?;
+        if !builder.automatic {
+            lifetimes::check_static_result(
+                &tree.state,
+                &builder.dims.const_env,
+                builder.state.locals,
+                &subroutine,
+                builder.state.subroutine_directions,
+            )?;
+        }
+    } else if !builder.state.constant_evaluation {
+        let retain_result = !builder.automatic
+            && lifetimes::check_static_result(
+                &tree.state,
+                &builder.dims.const_env,
+                builder.state.locals,
+                &subroutine,
+                builder.state.subroutine_directions,
+            )
+            .is_err();
+        // Keep scratch arrays/bitwise result proofs on the existing temporary path.
+        let retained_types = static_types
+            .iter()
+            .filter(|(name, _)| {
+                lifetimes::check_subroutine_statics(
+                    &tree.state,
+                    &subroutine,
+                    &builder.dims.const_env,
+                    builder.state.locals,
+                    &std::iter::once((*name).clone()).collect(),
+                    builder.state.subroutine_directions,
+                )
+                .is_err()
+            })
+            .map(|(name, ty)| (name.clone(), ty.clone()))
+            .collect::<HashMap<_, _>>();
+        let (mut kept, mut initializers) = lifetimes::keep_static_locals(
+            &tree.state,
+            &retained_types,
+            builder.state.subroutine_directions,
+            std::iter::once(&mut subroutine.body),
+        )?;
+        if retain_result {
+            kept.extend(subroutine.return_var.clone());
+        }
+        for param in &subroutine.params {
+            if param.direction == ParamDirection::Output
+                && !subroutine.automatic_locals.contains(&param.name)
+                && lifetimes::output_retains_value(
+                    &subroutine,
+                    &param.name,
+                    builder.state.subroutine_directions,
+                )
+            {
+                kept.push(param.name.clone());
+            }
+        }
+        for initializer in &mut initializers {
+            qualify_stmt(item, initializer);
+            substitute_stmt_constants(&tree.state, initializer, declaration_env, literals);
+        }
+        for name in &kept {
+            let ty = static_types
+                .get(name)
+                .or_else(|| formal_types.get(name))
+                .expect("function storage has a local type");
+            builder.state.statics.push((name.clone(), ty.clone()));
+        }
+        builder.state.static_initializers.extend(initializers);
+        subroutine.persistent_locals = kept;
     }
     Ok(subroutine)
 }
@@ -2032,6 +2104,7 @@ fn lower_class(
                 .iter()
                 .map(|local| local.name.clone())
                 .collect(),
+            persistent_locals: Vec::new(),
             return_type: Some(crate::ir::Type::from_ast(
                 scoped_type(handle, declaration_env),
                 &const_functions::Environment {

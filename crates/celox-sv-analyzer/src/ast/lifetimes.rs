@@ -8,7 +8,8 @@
 //! entry is never read gives the same results that way. Any other static
 //! local of a procedural block keeps its value instead: its declaration no
 //! longer initializes it, and its initializer runs once at time zero. Static
-//! locals of subroutines that keep their value are not supported.
+//! locals of functions use the same storage; task locals that retain state
+//! remain unsupported.
 
 use super::*;
 mod bit_result;
@@ -210,7 +211,7 @@ pub(super) fn check_subroutine_statics(
     result
 }
 
-/// Reject a static function whose result keeps its value between calls: in
+/// Detect a static function whose result keeps its value between calls: in
 /// a static function the variable named after it is static too, so a call
 /// that does not assign it returns the result of an earlier call.
 pub(super) fn check_static_result(
@@ -228,6 +229,7 @@ pub(super) fn check_static_result(
         name: result,
         directions,
         two_state_widths: &widths,
+        read_on_return: false,
     };
     // `return value;` assigns the result as it leaves.
     match flow.block(&subroutine.body, false) {
@@ -239,6 +241,22 @@ pub(super) fn check_static_result(
             subroutine.name
         ))),
     }
+}
+
+/// An output-only static formal also preserves its value before copy-out.
+pub(super) fn output_retains_value(
+    subroutine: &Subroutine,
+    name: &str,
+    directions: &Directions,
+) -> bool {
+    let widths = argument_widths(subroutine);
+    let flow = Flow {
+        name,
+        directions,
+        two_state_widths: &widths,
+        read_on_return: true,
+    };
+    !matches!(flow.block(&subroutine.body, false), Ok(exits) if exits.next != Some(false))
 }
 
 /// The widths of the two-state arguments of `subroutine`.
@@ -279,7 +297,20 @@ fn entry(
         name,
         directions,
         two_state_widths: widths,
+        read_on_return: false,
     };
+    // Even a function that is legal in a constant expression can retain
+    // different state when called at runtime (13.4.3). Its initializer must
+    // execute once, including when the initialized local is read-only.
+    let mut calls_function = false;
+    if let Some(init) = init {
+        visit_calls(init, &mut |callee, _| {
+            calls_function |= callee.subroutine().is_some();
+        });
+    }
+    if calls_function {
+        return Ok(Entry::Observed);
+    }
     let observed = flow.block(after, false).is_err();
     Ok(match init {
         // Initialized once or on every entry, a local that is never written
@@ -296,6 +327,7 @@ struct Observed;
 /// Follows whether one local is written on every path, from its declaration
 /// on.
 struct Flow<'n> {
+    read_on_return: bool,
     name: &'n str,
     directions: &'n Directions,
     /// The widths of the two-state variables a `case` may select on, to
@@ -527,6 +559,9 @@ impl Flow<'_> {
                 ..Exits::default()
             }),
             Stmt::Return(value) => {
+                if self.read_on_return && !written {
+                    return Err(Observed);
+                }
                 if let Some(value) = value {
                     self.read(value, written)?;
                 }
