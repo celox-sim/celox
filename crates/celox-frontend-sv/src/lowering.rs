@@ -2712,6 +2712,31 @@ fn lower_module_with_overrides(
     force_signals: &[String],
     level_lists: LevelLists<'_>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
+    let parameter_types = module
+        .imported_parameters()
+        .iter()
+        .chain(module.parameters())
+        .filter_map(|parameter| {
+            Some((
+                parameter.name().to_string(),
+                (
+                    parameter.resolved_width()?,
+                    parameter.resolved_signed().unwrap_or(false),
+                ),
+            ))
+        })
+        .collect();
+    let constants = module_constants_with_overrides(module, parameter_overrides);
+    let fallbacks = module
+        .ff_processes()
+        .iter()
+        .any(|process| runs_as_process(module, process, &constants, &parameter_types))
+        .then(|| {
+            module.clone().run_edge_processes_as_processes(|process| {
+                runs_as_process(module, process, &constants, &parameter_types)
+            })
+        });
+    let module = fallbacks.as_ref().unwrap_or(module);
     let mut ff_event_roles = Vec::new();
     for process in module.ff_processes() {
         let clock = clock_event_from_ff_process(process)
@@ -2734,21 +2759,6 @@ fn lower_module_with_overrides(
             });
         }
     }
-    let parameter_types = module
-        .imported_parameters()
-        .iter()
-        .chain(module.parameters())
-        .filter_map(|parameter| {
-            Some((
-                parameter.name().to_string(),
-                (
-                    parameter.resolved_width()?,
-                    parameter.resolved_signed().unwrap_or(false),
-                ),
-            ))
-        })
-        .collect();
-    let constants = module_constants_with_overrides(module, parameter_overrides);
     let shared_memories = shared_edge_memories(module, &constants, &parameter_types, warnings);
     validate_variable_driver_ranges(module, &constants, &parameter_types, &shared_memories)?;
     let scheduled = module
@@ -8390,6 +8400,40 @@ fn insert_or_merge_ff_unit(
     } else {
         blocks.insert(trigger_set, unit);
     }
+}
+
+/// A plain `always` sensitive to edges is a flip-flop only in the shape of
+/// one: a clock and asynchronous resets, each a one-bit variable. Any other
+/// edge-sensitive `always` runs as a process waiting on the same events.
+fn runs_as_process(
+    module: &sv::ir::Module,
+    process: &sv::ir::FfProcess,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> bool {
+    let multi_bit = |name: &str| {
+        let r#type = module
+            .ports()
+            .iter()
+            .find(|port| port.name() == name)
+            .map(sv::ir::Port::r#type)
+            .or_else(|| {
+                module
+                    .signals()
+                    .iter()
+                    .find(|signal| signal.name() == name)
+                    .map(sv::ir::Signal::r#type)
+            });
+        r#type
+            .and_then(|r#type| signal_type_from_sv(r#type, constants, parameter_types).ok())
+            .is_some_and(|type_info| type_info.width != 1)
+    };
+    !process.is_always_ff()
+        && (clock_event_from_ff_process(process).is_none()
+            || process
+                .events()
+                .iter()
+                .any(|event| multi_bit(event.signal())))
 }
 
 fn clock_event_from_ff_process(process: &sv::ir::FfProcess) -> Option<&sv::ir::FfEvent> {

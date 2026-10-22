@@ -160,6 +160,9 @@ timed_cases! {
     fn blocking_write_waiters_run_before_nonblocking_updates = "timing::blocking_write_waiters_run_before_nonblocking_updates";
     fn blocking_write_waiters_rearm_before_nonblocking_updates = "timing::blocking_write_waiters_rearm_before_nonblocking_updates";
     fn blocking_write_edges_read_values_before_nonblocking_updates = "timing::blocking_write_edges_read_values_before_nonblocking_updates";
+    fn plain_always_expression_edges_run_as_processes = "timing::plain_always_expression_edges_run_as_processes";
+    fn plain_always_multi_bit_edges_follow_the_lsb = "timing::plain_always_multi_bit_edges_follow_the_lsb";
+    fn plain_always_edges_without_a_reset_run_as_processes = "timing::plain_always_edges_without_a_reset_run_as_processes";
 }
 
 #[test]
@@ -474,19 +477,19 @@ fn unimplemented_timing_features_are_rejected() {
             "delayed continuous assignment",
             444,
         ),
-        // #1708: a plain `always` that is not a flip-flop runs as a process.
+        // A plain `always` of these forms runs as a process.
         (
-            "bit [3:0] v; int n; always @(posedge v[0]) n++;",
+            "bit [3:0] v; int n; always_ff @(posedge v[0]) n <= n + 1;",
             "always_ff event expression",
             464,
         ),
         (
-            "bit [3:0] v; int n; always @(posedge v) n++;",
+            "bit [3:0] v; int n; always_ff @(posedge v) n <= n + 1;",
             "multi-bit always_ff event signal",
             88,
         ),
         (
-            "bit a, b; int n; always @(posedge a or posedge b) n <= n + 1;",
+            "bit a, b; int n; always_ff @(posedge a or posedge b) n <= n + 1;",
             "always_ff event control",
             88,
         ),
