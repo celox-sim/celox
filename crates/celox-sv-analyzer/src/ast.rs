@@ -90,7 +90,7 @@ impl Deref for AnalysisContext<'_> {
     }
 }
 
-pub use crate::system_functions::{ArrayQuery, Callee, SystemFunction, SystemTask};
+pub use crate::system_functions::{ArrayQuery, Callee, StringOp, SystemFunction, SystemTask};
 use crate::{AnalyzerError, system_functions, typecheck};
 
 mod array_compatibility;
@@ -1934,6 +1934,8 @@ impl Type {
 pub enum TypeKind {
     Real,
     Shortreal,
+    /// IEEE 1800-2023 6.16: a dynamically sized string, held as a heap handle.
+    String,
     Bit,
     Logic,
     Reg,
@@ -2362,6 +2364,8 @@ impl ConditionalAssignment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Function {
     return_real: bool,
+    /// Whether the function returns a `string`.
+    return_string: bool,
     name: String,
     params: Vec<FunctionParam>,
     /// The function's value as one expression of its arguments, or `None`
@@ -2602,6 +2606,8 @@ struct UnpackedDimension {
 struct VariableDimensions {
     randomizable: bool,
     real: bool,
+    /// A `string`: each element is a heap handle, not packed bits.
+    string: bool,
     packed: Vec<PackedDimension>,
     unpacked: Vec<UnpackedDimension>,
     signed: bool,

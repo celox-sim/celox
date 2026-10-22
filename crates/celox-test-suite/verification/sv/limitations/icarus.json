@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 14,
     "emission_error": 0,
-    "compile_error": 104,
+    "compile_error": 107,
     "runtime_error": 7,
     "unsupported": 0,
     "ignored": 0
@@ -1199,6 +1199,30 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:7: error: Method getc is not a string method.\n<case>/source_0.sv:7: error: Object celox_suite_tb.dut.s has no method \"getc(...)\".\n<case>/source_0.sv:9: error: Enable of unknown task ``s.putc''.\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "string::character_access",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:10: error: A reference to a net or variable (`n') is not allowed in a constant expression.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "string::concatenation_and_replication",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:8: error: Method compare is not a string method.\n<case>/source_0.sv:8: error: Object celox_suite_tb.dut.s has no method \"compare(...)\".\n<case>/source_0.sv:9: error: Method icompare is not a string method.\n<case>/source_0.sv:9: error: Object celox_suite_tb.dut.s has no method \"icompare(...)\".\n<case>/source_0.sv:11: error: Method toupper is not a string method.\n<case>/source_0.sv:11: error: Object celox_suite_tb.dut.s has no method \"toupper(...)\".\n<case>/source_0.sv:11: error: Method tolower is not a string method.\n<case>/source_0.sv:11: error: Object celox_suite_tb.dut.s has no method \"tolower(...)\".\n4 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "string::methods",
+      "phase": "compile",
+      "status": "compile_error"
     }
   ]
 }

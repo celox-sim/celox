@@ -568,6 +568,7 @@ impl<'a> FfParser<'a> {
                 .iter()
                 .map(|arg| arg.0.comptime().r#type.is_string())
                 .collect(),
+            arg_is_handle: Vec::new(),
         };
         let id = self
             .runtime_event_site_base

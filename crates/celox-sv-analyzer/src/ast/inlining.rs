@@ -106,6 +106,10 @@ pub(super) fn expr_signedness_with_return_types(
             ..
         } => function.result_type().map(|(_, signed)| signed),
         Expr::Call {
+            callee: Callee::String(op),
+            ..
+        } => Some(op.result_type().1),
+        Expr::Call {
             callee: Callee::Subroutine(name),
             ..
         } => functions

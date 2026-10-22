@@ -122,6 +122,7 @@ fn runtime_event_site_for_assert(
             .iter()
             .map(|arg| arg.0.comptime().r#type.is_string())
             .collect(),
+        arg_is_handle: Vec::new(),
     }
 }
 
