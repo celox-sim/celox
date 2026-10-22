@@ -2301,7 +2301,13 @@ fn relocate_executation_unit_with_errors<A, B>(
                                 SIRInstruction::ExternCall { dst, func, args } => {
                                     SIRInstruction::ExternCall {
                                         dst: *dst,
-                                        func: extern_functions[func],
+                                        // The heap helper is outside every
+                                        // module's extern function table.
+                                        func: if *func == celox_sir::extern_abi::HEAP_HELPER_ID {
+                                            *func
+                                        } else {
+                                            extern_functions[func]
+                                        },
                                         args: args.clone(),
                                     }
                                 }

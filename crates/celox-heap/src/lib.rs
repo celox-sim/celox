@@ -7,12 +7,16 @@
 //!
 //! References from state memory are not counted. A collection marks the
 //! entries reachable from the handles the caller passes as roots and frees
-//! the rest; callers collect only where every copy of a handle is in a place
-//! they can enumerate.
+//! the rest; callers collect only where every copy of a handle that may still
+//! be read is in a place they can enumerate. Handles are never reused, so a
+//! stale copy that is only compared, such as the value a wait started from,
+//! cannot equal a later string.
 
 use std::sync::Arc;
 
-use fxhash::FxHashMap as HashMap;
+use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
+
+pub mod ops;
 
 /// A reference to a heap entry, as stored in state memory.
 pub type Handle = u32;
@@ -30,11 +34,15 @@ const MIN_COLLECTION_INTERVAL: usize = 1024;
 /// Dynamic strings referenced by [`Handle`].
 #[derive(Clone, Debug)]
 pub struct Heap {
-    strings: Vec<Option<Arc<[u8]>>>,
+    strings: HashMap<Handle, Arc<[u8]>>,
     lookup: HashMap<Arc<[u8]>, Handle>,
-    free: Vec<Handle>,
+    /// The handle the next string gets.
+    next: Handle,
+    /// Mutable strings under construction, see [`ops`].
+    buffers: Vec<Option<Vec<u8>>>,
+    free_buffers: Vec<u64>,
     /// Entries below this handle are never collected.
-    pinned: usize,
+    pinned: Handle,
     created: usize,
     live_after_collection: usize,
 }
@@ -50,10 +58,14 @@ impl Heap {
         let empty: Arc<[u8]> = Arc::from(&[][..]);
         let mut lookup = HashMap::default();
         lookup.insert(empty.clone(), EMPTY_STRING);
+        let mut strings = HashMap::default();
+        strings.insert(EMPTY_STRING, empty);
         Self {
-            strings: vec![Some(empty)],
+            strings,
             lookup,
-            free: Vec::new(),
+            next: EMPTY_STRING + 1,
+            buffers: Vec::new(),
+            free_buffers: Vec::new(),
             pinned: 1,
             created: 0,
             live_after_collection: 1,
@@ -76,18 +88,11 @@ impl Heap {
             return handle;
         }
         let value: Arc<[u8]> = Arc::from(bytes);
-        let handle = match self.free.pop() {
-            Some(handle) => {
-                self.strings[handle as usize] = Some(value.clone());
-                handle
-            }
-            None => {
-                let handle = Handle::try_from(self.strings.len())
-                    .expect("the heap has more strings than handles can name");
-                self.strings.push(Some(value.clone()));
-                handle
-            }
-        };
+        let handle = self.next;
+        self.next = handle
+            .checked_add(1)
+            .expect("the heap created more strings than handles can name");
+        self.strings.insert(handle, value.clone());
         self.lookup.insert(value, handle);
         self.created += 1;
         handle
@@ -96,22 +101,17 @@ impl Heap {
     /// The contents of `handle`. A handle that names no string reads as `""`,
     /// so a value written into a handle slot by the host cannot crash a read.
     pub fn string(&self, handle: Handle) -> &[u8] {
-        self.strings
-            .get(handle as usize)
-            .and_then(Option::as_deref)
-            .unwrap_or_default()
+        self.strings.get(&handle).map_or(&[], |value| value)
     }
 
     /// Whether `handle` names a live string.
     pub fn contains(&self, handle: Handle) -> bool {
-        self.strings
-            .get(handle as usize)
-            .is_some_and(Option::is_some)
+        self.strings.contains_key(&handle)
     }
 
     /// The number of live strings, including `""`.
     pub fn len(&self) -> usize {
-        self.strings.len() - self.free.len()
+        self.strings.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -120,7 +120,7 @@ impl Heap {
 
     /// Bytes of string contents, excluding allocator overhead.
     pub fn content_size(&self) -> usize {
-        self.strings.iter().flatten().map(|value| value.len()).sum()
+        self.strings.values().map(|value| value.len()).sum()
     }
 
     /// Whether enough entries were created since the last collection to make
@@ -133,24 +133,48 @@ impl Heap {
     /// Free every unpinned entry that no handle in `roots` refers to. Roots
     /// that name no entry are ignored.
     pub fn collect(&mut self, roots: impl IntoIterator<Item = Handle>) {
-        let mut marked = vec![false; self.strings.len()];
-        marked[..self.pinned].fill(true);
-        for root in roots {
-            if let Some(mark) = marked.get_mut(root as usize) {
-                *mark = true;
+        let marked: HashSet<Handle> = roots.into_iter().collect();
+        let pinned = self.pinned;
+        let lookup = &mut self.lookup;
+        self.strings.retain(|handle, value| {
+            let live = *handle < pinned || marked.contains(handle);
+            if !live {
+                lookup.remove(value);
             }
-        }
-        for (handle, live) in marked.into_iter().enumerate() {
-            if live {
-                continue;
-            }
-            if let Some(value) = self.strings[handle].take() {
-                self.lookup.remove(&value);
-                self.free.push(handle as Handle);
-            }
-        }
+            live
+        });
+        // No buffer outlives the kernel that built it.
+        self.buffers.clear();
+        self.free_buffers.clear();
         self.created = 0;
         self.live_after_collection = self.len();
+    }
+
+    fn new_buffer(&mut self, bytes: Vec<u8>) -> u64 {
+        match self.free_buffers.pop() {
+            Some(buffer) => {
+                self.buffers[buffer as usize] = Some(bytes);
+                buffer
+            }
+            None => {
+                self.buffers.push(Some(bytes));
+                (self.buffers.len() - 1) as u64
+            }
+        }
+    }
+
+    fn buffer(&mut self, buffer: u64) -> &mut Vec<u8> {
+        self.buffers
+            .get_mut(buffer as usize)
+            .and_then(Option::as_mut)
+            .unwrap_or_else(|| panic!("heap buffer {buffer} is not live"))
+    }
+
+    fn take_buffer(&mut self, buffer: u64) -> Vec<u8> {
+        let bytes = std::mem::take(self.buffer(buffer));
+        self.buffers[buffer as usize] = None;
+        self.free_buffers.push(buffer);
+        bytes
     }
 }
 
@@ -185,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn collection_frees_unreachable_strings_and_reuses_handles() {
+    fn collection_frees_unreachable_strings_without_reusing_handles() {
         let mut heap = Heap::new();
         let kept = heap.intern(b"kept");
         let dropped = heap.intern(b"dropped");
@@ -193,12 +217,12 @@ mod tests {
         assert_eq!(heap.string(kept), b"kept");
         assert!(!heap.contains(dropped));
         assert!(heap.contains(EMPTY_STRING));
-        // A freed handle is reused, and its old contents are gone from the
-        // intern table.
-        let again = heap.intern(b"new");
-        assert_eq!(again, dropped);
-        assert_eq!(heap.string(again), b"new");
-        assert_ne!(heap.intern(b"dropped"), kept);
+        // A later string never takes a freed handle, and the freed contents
+        // are gone from the intern table.
+        let again = heap.intern(b"dropped");
+        assert_ne!(again, dropped);
+        assert_eq!(heap.string(again), b"dropped");
+        assert_eq!(heap.string(dropped), b"");
     }
 
     #[test]

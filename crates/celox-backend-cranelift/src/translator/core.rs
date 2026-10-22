@@ -489,23 +489,35 @@ impl SIRTranslator {
             state.mem_ptr,
             celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET as i32,
         );
+        // The heap helper sits two slots before the user table and takes the
+        // state pointer before its arguments.
+        let heap = func == celox_sir::extern_abi::HEAP_HELPER_ID;
         let function = state.builder.ins().load(
             types::I64,
             MemFlags::trusted(),
             table,
-            i32::try_from(func as u64 * 8).expect("extern function index fits the table"),
+            if heap {
+                -16
+            } else {
+                i32::try_from(func as u64 * 8).expect("extern function index fits the table")
+            },
         );
 
         let mut signature = Signature::new(self.target_config.default_call_conv);
         signature
             .params
-            .extend(args.iter().map(|_| AbiParam::new(types::I64)));
+            .extend((0..args.len() + usize::from(heap)).map(|_| AbiParam::new(types::I64)));
         signature.returns.push(AbiParam::new(types::I64));
         let signature = state.builder.import_signature(signature);
 
-        let arguments = args
-            .iter()
-            .map(|arg| self.extern_call_argument(state, *arg))
+        let arguments = heap
+            .then_some(state.mem_ptr)
+            .into_iter()
+            .chain(
+                args.iter()
+                    .map(|arg| self.extern_call_argument(state, *arg))
+                    .collect::<Vec<_>>(),
+            )
             .collect::<Vec<_>>();
         let call = state
             .builder
