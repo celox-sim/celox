@@ -1904,7 +1904,7 @@
     "category": "simulator_compile_limitation",
     "phase": "compile",
     "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
-    "reason": "Icarus 13.0 rejects pure virtual method declarations and interface classes with syntax errors (\"Invalid class item\", \"Invalid module item\") and fails code generation without a diagnostic (\"Code generation had 2 error(s)\") for a method called on an element of an array of class handles. IEEE 1800-2023 8.21 and 8.26 define pure virtual methods and interface classes, and 7.4 and 8.4 permit arrays of class handles. Verilator passes all three cases.",
+    "reason": "Icarus 13.0 rejects pure virtual method declarations and interface classes with syntax errors (\"Invalid class item\", \"Invalid module item\") and fails code generation without a diagnostic (\"Code generation had 2 error(s)\") for a method called on an element of an array of class handles. IEEE 1800-2023 8.21 and 8.26 define pure virtual methods and interface classes, and 7.4 and 8.4 permit arrays of class handles. Verilator passes the first three cases; see sv_verilator_interface_class_casts and sv_verilator_extended_interface_class_methods for the others.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
@@ -1914,7 +1914,62 @@
       "icarus": [
         "class::abstract_classes_and_pure_virtual_methods",
         "class::methods_of_handle_array_elements",
-        "class::classes_implementing_interface_classes"
+        "class::classes_implementing_interface_classes",
+        "class::methods_called_through_interface_class_handles",
+        "class::inherited_methods_of_extended_interface_classes",
+        "class::casts_from_interface_class_handles"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_interface_class_casts",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 returns 0 from $cast of a handle of one interface class to a variable of another interface class that the object's class also implements, so the case dereferences the unassigned null handle; the adapter-free source prints 0 1 where IEEE 1800-2023 8.16 and 8.26.5 require 1 1. Celox prints 1 1. Icarus rejects interface classes, see sv_icarus_abstract_and_interface_classes.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/interface_class_casts_verilator.json",
+      "verification/repros/interface_class_casts.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::casts_from_interface_class_handles"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_extended_interface_class_methods",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 does not find a method that an interface class inherits from an interface class it extends when the method is called through a handle of the extending class (\"Class method 'sides' not found in class 'NamedShape'\"). IEEE 1800-2023 8.26.3 makes the methods of the extended interface classes members of the extending one. Icarus rejects interface classes, see sv_icarus_abstract_and_interface_classes.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::inherited_methods_of_extended_interface_classes"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_cast",
+    "category": "simulator_compile_limitation",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not implement $cast (\"System task/function $cast() is not defined by any module\"), which IEEE 1800-2023 6.24.2 and 8.16 define. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::casts_of_class_handles"
       ]
     }
   },

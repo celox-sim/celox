@@ -9,8 +9,8 @@
     "unexpected_accept": 1,
     "mismatch": 16,
     "emission_error": 0,
-    "compile_error": 116,
-    "runtime_error": 7,
+    "compile_error": 119,
+    "runtime_error": 8,
     "unsupported": 0,
     "ignored": 0
   },
@@ -1309,6 +1309,38 @@
       "detail": "Icarus build exit status: 25; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:15: error: Invalid module item.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: I give up on this function definition.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:24: error: Invalid module item.\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: error: I give up on this function definition.\n<case>/source_0.sv:28: error: 'code' has already been declared in this scope.\n<case>/source_0.sv:20:      : It was declared here as a function.\n<case>/source_0.sv:31: syntax error\n<case>/source_0.sv:32: error: Invalid module item.\n<case>/source_0.sv:33: syntax error\n<case>/source_0.sv:33: error: Invalid module instantiation\n",
       "expectation": "Simulation",
       "name": "class::classes_implementing_interface_classes",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 32; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:13: error: Invalid module item.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Invalid module item.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:17: error: Invalid module item.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Invalid module item.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Invalid module item.\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:22: error: Invalid module item.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Invalid module instantiation\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:24: error: Invalid module instantiation\n<case>/source_0.sv:34: syntax error\n<case>/source_0.sv:34: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::casts_from_interface_class_handles",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "native testbench failed: exit status: 7; see runtime.log and protocol.log\n<case>/source_0.sv:23: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:26: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:29: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:32: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:34: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:36: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:39: Error: System task/function $cast() is not defined by any module.\n",
+      "expectation": "Simulation",
+      "name": "class::casts_of_class_handles",
+      "phase": "execute",
+      "status": "runtime_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 30; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:12: error: Invalid module item.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Invalid module item.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Invalid module item.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:16: error: Invalid module item.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Invalid module item.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:19: error: Invalid module item.\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: error: Invalid module item.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:23: error: Invalid module item.\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:24: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "class::inherited_methods_of_extended_interface_classes",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 46; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:12: error: Invalid module item.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Invalid module item.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Invalid module item.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:18: error: Invalid module item.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Invalid module item.\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: error: Invalid module item.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:22: error: Invalid module item.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Invalid module item.\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:25: error: Invalid module item.\n<case>/source_0.sv:26: syntax error\n<case>/source_0.sv:26: error: Invalid module item.\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:29: error: Invalid module item.\n<case>/source_0.sv:30: syntax error\n<case>/source_0.sv:30: error: Invalid module item.\n<case>/source_0.sv:31: syntax error\n<case>/source_0.sv:31: error: Invalid module item.\n<case>/source_0.sv:32: syntax error\n<case>/source_0.sv:34: error: Invalid module item.\n<case>/source_0.sv:35: syntax error\n<case>/source_0.sv:35: error: Invalid module instantiation\n<case>/source_0.sv:36: syntax error\n<case>/source_0.sv:36: error: Invalid module instantiation\n<case>/source_0.sv:38: syntax error\n<case>/source_0.sv:38: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "class::methods_called_through_interface_class_handles",
       "phase": "compile",
       "status": "compile_error"
     }

@@ -457,15 +457,36 @@ fn class_signatures(
             context,
         );
     }
-    if !constructor {
+    if !constructor && !class.interface {
         publish_signature(
             classes::Class::subroutine_name(&class_name, "new"),
             vec![this],
-            Some(Some(handle)),
+            Some(Some(handle.clone())),
             tree,
             context,
         );
     }
+    // `$cast` to a variable of the class (8.16).
+    let formal = |name: &str, direction| {
+        (
+            FunctionArgumentMetadata {
+                name: name.into(),
+                direction,
+                has_default: false,
+            },
+            handle.clone(),
+        )
+    };
+    publish_signature(
+        classes::Class::cast_name(&class_name),
+        vec![
+            formal(procedural::CAST_DESTINATION, ParamDirection::Inout),
+            formal(procedural::CAST_SOURCE, ParamDirection::Input),
+        ],
+        Some(Some(procedural::int_type())),
+        tree,
+        context,
+    );
     Ok(())
 }
 /// Publish the signatures of the methods of every class in the source.
@@ -474,9 +495,7 @@ pub(in crate::ast) fn all_class_signatures(
     context: &mut PackedDimensions,
 ) {
     for class in &tree.declarations().classes {
-        if !class.interface {
-            let _ = class_signatures(class, tree, context);
-        }
+        let _ = class_signatures(class, tree, context);
     }
 }
 fn publish_signature(

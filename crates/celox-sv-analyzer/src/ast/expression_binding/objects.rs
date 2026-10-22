@@ -321,6 +321,104 @@ pub(in crate::ast) fn method(
     Ok(Some((subroutine, formals, receiver)))
 }
 
+/// Check that the handle native expression `id` evaluates to may be
+/// assigned to a variable of class `target`: its class derives from or
+/// implements `target`, or it is `null` or of a class not known before
+/// binding (IEEE 1800-2023 8.16, 8.26.5).
+pub(in crate::ast) fn check_assignment(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+    target: &str,
+    context: impl FnOnce() -> String,
+) -> Converted<()> {
+    let Some(source) = native_class(tree, id, native, dimensions) else {
+        return Ok(());
+    };
+    if derives_from(tree, dimensions, &source, target)? {
+        return Ok(());
+    }
+    Err(AnalyzerError::IncompatibleClassHandle {
+        context: context(),
+        actual: source,
+        target: target.to_owned(),
+    })
+}
+
+/// Whether class `class_name` derives from or implements `ancestor`.
+fn derives_from(
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    class_name: &str,
+    ancestor: &str,
+) -> Converted<bool> {
+    Ok(class(tree, dimensions, class_name)?.derives_from(
+        tree,
+        ancestor,
+        &dimensions.const_env,
+        &dimensions.type_aliases,
+    ))
+}
+
+/// A `$cast(destination, source)` whose destination is a class handle
+/// (IEEE 1800-2023 8.16).
+pub(in crate::ast) enum Cast {
+    /// A call of the destination class's [`Class::cast_name`] subroutine
+    /// with the destination and the source.
+    Call {
+        name: String,
+        destination: ExprId,
+        source: ExprId,
+    },
+    /// The source's class is neither assignment nor cast compatible with
+    /// the destination's, so the cast fails whatever the source's value.
+    Fails,
+}
+
+/// The `$cast` with `arguments` when its destination is a variable or an
+/// array element of a class handle type.
+pub(in crate::ast) fn cast(
+    tree: &AnalysisContext<'_>,
+    arguments: &[celox_sv_syntax::Argument],
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<Cast>> {
+    let [destination, source] = arguments else {
+        return Ok(None);
+    };
+    let (Some(destination), Some(source), None, None) = (
+        destination.value,
+        source.value,
+        &destination.name,
+        &source.name,
+    ) else {
+        return Ok(None);
+    };
+    let Some(target) = native_class(tree, destination, native, dimensions) else {
+        return Ok(None);
+    };
+    if property(tree, destination, native, dimensions)?.is_some() {
+        return Err(unsupported("`$cast` to a class property"));
+    }
+    class(tree, dimensions, &target)?;
+    // The source's class may be a base of the destination's, or an interface
+    // class, whose object the call checks; any other class's cannot be
+    // assigned (8.16).
+    if let Some(source_class) = native_class(tree, source, native, dimensions)
+        && !derives_from(tree, dimensions, &source_class, &target)?
+        && !derives_from(tree, dimensions, &target, &source_class)?
+        && !class(tree, dimensions, &source_class)?.is_interface
+    {
+        return Ok(Some(Cast::Fails));
+    }
+    Ok(Some(Cast::Call {
+        name: Class::cast_name(&target),
+        destination,
+        source,
+    }))
+}
+
 /// The receiver of an unqualified method call inside a method.
 pub(in crate::ast) fn this() -> Expr {
     Expr::Ident(THIS.into())
@@ -354,7 +452,16 @@ pub(in crate::ast) fn constructor(
             name,
         } if separator == "::" && name.spelling == "new" => {
             match named_class(tree, *expression, native, dimensions) {
-                Some(class) => class,
+                Some(class) => {
+                    if !derives_from(tree, dimensions, &class, class_name)? {
+                        return Err(AnalyzerError::IncompatibleClassHandle {
+                            context: format!("`{class}::new`"),
+                            actual: class,
+                            target: class_name.to_owned(),
+                        });
+                    }
+                    class
+                }
                 None => return Ok(None),
             }
         }
