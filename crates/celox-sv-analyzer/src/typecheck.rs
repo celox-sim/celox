@@ -15,7 +15,7 @@ pub struct IntegralLiteral {
 }
 
 /// The type of a fixed-size unpacked array of an integral element type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UnpackedArrayType {
     /// The element count of each unpacked dimension, slowest varying first.
     pub dims: Vec<usize>,
