@@ -1,1 +1,1 @@
-Rebase onto master after #1717, #1722 and #1744; merge the new limitations.json entries with master's named array parameter entries.
+Rebase onto master after #1717, #1722, #1734, #1735, #1736 and #1744; merge limitations.json entries and the sv-tests README paragraphs, raising the sv-tests totals by the ten real-function passes.
