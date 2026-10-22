@@ -370,10 +370,15 @@ unsupported, including when the inference option is enabled.
   `a = 1; a = 0;` wakes `@(a)` but not `@(a ^ b)`; write `#0` between the
   writes to make the pulse visible. IEEE 1800-2023 4.7 permits this order;
   Icarus evaluates the expression at each write.
-- A waiter does not yet see a value that one evaluation of `always_comb`, an
-  edge-triggered `always` or `always_ff` writes and then overwrites, as in
-  `y = 0; if (a) y = 1;` ([#1706](https://github.com/celox-sim/celox/issues/1706)). `always @*` already
-  reports that write.
+- A waiter sees every value that one evaluation of `always_comb`,
+  `always @*`, an edge-triggered `always` or `always_ff` writes, including
+  one that a later write overwrites: with `a` at 1, `y = 0; if (a) y = 1;`
+  wakes `@(y)` (IEEE 1800-2023 4.3, 9.4.2). Nonblocking updates apply in the
+  NBA region in issue order, each its own update (10.4.2). A child's output
+  port is a continuous assignment to the parent's net (23.3.3), so a waiter
+  in the parent sees only the settled value, as in the previous item.
+  Verilator 5.052 sees only the final value of an evaluation; Icarus 13.0
+  also sees the pulse through the port.
 
 ### Variable lifetimes
 
