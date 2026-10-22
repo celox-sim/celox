@@ -42,14 +42,30 @@ synthesis and is tested at the design level.
 | Statements | `if` / `else`, `case`, `casez`, `casex`, `case ... inside`, `unique` / `priority`, `for`, `while`, `do ... while`, `repeat`, `forever` and `foreach` (unrolled when the trip count is constant, otherwise executed at run time), `break` / `continue` / `return`, immediate assertions |
 | Functions | `function` and `task` with `input`, `output` and `inout` arguments, `return` or assignment to the function name, local variables and `localparam`s, selected and composite assignments; calls are inlined. Calls with constant arguments in constant expressions (parameters, ranges) are evaluated during elaboration |
 
+### Timing controls {#timing-controls}
+
+In a timed `Simulation`, `initial` and plain `always` processes can suspend:
+
+| Control | Supported |
+| --- | --- |
+| `#delay` | integral delays, `#(min:typ:max)` (the typical value) and [time literals](#time-literal-delays); an X or Z delay counts as zero |
+| `@(...)` | variables, `posedge` / `negedge` / `edge`, items joined by `or` or `,`, bit, part and run-time index selects, any expression including calls of pure functions, and `@*` / `@(*)`, which waits on the variables its statement reads |
+| `wait (condition)` | any condition; an X or Z condition counts as false |
+| Assignments | blocking and nonblocking; nonblocking updates take effect in the NBA region of the time slot |
+
+An `always` with a sensitivity list other than `@*`, such as
+`always @(a or b)`, runs as a process too. A `Simulator` runs no processes,
+so such a design simulates without them there; use `Simulation`, or write
+`always @*` or `always_comb` ([#1712](https://github.com/celox-sim/celox/issues/1712)).
+
 ### Timed task calls
 
 An `initial` or ordinary `always` process can call tasks containing `#delay`,
 `@(event)` and `wait (condition)`, including through nested tasks. Calls are
 inlined into the caller's resumable state machine. A normal edge-sensitive
 `always` that calls a timed task waits for that task to return before rearming
-its event control. Functions, `always_comb`, `always @*` and `always_ff` cannot
-call a timed task.
+its event control. Functions, `always_comb` and `always_ff` cannot call a timed
+task, and `always @*` cannot yet ([#1710](https://github.com/celox-sim/celox/issues/1710)).
 
 Automatic task arguments and locals have separate storage for each activation
 and survive suspension. Module-local static task arguments remain shared. Inputs and inouts
@@ -74,12 +90,12 @@ stream (IEEE 1800-2023 18.12).
 Constraints (`with`), class methods, enum variables, unpacked arrays, nets,
 constants, selects and concatenation arguments are unsupported and rejected.
 
-### Time literal delays
+### Time literal delays {#time-literal-delays}
 
 Standalone delay controls accept time literals such as `#5ns`, `#(2.75ns)` and
 `#40ps`, with all six units from `fs` to `s`. Values round at the declaring
 scope's precision before conversion to scheduler ticks (5.8, 3.14.1). Real-valued
-arithmetic expressions remain unsupported.
+delays are not supported yet ([#1707](https://github.com/celox-sim/celox/issues/1707)).
 
 ### Built-in functions and tasks
 
@@ -103,10 +119,17 @@ it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
 - Classes. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
-- Behavioral and verification constructs: `final`, intra-assignment timing controls,
+- Behavioral and verification constructs: `final`, intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
-  named events, `fork` / `join`, concurrent assertions, `force` / `release`.
-- Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset. Level-sensitive sensitivity lists other than `@*` are unsupported.
+  named events and `->`, `fork` / `join`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
+- Timing controls in processes: `iff` qualifiers ([#1444](https://github.com/celox-sim/celox/issues/1444)),
+  real-valued delays ([#1707](https://github.com/celox-sim/celox/issues/1707)), package-scoped delay values
+  ([#1710](https://github.com/celox-sim/celox/issues/1710)), impure function calls in event expressions, and
+  `wait` or event expressions reading a static task argument. Nonblocking
+  assignments in a process cannot yet target an unpacked array element, a
+  run-time position or a constant position outside the target
+  ([#1709](https://github.com/celox-sim/celox/issues/1709)).
+- Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset.
 - Inferred latches inside `always_comb` are rejected by default. Set `inferred_latch = "warn"` or `"allow"` in `celox.toml` under `[diagnostics]` to permit retained blocking assignments. Ordinary `always @*` and explicit `always_latch` do not require this option.
 - Ports and instances: non-ANSI port declarations ([#426](https://github.com/celox-sim/celox/issues/426)), `ref` ports
   ([#427](https://github.com/celox-sim/celox/issues/427)), wildcard `.*` connections ([#442](https://github.com/celox-sim/celox/issues/442)), gate primitives ([#457](https://github.com/celox-sim/celox/issues/457)),
@@ -115,7 +138,9 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   array, ANSI port default values, tagged unions, soft packed unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   unpacked structs, strings and `real`.
 - Sequential processes: `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)) and edge operands other than a
-  plain signal ([#464](https://github.com/celox-sim/celox/issues/464)) in event lists.
+  plain signal ([#464](https://github.com/celox-sim/celox/issues/464)) in event lists. A plain `always` with
+  such an edge, a multi-bit edge signal, or several edges without a reset is
+  rejected too, until it runs as a process ([#1708](https://github.com/celox-sim/celox/issues/1708)).
 - Combinational processes: nonblocking assignments inside `always_comb`
   ([#453](https://github.com/celox-sim/celox/issues/453)).
 - Loops: a procedural loop unrolls at most 10,000 iterations; a combinational
@@ -289,6 +314,27 @@ The latter include reads inside called functions; task calls contribute only
 their argument expressions (IEEE 1800-2023 9.4.2.2 and 9.2.2.2.1).
 Nonblocking latch assignments (`<=`) require NBA scheduling and remain
 unsupported, including when the inference option is enabled.
+
+### Event and level waits {#timing-semantics}
+
+- An event control waits for a change that happens after it begins
+  (IEEE 1800-2023 9.4.2). In `a = 1; @(a ^ b);` the write to `a` is not an
+  event of the wait; the process resumes when `a` or `b` changes later.
+  Icarus 13.0 wakes on the earlier write; Verilator 5.052 agrees with Celox.
+- `posedge` and `negedge` of a multi-bit expression follow its least
+  significant bit (Table 9-2): `@(posedge v)` ignores `v[3]`, and
+  `@(posedge v[3])` follows it. Transitions through X and Z count as in that
+  table, so `0` to `x` is a `posedge`.
+- Continuous assignments, combinational processes and event expressions see
+  a process's writes when that process reaches a timing control or ends.
+  After `b = 1; a = 1;`, `a ^ b` has not changed, and a pulse
+  `a = 1; a = 0;` wakes `@(a)` but not `@(a ^ b)`; write `#0` between the
+  writes to make the pulse visible. IEEE 1800-2023 4.7 permits this order;
+  Icarus evaluates the expression at each write.
+- A waiter does not yet see a value that one evaluation of `always_comb`, an
+  edge-triggered `always` or `always_ff` writes and then overwrites, as in
+  `y = 0; if (a) y = 1;` ([#1706](https://github.com/celox-sim/celox/issues/1706)). `always @*` already
+  reports that write.
 
 ### Variable lifetimes
 
