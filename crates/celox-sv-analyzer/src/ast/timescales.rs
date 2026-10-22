@@ -794,12 +794,24 @@ impl Timescales {
     /// The time units of the simulation, which counts the global time
     /// precision (3.14.3), in one time unit of the scope of `node`.
     fn time_divisor_in_unit(&self, at: usize, unit: &Unit) -> u64 {
+        self.ticks_in(at, unit, |scale| scale.unit)
+    }
+
+    /// The time units of the simulation in one time precision step of the
+    /// scope of `node` (3.14.1).
+    fn precision_divisor_in_unit(&self, at: usize, unit: &Unit) -> u64 {
+        self.ticks_in(at, unit, |scale| scale.precision)
+    }
+
+    /// The time units of the simulation in `10^exponent(scale)` seconds,
+    /// where `scale` is the time scale of the scope at `at`.
+    fn ticks_in(&self, at: usize, unit: &Unit, exponent: impl Fn(&Scale) -> i32) -> u64 {
         let scale =
             scope_at(&unit.scopes, &unit.parents, at).map_or(unit.scale, |i| unit.scopes[i].scale);
         let precision = self.precision.unwrap_or(DEFAULT.precision);
         // A scope's precision is not coarser than its unit, and no unit is
         // longer than 100 s or precision finer than 1 fs.
-        10u64.pow((scale.unit - precision.min(scale.precision)) as u32)
+        10u64.pow((exponent(&scale) - precision.min(scale.precision)) as u32)
     }
 
     fn resolve(
@@ -1009,27 +1021,37 @@ pub(super) fn time_divisor(
     node: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
 ) -> Converted<u64> {
+    divisor(node, tree, Timescales::time_divisor_in_unit)
+}
+
+/// The simulation's time units in one time precision step of the scope of
+/// `node`, at which a real delay is rounded (3.14.1).
+pub(super) fn precision_divisor(
+    node: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+) -> Converted<u64> {
+    divisor(node, tree, Timescales::precision_divisor_in_unit)
+}
+
+fn divisor(
+    node: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    in_unit: fn(&Timescales, usize, &Unit) -> u64,
+) -> Converted<u64> {
+    let context = tree.state.timescales.design.borrow();
+    let at = tree.declarations().expression(node).tokens.start;
+    if let Some(prepared) = &context.prepared
+        && prepared.address == tree.syntax_tree as *const SyntaxTree as usize
     {
-        let context = tree.state.timescales.design.borrow();
-        if let Some(prepared) = &context.prepared
-            && prepared.address == tree.syntax_tree as *const SyntaxTree as usize
-        {
-            return Ok(context.design.time_divisor_in_unit(
-                tree.declarations().expression(node).tokens.start,
-                &prepared.unit,
-            ));
-        }
-        let design = &context.design;
-        let source = key(tree);
-        let extended = (!design.units.contains_key(&source))
-            .then(|| design.including_tree(tree))
-            .transpose()?;
-        let design = extended.as_ref().unwrap_or(design);
-        Ok(design.time_divisor_in_unit(
-            tree.declarations().expression(node).tokens.start,
-            &design.units[&source],
-        ))
+        return Ok(in_unit(&context.design, at, &prepared.unit));
     }
+    let design = &context.design;
+    let source = key(tree);
+    let extended = (!design.units.contains_key(&source))
+        .then(|| design.including_tree(tree))
+        .transpose()?;
+    let design = extended.as_ref().unwrap_or(design);
+    Ok(in_unit(design, at, &design.units[&source]))
 }
 
 /// A standalone time literal used as a delay: round at the declaring

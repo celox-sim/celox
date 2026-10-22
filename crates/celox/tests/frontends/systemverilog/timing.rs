@@ -119,6 +119,8 @@ timed_cases! {
     fn long_process_loops_finish_within_one_time_slot = "timing::long_process_loops_finish_within_one_time_slot";
     fn initial_blocks_run_at_time_zero = "timing::initial_blocks_run_at_time_zero";
     fn host_edges_after_time_zero_clock_flip_flops = "timing::host_edges_after_time_zero_clock_flip_flops";
+    fn real_delays_round_at_the_scope_precision = "timing::real_delays_round_at_the_scope_precision";
+    fn negative_real_delays_wait_their_twos_complement = "timing::negative_real_delays_wait_their_twos_complement";
     fn expression_events_see_pulses_within_a_time_slot = "timing::expression_events_see_pulses_within_a_time_slot";
     fn real_expression_events_see_fractional_changes = "timing::real_expression_events_see_fractional_changes";
     fn bit_select_edges_follow_the_selected_bit = "timing::bit_select_edges_follow_the_selected_bit";
@@ -217,6 +219,58 @@ fn time_literal_delays_round_at_scope_precision() {
     assert_eq!(sim.get(coarse), 0u8.into());
     sim.run_until(2800).unwrap();
     assert_eq!(sim.get(coarse), 1u8.into());
+}
+
+/// A real delay is rounded at its scope's precision with ties away from
+/// zero (IEEE 1800-2023 3.14.1, 6.12.1): 2.7505 ns waits 2751 ps at 1 ps,
+/// and 2.75 ns waits 2.8 ns at 100 ps.
+#[test]
+fn real_delays_round_at_scope_precision() {
+    let source = r#"
+        module Fine(output int stage);
+            timeunit 1ns / 1ps;
+            real r = 2.7505;
+            initial begin #r stage = 1; #1.5 stage = 2; end
+        endmodule
+        module Coarse(output int stage);
+            timeunit 1ns / 100ps;
+            real r = 2.75;
+            shortreal half = 0.05;
+            initial begin #r stage = 1; #1.25 stage = 2; #half stage = 3; end
+        endmodule
+        module Top(output int fine, coarse);
+            timeunit 1ns / 1ps;
+            Fine f(fine); Coarse c(coarse);
+        endmodule
+    "#;
+    for level in [celox::OptLevel::O0, celox::OptLevel::O1] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("real_delays.sv"))],
+            "Top",
+        )
+        .opt_level(level)
+        .build()
+        .unwrap();
+        let fine = sim.signal("fine");
+        let coarse = sim.signal("coarse");
+        // (time in ps, fine stage, coarse stage)
+        for (time, f, c) in [
+            (2750u64, 0u32, 0u32),
+            (2751, 1, 0),
+            (2799, 1, 0),
+            (2800, 1, 1),
+            (4099, 1, 1),
+            (4100, 1, 2),
+            (4199, 1, 2),
+            (4200, 1, 3),
+            (4250, 1, 3),
+            (4251, 2, 3),
+        ] {
+            sim.run_until(time).unwrap();
+            assert_eq!(sim.get(fine), f.into(), "{level:?} fine at {time}");
+            assert_eq!(sim.get(coarse), c.into(), "{level:?} coarse at {time}");
+        }
+    }
 }
 
 /// The variables of an event expression, `$event[k]` and its copies of
