@@ -110,15 +110,16 @@ impl CompiledExpr {
         memory: *mut u8,
         on_write: impl FnMut(usize, usize),
     ) -> TestbenchValue {
-        self.eval_with_strings(memory, &mut crate::TestbenchStrings::new(), on_write)
+        self.eval_with_heap(memory, None, on_write)
     }
 
-    /// Evaluate using the simulator-owned string storage. Values are copied on
-    /// load so assigning another variable cannot alias a mutable string.
-    pub fn eval_with_strings(
+    /// Evaluate with the simulator's heap, which string variables refer to.
+    /// Without a heap, string variables read as `""` and string stores are
+    /// dropped instead of writing a handle no heap knows.
+    pub fn eval_with_heap(
         &self,
         memory: *mut u8,
-        strings: &mut crate::TestbenchStrings,
+        mut heap: Option<&mut celox_heap::Heap>,
         mut on_write: impl FnMut(usize, usize),
     ) -> TestbenchValue {
         let mut stack: Vec<TestbenchValue> = Vec::with_capacity(16);
@@ -126,7 +127,7 @@ impl CompiledExpr {
         let ops = self.bytecode.ops();
 
         while pc < ops.len() {
-            self.exec_at(ops, &mut pc, &mut stack, memory, strings, &mut on_write);
+            self.exec_at(ops, &mut pc, &mut stack, memory, &mut heap, &mut on_write);
         }
         stack.pop().unwrap_or_else(|| {
             debug_assert!(false, "testbench bytecode: stack empty after evaluation");
@@ -143,7 +144,7 @@ impl CompiledExpr {
         pc: &mut usize,
         stack: &mut Vec<TestbenchValue>,
         memory: *mut u8,
-        strings: &mut crate::TestbenchStrings,
+        heap: &mut Option<&mut celox_heap::Heap>,
         on_write: &mut impl FnMut(usize, usize),
     ) {
         match &ops[*pc] {
@@ -152,14 +153,17 @@ impl CompiledExpr {
                 *pc += 1;
             }
             TbOpcode::LoadString { location, elements } => {
-                let index = stack.pop().expect("string index").to_u64() as usize;
-                let value = if index < *elements {
-                    strings
-                        .get(&(*location, index))
-                        .cloned()
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
+                let index = stack.pop().expect("string element offset").to_u64() as usize
+                    / celox_design::HANDLE_WIDTH;
+                let value = match heap {
+                    Some(heap) if index < *elements => {
+                        let offset = location + index * celox_heap::HANDLE_BYTES;
+                        // SAFETY: bound bytecode addresses a handle slot of
+                        // `elements` handles in this memory image.
+                        let handle = unsafe { read_handle(memory, offset) };
+                        heap.string(handle).to_vec()
+                    }
+                    _ => Vec::new(),
                 };
                 stack.push(TestbenchValue::String(value));
                 *pc += 1;
@@ -168,7 +172,19 @@ impl CompiledExpr {
                 let TestbenchValue::String(value) = stack.pop().expect("string store value") else {
                     unreachable!("string store requires a string value");
                 };
-                strings.insert((*location, 0), value);
+                if let Some(heap) = heap {
+                    let handle = heap.intern(&value);
+                    // SAFETY: bound bytecode addresses a handle slot in this
+                    // memory image.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            handle.to_le_bytes().as_ptr(),
+                            memory.add(*location),
+                            celox_heap::HANDLE_BYTES,
+                        );
+                    }
+                    on_write(*location, celox_heap::HANDLE_BYTES);
+                }
                 *pc += 1;
             }
             TbOpcode::ConstU64(v) => {
@@ -326,14 +342,14 @@ impl CompiledExpr {
                 if !cond.is_zero() {
                     let then_end = *pc + then_len;
                     while *pc < then_end {
-                        self.exec_at(ops, pc, stack, memory, strings, on_write);
+                        self.exec_at(ops, pc, stack, memory, heap, on_write);
                     }
                     *pc += else_len; // skip else block
                 } else {
                     *pc += then_len; // skip then block
                     let else_end = *pc + else_len;
                     while *pc < else_end {
-                        self.exec_at(ops, pc, stack, memory, strings, on_write);
+                        self.exec_at(ops, pc, stack, memory, heap, on_write);
                     }
                 }
             }
@@ -996,6 +1012,20 @@ fn eval_binop_wide_cmp(l: &BigUint, op: Op, r: &BigUint) -> u64 {
         Op::LogicOr => ((*l != BigUint::ZERO) || (*r != BigUint::ZERO)) as u64,
         _ => unreachable!("operator is not testbench comparison plumbing: {op:?}"),
     }
+}
+
+/// Read the handle stored at `offset`.
+///
+/// # Safety
+///
+/// `memory + offset` must be valid for reading a handle.
+unsafe fn read_handle(memory: *const u8, offset: usize) -> celox_heap::Handle {
+    let mut bytes = [0; celox_heap::HANDLE_BYTES];
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        std::ptr::copy_nonoverlapping(memory.add(offset), bytes.as_mut_ptr(), bytes.len());
+    }
+    celox_heap::Handle::from_le_bytes(bytes)
 }
 
 #[cfg(test)]

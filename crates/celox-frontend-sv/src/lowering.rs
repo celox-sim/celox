@@ -97,6 +97,7 @@ impl SvVariable {
                 kind: self.domain_kind,
                 type_kind: self.type_kind,
                 array_dims: self.array_dims.clone(),
+                value_kind: Default::default(),
             },
             unpacked_ranges: self.unpacked_ranges.clone(),
             packed_dims: self
