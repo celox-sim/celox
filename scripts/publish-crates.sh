@@ -17,11 +17,11 @@ fi
 # already been published. Keep each adapter after the crates it links.
 crates=(
   celox-sv-syntax
+  celox-design
   celox-sv-analyzer
   celox-test-suite
   celox-analysis
   celox-backend-common
-  celox-design
   celox-frontend-sdk
   celox-macros
   celox-ts-gen
