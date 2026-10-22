@@ -48,7 +48,7 @@ In a timed `Simulation`, `initial` and plain `always` processes can suspend:
 
 | Control | Supported |
 | --- | --- |
-| `#delay` | integral delays, `#(min:typ:max)` (the typical value) and [time literals](#time-literal-delays); an X or Z delay counts as zero |
+| `#delay` | integral and real delays, `#(min:typ:max)` (the typical value) and [time literals](#time-literal-delays); an X or Z delay counts as zero |
 | `@(...)` | variables, `posedge` / `negedge` / `edge`, items joined by `or` or `,`, bit, part and run-time index selects, any expression including calls of pure functions, and `@*` / `@(*)`, which waits on the variables its statement reads |
 | `wait (condition)` | any condition; an X or Z condition counts as false |
 | Assignments | blocking and nonblocking; nonblocking updates take effect in the NBA region of the time slot |
@@ -94,8 +94,10 @@ constants, selects and concatenation arguments are unsupported and rejected.
 
 Standalone delay controls accept time literals such as `#5ns`, `#(2.75ns)` and
 `#40ps`, with all six units from `fs` to `s`. Values round at the declaring
-scope's precision before conversion to scheduler ticks (5.8, 3.14.1). Real-valued
-delays are not supported yet ([#1707](https://github.com/celox-sim/celox/issues/1707)).
+scope's precision before conversion to scheduler ticks (5.8, 3.14.1). A real
+delay such as `#1.5` or `#r` rounds the same way, with ties away from zero
+(6.12.1); a negative one waits its two's complement (9.4.1), and a NaN one
+waits zero.
 
 ### Built-in functions and tasks
 
@@ -123,7 +125,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events and `->`, `fork` / `join`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
 - Timing controls in processes: `iff` qualifiers ([#1444](https://github.com/celox-sim/celox/issues/1444)),
-  real-valued delays ([#1707](https://github.com/celox-sim/celox/issues/1707)), package-scoped delay values
+  package-scoped delay values
   ([#1710](https://github.com/celox-sim/celox/issues/1710)), impure function calls in event expressions, and
   `wait` or event expressions reading a static task argument. Nonblocking
   assignments in a process cannot yet target an unpacked array element, a

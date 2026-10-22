@@ -2600,8 +2600,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             sv::ir::Stmt::Delay {
                 amount,
                 ticks_per_unit,
+                ticks_per_precision,
             } => {
-                self.delay(amount, *ticks_per_unit)?;
+                self.delay(amount, *ticks_per_unit, *ticks_per_precision)?;
                 Ok(true)
             }
             sv::ir::Stmt::WaitEvent(items) => {
@@ -4364,21 +4365,30 @@ impl Ff<'_, '_> {
         &mut self,
         amount: &sv::ir::Expr,
         ticks_per_unit: u64,
+        ticks_per_precision: u64,
     ) -> Result<(), sv::AnalyzerError> {
-        let signed = self.expr_signed(amount);
-        let mut arena = SLTNodeArena::new();
-        let node = self.expr_slt(amount, None, &mut arena)?;
-        let original = self.lower_slt(&arena, node)?;
-        let node = coerce_node_width(&mut arena, node, Some(PROCESS_DELAY_WIDTH), signed)
-            .map_err(slt_error)?;
-        let delay = self.lower_slt(&arena, node)?;
-        let mut delay = self.zero_if_unknown(delay, original);
-        if ticks_per_unit > 1 {
+        let (mut delay, ticks_per_step) = match self.m.expr_float_precision(amount) {
+            Some(precision) => (
+                self.real_delay(amount, precision, ticks_per_unit / ticks_per_precision)?,
+                ticks_per_precision,
+            ),
+            None => {
+                let signed = self.expr_signed(amount);
+                let mut arena = SLTNodeArena::new();
+                let node = self.expr_slt(amount, None, &mut arena)?;
+                let original = self.lower_slt(&arena, node)?;
+                let node = coerce_node_width(&mut arena, node, Some(PROCESS_DELAY_WIDTH), signed)
+                    .map_err(slt_error)?;
+                let delay = self.lower_slt(&arena, node)?;
+                (self.zero_if_unknown(delay, original), ticks_per_unit)
+            }
+        };
+        if ticks_per_step > 1 {
             // Check before multiplying so the 64-bit delay slot cannot wrap.
             let limit = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
             self.b.emit(SIRInstruction::Imm(
                 limit,
-                SIRValue::new(u64::MAX / ticks_per_unit),
+                SIRValue::new(u64::MAX / ticks_per_step),
             ));
             let overflow = self.b.alloc_bit(1, false);
             self.b.emit(SIRInstruction::Binary(
@@ -4402,7 +4412,7 @@ impl Ff<'_, '_> {
             self.b.switch_to_block(scaled);
             let factor = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
             self.b
-                .emit(SIRInstruction::Imm(factor, SIRValue::new(ticks_per_unit)));
+                .emit(SIRInstruction::Imm(factor, SIRValue::new(ticks_per_step)));
             let product = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
             self.b.emit(SIRInstruction::Binary(
                 product,
@@ -4414,6 +4424,42 @@ impl Ff<'_, '_> {
         }
         self.with_kernel(|kernel| kernel.inactive_delay(delay))
             .map_err(kernel_error)
+    }
+
+    /// A real delay `amount` in precision steps of the declaring scope:
+    /// scaled from time units by `steps_per_unit`, rounded to the nearest
+    /// step with ties away from zero (3.14.1, 6.12.1), and read as an
+    /// unsigned 64-bit time like an integral delay (9.4.1). A NaN or
+    /// infinite delay is zero, as an unknown integral one is.
+    fn real_delay(
+        &mut self,
+        amount: &sv::ir::Expr,
+        precision: celox_sir::FloatPrecision,
+        steps_per_unit: u64,
+    ) -> Result<RegisterId, sv::AnalyzerError> {
+        let scaled = if steps_per_unit > 1 {
+            sv::ir::Expr::Binary {
+                left: Box::new(amount.clone()),
+                op: sv::ir::BinaryOp::Mul,
+                right: Box::new(sv::ir::Expr::Literal(format!("{steps_per_unit}.0"))),
+            }
+        } else {
+            amount.clone()
+        };
+        let precision = self.m.expr_float_precision(&scaled).unwrap_or(precision);
+        let mut arena = SLTNodeArena::new();
+        let node = self.expr_slt(&scaled, None, &mut arena)?;
+        let node = floating::convert(
+            &mut arena,
+            node,
+            Some(precision),
+            None,
+            PROCESS_DELAY_WIDTH,
+            true,
+            true,
+        )
+        .ok_or_else(|| unsupported("real delay conversion"))?;
+        self.lower_slt(&arena, node)
     }
 
     /// `value` as a two-state register that is zero when `source` has an
