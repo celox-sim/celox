@@ -157,6 +157,9 @@ pub(crate) struct LoweredSvModule {
     /// The continuous assignments of the event expressions the processes
     /// wait on, by their hidden target `$event[k]`.
     event_assignments: Vec<(SourceVarId, Vec<sv::ir::Stmt>)>,
+    /// The creation orders of the `always @(list)` processes lowered like
+    /// `always @*`.
+    level_lists_lowered: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -312,7 +315,15 @@ fn interface_signatures_collecting(
         .into_iter()
         .map(|prototype| {
             warnings.extend(crate::warning::analyzer_warnings(&prototype.warnings));
-            let lowered = lower_module(&prototype.module, false, true, false, warnings, &[])?;
+            let lowered = lower_module(
+                &prototype.module,
+                false,
+                true,
+                false,
+                warnings,
+                &[],
+                LevelLists::Processes,
+            )?;
             Ok(InterfaceSignature {
                 name: prototype.name,
                 module: lowered.source,
@@ -828,7 +839,15 @@ fn lower_package_states(
         .into_iter()
         .enumerate()
         .map(|(index, module)| {
-            let mut lowered = lower_module(module, four_state, true, ff_parts, warnings, &[])?;
+            let mut lowered = lower_module(
+                module,
+                four_state,
+                true,
+                ff_parts,
+                warnings,
+                &[],
+                LevelLists::Processes,
+            )?;
             lowered.sim_module.time_precision = Some(
                 celox_design::TimePrecision::try_from(packages.global_time_precision())
                     .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
@@ -1569,6 +1588,7 @@ fn prepare_external_hierarchy_collecting(
             // The foreign module's own combinational blocks carry its copies.
             event_copies: Vec::new(),
             event_assignments: Vec::new(),
+            level_lists_lowered: Vec::new(),
         }
     };
     let foreign_modules: HashMap<_, _> = foreign
@@ -1707,7 +1727,14 @@ fn prepare_external_hierarchy_collecting(
         let base = analyzed
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-        let lowered = specialize_module(base, &key, four_state, false, warnings)?;
+        let lowered = specialize_module(
+            base,
+            &key,
+            four_state,
+            false,
+            warnings,
+            LevelLists::Processes,
+        )?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name)
@@ -1744,7 +1771,14 @@ fn prepare_external_hierarchy_collecting(
                 .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
             Ok((
                 module_id,
-                specialize_module(base, key, four_state, false, warnings)?,
+                specialize_module(
+                    base,
+                    key,
+                    four_state,
+                    false,
+                    warnings,
+                    LevelLists::Processes,
+                )?,
             ))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
@@ -2200,7 +2234,14 @@ fn schedule_sources_collecting(
         let base = analyzed
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-        let lowered = specialize_module(base, &key, four_state, false, warnings)?;
+        let lowered = specialize_module(
+            base,
+            &key,
+            four_state,
+            false,
+            warnings,
+            LevelLists::Processes,
+        )?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name) {
@@ -2221,95 +2262,170 @@ fn schedule_sources_collecting(
         }
     }
 
-    let lowered_modules = module_ids
-        .iter()
-        .map(|(key, &module_id)| {
-            let base = analyzed
-                .get(&key.name)
-                .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-            let lowered = specialize_module(base, key, four_state, parallel.enabled(), warnings)
+    // A combinational loop through an `always @(list)` lowered like
+    // `always @*` may converge as a process: demote the lists in the loop
+    // and schedule again, until no lowered list takes part in it.
+    let no_demotions = HashSet::default();
+    let mut demoted: HashMap<ModuleId, HashSet<usize>> = HashMap::default();
+    let mut trace = trace;
+    loop {
+        let lowered_modules = module_ids
+            .iter()
+            .map(|(key, &module_id)| {
+                let base = analyzed
+                    .get(&key.name)
+                    .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
+                let level_lists = LevelLists::Lowered {
+                    demoted: demoted.get(&module_id).unwrap_or(&no_demotions),
+                };
+                let lowered = specialize_module(
+                    base,
+                    key,
+                    four_state,
+                    parallel.enabled(),
+                    warnings,
+                    level_lists,
+                )
                 .map_err(FrontendError::from)?;
-            Ok((module_id, lowered))
-        })
-        .collect::<Result<HashMap<_, _>, FrontendError>>()?;
-    validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
-    let root = &lowered_modules[&root_id];
-    if let Some(port) = root
-        .port_order
-        .iter()
-        .map(|port_id| &root.variables[port_id])
-        .find(|port| port.kind == VariableKind::Inout)
-    {
-        return Err(unsupported_sv_inout(port.path.join(".")).into());
-    }
-    validate_sv_module_graph(
-        &root_key,
-        &module_ids,
-        &lowered_modules,
-        &mut HashSet::default(),
-        &mut HashSet::default(),
-    )?;
-
-    let mut modules = HashMap::default();
-    let mut module_names = HashMap::default();
-    for (key, &module_id) in &module_ids {
-        let lowered = &lowered_modules[&module_id];
-        let mut sim_module = lowered.sim_module.clone();
-        attach_instance_glue(
-            &mut sim_module,
-            lowered,
-            key,
+                Ok((module_id, lowered))
+            })
+            .collect::<Result<HashMap<_, _>, FrontendError>>()?;
+        validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
+        let root = &lowered_modules[&root_id];
+        if let Some(port) = root
+            .port_order
+            .iter()
+            .map(|port_id| &root.variables[port_id])
+            .find(|port| port.kind == VariableKind::Inout)
+        {
+            return Err(unsupported_sv_inout(port.path.join(".")).into());
+        }
+        validate_sv_module_graph(
+            &root_key,
             &module_ids,
             &lowered_modules,
+            &mut HashSet::default(),
+            &mut HashSet::default(),
+        )?;
+
+        let mut modules = HashMap::default();
+        let mut module_names = HashMap::default();
+        for (key, &module_id) in &module_ids {
+            let lowered = &lowered_modules[&module_id];
+            let mut sim_module = lowered.sim_module.clone();
+            attach_instance_glue(
+                &mut sim_module,
+                lowered,
+                key,
+                &module_ids,
+                &lowered_modules,
+                four_state,
+                allow_inferred_latches,
+                warnings,
+            )?;
+            module_names.insert(module_id, key.name.clone());
+            modules.insert(module_id, sim_module);
+        }
+
+        let package_states = lower_package_states(
+            &analyzed[&top].packages,
+            module_ids.len(),
             four_state,
-            allow_inferred_latches,
+            parallel.enabled(),
             warnings,
         )?;
-        module_names.insert(module_id, key.name.clone());
-        modules.insert(module_id, sim_module);
+        validate_package_variable_drivers([&root_key], &module_ids, &lowered_modules)?;
+        let mut packages = Vec::new();
+        for (name, module_id, lowered) in &package_states {
+            module_names.insert(*module_id, name.clone());
+            modules.insert(*module_id, lowered.sim_module.clone());
+            packages.push((name.clone(), *module_id));
+        }
+        bind_package_variables(
+            &mut modules,
+            lowered_modules
+                .iter()
+                .map(|(&module_id, lowered)| (module_id, lowered)),
+            &package_states,
+        )?;
+        for (key, id) in &module_ids {
+            restore_interface_member_paths(modules.get_mut(id).unwrap(), &analyzed[&key.name]);
+        }
+        let symbolic = SymbolicRtl {
+            modules,
+            module_names,
+            root_id,
+            packages,
+        };
+        let mut loop_members = Vec::new();
+        let scheduled =
+            celox_frontend_core::symbolic::assembly::schedule_symbolic_rtl_reporting_loops(
+                symbolic,
+                None,
+                ignored_loops,
+                true_loops,
+                four_state,
+                parallel,
+                trace_options,
+                trace.as_deref_mut(),
+                &mut loop_members,
+            );
+        let error = match scheduled {
+            Ok(scheduled) => return Ok(scheduled),
+            Err(error) => error,
+        };
+        if !demote_level_lists(&loop_members, &lowered_modules, &mut demoted) {
+            return Err(error.into());
+        }
     }
+}
 
-    let package_states = lower_package_states(
-        &analyzed[&top].packages,
-        module_ids.len(),
-        four_state,
-        parallel.enabled(),
-        warnings,
-    )?;
-    validate_package_variable_drivers([&root_key], &module_ids, &lowered_modules)?;
-    let mut packages = Vec::new();
-    for (name, module_id, lowered) in &package_states {
-        module_names.insert(*module_id, name.clone());
-        modules.insert(*module_id, lowered.sim_module.clone());
-        packages.push((name.clone(), *module_id));
-    }
-    bind_package_variables(
-        &mut modules,
-        lowered_modules
+/// Demote the `always @(list)` processes lowered like `always @*` which
+/// drive a range of a combinational loop. Whether any was demoted.
+fn demote_level_lists(
+    loop_members: &[celox_frontend_core::symbolic::assembly::LoopMember],
+    lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
+    demoted: &mut HashMap<ModuleId, HashSet<usize>>,
+) -> bool {
+    let mut changed = false;
+    for (module_id, member) in loop_members {
+        let Some(lowered) = lowered_modules.get(module_id) else {
+            continue;
+        };
+        let Some(signal_name) = lowered
+            .signal_names
             .iter()
-            .map(|(&module_id, lowered)| (module_id, lowered)),
-        &package_states,
-    )?;
-    for (key, id) in &module_ids {
-        restore_interface_member_paths(modules.get_mut(id).unwrap(), &analyzed[&key.name]);
+            .find_map(|(name, &id)| (id == member.id).then_some(name.as_str()))
+        else {
+            continue;
+        };
+        let scan = DriverScan {
+            signal_name,
+            subroutines: lowered.source.subroutines(),
+            range: &|_| None,
+        };
+        for process in lowered.source.comb_processes() {
+            let creation_order = process.creation_order();
+            if process.kind() != sv::ir::CombProcessKind::AlwaysStar
+                || !lowered.level_lists_lowered.contains(&creation_order)
+                || demoted
+                    .get(module_id)
+                    .is_some_and(|demoted| demoted.contains(&creation_order))
+            {
+                continue;
+            }
+            let mut drivers = Vec::new();
+            body_driver_ranges(&mut drivers, process.body(), 0, &scan);
+            if !drivers.is_empty() {
+                demoted
+                    .entry(*module_id)
+                    .or_default()
+                    .insert(creation_order);
+                changed = true;
+            }
+        }
     }
-    let symbolic = SymbolicRtl {
-        modules,
-        module_names,
-        root_id,
-        packages,
-    };
-    celox_frontend_core::symbolic::assembly::schedule_symbolic_rtl(
-        symbolic,
-        None,
-        ignored_loops,
-        true_loops,
-        four_state,
-        parallel,
-        trace_options,
-        trace,
-    )
-    .map_err(FrontendError::from)
+    changed
 }
 
 // Use elaboration provenance rather than treating every '$' as a separator:
@@ -2392,6 +2508,7 @@ fn specialize_module(
     four_state: bool,
     ff_parts: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    level_lists: LevelLists<'_>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let overrides = evaluated_parameter_overrides(&key.parameter_overrides)?;
     // Type bindings are already resolved in the caller scope.
@@ -2441,6 +2558,7 @@ fn specialize_module(
         ff_parts,
         warnings,
         &local_forces,
+        level_lists,
     )?;
     for instance in &mut lowered.instances {
         let name = if let Some((index, _)) = instance.array_element {
@@ -2491,6 +2609,7 @@ fn lower_module(
     ff_parts: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
     force_signals: &[String],
+    level_lists: LevelLists<'_>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     lower_module_with_overrides(
         module,
@@ -2500,7 +2619,19 @@ fn lower_module(
         ff_parts,
         warnings,
         force_signals,
+        level_lists,
     )
+}
+
+/// Which `always @(list)` processes are lowered like `always @*`.
+#[derive(Clone, Copy)]
+enum LevelLists<'a> {
+    /// All of them stay processes.
+    Processes,
+    /// Every one whose list is its implicit event expression, except the
+    /// demoted ones, by creation order, which take part in a combinational
+    /// loop as `always @*`.
+    Lowered { demoted: &'a HashSet<usize> },
 }
 
 fn needs_host_request(
@@ -2560,6 +2691,7 @@ struct FfEventRole {
 
 /// `ff_parts` additionally keeps every `always_ff` process as an
 /// independently evaluated part, for lane-partitioned builds.
+#[allow(clippy::too_many_arguments)]
 fn lower_module_with_overrides(
     module: &sv::ir::Module,
     parameter_overrides: &[LoweredSvParameterOverride],
@@ -2568,6 +2700,7 @@ fn lower_module_with_overrides(
     ff_parts: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
     force_signals: &[String],
+    level_lists: LevelLists<'_>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let mut ff_event_roles = Vec::new();
     for process in module.ff_processes() {
@@ -2878,6 +3011,41 @@ fn lower_module_with_overrides(
         &constants,
         &parameter_types,
     )?;
+    // `always @(list)` naming exactly the reads of its statement is
+    // `always @*` (IEEE 1800-2023 9.4.2.2), which needs no process.
+    let mut level_lists_lowered = Vec::new();
+    let level_sensitive = match level_lists {
+        LevelLists::Processes => None,
+        LevelLists::Lowered { demoted } => Some(demoted),
+    }
+    .filter(|_| {
+        module
+            .initial_processes()
+            .iter()
+            .any(|process| process.level_sensitive().is_some())
+    })
+    .map(|demoted| {
+        let pm = procedural::ProcModule::new(
+            module,
+            &mut variables,
+            &mut name_to_id,
+            &constants,
+            &parameter_types,
+            four_state,
+            warnings,
+        );
+        module.clone().lower_level_sensitive_processes(|process| {
+            let selected = !demoted.contains(&process.creation_order())
+                && process
+                    .level_sensitive()
+                    .is_some_and(|(items, body)| pm.is_implicit_event_list(items, body));
+            if selected {
+                level_lists_lowered.push(process.creation_order());
+            }
+            selected
+        })
+    });
+    let module = level_sensitive.as_ref().unwrap_or(module);
     let (
         (
             eval_only_ff_blocks,
@@ -3050,6 +3218,7 @@ fn lower_module_with_overrides(
         package_variables,
         event_copies: event_vars.copies,
         event_assignments,
+        level_lists_lowered,
     })
 }
 
@@ -8543,6 +8712,76 @@ pub(crate) fn unsupported_sv_inout(path: String) -> ParserError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The process kernels of `source`, other than declaration initializers.
+    fn procedure_kernels(source: &str) -> usize {
+        let scheduled = schedule_sources(
+            &[(source, Path::new("top.sv"))],
+            "Top",
+            &[],
+            &[],
+            &[],
+            false,
+            &celox_frontend_core::ParallelScheduleOptions::default(),
+            &FrontendTraceOptions::default(),
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        scheduled
+            .scheduled
+            .runtime_schema
+            .processes
+            .iter()
+            .filter(|process| !process.is_initializer)
+            .count()
+    }
+
+    /// Only the `always @(list)` processes of a combinational loop stay
+    /// processes; one `initial` block drives each design.
+    #[test]
+    fn level_lists_in_a_combinational_loop_stay_processes() {
+        for (source, kernels) in [
+            (
+                "module Top(output bit [7:0] a, b, c);
+                   bit [7:0] s;
+                   initial begin #1; s = 1; end
+                   always @(s, b) a = b + s;
+                   always @(a) c = a;
+                 endmodule",
+                1,
+            ),
+            (
+                "module Top(output bit [7:0] a, b);
+                   initial begin #1; a = 1; end
+                   always @(a) if (a < 4) b = a;
+                   always @(b) if (b < 4) a = b + 1;
+                 endmodule",
+                3,
+            ),
+            (
+                "module Top(output bit [7:0] a, b);
+                   bit [7:0] s;
+                   initial begin #1; s = 1; end
+                   always @(s or b) a = (b < 4) ? b + s : b;
+                   always_comb b = (a < 4) ? a : 8'd3;
+                 endmodule",
+                2,
+            ),
+            (
+                "module Top(output bit [7:0] a, b, c);
+                   bit [7:0] s;
+                   initial begin #1; s = 1; end
+                   always @(s or b) a = (b < 4) ? b + s : b;
+                   assign b = (a < 4) ? a : 8'd3;
+                   always @(b) c = b + 8'd10;
+                 endmodule",
+                2,
+            ),
+        ] {
+            assert_eq!(procedure_kernels(source), kernels, "{source}");
+        }
+    }
 
     #[test]
     fn power_signedness_follows_base_with_self_determined_exponent() {
