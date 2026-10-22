@@ -678,3 +678,70 @@ sv_backends! {
         @case "timing::static_function_readonly_initializer_calls_execute_once";
     }
 }
+
+/// An edge whose evaluation a `$fatal` ends before its commit leaves no
+/// held write of a watched variable behind: when the host continues, the
+/// later edges rewrite `y[0]` to its own value and wake no waiter.
+#[test]
+fn runtime_error_before_a_commit_leaves_no_held_writes() {
+    let source = r#"
+        module Top(output bit [1:0] y, output int n, r, f);
+            timeunit 1ns / 1ns;
+            bit clk, bad = 1;
+            initial y = 2'b01;
+            always_ff @(posedge clk) begin
+                if (bad) begin y[0] <= 0; $fatal(1, "bad edge"); end
+                else begin y[0] <= 1; y[0] <= 1; end
+            end
+            initial #2 forever begin @(y); n++; end
+            initial #2 forever begin @(posedge y); r++; end
+            initial #2 forever begin @(negedge y); f++; end
+            initial begin
+                #1 clk = 1;
+                #1 clk = 0; bad = 0;
+                #1 clk = 1;
+                #1 clk = 0;
+                #1 clk = 1;
+            end
+        endmodule
+    "#;
+    let mut backends = vec!["cranelift", "cranelift-parallel"];
+    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+        backends.extend(["native", "native-parallel"]);
+    }
+    for backend in backends {
+        let builder = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("held_after_error.sv"))],
+            "Top",
+        );
+        let builder = if backend.ends_with("-parallel") {
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+        } else {
+            builder
+        };
+        // The backends build different simulation types.
+        macro_rules! check {
+            ($sim:expr) => {{
+                let mut sim = $sim.unwrap();
+                let [y, n, r, f] = ["y", "n", "r", "f"].map(|name| sim.signal(name));
+                assert!(
+                    sim.run_until(1).is_err(),
+                    "{backend}: the first edge reports $fatal"
+                );
+                sim.run_until(10).unwrap();
+                assert_eq!(sim.get(y), 1u8.into(), "{backend}");
+                for (signal, label) in [(n, "n"), (r, "r"), (f, "f")] {
+                    assert_eq!(sim.get(signal), 0u32.into(), "{backend}: {label}");
+                }
+            }};
+        }
+        if backend.starts_with("native") {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check!(builder.build_native());
+        } else {
+            check!(builder.build_cranelift());
+        }
+    }
+}
