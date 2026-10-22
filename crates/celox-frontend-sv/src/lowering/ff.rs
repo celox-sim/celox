@@ -72,6 +72,8 @@ pub(super) struct Ff<'p, 'a> {
     /// The nonblocking assignment sites of the process, by local index.
     nba_sites: Vec<NbaSite<SourceVarId>>,
     host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
+    /// The nonblocking sites with a staged and a queued path.
+    nba_switches: Vec<NbaSwitch<SourceVarId>>,
     direct: bool,
 }
 
@@ -122,6 +124,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
             host_request_sites: Vec::new(),
+            nba_switches: Vec::new(),
         }
     }
 
@@ -4240,6 +4243,7 @@ impl Ff<'_, '_> {
             wait_sites: self.wait_sites,
             nba_sites: self.nba_sites,
             host_request_sites: self.host_request_sites,
+            nba_switches: self.nba_switches,
         })
     }
 
@@ -4277,19 +4281,25 @@ impl Ff<'_, '_> {
                 },
             )?;
             high = low;
+            // The staged value has an object of its own: a value still
+            // staged from earlier in the time slot is queued before it is
+            // replaced. Assembly keeps the staged or the queued path.
+            let staged_four_state = self.m.var(staged).is_4state;
+            let (value, _) = self.m.temp("nba_value", width, false, staged_four_state);
+            let (pending, _) = self.m.temp("nba_pending", 1, false, false);
+            let (switch, _) = self.m.temp("nba_staged", 1, false, false);
             let site = NbaSite {
                 process: self.process,
                 target: id,
                 lsb,
                 width,
-                value: staged,
+                value,
                 offset: None,
-                pending: None,
+                pending: Some(pending),
             };
             let index = self.nba_sites.len() as u32;
-            let staged_four_state = self.m.var(staged).is_4state;
             self.with_kernel(|kernel| {
-                kernel.nonblocking(index, &site, |builder| {
+                kernel.nonblocking_switched(index, &site, switch, |builder| {
                     let value = if staged_four_state {
                         builder.alloc_logic(width)
                     } else {
@@ -4305,6 +4315,11 @@ impl Ff<'_, '_> {
                 })
             })
             .map_err(kernel_error)?;
+            self.nba_switches.push(NbaSwitch {
+                value,
+                switch,
+                queued: staged,
+            });
             self.nba_sites.push(site);
         }
         Ok(())
@@ -4784,6 +4799,7 @@ pub(super) struct KernelUnit {
     pub wait_sites: Vec<WaitSite<SourceVarId>>,
     pub nba_sites: Vec<NbaSite<SourceVarId>>,
     pub host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
+    pub nba_switches: Vec<NbaSwitch<SourceVarId>>,
 }
 
 /// Iterations, as a power of two, between the yields of a kernel loop that

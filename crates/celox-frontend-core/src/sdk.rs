@@ -1936,6 +1936,7 @@ pub fn lower_frontend_artifact(
         counter_slots,
         wait_sites,
         nba_sites,
+        nba_switches: Vec::new(),
         host_request_sites: Vec::new(),
         time_slot: None,
     };
