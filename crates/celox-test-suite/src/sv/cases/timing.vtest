@@ -1214,3 +1214,234 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (run_until 2) (assert_eq count 1) (assert_eq y 3)
   (run_until 3) (assert_eq z 3)
   (run_until 4) (assert_eq count 2) (assert_eq y 7) (assert_eq z 3))
+
+; Scheduling boundaries: processes that only delay, processes woken by one
+; clock edge, generated clocks feeding flip-flop domains, and the points where
+; a simulator may run them differently from other processes. Each case keeps
+; its result independent of the order the standard leaves open between
+; processes of one region (IEEE 1800-2023 4.5, 4.7).
+
+; A process resumed by `#0` runs in the inactive region, after the active
+; region has run the flip-flop domain its edge triggered.
+(case zero_delay_process_ends_a_pulse_after_its_edge_triggers
+  (source "pulse.sv" #"
+                module Top(output logic [7:0] count, output logic p);
+                    initial p = 1'b0;
+                    initial count = 8'd0;
+                    always begin #10 p = 1'b1; #0 p = 1'b0; end
+                    always_ff @(posedge p) count <= count + 8'd1;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 5)
+  (assert_eq count 0)
+  (run_until 35)
+  (assert_eq count 3 "every zero-width pulse is an edge")
+  (assert_eq p 0))
+
+; Edge waits count the same edges wherever the process that generates the
+; clock is declared, also for an edge no flip-flop domain uses.
+(case edge_waits_count_generated_clock_edges_in_any_declaration_order
+  (source "order.sv" #"
+                module Top(output logic [7:0] before_clock, after_clock, falls);
+                    logic clk = 1'b0;
+                    initial begin
+                        before_clock = 8'd0;
+                        forever @(posedge clk) before_clock = before_clock + 8'd1;
+                    end
+                    always #5 clk = ~clk;
+                    initial begin
+                        after_clock = 8'd0;
+                        forever @(posedge clk) after_clock = after_clock + 8'd1;
+                    end
+                    initial begin
+                        falls = 8'd0;
+                        forever @(negedge clk) falls = falls + 8'd1;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 4)
+  (assert_eq before_clock 0)
+  ; Rising edges at 5, 15, ..., 95; falling edges at 10, 20, ..., 100.
+  (run_until 100)
+  (assert_eq before_clock 10)
+  (assert_eq after_clock 10)
+  (assert_eq falls 10))
+
+; Nonblocking assignments of a process that only delays publish in the NBA
+; region of their own time, between the clock edges.
+(case delay_process_nonblocking_updates_reach_later_edges
+  (source "delay_nba.sv" #"
+                module Top(output logic [7:0] s, q);
+                    logic clk = 1'b0;
+                    always #5 clk = ~clk;
+                    initial begin
+                        s = 8'd0;
+                        #12 s <= 8'd5;
+                        #10 s <= s + 8'd1;
+                    end
+                    always_ff @(posedge clk) q <= s;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 12)
+  (assert_eq s 5)
+  (run_until 16)
+  (assert_eq q 5)
+  (run_until 26)
+  (assert_eq s 6)
+  (assert_eq q 6))
+
+; A clock whose half period is a variable: each delay reads it when the
+; process reaches the delay.
+(case variable_delay_clock_changes_its_period
+  (source "variable_period.sv" #"
+                module Top(output logic [7:0] count);
+                    logic clk = 1'b0;
+                    logic [7:0] half = 8'd5;
+                    initial count = 8'd0;
+                    always #(half) clk = ~clk;
+                    initial #37 half = 8'd10;
+                    always_ff @(posedge clk) count <= count + 8'd1;
+                endmodule
+            "#)
+  (top Top)
+  ; Rising edges at 5, 15, 25, 35, then 50 and 70.
+  (run_until 45)
+  (assert_eq count 4)
+  (run_until 75)
+  (assert_eq count 6))
+
+(case asynchronous_reset_driven_by_a_delay_process
+  (source "async_reset.sv" #"
+                module Top(output logic [7:0] q);
+                    logic clk = 1'b0;
+                    logic rst = 1'b0;
+                    always #5 clk = ~clk;
+                    initial begin
+                        #2 rst = 1'b1;
+                        #10 rst = 1'b0;
+                        #31 rst = 1'b1;
+                        #4 rst = 1'b0;
+                    end
+                    always_ff @(posedge clk or posedge rst)
+                        if (rst) q <= 8'd0;
+                        else q <= q + 8'd1;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 3)
+  (assert_eq q 0)
+  ; Counting edges at 15, 25 and 35.
+  (run_until 40)
+  (assert_eq q 3)
+  (run_until 44)
+  (assert_eq q 0 "the reset asserts between clock edges")
+  ; Held in reset at 45; counting again at 55.
+  (run_until 56)
+  (assert_eq q 1))
+
+; Two generated clocks rise at the same time: each domain samples the
+; other's registers from before the edge.
+(case generated_clocks_with_a_common_edge_sample_each_other
+  (source "two_clocks.sv" #"
+                module Top(output logic [7:0] a_count, b_count, a_seen, b_seen);
+                    logic a = 1'b0;
+                    logic b = 1'b0;
+                    always #5 a = ~a;
+                    always #15 b = ~b;
+                    initial begin
+                        a_count = 8'd0;
+                        b_count = 8'd0;
+                    end
+                    always_ff @(posedge a) begin
+                        a_count <= a_count + 8'd1;
+                        a_seen <= b_count;
+                    end
+                    always_ff @(posedge b) begin
+                        b_count <= b_count + 8'd1;
+                        b_seen <= a_count;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  ; a rises at 5, 15, 25, 35, 45; b at 15 and 45.
+  (run_until 50)
+  (assert_eq a_count 5)
+  (assert_eq b_count 2)
+  (assert_eq a_seen 1)
+  (assert_eq b_seen 4))
+
+; Inputs the script writes between runs reach combinational logic before the
+; next generated clock edge samples it.
+(case script_writes_between_runs_reach_generated_clock_domains
+  (source "host_comb.sv" #"
+                module Top(input logic [7:0] in, output logic [7:0] sum, q);
+                    logic clk = 1'b0;
+                    logic [7:0] r = 8'd0;
+                    always #5 clk = ~clk;
+                    assign sum = in + r;
+                    assign q = r;
+                    always_ff @(posedge clk) r <= sum;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 0)
+  (modify (set in 1))
+  (run_until 6)
+  (assert_eq q 1)
+  (assert_eq sum 2)
+  (modify (set in 3))
+  (run_until 7)
+  (assert_eq sum 4 "a write settles without a clock edge")
+  (run_until 16)
+  (assert_eq q 4)
+  (assert_eq sum 7))
+
+; An edge wait on an input the script drives, next to a generated clock.
+(case edge_waits_on_script_inputs_next_to_a_generated_clock
+  (source "host_wait.sv" #"
+                module Top(input logic go, output logic [7:0] ticks, at_go);
+                    logic clk = 1'b0;
+                    logic [7:0] n = 8'd0;
+                    always #5 clk = ~clk;
+                    always_ff @(posedge clk) n <= n + 8'd1;
+                    assign ticks = n;
+                    initial begin
+                        at_go = 8'd0;
+                        forever begin
+                            @(posedge go);
+                            at_go = n;
+                        end
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 0)
+  (modify (set go 0))
+  (run_until 22)
+  (modify (set go 1))
+  (run_until 23)
+  (assert_eq at_go 2)
+  (modify (set go 0))
+  (run_until 37)
+  (modify (set go 1))
+  (run_until 38)
+  (assert_eq at_go 4)
+  (assert_eq ticks 4))
+
+; `$finish` from a process that only delays ends the run between edges.
+(case finish_from_a_delay_process_between_clock_edges
+  (source "delay_finish.sv" #"
+                module Top(output logic [7:0] count);
+                    logic clk = 1'b0;
+                    initial count = 8'd0;
+                    always #5 clk = ~clk;
+                    always_ff @(posedge clk) count <= count + 8'd1;
+                    initial #27 $finish;
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq count 3))
