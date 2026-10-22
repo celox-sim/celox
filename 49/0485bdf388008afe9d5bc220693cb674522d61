@@ -1,0 +1,1 @@
+Accept the two reviewed sv-tests static-function elaboration improvements that caused the conformance expectation gate to fail; all 2054 CI verdicts were compared.
