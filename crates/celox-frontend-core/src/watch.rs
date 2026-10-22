@@ -368,12 +368,30 @@ pub fn multi_store_candidates<A, K: Eq + std::hash::Hash + Clone>(
     unit: &ExecutionUnit<A>,
     key: impl Fn(&A) -> Option<K>,
 ) -> Vec<K> {
+    multi_write_candidates(unit, |instruction| {
+        write_destination(instruction).and_then(&key)
+    })
+}
+
+/// Like [`multi_store_candidates`], over the stores alone. A flip-flop
+/// evaluation seeds its working state with commits; only its stores are
+/// writes of the process.
+pub fn multi_store_only_candidates<A, K: Eq + std::hash::Hash + Clone>(
+    unit: &ExecutionUnit<A>,
+    key: impl Fn(&A) -> Option<K>,
+) -> Vec<K> {
+    multi_write_candidates(unit, |instruction| match instruction {
+        SIRInstruction::Store(address, ..) => key(address),
+        _ => None,
+    })
+}
+
+fn multi_write_candidates<A, K: Eq + std::hash::Hash + Clone>(
+    unit: &ExecutionUnit<A>,
+    destination: impl Fn(&SIRInstruction<A>) -> Option<K>,
+) -> Vec<K> {
     let writes = |block: &celox_sir::BasicBlock<A>| -> Vec<Option<K>> {
-        block
-            .instructions
-            .iter()
-            .map(|instruction| write_destination(instruction).and_then(&key))
-            .collect()
+        block.instructions.iter().map(&destination).collect()
     };
     let block_writes: crate::HashMap<celox_sir::BlockId, Vec<Option<K>>> = unit
         .blocks
@@ -420,6 +438,30 @@ pub fn instrument_unit<A: Clone>(
     unit: &mut ExecutionUnit<A>,
     watch_for: impl Fn(&A) -> Option<WatchCode<A>>,
 ) {
+    instrument_writes(unit, write_destination, watch_for);
+}
+
+/// Like [`instrument_unit`], for the stores alone: the commits that seed a
+/// flip-flop evaluation's working state are not writes of the process.
+pub fn instrument_stores<A: Clone>(
+    unit: &mut ExecutionUnit<A>,
+    watch_for: impl Fn(&A) -> Option<WatchCode<A>>,
+) {
+    instrument_writes(
+        unit,
+        |instruction| match instruction {
+            SIRInstruction::Store(address, ..) => Some(address),
+            _ => None,
+        },
+        watch_for,
+    );
+}
+
+fn instrument_writes<A: Clone>(
+    unit: &mut ExecutionUnit<A>,
+    destination: impl Fn(&SIRInstruction<A>) -> Option<&A>,
+    watch_for: impl Fn(&A) -> Option<WatchCode<A>>,
+) {
     let mut next_register = unit
         .register_map
         .keys()
@@ -427,16 +469,16 @@ pub fn instrument_unit<A: Clone>(
         .max()
         .unwrap_or(0);
     for block in unit.blocks.values_mut() {
-        if !block.instructions.iter().any(|instruction| {
-            write_destination(instruction)
-                .and_then(&watch_for)
-                .is_some()
-        }) {
+        if !block
+            .instructions
+            .iter()
+            .any(|instruction| destination(instruction).and_then(&watch_for).is_some())
+        {
             continue;
         }
         let mut instructions = Vec::with_capacity(block.instructions.len());
         for instruction in std::mem::take(&mut block.instructions) {
-            let Some(watch) = write_destination(&instruction).and_then(&watch_for) else {
+            let Some(watch) = destination(&instruction).and_then(&watch_for) else {
                 instructions.push(instruction);
                 continue;
             };

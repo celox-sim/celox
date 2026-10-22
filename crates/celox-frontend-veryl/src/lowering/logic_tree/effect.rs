@@ -342,6 +342,7 @@ fn collect_system_function_effect(
         args: observer_args,
         loop_runner: None,
         sensitivity: Vec::new(),
+        sensitivity_counters: Vec::new(),
         local_inputs,
         observed_inputs: observed_inputs.into_iter().collect(),
         position_inputs: position_inputs.into_iter().collect(),

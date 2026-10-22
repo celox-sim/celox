@@ -152,6 +152,28 @@ impl<B: SimBackend> SimulationState<B> {
         }
     }
 
+    /// Like [`Self::mark_counted_domains`], for the batch round: a counted
+    /// occurrence is an edge even where the settled levels show none, so
+    /// the marked domains are added to `approved`.
+    pub(super) fn mark_counted_domains_in_batch(
+        &mut self,
+        backend: &mut B,
+        approved: &mut Option<bit_set::BitSet>,
+    ) {
+        for trigger in &self.model.counted_triggers {
+            let value: u32 = backend.get_as(trigger.counter);
+            let (index, kind) = trigger.seen;
+            let seen = &mut self.process_state.domain_counters[index][kind];
+            if value != *seen {
+                *seen = value;
+                backend.mark_triggered_bit(trigger.id);
+                approved
+                    .get_or_insert_with(Default::default)
+                    .insert(trigger.id);
+            }
+        }
+    }
+
     /// Mark the domains a scheduled or process-driven value of an event
     /// signal triggers, against the values of the last settled round.
     #[inline]

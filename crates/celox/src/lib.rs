@@ -9,6 +9,7 @@ mod backend;
 #[cfg(all(feature = "arm64-codegen", feature = "x86_64-codegen"))]
 compile_error!("arm64-codegen and x86_64-codegen cannot be enabled together");
 #[cfg(feature = "host-runtime")]
+mod comb_activation;
 mod component;
 #[cfg(feature = "host-runtime")]
 pub use component::{

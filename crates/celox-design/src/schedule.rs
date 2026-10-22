@@ -26,12 +26,15 @@ pub struct ScheduleModel<A> {
     /// Counted signals with all their counters, and the canonical domains
     /// each counter triggers, in [`RuntimeSchema::watches`] order.
     pub counted: Vec<CountedModel<A>>,
+    /// Bit ranges whose changes bump an occurrence counter
+    /// ([`RuntimeSchema::occurrence_probes`]).
+    pub probes: Vec<(crate::VarAtomBase<A>, A)>,
     /// Process kernels in kernel order.
     pub processes: Vec<ProcessModel<A>>,
     /// Signals a wait watches, which the host's writes must be logged for.
     pub waited: Vec<A>,
-    /// The design has process kernels or counted signals. Without either,
-    /// a round of the scheduler is the batch step.
+    /// The design has process kernels. Without them, a round of the
+    /// scheduler is the batch step, which also checks counted signals.
     pub timed: bool,
     /// Some nonblocking site has a pending flag.
     pub has_pending_nba_sites: bool,
@@ -131,8 +134,9 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
         Self {
             events: design.events.clone(),
             kinds: design.event_kinds(),
-            timed: !processes.is_empty() || !counted.is_empty(),
+            timed: !processes.is_empty(),
             counted,
+            probes: schema.occurrence_probes.clone(),
             processes,
             waited,
             has_pending_nba_sites,
