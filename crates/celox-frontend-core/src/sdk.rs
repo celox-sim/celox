@@ -1962,6 +1962,8 @@ pub fn lower_frontend_artifact(
         processes,
         package_bindings: HashMap::default(),
         counter_slots,
+        pending_slots: Vec::new(),
+        comb_alternatives: Vec::new(),
         wait_sites,
         nba_sites,
         nba_switches: Vec::new(),

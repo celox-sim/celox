@@ -18,6 +18,26 @@ pub(super) fn unsupported(construct: impl Into<String>) -> sv::AnalyzerError {
     sv::AnalyzerError::Unsupported(construct.into())
 }
 
+/// What [`ProcModule::rollback`] restores.
+pub(super) struct Checkpoint {
+    next_id: SourceVarId,
+    created: usize,
+    temp_counter: usize,
+    capture_counter: u64,
+    runtime_event_sites: usize,
+    runtime_errors: usize,
+    extern_functions: usize,
+    extern_calls: usize,
+    warnings: usize,
+}
+
+impl Checkpoint {
+    /// The number of runtime event sites at the checkpoint.
+    pub fn runtime_event_sites(&self) -> usize {
+        self.runtime_event_sites
+    }
+}
+
 /// The variables and subroutines of the module being lowered.
 pub(super) struct ProcModule<'a> {
     pub variables: &'a mut HashMap<SourceVarId, SvVariable>,
@@ -673,6 +693,48 @@ impl<'a> ProcModule<'a> {
             _ => (0, (self.var(id).width / width) as i128 - 1),
         };
         Ok((left, right, width))
+    }
+
+    /// The lowering state, for [`Self::rollback`].
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            next_id: self.next_id,
+            created: self.created.len(),
+            temp_counter: self.temp_counter,
+            capture_counter: self.capture_counter,
+            runtime_event_sites: self.runtime_event_sites.len(),
+            runtime_errors: self.runtime_errors.len(),
+            extern_functions: self.extern_functions.len(),
+            extern_calls: self.extern_calls,
+            warnings: self.warnings.len(),
+        }
+    }
+
+    /// Forget everything lowered since `checkpoint`, so that the module
+    /// lowers as if it had never been.
+    pub fn rollback(&mut self, checkpoint: Checkpoint) {
+        for id in checkpoint.next_id.0..self.next_id.0 {
+            let Some(variable) = self.variables.remove(&SourceVarId(id)) else {
+                continue;
+            };
+            if let Some(name) = variable.path.first()
+                && self.name_to_id.get(name) == Some(&SourceVarId(id))
+            {
+                self.name_to_id.remove(name);
+            }
+        }
+        self.next_id = checkpoint.next_id;
+        self.created.truncate(checkpoint.created);
+        self.temp_counter = checkpoint.temp_counter;
+        self.capture_counter = checkpoint.capture_counter;
+        self.runtime_event_sites
+            .truncate(checkpoint.runtime_event_sites);
+        // Codes are numbered from one in registration order.
+        self.runtime_errors
+            .retain(|&code, _| code <= checkpoint.runtime_errors as i64);
+        self.extern_functions.truncate(checkpoint.extern_functions);
+        self.extern_calls = checkpoint.extern_calls;
+        self.warnings.truncate(checkpoint.warnings);
     }
 
     /// Register a runtime event site and return its local number.
