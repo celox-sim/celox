@@ -47,7 +47,7 @@ outline: [2, 3]
 
 | 制御 | 対応範囲 |
 | --- | --- |
-| `#delay` | 整数の遅延、`#(min:typ:max)`（typ の値）、[時間リテラル](#time-literal-delays)。X / Z の遅延は 0 として扱う |
+| `#delay` | 整数と実数の遅延、`#(min:typ:max)`（typ の値）、[時間リテラル](#time-literal-delays)。X / Z の遅延は 0 として扱う |
 | `@(...)` | 変数、`posedge` / `negedge` / `edge`、`or` または `,` で並べた項目、ビット選択・部分選択・実行時添字の選択、pure な関数呼び出しを含む任意の式、文が読む変数を待つ `@*` / `@(*)` |
 | `wait (condition)` | 任意の条件。X / Z の条件は偽として扱う |
 | 代入 | ブロッキング代入とノンブロッキング代入。ノンブロッキング代入はそのタイムスロットの NBA 領域で反映 |
@@ -88,7 +88,8 @@ select・連結式の引数は未対応として拒否します。
 
 遅延制御の時間リテラルは `#5ns`、`#(2.75ns)`、`#40ps` など、`fs` から `s` の6単位に
 対応します。宣言スコープの時間精度で丸めてから scheduler の tick に変換します
-（5.8、3.14.1）。実数の遅延はまだ未対応です（[#1707](https://github.com/celox-sim/celox/issues/1707)）。
+（5.8、3.14.1）。`#1.5` や `#r` などの実数の遅延も同様に丸め、ちょうど中間の値は 0 から遠い方に
+丸めます（6.12.1）。負の遅延は2の補数として待ち（9.4.1）、NaN の遅延は 0 として扱います。
 
 ### 組み込み関数とタスク
 
@@ -117,7 +118,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 - 振る舞い記述・検証向けの構文：`final`、代入内のタイミング制御（`a = #1 b`）、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
   named event と `->`、`fork` / `join`、`wait fork` / `disable fork`、並行アサーション、`force` / `release`。
 - プロセス内のタイミング制御：`iff` 修飾（[#1444](https://github.com/celox-sim/celox/issues/1444)）、
-  実数の遅延（[#1707](https://github.com/celox-sim/celox/issues/1707)）、package スコープの遅延値
+  package スコープの遅延値
   （[#1710](https://github.com/celox-sim/celox/issues/1710)）、イベント式内の impure な関数呼び出し、
   static task 引数を読む `wait` 条件とイベント式。プロセス内のノンブロッキング代入は、
   unpacked 配列の要素、実行時に決まる位置、代入先の範囲外の定数位置をまだ代入先にできません

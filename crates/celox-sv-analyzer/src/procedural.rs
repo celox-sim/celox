@@ -87,6 +87,9 @@ pub enum StmtBase<E, L> {
         amount: E,
         /// Global-precision ticks in one time unit of the declaring scope.
         ticks_per_unit: u64,
+        /// Global-precision ticks in one time precision step of the
+        /// declaring scope, to which a real amount is rounded (3.14.1).
+        ticks_per_precision: u64,
     },
     /// `@(items)`: suspend the process until one of the events occurs
     /// (9.4.2).
@@ -304,9 +307,11 @@ impl<E, L> StmtBase<E, L> {
             StmtBase::Delay {
                 amount,
                 ticks_per_unit,
+                ticks_per_precision,
             } => StmtBase::Delay {
                 amount: fe(amount),
                 ticks_per_unit,
+                ticks_per_precision,
             },
             StmtBase::WaitEvent(items) => StmtBase::WaitEvent(
                 items

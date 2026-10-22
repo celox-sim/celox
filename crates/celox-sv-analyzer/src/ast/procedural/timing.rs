@@ -20,11 +20,13 @@ impl BodyBuilder<'_, '_, '_> {
                     return Ok(Stmt::Delay {
                         amount: Expr::Literal(format!("64'd{ticks}")),
                         ticks_per_unit: 1,
+                        ticks_per_precision: 1,
                     });
                 }
                 Ok(Stmt::Delay {
                     amount: self.native_delay(*value, *parenthesized)?,
                     ticks_per_unit: timescales::time_divisor(*value, self.tree)?,
+                    ticks_per_precision: timescales::precision_divisor(*value, self.tree)?,
                 })
             }
             TimingControlKind::Event(event) => {
@@ -85,6 +87,13 @@ impl BodyBuilder<'_, '_, '_> {
         }
         match &native.expression(value).kind {
             ExprKind::Literal(text) if text.chars().all(|c| c.is_ascii_digit() || c == '_') => {
+                Ok(Expr::Literal(text.replace('_', "")))
+            }
+            // A real_number delay value such as `#1.5` (A.2.2.3).
+            ExprKind::Literal(text)
+                if text.contains(['.', 'e', 'E'])
+                    && text.replace('_', "").parse::<f64>().is_ok() =>
+            {
                 Ok(Expr::Literal(text.replace('_', "")))
             }
             ExprKind::Name(name) => {
