@@ -52,11 +52,12 @@ module Reg (
 
 - `Simulator.create(Module)` creates a simulator instance from a Veryl module definition.
 - Signal values are read and written via `sim.dut.<port>`.
-- `sim.tick()` advances the simulation by one clock cycle.
-  Clock domains derived from that clock run in the same tick when their clock
-  rises: a gated `clk & en` together with `clk`'s own domain, a
-  register-driven divider after it. A tick is the clock's active edge only:
-  domains clocked by its opposite edge, such as `~clk`, do not run.
+- `sim.tick()` advances the simulation by one clock period: the clock's
+  active edge, then its inactive edge. Every domain sensitive to either edge
+  runs, including clocks derived from it, such as a gated `clk & en`, a
+  register-driven divider or `~clk`. See
+  [Execution Semantics](./execution-semantics.md) for the SystemVerilog a
+  tick is equivalent to.
 - `sim.dispose()` frees the native resources.
 
 ::: tip Combinational logic
@@ -65,9 +66,8 @@ For purely combinational modules (`always_comb` only), `tick()` is not required.
 
 ### Clock edges
 
-`tick()` stands for a clock's active edge and leaves the clock signal alone.
-When a design also reacts to the other edge, for example a register on `~clk`
-or on a falling `clk & en`, drive the edges themselves:
+`tick()` drives a whole clock period. To stop between the two edges, or to
+drive a reset, move the signals edge by edge:
 
 ```typescript
 const clk = sim.event("clk");
@@ -76,7 +76,6 @@ sim.posedge(clk);      // clk = 1: domains sensitive to its rising edge run
 sim.negedge(clk);      // clk = 0: domains sensitive to its falling edge run
 sim.activeEdge(clk);   // the clock's own edge: rising for a posedge clock
 sim.inactiveEdge(clk); // the opposite edge
-sim.cycle(clk);        // activeEdge(), then inactiveEdge()
 
 // Several clocks at one instant: every domain samples the state before them.
 sim.edges([
@@ -95,8 +94,8 @@ Veryl's abstract `clock` type, `activeEdge()` follows the build's clock type
 (`clockType: "negedge"` makes it the falling edge). Reset ports work the same
 way: `negedge(rst)` asserts an active-low asynchronous reset.
 
-`cycle()` gives the same results as two timed steps of the clock, a rising
-and a falling one.
+`tick()` is `activeEdge()` followed by `inactiveEdge()`, and gives the same
+results as two timed steps of the clock, a rising and a falling one.
 
 ## Time-Based Simulation
 
