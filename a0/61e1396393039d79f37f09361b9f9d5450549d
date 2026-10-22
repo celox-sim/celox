@@ -1,0 +1,6 @@
+Revision history for #1734:
+
+rev 2 (content) 2026-10-22 10:13 UTC — Rebase onto current master to resolve #1734 conflicts and retain dependent PRs.
+rev 1 (initial) 2026-10-22 10:13 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1734,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"196b9a97197001843a6f100092d0fc4bc1bb93ff","timestamp_iso":"2026-10-22T10:13:15Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"196b9a97197001843a6f100092d0fc4bc1bb93ff","new_sha":"9fcd02acfc172dd25b6c02f72941500936ba86df","timestamp_iso":"2026-10-22T10:13:15Z","reason":"Rebase onto current master to resolve #1734 conflicts and retain dependent PRs.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/196b9a97197001843a6f100092d0fc4bc1bb93ff...9fcd02acfc172dd25b6c02f72941500936ba86df"}]} -->
