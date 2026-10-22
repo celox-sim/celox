@@ -144,6 +144,13 @@ pub trait SimBackend {
     /// The heap, for changes made while no compiled code runs.
     fn heap_mut(&mut self) -> &mut celox_heap::Heap;
 
+    /// Whether a compiled scheduler's unit runs time slots for less than
+    /// the runtime's loop does. An interpreter executes the unit slower
+    /// than the loop's native bookkeeping.
+    fn runs_compiled_scheduler(&self) -> bool {
+        true
+    }
+
     // ── event enumeration ───────────────────────────────────────
     fn id_to_addr_slice(&self) -> &[AbsoluteAddr];
     fn id_to_event_slice(&self) -> &[Self::Event];

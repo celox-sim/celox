@@ -30,6 +30,9 @@ mod ir;
 mod optimizer;
 mod parser;
 pub(crate) mod portable;
+// Builds without the host runtime run every slot in the reference loop.
+#[cfg(feature = "host-runtime")]
+mod scheduler;
 #[cfg(feature = "host-runtime")]
 mod simulation;
 mod simulator;

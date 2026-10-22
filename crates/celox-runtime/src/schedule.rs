@@ -36,6 +36,29 @@ pub struct ResolvedSchedule<B: SimBackend> {
     pub(crate) active_commits: bit_set::BitSet,
     /// Signals the current time is stored into before each round.
     pub(crate) time_slots: Vec<SignalRef>,
+    /// The compiled scheduler, when one was generated.
+    pub(crate) scheduler: Option<SchedulerRefs>,
+    /// Per process kernel, why the compiled scheduler does not run it, or
+    /// `None` when it does. Empty when no scheduler was considered.
+    pub(crate) kernel_fallback: Vec<Option<String>>,
+}
+
+/// A design's compiled scheduler resolved against a backend: its process
+/// unit and the slots it exchanges a run with.
+pub(crate) struct SchedulerRefs {
+    pub(crate) unit: usize,
+    pub(crate) limit: SignalRef,
+    pub(crate) now: SignalRef,
+    pub(crate) exit: SignalRef,
+    pub(crate) finish: SignalRef,
+    pub(crate) count: SignalRef,
+    pub(crate) current: SignalRef,
+    pub(crate) levels: SignalRef,
+    /// The wake and waiting slots of each kernel the scheduler runs, by
+    /// process index.
+    pub(crate) wake: Vec<Option<(SignalRef, SignalRef)>>,
+    /// The event ids of the bits of `levels`.
+    pub(crate) events: Vec<usize>,
 }
 
 impl<B: SimBackend> ResolvedSchedule<B> {
@@ -212,6 +235,40 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             timed: model.timed,
             active_commits,
             time_slots: model.time_slots.iter().map(resolve).collect(),
+            scheduler: model.scheduler.as_ref().and_then(|scheduler| {
+                let slots = &scheduler.slots;
+                Some(SchedulerRefs {
+                    unit: scheduler.unit?,
+                    limit: resolve(&slots.limit),
+                    now: resolve(&slots.now),
+                    exit: resolve(&slots.exit),
+                    finish: resolve(&slots.finish),
+                    count: resolve(&slots.count),
+                    current: resolve(&slots.current),
+                    levels: resolve(&slots.levels),
+                    wake: slots
+                        .wake
+                        .iter()
+                        .zip(&slots.waiting)
+                        .zip(&scheduler.fallback)
+                        .map(|((wake, waiting), fallback)| {
+                            fallback
+                                .is_none()
+                                .then(|| (resolve(wake), resolve(waiting)))
+                        })
+                        .collect(),
+                    events: scheduler
+                        .events
+                        .iter()
+                        .map(|event| backend.resolve_event_opt(event).map(|event| event.id()))
+                        .collect::<Option<_>>()?,
+                })
+            }),
+            kernel_fallback: model
+                .scheduler
+                .as_ref()
+                .map(|scheduler| scheduler.fallback.clone())
+                .unwrap_or_default(),
         }
     }
 }
