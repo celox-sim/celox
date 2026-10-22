@@ -91,7 +91,7 @@ celox-sv-analyzer = { workspace = true }
 insta      = "1.46"
 libc.workspace = true
 criterion  = "0.8"
-codspeed-criterion-compat = "5.0.1"
+codspeed-criterion-compat = "6.0.0"
 proptest   = "1.10"
 test-case  = "3"
 tempfile.workspace = true
