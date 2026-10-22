@@ -77,6 +77,9 @@ pub(super) struct Ff<'p, 'a> {
     /// The nonblocking sites with a staged and a queued path.
     nba_switches: Vec<NbaSwitch<SourceVarId>>,
     direct: bool,
+    /// Whether a combinational process also reruns for occurrences of its
+    /// inputs that left their value unchanged.
+    input_occurrences: bool,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -122,12 +125,21 @@ impl<'p, 'a> Ff<'p, 'a> {
             dist_seed: None,
             kernel: None,
             direct: false,
+            input_occurrences: true,
             process: 0,
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
             host_request_sites: Vec::new(),
             nba_switches: Vec::new(),
         }
+    }
+
+    /// Lower a combinational process that reruns only when an input value
+    /// changed. Its inputs then need no occurrence counters, so the units
+    /// that write them stay unchanged.
+    pub fn without_input_occurrences(mut self) -> Self {
+        self.input_occurrences = false;
+        self
     }
 
     pub fn with_sparse_memories(mut self, names: &HashSet<String>) -> Self {
@@ -3722,6 +3734,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .emit(SIRInstruction::Binary(next, changed, BinaryOp::Or, differs));
             changed = next;
             snapshots.push((saved, width, current));
+            if !self.input_occurrences {
+                continue;
+            }
             // A source can change and return to its saved value inside one
             // initial activation. Count occurrences around stores before
             // optimization, rather than relying only on the settled value.
@@ -4025,6 +4040,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             active: seal_builder(active),
             nba: seal_builder(nba),
             targets,
+            staged: staged
+                .iter()
+                .map(|stage| (stage.id, stage.value, stage.mask))
+                .collect(),
         })
     }
 }
@@ -4072,6 +4091,8 @@ pub(super) struct FfProcessUnits {
     pub active: ExecutionUnit<Addr>,
     pub nba: ExecutionUnit<Addr>,
     pub targets: Vec<VarAtomBase<SourceVarId>>,
+    /// The staged variables, as (variable, staging value, staging mask).
+    pub staged: Vec<(SourceVarId, SourceVarId, SourceVarId)>,
 }
 
 /// The staging of a variable a process writes both by blocking and by

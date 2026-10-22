@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, fmt};
 use celox_design::{
     CounterSlots, ExternFunction, InitialStateValue, ModuleId, NbaSite, ProcessSlots,
     RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, TriggerSet,
-    VariableMetadata, WaitSite,
+    VarAtomBase, VariableMetadata, WaitSite,
 };
 use celox_sir::ExecutionUnit;
 use celox_slt::{CombObserver, FfAccessSummary, GlueBlockBase, LogicPath, SLTNodeArena};
@@ -66,6 +66,24 @@ pub struct SplitCommit<A> {
     pub nba: ExecutionUnit<A>,
 }
 
+/// A combinational process that `comb_blocks` holds both as symbolic
+/// definitions and as an imperative unit. The symbolic form computes only
+/// the final value of each written variable; the unit performs every store,
+/// so the counters of a watched variable see the intermediate values
+/// (IEEE 1800-2023 4.3, 9.4.2). Assembly keeps the unit for an instance in
+/// which a variable of `candidates` is counted, and the symbolic
+/// definitions otherwise.
+#[derive(Clone, Debug)]
+pub struct CombAlternative {
+    /// The `process` of the unit's paths.
+    pub process: SourceVarId,
+    /// The ranges the symbolic definitions write; other drivers may write
+    /// the other bits of the same variables.
+    pub targets: Vec<VarAtomBase<SourceVarId>>,
+    /// The variables the unit may store twice in one execution.
+    pub candidates: Vec<SourceVarId>,
+}
+
 #[derive(Clone)]
 pub struct SimModule {
     /// A frontend's global tick precision; absent for scale-free frontends.
@@ -117,6 +135,12 @@ pub struct SimModule {
     /// `crate::watch::multi_store_candidates`). Assembly counts a signal's
     /// occurrences only if a flip-flop domain or a wait watches it.
     pub counter_slots: Vec<CounterSlots<SourceVarId>>,
+    /// Objects that hold the occurrences of a flip-flop's repeated writes
+    /// to a signal until their commit (see `crate::watch::PendingSlots`).
+    /// Assembly uses them only for the signals it counts.
+    pub pending_slots: Vec<crate::watch::PendingSlots<SourceVarId>>,
+    /// Combinational processes lowered both ways; see [`CombAlternative`].
+    pub comb_alternatives: Vec<CombAlternative>,
     /// Wait sites of the module's processes; `process` indexes
     /// [`Self::processes`].
     pub wait_sites: Vec<WaitSite<SourceVarId>>,
