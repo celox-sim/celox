@@ -4626,6 +4626,17 @@ impl Ff<'_, '_> {
         let mut samples = Vec::new();
         for item in items {
             let expr = self.propagate(&item.expr);
+            let edge = match item.edge {
+                sv::ir::EventEdge::Any => None,
+                sv::ir::EventEdge::Pos => Some("posedge"),
+                sv::ir::EventEdge::Neg => Some("negedge"),
+                sv::ir::EventEdge::Both => Some("edge"),
+            };
+            if let Some(edge) = edge
+                && self.m.expr_float_precision(&expr).is_some()
+            {
+                return Err(sv::AnalyzerError::RealEdgeEvent { edge });
+            }
             let id = match &expr {
                 sv::ir::Expr::Ident(name) => match self.m.id(name) {
                     Some(id) if !self.m.is_hidden(id) => id,

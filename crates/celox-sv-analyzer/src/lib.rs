@@ -158,6 +158,10 @@ pub enum AnalyzerError {
         actual: String,
         target: String,
     },
+    /// `posedge`, `negedge` or `edge` of a real expression, which has no
+    /// least significant bit to judge the edge on (IEEE 1800-2023 6.12).
+    #[error("`{edge}` of a real expression: edge event controls do not apply to reals")]
+    RealEdgeEvent { edge: &'static str },
 }
 
 impl miette::Diagnostic for AnalyzerError {}

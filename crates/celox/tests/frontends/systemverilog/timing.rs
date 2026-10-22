@@ -536,6 +536,39 @@ fn unimplemented_timing_features_are_rejected() {
     }
 }
 
+/// A real has no least significant bit, so no edge event control applies to
+/// one (IEEE 1800-2023 6.12); a change of its value is an event.
+#[test]
+fn edge_events_of_reals_are_errors() {
+    for (body, edge) in [
+        ("real r; initial @(posedge r);", "posedge"),
+        ("real r; int n; always @(negedge r) n++;", "negedge"),
+        ("real r; initial @(edge (r * 2.0));", "edge"),
+        (
+            "shortreal r; bit c; int n; always @(posedge c or posedge r) n++;",
+            "posedge",
+        ),
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("real_edge.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("`{body}` must be rejected"))
+        .to_string();
+        assert!(
+            error.contains(&format!("`{edge}` of a real expression")),
+            "{body}: {error}"
+        );
+    }
+    let source = "module Top; real r; initial @(r); endmodule";
+    celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("real.sv"))], "Top")
+        .build()
+        .expect("a change of a real is an event");
+}
+
 /// Only `initial` and `always` processes may suspend (IEEE 1800-2023
 /// 9.2.2.2, 9.2.2.4 and 13.4); a timing control elsewhere is an error.
 #[test]
