@@ -1831,9 +1831,9 @@ fn reports_where_a_known_system_function_is_not_supported() {
             "module Top(output logic [63:0] y); assign y = $fgets(y, 0); endmodule",
         ),
         (
-            "system function `$sqrt` in an expression",
+            "system function `$q_full` in an expression",
             "module Top(output logic y);
-                localparam int P = $sqrt(4);
+                localparam int P = $q_full(0);
                 assign y = 1'b0;
             endmodule",
         ),

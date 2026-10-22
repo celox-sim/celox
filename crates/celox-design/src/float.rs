@@ -13,6 +13,8 @@ pub fn eval_float_binary(op: B, precision: P, lhs: u64, rhs: u64) -> u64 {
                 B::Div => (a / b).to_bits() as u64,
                 B::Rem => (a % b).to_bits() as u64,
                 B::Pow => a.powf(b).to_bits() as u64,
+                B::Atan2 => a.atan2(b).to_bits() as u64,
+                B::Hypot => a.hypot(b).to_bits() as u64,
                 B::Eq => (a == b) as u64,
                 B::Ne => (a != b) as u64,
                 B::Lt => (a < b) as u64,
@@ -78,6 +80,132 @@ pub fn eval_float_unary(op: U, precision: P, value: u64) -> u64 {
         }
         U::Convert { to: P::F32 } => (x as f32).to_bits() as u64,
         U::Convert { to: P::F64 } => x.to_bits(),
+        U::Ln => {
+            let value = x.ln();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Log10 => {
+            let value = x.log10();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Exp => {
+            let value = x.exp();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Sqrt => {
+            let value = x.sqrt();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Floor => {
+            let value = x.floor();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Ceil => {
+            let value = x.ceil();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Sin => {
+            let value = x.sin();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Cos => {
+            let value = x.cos();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Tan => {
+            let value = x.tan();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Asin => {
+            let value = x.asin();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Acos => {
+            let value = x.acos();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Atan => {
+            let value = x.atan();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Sinh => {
+            let value = x.sinh();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Cosh => {
+            let value = x.cosh();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Tanh => {
+            let value = x.tanh();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Asinh => {
+            let value = x.asinh();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Acosh => {
+            let value = x.acosh();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
+        U::Atanh => {
+            let value = x.atanh();
+            match precision {
+                P::F32 => (value as f32).to_bits() as u64,
+                P::F64 => value.to_bits(),
+            }
+        }
     }
 }
 

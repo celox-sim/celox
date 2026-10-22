@@ -1457,6 +1457,8 @@ pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> 
             dimensions.get(name).is_some_and(|ty| ty.real)
                 || dimensions.parameter_values.get(name).is_some_and(|value| {
                     matches!(value, Expr::Literal(text) if text.contains(['.', 'e', 'E']) && text.replace('_', "").parse::<f64>().is_ok())
+                        || matches!(value, Expr::Call { callee: Callee::System(function), .. }
+                            if function.is_real_math() || matches!(function, SystemFunction::Bitstoreal | SystemFunction::Bitstoshortreal | SystemFunction::Itor))
                 })
         }
         Expr::Literal(text) => {
@@ -1465,7 +1467,28 @@ pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> 
         Expr::Call {
             callee:
                 Callee::System(
-                    SystemFunction::Bitstoreal
+                    SystemFunction::Ln
+                    | SystemFunction::Log10
+                    | SystemFunction::Exp
+                    | SystemFunction::Sqrt
+                    | SystemFunction::Floor
+                    | SystemFunction::Ceil
+                    | SystemFunction::Sin
+                    | SystemFunction::Cos
+                    | SystemFunction::Tan
+                    | SystemFunction::Asin
+                    | SystemFunction::Acos
+                    | SystemFunction::Atan
+                    | SystemFunction::Sinh
+                    | SystemFunction::Cosh
+                    | SystemFunction::Tanh
+                    | SystemFunction::Asinh
+                    | SystemFunction::Acosh
+                    | SystemFunction::Atanh
+                    | SystemFunction::Pow
+                    | SystemFunction::Atan2
+                    | SystemFunction::Hypot
+                    | SystemFunction::Bitstoreal
                     | SystemFunction::Bitstoshortreal
                     | SystemFunction::Itor
                     | SystemFunction::Realtime,

@@ -178,9 +178,10 @@ pub(super) fn lower_native_float_binary(
     op: celox_sir::FloatBinaryOp,
     precision: celox_sir::FloatPrecision,
 ) -> bool {
-    if matches!(
+    use celox_sir::FloatBinaryOp as F;
+    if !matches!(
         op,
-        celox_sir::FloatBinaryOp::Rem | celox_sir::FloatBinaryOp::Pow
+        F::Add | F::Sub | F::Mul | F::Div | F::Eq | F::Ne | F::Lt | F::Le | F::Gt | F::Ge
     ) {
         return false;
     }

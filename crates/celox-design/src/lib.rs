@@ -1124,6 +1124,8 @@ pub enum FloatBinaryOp {
     Le,
     Gt,
     Ge,
+    Atan2,
+    Hypot,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FloatUnaryOp {
@@ -1134,6 +1136,24 @@ pub enum FloatUnaryOp {
     ToSigned { width: usize, round: bool },
     ToUnsigned { width: usize, round: bool },
     Convert { to: FloatPrecision },
+    Ln,
+    Log10,
+    Exp,
+    Sqrt,
+    Floor,
+    Ceil,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Sinh,
+    Cosh,
+    Tanh,
+    Asinh,
+    Acosh,
+    Atanh,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

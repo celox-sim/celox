@@ -18,7 +18,33 @@ pub(super) fn precision(
             Some(FP::F64)
         }
         E::Call {
-            callee: sv::ir::Callee::System(F::Bitstoreal | F::Itor | F::Realtime),
+            callee:
+                sv::ir::Callee::System(
+                    F::Bitstoreal
+                    | F::Itor
+                    | F::Realtime
+                    | F::Ln
+                    | F::Log10
+                    | F::Exp
+                    | F::Sqrt
+                    | F::Floor
+                    | F::Ceil
+                    | F::Sin
+                    | F::Cos
+                    | F::Tan
+                    | F::Asin
+                    | F::Acos
+                    | F::Atan
+                    | F::Sinh
+                    | F::Cosh
+                    | F::Tanh
+                    | F::Asinh
+                    | F::Acosh
+                    | F::Atanh
+                    | F::Pow
+                    | F::Atan2
+                    | F::Hypot,
+                ),
             ..
         } => Some(FP::F64),
         E::Call {
@@ -341,6 +367,34 @@ pub(super) fn lower(
             ..
         } => {
             let arg = args.first()?.as_ref()?;
+            if function.is_real_math() {
+                let (left, mut sources) = operand(arg, FP::F64, arena)?;
+                let node = if let Some(op) = function.real_math_unary() {
+                    arena
+                        .alloc(SLTNode::Unary(
+                            UnaryOp::Float {
+                                op,
+                                precision: FP::F64,
+                            },
+                            left,
+                        ))
+                        .ok()?
+                } else {
+                    let (right, other) = operand(args.get(1)?.as_ref()?, FP::F64, arena)?;
+                    sources.extend(other);
+                    arena
+                        .alloc(SLTNode::Binary(
+                            left,
+                            BinaryOp::Float {
+                                op: function.real_math_binary()?,
+                                precision: FP::F64,
+                            },
+                            right,
+                        ))
+                        .ok()?
+                };
+                return Some((node, sources));
+            }
             match function {
                 F::Bitstoreal | F::Bitstoshortreal => {
                     let (node, sources) = recur(arg, arena)?;

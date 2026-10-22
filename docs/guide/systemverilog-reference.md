@@ -614,6 +614,21 @@ the seed. Normal accepts any integer mean and standard deviation. These
 functions do not require an SV `real` type. Their seed is design state, so
 checkpoints replay their sequence.
 
+## Real mathematical functions {#real-math}
+
+`$ln`, `$log10`, `$exp`, `$sqrt`, `$pow`, `$floor`, `$ceil`, `$sin`, `$cos`,
+`$tan`, `$asin`, `$acos`, `$atan`, `$atan2`, `$hypot`, `$sinh`, `$cosh`, `$tanh`,
+`$asinh`, `$acosh` and `$atanh` accept real arguments and return a real result,
+following the C math functions in IEEE 1800-2023 20.8.2. Integral and shortreal
+arguments are converted to real before the call; `$floor` and `$ceil` also
+return real, and `$atan2(y, x)` preserves that operand order. Domain and range
+cases produce the corresponding floating-point NaN or infinity.
+
+These pure functions work in combinational, clocked and timed processes, and
+with constant arguments at elaboration (11.2.1). Real parameters retain their
+precision through nested calls; integer assignments and casts convert only the
+final result. All simulator backends use the same math operation evaluator.
+
 ## Mixing Veryl and SystemVerilog {#mixed-language}
 
 `Simulator::from_mixed_sources`combines both source lists in one simulation.

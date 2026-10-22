@@ -1521,13 +1521,18 @@ impl Parameter {
                 expr: Box::new(value),
             };
         }
-        let mut value = typecheck::eval_const_expr_in_env(
-            &value.into(),
-            &const_functions::Environment {
-                constants,
-                functions: &state.const_functions,
-            },
-        )?;
+        let value: crate::ir::ConstExpr = value.into();
+        let environment = const_functions::Environment {
+            constants,
+            functions: &state.const_functions,
+        };
+        let mut value = if self.has_declared_type && typecheck::const_expr_has_real_type(&value) {
+            // An explicitly integral parameter supplies an integer assignment
+            // context. Untyped real parameters retain their floating type.
+            typecheck::round_real_to_i128(typecheck::eval_real_const_expr(&value, &environment)?)
+        } else {
+            typecheck::eval_const_expr_in_env(&value, &environment)?
+        };
         if let Some(width) = self.declared_width {
             value =
                 coerce_const_parameter_value(value, width, self.declared_signed.unwrap_or(false));
@@ -1545,6 +1550,12 @@ impl Parameter {
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
     ) -> (Option<i128>, Option<Expr>) {
+        if self.floating.is_some() {
+            return (
+                None,
+                self.resolved_literal(state, constants, parameter_types, literals),
+            );
+        }
         if let Some(value) = self.resolved_value(state, constants, parameter_types) {
             return (Some(value), None);
         }
