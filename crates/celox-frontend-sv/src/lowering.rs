@@ -4089,6 +4089,7 @@ fn lower_initial_processes(
             ProcessSlots {
                 is_initializer: process.is_initializer(),
                 requires_timed_simulation: process.is_scheduled_edge(),
+                const_delays: false,
                 resume: declare("resume", PROCESS_RESUME_WIDTH),
                 status: declare("status", PROCESS_STATUS_WIDTH),
                 delay: declare("delay", PROCESS_DELAY_WIDTH),
@@ -4133,7 +4134,7 @@ fn lower_initial_processes(
             }));
             Ok(SymbolicProcess {
                 kernel: kernel.unit,
-                slots,
+                slots: kernel.slots,
                 origin: process_origin(process),
             })
         })

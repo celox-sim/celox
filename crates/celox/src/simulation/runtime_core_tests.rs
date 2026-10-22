@@ -173,6 +173,33 @@ fn value<B: SimBackend>(sim: &mut Simulation<B>, name: &str) -> u64 {
 }
 
 #[test]
+fn kernels_record_whether_every_delay_is_a_constant_time() {
+    let mut d = Design::new("Delays", false);
+    let x = d.internal("x", 8, 0);
+    let amount = d.input("amount", 8);
+    let constant = vec![d.inactive_delay(5), d.set(x, 1), d.delay(2)];
+    d.module.process(constant).unwrap();
+    let zero = vec![d.inactive_delay(0), d.set(x, 2)];
+    d.module.process(zero).unwrap();
+    let variable = Statement::InactiveDelay {
+        amount: d.read(amount),
+    };
+    d.module.process(vec![variable]).unwrap();
+    let none = vec![d.set(x, 3)];
+    d.module.process(none).unwrap();
+    let sim = builder(&d.finish(), false).build_interpreter().unwrap();
+    let flags: Vec<_> = sim
+        .simulator
+        .program
+        .runtime_schema
+        .processes
+        .iter()
+        .map(|slots| slots.const_delays)
+        .collect();
+    assert_eq!(flags, [true, false, false, true]);
+}
+
+#[test]
 fn process_optimization_preserves_state_changes_between_continuations() {
     for four_state in [false, true] {
         let mut d = Design::new("OptimizedProcess", four_state);
@@ -739,6 +766,41 @@ module Top(input logic a, b, output logic y, output logic [31:0] r, output logic
     always_ff @(posedge y) n <= n + 8'd1;
 endmodule
 "#;
+
+    #[test]
+    fn sv_kernels_record_whether_every_delay_is_a_constant_time() {
+        let source = r#"
+`timescale 1ns/1ps
+module Top(input logic [7:0] d);
+    localparam int HALF = 5;
+    logic clk, a, b, c, e;
+    initial clk = 1'b0;
+    always #HALF clk = ~clk;
+    initial #(d) a = 1'b1;
+    initial #0 b = 1'b1;
+    initial #2.5 e = 1'b1;
+    initial #(-1) c = 1'b1;
+endmodule
+"#;
+        let sim = crate::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("delays.sv"))],
+            "Top",
+        )
+        .build_interpreter()
+        .unwrap();
+        let flags: Vec<_> = sim
+            .simulator
+            .program
+            .runtime_schema
+            .processes
+            .iter()
+            .filter(|slots| !slots.is_initializer)
+            .map(|slots| slots.const_delays)
+            .collect();
+        // `initial clk = 1'b0` folds into an initial value. A real delay
+        // and a negative one count as variable.
+        assert_eq!(flags, [true, false, false, false, false]);
+    }
 
     #[test]
     fn imperative_comb_units_pulse_only_when_an_input_changes() {

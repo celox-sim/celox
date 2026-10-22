@@ -481,6 +481,23 @@ fn coerce_sir_register(
     Ok(current)
 }
 
+/// The value of expression `id` as a delay amount, if it is a two-state
+/// constant whose coercion to [`PROCESS_DELAY_WIDTH`] bits keeps its value.
+fn constant_delay(artifact: &FrontendArtifact, id: ExprId) -> Option<u64> {
+    let expression = artifact.expression(id)?;
+    let ExprNode::Constant(value) = expression.node() else {
+        return None;
+    };
+    let value_type = expression.value_type();
+    let negative = value_type.is_signed()
+        && value_type.width() > 0
+        && value.payload().bit(value_type.width() as u64 - 1);
+    if value.mask().bits() != 0 || negative {
+        return None;
+    }
+    u64::try_from(value.payload()).ok()
+}
+
 fn coerce_sir_expression(
     artifact: &FrontendArtifact,
     id: ExprId,
@@ -1319,6 +1336,7 @@ fn lower_statements(
                 return Ok(false);
             }
             Statement::Delay { amount } | Statement::InactiveDelay { amount } => {
+                let constant = constant_delay(artifact, *amount);
                 let amount = coerce_sir_expression(
                     artifact,
                     *amount,
@@ -1327,9 +1345,9 @@ fn lower_statements(
                     &mut cache,
                 )?;
                 if matches!(statement, Statement::Delay { .. }) {
-                    kernel.delay(amount)?;
+                    kernel.delay(amount, constant)?;
                 } else {
-                    kernel.inactive_delay(amount)?;
+                    kernel.inactive_delay(amount, constant)?;
                 }
             }
             Statement::WaitEvent { terms } => {
@@ -1713,6 +1731,7 @@ fn lower_processes(
         let slots = ProcessSlots {
             is_initializer: false,
             requires_timed_simulation: false,
+            const_delays: false,
             resume: lowering
                 .hidden
                 .declare(name("resume"), PROCESS_RESUME_WIDTH, false),
@@ -1728,6 +1747,7 @@ fn lower_processes(
         lowering.process_nba_sites = 0;
         let mut kernel = ProcessKernelBuilder::new(slots);
         lower_statements(&mut lowering, &mut kernel, process.body())?;
+        let slots = kernel.slots();
         let kernel = kernel.build();
         candidates.extend(crate::watch::multi_store_candidates(&kernel, |address| {
             stable_signal(address, artifact.signals().len())
