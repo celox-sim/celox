@@ -1,0 +1,6 @@
+Revision history for #1736:
+
+rev 2 (rebase) 2026-10-22 10:13 UTC — Replay dependent formatted input changes after resolving #1734 master conflicts.
+rev 1 (initial) 2026-10-22 10:13 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1736,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"e3b6a4308394b99d2e32cd2b8a8101cc372bd950","timestamp_iso":"2026-10-22T10:13:15Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"e3b6a4308394b99d2e32cd2b8a8101cc372bd950","new_sha":"e3679f532c5105328cb3a0d16b2db5091d626d18","timestamp_iso":"2026-10-22T10:13:15Z","reason":"Replay dependent formatted input changes after resolving #1734 master conflicts.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/e3b6a4308394b99d2e32cd2b8a8101cc372bd950...e3679f532c5105328cb3a0d16b2db5091d626d18"}]} -->
