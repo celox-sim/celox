@@ -1,1 +1,6 @@
-Accept the two reviewed sv-tests static-function elaboration improvements that caused the conformance expectation gate to fail; all 2054 CI verdicts were compared.
+Revision history for #1737:
+
+rev 2 (content) 2026-10-22 07:56 UTC — Accept the two reviewed sv-tests static-function elaboration improvements that caused the conformance expectation gate to fail; all 2054 CI verdicts were compared.
+rev 1 (initial) 2026-10-22 07:56 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1737,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"490485bdf388008afe9d5bc220693cb674522d61","timestamp_iso":"2026-10-22T07:56:41Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"490485bdf388008afe9d5bc220693cb674522d61","new_sha":"0771ed2fbf9d99c84dff7b1f1bc9060f7caf7d56","timestamp_iso":"2026-10-22T07:56:41Z","reason":"Accept the two reviewed sv-tests static-function elaboration improvements that caused the conformance expectation gate to fail; all 2054 CI verdicts were compared.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/490485bdf388008afe9d5bc220693cb674522d61...0771ed2fbf9d99c84dff7b1f1bc9060f7caf7d56"}]} -->
