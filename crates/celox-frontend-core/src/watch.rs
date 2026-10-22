@@ -368,12 +368,19 @@ pub fn multi_store_candidates<A, K: Eq + std::hash::Hash + Clone>(
     unit: &ExecutionUnit<A>,
     key: impl Fn(&A) -> Option<K>,
 ) -> Vec<K> {
+    multi_write_candidates(unit, |instruction| {
+        write_destination(instruction).and_then(&key)
+    })
+}
+
+/// [`multi_store_candidates`] with the written key of each instruction
+/// given by `key`, for callers that count only some kinds of writes.
+pub fn multi_write_candidates<A, K: Eq + std::hash::Hash + Clone>(
+    unit: &ExecutionUnit<A>,
+    key: impl Fn(&SIRInstruction<A>) -> Option<K>,
+) -> Vec<K> {
     let writes = |block: &celox_sir::BasicBlock<A>| -> Vec<Option<K>> {
-        block
-            .instructions
-            .iter()
-            .map(|instruction| write_destination(instruction).and_then(&key))
-            .collect()
+        block.instructions.iter().map(&key).collect()
     };
     let block_writes: crate::HashMap<celox_sir::BlockId, Vec<Option<K>>> = unit
         .blocks
@@ -420,6 +427,17 @@ pub fn instrument_unit<A: Clone>(
     unit: &mut ExecutionUnit<A>,
     watch_for: impl Fn(&A) -> Option<WatchCode<A>>,
 ) {
+    instrument_writes(unit, |instruction| {
+        write_destination(instruction).and_then(&watch_for)
+    });
+}
+
+/// [`instrument_unit`] with the watched signal of each instruction given
+/// by `watch_for`, for callers that count only some kinds of writes.
+pub fn instrument_writes<A: Clone>(
+    unit: &mut ExecutionUnit<A>,
+    watch_for: impl Fn(&SIRInstruction<A>) -> Option<WatchCode<A>>,
+) {
     let mut next_register = unit
         .register_map
         .keys()
@@ -427,16 +445,16 @@ pub fn instrument_unit<A: Clone>(
         .max()
         .unwrap_or(0);
     for block in unit.blocks.values_mut() {
-        if !block.instructions.iter().any(|instruction| {
-            write_destination(instruction)
-                .and_then(&watch_for)
-                .is_some()
-        }) {
+        if !block
+            .instructions
+            .iter()
+            .any(|instruction| watch_for(instruction).is_some())
+        {
             continue;
         }
         let mut instructions = Vec::with_capacity(block.instructions.len());
         for instruction in std::mem::take(&mut block.instructions) {
-            let Some(watch) = write_destination(&instruction).and_then(&watch_for) else {
+            let Some(watch) = watch_for(&instruction) else {
                 instructions.push(instruction);
                 continue;
             };
@@ -461,61 +479,549 @@ pub fn instrument_unit<A: Clone>(
     }
 }
 
+/// Objects that hold back the occurrences of one flip-flop evaluation's
+/// writes to a signal until the commit that publishes them.
+///
+/// A flip-flop evaluates into the signal's next state, and a commit
+/// publishes it in the active or the NBA region. Every write is an update
+/// of the signal there, applied in issue order (IEEE 1800-2023 4.5,
+/// 10.4.2): `y <= 0; y <= 1;` is two updates. Counting at the writes would
+/// wake a waiter before the commit, and counting at the commit alone sees
+/// only the final value. So the evaluation keeps its first written value
+/// and counts the occurrences between later writes as pending; the commit
+/// adds the occurrence from the published value to the first one, and the
+/// pending ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingSlots<A> {
+    pub signal: A,
+    /// For the nonblocking writes of a variable the process also writes by
+    /// blocking assignments: the staging value and mask they go to.
+    /// Otherwise the writes go to the signal's next state.
+    pub staged: Option<StagedSlots<A>>,
+    /// The value after the first write, and whether there was one.
+    pub first: A,
+    pub has_first: A,
+    pub changes: A,
+    pub rises: A,
+    pub falls: A,
+}
+
+/// The staging objects of [`PendingSlots`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StagedSlots<A> {
+    pub value: A,
+    pub mask: A,
+    /// The mask after the first write: the bits the first value holds.
+    pub first_mask: A,
+}
+
+impl<A: Copy> PendingSlots<A> {
+    pub fn pending(&self, kind: CounterKind) -> A {
+        match kind {
+            CounterKind::Changes => self.changes,
+            CounterKind::Rises => self.rises,
+            CounterKind::Falls => self.falls,
+        }
+    }
+
+    pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> PendingSlots<B> {
+        PendingSlots {
+            signal: map(self.signal),
+            staged: self.staged.map(|staged| StagedSlots {
+                value: map(staged.value),
+                mask: map(staged.mask),
+                first_mask: map(staged.first_mask),
+            }),
+            first: map(self.first),
+            has_first: map(self.has_first),
+            changes: map(self.changes),
+            rises: map(self.rises),
+            falls: map(self.falls),
+        }
+    }
+}
+
+/// The code view of a signal's [`PendingSlots`].
+#[derive(Clone, Debug)]
+pub struct PendingCode<A> {
+    /// The signal's stable state and its counters.
+    pub watch: WatchCode<A>,
+    /// The signal's next state.
+    pub next: A,
+    pub staged: Option<StagedSlots<A>>,
+    pub first: A,
+    pub has_first: A,
+    pub pending: Vec<(CounterKind, A)>,
+}
+
+/// What an instruction of a flip-flop unit does to a [`PendingCode`]
+/// stream.
+enum PendingRole {
+    /// A write of the evaluation; `marks` for a store to the staging mask.
+    Write { marks: bool },
+    /// The publication.
+    Release,
+}
+
+impl<A: PartialEq> PendingCode<A> {
+    fn role(&self, instruction: &SIRInstruction<A>) -> Option<PendingRole> {
+        match (instruction, &self.staged) {
+            (SIRInstruction::Store(address, ..), None) => {
+                (*address == self.next).then_some(PendingRole::Write { marks: false })
+            }
+            (SIRInstruction::Store(address, ..), Some(staged)) => {
+                if *address == staged.value {
+                    Some(PendingRole::Write { marks: false })
+                } else if *address == staged.mask {
+                    Some(PendingRole::Write { marks: true })
+                } else {
+                    (*address == self.watch.signal).then_some(PendingRole::Release)
+                }
+            }
+            // A seed copies the stable state into the next state; it is
+            // not a write.
+            (SIRInstruction::Commit(source, destination, ..), None) => (*source == self.next
+                && *destination == self.watch.signal)
+                .then_some(PendingRole::Release),
+            _ => None,
+        }
+    }
+}
+
+fn value_register<A>(b: &mut SIRBuilder<A>, width: usize, four_state: bool) -> RegisterId {
+    if four_state {
+        b.alloc_logic(width)
+    } else {
+        b.alloc_bit(width, false)
+    }
+}
+
+fn store<A: Clone>(b: &mut SIRBuilder<A>, address: &A, width: usize, value: RegisterId) {
+    b.emit(SIRInstruction::Store(
+        address.clone(),
+        SIROffset::Static(0),
+        width,
+        value,
+        Vec::new(),
+        Vec::new(),
+    ));
+}
+
+/// `base` with the bits `mask` marks taken from `value`.
+fn overlay<A>(
+    b: &mut SIRBuilder<A>,
+    base: RegisterId,
+    value: RegisterId,
+    mask: RegisterId,
+    width: usize,
+    four_state: bool,
+) -> RegisterId {
+    let keep = b.alloc_bit(width, false);
+    b.emit(SIRInstruction::Unary(
+        keep,
+        celox_design::UnaryOp::BitNot,
+        mask,
+    ));
+    let kept = value_register(b, width, four_state);
+    b.emit(SIRInstruction::Binary(kept, base, BinaryOp::And, keep));
+    let taken = value_register(b, width, four_state);
+    b.emit(SIRInstruction::Binary(taken, value, BinaryOp::And, mask));
+    let merged = value_register(b, width, four_state);
+    b.emit(SIRInstruction::Binary(merged, kept, BinaryOp::Or, taken));
+    merged
+}
+
+/// The value the writes of `code` have produced so far: the next state, or
+/// for a staged stream the next state with the staged bits replaced, as the
+/// NBA merge will publish it.
+fn pending_view<A: Clone>(b: &mut SIRBuilder<A>, code: &PendingCode<A>) -> RegisterId {
+    let (width, four_state) = (code.watch.width, code.watch.four_state);
+    let next = load(b, &code.next, width, four_state);
+    let Some(staged) = &code.staged else {
+        return next;
+    };
+    let value = load(b, &staged.value, width, four_state);
+    let mask = load(b, &staged.mask, width, false);
+    overlay(b, next, value, mask, width, four_state)
+}
+
+/// Emit `write`, a write of the evaluation to the stream of `code`, and
+/// keep its occurrence: the first write is remembered, a later one counts
+/// as pending.
+fn emit_pending_write<A: Clone>(
+    b: &mut SIRBuilder<A>,
+    code: &PendingCode<A>,
+    write: SIRInstruction<A>,
+    marks: bool,
+) {
+    let (width, four_state) = (code.watch.width, code.watch.four_state);
+    let old = pending_view(b, code);
+    let old_lsb = lsb(b, old, width, four_state);
+    b.emit(write);
+    let new = pending_view(b, code);
+    let new_lsb = lsb(b, new, width, four_state);
+    let has_first = load(b, &code.has_first, 1, false);
+    for &(kind, ref pending) in &code.pending {
+        let occurred = occurrence(b, kind, (old, old_lsb), (new, new_lsb), width, four_state);
+        let held = binary(b, occurred, BinaryOp::And, has_first);
+        bump(b, pending, held);
+    }
+    // A staged value takes effect where its mask is marked, and the
+    // evaluation clears the mask before its body: the first write of a
+    // staged stream is the first mark.
+    if code.staged.is_some() && !marks {
+        return;
+    }
+    let none = b.alloc_bit(1, false);
+    b.emit(SIRInstruction::Unary(
+        none,
+        celox_design::UnaryOp::LogicNot,
+        has_first,
+    ));
+    let (first, set) = match &code.staged {
+        None => (new, none),
+        Some(staged) => {
+            let mask = load(b, &staged.mask, width, false);
+            let zero = constant(b, 0, width, false);
+            let marked = binary(b, mask, BinaryOp::NeCase, zero);
+            let set = binary(b, none, BinaryOp::And, marked);
+            let previous = load(b, &staged.first_mask, width, false);
+            let first_mask = b.alloc_bit(width, false);
+            b.emit(SIRInstruction::Mux(first_mask, set, mask, previous));
+            store(b, &staged.first_mask, width, first_mask);
+            (load(b, &staged.value, width, four_state), set)
+        }
+    };
+    let previous = load(b, &code.first, width, four_state);
+    let kept = value_register(b, width, four_state);
+    b.emit(SIRInstruction::Mux(kept, set, first, previous));
+    store(b, &code.first, width, kept);
+    let started = binary(b, has_first, BinaryOp::Or, set);
+    store(b, &code.has_first, 1, started);
+}
+
+/// After the publication of the stream of `code`, count its occurrences:
+/// the one from `published`, the signal's value before the publication, to
+/// the first written value in the bits the publication writes (`mask`), and
+/// the pending ones. The stream is then empty.
+fn emit_release<A: Clone>(
+    b: &mut SIRBuilder<A>,
+    code: &PendingCode<A>,
+    published: RegisterId,
+    written: &num_bigint::BigUint,
+) {
+    let (width, four_state) = (code.watch.width, code.watch.four_state);
+    let has_first = load(b, &code.has_first, 1, false);
+    let first = load(b, &code.first, width, four_state);
+    let mask = match &code.staged {
+        Some(staged) => load(b, &staged.first_mask, width, false),
+        None => {
+            let mask = b.alloc_bit(width, false);
+            b.emit(SIRInstruction::Imm(mask, SIRValue::new(written.clone())));
+            mask
+        }
+    };
+    let first = overlay(b, published, first, mask, width, four_state);
+    let published_lsb = lsb(b, published, width, four_state);
+    let first_lsb = lsb(b, first, width, four_state);
+    for &(kind, ref pending) in &code.pending {
+        let Some((_, counter)) = code.watch.counters.iter().find(|(k, _)| *k == kind) else {
+            continue;
+        };
+        let occurred = occurrence(
+            b,
+            kind,
+            (published, published_lsb),
+            (first, first_lsb),
+            width,
+            four_state,
+        );
+        let counted = binary(b, occurred, BinaryOp::And, has_first);
+        bump(b, counter, counted);
+        let total = load(b, counter, EVENT_COUNTER_WIDTH, false);
+        let held = load(b, pending, EVENT_COUNTER_WIDTH, false);
+        let sum = b.alloc_bit(EVENT_COUNTER_WIDTH, false);
+        b.emit(SIRInstruction::Binary(sum, total, BinaryOp::Add, held));
+        store(b, counter, EVENT_COUNTER_WIDTH, sum);
+    }
+    emit_clear(b, code);
+}
+
+/// Empty the stream of `code`.
+fn emit_clear<A: Clone>(b: &mut SIRBuilder<A>, code: &PendingCode<A>) {
+    let zero = constant(b, 0, 1, false);
+    store(b, &code.has_first, 1, zero);
+    let zero = b.alloc_bit(EVENT_COUNTER_WIDTH, false);
+    b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+    for (_, pending) in &code.pending {
+        store(b, pending, EVENT_COUNTER_WIDTH, zero);
+    }
+}
+
+/// The instructions `emit` builds, with registers from `next_register` on.
+fn emitted<A>(
+    register_map: &mut impl Extend<(RegisterId, celox_sir::RegisterType)>,
+    next_register: &mut usize,
+    emit: impl FnOnce(&mut SIRBuilder<A>),
+) -> Vec<SIRInstruction<A>> {
+    let mut b = SIRBuilder::new_with(*next_register);
+    emit(&mut b);
+    b.seal_block(SIRTerminator::Return);
+    let (mut blocks, registers, next) = b.drain();
+    *next_register = next;
+    register_map.extend(registers);
+    blocks
+        .remove(&celox_sir::BlockId(0))
+        .expect("the emitted block")
+        .instructions
+}
+
+/// Instrument the writes and publications of a flip-flop unit for the
+/// streams of `codes` (see [`PendingSlots`]). A unit that writes a stream
+/// starts it empty, so an evaluation that was superseded before its commit
+/// leaves nothing behind.
+pub fn instrument_pending<A: Clone + PartialEq>(
+    unit: &mut ExecutionUnit<A>,
+    codes: &[PendingCode<A>],
+) {
+    if codes.is_empty() {
+        return;
+    }
+    let mut next_register = unit
+        .register_map
+        .keys()
+        .map(|id| id.0 + 1)
+        .max()
+        .unwrap_or(0);
+    let mut started = vec![false; codes.len()];
+    let mut blocks: Vec<_> = unit.blocks.keys().copied().collect();
+    blocks.sort_unstable();
+    for id in blocks {
+        let block = unit.blocks.get_mut(&id).expect("a block of the unit");
+        let roles: Vec<_> = block
+            .instructions
+            .iter()
+            .map(|instruction| {
+                codes
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, code)| code.role(instruction).map(|role| (index, role)))
+            })
+            .collect();
+        if roles.iter().all(Option::is_none) {
+            continue;
+        }
+        // The bits each stream's commits in this block publish, and where
+        // its last publication is.
+        let mut written = vec![num_bigint::BigUint::default(); codes.len()];
+        let mut last = vec![None; codes.len()];
+        for (position, (instruction, role)) in block.instructions.iter().zip(&roles).enumerate() {
+            let Some((index, PendingRole::Release)) = role else {
+                continue;
+            };
+            last[*index] = Some(position);
+            let width = codes[*index].watch.width;
+            let range = match instruction {
+                SIRInstruction::Commit(_, _, SIROffset::Static(lsb), bits, _) => {
+                    ((num_bigint::BigUint::from(1u8) << *bits) - 1u8) << *lsb
+                }
+                _ => (num_bigint::BigUint::from(1u8) << width) - 1u8,
+            };
+            written[*index] |= range;
+        }
+        let mut published: Vec<Option<RegisterId>> = vec![None; codes.len()];
+        let mut instructions = Vec::with_capacity(block.instructions.len());
+        for (position, (instruction, role)) in std::mem::take(&mut block.instructions)
+            .into_iter()
+            .zip(roles)
+            .enumerate()
+        {
+            match role {
+                None => instructions.push(instruction),
+                Some((index, PendingRole::Write { marks })) => {
+                    started[index] = true;
+                    instructions.extend(emitted(&mut unit.register_map, &mut next_register, |b| {
+                        emit_pending_write(b, &codes[index], instruction, marks)
+                    }));
+                }
+                Some((index, PendingRole::Release)) => {
+                    let code = &codes[index];
+                    if published[index].is_none() {
+                        instructions.extend(emitted(
+                            &mut unit.register_map,
+                            &mut next_register,
+                            |b| {
+                                published[index] = Some(load(
+                                    b,
+                                    &code.watch.signal,
+                                    code.watch.width,
+                                    code.watch.four_state,
+                                ));
+                            },
+                        ));
+                    }
+                    instructions.push(instruction);
+                    if last[index] == Some(position) {
+                        let before = published[index].expect("loaded before the first commit");
+                        instructions.extend(emitted(
+                            &mut unit.register_map,
+                            &mut next_register,
+                            |b| emit_release(b, code, before, &written[index]),
+                        ));
+                    }
+                }
+            }
+        }
+        block.instructions = instructions;
+    }
+    let mut entry = Vec::new();
+    for (code, _) in codes.iter().zip(&started).filter(|(_, started)| **started) {
+        entry.extend(emitted(&mut unit.register_map, &mut next_register, |b| {
+            emit_clear(b, code)
+        }));
+    }
+    let block = unit
+        .blocks
+        .get_mut(&unit.entry_block_id)
+        .expect("the entry block");
+    entry.append(&mut block.instructions);
+    block.instructions = entry;
+}
+
+type SymbolicVariables =
+    crate::HashMap<crate::SourceVarId, crate::symbolic::artifact::SymbolicVariable>;
+
+/// Whether `id` is a signal of the design that an event control can watch:
+/// state of the module (`module_affiliated`), since nothing outside the
+/// module watches hidden state, and no unpacked array, which no event
+/// control watches as a whole.
+fn watchable(variables: &SymbolicVariables, id: &crate::SourceVarId) -> bool {
+    variables
+        .get(id)
+        .is_some_and(|var| var.module_affiliated && var.metadata.array_dims.is_empty())
+}
+
+/// Declare a hidden object `path` of `width` bits and return it.
+fn declare_hidden(
+    variables: &mut SymbolicVariables,
+    path: Vec<String>,
+    width: usize,
+    is_4state: bool,
+) -> crate::SourceVarId {
+    use celox_design::{DomainKind, PortTypeKind, VariableMetadata};
+    let id = crate::SourceVarId(variables.keys().map(|id| id.0 + 1).max().unwrap_or(0));
+    variables.insert(
+        id,
+        crate::symbolic::artifact::SymbolicVariable {
+            path,
+            kind: crate::VariableKind::Variable,
+            signed: false,
+            metadata: VariableMetadata {
+                width,
+                is_4state,
+                kind: DomainKind::Other,
+                type_kind: if is_4state {
+                    PortTypeKind::Logic
+                } else {
+                    PortTypeKind::Bit
+                },
+                array_dims: Vec::new(),
+                value_kind: Default::default(),
+            },
+            unpacked_ranges: Vec::new(),
+            packed_dims: vec![width],
+            source: None,
+            module_affiliated: false,
+        },
+    );
+    id
+}
+
 /// Declare counter objects for `candidates` among the variables of a module
-/// and return them. Candidates that are not signals of the design
-/// (`module_affiliated`) are skipped, since nothing outside the module
-/// watches hidden state, and so are unpacked arrays, which no event control
-/// watches as a whole.
+/// and return them. Candidates that are not [`watchable`] are skipped.
 pub fn declare_counter_slots(
-    variables: &mut crate::HashMap<crate::SourceVarId, crate::symbolic::artifact::SymbolicVariable>,
+    variables: &mut SymbolicVariables,
     candidates: impl IntoIterator<Item = crate::SourceVarId>,
 ) -> Vec<celox_design::CounterSlots<crate::SourceVarId>> {
-    use celox_design::{DomainKind, PortTypeKind, VariableMetadata};
     let mut candidates: Vec<_> = candidates
         .into_iter()
-        .filter(|id| {
-            variables
-                .get(id)
-                .is_some_and(|var| var.module_affiliated && var.metadata.array_dims.is_empty())
-        })
+        .filter(|id| watchable(variables, id))
         .collect();
     candidates.sort_unstable();
     candidates.dedup();
-    let mut next = variables.keys().map(|id| id.0 + 1).max().unwrap_or(0);
     candidates
         .into_iter()
         .map(|signal| {
             let name = variables[&signal].path.join(".");
             let mut counter = |kind: &str| {
-                let id = crate::SourceVarId(next);
-                next += 1;
-                variables.insert(
-                    id,
-                    crate::symbolic::artifact::SymbolicVariable {
-                        path: vec![format!("$counter[{name}]"), kind.to_string()],
-                        kind: crate::VariableKind::Variable,
-                        signed: false,
-                        metadata: VariableMetadata {
-                            width: EVENT_COUNTER_WIDTH,
-                            is_4state: false,
-                            kind: DomainKind::Other,
-                            type_kind: PortTypeKind::Bit,
-                            array_dims: Vec::new(),
-                            value_kind: Default::default(),
-                        },
-                        unpacked_ranges: Vec::new(),
-                        packed_dims: vec![EVENT_COUNTER_WIDTH],
-                        source: None,
-                        module_affiliated: false,
-                    },
-                );
-                id
+                declare_hidden(
+                    variables,
+                    vec![format!("$counter[{name}]"), kind.to_string()],
+                    EVENT_COUNTER_WIDTH,
+                    false,
+                )
             };
             celox_design::CounterSlots {
                 signal,
                 changes: counter("changes"),
                 rises: counter("rises"),
                 falls: counter("falls"),
+            }
+        })
+        .collect()
+}
+
+/// Declare the [`PendingSlots`] of `streams` among the variables of a
+/// module and return them. A stream is a signal and, for nonblocking writes
+/// staged apart from blocking ones, its staging value and mask. Streams of
+/// signals that are not [`watchable`] are skipped.
+pub fn declare_pending_slots(
+    variables: &mut SymbolicVariables,
+    streams: impl IntoIterator<
+        Item = (
+            crate::SourceVarId,
+            Option<(crate::SourceVarId, crate::SourceVarId)>,
+        ),
+    >,
+) -> Vec<PendingSlots<crate::SourceVarId>> {
+    let mut streams: Vec<_> = streams
+        .into_iter()
+        .filter(|(signal, _)| watchable(variables, signal))
+        .collect();
+    streams.sort_unstable();
+    streams.dedup();
+    streams
+        .into_iter()
+        .map(|(signal, staged)| {
+            let name = variables[&signal].path.join(".");
+            let (width, is_4state) = {
+                let metadata = &variables[&signal].metadata;
+                (metadata.width, metadata.is_4state)
+            };
+            let stream = match staged {
+                Some(_) => format!("$staged[{name}]"),
+                None => format!("$pending[{name}]"),
+            };
+            let mut hidden = |kind: &str, width: usize, is_4state: bool| {
+                declare_hidden(
+                    variables,
+                    vec![stream.clone(), kind.to_string()],
+                    width,
+                    is_4state,
+                )
+            };
+            PendingSlots {
+                signal,
+                staged: staged.map(|(value, mask)| StagedSlots {
+                    value,
+                    mask,
+                    first_mask: hidden("first_mask", width, false),
+                }),
+                first: hidden("first", width, is_4state),
+                has_first: hidden("has_first", 1, false),
+                changes: hidden("changes", EVENT_COUNTER_WIDTH, false),
+                rises: hidden("rises", EVENT_COUNTER_WIDTH, false),
+                falls: hidden("falls", EVENT_COUNTER_WIDTH, false),
             }
         })
         .collect()
