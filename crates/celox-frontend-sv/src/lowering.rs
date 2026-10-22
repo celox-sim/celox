@@ -18,7 +18,7 @@ use celox_design::{
 };
 use celox_frontend_core::process::PROCESS_RESUME_WIDTH;
 use celox_frontend_core::symbolic::artifact::{
-    ExternalHierarchy, ExternalModule, NbaSwitch, PackageBinding, SimModule,
+    CombAlternative, ExternalHierarchy, ExternalModule, NbaSwitch, PackageBinding, SimModule,
     SymbolicGlueAddr as GlueAddr, SymbolicProcess, SymbolicRtl, SymbolicVariable,
 };
 use celox_frontend_core::{
@@ -157,6 +157,8 @@ pub(crate) struct LoweredSvModule {
     /// The creation orders of the `always @(list)` processes lowered like
     /// `always @*`.
     level_lists_lowered: Vec<usize>,
+    /// The write streams one flip-flop evaluation may write twice.
+    repeated_ff_writes: Vec<FfWriteStream>,
 }
 
 #[derive(Clone)]
@@ -1595,6 +1597,7 @@ fn prepare_external_hierarchy_collecting(
             event_copies: Vec::new(),
             event_assignments: Vec::new(),
             level_lists_lowered: Vec::new(),
+            repeated_ff_writes: Vec::new(),
         }
     };
     let foreign_modules: HashMap<_, _> = foreign
@@ -3052,6 +3055,7 @@ fn lower_module_with_overrides(
         })
     });
     let module = level_sensitive.as_ref().unwrap_or(module);
+    let mut repeated_ff_writes = Vec::new();
     let (
         (
             eval_only_ff_blocks,
@@ -3075,8 +3079,14 @@ fn lower_module_with_overrides(
             four_state,
             warnings,
         );
-        let blocks =
-            lower_ff_processes(module, &mut pm, ff_parts, &ff_event_roles, &shared_memories)?;
+        let blocks = lower_ff_processes(
+            module,
+            &mut pm,
+            ff_parts,
+            &ff_event_roles,
+            &shared_memories,
+            &mut repeated_ff_writes,
+        )?;
         (
             blocks,
             std::mem::take(&mut pm.runtime_event_sites),
@@ -3209,6 +3219,8 @@ fn lower_module_with_overrides(
             processes,
             package_bindings: HashMap::default(),
             counter_slots: Vec::new(),
+            pending_slots: Vec::new(),
+            comb_alternatives: Vec::new(),
             wait_sites,
             nba_sites,
             nba_switches,
@@ -3225,6 +3237,7 @@ fn lower_module_with_overrides(
         event_copies: event_vars.copies,
         event_assignments,
         level_lists_lowered,
+        repeated_ff_writes,
     })
 }
 
@@ -3610,32 +3623,40 @@ pub(crate) fn attach_instance_glue(
     // An event expression is one more continuous assignment to a hidden
     // buffer the processes watch.
     port_assignments.extend(lowered.event_assignments.iter().cloned());
-    let (comb_blocks, arena, created, comb_observers, comb_sites) = lower_comb_processes(
-        &lowered.source,
-        &port_assignments,
-        &mut parent_variables,
-        &mut signal_names,
-        &lowered.constants,
-        &lowered.parameter_types,
-        four_state,
-        allow_inferred_latches,
-        &mut module.runtime_errors,
-        &mut module.extern_functions,
-        warnings,
-    )
-    .map_err(|error| match error {
-        sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
-            detail,
-            source_location: None,
-        },
-        error => ParserError::unsupported(
-            error.tracking_issue(),
-            LoweringPhase::SimulatorParser,
-            "systemverilog combinational process lowering",
-            error.to_string(),
-            None,
-        ),
-    })?;
+    // The repeated writes of flip-flops and combinational processes are
+    // counted only in a design with a wait, so a design without one, such
+    // as pure RTL, lowers exactly as before.
+    let waits = lowered_modules
+        .values()
+        .any(|module| !module.sim_module.wait_sites.is_empty());
+    let (comb_blocks, arena, created, comb_observers, comb_sites, comb_alternatives) =
+        lower_comb_processes(
+            &lowered.source,
+            &port_assignments,
+            &mut parent_variables,
+            &mut signal_names,
+            &lowered.constants,
+            &lowered.parameter_types,
+            four_state,
+            allow_inferred_latches,
+            &mut module.runtime_errors,
+            &mut module.extern_functions,
+            warnings,
+            waits,
+        )
+        .map_err(|error| match error {
+            sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
+                detail,
+                source_location: None,
+            },
+            error => ParserError::unsupported(
+                error.tracking_issue(),
+                LoweringPhase::SimulatorParser,
+                "systemverilog combinational process lowering",
+                error.to_string(),
+                None,
+            ),
+        })?;
     let (mut comb_blocks, mut arena) = (comb_blocks, arena);
     push_event_copies(&lowered.event_copies, &mut comb_blocks, &mut arena)?;
     module.comb_boundaries = comb_boundaries(&comb_blocks);
@@ -3728,8 +3749,21 @@ pub(crate) fn attach_instance_glue(
                 arena: glue.2,
             });
     }
+    if waits {
+        candidates.extend(lowered.repeated_ff_writes.iter().map(|&(signal, _)| signal));
+        for alternative in &comb_alternatives {
+            candidates.extend(alternative.candidates.iter().copied());
+        }
+    }
+    module.comb_alternatives = comb_alternatives;
     module.counter_slots =
         celox_frontend_core::watch::declare_counter_slots(&mut module.variables, candidates);
+    if waits {
+        module.pending_slots = celox_frontend_core::watch::declare_pending_slots(
+            &mut module.variables,
+            lowered.repeated_ff_writes.iter().copied(),
+        );
+    }
     Ok(())
 }
 
@@ -4167,6 +4201,7 @@ fn lower_comb_processes(
     runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     extern_functions: &mut Vec<ExternFunction>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    waits: bool,
 ) -> Result<
     (
         Vec<LogicPath<SourceVarId>>,
@@ -4174,11 +4209,13 @@ fn lower_comb_processes(
         Vec<SourceVarId>,
         Vec<CombObserver<SourceVarId>>,
         Vec<RuntimeEventSite>,
+        Vec<CombAlternative>,
     ),
     sv::AnalyzerError,
 > {
     let mut arena = SLTNodeArena::new();
     let mut comb_blocks = Vec::new();
+    let mut alternatives = Vec::new();
     let mut observers = Vec::new();
     let mut sites = Vec::new();
     let mut pm = procedural::ProcModule::new(
@@ -4233,6 +4270,38 @@ fn lower_comb_processes(
         comb.site_base = sites.len() as u32;
         comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
         match comb.lower_process(process.body()) {
+            // In a design with a wait, a variable the process stores twice
+            // may be watched, so it also gets its imperative alternative.
+            // A process with runtime events keeps only its symbolic form.
+            Ok(paths)
+                if waits
+                    && process.kind() == sv::ir::CombProcessKind::AlwaysComb
+                    && comb.observers.is_empty()
+                    && comb.sites.is_empty() =>
+            {
+                drop(comb);
+                let mut targets: Vec<_> = paths
+                    .iter()
+                    .filter_map(|path| match &path.target {
+                        LogicPathTarget::Var(target) => Some(*target),
+                        _ => None,
+                    })
+                    .collect();
+                targets.sort_unstable();
+                targets.dedup();
+                comb_blocks.extend(paths);
+                if let Some((paths, alternative)) = lower_comb_alternative(
+                    &mut pm,
+                    process,
+                    random_seeds[&(2, index)],
+                    targets,
+                    &mut arena,
+                ) {
+                    comb_blocks.extend(paths);
+                    alternatives.push(alternative);
+                }
+                continue;
+            }
             Ok(paths) => comb_blocks.extend(paths),
             Err(sv::AnalyzerError::Unsupported(reason))
                 if reason.starts_with("latch inference inside always_comb")
@@ -4331,7 +4400,71 @@ fn lower_comb_processes(
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);
     let created = std::mem::take(&mut pm.created);
-    Ok((comb_blocks, arena, created, observers, sites))
+    Ok((comb_blocks, arena, created, observers, sites, alternatives))
+}
+
+/// The imperative unit of an `always_comb` process lowered symbolically to
+/// `targets`, and its [`CombAlternative`], if the unit may store a variable
+/// of the design twice in one execution. Otherwise nothing of the attempt
+/// remains in `pm`.
+fn lower_comb_alternative(
+    pm: &mut procedural::ProcModule<'_>,
+    process: &sv::ir::CombProcess,
+    random_seed: u32,
+    targets: Vec<VarAtomBase<SourceVarId>>,
+    arena: &mut SLTNodeArena<SourceVarId>,
+) -> Option<(Vec<LogicPath<SourceVarId>>, CombAlternative)> {
+    let checkpoint = pm.checkpoint();
+    let mut scratch = SLTNodeArena::new();
+    let lowered = ff::Ff::new(pm, random_seed)
+        .without_input_occurrences()
+        .lower_comb_process(
+            process.body(),
+            process.sensitivity_body(),
+            process.kind(),
+            false,
+            process.site(),
+            &[],
+            &mut scratch,
+        );
+    let alternative = match lowered {
+        Ok(paths) if pm.runtime_event_sites.len() == checkpoint.runtime_event_sites() => paths
+            .first()
+            .and_then(|path| match &path.target {
+                LogicPathTarget::Process { process, unit, .. } => Some((*process, unit)),
+                _ => None,
+            })
+            .map(|(id, unit)| {
+                let candidates: Vec<_> =
+                    celox_frontend_core::watch::multi_store_candidates(unit, |&address| {
+                        (!pm.is_hidden(address) && pm.var(address).array_dims.is_empty())
+                            .then_some(address)
+                    });
+                (id, candidates)
+            })
+            .filter(|(_, candidates)| !candidates.is_empty())
+            .map(|(process, candidates)| (paths, process, candidates)),
+        _ => None,
+    };
+    let Some((mut paths, process, mut candidates)) = alternative else {
+        pm.rollback(checkpoint);
+        return None;
+    };
+    for path in &mut paths {
+        path.expr = arena
+            .alloc(scratch.get(path.expr).clone())
+            .expect("an input node of a fresh arena");
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+    Some((
+        paths,
+        CombAlternative {
+            process,
+            targets,
+            candidates,
+        },
+    ))
 }
 
 /// The continuous assignments `copy = signal` of the hidden event copies of
@@ -7992,12 +8125,45 @@ impl FfEventVars {
     }
 }
 
+/// A signal a flip-flop evaluation writes and, for nonblocking writes staged
+/// apart from blocking ones, its staging value; see
+/// `celox_frontend_core::watch::PendingSlots`.
+type FfWriteStream = (SourceVarId, Option<SourceVarId>);
+
+/// The write streams one execution of the flip-flop evaluation `eval` may
+/// write twice. `staged` lists its staged variables as (variable, value,
+/// mask).
+fn repeated_ff_writes(
+    eval: &ExecutionUnit<RegionedVarAddr>,
+    staged: &[(SourceVarId, SourceVarId, SourceVarId)],
+) -> Vec<FfWriteStream> {
+    // A seed commits the stable state into the next state; only the stores
+    // of the body are writes. Every nonblocking write of a staged variable
+    // marks its mask, so the value alone tells a repeated write.
+    celox_frontend_core::watch::multi_write_candidates(eval, |instruction| match instruction {
+        SIRInstruction::Store(address, ..) if address.region == WORKING_REGION => {
+            Some(address.var_id)
+        }
+        _ => None,
+    })
+    .into_iter()
+    .filter_map(
+        |id| match staged.iter().find(|&&(_, value, _)| value == id) {
+            Some(&(signal, value, _)) => Some((signal, Some(value))),
+            None if staged.iter().any(|&(_, _, mask)| mask == id) => None,
+            None => Some((id, None)),
+        },
+    )
+    .collect()
+}
+
 fn lower_ff_processes(
     module: &sv::ir::Module,
     pm: &mut procedural::ProcModule<'_>,
     ff_parts: bool,
     ff_event_roles: &[FfEventRole],
     shared_memories: &HashSet<String>,
+    repeated_writes: &mut Vec<FfWriteStream>,
 ) -> Result<SvFfBlocks, sv::AnalyzerError> {
     let mut parallel_ff_parts = HashMap::<_, Vec<_>>::default();
     let mut eval_only_ff_blocks = HashMap::default();
@@ -8107,9 +8273,11 @@ fn lower_ff_processes(
             active,
             nba,
             targets,
+            staged,
         } = ff::Ff::new(pm, random_seeds[&(0, index)])
             .with_sparse_memories(shared_memories)
             .lower_process(process.body())?;
+        repeated_writes.extend(repeated_ff_writes(&eval_only, &staged));
         // A process without writes still runs for its runtime events and
         // extern calls.
         let has_effects =

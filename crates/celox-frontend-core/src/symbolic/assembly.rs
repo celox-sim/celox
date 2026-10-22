@@ -16,7 +16,7 @@ use celox_design::{
     InitialStateValue, InstanceId, ModuleId, NbaSite, ProcessSlots, RegionedAbsoluteAddrBase,
     RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite,
     RuntimeSchema, STABLE_REGION, StateAddr, StateObjectId, TriggerSet, VarAtomBase,
-    VariableMetadata, WaitSite,
+    VariableMetadata, WORKING_REGION, WaitSite,
 };
 use celox_sir::{
     BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIROffset,
@@ -745,6 +745,14 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     .map(|(alias, _)| *alias),
             )
             .collect();
+        let counted = counted_signals(&timing, &event_addresses);
+        choose_comb_alternatives(
+            bindings,
+            &instance_modules,
+            &modules,
+            &counted,
+            &mut comb_blocks,
+        );
         // Count sensitivity occurrences before any optimizer can coalesce
         // consecutive writes whose final value is unchanged.
         let mut probes = Vec::new();
@@ -868,13 +876,32 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 }
             }
         }
+        let ff_units = eval_apply_ffs
+            .values_mut()
+            .chain(eval_only_ffs.values_mut())
+            .chain(apply_ffs.values_mut())
+            .flatten()
+            .chain(
+                parallel_ff_units
+                    .values_mut()
+                    .flatten()
+                    .flat_map(|(_, part)| [&mut part.evaluate, &mut part.apply]),
+            )
+            .chain(
+                split_commits
+                    .values_mut()
+                    .flatten()
+                    .flatten()
+                    .flat_map(|split| [&mut split.active, &mut split.nba]),
+            );
         instrument_counted_signals(
             &timing,
-            &event_addresses,
+            counted,
             &variables,
             four_state,
             &mut processes,
             &mut comb_blocks,
+            ff_units,
         )
     };
     // Combinational values and the variables they are computed from.
@@ -3232,6 +3259,7 @@ struct RelocatedProcess {
 /// design.
 struct TimingMetadata {
     counter_slots: Vec<CounterSlots<AbsoluteAddr>>,
+    pending_slots: Vec<crate::watch::PendingSlots<AbsoluteAddr>>,
     wait_sites: Vec<WaitSite<AbsoluteAddr>>,
     nba_sites: Vec<NbaSite<AbsoluteAddr>>,
     host_request_sites: Vec<HostRequestSite<AbsoluteAddr>>,
@@ -3540,6 +3568,7 @@ fn relocate_timing(
     instances.sort_unstable_by_key(|(instance, _)| **instance);
     let mut metadata = TimingMetadata {
         counter_slots: Vec::new(),
+        pending_slots: Vec::new(),
         wait_sites: Vec::new(),
         nba_sites: Vec::new(),
         host_request_sites: Vec::new(),
@@ -3552,6 +3581,9 @@ fn relocate_timing(
         metadata
             .counter_slots
             .extend(module.counter_slots.iter().map(|slots| slots.map(locate)));
+        metadata
+            .pending_slots
+            .extend(module.pending_slots.iter().map(|slots| slots.map(locate)));
         metadata
             .wait_sites
             .extend(module.wait_sites.iter().map(|site| WaitSite {
@@ -3588,28 +3620,84 @@ fn relocate_timing(
 
 /// Counted signals: those a unit may store twice between two runtime checks
 /// (a frontend declared counters for them) and that a flip-flop domain or a
-/// wait watches. Returns their counters by signal and instruments the
-/// process kernels and combinational process units that write them; no
-/// other unit changes.
-fn instrument_counted_signals(
+/// wait watches, by signal.
+fn counted_signals(
     timing: &TimingMetadata,
     event_addresses: &HashSet<AbsoluteAddr>,
-    variables: &HashMap<AbsoluteAddr, (usize, bool)>,
-    four_state: bool,
-    processes: &mut [RelocatedProcess],
-    comb_blocks: &mut [LogicPath<AbsoluteAddr>],
 ) -> BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> {
     let waited: HashSet<AbsoluteAddr> = timing
         .wait_sites
         .iter()
         .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal))
         .collect();
-    let counted: BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> = timing
+    timing
         .counter_slots
         .iter()
         .filter(|slots| event_addresses.contains(&slots.signal) || waited.contains(&slots.signal))
         .map(|slots| (slots.signal, *slots))
-        .collect();
+        .collect()
+}
+
+/// Keep, for every instance of a process in `comb_alternatives`, either
+/// its imperative unit, when a variable it may store twice is `counted`, or
+/// its symbolic definitions, and remove the paths of the other form from
+/// `comb_blocks`. Paths of other drivers of the same variables stay.
+fn choose_comb_alternatives(
+    bindings: &PackageBindings,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
+    counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    comb_blocks: &mut Vec<LogicPath<AbsoluteAddr>>,
+) {
+    let mut imperative = HashSet::default();
+    let mut symbolic = HashMap::<AbsoluteAddr, Vec<_>>::default();
+    for (&instance, module) in instance_modules {
+        for alternative in &modules[module].comb_alternatives {
+            let locate = |var_id| bindings.locate(instance, var_id);
+            if alternative
+                .candidates
+                .iter()
+                .any(|&candidate| counted.contains_key(&locate(candidate)))
+            {
+                for target in &alternative.targets {
+                    symbolic
+                        .entry(locate(target.id))
+                        .or_default()
+                        .push(target.access);
+                }
+            } else {
+                imperative.insert(locate(alternative.process));
+            }
+        }
+    }
+    if imperative.is_empty() && symbolic.is_empty() {
+        return;
+    }
+    // Flattening may have split a definition at the boundaries of its
+    // readers, so a path of the process is any piece of one of its ranges.
+    // No other driver writes those bits: the SV frontend rejects overlapping
+    // drivers (`validate_variable_driver_ranges`).
+    comb_blocks.retain(|path| match &path.target {
+        LogicPathTarget::Var(target) => !symbolic
+            .get(&target.id)
+            .is_some_and(|ranges| ranges.iter().any(|range| range.overlaps(&target.access))),
+        LogicPathTarget::Process { process, .. } => !imperative.contains(process),
+        LogicPathTarget::CombCaptureEvent { .. } => true,
+    });
+}
+
+/// Instrument the process kernels, combinational process units and
+/// flip-flop units that write a `counted` signal, and return `counted`; no
+/// other unit changes.
+fn instrument_counted_signals<'u>(
+    timing: &TimingMetadata,
+    counted: BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    variables: &HashMap<AbsoluteAddr, (usize, bool)>,
+    four_state: bool,
+    processes: &mut [RelocatedProcess],
+    comb_blocks: &mut [LogicPath<AbsoluteAddr>],
+    ff_units: impl Iterator<Item = &'u mut ExecutionUnit<RegionedAbsoluteAddr>>,
+) -> BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> {
     if counted.is_empty() {
         return counted;
     }
@@ -3654,6 +3742,75 @@ fn instrument_counted_signals(
                 })
             });
         }
+    }
+    let stable = |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, var);
+    let working = |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, var);
+    let watch = |signal: AbsoluteAddr| {
+        let (slots, width, four_state) = code(signal)?;
+        Some(crate::watch::WatchCode {
+            signal: stable(slots.signal),
+            offset: celox_sir::SIROffset::Static(0),
+            width,
+            four_state,
+            counters: CounterKind::ALL
+                .into_iter()
+                .map(|kind| (kind, stable(slots.counter(kind))))
+                .collect(),
+        })
+    };
+    // A flip-flop writes its next state, and a commit publishes it. Repeated
+    // writes are held back until the commit; a single write is counted at
+    // the commit itself.
+    let pending: Vec<_> = timing
+        .pending_slots
+        .iter()
+        .filter_map(|slots| {
+            Some(crate::watch::PendingCode {
+                watch: watch(slots.signal)?,
+                write: working(slots.staged.unwrap_or(slots.signal)),
+                staged: slots.staged.is_some(),
+                value: stable(slots.value),
+                covered: stable(slots.covered),
+                first: stable(slots.first),
+                changed: stable(slots.changed),
+                written: stable(slots.written),
+                edges: vec![
+                    (CounterKind::Rises, stable(slots.rises)),
+                    (CounterKind::Falls, stable(slots.falls)),
+                ],
+            })
+        })
+        .collect();
+    let held = |staged: bool| -> HashSet<AbsoluteAddr> {
+        timing
+            .pending_slots
+            .iter()
+            .filter(|slots| slots.staged.is_some() == staged)
+            .map(|slots| slots.signal)
+            .collect()
+    };
+    let (held_next, held_staged) = (held(false), held(true));
+    for unit in ff_units {
+        crate::watch::instrument_writes(unit, |instruction| match instruction {
+            // The commit of the next state; a seed copies the other way.
+            SIRInstruction::Commit(source, destination, ..)
+                if source.region == WORKING_REGION
+                    && destination.region == STABLE_REGION
+                    && source.absolute_addr() == destination.absolute_addr()
+                    && !held_next.contains(&destination.absolute_addr()) =>
+            {
+                watch(destination.absolute_addr())
+            }
+            // The merge of staged nonblocking values.
+            SIRInstruction::Store(destination, ..)
+                if destination.region == STABLE_REGION
+                    && !held_staged.contains(&destination.absolute_addr()) =>
+            {
+                watch(destination.absolute_addr())
+            }
+            _ => None,
+        });
+        crate::watch::instrument_pending(unit, &pending);
     }
     counted
 }

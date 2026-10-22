@@ -101,6 +101,29 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus 13.0 collapses a child's output port with the parent's net, so a waiter in the parent sees each value the child's always_comb writes inside one evaluation and counts 3 instead of 1. Both are conforming: the port is a continuous assignment (IEEE 1800-2023 23.3.3), evaluated after the child's process yields, and 4.7 leaves that order open. The case asserts the settled count, which Verilator 5.052 and Celox give.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_port_pulses_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_port_pulses",
+        "observed_version": "Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 collapses a child's output port with the parent's net, so a waiter in the parent sees each value the child's always_comb writes inside one evaluation and counts 3 instead of 1. Both are conforming: the port is a continuous assignment (IEEE 1800-2023 23.3.3), evaluated after the child's process yields, and 4.7 leaves that order open. The case asserts the settled count, which Verilator 5.052 and Celox give.",
+        "upstream": []
+      },
+      "name": "timing::child_port_pulses_reach_waiters_settled",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::combinational_finish_ends_timed_execution",
@@ -434,6 +457,61 @@
       "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
+      "name": "timing::intermediate_combinational_writes_keep_other_drivers",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::intermediate_combinational_writes_reach_concatenated_ports",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::intermediate_combinational_writes_replace_split_definitions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::intermediate_combinational_writes_wake_waiters",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::intermediate_edge_process_writes_wake_waiters",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "timing::level_sensitive_always_runs_as_a_process",
       "phase": "execute",
       "status": "passed",
@@ -534,6 +612,17 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::output_reads_settle_waiting_processes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::parallel_flip_flop_parts_keep_pulses",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -688,6 +777,28 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::separate_comb_assignments_preserve_selected_dependencies",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::staged_nonblocking_writes_follow_later_blocking_writes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::staged_nonblocking_writes_wake_waiters",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
