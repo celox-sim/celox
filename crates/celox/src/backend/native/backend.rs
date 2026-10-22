@@ -2441,6 +2441,8 @@ pub struct NativeBackend {
     memory: MemoryImage,
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
     comb_capture_enabled: Vec<u8>,
+    /// Boxed so the address in the state header survives moves.
+    heap: Box<celox_heap::Heap>,
     execution_timing: Option<NativeExecutionTiming>,
     /// Worker threads for lane-partitioned kernels, started on first use.
     lane_pool: Option<celox_runtime::parallel::LanePool>,
@@ -2665,6 +2667,7 @@ impl NativeBackend {
             memory,
             runtime_event_buffer,
             comb_capture_enabled,
+            heap: Default::default(),
             execution_timing: None,
             lane_pool: None,
             lane_selectors: Default::default(),
@@ -2686,12 +2689,14 @@ impl NativeBackend {
         memory: MemoryImage,
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
         comb_capture_enabled: Vec<u8>,
+        heap: Box<celox_heap::Heap>,
     ) -> Self {
         let mut backend = Self {
             compiled: shared,
             memory,
             runtime_event_buffer,
             comb_capture_enabled,
+            heap,
             execution_timing: None,
             lane_pool: None,
             lane_selectors: Default::default(),
@@ -2699,6 +2704,7 @@ impl NativeBackend {
         // The state names the previous tier's extern function table; point it
         // at the one this code owns.
         backend.install_extern_functions();
+        backend.install_heap();
         backend
     }
 
@@ -2822,6 +2828,14 @@ impl NativeBackend {
             self.comb_capture_enabled.as_ptr() as u64,
         );
         self.install_extern_functions();
+        self.install_heap();
+    }
+
+    fn install_heap(&mut self) {
+        self.memory.write_header_word(
+            celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET,
+            std::ptr::from_mut(&mut *self.heap) as u64,
+        );
     }
 
     fn install_extern_functions(&mut self) {
@@ -3387,6 +3401,14 @@ impl super::super::SimBackend for NativeBackend {
 
     fn layout(&self) -> &MemoryLayout {
         &self.compiled.layout
+    }
+
+    fn heap(&self) -> &celox_heap::Heap {
+        &self.heap
+    }
+
+    fn heap_mut(&mut self) -> &mut celox_heap::Heap {
+        &mut self.heap
     }
 
     fn id_to_addr_slice(&self) -> &[AbsoluteAddr] {

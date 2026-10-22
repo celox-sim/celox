@@ -631,7 +631,21 @@ fn verify_instruction_types<A>(
         SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
             same_width(*old, *new, "TYPE.CAPTURE_COMPARE_OPERANDS")?;
         }
-        SIRInstruction::ExternCall { dst, args, .. } => {
+        SIRInstruction::ExternCall { dst, func, args } => {
+            if *func == crate::extern_abi::HEAP_HELPER_ID
+                && args.len() != crate::extern_abi::HEAP_HELPER_ARGUMENTS
+            {
+                return Err(SirVerifyError::instruction(
+                    "TYPE.HEAP_CALL_ARGUMENT_COUNT",
+                    block,
+                    index,
+                    format!(
+                        "a heap call takes {} arguments, not {}",
+                        crate::extern_abi::HEAP_HELPER_ARGUMENTS,
+                        args.len()
+                    ),
+                ));
+            }
             if args.len() > crate::MAX_EXTERN_CALL_ARGUMENTS {
                 return Err(SirVerifyError::instruction(
                     "TYPE.EXTERN_CALL_ARGUMENT_COUNT",

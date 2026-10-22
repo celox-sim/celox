@@ -61,6 +61,10 @@ pub(super) fn expr_is_two_state(
             ..
         } => function.result_type().is_some(),
         Expr::Call {
+            callee: Callee::String(op),
+            ..
+        } => !matches!(op, crate::system_functions::StringOp::Atoi(_)),
+        Expr::Call {
             callee: Callee::Subroutine(name),
             ..
         } => packed_dimensions

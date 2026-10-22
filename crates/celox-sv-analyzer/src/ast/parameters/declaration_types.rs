@@ -23,6 +23,9 @@ pub(super) fn prefix<'a>(
     let data = tree.declarations().data_type(data_type);
     let (alias, primitive) = match &data.kind {
         DataTypeKind::Implicit => (None, None),
+        // A string parameter is a constant, which keeps the packed value of
+        // its literal like an untyped one (IEEE 1800-2023 6.20.2).
+        DataTypeKind::Builtin(name) if name == "string" => (None, None),
         DataTypeKind::Builtin(name) => (
             None,
             Some(

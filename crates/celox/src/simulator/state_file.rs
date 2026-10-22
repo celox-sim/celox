@@ -126,19 +126,8 @@ pub struct StateSchema {
 
 impl StateSchema {
     /// Save the value of every state object of `backend` as last evaluated.
-    /// String objects read as `""`; use [`Self::capture_with_heap`] for a
-    /// backend whose strings live in a heap.
     pub fn capture<B: SimBackend>(&self, backend: &B) -> StateFile {
-        self.capture_with_heap(backend, &celox_heap::Heap::new())
-    }
-
-    /// Save the value of every state object of `backend`, with the contents
-    /// of its strings from `heap`.
-    pub fn capture_with_heap<B: SimBackend>(
-        &self,
-        backend: &B,
-        heap: &celox_heap::Heap,
-    ) -> StateFile {
+        let heap = backend.heap();
         let mut strings = Vec::new();
         let mut file_ids: HashMap<celox_heap::Handle, u32> = HashMap::default();
         let mut objects: Vec<StateObject> = self
@@ -212,16 +201,6 @@ impl StateSchema {
         backend: &mut B,
         file: &StateFile,
     ) -> Result<(), StateMismatch> {
-        self.load_with_heap(backend, &mut celox_heap::Heap::new(), file)
-    }
-
-    /// Like [`Self::load`], creating the file's strings in `heap`.
-    pub fn load_with_heap<B: SimBackend>(
-        &self,
-        backend: &mut B,
-        heap: &mut celox_heap::Heap,
-        file: &StateFile,
-    ) -> Result<(), StateMismatch> {
         let saved: BTreeMap<&str, &StateObject> = file
             .objects
             .iter()
@@ -278,7 +257,7 @@ impl StateSchema {
                         .checked_sub(1)
                         .and_then(|index| file.strings.get(index))
                         .map_or(&[][..], Vec::as_slice);
-                    element.copy_from_slice(&heap.intern(contents).to_le_bytes());
+                    element.copy_from_slice(&backend.heap_mut().intern(contents).to_le_bytes());
                 }
                 BigUint::from_bytes_le(&value)
             } else {
@@ -322,9 +301,7 @@ impl<B: SimBackend> Simulator<B> {
             self.eval_comb_checked().map_err(StateError::Runtime)?;
             self.dirty = false;
         }
-        Ok(self
-            .state_schema()
-            .capture_with_heap(&self.backend, &self.heap))
+        Ok(self.state_schema().capture(&self.backend))
     }
 
     /// Load the state saved in `file`, matching objects by path.
@@ -354,7 +331,7 @@ impl<B: SimBackend> Simulator<B> {
         // combinational loop), so keep the current state to return to.
         let previous = self.checkpoint()?;
         self.state_schema()
-            .load_with_heap(&mut self.backend, &mut self.heap, file)
+            .load(&mut self.backend, file)
             .map_err(StateError::Mismatch)?;
         for address in &self.program.runtime_schema.time_slots {
             self.backend.set(
