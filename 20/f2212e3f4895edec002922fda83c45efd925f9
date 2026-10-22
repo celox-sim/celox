@@ -1,0 +1,1 @@
+Fix CI retained-report validation: add the two reviewed Icarus class randomization exclusions to the retained class report. Reproduced the failure locally; all three retained_reports tests now pass.
