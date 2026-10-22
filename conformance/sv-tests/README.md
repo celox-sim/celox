@@ -172,6 +172,21 @@ runs at the pinned revision report 534 passing cases in 2state and 536 in
 interface classes, classes in packages, parameterized classes and shallow copies
 stay unsupported.
 
+Virtual methods, abstract classes and classes implementing interface classes
+update eighteen more rows: both state modes for `8.15--super-default-new`,
+`8.20--virtual_method`, `8.21--abstract_class`, `8.22--dynamic_method_lookup`,
+`8.26.2--implements`, `8.26.2--implements_extends`,
+`8.26.2--implements_multiple`, `8.26.6.1--name_conflict_resolved` and
+`8.26.7--partial_implementation` change from fail to pass. Each was simulated
+and its displayed values checked: the override of the object's class runs
+through base-class handles and an array of them, and the shadowed property of
+`8.20--virtual_method` reads the derived class's value. Full official runs at
+the pinned revision report 543 passing cases in 2state and 545 in 4state, with
+no passing case regressing. `8.26.6.1--name_conflict_unresolved` stays a
+passing negative case: its return types conflict, which is rejected. Calls
+through interface class handles, `$cast`, parameterized classes and shallow
+copies stay unsupported.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.

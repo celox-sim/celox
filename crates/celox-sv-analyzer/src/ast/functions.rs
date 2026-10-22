@@ -100,6 +100,7 @@ pub(super) fn native_functions(
             &mut state,
             item,
             None,
+            None,
         ) {
             Ok(subroutine) => {
                 let has_real = subroutine.return_type.as_ref().is_some_and(|ty| {
