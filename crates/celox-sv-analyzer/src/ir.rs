@@ -118,6 +118,34 @@ impl Module {
         self
     }
 
+    /// Represent selected [`InitialProcess::level_sensitive`] processes as
+    /// `always @*`. The caller selects a process only when its list is the
+    /// implicit event expression of its statement (IEEE 1800-2023 9.4.2.2).
+    pub fn lower_level_sensitive_processes(
+        mut self,
+        mut select: impl FnMut(&InitialProcess) -> bool,
+    ) -> Self {
+        let mut retained = Vec::new();
+        for process in std::mem::take(&mut self.initial_processes) {
+            let Some(body) = process
+                .level_sensitive()
+                .filter(|_| select(&process))
+                .map(|(_, body)| body.to_vec())
+            else {
+                retained.push(process);
+                continue;
+            };
+            let at = self
+                .comb_processes
+                .partition_point(|comb| comb.creation_order <= process.creation_order);
+            let mut comb = CombProcess::new(CombProcessKind::AlwaysStar, None, Vec::new(), body);
+            comb.creation_order = process.creation_order;
+            self.comb_processes.insert(at, comb);
+        }
+        self.initial_processes = retained;
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: ModuleId,
@@ -1057,6 +1085,34 @@ impl InitialProcess {
         self.repeats
     }
 
+    /// The event list and statement of `always @(list) statement`, when no
+    /// list item has an edge.
+    pub fn level_sensitive(&self) -> Option<(&[EventItem], &[Stmt])> {
+        if !self.repeats || self.scheduled_edge || self.condition.is_some() {
+            return None;
+        }
+        let [
+            Stmt::Loop {
+                kind: LoopKind::Forever,
+                init,
+                condition: None,
+                step,
+                body,
+            },
+        ] = self.body.as_slice()
+        else {
+            return None;
+        };
+        let (Stmt::WaitEvent(items), body) = body.split_first()? else {
+            return None;
+        };
+        (init.is_empty()
+            && step.is_empty()
+            && items.iter().all(|item| item.edge == EventEdge::Any)
+            && !leaves_the_process_loop(body))
+        .then_some((items.as_slice(), body))
+    }
+
     /// The condition of the enclosing conditional generate block, if any.
     pub fn condition(&self) -> Option<&ConstExpr> {
         self.condition.as_ref()
@@ -1065,6 +1121,24 @@ impl InitialProcess {
     pub fn body(&self) -> &[Stmt] {
         &self.body
     }
+}
+
+/// Whether `body` has a `break`, `continue` or `return` outside its own
+/// loops, which would leave the loop of its `always` process.
+fn leaves_the_process_loop(body: &[Stmt]) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::Break | Stmt::Continue | Stmt::Return(_) => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => leaves_the_process_loop(then_body) || leaves_the_process_loop(else_body),
+        Stmt::Case { items, default, .. } => {
+            items.iter().any(|item| leaves_the_process_loop(&item.body))
+                || default.as_deref().is_some_and(leaves_the_process_loop)
+        }
+        _ => false,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
