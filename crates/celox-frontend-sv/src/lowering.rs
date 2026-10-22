@@ -3918,6 +3918,21 @@ fn process_random_seeds(module: &sv::ir::Module) -> HashMap<(u8, usize), u32> {
         .collect()
 }
 
+/// The source procedure of a process kernel, for diagnostics.
+fn process_origin(process: &sv::ir::InitialProcess) -> celox_design::ProcessOrigin {
+    let construct = match process.site() {
+        Some(site) => site.construct,
+        None if process.is_initializer() => "declaration initializer",
+        None if process.repeats() => "always",
+        None => "initial",
+    };
+    celox_design::ProcessOrigin {
+        construct: construct.to_string(),
+        location: process.site().map(ToString::to_string),
+        scope: None,
+    }
+}
+
 /// The `initial` blocks and declaration initializers (IEEE 1800-2023 9.2.1,
 /// 10.5): the initial state they define, and the processes that run the
 /// others from time zero.
@@ -4108,15 +4123,12 @@ fn lower_initial_processes(
             nba_switches.extend(kernel.nba_switches);
             host_request_sites.extend(kernel.host_request_sites.into_iter().map(|mut site| {
                 site.process = index;
-                // Repeating ordinary always processes also execute only in
-                // the timed scheduler. Keep this site requirement separate
-                // from the converted-FF startup marker on ProcessSlots.
-                site.requires_timed_simulation = process.repeats();
                 site
             }));
             Ok(SymbolicProcess {
                 kernel: kernel.unit,
                 slots,
+                origin: process_origin(process),
             })
         })
         .collect::<Result<Vec<_>, sv::AnalyzerError>>();

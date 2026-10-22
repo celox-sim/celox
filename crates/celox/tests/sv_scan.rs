@@ -122,7 +122,13 @@ fn pure_sscanf_allows_checkpoint_and_untimed_build_is_rejected() {
     let error = celox::Simulator::from_sv_sources(vec![(source, Path::new("scan.sv"))], "Top")
         .build_interpreter()
         .unwrap_err();
-    assert!(format!("{error:?}").contains("formatted input requires Simulation"));
+    assert!(
+        matches!(
+            error.kind(),
+            celox::SimulatorErrorKind::ProcessRequiresSimulation(_)
+        ),
+        "{error}"
+    );
 }
 #[test]
 fn rejected_formats_are_explicit() {

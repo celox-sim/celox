@@ -165,7 +165,8 @@ fn run(options: &Options) -> Result<(), String> {
     let top = select_top(&parsed, options.top.as_deref())?;
     match options.mode {
         Mode::Parsing => unreachable!("parsing returned before root selection"),
-        Mode::Elaboration => celox::Simulator::from_sv_sources(sources, &top)
+        // A Simulator rejects designs with processes, which it does not run.
+        Mode::Elaboration => celox::Simulation::from_sv_sources(sources, &top)
             .four_state(options.four_state)
             .build()
             .map(|_| ())

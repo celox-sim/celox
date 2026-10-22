@@ -1732,7 +1732,15 @@ fn lower_processes(
         candidates.extend(crate::watch::multi_store_candidates(&kernel, |address| {
             stable_signal(address, artifact.signals().len())
         }));
-        processes.push(SymbolicProcess { kernel, slots });
+        processes.push(SymbolicProcess {
+            kernel,
+            slots,
+            origin: celox_design::ProcessOrigin {
+                construct: "process".to_string(),
+                location: None,
+                scope: None,
+            },
+        });
     }
     Ok(LoweredProcesses {
         processes,

@@ -390,8 +390,6 @@ impl<A: Copy> HostRequestValue<A> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostRequestSite<A> {
     pub process: usize,
-    /// This request belongs to an edge procedure lowered to a scheduled kernel.
-    pub requires_timed_simulation: bool,
     pub kind: HostRequestKind,
     pub operation: u32,
     pub args: Vec<HostRequestValue<A>>,
@@ -403,7 +401,6 @@ impl<A: Copy> HostRequestSite<A> {
     pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> HostRequestSite<B> {
         HostRequestSite {
             process: self.process,
-            requires_timed_simulation: self.requires_timed_simulation,
             kind: self.kind,
             operation: self.operation,
             args: self.args.iter().map(|value| value.map(&mut map)).collect(),
@@ -418,6 +415,30 @@ impl<A: Copy> HostRequestSite<A> {
 
     pub fn slots(&self) -> impl Iterator<Item = A> + '_ {
         self.args.iter().chain(&self.results).map(|value| value.id)
+    }
+}
+
+/// The source procedure a process kernel was lowered from, for diagnostics.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProcessOrigin {
+    /// The construct, such as `initial` or `always`.
+    pub construct: String,
+    /// `path:line:column` of the construct, when known.
+    pub location: Option<String>,
+    /// Fully elaborated module-instance scope that owns the process.
+    pub scope: Option<String>,
+}
+
+impl std::fmt::Display for ProcessOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "`{}`", self.construct)?;
+        if let Some(location) = &self.location {
+            write!(f, " at {location}")?;
+        }
+        if let Some(scope) = &self.scope {
+            write!(f, " in `{scope}`")?;
+        }
+        Ok(())
     }
 }
 
@@ -795,6 +816,8 @@ pub struct RuntimeSchema<A> {
     pub live_signals: HashSet<A>,
     /// Control slots of the process kernels, in kernel order.
     pub processes: Vec<ProcessSlots<A>>,
+    /// Source procedures of the process kernels, in kernel order.
+    pub process_origins: Vec<ProcessOrigin>,
     /// Counted signals and their occurrence counters.
     pub watches: Vec<EventWatch<A>>,
     /// Wait sites of the process kernels. A process's sites appear in the
@@ -833,6 +856,7 @@ impl<A> Default for RuntimeSchema<A> {
             dead_store_policy: DeadStorePolicy::Off,
             live_signals: HashSet::default(),
             processes: Vec::new(),
+            process_origins: Vec::new(),
             watches: Vec::new(),
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
@@ -1516,7 +1540,6 @@ mod tests {
         let site = HostRequestSite {
             process: 2,
             kind: HostRequestKind::Plusargs,
-            requires_timed_simulation: false,
             operation: 1,
             args: vec![value(3u32)],
             results: vec![value(5)],

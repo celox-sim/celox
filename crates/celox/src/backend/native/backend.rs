@@ -401,6 +401,7 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) live_signals: std::collections::BTreeSet<AbsoluteAddr>,
     pub(crate) declaration_startup: Option<celox_design::DeclarationStartup<AbsoluteAddr>>,
     pub(crate) processes: Vec<celox_design::ProcessSlots<AbsoluteAddr>>,
+    pub(crate) process_origins: Vec<celox_design::ProcessOrigin>,
     pub(crate) watches: Vec<celox_design::EventWatch<AbsoluteAddr>>,
     pub(crate) wait_sites: Vec<celox_design::WaitSite<AbsoluteAddr>>,
     pub(crate) nba_sites: Vec<celox_design::NbaSite<AbsoluteAddr>>,
@@ -514,6 +515,7 @@ impl NativeProgramImage {
                 dead_store_policy: self.runtime_schema.dead_store_policy,
                 live_signals: self.runtime_schema.live_signals.iter().copied().collect(),
                 processes: self.runtime_schema.processes.clone(),
+                process_origins: self.runtime_schema.process_origins.clone(),
                 watches: self.runtime_schema.watches.clone(),
                 wait_sites: self.runtime_schema.wait_sites.clone(),
                 nba_sites: self.runtime_schema.nba_sites.clone(),
@@ -2408,6 +2410,7 @@ fn compile_program(
                     .copied()
                     .collect(),
                 processes: sir.runtime().runtime_schema.processes.clone(),
+                process_origins: sir.runtime().runtime_schema.process_origins.clone(),
                 watches: sir.runtime().runtime_schema.watches.clone(),
                 wait_sites: sir.runtime().runtime_schema.wait_sites.clone(),
                 nba_sites: sir.runtime().runtime_schema.nba_sites.clone(),

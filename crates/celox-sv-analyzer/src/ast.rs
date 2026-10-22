@@ -1176,6 +1176,7 @@ impl Module {
                 first_block,
                 InitialProcess {
                     creation_order: 0,
+                    site: None,
                     condition: None,
                     body: static_initializers,
                     initializer: true,
@@ -2260,6 +2261,7 @@ pub struct FfProcess {
     always_ff: bool,
     suspendable: bool,
     creation_order: usize,
+    site: Option<crate::procedural::ProcessSite>,
     events: Vec<FfEvent>,
     body: Vec<Stmt>,
 }
@@ -2274,11 +2276,16 @@ impl FfProcess {
         self.creation_order
     }
 
+    pub fn site(&self) -> Option<&crate::procedural::ProcessSite> {
+        self.site.as_ref()
+    }
+
     fn new(events: Vec<FfEvent>, body: Vec<Stmt>) -> Self {
         Self {
             always_ff: false,
             suspendable: false,
             creation_order: 0,
+            site: None,
             events,
             body,
         }
@@ -2297,6 +2304,7 @@ impl FfProcess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialProcess {
     creation_order: usize,
+    site: Option<crate::procedural::ProcessSite>,
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
     initializer: bool,
@@ -2309,6 +2317,10 @@ impl InitialProcess {
     /// Position among the elaborated module items, shared across process kinds.
     pub fn creation_order(&self) -> usize {
         self.creation_order
+    }
+
+    pub fn site(&self) -> Option<&crate::procedural::ProcessSite> {
+        self.site.as_ref()
     }
 
     pub fn condition(&self) -> Option<&ConstExpr> {

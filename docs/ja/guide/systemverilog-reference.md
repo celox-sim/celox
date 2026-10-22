@@ -38,7 +38,7 @@ outline: [2, 3]
 | 連続論理 | `assign`、`wire w = expr;` |
 | 組み合わせプロセス | `always_comb`、`always @*`、ブロッキング代入の `always_latch`、ブロックローカル変数、逐次・依存するブロッキング代入、プロセスが書き込む前の変数の読み出し（直前の値） |
 | 順序プロセス | `always_ff @(posedge clk)`、`always @(posedge clk or negedge rst_n)` など。ブロッキング・ノンブロッキング代入、連結を代入先とする代入、4 値のクロック・リセット信号、複数のクロックドメインで共有する非同期リセット、同一クロック・同一リセットの両エッジを使うプロセス、あるプロセスのクロックを別のプロセスの非同期リセットとして使う信号（時間付きの `Simulation` はすべてのエッジを実行します。`Simulator::tick` はイベントの立ち上がりエッジだけです） |
-| initial ブロック | `initial` ブロックと変数宣言の初期化子（`logic [7:0] v = 8'h5a;`、interface のメンバーを含む）。初期化子は `initial` ブロックより先に適用。書き込む値が定数のもの（定数の `if` / `for`、`$readmemh` / `$readmemb` を含む）は初期状態を定める。デザインの状態を読むものやシステムタスクを呼ぶものなどそれ以外は、時間を持つ `Simulation` で時刻 0 からプロセスとして実行（`Simulator` はプロセスを実行しない） |
+| initial ブロック | `initial` ブロックと変数宣言の初期化子（`logic [7:0] v = 8'h5a;`、interface のメンバーを含む）。初期化子は `initial` ブロックより先に適用。書き込む値が定数のもの（定数の `if` / `for`、`$readmemh` / `$readmemb` を含む）は初期状態を定める。デザインの状態を読むものやシステムタスクを呼ぶものなどそれ以外は、時間を持つ `Simulation` で時刻 0 からプロセスとして実行（`Simulator` はプロセスを実行しないため、このようなデザインでは `SimulatorErrorKind::ProcessRequiresSimulation` でビルドに失敗） |
 | 文 | `if` / `else`、`case`、`casez`、`casex`、`case ... inside`、`unique` / `priority`、`for`、`while`、`do ... while`、`repeat`、`forever`、`foreach`（反復回数が定数なら展開し、そうでなければ実行時に実行）、`break` / `continue` / `return`、即時アサーション |
 | 関数 | `input` / `output` / `inout` 引数を持てる `function` と、`task`。`return`、または関数名への代入で値を返す。ローカル変数と `localparam`、部分選択や複合的な代入先への代入。呼び出しはインライン展開。定数式（パラメータ、範囲）の中の定数引数による呼び出しはエラボレーション時に評価 |
 
@@ -59,9 +59,9 @@ outline: [2, 3]
 文にはタイミング制御とノンブロッキング代入を含められません。エッジを持たないそれ以外の
 センシティビティリストを持つ `always` はプロセスとして実行します。`always @(a) y = a + b;` は
 `b` だけが変化しても `y` を更新しません。`always @*` として扱うと他の論理と組み合わせループを作るリストも
-プロセスとして実行します。`Simulator` はプロセスを実行しないため、そこではこのプロセス抜きで
-シミュレーションされます。`Simulation` を使うか、`always @*` / `always_comb` で記述してください
-（[#1712](https://github.com/celox-sim/celox/issues/1712)）。
+プロセスとして実行します。`Simulator` はプロセスを実行しないため、このようなデザインでは
+`SimulatorErrorKind::ProcessRequiresSimulation` でビルドに失敗します。`Simulation` を使うか、
+`always @*` / `always_comb` で記述してください。
 
 ### 時間待ちを含む task
 

@@ -63,8 +63,10 @@ tracks time and runs scheduled edges. Constant initialization applies to both.
 `initial` blocks that read design state or call system tasks, processes with
 timing controls and `always` blocks whose sensitivity list is neither `@*` nor
 [the variables they read](./systemverilog-reference#timing-controls) run as
-processes and need `Simulation`; a `Simulator` does not run them
-([#1712](https://github.com/celox-sim/celox/issues/1712)).
+processes and need `Simulation`. A `Simulator` runs no process, so building
+one for such a design fails with `SimulatorErrorKind::ProcessRequiresSimulation`,
+which names the first process and its source location. For a mixed hierarchy,
+build the `Simulation` with `Simulation::from_sources(veryl).with_sv_sources(sv)`.
 
 Use `.four_state(true)` on the builder when your test needs X/Z values. The
 [4-state guide](./four-state) explains the state model. For time units,

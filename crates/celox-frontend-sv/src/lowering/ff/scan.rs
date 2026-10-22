@@ -75,7 +75,6 @@ impl Ff<'_, '_> {
         self.host_request_sites.push(HostRequestSite {
             process: 0,
             kind: HostRequestKind::Scan,
-            requires_timed_simulation: false,
             operation: u32::from(function == sv::ir::SystemFunction::Fscanf),
             args: inputs,
             results,
