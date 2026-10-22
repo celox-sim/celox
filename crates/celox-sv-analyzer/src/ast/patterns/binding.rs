@@ -107,6 +107,7 @@ fn select<'a>(
         let sub = Shape::Owned(Rc::new(VariableDimensions {
             real: false,
             string: false,
+            class: None,
             unpacked: rest.to_vec(),
             ..(*shape).clone()
         }));
@@ -208,6 +209,7 @@ fn select<'a>(
             randomizable: true,
             real: false,
             string: false,
+            class: None,
             packed: rest.to_vec(),
             unpacked: Vec::new(),
             signed: shape.signed_element_depth == Some(1),
@@ -244,6 +246,7 @@ fn select<'a>(
         randomizable: true,
         real: false,
         string: false,
+        class: None,
         packed: Vec::new(),
         unpacked: Vec::new(),
         signed: false,
@@ -386,6 +389,7 @@ pub(in crate::ast) fn bind_native(
                     let sub = Shape::Owned(Rc::new(VariableDimensions {
                         real: false,
                         string: false,
+                        class: None,
                         unpacked: rest.to_vec(),
                         ..(*shape).clone()
                     }));

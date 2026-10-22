@@ -1,0 +1,231 @@
+(group class (category types))
+
+(case objects_properties_and_methods
+  (source "class.sv" #"
+module Top(output bit done);
+    class Counter;
+        int count = 5;
+        string label;
+        function new(string name);
+            label = name;
+        endfunction
+        function void bump(int by);
+            count += by;
+        endfunction
+        function int get();
+            return count;
+        endfunction
+    endclass
+    Counter c, d;
+    initial begin
+        if (c == null) $display("null");
+        c = new("first");
+        c.bump(3);
+        d = c;
+        d.bump(1);
+        $display("count=%0d get=%0d label=%s", c.count, d.get(), c.label);
+        c.count = 1;
+        $display("after=%0d", d.count);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "null\ncount=9 get=9 label=first\nafter=1\n"))
+
+(case implicit_constructors_and_this
+  (source "class.sv" #"
+module Top(output int sum, output bit done);
+    class Point;
+        int x, y = 2;
+        function void set(int x, int y);
+            this.x = x;
+            this.y = y;
+        endfunction
+        function int total();
+            return x + this.y;
+        endfunction
+    endclass
+    Point p;
+    initial begin
+        p = new;
+        sum = p.total();
+        p.set(10, 20);
+        sum = sum * 100 + p.total();
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq sum 230))
+
+(case objects_referring_to_objects
+  (source "class.sv" #"
+module Top(output int total, output bit done);
+    class Node;
+        int value;
+        Node next;
+        function new(int value, Node next = null);
+            this.value = value;
+            this.next = next;
+        endfunction
+    endclass
+    Node head, n;
+    initial begin
+        head = new(1);
+        head = new(2, head);
+        head = new(3, head);
+        n = head;
+        while (n != null) begin
+            total = total * 10 + n.value;
+            n = n.next;
+        end
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq total 321))
+
+(case extern_methods_and_tasks
+  (source "class.sv" #"
+module Top(output int result, output bit done);
+    class Accumulator;
+        int total;
+        extern function void add(int value);
+        task twice(int value);
+            add(value);
+            add(value);
+        endtask
+        function new();
+            total = 100;
+            return;
+        endfunction
+    endclass
+    function void Accumulator::add(int value);
+        total += value;
+    endfunction
+    Accumulator a;
+    initial begin
+        a = new;
+        a.twice(4);
+        a.add(1);
+        result = a.total;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq result 109))
+
+(case objects_survive_heap_collections
+  (source "class.sv" #"
+module Top(output int n);
+    class Box;
+        string text;
+        Box inner;
+    endclass
+    logic clk = 0;
+    always #1 clk = ~clk;
+    Box kept, last;
+    string number;
+    initial begin
+        kept = new;
+        kept.inner = new;
+        kept.inner.text = "inner";
+    end
+    always @(posedge clk) begin
+        last = new;
+        number.itoa(n);
+        last.text = number;
+        n = n + 1;
+    end
+    initial #6000 $display("[%s] [%s] %0d", kept.inner.text, last.text, n);
+endmodule
+"#)
+  (top Top)
+  (run_until 6000)
+  (expect_output "[inner] [2999] 3000\n"))
+
+
+(case string_methods_on_properties
+  (source "class.sv" #"
+module Top(output bit done);
+    class Named;
+        string name;
+        function string greeting();
+            return {"hi ", name};
+        endfunction
+    endclass
+    Named n;
+    initial begin
+        n = new;
+        n.name.itoa(42);
+        n.name = {n.name, "!"};
+        n.name.putc(0, "7");
+        $display("[%s] %0d %s", n.name, n.name.len(), n.name.toupper());
+        $display("%s %0d", {n.greeting(), "?"}, n.greeting() == "hi 72!");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "[72!] 3 72!\nhi 72!? 1\n"))
+
+(case derived_properties_hide_base_properties
+  (source "class.sv" #"
+module Top(output bit done);
+    class Base;
+        int a = 1;
+        function int base_a();
+            return a;
+        endfunction
+    endclass
+    class Derived extends Base;
+        int a = 2;
+        function int own_a();
+            return a;
+        endfunction
+    endclass
+    Derived d;
+    Base b;
+    initial begin
+        d = new;
+        b = d;
+        d.a = 5;
+        $display("%0d %0d %0d %0d", d.a, b.a, d.own_a(), d.base_a());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "5 1 5 1\n"))
+
+(case inherited_properties_and_methods
+  (source "class.sv" #"
+module Top(output int result, output bit same, output bit done);
+    class Base;
+        int a = 1;
+        function int twice();
+            return a * 2;
+        endfunction
+        function int describe();
+            return 10;
+        endfunction
+    endclass
+    class Derived extends Base;
+        int b = 5;
+        function int describe();
+            return 20 + a + b;
+        endfunction
+    endclass
+    Derived d;
+    Base b;
+    initial begin
+        d = new;
+        d.a = 3;
+        b = d;
+        same = b == d;
+        result = d.twice() * 1000 + d.describe() * 10 + b.describe() / 10;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq same 1) (assert_eq result 6281))

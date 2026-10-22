@@ -49,6 +49,18 @@ pub const REPLICATE: u64 = 24;
 pub const ITOA: u64 = 25;
 /// `freeze(buffer)`: the interned string holding `buffer`, which is freed.
 pub const FREEZE: u64 = 32;
+/// `new_object(size)`: a new object of the class in the parameter, with
+/// `size` zeroed bytes.
+pub const OBJECT_NEW: u64 = 48;
+/// `declare_handle(object, offset, kind)`: the property at byte `offset`
+/// holds a handle; `kind` is 0 for a string and 1 for an object.
+pub const OBJECT_HANDLE: u64 = 49;
+/// `load(object, offset, count)`: `count` bytes at `offset`, at most 8.
+pub const OBJECT_LOAD: u64 = 50;
+/// `store(object, offset | count << 32, value)`: write `count` bytes.
+pub const OBJECT_STORE: u64 = 51;
+/// `class_of(object)`: its class, or 0 for `null`.
+pub const OBJECT_CLASS: u64 = 52;
 
 /// The opcode word of `op` with parameter `parameter`.
 pub const fn encode(op: u64, parameter: u64) -> u64 {
@@ -140,6 +152,22 @@ impl Heap {
                 let bytes = self.take_buffer(a);
                 self.intern(&bytes).into()
             }
+            OBJECT_NEW => self.new_object(parameter as u32, a as usize).into(),
+            OBJECT_HANDLE => {
+                let kind = if c == 0 {
+                    crate::HandleKind::String
+                } else {
+                    crate::HandleKind::Object
+                };
+                self.declare_handle(a as Handle, b as u32, kind);
+                0
+            }
+            OBJECT_LOAD => self.load(a as Handle, b as usize, c as usize),
+            OBJECT_STORE => {
+                self.store(a as Handle, b as u32 as usize, (b >> 32) as usize, c);
+                0
+            }
+            OBJECT_CLASS => self.class_of(a as Handle).into(),
             other => panic!("unknown heap operation {other}"),
         }
     }

@@ -4,6 +4,7 @@ use celox_sv_syntax::{Declarations, DimensionKind, ExprId, ExprKind};
 mod calls;
 mod direct;
 mod lvalues;
+mod objects;
 #[cfg(test)]
 mod selected;
 mod strings;
@@ -13,6 +14,10 @@ pub(super) use direct::{
     remove_real_division_guards, ungroup,
 };
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
+pub(super) use objects::{
+    constructor as object_constructor, method as object_method, property as object_property,
+    receiver as object_receiver, this as object_this,
+};
 pub(super) use strings::{
     call as string_call, method as string_method, native_string, to_string as string_operand,
 };
@@ -37,6 +42,12 @@ pub(super) fn expression(
         LValue::Ident(name) => dimensions.get(name),
         _ => None,
     };
+    // `new` creates an object of the variable's class (IEEE 1800-2023 8.7).
+    if let Some(class) = shape.and_then(|shape| shape.class.as_deref())
+        && let Some(call) = objects::constructor(tree, root, native, dimensions, class)?
+    {
+        return Ok(call);
+    }
     let value = bind_value(root, native, tree, dimensions, shape)?;
     // A string literal or integral value assigned to a string becomes its
     // bytes (IEEE 1800-2023 6.16).

@@ -11,6 +11,7 @@
 
 mod file_io;
 mod fread;
+mod objects;
 mod scan;
 mod strings;
 
@@ -267,7 +268,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     }
                     continue;
                 }
-                sv::ir::Callee::String(_) => continue,
+                sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
@@ -875,6 +876,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ..
             } => self.string_call(*op, args)?,
             Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                args,
+                ..
+            } => self.object_call(op, args)?,
+            Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fopen),
                 args,
                 ..
@@ -1009,8 +1015,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                     sv::ir::TypeKind::Shortreal => Some(celox_sir::FloatPrecision::F32),
                     _ => None,
                 };
-                self.m.variables.get_mut(&temp).unwrap().string =
-                    r#type.kind() == sv::ir::TypeKind::String;
+                self.m.variables.get_mut(&temp).unwrap().value_kind = match r#type.kind() {
+                    sv::ir::TypeKind::String => celox_design::ValueKind::StrRef,
+                    sv::ir::TypeKind::Object => celox_design::ValueKind::ObjRef,
+                    _ => celox_design::ValueKind::Bits,
+                };
                 let Some(result) = result else {
                     return Err(unsupported(format!(
                         "void function `{name}` used as a value"
@@ -4687,7 +4696,7 @@ impl Ff<'_, '_> {
                 source: None,
                 hidden: true,
                 force_control: None,
-                string: false,
+                value_kind: Default::default(),
             },
         );
         let mut renames = HashMap::default();
@@ -4916,6 +4925,8 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                 }
                 // A string operation is a value of its operands.
                 sv::ir::Callee::String(_) => continue,
+                // A property can change without the handle changing.
+                sv::ir::Callee::Object(op) => return Some(op.to_string()),
                 sv::ir::Callee::Subroutine(name) => name,
             };
             if !visited.insert(name.clone()) {

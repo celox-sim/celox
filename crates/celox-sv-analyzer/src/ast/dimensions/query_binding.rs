@@ -864,6 +864,7 @@ mod tests {
                 dimensions: Some(2),
                 signed: false,
                 is_2state: false,
+                string: false,
             },
         );
         for declaration in &tree.declarations().data_declarations {

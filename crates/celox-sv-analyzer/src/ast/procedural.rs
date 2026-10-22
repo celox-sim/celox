@@ -71,12 +71,17 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
         randomizable: !r#type.is_enum,
         real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
         string: matches!(r#type.kind(), TypeKind::String),
+        class: r#type.class().map(str::to_owned),
         packed: dimensions::signal_packed_dimension_widths(r#type.packed_ranges()),
         unpacked: unpacked_dimension_widths(r#type.unpacked_ranges()),
         signed: r#type.is_signed(),
         is_2state: matches!(
             r#type.kind(),
-            TypeKind::Bit | TypeKind::Real | TypeKind::Shortreal | TypeKind::String
+            TypeKind::Bit
+                | TypeKind::Real
+                | TypeKind::Shortreal
+                | TypeKind::String
+                | TypeKind::Object
         ),
         members: r#type.members.clone(),
         signed_element_depth: r#type.signed_element_depth,
@@ -114,6 +119,7 @@ fn int_type() -> Type {
         unpacked_ranges: Vec::new(),
         members: Vec::new(),
         signed_element_depth: None,
+        class: None,
     }
 }
 
@@ -250,6 +256,19 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             shadowed_parameter_value: self.dims.parameter_values.remove(source),
             shadowed_dimensions: self.dims.remove(source),
             shadowed_signedness: self.dims.expression_signedness.remove(source),
+        }
+    }
+
+    /// Hide the module-scope names that the properties of `class` shadow
+    /// inside its methods (IEEE 1800-2023 8.5), until the scope ends.
+    fn enter_class_scope(&mut self, class: &classes::Class) {
+        for property in &class.properties {
+            let entry = self.take_binding(&property.name, None, 0);
+            self.scopes
+                .last_mut()
+                .expect("a body always has a scope")
+                .entries
+                .push(entry);
         }
     }
 
@@ -469,9 +488,17 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         if let Some(stmt) = self.string_character_assignment(op, nonblocking, left, right)? {
             return Ok(stmt);
         }
+        if let Some(stmt) = self.property_assignment(op, nonblocking, left, right)? {
+            return Ok(stmt);
+        }
         let (written, lhs) = self.native_lvalue(left)?;
         if op != "="
-            && expression_binding::native_string(left, self.tree.declarations(), &self.dims)
+            && expression_binding::native_string(
+                self.tree,
+                left,
+                self.tree.declarations(),
+                &self.dims,
+            )
         {
             return Err(unsupported(format!("operator `{op}` on a string")));
         }
@@ -525,7 +552,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         else {
             return Ok(None);
         };
-        if !expression_binding::native_string(*expression, native, &self.dims) {
+        if !expression_binding::native_string(self.tree, *expression, native, &self.dims) {
             return Ok(None);
         }
         let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind else {
@@ -547,6 +574,134 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         .map(Some)
     }
 
+    /// An assignment to a property of a class object: `h.p = v`, or `p = v`
+    /// inside a method of its class (IEEE 1800-2023 8.5).
+    fn property_assignment(
+        &self,
+        op: &str,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Result<Option<Stmt>, AnalyzerError> {
+        let native = self.tree.declarations();
+        let Some((property, receiver)) =
+            expression_binding::object_property(self.tree, left, native, &self.dims)?
+        else {
+            return Ok(None);
+        };
+        if nonblocking {
+            return Err(unsupported("nonblocking assignment to a class property"));
+        }
+        let handle = expression_binding::object_receiver(self.tree, receiver, native, &self.dims)?;
+        let target = dimensions_from_type(&property.r#type);
+        let bind = |right| {
+            expression_binding::bind_value(right, native, self.tree, &self.dims, Some(&target))
+        };
+        let mut value = match property.r#type.class() {
+            Some(class) if op == "=" => {
+                match expression_binding::object_constructor(
+                    self.tree, right, native, &self.dims, class,
+                )? {
+                    Some(call) => call,
+                    None => bind(right)?,
+                }
+            }
+            _ if op == "=" => bind(right)?,
+            _ => expression_binding::value(right, native, self.tree, &self.dims)?,
+        };
+        if property.field.handle == Some(system_functions::HandleProperty::String) {
+            if op != "=" {
+                return Err(unsupported(format!("operator `{op}` on a string")));
+            }
+            value = expression_binding::string_operand(value, &self.dims);
+        }
+        if op != "=" {
+            let operator = match op.strip_suffix('=') {
+                Some("+") => BinaryOp::Add,
+                Some("-") => BinaryOp::Sub,
+                Some("*") => BinaryOp::Mul,
+                Some("/") => BinaryOp::Div,
+                Some("%") => BinaryOp::Mod,
+                Some("&") => BinaryOp::BitAnd,
+                Some("|") => BinaryOp::BitOr,
+                Some("^") => BinaryOp::BitXor,
+                Some("<<") | Some("<<<") => BinaryOp::Shl,
+                Some(">>") => BinaryOp::Shr,
+                Some(">>>") => BinaryOp::Sar,
+                _ => return Err(unsupported(format!("assignment operator `{op}`"))),
+            };
+            value = Expr::Binary {
+                left: Box::new(classes::object_call(
+                    system_functions::ObjectOp::Load(property.field),
+                    vec![handle.clone()],
+                )),
+                op: operator,
+                right: Box::new(value),
+            };
+        }
+        let mut store = classes::object_call(
+            system_functions::ObjectOp::Store(property.field),
+            vec![handle, value],
+        );
+        self.rename_expr(&mut store);
+        Ok(Some(Stmt::Eval(store)))
+    }
+
+    /// A call of a class method as a statement, `h.m(args)`, `h.m`, or an
+    /// unqualified `m(args)` inside a method of its class (IEEE 1800-2023
+    /// 8.10).
+    fn method_call_statement(
+        &self,
+        root: celox_sv_syntax::ExprId,
+    ) -> Result<Option<Stmt>, AnalyzerError> {
+        let native = self.tree.declarations();
+        let call = match native.expression(root).kind {
+            celox_sv_syntax::ExprKind::Call { expression, .. } => {
+                if expression_binding::object_method(self.tree, expression, native, &self.dims)?
+                    .is_none()
+                {
+                    return Ok(None);
+                }
+                expression_binding::value(root, native, self.tree, &self.dims)?
+            }
+            _ => {
+                let Some((name, formals, receiver)) =
+                    expression_binding::object_method(self.tree, root, native, &self.dims)?
+                else {
+                    return Ok(None);
+                };
+                let receiver = match receiver {
+                    Some(receiver) => {
+                        expression_binding::value(receiver, native, self.tree, &self.dims)?
+                    }
+                    None => expression_binding::object_this(),
+                };
+                let mut args = vec![Some(receiver)];
+                args.resize(formals + 1, None);
+                Expr::Call {
+                    callee: Callee::Subroutine(name),
+                    args,
+                    arg_order: Vec::new(),
+                }
+            }
+        };
+        let mut call = call;
+        self.rename_expr(&mut call);
+        let Expr::Call {
+            callee: Callee::Subroutine(name),
+            args,
+            arg_order,
+        } = call
+        else {
+            return Err(unsupported("method call statement"));
+        };
+        Ok(Some(Stmt::Call {
+            name,
+            args,
+            arg_order,
+        }))
+    }
+
     /// `string = op(string, args)`: a method that updates the string it is
     /// called on.
     fn string_update(
@@ -556,6 +711,30 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         args: Vec<Expr>,
         nonblocking: bool,
     ) -> Result<Stmt, AnalyzerError> {
+        let native = self.tree.declarations();
+        if let Some((property, receiver)) =
+            expression_binding::object_property(self.tree, string, native, &self.dims)?
+        {
+            if nonblocking {
+                return Err(unsupported("nonblocking assignment to a class property"));
+            }
+            let handle =
+                expression_binding::object_receiver(self.tree, receiver, native, &self.dims)?;
+            let receiver = (op == StringOp::Putc).then(|| {
+                classes::object_call(
+                    system_functions::ObjectOp::Load(property.field),
+                    vec![handle.clone()],
+                )
+            });
+            let value =
+                expression_binding::string_call(op, receiver.into_iter().chain(args).collect());
+            let mut store = classes::object_call(
+                system_functions::ObjectOp::Store(property.field),
+                vec![handle, value],
+            );
+            self.rename_expr(&mut store);
+            return Ok(Stmt::Eval(store));
+        }
         let (written, lhs) = self.native_lvalue(string)?;
         let LValue::Ident(name) = &written else {
             return Err(unsupported(format!(
@@ -696,7 +875,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             signals
                 .into_iter()
                 .zip(native.variables.iter().filter(|variable| {
-                    type_binding::ordinary_variable(variable, self.tree.declarations())
+                    type_binding::ordinary_variable(
+                        variable,
+                        native.data_type,
+                        self.tree.declarations(),
+                    )
                 }))
         {
             // A declaration may not repeat a name of its own scope, such as
@@ -834,7 +1017,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .expression(expression_binding::ungroup(root, native))
             .kind
             && let Some((op, string)) =
-                expression_binding::string_method(*expression, native, &self.dims)
+                expression_binding::string_method(self.tree, *expression, native, &self.dims)
         {
             let (_, count) = StringOp::method(&op.to_string()).expect("a method name");
             let args = arguments
@@ -860,6 +1043,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         {
             let query_root =
                 expression_binding::call_statement_root(root, discarded, self.tree.declarations())?;
+            if let Some(call) = self.method_call_statement(query_root)? {
+                return Ok(vec![call]);
+            }
             if let celox_sv_syntax::ExprKind::Call { expression, .. } =
                 self.tree.declarations().expression(query_root).kind
                 && matches!(
@@ -1289,6 +1475,57 @@ pub(super) fn subroutine_argument_names(
             names.insert(qualified.clone(), params);
             shapes.insert(qualified, param_shapes);
         }
+        for class in classes::item_classes(item.id, tree) {
+            let _constant_functions = item.enter();
+            let aliases = item.type_aliases(type_aliases);
+            let handle = classes::handle_type(tree, &class)
+                .ok_or_else(|| unsupported(format!("class `{class}`")))?;
+            let mut constructor = false;
+            for native_id in classes::declared_methods(tree, &class)? {
+                let native = tree.declarations().subroutine(native_id);
+                let mut params = subroutine_param_declarations(native, tree, &item.env, &aliases)?;
+                if native.kind == celox_sv_syntax::SubroutineKind::Constructor {
+                    constructor = true;
+                } else {
+                    params.insert(
+                        0,
+                        (
+                            classes::THIS.to_owned(),
+                            ParamDirection::Input,
+                            handle.clone(),
+                            None,
+                        ),
+                    );
+                }
+                let qualified = item.name(&classes::Class::subroutine_name(
+                    &class,
+                    &instances::normalize_identifier(&native.name.spelling),
+                ));
+                directions.insert(
+                    qualified.clone(),
+                    params.iter().map(|(_, direction, ..)| *direction).collect(),
+                );
+                shapes.insert(
+                    qualified.clone(),
+                    params
+                        .iter()
+                        .map(|(_, _, r#type, _)| {
+                            dimensions_from_type(&scoped_type(r#type.clone(), &item.env))
+                        })
+                        .collect(),
+                );
+                names.insert(
+                    qualified,
+                    params.into_iter().map(|(name, ..)| name).collect(),
+                );
+            }
+            if !constructor {
+                let qualified = item.name(&classes::Class::subroutine_name(&class, "new"));
+                directions.insert(qualified.clone(), Vec::new());
+                shapes.insert(qualified.clone(), Vec::new());
+                names.insert(qualified, Vec::new());
+            }
+        }
     }
     Ok((names, shapes, directions))
 }
@@ -1393,6 +1630,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
                 literals,
                 state,
                 item,
+                None,
             );
             let subroutine = match (lowered, rejected.as_deref_mut()) {
                 (Ok(subroutine), _) => subroutine,
@@ -1413,6 +1651,30 @@ pub(super) fn subroutines_with_symbolic_parameters(
             }
             subroutines.push(subroutine);
         }
+        for class in classes::item_classes(item.id, tree) {
+            let (item_dimensions, literals) = views.get(item);
+            let _constant_functions = item.enter();
+            let type_aliases = item.type_aliases(module_type_aliases);
+            match (
+                lower_class(
+                    &class,
+                    tree,
+                    &item.env,
+                    &type_aliases,
+                    item_dimensions,
+                    literals,
+                    state,
+                    item,
+                ),
+                rejected.as_deref_mut(),
+            ) {
+                (Ok(methods), _) => subroutines.extend(methods),
+                (Err(error), Some(rejected)) => {
+                    rejected.insert(class, error);
+                }
+                (Err(error), None) => return Err(error),
+            }
+        }
     }
     Ok(subroutines)
 }
@@ -1430,9 +1692,17 @@ pub(super) fn lower_subroutine(
     literals: &HashMap<String, Expr>,
     state: &mut BodyState<'_>,
     item: &generate::Item,
+    class: Option<&classes::Class>,
 ) -> Converted<Subroutine> {
     let native = tree.declarations().subroutine(native_id);
     let name = instances::normalize_identifier(&native.name.spelling);
+    let constructor = native.kind == celox_sv_syntax::SubroutineKind::Constructor;
+    let handle = class
+        .map(|class| {
+            classes::handle_type(tree, &class.name)
+                .ok_or_else(|| unsupported(format!("class `{}`", class.name)))
+        })
+        .transpose()?;
     let params = subroutine_param_declarations(native, tree, declaration_env, type_aliases)?;
     let mut formal_names = HashSet::default();
     if let Some((name, ..)) = params
@@ -1442,6 +1712,7 @@ pub(super) fn lower_subroutine(
         return Err(unsupported(format!("duplicate function argument `{name}`")));
     }
     let return_type = match native.return_type {
+        _ if constructor => handle.clone(),
         Some(id)
             if matches!(
                 tree.declarations().data_type(id).kind,
@@ -1480,10 +1751,14 @@ pub(super) fn lower_subroutine(
                 "unknown native subroutine lifetime".into(),
             ));
         }
-        None => builder.automatic,
+        // Methods are automatic (IEEE 1800-2023 8.6).
+        None => builder.automatic || class.is_some(),
     };
     let first_static = builder.state.statics.len();
     builder.push_scope();
+    if let Some(class) = class {
+        builder.enter_class_scope(class);
+    }
     // Defaults bind in the enclosing declaration scope, before
     // any formal can shadow those names (IEEE 1800-2023 13.5.3).
     let defaults = params
@@ -1499,7 +1774,22 @@ pub(super) fn lower_subroutine(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut lowered_params = Vec::new();
-    for ((source, direction, r#type, _), default) in params.into_iter().zip(defaults) {
+    // A method receives the handle of its object first, and a constructor
+    // returns the handle of the object it creates.
+    let this = handle.clone().filter(|_| !constructor).map(|handle| {
+        (
+            classes::THIS.to_owned(),
+            ParamDirection::Input,
+            handle,
+            None,
+        )
+    });
+    let defaults = this
+        .iter()
+        .map(|_| None)
+        .chain(defaults)
+        .collect::<Vec<_>>();
+    for ((source, direction, r#type, _), default) in this.into_iter().chain(params).zip(defaults) {
         let name = builder.declare(&source, r#type.clone());
         lowered_params.push(SubroutineParam {
             name,
@@ -1515,11 +1805,18 @@ pub(super) fn lower_subroutine(
             default,
         });
     }
-    let return_var = return_type
-        .as_ref()
-        .map(|r#type| builder.declare(&name, r#type.clone()));
+    let return_var = return_type.as_ref().map(|r#type| {
+        builder.declare(
+            if constructor { classes::THIS } else { &name },
+            r#type.clone(),
+        )
+    });
     let parameter_locals_end = builder.state.locals.len();
-    let body = builder.native_body(&native.items, &native.authored_statements)?;
+    let mut body = match (class, &return_var) {
+        (Some(class), Some(this)) if constructor => builder.constructor_prologue(class, this)?,
+        _ => Vec::new(),
+    };
+    body.extend(builder.native_body(&native.items, &native.authored_statements)?);
     builder.pop_scope();
     let statics: HashSet<String> = builder
         .state
@@ -1528,7 +1825,8 @@ pub(super) fn lower_subroutine(
         .into_iter()
         .map(|(name, _)| name)
         .collect();
-    if return_var.is_some() {
+    // A constructor's `return;` returns the object (IEEE 1800-2023 8.7).
+    if return_var.is_some() && !constructor {
         let mut expressionless = false;
         for stmt in &body {
             stmt.walk(&mut |stmt| expressionless |= matches!(stmt, Stmt::Return(None)));
@@ -1538,7 +1836,10 @@ pub(super) fn lower_subroutine(
         }
     }
     let mut subroutine = Subroutine {
-        name: item.name(&name),
+        name: item.name(&match class {
+            Some(class) => classes::Class::subroutine_name(&class.name, &name),
+            None => name,
+        }),
         is_task: native.kind == celox_sv_syntax::SubroutineKind::Task,
         automatic_locals: builder.state.locals[first_local..]
             .iter()
@@ -1603,6 +1904,153 @@ pub(super) fn lower_subroutine(
         )?;
     }
     Ok(subroutine)
+}
+
+impl BodyBuilder<'_, '_, '_> {
+    /// The statements a constructor of `class` runs before its body: create
+    /// the object into `this` and initialize the properties that have
+    /// initializers (IEEE 1800-2023 8.7, 8.8).
+    fn constructor_prologue(&mut self, class: &classes::Class, this: &str) -> Converted<Vec<Stmt>> {
+        let native = self.tree.declarations();
+        let handles = class
+            .properties
+            .iter()
+            .filter_map(|property| {
+                property
+                    .field
+                    .handle
+                    .map(|handle| (property.field.offset, handle))
+            })
+            .collect();
+        let mut body = vec![Stmt::Assign {
+            lhs: LValue::Ident(this.to_owned()),
+            rhs: classes::object_call(
+                system_functions::ObjectOp::New {
+                    class: class.id,
+                    size: class.size,
+                    handles,
+                },
+                Vec::new(),
+            ),
+            nonblocking: false,
+        }];
+        for property in &class.properties {
+            let Some(initializer) = property.initializer else {
+                continue;
+            };
+            let mut value = match property.r#type.class() {
+                Some(class) => expression_binding::object_constructor(
+                    self.tree,
+                    initializer,
+                    native,
+                    &self.dims,
+                    class,
+                )?,
+                None => None,
+            };
+            let mut value = match value.take() {
+                Some(value) => value,
+                None => expression_binding::bind_value(
+                    initializer,
+                    native,
+                    self.tree,
+                    &self.dims,
+                    Some(&dimensions_from_type(&property.r#type)),
+                )?,
+            };
+            if property.field.handle == Some(system_functions::HandleProperty::String) {
+                value = expression_binding::string_operand(value, &self.dims);
+            }
+            self.rename_expr(&mut value);
+            body.push(Stmt::Eval(classes::object_call(
+                system_functions::ObjectOp::Store(property.field),
+                vec![Expr::Ident(this.to_owned()), value],
+            )));
+        }
+        Ok(body)
+    }
+}
+
+/// The methods of class `name` as subroutines, with an implicit constructor
+/// when the class declares none (IEEE 1800-2023 8.7).
+#[allow(clippy::too_many_arguments)]
+fn lower_class(
+    name: &str,
+    tree: &AnalysisContext<'_>,
+    declaration_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    item_dimensions: &PackedDimensions,
+    literals: &HashMap<String, Expr>,
+    state: &mut BodyState<'_>,
+    item: &generate::Item,
+) -> Converted<Vec<Subroutine>> {
+    let class = classes::class(tree, name, declaration_env, type_aliases)?;
+    if let Some(base) = &class.base
+        && classes::class(tree, base, declaration_env, type_aliases)?
+            .method("new")
+            .is_some()
+    {
+        return Err(unsupported("class extending a class with a constructor"));
+    }
+    let mut subroutines = Vec::new();
+    let mut constructor = false;
+    for id in classes::declared_methods(tree, name)? {
+        constructor |=
+            tree.declarations().subroutine(id).kind == celox_sv_syntax::SubroutineKind::Constructor;
+        subroutines.push(lower_subroutine(
+            id,
+            tree,
+            declaration_env,
+            type_aliases,
+            item_dimensions,
+            literals,
+            state,
+            item,
+            Some(&class),
+        )?);
+    }
+    if !constructor {
+        let handle = classes::handle_type(tree, name)
+            .ok_or_else(|| unsupported(format!("class `{name}`")))?;
+        let mut builder = BodyBuilder::new(
+            tree,
+            item_dimensions,
+            state,
+            system_functions::Body::Subroutine,
+        );
+        builder.automatic = true;
+        let first_local = builder.state.locals.len();
+        builder.push_scope();
+        builder.enter_class_scope(&class);
+        let this = builder.declare(classes::THIS, handle.clone());
+        let body = builder.constructor_prologue(&class, &this)?;
+        builder.pop_scope();
+        let mut subroutine = Subroutine {
+            name: item.name(&classes::Class::subroutine_name(name, "new")),
+            is_task: false,
+            automatic_locals: builder.state.locals[first_local..]
+                .iter()
+                .map(|local| local.name.clone())
+                .collect(),
+            return_type: Some(crate::ir::Type::from_ast(
+                scoped_type(handle, declaration_env),
+                &const_functions::Environment {
+                    constants: &*item.env,
+                    functions: &tree.state.const_functions,
+                },
+            )),
+            params: Vec::new(),
+            return_var: Some(this),
+            body,
+            sensitivity_body: Vec::new(),
+        };
+        for stmt in &mut subroutine.body {
+            qualify_stmt(item, stmt);
+            substitute_stmt_constants(&tree.state, stmt, declaration_env, literals);
+        }
+        subroutines.push(subroutine);
+    }
+    Ok(subroutines)
 }
 
 /// Qualify the module-scope names of a statement for its generate scope.
@@ -1672,11 +2120,13 @@ pub(super) fn initial_processes_from_scope(
                     return Err(unsupported("opaque declaration initializer"));
                 }
             };
-            for variable in declaration
-                .variables
-                .iter()
-                .filter(|variable| type_binding::ordinary_variable(variable, tree.declarations()))
-            {
+            for variable in declaration.variables.iter().filter(|variable| {
+                type_binding::ordinary_variable(
+                    variable,
+                    declaration.data_type,
+                    tree.declarations(),
+                )
+            }) {
                 if let Some(value) = variable.value {
                     assignments.push((
                         instances::normalize_identifier(&variable.name.spelling),

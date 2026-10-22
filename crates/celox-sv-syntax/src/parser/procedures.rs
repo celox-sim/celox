@@ -857,7 +857,20 @@ impl Parser<'_> {
                 self.expect(")")?;
             }
         } else if self.peek() == "(" {
-            self.expression_machine(super::expressions::Job::Arguments)?;
+            // A class constructor call keeps its arguments (8.7).
+            let callee = self.node(start, ExprKind::Name(name))?;
+            let super::expressions::Value::Arguments(arguments) =
+                self.expression_machine(super::expressions::Job::Arguments)?
+            else {
+                return Err(self.error("constructor arguments"));
+            };
+            return self.node(
+                start,
+                ExprKind::Call {
+                    expression: callee,
+                    arguments,
+                },
+            );
         } else if !matches!(self.peek(), ";" | "," | "") {
             self.expression(0)?;
         }

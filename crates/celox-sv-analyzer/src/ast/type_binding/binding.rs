@@ -67,6 +67,10 @@ pub(in crate::ast) fn bind_in(
                             _ => return Ok(None),
                         };
                         let Some(ty) = context.type_aliases.get(&name) else {
+                            if let Some(class) = super::super::classes::handle_type(tree, &name) {
+                                values.push(class);
+                                continue;
+                            }
                             return Ok(None);
                         };
                         values.push(types::enclose_aliased_packed_type(ty.clone(), ranges));

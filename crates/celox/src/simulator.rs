@@ -124,7 +124,7 @@ mod host {
     pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
         pub(crate) backend: B,
         /// Byte offsets of every handle slot in state memory.
-        pub(super) handle_slots: std::sync::OnceLock<Arc<[usize]>>,
+        pub(super) handle_slots: std::sync::OnceLock<Arc<[(usize, celox_heap::HandleKind)]>>,
         /// Set while handles live outside state memory, where no collection
         /// may run: between the polls of concurrent testbench processes.
         pub(crate) heap_safepoints_blocked: bool,
@@ -1679,7 +1679,7 @@ mod host {
         pub fn tick(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
             let result = self.tick_unit(event);
             self.heap_safepoint();
-            result
+            result.and(self.take_heap_fault())
         }
 
         fn tick_unit(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
@@ -1992,7 +1992,7 @@ mod host {
         pub fn tick_events(&mut self, events: &[B::Event]) -> Result<(), RuntimeErrorCode> {
             let result = self.tick_events_unit(events);
             self.heap_safepoint();
-            result
+            result.and(self.take_heap_fault())
         }
 
         fn tick_events_unit(&mut self, events: &[B::Event]) -> Result<(), RuntimeErrorCode> {

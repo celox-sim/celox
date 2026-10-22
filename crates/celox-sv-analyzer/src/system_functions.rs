@@ -743,6 +743,72 @@ impl fmt::Display for StringOp {
     }
 }
 
+/// Where a property lives in an object and how it is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ObjectField {
+    /// Byte offset of the value.
+    pub offset: u32,
+    pub width: u32,
+    pub signed: bool,
+    /// What a handle property refers to.
+    pub handle: Option<HandleProperty>,
+}
+
+/// What a handle property refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HandleProperty {
+    String,
+    Object,
+}
+
+impl ObjectField {
+    /// Bytes of the value.
+    pub fn bytes(self) -> u32 {
+        self.width.div_ceil(8)
+    }
+}
+
+/// An operation on class objects (IEEE 1800-2023 clause 8). The analyzer
+/// lays out each class and writes the layout into the operation, so the
+/// frontend needs no class table.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ObjectOp {
+    /// A new object of `class` with `size` zeroed bytes, whose handle
+    /// properties are at the given offsets.
+    New {
+        class: u32,
+        size: u32,
+        handles: Vec<(u32, HandleProperty)>,
+    },
+    /// Read a property of the object in the argument.
+    Load(ObjectField),
+    /// Write the second argument into a property of the object in the first.
+    Store(ObjectField),
+    /// The run-time class of the object in the argument, 0 for `null`.
+    ClassOf,
+}
+
+impl ObjectOp {
+    /// The width and signedness of the result.
+    pub fn result_type(&self) -> (usize, bool) {
+        match self {
+            Self::Load(field) => (field.width as usize, field.signed),
+            Self::New { .. } | Self::ClassOf | Self::Store(_) => (32, false),
+        }
+    }
+}
+
+impl fmt::Display for ObjectOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::New { .. } => "new",
+            Self::Load(_) => "property read",
+            Self::Store(_) => "property write",
+            Self::ClassOf => "class query",
+        })
+    }
+}
+
 /// The subroutine a call expression calls.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Callee {
@@ -751,6 +817,9 @@ pub enum Callee {
     System(SystemFunction),
     /// A string operation, see [`StringOp`].
     String(StringOp),
+    /// A class object operation, see [`ObjectOp`].
+    /// Boxed to keep call expressions small.
+    Object(Box<ObjectOp>),
 }
 
 impl Callee {
@@ -758,14 +827,14 @@ impl Callee {
     pub fn subroutine(&self) -> Option<&str> {
         match self {
             Self::Subroutine(name) => Some(name),
-            Self::System(_) | Self::String(_) => None,
+            Self::System(_) | Self::String(_) | Self::Object(_) => None,
         }
     }
 
     /// The system function, if this is one.
     pub fn system(&self) -> Option<SystemFunction> {
         match self {
-            Self::Subroutine(_) | Self::String(_) => None,
+            Self::Subroutine(_) | Self::String(_) | Self::Object(_) => None,
             Self::System(function) => Some(*function),
         }
     }
@@ -775,6 +844,7 @@ impl Callee {
     pub fn result_type(&self) -> Option<(usize, bool)> {
         match self {
             Self::String(op) => Some(op.result_type()),
+            Self::Object(op) => Some(op.result_type()),
             _ => self.system()?.result_type(),
         }
     }
@@ -785,6 +855,7 @@ impl Callee {
             Self::Subroutine(name) => Self::Subroutine(rename(name)),
             Self::System(function) => Self::System(function),
             Self::String(op) => Self::String(op),
+            Self::Object(op) => Self::Object(op),
         }
     }
 
@@ -802,6 +873,7 @@ impl fmt::Display for Callee {
             Self::Subroutine(name) => f.write_str(name),
             Self::System(function) => f.write_str(function.name()),
             Self::String(op) => op.fmt(f),
+            Self::Object(op) => op.fmt(f),
         }
     }
 }

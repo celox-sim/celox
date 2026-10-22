@@ -27,6 +27,8 @@ pub(super) struct AnalysisState {
     root_subroutines: std::cell::Cell<bool>,
     next_call_site: std::rc::Rc<std::cell::Cell<usize>>,
     timescales: timescales::State,
+    /// Classes laid out so far, by name.
+    classes: std::cell::RefCell<HashMap<String, std::rc::Rc<classes::Class>>>,
 }
 
 /// Syntax and specialization bindings for one scope within an analysis session.
@@ -90,7 +92,9 @@ impl Deref for AnalysisContext<'_> {
     }
 }
 
-pub use crate::system_functions::{ArrayQuery, Callee, StringOp, SystemFunction, SystemTask};
+pub use crate::system_functions::{
+    ArrayQuery, Callee, ObjectOp, StringOp, SystemFunction, SystemTask,
+};
 use crate::{AnalyzerError, system_functions, typecheck};
 
 mod array_compatibility;
@@ -99,6 +103,7 @@ mod assignment_analysis;
 mod bound_patterns;
 mod case;
 mod casts;
+mod classes;
 mod comb_process;
 pub use bound_patterns::BoundPattern;
 mod comb_rewrite;
@@ -1048,6 +1053,7 @@ impl Module {
                         dimensions: function.return_dimensions,
                         signed: function.return_signed,
                         is_2state: function.return_is_2state,
+                        string: function.return_string,
                     },
                 )
             }));
@@ -1065,9 +1071,12 @@ impl Module {
                         dimensions: Some(usize::from(r#type.width() > 1)),
                         signed: r#type.is_signed(),
                         is_2state: !r#type.is_4state(),
+                        string: false,
                     },
                 ))
             }));
+        // Class methods are subroutines `class::method` (IEEE 1800-2023 8.6).
+        dimensions::all_class_signatures(syntax_tree, &mut packed_dimensions);
         packed_dimensions.functions = Arc::new(functions.clone());
         packed_dimensions.expression_signedness = expression_signedness.clone().into();
         for instance in &mut instances {
@@ -1920,6 +1929,8 @@ pub struct Type {
     /// named type, which is signed although the whole array is not (IEEE
     /// 1800-2023 7.4.1).
     signed_element_depth: Option<usize>,
+    /// The class of an object handle type.
+    class: Option<String>,
 }
 
 impl Type {
@@ -1932,6 +1943,7 @@ impl Type {
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
             signed_element_depth: None,
+            class: None,
         }
     }
 
@@ -1944,7 +1956,13 @@ impl Type {
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
             signed_element_depth: None,
+            class: None,
         }
+    }
+
+    /// The class of an object handle type.
+    pub fn class(&self) -> Option<&str> {
+        self.class.as_deref()
     }
 
     pub fn kind(&self) -> TypeKind {
@@ -1970,6 +1988,9 @@ pub enum TypeKind {
     Shortreal,
     /// IEEE 1800-2023 6.16: a dynamically sized string, held as a heap handle.
     String,
+    /// IEEE 1800-2023 8.4: a handle of a class object, `null` or an object
+    /// in the heap.
+    Object,
     Bit,
     Logic,
     Reg,
@@ -2653,6 +2674,8 @@ struct VariableDimensions {
     real: bool,
     /// A `string`: each element is a heap handle, not packed bits.
     string: bool,
+    /// The class of an object handle variable.
+    class: Option<String>,
     packed: Vec<PackedDimension>,
     unpacked: Vec<UnpackedDimension>,
     signed: bool,
@@ -2680,6 +2703,8 @@ struct FunctionReturnMetadata {
     dimensions: Option<usize>,
     signed: bool,
     is_2state: bool,
+    /// The function returns a `string`.
+    string: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
