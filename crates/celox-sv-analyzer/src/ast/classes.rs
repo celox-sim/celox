@@ -24,6 +24,8 @@ pub(super) struct Property {
     pub name: String,
     pub r#type: Type,
     pub field: ObjectField,
+    pub rand: bool,
+    pub randc: bool,
     /// The initializer of the declaration, evaluated by the constructor.
     pub initializer: Option<celox_sv_syntax::ExprId>,
 }
@@ -88,9 +90,45 @@ pub(super) struct Class {
     pub methods: Vec<Method>,
     /// Bytes of an object.
     pub size: u32,
+    pub has_constraints: bool,
 }
 
 impl Class {
+    /// Validate the supported unconstrained subset before binding a call.
+    pub fn check_randomize(&self, tree: &AnalysisContext<'_>) -> Converted<()> {
+        if self.has_constraints {
+            return Err(unsupported("class randomize with constraints"));
+        }
+        if self.base.is_some() {
+            return Err(unsupported("class randomize with inheritance"));
+        }
+        for property in &self.properties {
+            if property.randc {
+                return Err(unsupported("class randomize with randc properties"));
+            }
+            if property.rand && (property.field.handle.is_some() || property.r#type.is_enum) {
+                return Err(unsupported(
+                    "class randomize requires integral non-enum rand properties",
+                ));
+            }
+        }
+        for hook in ["pre_randomize", "post_randomize"] {
+            if let Some(method) = self.method(hook) {
+                let native = tree.declarations().subroutine(method.native);
+                if native.kind != celox_sv_syntax::SubroutineKind::Function
+                    || native.ports.as_ref().is_some_and(|ports| !ports.is_empty())
+                    || method.qualifiers.is_static
+                    || method.qualifiers.is_virtual
+                {
+                    return Err(unsupported(
+                        "randomization hooks require non-static, non-virtual functions without arguments",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The property `name`; one the class declares hides one of a base
     /// (IEEE 1800-2023 8.14).
     pub fn property(&self, name: &str) -> Option<&Property> {
@@ -358,6 +396,14 @@ pub(super) fn class(
         .unwrap_or_default();
     let mut size = base.as_ref().map_or(0, |base| base.size);
     for property in &declaration.properties {
+        if property.declaration.constant && (property.qualifiers.rand || property.qualifiers.randc)
+        {
+            return Err(unsupported("const random class property"));
+        }
+        if property.qualifiers.is_static && (property.qualifiers.rand || property.qualifiers.randc)
+        {
+            return Err(unsupported("static random class property"));
+        }
         let ty = type_binding::procedural_type(
             property.declaration.data_type,
             native,
@@ -389,6 +435,8 @@ pub(super) fn class(
                 name,
                 r#type: ty.clone(),
                 field,
+                rand: property.qualifiers.rand,
+                randc: property.qualifiers.randc,
                 initializer: variable.value,
             });
         }
@@ -403,6 +451,11 @@ pub(super) fn class(
     for method in &declaration.methods {
         let subroutine = native.subroutine(method.subroutine);
         let method_name = instances::normalize_identifier(&subroutine.name.spelling);
+        if matches!(method_name.as_str(), "randomize" | "srandom") {
+            return Err(unsupported(
+                "overriding built-in class randomization methods",
+            ));
+        }
         // A method overriding a virtual method is virtual (8.20).
         let is_virtual = method.qualifiers.is_virtual
             || methods
@@ -477,6 +530,8 @@ pub(super) fn class(
     let class = Rc::new(Class {
         name: name.to_owned(),
         id: class_id(name),
+        has_constraints: declaration.has_constraints
+            || base.as_ref().is_some_and(|base| base.has_constraints),
         base: base.map(|base| base.name.clone()),
         interfaces,
         is_abstract: declaration.virtual_class,
@@ -561,6 +616,7 @@ fn interface_class(
         interfaces,
         is_abstract: true,
         is_interface: true,
+        has_constraints: false,
         properties: Vec::new(),
         base_properties: 0,
         statics: Vec::new(),

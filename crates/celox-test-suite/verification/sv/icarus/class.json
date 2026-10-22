@@ -311,6 +311,29 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus 13.0 rejects the built-in class randomize and srandom methods during elaboration. IEEE 1800-2023 18.6 and 18.13.3 define these methods. Verilator executes both shared cases successfully, including hooks and independent object random streams.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_class_randomize_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_class_randomize",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the built-in class randomize and srandom methods during elaboration. IEEE 1800-2023 18.6 and 18.13.3 define these methods. Verilator executes both shared cases successfully, including hooks and independent object random streams.",
+        "upstream": []
+      },
+      "name": "class::randomize_without_rand_members",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects class scope resolution with a syntax error: reading a static property (Counter::created), calling a static method (Counter::next()) and assigning a static property (Counter::last = \"set\"). IEEE 1800-2023 8.9, 8.10 and 8.23 define these accesses. Verilator passes the case.",
       "expectation": "Simulation",
       "known_issue": {
@@ -349,6 +372,29 @@
         "upstream": []
       },
       "name": "class::string_methods_on_properties",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects the built-in class randomize and srandom methods during elaboration. IEEE 1800-2023 18.6 and 18.13.3 define these methods. Verilator executes both shared cases successfully, including hooks and independent object random streams.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_class_randomize_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_class_randomize",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the built-in class randomize and srandom methods during elaboration. IEEE 1800-2023 18.6 and 18.13.3 define these methods. Verilator executes both shared cases successfully, including hooks and independent object random streams.",
+        "upstream": []
+      },
+      "name": "class::unconstrained_randomize",
       "phase": "skip",
       "status": "ignored",
       "stronger_than_sv": false,

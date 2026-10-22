@@ -6564,3 +6564,56 @@ fn explicit_output_data_types_default_to_variables() {
     assert!(ports[3].is_net());
     assert!(ports[4].is_net());
 }
+
+#[test]
+fn class_randomize_rejects_unsupported_semantics() {
+    for (members, call, expected) in [
+        (
+            "rand int x; constraint c { x == 1; }",
+            "c.randomize()",
+            "constraints",
+        ),
+        ("randc bit [1:0] x;", "c.randomize()", "randc"),
+        ("rand int x;", "c.srandom()", "argument"),
+        ("rand int x;", "c.srandom(1, 2)", "arguments"),
+        (
+            "rand int x; extern constraint c;",
+            "c.randomize()",
+            "constraints",
+        ),
+        ("rand const int x;", "c.randomize()", "const"),
+        ("static rand int x;", "c.randomize()", "static random"),
+        ("rand int x;", "C::randomize()", "object receiver"),
+        ("rand int x;", "C::srandom(1)", "object receiver"),
+        (
+            "static function int f(); return randomize(); endfunction",
+            "c.f()",
+            "object receiver",
+        ),
+        ("rand string x;", "c.randomize()", "integral non-enum"),
+        (
+            "rand int x;",
+            "c.randomize() with { x == 1; }",
+            "unsupported",
+        ),
+        ("rand int x;", "c.randomize(x)", "arguments"),
+        (
+            "rand int x; function void pre_randomize(int arg); endfunction",
+            "c.randomize()",
+            "hooks",
+        ),
+        (
+            "function int randomize(); return 1; endfunction",
+            "c.randomize()",
+            "overriding",
+        ),
+    ] {
+        let source = format!(
+            "module Top; class C; {members} endclass C c; initial begin c = new; void'({call}); end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("randomize_unsupported.sv"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.to_lowercase().contains(expected), "{source}: {error}");
+    }
+}

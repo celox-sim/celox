@@ -786,12 +786,21 @@ pub enum ObjectOp {
     Store(ObjectField),
     /// The run-time class of the object in the argument, 0 for `null`.
     ClassOf,
+    /// Advance the object's independent RNG, returning 64 random bits.
+    Random,
+    /// Seed the object's RNG from the second argument.
+    Seed,
+    /// Validate a receiver; a nonzero class also rejects unsupported dynamic
+    /// dispatch through a base handle before randomizing its properties.
+    Check(u32),
 }
 
 impl ObjectOp {
     /// The width and signedness of the result.
     pub fn result_type(&self) -> (usize, bool) {
         match self {
+            Self::Random => (64, false),
+            Self::Seed | Self::Check(_) => (32, false),
             Self::Load(field) => (field.width as usize, field.signed),
             Self::New { .. } | Self::ClassOf | Self::Store(_) => (32, false),
         }
@@ -805,6 +814,9 @@ impl fmt::Display for ObjectOp {
             Self::Load(_) => "property read",
             Self::Store(_) => "property write",
             Self::ClassOf => "class query",
+            Self::Random => "object random bits",
+            Self::Seed => "object random seed",
+            Self::Check(_) => "object receiver check",
         })
     }
 }

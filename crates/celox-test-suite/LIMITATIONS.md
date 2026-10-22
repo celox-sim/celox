@@ -577,6 +577,12 @@ interface. Verilator 5.052 executes the same emitted Veryl design successfully.
 The [retained diagnostic](verification/repros/interface_nested_icarus.json)
 records this compile limitation.
 
+Class randomization (`sv_icarus_class_randomize`) excludes the two cases
+`class::unconstrained_randomize` and `class::randomize_without_rand_members`
+from Icarus 13.0. It rejects the built-in `randomize` and `srandom` methods
+during elaboration; [the original diagnostics](verification/repros/sv_class_randomize_icarus.json)
+remain available. Both cases pass Verilator and Celox.
+
 ## Veryl analyzer floating-point constant expressions
 
 Veryl analyzer 0.22 can fold negative `f32` casts and dependent floating-point

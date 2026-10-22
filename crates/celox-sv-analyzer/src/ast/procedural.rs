@@ -10,6 +10,7 @@ use super::*;
 mod assertions;
 mod control;
 mod foreach;
+mod randomization;
 pub(super) mod timed_tasks;
 mod timing;
 use crate::procedural::{
@@ -727,6 +728,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     }
                     expression_binding::ObjectReceiver::Static => Vec::new(),
                 };
+                if name.ends_with("::srandom") {
+                    return Err(unsupported("srandom requires a seed argument"));
+                }
                 args.resize(
                     formals + usize::from(receiver != expression_binding::ObjectReceiver::Static),
                     None,
@@ -1627,6 +1631,21 @@ pub(super) fn subroutine_argument_names(
                     params.into_iter().map(|(name, ..)| name).collect(),
                 );
             }
+            for method in ["randomize", "srandom"] {
+                let qualified = item.name(&classes::Class::subroutine_name(&class, method));
+                let mut param_names = vec![classes::THIS.to_owned()];
+                let mut param_shapes = vec![dimensions_from_type(&handle)];
+                if method == "srandom" {
+                    param_names.push("seed".into());
+                    param_shapes.push(dimensions_from_type(&int_type()));
+                }
+                directions.insert(
+                    qualified.clone(),
+                    vec![ParamDirection::Input; param_names.len()],
+                );
+                shapes.insert(qualified.clone(), param_shapes);
+                names.insert(qualified, param_names);
+            }
             let handle = dimensions_from_type(&scoped_type(handle, &item.env));
             if !constructor && !layout.is_some_and(|layout| layout.is_interface) {
                 let qualified = item.name(&classes::Class::subroutine_name(&class, "new"));
@@ -2440,6 +2459,13 @@ fn lower_class(
         tree,
         declaration_env,
         type_aliases,
+        item_dimensions,
+        state,
+        item,
+    )?);
+    subroutines.extend(randomization::lower(
+        &class,
+        tree,
         item_dimensions,
         state,
         item,

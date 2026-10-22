@@ -2068,5 +2068,23 @@
         "timing::process_nonblocking_assignments_outside_their_target"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_class_randomize",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects the built-in class randomize and srandom methods during elaboration. IEEE 1800-2023 18.6 and 18.13.3 define these methods. Verilator executes both shared cases successfully, including hooks and independent object random streams.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_class_randomize_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::randomize_without_rand_members",
+        "class::unconstrained_randomize"
+      ]
+    }
   }
 ]

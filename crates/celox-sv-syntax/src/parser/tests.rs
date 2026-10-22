@@ -2786,3 +2786,16 @@ fn class_declarations_record_names_bases_properties_and_method_qualifiers() {
         );
     }
 }
+
+#[test]
+fn class_random_qualifiers_and_constraints_are_preserved() {
+    let syntax = parse(
+        "class C; rand bit x; randc bit y; extern constraint limits; endclass module M; endmodule",
+    );
+    let class = &syntax.classes[0];
+    assert!(class.has_constraints);
+    assert!(class.properties[0].qualifiers.rand);
+    assert!(!class.properties[0].qualifiers.randc);
+    assert!(class.properties[1].qualifiers.randc);
+    assert!(!class.properties[1].qualifiers.rand);
+}

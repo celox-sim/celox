@@ -1,0 +1,31 @@
+{
+  "schema_version": 3,
+  "suite": "sv",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:11: Error: randomize is not a method of class Empty.\n<case>/source_0.sv:11: error: Object celox_suite_tb.dut.object has no method \"randomize(...)\".\n<case>/source_0.sv:11: error: Unable to elaborate condition expression.\n<case>/source_0.sv:12: Error: randomize is not a method of class Empty.\n<case>/source_0.sv:12: error: Object celox_suite_tb.dut.object has no method \"randomize(...)\".\n<case>/source_0.sv:12: error: Unable to elaborate condition expression.\n6 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "class::randomize_without_rand_members",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 18; see <case>/build.log\n<case>/source_0.sv:20: error: No function named `randomize' found in this context (celox_suite_tb.dut.Sample.again).\n<case>/source_0.sv:32: error: Can't find task srandom in class Sample\n<case>/source_0.sv:32: error: Enable of unknown task ``a.srandom''.\n<case>/source_0.sv:33: Error: randomize is not a method of class Sample.\n<case>/source_0.sv:33: error: Object celox_suite_tb.dut.a has no method \"randomize(...)\".\n<case>/source_0.sv:33: error: Unable to elaborate condition expression.\n<case>/source_0.sv:44: error: Can't find task srandom in class Sample\n<case>/source_0.sv:44: error: Enable of unknown task ``alias_a.srandom''.\n<case>/source_0.sv:47: Error: randomize is not a method of class Sample.\n<case>/source_0.sv:47: error: Object celox_suite_tb.dut.b has no method \"randomize(...)\".\n<case>/source_0.sv:49: Error: randomize is not a method of class Sample.\n<case>/source_0.sv:49: error: Object celox_suite_tb.dut.a has no method \"randomize(...)\".\n<case>/source_0.sv:49: error: Unable to elaborate condition expression.\n<case>/source_0.sv:52: error: Can't find task srandom in class Sample\n<case>/source_0.sv:52: error: Enable of unknown task ``b.srandom''.\n<case>/source_0.sv:53: Error: randomize is not a method of class Sample.\n<case>/source_0.sv:53: error: Object celox_suite_tb.dut.b has no method \"randomize(...)\".\n<case>/source_0.sv:53: error: Unable to elaborate condition expression.\n18 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "class::unconstrained_randomize",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "note": "Focused unexcluded class randomization failures. Both shared cases pass Celox native, Cranelift, Wasm and Verilator."
+}
