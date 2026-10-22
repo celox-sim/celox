@@ -469,6 +469,8 @@ mod tests {
             subroutine_directions: &directions,
             automatic: false,
             statics: Vec::new(),
+            static_initializers: Vec::new(),
+            constant_evaluation: false,
         };
         let mut builder = BodyBuilder::new(
             &tree,

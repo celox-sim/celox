@@ -377,23 +377,34 @@ unsupported, including when the inference option is enabled.
 
 ### Variable lifetimes
 
-Variable lifetimes follow IEEE 1800-2023 6.21. A variable declared in a
-procedural block, function or task is static unless it, its subroutine or
-its module (`module automatic`) is declared `automatic`. A static local of a
-block keeps its value from one execution of the block to the next, and its
+Variable lifetimes follow IEEE 1800-2023 6.21. Outside classes, a variable
+declared in a procedural block, function or task is static unless it, its
+subroutine or its module (`module automatic`) is declared `automatic`.
+Class methods have automatic lifetime (8.6). A static local of a block
+keeps its value from one execution of the block to the next, and its
 initializer runs once at time zero: in `always_ff`, `int count; count++;`
 counts. An automatic local is initialized on every entry. A static local
 whose value on entry is never read, because every path writes it before
 reading it, behaves the same either way. Because a static local keeps its
 value, a local of `always_comb` that only some paths write is a latch, and
-requires relaxing `inferred_latch` like other inferred latches. A static local of a function or task
-that keeps its value between calls is not supported, nor is a static local
-whose initializer is not constant; declare them `automatic`. The result of
-a static function is static too, so one with a path that does not assign
-it (other than a `case` whose items cover every value of a two-state
-argument) is
-rejected as well. An interface
-whose default lifetime (`interface automatic`) differs from that of the
+requires relaxing `inferred_latch` like other inferred latches.
+
+Static function locals and result variables keep their values between calls
+(13.4.2), including scalar `real` values and packed/unpacked integral storage.
+An explicit `static` local of an automatic function is shared too; automatic
+locals are initialized on each call. Static output arguments retain their
+previous values on paths that leave them unassigned. Observable static storage
+is shared by call sites and timed processes, and module-local storage is separate
+for each module instance. Declaration initializers run once at time zero,
+including when the function has not been called. Initializers that call a
+stateful function require `Simulation` or a native testbench to execute the
+initialization process. Constant function calls use
+fresh values and do not affect runtime storage (13.4.3).
+
+Task locals that keep their values and nonconstant static initializers remain
+unsupported; declare those locals `automatic`. Package function state follows
+the existing package-variable restrictions on multiple procedural drivers.
+An interface whose default lifetime (`interface automatic`) differs from that of the
 module it is used in is rejected.
 
 ### Run-time loops

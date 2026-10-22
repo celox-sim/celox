@@ -5797,19 +5797,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "static variable `saved` of subroutine `saved_value` that keeps its value between calls",
-            r#"
-            module Top(input logic set, value, output logic y);
-                function logic saved_value(input logic do_set, input logic new_value);
-                    logic saved;
-                    if (do_set) saved = new_value;
-                    return saved;
-                endfunction
-                assign y = saved_value(set, value);
-            endmodule
-        "#,
-        ),
-        (
             "implicit net `missing` disabled",
             r#"
             `default_nettype none

@@ -1087,12 +1087,21 @@ fn validate_variable_driver_ranges(
                 .iter()
                 .any(|right| left.0 != right.0 && net_driver_ranges_overlap(left.1, right.1))
         });
-        let overlapping_continuous = driver_ranges_overlap(&continuous_driver_ranges(
-            module,
-            signal_name,
-            constants,
-            parameter_types,
-        ));
+        let continuous = continuous_driver_ranges(module, signal_name, constants, parameter_types);
+        let function_storage = module.subroutines().iter().any(|subroutine| {
+            subroutine
+                .persistent_locals
+                .iter()
+                .any(|name| name == signal_name)
+        });
+        // Multiple statements in a function are one procedural driver for
+        // its static storage, even when the caller is a continuous assignment.
+        let overlapping_continuous = continuous.iter().enumerate().any(|(index, left)| {
+            continuous[index + 1..].iter().any(|right| {
+                (!function_storage || left.0 != right.0)
+                    && net_driver_ranges_overlap(left.1, right.1)
+            })
+        });
         if overlapping_continuous || (has_overlap && !shared_memories.contains(signal_name)) {
             return Err(sv::AnalyzerError::Unsupported(format!(
                 "multiple variable drivers for `{signal_name}`"

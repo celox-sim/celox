@@ -1704,3 +1704,51 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (top Top)
   (run_to_finish)
   (assert_eq count 3))
+
+(case static_function_storage_is_shared_between_processes
+  (source "static_processes.sv" #"
+    module Top(output int first, second, third);
+      function int next_value();
+        static int saved = 11;
+        saved++;
+        return saved;
+      endfunction
+      initial begin
+        #1 first = next_value();
+        #2 third = next_value();
+      end
+      initial begin
+        #2 second = next_value();
+        #2 $finish;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq first 12) (assert_eq second 13) (assert_eq third 14))
+
+(case static_function_readonly_initializer_calls_execute_once
+  (source "static_initializer.sv" #"
+    module Top(output int cached, next, cached_again, next_again);
+      function int count();
+        static bit [31:0] value;
+        value++;
+        return value;
+      endfunction
+      function int remember();
+        static int value = count();
+        return value;
+      endfunction
+      initial begin
+        #1 cached = remember();
+        next = count();
+        #1 cached_again = remember();
+        next_again = count();
+        #1 $finish;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq cached 1) (assert_eq next 2)
+  (assert_eq cached_again 1) (assert_eq next_again 3))

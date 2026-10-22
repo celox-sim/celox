@@ -85,6 +85,8 @@ pub(super) fn native_functions(
             subroutine_directions: &directions,
             automatic,
             statics: Vec::new(),
+            static_initializers: Vec::new(),
+            constant_evaluation: false,
         };
         let mut dims = item.dimensions(dimensions);
         dims.subroutine_param_names = names.clone();

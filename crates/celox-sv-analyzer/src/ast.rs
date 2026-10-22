@@ -1105,6 +1105,8 @@ impl Module {
             subroutine_directions: &subroutine_directions,
             automatic: lifetimes::automatic_by_default(syntax_tree),
             statics: Vec::new(),
+            static_initializers: Vec::new(),
+            constant_evaluation: false,
         };
         let (mut subroutines, mut comb_processes, mut ff_processes, mut initial_processes) =
             if imported.declarations_only {
@@ -1157,7 +1159,7 @@ impl Module {
         // Static locals of the processes that keep their value are variables
         // of the module, initialized once with the declaration initializers.
         let statics: HashMap<String, Type> = body_state.statics.drain(..).collect();
-        let (kept, static_initializers) = lifetimes::keep_static_locals(
+        let (mut kept, mut static_initializers) = lifetimes::keep_static_locals(
             &syntax_tree.state,
             &statics,
             &subroutine_directions,
@@ -1171,6 +1173,10 @@ impl Module {
                         .map(|process| &mut process.body),
                 ),
         )?;
+        for subroutine in &subroutines {
+            kept.extend(subroutine.persistent_locals.iter().cloned());
+        }
+        static_initializers.append(&mut body_state.static_initializers);
         locals.retain(|local| !kept.contains(&local.name));
         for name in kept {
             signals.push(Signal::new(name.clone(), statics[&name].clone()));
