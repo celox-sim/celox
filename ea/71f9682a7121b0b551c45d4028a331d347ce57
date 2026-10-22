@@ -1,0 +1,3 @@
+Refresh against current master and preserve both upstream and randomization changes in newly conflicting files.
+
+Adapt the object-RNG differential regression to the new ShadowCheck constructor, which now requires SchedulerMode.
