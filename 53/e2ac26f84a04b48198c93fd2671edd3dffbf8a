@@ -1,0 +1,8 @@
+Revision history for #1767:
+
+rev 2 (content) 2026-10-22 20:38 UTC — Fix CI retained-report validation: add the two reviewed Icarus class randomization exclusions to the retained class report. Reproduced the failure locally; all three retained_reports tests now pass.
+rev 1 (initial) 2026-10-22 20:38 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1767,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"20f2212e3f4895edec002922fda83c45efd925f9","timestamp_iso":"2026-10-22T20:38:36Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"20f2212e3f4895edec002922fda83c45efd925f9","new_sha":"d18dd9d52e6c80f4397f78a911dc470581670830","timestamp_iso":"2026-10-22T20:38:36Z","reason":"Fix CI retained-report validation: add the two reviewed Icarus class randomization exclusions to the retained class report. Reproduced the failure locally; all three retained_reports tests now pass.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/20f2212e3f4895edec002922fda83c45efd925f9...d18dd9d52e6c80f4397f78a911dc470581670830"}]} -->
+
+Resolve CI integration failure with current master: generated randomization subroutines must initialize persistent_locals introduced by #1737. Sync the stack and validate the combined tree before republishing.
