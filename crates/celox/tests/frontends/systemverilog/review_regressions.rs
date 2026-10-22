@@ -8615,7 +8615,7 @@ fn timed_task_edge_processes_allow_initialization_and_disjoint_drivers() {
             always @(negedge clk) begin pause(); q[1] = a; end
         endmodule
     "#;
-    Simulator::from_sv_sources(
+    celox::Simulation::from_sv_sources(
         vec![(source, Path::new("disjoint_timed_drivers.sv"))],
         "Top",
     )
@@ -8652,7 +8652,7 @@ fn waits_on_automatic_task_arguments_still_compile() {
             initial t(0);
         endmodule
     "#;
-    Simulator::from_sv_sources(vec![(source, Path::new("automatic_wait.sv"))], "Top")
+    celox::Simulation::from_sv_sources(vec![(source, Path::new("automatic_wait.sv"))], "Top")
         .build_cranelift()
         .expect("automatic arguments are private; visible go supplies the wakeup");
 }

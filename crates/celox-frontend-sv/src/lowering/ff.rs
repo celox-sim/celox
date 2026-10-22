@@ -1298,7 +1298,6 @@ impl<'p, 'a> Ff<'p, 'a> {
         self.host_request_sites.push(HostRequestSite {
             process: self.process,
             kind: HostRequestKind::Vcd,
-            requires_timed_simulation: false,
             operation: operation as u32,
             args: values,
             results: Vec::new(),
@@ -1923,7 +1922,6 @@ impl<'p, 'a> Ff<'p, 'a> {
         self.host_request_sites.push(HostRequestSite {
             process: 0,
             kind: HostRequestKind::Distribution,
-            requires_timed_simulation: false,
             operation,
             args: operands,
             results: vec![value(ret_id), value(seed_id)],
@@ -2001,7 +1999,6 @@ impl<'p, 'a> Ff<'p, 'a> {
         self.host_request_sites.push(HostRequestSite {
             process: 0,
             kind: HostRequestKind::Plusargs,
-            requires_timed_simulation: false,
             operation: u32::from(value_query),
             args: vec![HostRequestValue {
                 float_precision: None,

@@ -441,8 +441,8 @@ fn native_runtime_declaration_startup_at_o0_and_o2() {
 }
 
 #[test]
-fn plain_simulator_does_not_execute_initial_kernels() {
-    let mut simulator = celox::Simulator::from_sv_sources(
+fn plain_simulator_rejects_initial_kernels() {
+    let error = celox::Simulator::from_sv_sources(
         vec![(
             HOST_DECLARATION,
             Path::new("declaration_plain_simulator.sv"),
@@ -451,9 +451,15 @@ fn plain_simulator_does_not_execute_initial_kernels() {
     )
     .plusargs(["+on"])
     .build_interpreter()
-    .unwrap();
-    let a = simulator.signal("a");
-    let q = simulator.signal("q");
-    assert_eq!(simulator.get(a), 0u8.into());
-    assert_eq!(simulator.get(q), 0u8.into());
+    .map(|_| ())
+    .expect_err("Simulator accepted a design whose kernels it does not run");
+    // Declaration initializers start before the initial block.
+    let celox::SimulatorErrorKind::ProcessRequiresSimulation(origin) = error.kind() else {
+        panic!("{error}");
+    };
+    assert_eq!(origin.construct, "declaration initializer");
+    assert_eq!(
+        origin.location.as_deref(),
+        Some("declaration_plain_simulator.sv:3:3")
+    );
 }

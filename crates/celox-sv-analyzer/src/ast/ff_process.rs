@@ -32,6 +32,15 @@ pub(super) fn ff_processes_from_scope(
         }
         for process in &mut processes[start..] {
             process.creation_order = creation_order;
+            process.site = procedural::process_site(
+                if process.always_ff {
+                    "always_ff"
+                } else {
+                    "always"
+                },
+                syntax_tree.declarations().body_item(item.id).tokens,
+                syntax_tree,
+            );
             for event in &mut process.events {
                 event.signal = item.name(&event.signal);
             }

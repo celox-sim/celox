@@ -4,7 +4,8 @@ use crate::{ast, symbol::ModuleId, typecheck};
 
 pub use crate::ast::warnings::AnalyzerWarning;
 pub use crate::procedural::{
-    CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, SourceSpan, StmtBase, SystemTaskArg,
+    CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, ProcessSite, SourceSpan, StmtBase,
+    SystemTaskArg,
 };
 pub use crate::system_functions::{
     ArrayQuery, Callee, MemoryFormat, Radix, Severity, StringOp, SystemFunction, SystemTask,
@@ -99,6 +100,7 @@ impl Module {
             body.extend(process.body);
             self.initial_processes.push(InitialProcess {
                 creation_order: process.creation_order,
+                site: process.site,
                 scheduled_edge: true,
                 condition: None,
                 body: vec![Stmt::Loop {
@@ -1003,6 +1005,7 @@ pub enum CombProcessKind {
 pub struct FfProcess {
     always_ff: bool,
     creation_order: usize,
+    site: Option<ProcessSite>,
     events: Vec<FfEvent>,
     body: Vec<Stmt>,
 }
@@ -1018,10 +1021,16 @@ impl FfProcess {
         self.creation_order
     }
 
+    /// Where the procedure is written.
+    pub fn site(&self) -> Option<&ProcessSite> {
+        self.site.as_ref()
+    }
+
     pub(crate) fn new(events: Vec<FfEvent>, body: Vec<Stmt>) -> Self {
         Self {
             always_ff: false,
             creation_order: 0,
+            site: None,
             events,
             body,
         }
@@ -1040,6 +1049,7 @@ impl FfProcess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialProcess {
     creation_order: usize,
+    site: Option<ProcessSite>,
     scheduled_edge: bool,
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
@@ -1060,9 +1070,15 @@ impl InitialProcess {
         self.creation_order
     }
 
+    /// Where the procedure is written.
+    pub fn site(&self) -> Option<&ProcessSite> {
+        self.site.as_ref()
+    }
+
     pub(crate) fn new(condition: Option<ConstExpr>, body: Vec<Stmt>, initializer: bool) -> Self {
         Self {
             creation_order: 0,
+            site: None,
             scheduled_edge: false,
             condition,
             body,
@@ -1470,6 +1486,7 @@ impl From<ast::FfProcess> for FfProcess {
         );
         result.always_ff = process.is_always_ff();
         result.creation_order = process.creation_order();
+        result.site = process.site().cloned();
         result
     }
 }
@@ -1487,6 +1504,7 @@ impl From<ast::InitialProcess> for InitialProcess {
             process.is_initializer(),
         );
         result.creation_order = process.creation_order();
+        result.site = process.site().cloned();
         result.synthetic = process.is_synthetic();
         result.repeats = process.repeats();
         result

@@ -491,6 +491,13 @@ fn top_parameters_merge_common_target_and_cli_without_editing_sv() {
     );
     success(&output);
     assert_eq!(output.stdout, b"v=9 w=16\n");
+    assert_eq!(
+        fs::read_to_string(root.path().join("top.sv")).unwrap(),
+        source
+    );
+    // A VPI image runs no process.
+    let untimed = "module Top #(parameter W=8, parameter V=1, parameter NEXT=V+1) (output logic [W-1:0] y); assign y=NEXT; endmodule";
+    fs::write(root.path().join("top.sv"), untimed).unwrap();
     success(&invoke(
         root.path(),
         &[
@@ -516,8 +523,9 @@ fn top_parameters_merge_common_target_and_cli_without_editing_sv() {
     assert_eq!(celox::SimBackend::get_as::<u16>(sim.backend(), signal), 0);
     assert_eq!(
         fs::read_to_string(root.path().join("top.sv")).unwrap(),
-        source
+        untimed
     );
+    fs::write(root.path().join("top.sv"), source).unwrap();
     let output = invoke(root.path(), &["run", "--target", "wide", "-GMISSING=1"]);
     assert!(!output.status.success());
     assert!(
@@ -641,6 +649,14 @@ fn sv_parameter_literals_preserve_types_across_project_target_and_cli() {
     let output = invoke(root.path(), &[&["run"][..], &args].concat());
     success(&output);
     assert_eq!(output.stdout, b"ok\n");
+    assert_eq!(
+        fs::read_to_string(root.path().join("top.sv")).unwrap(),
+        source
+    );
+    // A VPI image runs no process.
+    let (design, _) = source.split_once("initial").unwrap();
+    let source = format!("{design}endmodule\n");
+    fs::write(root.path().join("top.sv"), &source).unwrap();
     success(&invoke(
         root.path(),
         &[&["vpi", "build"][..], &args, &["-o", "sim"]].concat(),
@@ -667,17 +683,20 @@ fn sv_parameter_literals_preserve_types_across_project_target_and_cli() {
 #[test]
 fn state_mode_merges_project_target_and_cli_for_run_and_native_build() {
     let root = tempfile::tempdir().unwrap();
-    fs::write(
-        root.path().join("top.sv"),
-        r#"
+    let timed = r#"
         module Top(output logic[3:0] y);
             logic[3:0] uninitialized;
             assign y=uninitialized;
             initial begin #1; $display("value=%b",y); $finish; end
         endmodule
-    "#,
-    )
-    .unwrap();
+    "#;
+    // A VPI image runs no process.
+    let untimed = r#"
+        module Top(output logic[3:0] y);
+            logic[3:0] uninitialized;
+            assign y=uninitialized;
+        endmodule
+    "#;
     fs::write(
         root.path().join("celox.toml"),
         "sources=['top.sv']\ntop='Top'\nfour_state=true\n[targets.two]\nfour_state=false\n",
@@ -693,9 +712,11 @@ fn state_mode_merges_project_target_and_cli_for_run_and_native_build() {
             true,
         ),
     ] {
+        fs::write(root.path().join("top.sv"), timed).unwrap();
         let run = invoke(root.path(), &[&["run"][..], &args].concat());
         success(&run);
         assert_eq!(String::from_utf8(run.stdout).unwrap(), expected);
+        fs::write(root.path().join("top.sv"), untimed).unwrap();
         success(&invoke(
             root.path(),
             &[&["vpi", "build"][..], &args, &["-o", "sim"]].concat(),
@@ -798,6 +819,12 @@ fn sv_cli_defaults_to_two_state_for_run_and_native_images() {
     let run = invoke(root.path(), &["run", "top.sv", "--top", "Top"]);
     success(&run);
     assert_eq!(run.stdout, b"value=0000\n");
+    // A VPI image runs no process.
+    fs::write(
+        root.path().join("top.sv"),
+        "module Top(output logic[3:0] y); logic[3:0] uninitialized; assign y=uninitialized; endmodule",
+    )
+    .unwrap();
     success(&invoke(
         root.path(),
         &["vpi", "build", "top.sv", "--top", "Top", "-o", "sim"],
@@ -816,9 +843,7 @@ fn sv_cli_defaults_to_two_state_for_run_and_native_images() {
 #[test]
 fn timescale_reaches_run_and_native_images_with_target_and_cli_precedence() {
     let root = tempfile::tempdir().unwrap();
-    fs::write(
-        root.path().join("top.sv"),
-        r#"
+    let timed = r#"
 `timescale 1ns/1ps
 module Top(input bit clk, output bit q);
     always_ff @(posedge clk) q <= !q;
@@ -827,9 +852,14 @@ module Top(input bit clk, output bit q);
         #1ns $finish;
     end
 endmodule
-"#,
-    )
-    .unwrap();
+"#;
+    // A VPI image runs no process.
+    let untimed = r#"
+`timescale 1ns/1ps
+module Top(input bit clk, output bit q);
+    always_ff @(posedge clk) q <= !q;
+endmodule
+"#;
     fs::write(
         root.path().join("celox.toml"),
         r#"
@@ -847,12 +877,14 @@ timescale = "1ns/1fs"
         (vec!["--target", "fine", "--timescale", "10ns/100fs"], -13),
         (vec!["--timescale", "1ns/10ps"], -12),
     ] {
+        fs::write(root.path().join("top.sv"), timed).unwrap();
         let output = invoke(root.path(), &[vec!["run"], options.clone()].concat());
         success(&output);
         assert!(
             String::from_utf8_lossy(&output.stdout).contains(&format!("SCALE -12 {precision}")),
             "{output:?}"
         );
+        fs::write(root.path().join("top.sv"), untimed).unwrap();
         success(&invoke(
             root.path(),
             &[vec!["vpi", "build", "-o", "sim"], options].concat(),
@@ -863,6 +895,7 @@ timescale = "1ns/1fs"
             unsafe { celox::NativeProgramInstance::from_attached_bytes(&bytes) }.unwrap();
         assert_eq!(instance.time_precision().exponent(), precision);
     }
+    fs::write(root.path().join("top.sv"), timed).unwrap();
     rejected(
         &invoke(root.path(), &["run", "--timescale", "1ps/1ns"]),
         "invalid timescale",
