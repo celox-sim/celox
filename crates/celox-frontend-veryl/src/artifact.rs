@@ -460,6 +460,11 @@ pub(crate) fn project_module_with_ids(
                             .iter()
                             .filter_map(|value| *value)
                             .collect(),
+                        value_kind: if variable.r#type.is_string() {
+                            celox_design::ValueKind::StrRef
+                        } else {
+                            celox_design::ValueKind::Bits
+                        },
                     },
                     packed_dims,
                     unpacked_ranges: Vec::new(),

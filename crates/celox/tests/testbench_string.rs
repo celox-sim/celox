@@ -146,12 +146,6 @@ fn checkpoint_restores_string_values() {
     );
     let saved = sim.checkpoint().unwrap();
     assert_eq!(saved.state_size(), empty_size + b"saved string".len());
-    assert!(
-        sim.save_state()
-            .unwrap_err()
-            .to_string()
-            .contains("dynamic testbench strings")
-    );
     sim.set(mode, 1u32);
     assert_eq!(
         run_compiled_testbench(&mut sim, &program),
@@ -163,6 +157,159 @@ fn checkpoint_restores_string_values() {
         run_compiled_testbench(&mut sim, &program),
         celox::TestResult::Pass
     );
+}
+
+#[test]
+fn state_files_restore_string_values_by_contents() {
+    use celox::testbench::{compile_initial_testbench, run_compiled_testbench};
+    let source = r#"
+        #[test(Top)] module Top {
+            var text: string;
+            var names: string[3];
+            var mode: u32;
+            initial {
+                if mode == 0 {
+                    text = "saved string";
+                    names[1] = "one";
+                    names[2] = "two";
+                } else if mode == 1 {
+                    text = "replacement";
+                    names[1] = "uno";
+                } else {
+                    $assert(text == "saved string", "[%s]", text);
+                    $assert(names[0] == "", "[%s]", names[0]);
+                    $assert(names[1] == "one", "[%s]", names[1]);
+                    $assert(names[2] == "two", "[%s]", names[2]);
+                }
+                $finish();
+            }
+        }
+    "#;
+    let mut sim = celox::Simulator::builder(source, "Top")
+        .build_interpreter()
+        .unwrap();
+    let program = compile_initial_testbench(&sim).unwrap();
+    let mode = sim.signal("mode");
+    sim.set(mode, 0u32);
+    assert_eq!(
+        run_compiled_testbench(&mut sim, &program),
+        celox::TestResult::Pass
+    );
+    let saved = sim.save_state().unwrap();
+    assert_eq!(
+        saved.strings,
+        [b"one".to_vec(), b"two".to_vec(), b"saved string".to_vec()]
+    );
+    let mut bytes = Vec::new();
+    saved.write_to(&mut bytes).unwrap();
+    let saved = celox::StateFile::read_from(bytes.as_slice()).unwrap();
+
+    sim.set(mode, 1u32);
+    assert_eq!(
+        run_compiled_testbench(&mut sim, &program),
+        celox::TestResult::Pass
+    );
+    // A fresh simulator has none of the saved strings in its heap, so the
+    // file must carry their contents.
+    for target in [
+        &mut sim,
+        &mut celox::Simulator::builder(source, "Top")
+            .build_interpreter()
+            .unwrap(),
+    ] {
+        target.load_state(&saved).unwrap();
+        let mode = target.signal("mode");
+        target.set(mode, 2u32);
+        assert_eq!(
+            run_compiled_testbench(target, &program),
+            celox::TestResult::Pass
+        );
+    }
+}
+
+#[test]
+fn collected_heap_keeps_reachable_strings() {
+    use celox::testbench::{compile_initial_testbench, run_compiled_testbench};
+    // More distinct strings than one collection interval.
+    let values: Vec<String> = (0..1500).map(|index| format!("value {index}")).collect();
+    let assignments: String = values
+        .iter()
+        .map(|value| format!("text = \"{value}\"; clk.next();\n"))
+        .collect();
+    let source = format!(
+        r#"
+        #[test(Top)] module Top {{
+            var kept: string;
+            var text: string;
+            inst clk: $tb::clock_gen;
+            initial {{
+                kept = "kept";
+                {assignments}
+                $assert(kept == "kept", "[%s]", kept);
+                $assert(text == "value 1499", "[%s]", text);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    let mut sim = celox::Simulator::builder(&source, "Top")
+        .build_interpreter()
+        .unwrap();
+    let program = compile_initial_testbench(&sim).unwrap();
+    let empty_size = sim.checkpoint().unwrap().state_size();
+    assert_eq!(
+        run_compiled_testbench(&mut sim, &program),
+        celox::TestResult::Pass
+    );
+    // Without a collection the heap would hold every value.
+    let all_values: usize = values.iter().map(String::len).sum::<usize>() + b"kept".len();
+    assert!(sim.checkpoint().unwrap().state_size() - empty_size < all_values / 2);
+}
+
+#[test]
+fn concurrent_processes_keep_strings_across_collections() {
+    use celox::testbench::{compile_initial_testbench, run_compiled_testbench};
+    let values: Vec<String> = (0..1500).map(|index| format!("value {index}")).collect();
+    let assignments: String = values
+        .iter()
+        .map(|value| format!("text = identity(\"{value}\"); clk.next();\n"))
+        .collect();
+    let source = format!(
+        r#"
+        #[test(Top)] module Top {{
+            var kept: string;
+            var text: string;
+            var done: bit;
+            inst clk: $tb::clock_gen;
+            function identity(value: input string) -> string {{
+                return value;
+            }}
+            initial {{
+                kept = identity("kept");
+                clk.next(1600);
+                $assert(kept == "kept", "[%s]", kept);
+                $assert(done == 1);
+                $finish();
+            }}
+            initial {{
+                {assignments}
+                $assert(text == "value 1499", "[%s]", text);
+                done = 1;
+            }}
+        }}
+    "#
+    );
+    let mut sim = celox::Simulator::builder(&source, "Top")
+        .build_interpreter()
+        .unwrap();
+    let program = compile_initial_testbench(&sim).unwrap();
+    let empty_size = sim.checkpoint().unwrap().state_size();
+    assert_eq!(
+        run_compiled_testbench(&mut sim, &program),
+        celox::TestResult::Pass
+    );
+    let all_values: usize = values.iter().map(String::len).sum::<usize>() + b"kept".len();
+    assert!(sim.checkpoint().unwrap().state_size() - empty_size < all_values / 2);
 }
 
 #[test]

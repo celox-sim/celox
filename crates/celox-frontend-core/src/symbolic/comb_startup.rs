@@ -116,6 +116,7 @@ mod tests {
                 kind: DomainKind::Other,
                 type_kind: PortTypeKind::Logic,
                 array_dims: vec![2],
+                value_kind: Default::default(),
             },
         )]
         .into_iter()

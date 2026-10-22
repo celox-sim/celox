@@ -404,6 +404,7 @@ dependencies = [
  "celox-frontend-sdk",
  "celox-frontend-sv",
  "celox-frontend-veryl",
+ "celox-heap",
  "celox-macros",
  "celox-runtime",
  "celox-sir",
@@ -649,6 +650,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "celox-heap"
+version = "0.11.0"
+dependencies = [
+ "fxhash",
+]
+
+[[package]]
 name = "celox-macros"
 version = "0.11.0"
 dependencies = [
@@ -800,6 +808,7 @@ name = "celox-testbench"
 version = "0.11.0"
 dependencies = [
  "celox-design",
+ "celox-heap",
  "num-bigint",
  "num-traits",
  "serde",

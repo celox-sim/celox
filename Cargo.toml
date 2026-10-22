@@ -13,6 +13,7 @@ members = [
     "crates/celox-frontend-sdk",
     "crates/celox-frontend-sv",
     "crates/celox-frontend-veryl",
+    "crates/celox-heap",
     "crates/celox-sir",
     "crates/celox-sir-opt",
     "crates/celox-slt",
@@ -65,6 +66,7 @@ celox-frontend-core     = { version = "=0.11.0", path = "crates/celox-frontend-c
 celox-frontend-sdk      = { version = "=0.11.0", path = "crates/celox-frontend-sdk" } # x-release-please-version
 celox-frontend-sv       = { version = "=0.11.0", path = "crates/celox-frontend-sv" } # x-release-please-version
 celox-frontend-veryl    = { version = "=0.11.0", path = "crates/celox-frontend-veryl" } # x-release-please-version
+celox-heap              = { version = "=0.11.0", path = "crates/celox-heap" } # x-release-please-version
 celox-macros            = { version = "=0.11.0", path = "crates/celox-macros" } # x-release-please-version
 celox-napi              = { version = "=0.11.0", path = "crates/celox-napi" } # x-release-please-version
 celox-runtime           = { version = "=0.11.0", path = "crates/celox-runtime" } # x-release-please-version
