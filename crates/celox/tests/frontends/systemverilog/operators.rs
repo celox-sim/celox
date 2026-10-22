@@ -1,4 +1,12 @@
 sv_backends! {
+    fn casts_preserve_guarded_division_signedness(sim) {
+        @case "operators::casts_preserve_guarded_division_signedness";
+    }
+
+    fn casts_preserve_guarded_division_unknowns(sim) {
+        @case "operators::casts_preserve_guarded_division_unknowns";
+    }
+
     fn preserves_power_signedness_in_arithmetic(sim) {
         @case "operators::preserves_power_signedness_in_arithmetic";
     }

@@ -1690,3 +1690,72 @@ endmodule
   (assert_eq mul 0xfffffffc)
   (assert_eq div 0)
   (assert_eq dynamic_mul 0xfffffff0))
+
+; IEEE 1800-2023 6.24.1: a size cast preserves operand signedness.
+(case casts_preserve_guarded_division_signedness
+  (source "guarded_division_casts.sv" #"
+    module Top #(parameter DIVISOR = 2)(
+      input logic signed [12:0] a,
+      input logic signed [3:0] b,
+      input logic [3:0] u,
+      output logic [31:0] quotient, remainder, mixed, narrowed, nested,
+      output logic [31:0] parameter_quotient, typed, unsigned_quotient, signed_mixed);
+      assign quotient = 32'(a / b);
+      assign remainder = 32'(a % b);
+      assign mixed = 32'(a / u);
+      assign narrowed = 4'(a / b);
+      assign nested = 32'((a / b) / b);
+      assign parameter_quotient = 32'(a / DIVISOR);
+      assign typed = int'(a / b);
+      assign unsigned_quotient = unsigned'(a / b);
+      assign signed_mixed = signed'(a / u);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0x1ff3) (set b 2) (set u 2))
+  (assert_eq quotient 0xfffffffa)
+  (assert_eq remainder 0xffffffff)
+  (assert_eq mixed 4089)
+  (assert_eq narrowed 0xfffffffa)
+  (assert_eq nested 0xfffffffd)
+  (assert_eq parameter_quotient 0xfffffffa)
+  (assert_eq typed 0xfffffffa)
+  (assert_eq unsigned_quotient 8186)
+  (assert_eq signed_mixed 4089)
+  (modify (set u 1))
+  (assert_eq signed_mixed 0xfffffff3)
+  (modify (set u 2))
+  (modify (set a 13) (set b 0xe))
+  (assert_eq quotient 0xfffffffa)
+  (assert_eq remainder 1)
+  (assert_eq mixed 6)
+  (assert_eq narrowed 0xfffffffa)
+  (assert_eq nested 3)
+  (assert_eq parameter_quotient 6)
+  (assert_eq typed 0xfffffffa)
+  (assert_eq unsigned_quotient 8186)
+  (assert_eq signed_mixed 6))
+
+(case casts_preserve_guarded_division_unknowns
+  (four_state)
+  (source "guarded_division_unknowns.sv" #"
+    module Top(input logic signed [12:0] a, input logic signed [3:0] b,
+      output logic [31:0] quotient, remainder, nested,
+      output int two_state);
+      assign quotient = 32'(a / b);
+      assign remainder = 32'(a % b);
+      assign nested = 32'((a / b) / b);
+      assign two_state = int'(a / b);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0x1ff3) (set b 2))
+  (assert_eq quotient 0xfffffffa)
+  (assert_eq remainder 0xffffffff)
+  (assert_eq nested 0xfffffffd)
+  (assert_eq two_state 0xfffffffa)
+  (modify (set b 0))
+  (assert_eq quotient (fourstate 0xffffffff 0xffffffff))
+  (assert_eq remainder (fourstate 0xffffffff 0xffffffff))
+  (assert_eq nested (fourstate 0xffffffff 0xffffffff))
+  (assert_eq two_state 0))
