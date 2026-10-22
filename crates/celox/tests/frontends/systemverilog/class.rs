@@ -20,6 +20,10 @@ sv_backends! {
     fn class_abstract_classes_and_pure_virtual_methods(sim) { @case "class::abstract_classes_and_pure_virtual_methods"; }
     fn class_methods_of_handle_array_elements(sim) { @case "class::methods_of_handle_array_elements"; }
     fn class_classes_implementing_interface_classes(sim) { @case "class::classes_implementing_interface_classes"; }
+    fn class_methods_called_through_interface_class_handles(sim) { @case "class::methods_called_through_interface_class_handles"; }
+    fn class_inherited_methods_of_extended_interface_classes(sim) { @case "class::inherited_methods_of_extended_interface_classes"; }
+    fn class_casts_of_class_handles(sim) { @case "class::casts_of_class_handles"; }
+    fn class_casts_from_interface_class_handles(sim) { @case "class::casts_from_interface_class_handles"; }
 }
 
 sv_backends! {
@@ -156,5 +160,36 @@ fn misplaced_super_new_static_misuse_and_unimplemented_methods_are_rejected() {
         };
         let error = error.to_string();
         assert!(error.contains(want), "{error}");
+    }
+}
+
+#[test]
+fn incompatible_class_handle_assignments_are_rejected() {
+    for (statement, want) in [
+        ("d = b;", ["handle of class `B`", "class `D`"]),
+        ("d = u;", ["handle of class `U`", "class `D`"]),
+        ("i = b;", ["handle of class `B`", "class `I`"]),
+        ("b = U::new;", ["handle of class `U`", "class `B`"]),
+        ("d.next = b;", ["handle of class `B`", "class `D`"]),
+        ("$cast(d.next, b);", ["`$cast` to a class property", ""]),
+    ] {
+        let source = format!(
+            "module Top;
+                interface class I; endclass
+                class B; endclass
+                class D extends B implements I; D next; endclass
+                class U; endclass
+                B b; D d; U u; I i;
+                initial begin d = new; {statement} end
+            endmodule"
+        );
+        let Err(error) =
+            Simulator::from_sv_sources(vec![(source.as_str(), Path::new("class.sv"))], "Top")
+                .build_cranelift()
+        else {
+            panic!("`{statement}` is rejected");
+        };
+        let error = error.to_string();
+        assert!(want.iter().all(|want| error.contains(want)), "{error}");
     }
 }

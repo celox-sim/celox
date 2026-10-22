@@ -13,6 +13,41 @@
     },
     {
       "category": "Types",
+      "detail": "Verilator 5.052 returns 0 from $cast of a handle of one interface class to a variable of another interface class that the object's class also implements, so the case dereferences the unassigned null handle; the adapter-free source prints 0 1 where IEEE 1800-2023 8.16 and 8.26.5 require 1 1. Celox prints 1 1. Icarus rejects interface classes, see sv_icarus_abstract_and_interface_classes.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/interface_class_casts_verilator.json",
+          "verification/repros/interface_class_casts.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_interface_class_casts",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 returns 0 from $cast of a handle of one interface class to a variable of another interface class that the object's class also implements, so the case dereferences the unassigned null handle; the adapter-free source prints 0 1 where IEEE 1800-2023 8.16 and 8.26.5 require 1 1. Celox prints 1 1. Icarus rejects interface classes, see sv_icarus_abstract_and_interface_classes.",
+        "upstream": []
+      },
+      "name": "class::casts_from_interface_class_handles",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::casts_of_class_handles",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::classes_implementing_interface_classes",
@@ -68,9 +103,43 @@
     },
     {
       "category": "Types",
+      "detail": "Verilator 5.052 does not find a method that an interface class inherits from an interface class it extends when the method is called through a handle of the extending class (\"Class method 'sides' not found in class 'NamedShape'\"). IEEE 1800-2023 8.26.3 makes the methods of the extended interface classes members of the extending one. Icarus rejects interface classes, see sv_icarus_abstract_and_interface_classes.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_extended_interface_class_methods",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Verilator 5.052 does not find a method that an interface class inherits from an interface class it extends when the method is called through a handle of the extending class (\"Class method 'sides' not found in class 'NamedShape'\"). IEEE 1800-2023 8.26.3 makes the methods of the extended interface classes members of the extending one. Icarus rejects interface classes, see sv_icarus_abstract_and_interface_classes.",
+        "upstream": []
+      },
+      "name": "class::inherited_methods_of_extended_interface_classes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::inherited_properties_and_methods",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::methods_called_through_interface_class_handles",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,

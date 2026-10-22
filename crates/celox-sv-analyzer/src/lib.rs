@@ -147,6 +147,17 @@ pub enum AnalyzerError {
         actual: typecheck::UnpackedArrayType,
         target: typecheck::UnpackedArrayType,
     },
+    /// A handle of class `actual` assigned to a variable of class `target`
+    /// that `actual` neither derives from nor implements; only `$cast` may
+    /// assign it (IEEE 1800-2023 8.16, 8.26.5).
+    #[error(
+        "{context}: a handle of class `{actual}` is not assignment compatible with class `{target}`"
+    )]
+    IncompatibleClassHandle {
+        context: String,
+        actual: String,
+        target: String,
+    },
 }
 
 impl miette::Diagnostic for AnalyzerError {}

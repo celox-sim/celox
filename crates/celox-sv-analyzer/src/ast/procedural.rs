@@ -111,7 +111,7 @@ pub(super) fn scoped_type(mut r#type: Type, const_env: &HashMap<String, i128>) -
 }
 
 /// The `int` type of a loop variable declared by `foreach`.
-fn int_type() -> Type {
+pub(super) fn int_type() -> Type {
     Type {
         is_enum: false,
         kind: TypeKind::Bit,
@@ -629,7 +629,17 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     self.tree, right, native, &self.dims, class,
                 )? {
                     Some(call) => call,
-                    None => bind(right)?,
+                    None => {
+                        expression_binding::check_handle_assignment(
+                            self.tree,
+                            right,
+                            native,
+                            &self.dims,
+                            class,
+                            || format!("assignment to property `{}`", property.name),
+                        )?;
+                        bind(right)?
+                    }
                 }
             }
             _ if op == "=" => bind(right)?,
@@ -1177,6 +1187,31 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .collect::<Vec<_>>();
         let args = (!arguments.iter().any(|arg| arg.name.is_some())).then_some(presence);
         let name = name.spelling.as_str();
+        // `$cast` as a task reports a run-time error when the cast fails
+        // (IEEE 1800-2023 6.24.2).
+        if name == "$cast"
+            && !discarded
+            && let Some(cast) =
+                expression_binding::object_cast(self.tree, arguments, declarations, &self.dims)?
+        {
+            let error = Stmt::SystemTask {
+                task: SystemTask::Severity(system_functions::Severity::Error),
+                site: source_span(declarations.expression(root).tokens, self.tree),
+                args: vec![SystemTaskArg::Str(
+                    "$cast of a class handle to an incompatible class".into(),
+                )],
+            };
+            if let expression_binding::ObjectCast::Fails = cast {
+                return Ok(vec![error]);
+            }
+            let mut succeeded = self.native_value(root)?;
+            self.rename_expr(&mut succeeded);
+            return Ok(vec![Stmt::If {
+                condition: succeeded,
+                then_body: Vec::new(),
+                else_body: vec![error],
+            }]);
+        }
         let task = match system_functions::check_call(
             name,
             args.as_deref(),
@@ -1556,7 +1591,8 @@ pub(super) fn subroutine_argument_names(
                 .collect::<Vec<_>>();
             // A class that cannot be laid out reports why where it is
             // lowered.
-            if let Ok(layout) = classes::class(tree, &class, &item.env, &aliases) {
+            let layout = classes::class(tree, &class, &item.env, &aliases).ok();
+            if let Some(layout) = &layout {
                 methods.extend(layout.dispatched_methods().map(|method| {
                     (
                         classes::Class::dispatcher_name(&class, &method.name),
@@ -1591,15 +1627,23 @@ pub(super) fn subroutine_argument_names(
                     params.into_iter().map(|(name, ..)| name).collect(),
                 );
             }
-            if !constructor {
+            let handle = dimensions_from_type(&scoped_type(handle, &item.env));
+            if !constructor && !layout.is_some_and(|layout| layout.is_interface) {
                 let qualified = item.name(&classes::Class::subroutine_name(&class, "new"));
                 directions.insert(qualified.clone(), vec![ParamDirection::Input]);
-                shapes.insert(
-                    qualified.clone(),
-                    vec![dimensions_from_type(&scoped_type(handle, &item.env))],
-                );
+                shapes.insert(qualified.clone(), vec![handle.clone()]);
                 names.insert(qualified, vec![classes::THIS.to_owned()]);
             }
+            let qualified = item.name(&classes::Class::cast_name(&class));
+            directions.insert(
+                qualified.clone(),
+                vec![ParamDirection::Inout, ParamDirection::Input],
+            );
+            shapes.insert(qualified.clone(), vec![handle.clone(), handle]);
+            names.insert(
+                qualified,
+                vec![CAST_DESTINATION.to_owned(), CAST_SOURCE.to_owned()],
+            );
         }
     }
     Ok((names, shapes, directions))
@@ -2295,7 +2339,13 @@ fn lower_class(
     state: &mut BodyState<'_>,
     item: &generate::Item,
 ) -> Converted<Vec<Subroutine>> {
-    let class = classes::class(tree, name, declaration_env, type_aliases)?;
+    let class = match classes::class(tree, name, declaration_env, type_aliases) {
+        Ok(class) => class,
+        // An interface class that cannot be laid out has no subroutines; a
+        // use of its handles reports why (IEEE 1800-2023 8.26).
+        Err(_) if classes::is_interface(tree, name) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
     let mut subroutines = Vec::new();
     let mut constructor = false;
     for (id, _) in classes::declared_methods(tree, name)? {
@@ -2330,7 +2380,7 @@ fn lower_class(
             Some(&targets),
         )?);
     }
-    if !constructor {
+    if !constructor && !class.is_interface {
         let handle = classes::handle_type(tree, name)
             .ok_or_else(|| unsupported(format!("class `{name}`")))?;
         let ir_type = crate::ir::Type::from_ast(
@@ -2385,7 +2435,120 @@ fn lower_class(
         }
         subroutines.push(subroutine);
     }
+    subroutines.push(lower_cast(
+        name,
+        tree,
+        declaration_env,
+        type_aliases,
+        item_dimensions,
+        state,
+        item,
+    )?);
     Ok(subroutines)
+}
+
+/// The formals of [`classes::Class::cast_name`].
+pub(super) const CAST_DESTINATION: &str = "destination";
+pub(super) const CAST_SOURCE: &str = "source";
+
+/// The subroutine `$cast` to a variable of class `name` calls: it assigns
+/// the source handle to the destination and returns 1 when the source is
+/// `null` or its object's class derives from or implements the class, and
+/// otherwise returns 0 (IEEE 1800-2023 8.16).
+#[allow(clippy::too_many_arguments)]
+fn lower_cast(
+    name: &str,
+    tree: &AnalysisContext<'_>,
+    declaration_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    item_dimensions: &PackedDimensions,
+    state: &mut BodyState<'_>,
+    item: &generate::Item,
+) -> Converted<Subroutine> {
+    let environment = const_functions::Environment {
+        constants: &*item.env,
+        functions: &tree.state.const_functions,
+    };
+    let handle =
+        classes::handle_type(tree, name).ok_or_else(|| unsupported(format!("class `{name}`")))?;
+    let ir_handle =
+        crate::ir::Type::from_ast(scoped_type(handle.clone(), declaration_env), &environment);
+    let ir_int = crate::ir::Type::from_ast(int_type(), &environment);
+    let mut labels = vec![0];
+    labels.extend(classes::cast_targets(
+        tree,
+        name,
+        declaration_env,
+        type_aliases,
+    )?);
+    let mut builder = BodyBuilder::new(
+        tree,
+        item_dimensions,
+        state,
+        system_functions::Body::Subroutine,
+    );
+    builder.automatic = true;
+    let first_local = builder.state.locals.len();
+    builder.push_scope();
+    let destination = builder.declare(CAST_DESTINATION, handle.clone());
+    let source = builder.declare(CAST_SOURCE, handle);
+    let result = builder.declare("$cast", int_type());
+    builder.pop_scope();
+    let assign = |lhs: &str, rhs: Expr| Stmt::Assign {
+        lhs: LValue::Ident(lhs.to_owned()),
+        rhs,
+        nonblocking: false,
+    };
+    let mut subroutine = Subroutine {
+        name: item.name(&classes::Class::cast_name(name)),
+        is_task: false,
+        automatic_locals: builder.state.locals[first_local..]
+            .iter()
+            .map(|local| local.name.clone())
+            .collect(),
+        persistent_locals: Vec::new(),
+        return_type: Some(ir_int),
+        params: vec![
+            SubroutineParam {
+                name: destination.clone(),
+                source_name: CAST_DESTINATION.to_owned(),
+                direction: ParamDirection::Inout,
+                r#type: ir_handle.clone(),
+                default: None,
+            },
+            SubroutineParam {
+                name: source.clone(),
+                source_name: CAST_SOURCE.to_owned(),
+                direction: ParamDirection::Input,
+                r#type: ir_handle,
+                default: None,
+            },
+        ],
+        return_var: Some(result.clone()),
+        body: vec![Stmt::Case {
+            kind: CaseKind::Exact,
+            selector: classes::object_call(
+                system_functions::ObjectOp::ClassOf,
+                vec![Expr::Ident(source.clone())],
+            ),
+            items: vec![CaseItemBase {
+                labels: labels
+                    .iter()
+                    .map(|id| CaseLabel::Value(Expr::Literal(format!("32'd{id}"))))
+                    .collect(),
+                body: vec![
+                    assign(&destination, Expr::Ident(source)),
+                    assign(&result, Expr::Literal("1".into())),
+                ],
+            }],
+            default: Some(vec![assign(&result, Expr::Literal("0".into()))]),
+        }],
+        sensitivity_body: Vec::new(),
+    };
+    for stmt in &mut subroutine.body {
+        qualify_stmt(item, stmt);
+    }
+    Ok(subroutine)
 }
 
 /// Qualify the module-scope names of a statement for its generate scope.
