@@ -1,1 +1,6 @@
-Rebased onto master; merged conformance README, limitations and module lists with the latch/file-input/distribution changes and updated sv-tests totals to the new baseline.
+Revision history for #1696:
+
+rev 2 (content) 2026-10-22 01:03 UTC — Rebased onto master; merged conformance README, limitations and module lists with the latch/file-input/distribution changes and updated sv-tests totals to the new baseline.
+rev 1 (initial) 2026-10-22 01:03 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1696,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"9a40751f32f6c4e952162e59778bfaadde23e401","timestamp_iso":"2026-10-22T01:03:26Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"9a40751f32f6c4e952162e59778bfaadde23e401","new_sha":"24af60a3468027eaaec5a739de8f535c5a6addd2","timestamp_iso":"2026-10-22T01:03:26Z","reason":"Rebased onto master; merged conformance README, limitations and module lists with the latch/file-input/distribution changes and updated sv-tests totals to the new baseline.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/9a40751f32f6c4e952162e59778bfaadde23e401...24af60a3468027eaaec5a739de8f535c5a6addd2"}]} -->
