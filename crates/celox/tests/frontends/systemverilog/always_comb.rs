@@ -21,3 +21,9 @@ sv_backends! {
         @case "always_comb::orders_dynamic_array_read_after_its_writer";
     }
 }
+
+sv_backends! {
+    fn explicit_list_of_every_read_settles_like_a_wildcard(sim) {
+        @case "always_comb::explicit_list_of_every_read_settles_like_a_wildcard";
+    }
+}
