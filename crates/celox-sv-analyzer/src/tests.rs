@@ -3509,7 +3509,6 @@ fn rejects_unimplemented_timing_constructs() {
             "intra-assignment timing control",
         ),
         ("initial begin : b disable b; end", "disable statement"),
-        ("initial #1.5;", "delay value"),
         (
             "logic a, y; always_latch y <= a;",
             "nonblocking assignment inside always_latch",
@@ -6316,6 +6315,7 @@ fn time_literal_delays_accept_numeric_separators() {
     let ir::Stmt::Delay {
         amount,
         ticks_per_unit,
+        ..
     } = &ir.modules()[0].initial_processes()[0].body()[0]
     else {
         panic!("delay");

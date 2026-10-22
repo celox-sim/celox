@@ -1057,6 +1057,56 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (run_to_finish)
   (assert_eq count 8))
 
+(case real_delays_round_at_the_scope_precision
+  ; IEEE 1800-2023 3.14.1: a delay is rounded at the scope's precision, here
+  ; the default 1 ps, and 6.12.1 rounds a real tie away from zero: 0.0625 ns
+  ; waits 63 ps. A NaN delay counts as zero, as Icarus 13.0 and Verilator
+  ; 5.052 do.
+  (source "real_delays.sv" #"
+    module Top(output bit a_before, a_after, b_before, b_after, c_before,
+               c_after, d_after, e_before, e_after);
+      real r = 2.75, tie = 0.0625, zero = 0.0, nan;
+      shortreal quarter = 0.25;
+      bit a, b, c, d, e;
+      initial begin #r a = 1; end
+      initial begin #2749ps a_before = a; #2ps a_after = a; end
+      initial begin #3; #tie b = 1; end
+      initial begin #3062ps b_before = b; #2ps b_after = b; end
+      initial begin #5; #quarter c = 1; end
+      initial begin #5249ps c_before = c; #2ps c_after = c; end
+      initial begin nan = zero / zero; #6; #nan d = 1; end
+      initial begin #6001ps d_after = d; end
+      initial begin #7; #(r * 2) e = 1; end
+      initial begin #12499ps e_before = e; #2ps e_after = e; end
+      initial #20 $finish;
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq a_before 0)
+  (assert_eq a_after 1 "2.75 waits 2750 ps")
+  (assert_eq b_before 0)
+  (assert_eq b_after 1 "0.0625 waits 63 ps")
+  (assert_eq c_before 0)
+  (assert_eq c_after 1 "shortreal 0.25 waits 250 ps")
+  (assert_eq d_after 1 "a NaN delay waits zero")
+  (assert_eq e_before 0)
+  (assert_eq e_after 1 "r * 2 waits 5.5 ns"))
+
+(case negative_real_delays_wait_their_twos_complement
+  ; IEEE 1800-2023 9.4.1: a negative delay is read as a two's-complement
+  ; unsigned time, so -1.5 waits about 2^64 precision steps.
+  (source "negative_real_delay.sv" #"
+    module Top(output bit woke);
+      real r = -1.5;
+      initial begin #r woke = 1; end
+      initial #10 $finish;
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq woke 0))
+
 (case expression_events_see_pulses_within_a_time_slot
   ; IEEE 1800-2023 9.4.2: each change of the expression's value is an
   ; event, also one the slot undoes before it ends. The waits begin after
