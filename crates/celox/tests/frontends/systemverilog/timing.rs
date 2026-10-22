@@ -155,6 +155,8 @@ timed_cases! {
     fn intermediate_combinational_writes_keep_other_drivers = "timing::intermediate_combinational_writes_keep_other_drivers";
     fn parallel_flip_flop_parts_keep_pulses = "timing::parallel_flip_flop_parts_keep_pulses";
     fn staged_nonblocking_writes_follow_later_blocking_writes = "timing::staged_nonblocking_writes_follow_later_blocking_writes";
+    fn intermediate_combinational_writes_replace_split_definitions = "timing::intermediate_combinational_writes_replace_split_definitions";
+    fn intermediate_combinational_writes_reach_concatenated_ports = "timing::intermediate_combinational_writes_reach_concatenated_ports";
 }
 
 #[test]

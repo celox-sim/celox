@@ -1960,3 +1960,57 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (top Top)
   (run_to_finish)
   (expect_output "y=01 r=2\n"))
+
+; A reader of some bits of the counted variable splits its symbolic
+; definition at those bits; the imperative unit replaces every piece.
+(case intermediate_combinational_writes_replace_split_definitions
+  (source "split.sv" #"
+                module Top;
+                    logic [3:0] y, a = 4'b0101, b;
+                    logic [1:0] w;
+                    logic c = 0;
+                    int n;
+                    always_comb begin y = 4'b0; if (c) y = a; b = a; end
+                    assign w = y[1:0];
+                    initial #1 forever begin @(y); n++; end
+                    initial begin
+                        #2 c = 1;
+                        // While c is 1, each change of a rewrites y through 0.
+                        #1 a = 4'b0110;
+                        #1 a = 4'b0111;
+                        #1 $display("y=%b w=%b n=%0d", y, w, n);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=0111 w=11 n=3\n"))
+
+; The counted variable is an output port that the parent connects to a
+; concatenation.
+(case intermediate_combinational_writes_reach_concatenated_ports
+  (source "ports.sv" #"
+                module Child(input logic c, input logic [3:0] a, output logic [3:0] y);
+                    int n;
+                    always_comb begin y = 4'b0; if (c) y = a; end
+                    initial #1 forever begin @(y); n++; end
+                    initial #5 $display("y=%b n=%0d", y, n);
+                endmodule
+                module Top;
+                    logic [3:0] a = 4'b0101;
+                    logic [1:0] p, q;
+                    logic c = 0;
+                    Child u(.c(c), .a(a), .y({p, q}));
+                    initial begin
+                        #2 c = 1;
+                        #1 a = 4'b0110;
+                        #1 a = 4'b1001;
+                        #2 $display("p=%b q=%b", p, q);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=1001 n=3\np=10 q=01\n"))

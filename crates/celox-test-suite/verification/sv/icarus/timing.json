@@ -468,6 +468,28 @@
       "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
+      "name": "timing::intermediate_combinational_writes_reach_concatenated_ports",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::intermediate_combinational_writes_replace_split_definitions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "timing::intermediate_combinational_writes_wake_waiters",
       "phase": "execute",
       "status": "passed",
