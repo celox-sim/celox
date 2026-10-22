@@ -150,6 +150,16 @@ impl Heap {
         self.strings.contains_key(&handle)
     }
 
+    /// Whether `other` holds the same strings under the same handles, the
+    /// same strings under construction, and names new strings alike.
+    pub fn same_contents(&self, other: &Heap) -> bool {
+        self.strings == other.strings
+            && self.next == other.next
+            && self.buffers == other.buffers
+            && self.free_buffers == other.free_buffers
+            && self.pinned == other.pinned
+    }
+
     /// The number of live strings, including `""`.
     pub fn len(&self) -> usize {
         self.strings.len()

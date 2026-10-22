@@ -58,6 +58,8 @@ pub use celox_runtime::{
     StateDifference, StateFile, StateFileError, StateObject, StateRole, WaiterRecord,
     format_state_value,
 };
+#[doc(hidden)]
+pub use celox_runtime::{KernelSchedule, SchedulerMode, SchedulerStats};
 pub use celox_slt::scheduler::SchedulerError;
 pub use celox_state_layout::STATE_HEADER_SIZE;
 pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
