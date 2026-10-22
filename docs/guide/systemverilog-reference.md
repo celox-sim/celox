@@ -62,9 +62,15 @@ both `Simulator` and `Simulation`: `always @(a or b) y = a + b;` or
 or a nonblocking assignment. Any other sensitivity list without edges runs as
 a process: `always @(a) y = a + b;` leaves `y` unchanged when only `b`
 changes. So does a list that, as `always @*`, would close a combinational
-loop with other logic. A `Simulator` runs no processes, so building one for
-such a design fails with `SimulatorErrorKind::ProcessRequiresSimulation`; use
-`Simulation`, or write `always @*` or `always_comb`.
+loop with other logic. So does an edge-sensitive `always`
+that does not have the shape of a flip-flop: one with an edge of a select or
+an expression (`@(posedge v[0])`, `@(posedge (a & b))`), an `edge`, an item
+without an edge next to edges, a multi-bit edge signal (its least significant
+bit decides the edge), or several edges of which the body tests none as an
+asynchronous reset. Only `always_ff` must have that shape. A `Simulator` runs
+no processes, so building one for such a design fails with
+`SimulatorErrorKind::ProcessRequiresSimulation`; use `Simulation`, or write
+`always @*` or `always_comb`.
 
 ### Timed task calls
 
@@ -147,10 +153,9 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Declarations: variable declaration initializers of members of an interface
   array, ANSI port default values, tagged unions, soft packed unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   unpacked structs and `real`.
-- Sequential processes: `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)) and edge operands other than a
-  plain signal ([#464](https://github.com/celox-sim/celox/issues/464)) in event lists. A plain `always` with
-  such an edge, a multi-bit edge signal, or several edges without a reset is
-  rejected too, until it runs as a process ([#1708](https://github.com/celox-sim/celox/issues/1708)).
+- Sequential processes: `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)) in event lists, and in
+  `always_ff` edge operands other than a plain signal ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit
+  edge signals, and several edges without an asynchronous reset.
 - Combinational processes: nonblocking assignments inside `always_comb`
   ([#453](https://github.com/celox-sim/celox/issues/453)).
 - Loops: a procedural loop unrolls at most 10,000 iterations; a combinational

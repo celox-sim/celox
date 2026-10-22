@@ -60,7 +60,11 @@ outline: [2, 3]
 文にはタイミング制御とノンブロッキング代入を含められません。エッジを持たないそれ以外の
 センシティビティリストを持つ `always` はプロセスとして実行します。`always @(a) y = a + b;` は
 `b` だけが変化しても `y` を更新しません。`always @*` として扱うと他の論理と組み合わせループを作るリストも
-プロセスとして実行します。`Simulator` はプロセスを実行しないため、このようなデザインでは
+プロセスとして実行します。フリップフロップの形をしていないエッジ駆動の `always` も同様です。
+選択や式のエッジ（`@(posedge v[0])`、`@(posedge (a & b))`）、`edge`、エッジと並んだエッジなしの項目、
+複数ビットのエッジ信号（最下位ビットでエッジを判定）、本体がどれも非同期リセットとして判定しない
+複数のエッジを持つものがこれに当たります。この形でなければならないのは `always_ff` だけです。
+`Simulator` はプロセスを実行しないため、このようなデザインでは
 `SimulatorErrorKind::ProcessRequiresSimulation` でビルドに失敗します。`Simulation` を使うか、
 `always @*` / `always_comb` で記述してください。
 
@@ -135,10 +139,9 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 - ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
 - 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、soft packed union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、`real`。
-- 順序回路のプロセス：イベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）と単純な信号以外のエッジ
-  オペランド（[#464](https://github.com/celox-sim/celox/issues/464)）。このようなエッジ、複数ビットのエッジ信号、リセットを持たない
-  複数のエッジを持つ通常の `always` も、プロセスとして実行できるようになるまで拒否します
-  （[#1708](https://github.com/celox-sim/celox/issues/1708)）。
+- 順序回路のプロセス：イベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）、および `always_ff` での
+  単純な信号以外のエッジオペランド（[#464](https://github.com/celox-sim/celox/issues/464)）、複数ビットのエッジ信号、
+  非同期リセットを持たない複数のエッジ。
 - 組み合わせ回路のプロセス：`always_comb` 内のノンブロッキング代入（[#453](https://github.com/celox-sim/celox/issues/453)）。
 - ループ：手続き的なループの展開は 10,000 回までです。反復回数が実行時に決まる組み合わせ
   回路のループは、カウンタ形式の `for` である必要があります。loop-generate は 10,000 回を
