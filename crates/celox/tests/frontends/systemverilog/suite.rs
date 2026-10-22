@@ -11,6 +11,10 @@ struct CeloxBackend<B: SimBackend>(Simulator<B>);
 /// the default 1 ps.
 const UNIT: u64 = 1000;
 
+/// How far past the next event each run of `run_to_finish` goes, in
+/// simulation time units.
+const FINISH_STRETCH: u64 = 1 << 20;
+
 /// A timed case: the design's own processes and clocks run in a
 /// [`Simulation`]. A host write is settled at the current time by the next
 /// run operation, read, eval or output collection.
@@ -96,7 +100,12 @@ impl<B: SimBackend> TimedBackend<B> {
 impl<B: SimBackend> Drop for TimedBackend<B> {
     #[allow(clippy::disallowed_macros)] // The skip report goes to the test log.
     fn drop(&mut self) {
-        if std::thread::panicking() || scheduler_mode() != SchedulerMode::Differential {
+        if std::thread::panicking()
+            || !matches!(
+                scheduler_mode(),
+                SchedulerMode::Differential | SchedulerMode::DifferentialRuns
+            )
+        {
             return;
         }
         let stats = self.sim.scheduler_stats();
@@ -109,6 +118,10 @@ impl<B: SimBackend> Drop for TimedBackend<B> {
             }
             None => {}
         }
+        eprintln!(
+            "differential: compiled slots: {}",
+            u8::from(stats.compiled_slots > 0)
+        );
     }
 }
 
@@ -185,12 +198,14 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
         if self.finished {
             return Err("run_to_finish: the design had already finished".into());
         }
+        // Runs to the next events and a stretch beyond, as a host loop
+        // would, so that a compiled scheduler may run up to the finish.
         while !self.finished {
-            let step = self.sim.step()?;
-            self.capture_events()?;
-            if step.is_none() {
+            let Some(next) = self.sim.next_event_time() else {
                 break;
-            }
+            };
+            self.sim.run_until(next.saturating_add(FINISH_STRETCH))?;
+            self.capture_events()?;
         }
         if !self.finished {
             return Err(
@@ -255,13 +270,15 @@ impl<B: SimBackend> Backend for CeloxBackend<B> {
 }
 
 /// The scheduler mode of timed cases: `CELOX_SCHEDULER` set to
-/// `reference`, `compiled` or `differential`, by default the library's.
+/// `reference`, `compiled`, `differential` or `differential-runs`, by
+/// default the library's.
 #[allow(clippy::disallowed_methods)] // Opt-in test configuration is environment-driven.
 fn scheduler_mode() -> SchedulerMode {
     match std::env::var("CELOX_SCHEDULER").as_deref() {
         Ok("reference") => SchedulerMode::Reference,
         Ok("compiled") => SchedulerMode::Compiled,
         Ok("differential") => SchedulerMode::Differential,
+        Ok("differential-runs") => SchedulerMode::DifferentialRuns,
         Ok(other) => panic!("unknown CELOX_SCHEDULER mode `{other}`"),
         Err(_) => SchedulerMode::default(),
     }
@@ -359,4 +376,61 @@ pub fn run_case(name: &'static str, backend: &'static str) {
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     });
+}
+
+/// How the compiled scheduler runs the kernels of every timed suite case:
+/// how many it compiles and why it leaves the others to the reference loop.
+/// A kernel that stops qualifying changes this snapshot.
+#[test]
+fn compiled_scheduler_coverage() {
+    use std::fmt::Write;
+    let report = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn_scoped(scope, || {
+                let mut report = String::new();
+                for case in celox_test_suite::sv::cases() {
+                    let design = case.design();
+                    if !design.timed {
+                        continue;
+                    }
+                    let sources = design
+                        .sources
+                        .iter()
+                        .map(|source| (source.text.as_str(), source.path.as_path()))
+                        .collect::<Vec<_>>();
+                    let builder = design.parameters.iter().fold(
+                        Simulation::from_sv_sources(sources, &design.top)
+                            .scheduler_mode(SchedulerMode::Compiled)
+                            .four_state(design.four_state)
+                            .allow_inferred_latches(design.allow_inferred_latches),
+                        |builder, (name, value)| builder.param(name, *value),
+                    );
+                    let Ok(sim) = builder.build_interpreter() else {
+                        continue;
+                    };
+                    let kernels = sim.scheduler_stats().kernels;
+                    let compiled = kernels
+                        .iter()
+                        .filter(|kernel| matches!(kernel, celox::KernelSchedule::Compiled))
+                        .count();
+                    let mut reasons = std::collections::BTreeMap::<&str, usize>::new();
+                    for kernel in &kernels {
+                        if let celox::KernelSchedule::Reference(reason) = kernel {
+                            *reasons.entry(reason).or_default() += 1;
+                        }
+                    }
+                    write!(report, "{}: {compiled}/{}", case.name, kernels.len()).unwrap();
+                    for (reason, count) in reasons {
+                        write!(report, "; {reason} ({count})").unwrap();
+                    }
+                    report.push('\n');
+                }
+                report
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    });
+    insta::assert_snapshot!(report);
 }
