@@ -2734,6 +2734,8 @@ struct PackedDimensions {
     /// assignment patterns passed as arguments.
     subroutine_param_shapes: Arc<HashMap<String, Vec<VariableDimensions>>>,
     subroutine_param_names: Arc<HashMap<String, Vec<String>>>,
+    /// The class whose method is being bound.
+    class_scope: Option<String>,
 }
 
 impl PackedDimensions {
@@ -2756,6 +2758,7 @@ impl PackedDimensions {
             type_query: false,
             subroutine_param_shapes: Arc::default(),
             subroutine_param_names: Arc::default(),
+            class_scope: None,
         }
     }
 }

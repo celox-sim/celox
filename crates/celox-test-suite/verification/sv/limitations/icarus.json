@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 15,
     "emission_error": 0,
-    "compile_error": 112,
+    "compile_error": 113,
     "runtime_error": 7,
     "unsupported": 0,
     "ignored": 0
@@ -1269,6 +1269,14 @@
       "detail": "Icarus build exit status: 1; see <case>/build.log\nSORRY: Compare class handles not implemented\nerror: Code generation had 1 error(s).\n",
       "expectation": "Simulation",
       "name": "class::inherited_properties_and_methods",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Malformed statement\n<case>/source_0.sv:26: syntax error\n<case>/source_0.sv:26: error: Malformed statement\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: Syntax in assignment statement l-value.\n",
+      "expectation": "Simulation",
+      "name": "class::static_properties_and_methods",
       "phase": "compile",
       "status": "compile_error"
     }
