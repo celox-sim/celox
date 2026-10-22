@@ -1,6 +1,1 @@
-Revision history for #1724:
-
-rev 2 (rebase) 2026-10-22 08:43 UTC — Rebase onto master after #1688 merged; resolve the unsupported-features list in docs/guide/systemverilog.md now that real-valued delays are supported.
-rev 1 (initial) 2026-10-22 08:43 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":1724,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"f05b57080da35ad7f60a22e4c67d1d19644f5bdb","timestamp_iso":"2026-10-22T08:43:42Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"f05b57080da35ad7f60a22e4c67d1d19644f5bdb","new_sha":"cc6e574638f2bbc2c62749d0da802b27ed7e509c","timestamp_iso":"2026-10-22T08:43:42Z","reason":"Rebase onto master after #1688 merged; resolve the unsupported-features list in docs/guide/systemverilog.md now that real-valued delays are supported.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/f05b57080da35ad7f60a22e4c67d1d19644f5bdb...cc6e574638f2bbc2c62749d0da802b27ed7e509c"}]} -->
+Rebase onto master after #1717, #1722 and #1744; merge the new limitations.json entries with master's named array parameter entries.
