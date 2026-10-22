@@ -1,1 +1,7 @@
-Rebased onto master; add value_kind to the VariableMetadata initializers that #1627 introduced (merge-queue build failure).
+Revision history for #1679:
+
+rev 3 (content) 2026-10-22 01:03 UTC — Rebased onto master; add value_kind to the VariableMetadata initializers that #1627 introduced (merge-queue build failure).
+rev 2 (content) 2026-10-21 05:43 UTC
+rev 1 (initial) 2026-10-21 05:43 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1679,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"42f160cff7f6e85c44011c1e77d2fb35fe4f35f7","timestamp_iso":"2026-10-21T05:43:49Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"42f160cff7f6e85c44011c1e77d2fb35fe4f35f7","new_sha":"ed3261e3964814caf1018232c77a0153e58e0b65","timestamp_iso":"2026-10-21T05:43:49Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/42f160cff7f6e85c44011c1e77d2fb35fe4f35f7...ed3261e3964814caf1018232c77a0153e58e0b65"},{"number":3,"change_type":"content","old_sha":"ed3261e3964814caf1018232c77a0153e58e0b65","new_sha":"4289f0842a4b5f7a5add5fdbf97f5847efe8388f","timestamp_iso":"2026-10-22T01:03:26Z","reason":"Rebased onto master; add value_kind to the VariableMetadata initializers that #1627 introduced (merge-queue build failure).","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/ed3261e3964814caf1018232c77a0153e58e0b65...4289f0842a4b5f7a5add5fdbf97f5847efe8388f"}]} -->
