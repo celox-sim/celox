@@ -376,7 +376,20 @@ impl<B: SimBackend> Simulator<B> {
         let comb_writes = &self.program.runtime_schema.comb_writes;
         // A timed simulation stores its time into the time slots, and a state
         // file keeps the time in its schedule; an untimed one reads zero.
-        let time_slots: crate::HashSet<_> = self.program.runtime_schema.time_slots.iter().collect();
+        // A compiled scheduler's slots hold nothing between runs.
+        let time_slots: crate::HashSet<_> = self
+            .program
+            .runtime_schema
+            .time_slots
+            .iter()
+            .chain(
+                self.program
+                    .runtime_schema
+                    .scheduler
+                    .iter()
+                    .flat_map(|scheduler| scheduler.slots.iter()),
+            )
+            .collect();
         let mut objects: Vec<_> = self
             .backend
             .layout()
