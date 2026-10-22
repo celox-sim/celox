@@ -233,7 +233,9 @@ pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
         MInst::ExternArg { .. } | MInst::CallExtern { .. } | MInst::ExternResult { .. } => {
             MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))
         }
-        MInst::X86Simd(X86SimdInst::Scratch128 { .. })
+        MInst::FloatBinary { .. }
+        | MInst::FloatUnary { .. }
+        | MInst::X86Simd(X86SimdInst::Scratch128 { .. })
         | MInst::X86Simd(X86SimdInst::Zero128 { .. })
         | MInst::X86Simd(X86SimdInst::Pack128 { .. })
         | MInst::X86Simd(X86SimdInst::Binary128 { .. }) => MemoryEffects::NONE,
@@ -327,7 +329,9 @@ pub(crate) fn writes(inst: &MInst) -> MemoryEffects {
         MInst::ExternArg { .. } | MInst::CallExtern { .. } | MInst::ExternResult { .. } => {
             MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))
         }
-        MInst::X86Simd(X86SimdInst::Scratch128 { .. })
+        MInst::FloatBinary { .. }
+        | MInst::FloatUnary { .. }
+        | MInst::X86Simd(X86SimdInst::Scratch128 { .. })
         | MInst::X86Simd(X86SimdInst::Zero128 { .. })
         | MInst::X86Simd(X86SimdInst::Pack128 { .. })
         | MInst::X86Simd(X86SimdInst::Binary128 { .. })

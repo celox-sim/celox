@@ -323,6 +323,23 @@ fn verify_instruction_constraints(
     inst: &MInst,
 ) -> Result<(), MirVerifyError> {
     match inst {
+        MInst::FloatBinary {
+            op: celox_sir::FloatBinaryOp::Rem | celox_sir::FloatBinaryOp::Pow,
+            ..
+        }
+        | MInst::FloatUnary {
+            op:
+                celox_sir::FloatUnaryOp::FromSigned { .. }
+                | celox_sir::FloatUnaryOp::FromUnsigned { .. }
+                | celox_sir::FloatUnaryOp::ToSigned { .. }
+                | celox_sir::FloatUnaryOp::ToUnsigned { .. },
+            ..
+        } => Err(MirVerifyError::instruction(
+            "OPCODE.FLOAT_NATIVE",
+            block,
+            index,
+            "floating-point operation requires helper lowering",
+        )),
         MInst::ShrImm { imm, .. } | MInst::ShlImm { imm, .. } | MInst::SarImm { imm, .. }
             if *imm >= 64 =>
         {
