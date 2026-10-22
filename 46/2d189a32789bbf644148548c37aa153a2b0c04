@@ -1,0 +1,1 @@
+Rebased onto master after #1737; the $cast helper initializes the new persistent_locals field and the sv-tests totals rise by one for its two accepted rows.
