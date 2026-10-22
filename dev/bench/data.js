@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792698657715,
+  "lastUpdate": 1792698964646,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -398991,6 +398991,42 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-celox-jit/heliodor_suite_66_linux_boot_execution",
             "unit": "ms",
             "value": 250851.744894
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "86a2c204009cd5f7635ee0aaa5094e6da824c1be",
+          "message": "perf(sv)!: stage nonblocking updates of a target with one writer (#1684)",
+          "timestamp": "2026-10-22T06:11:35Z",
+          "url": "https://github.com/celox-sim/celox/commit/86a2c204009cd5f7635ee0aaa5094e6da824c1be"
+        },
+        "date": 1792698964646,
+        "cpu": "AMD EPYC 7763",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_66_linux_boot_startup",
+            "unit": "ms",
+            "value": 21442.170906
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_66_linux_boot_execution",
+            "unit": "ms",
+            "value": 273743.043418
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_66_linux_boot_end_to_end",
+            "unit": "ms",
+            "value": 295216.847419
           }
         ]
       }
