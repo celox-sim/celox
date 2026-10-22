@@ -12,6 +12,13 @@ permissions:
 jobs:
   conventional-title:
     name: Conventional Commit title
+    # Queue metadata comes from git notes, not the draft PR description.
+    # Keep base edits: retargeting can enable the default-branch release gate.
+    if: >-
+      github.event_name == 'merge_group' ||
+      (github.event.pull_request.state == 'open' &&
+       (github.event.action != 'edited' ||
+        github.event.changes.title || github.event.changes.base))
     runs-on: ubuntu-latest
     steps:
       - name: Check out the trusted title validator
