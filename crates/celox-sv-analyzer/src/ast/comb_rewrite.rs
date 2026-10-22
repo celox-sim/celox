@@ -84,6 +84,14 @@ pub(super) fn expr_static_width(
             }
         }
         Expr::Inside { .. } => Some(1),
+        // The synthetic unknown arm has the guarded operation's width.
+        Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } if matches!(&**then_expr, Expr::Literal(text) if text == crate::DIV_ZERO_UNKNOWN_LITERAL) => {
+            expr_static_width(state, else_expr, packed_dimensions)
+        }
         Expr::Mux {
             then_expr,
             else_expr,

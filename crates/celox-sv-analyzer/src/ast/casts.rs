@@ -87,8 +87,17 @@ pub(super) fn runtime_cast_target_expr(
             let width = expr_static_width(state, &expr, packed_dimensions).ok_or_else(|| {
                 unsupported("signedness cast of an operand without a static width")
             })?;
+            let operand_signed =
+                dimensions::expression_signedness(&expr, packed_dimensions, const_env)
+                    .ok_or_else(|| unsupported("cast of an operand whose signedness is unknown"))?;
             return Ok(Expr::Resize {
-                expr: Box::new(expr),
+                // Signing changes the result type after evaluating the operand
+                // in its own type; it must not change a division's operator.
+                expr: Box::new(Expr::Resize {
+                    expr: Box::new(expr),
+                    width,
+                    signed: operand_signed,
+                }),
                 width,
                 signed,
             });
