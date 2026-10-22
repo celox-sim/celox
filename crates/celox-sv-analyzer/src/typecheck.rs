@@ -1,5 +1,11 @@
 //! Type and width resolution helpers.
 
+mod real;
+pub(crate) use real::round_to_i128 as round_real_to_i128;
+pub(crate) use real::{
+    evaluate as eval_real_const_expr, has_real_type as const_expr_has_real_type,
+};
+
 use fxhash::FxHashMap as HashMap;
 
 use num_bigint::BigUint;
@@ -144,6 +150,15 @@ pub(crate) fn eval_const_expr_in_env(
     expr: &ConstExpr,
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
+    // This evaluator serves integral-only bounds and selectors as well as
+    // numeric parameters. A real result is converted only by a caller with
+    // an explicit integer destination; truth/comparison results remain valid.
+    if real::has_real_type(expr) {
+        return None;
+    }
+    if real::needs_real_evaluation(expr) {
+        return real::evaluate(expr, constants).map(real::round_to_i128);
+    }
     match expr {
         ConstExpr::Literal(value) => literal_as_i128(value),
         ConstExpr::Ident(name) => constants.get(name).copied(),
@@ -177,7 +192,11 @@ pub(crate) fn eval_const_expr_in_env(
             if let Some(literal) = integral_literal_from_const_expr(expr) {
                 return integral_literal_as_i128(&literal, *signed);
             }
-            let value = eval_const_expr_in_env(operand, constants)?;
+            let value = if real::has_real_type(operand) {
+                real::round_to_i128(real::evaluate(operand, constants)?)
+            } else {
+                eval_const_expr_in_env(operand, constants)?
+            };
             literal_as_i128(&format_typed_constant_literal(value, *width, *signed))
         }
         ConstExpr::Select { expr, bit } => {
@@ -897,6 +916,9 @@ pub(crate) fn integral_literal_truth(literal: &IntegralLiteral) -> Option<bool> 
 }
 
 fn eval_const_truth(expr: &ConstExpr, constants: &dyn ConstantEnvironment) -> Option<Option<bool>> {
+    if real::has_real_type(expr) {
+        return real::evaluate(expr, constants).map(|value| Some(value != 0.0));
+    }
     if let Some(literal) = integral_literal_from_const_expr(expr) {
         return Some(integral_literal_truth(&literal));
     }
@@ -1357,6 +1379,28 @@ fn eval_system_function(
     args: &[ConstExpr],
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
+    if matches!(
+        function,
+        SystemFunction::Rtoi | SystemFunction::Realtobits | SystemFunction::Shortrealtobits
+    ) {
+        let [arg] = args else {
+            return None;
+        };
+        let value = real::evaluate(arg, constants)?;
+        return Some(match function {
+            SystemFunction::Rtoi => celox_design::eval_float_unary(
+                celox_design::FloatUnaryOp::ToSigned {
+                    width: 32,
+                    round: false,
+                },
+                celox_design::FloatPrecision::F64,
+                value.to_bits(),
+            ) as u32 as i32 as i128,
+            SystemFunction::Realtobits => i128::from(value.to_bits()),
+            SystemFunction::Shortrealtobits => i128::from((value as f32).to_bits()),
+            _ => unreachable!(),
+        });
+    }
     if function == SystemFunction::Countbits {
         let (arg, controls) = args.split_first()?;
         if controls.is_empty() {

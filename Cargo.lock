@@ -773,6 +773,7 @@ dependencies = [
 name = "celox-sv-analyzer"
 version = "0.11.0"
 dependencies = [
+ "celox-design",
  "celox-sv-syntax",
  "fxhash",
  "miette",

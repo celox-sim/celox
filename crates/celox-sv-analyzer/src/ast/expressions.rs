@@ -131,7 +131,28 @@ pub(super) fn numeric_system_function(
                 signed: function == SystemFunction::Signed,
             })
         }
-        SystemFunction::Rtoi
+        SystemFunction::Ln
+        | SystemFunction::Log10
+        | SystemFunction::Exp
+        | SystemFunction::Sqrt
+        | SystemFunction::Floor
+        | SystemFunction::Ceil
+        | SystemFunction::Sin
+        | SystemFunction::Cos
+        | SystemFunction::Tan
+        | SystemFunction::Asin
+        | SystemFunction::Acos
+        | SystemFunction::Atan
+        | SystemFunction::Sinh
+        | SystemFunction::Cosh
+        | SystemFunction::Tanh
+        | SystemFunction::Asinh
+        | SystemFunction::Acosh
+        | SystemFunction::Atanh
+        | SystemFunction::Pow
+        | SystemFunction::Atan2
+        | SystemFunction::Hypot
+        | SystemFunction::Rtoi
         | SystemFunction::Itor
         | SystemFunction::Realtobits
         | SystemFunction::Bitstoreal

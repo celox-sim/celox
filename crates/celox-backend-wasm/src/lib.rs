@@ -6225,7 +6225,7 @@ fn emit_trigger_detection(
 }
 
 fn float_needs_helper(code: u64) -> bool {
-    matches!(code & 255, 4 | 5)
+    matches!(code & 255, 4 | 5 | 12 | 13 | 40..=57)
 }
 fn compile_float(
     dst: RegisterId,

@@ -204,7 +204,7 @@ fn basic_float_operations_select_native_mir_and_emit_without_helpers() {
 
 #[test]
 fn complex_float_operations_keep_helper_calls() {
-    for op in [F::Rem, F::Pow] {
+    for op in [F::Rem, F::Pow, F::Atan2, F::Hypot] {
         let (unit, layout) = float_unit(
             SIRInstruction::Binary(
                 RegisterId(2),
@@ -219,5 +219,42 @@ fn complex_float_operations_keep_helper_calls() {
         );
         let mir = lower_execution_unit(&unit, &layout, false);
         assert!(mir.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, MInst::CallExtern { func, .. } if *func == celox_sir::float::FLOAT_HELPER_ID)));
+    }
+}
+
+#[test]
+fn real_math_unary_operations_keep_helper_calls() {
+    for precision in [P::F32, P::F64] {
+        for op in [
+            U::Ln,
+            U::Log10,
+            U::Exp,
+            U::Sqrt,
+            U::Floor,
+            U::Ceil,
+            U::Sin,
+            U::Cos,
+            U::Tan,
+            U::Asin,
+            U::Acos,
+            U::Atan,
+            U::Sinh,
+            U::Cosh,
+            U::Tanh,
+            U::Asinh,
+            U::Acosh,
+            U::Atanh,
+        ] {
+            let (unit, layout) = float_unit(
+                SIRInstruction::Unary(
+                    RegisterId(2),
+                    UnaryOp::Float { op, precision },
+                    RegisterId(0),
+                ),
+                precision,
+            );
+            let mir = lower_execution_unit(&unit, &layout, false);
+            assert!(mir.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, MInst::CallExtern { func, .. } if *func == celox_sir::float::FLOAT_HELPER_ID)));
+        }
     }
 }

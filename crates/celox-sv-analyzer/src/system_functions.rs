@@ -18,6 +18,28 @@ use crate::AnalyzerError;
 /// A system function the frontend supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SystemFunction {
+    Ln,
+    Log10,
+    Exp,
+    Sqrt,
+    Floor,
+    Ceil,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Sinh,
+    Cosh,
+    Tanh,
+    Asinh,
+    Acosh,
+    Atanh,
+    Pow,
+    Atan2,
+    Hypot,
+
     Rtoi,
     Itor,
     Realtobits,
@@ -110,6 +132,62 @@ pub enum ArrayQuery {
 }
 
 impl SystemFunction {
+    /// IEEE 1800-2023 20.8.2: every real math call has real formals/result.
+    pub fn real_math_unary(self) -> Option<celox_design::FloatUnaryOp> {
+        Some(match self {
+            Self::Ln => celox_design::FloatUnaryOp::Ln,
+            Self::Log10 => celox_design::FloatUnaryOp::Log10,
+            Self::Exp => celox_design::FloatUnaryOp::Exp,
+            Self::Sqrt => celox_design::FloatUnaryOp::Sqrt,
+            Self::Floor => celox_design::FloatUnaryOp::Floor,
+            Self::Ceil => celox_design::FloatUnaryOp::Ceil,
+            Self::Sin => celox_design::FloatUnaryOp::Sin,
+            Self::Cos => celox_design::FloatUnaryOp::Cos,
+            Self::Tan => celox_design::FloatUnaryOp::Tan,
+            Self::Asin => celox_design::FloatUnaryOp::Asin,
+            Self::Acos => celox_design::FloatUnaryOp::Acos,
+            Self::Atan => celox_design::FloatUnaryOp::Atan,
+            Self::Sinh => celox_design::FloatUnaryOp::Sinh,
+            Self::Cosh => celox_design::FloatUnaryOp::Cosh,
+            Self::Tanh => celox_design::FloatUnaryOp::Tanh,
+            Self::Asinh => celox_design::FloatUnaryOp::Asinh,
+            Self::Acosh => celox_design::FloatUnaryOp::Acosh,
+            Self::Atanh => celox_design::FloatUnaryOp::Atanh,
+            _ => return None,
+        })
+    }
+    pub fn real_math_binary(self) -> Option<celox_design::FloatBinaryOp> {
+        Some(match self {
+            Self::Pow => celox_design::FloatBinaryOp::Pow,
+            Self::Atan2 => celox_design::FloatBinaryOp::Atan2,
+            Self::Hypot => celox_design::FloatBinaryOp::Hypot,
+            _ => return None,
+        })
+    }
+    pub fn is_real_math(self) -> bool {
+        self.real_math_unary().is_some() || self.real_math_binary().is_some()
+    }
+    pub fn eval_real_math(self, args: &[f64]) -> Option<f64> {
+        use celox_design::{FloatPrecision, eval_float_binary, eval_float_unary};
+        let bits = if let Some(op) = self.real_math_unary() {
+            let [arg] = args else {
+                return None;
+            };
+            eval_float_unary(op, FloatPrecision::F64, arg.to_bits())
+        } else {
+            let [left, right] = args else {
+                return None;
+            };
+            eval_float_binary(
+                self.real_math_binary()?,
+                FloatPrecision::F64,
+                left.to_bits(),
+                right.to_bits(),
+            )
+        };
+        Some(f64::from_bits(bits))
+    }
+
     /// Calls that return through the timed scheduler's host boundary.
     pub fn is_host_request(self) -> bool {
         matches!(
@@ -138,6 +216,28 @@ impl SystemFunction {
     /// The built-in name (`$` functions or `std::randomize`).
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Ln => "$ln",
+            Self::Log10 => "$log10",
+            Self::Exp => "$exp",
+            Self::Sqrt => "$sqrt",
+            Self::Floor => "$floor",
+            Self::Ceil => "$ceil",
+            Self::Sin => "$sin",
+            Self::Cos => "$cos",
+            Self::Tan => "$tan",
+            Self::Asin => "$asin",
+            Self::Acos => "$acos",
+            Self::Atan => "$atan",
+            Self::Sinh => "$sinh",
+            Self::Cosh => "$cosh",
+            Self::Tanh => "$tanh",
+            Self::Asinh => "$asinh",
+            Self::Acosh => "$acosh",
+            Self::Atanh => "$atanh",
+            Self::Pow => "$pow",
+            Self::Atan2 => "$atan2",
+            Self::Hypot => "$hypot",
+
             Self::Rtoi => "$rtoi",
             Self::Itor => "$itor",
             Self::Realtobits => "$realtobits",
@@ -279,6 +379,28 @@ impl SystemFunction {
     /// literals where it converts them.
     pub fn result_type(self) -> Option<(usize, bool)> {
         match self {
+            Self::Ln
+            | Self::Log10
+            | Self::Exp
+            | Self::Sqrt
+            | Self::Floor
+            | Self::Ceil
+            | Self::Sin
+            | Self::Cos
+            | Self::Tan
+            | Self::Asin
+            | Self::Acos
+            | Self::Atan
+            | Self::Sinh
+            | Self::Cosh
+            | Self::Tanh
+            | Self::Asinh
+            | Self::Acosh
+            | Self::Atanh
+            | Self::Pow
+            | Self::Atan2
+            | Self::Hypot => Some((64, false)),
+
             Self::Timeunit
             | Self::Timeprecision
             | Self::Clog2
@@ -831,27 +953,27 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     function(SystemFunction::Size, 1, Some(2)),
     // 20.8 Math functions
     function(SystemFunction::Clog2, 1, Some(1)),
-    unsupported("$ln", Function),
-    unsupported("$log10", Function),
-    unsupported("$exp", Function),
-    unsupported("$sqrt", Function),
-    unsupported("$pow", Function),
-    unsupported("$floor", Function),
-    unsupported("$ceil", Function),
-    unsupported("$sin", Function),
-    unsupported("$cos", Function),
-    unsupported("$tan", Function),
-    unsupported("$asin", Function),
-    unsupported("$acos", Function),
-    unsupported("$atan", Function),
-    unsupported("$atan2", Function),
-    unsupported("$hypot", Function),
-    unsupported("$sinh", Function),
-    unsupported("$cosh", Function),
-    unsupported("$tanh", Function),
-    unsupported("$asinh", Function),
-    unsupported("$acosh", Function),
-    unsupported("$atanh", Function),
+    function(SystemFunction::Ln, 1, Some(1)),
+    function(SystemFunction::Log10, 1, Some(1)),
+    function(SystemFunction::Exp, 1, Some(1)),
+    function(SystemFunction::Sqrt, 1, Some(1)),
+    function(SystemFunction::Pow, 2, Some(2)),
+    function(SystemFunction::Floor, 1, Some(1)),
+    function(SystemFunction::Ceil, 1, Some(1)),
+    function(SystemFunction::Sin, 1, Some(1)),
+    function(SystemFunction::Cos, 1, Some(1)),
+    function(SystemFunction::Tan, 1, Some(1)),
+    function(SystemFunction::Asin, 1, Some(1)),
+    function(SystemFunction::Acos, 1, Some(1)),
+    function(SystemFunction::Atan, 1, Some(1)),
+    function(SystemFunction::Atan2, 2, Some(2)),
+    function(SystemFunction::Hypot, 2, Some(2)),
+    function(SystemFunction::Sinh, 1, Some(1)),
+    function(SystemFunction::Cosh, 1, Some(1)),
+    function(SystemFunction::Tanh, 1, Some(1)),
+    function(SystemFunction::Asinh, 1, Some(1)),
+    function(SystemFunction::Acosh, 1, Some(1)),
+    function(SystemFunction::Atanh, 1, Some(1)),
     // 20.9 Bit vector system functions
     function(SystemFunction::Countbits, 2, None),
     function(SystemFunction::Countones, 1, Some(1)),

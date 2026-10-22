@@ -145,6 +145,9 @@ pub(super) fn cast_constant_target(
         );
     }
     fn contains_real(expr: &ConstExpr) -> bool {
+        if typecheck::const_expr_has_real_type(&expr.clone().into()) {
+            return true;
+        }
         match expr {
             ConstExpr::Literal(text) => {
                 text.contains(['.', 'e', 'E']) && text.replace('_', "").parse::<f64>().is_ok()
@@ -155,12 +158,7 @@ pub(super) fn cast_constant_target(
         }
     }
     if contains_real(&operand) {
-        let Expr::Literal(text) =
-            parameters::real_literal(&operand, TypeKind::Real, const_env, &HashMap::default())?
-        else {
-            return None;
-        };
-        let value = text.parse::<f64>().ok()?.round();
+        let value = typecheck::eval_real_const_expr(&operand.clone().into(), const_env)?.round();
         let (width, signed) = match target {
             RuntimeCastTarget::Integral {
                 target,

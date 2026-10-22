@@ -698,7 +698,9 @@ fn emit_instruction(
                     P::F32 => dynasm!(ops ; .arch aarch64 ; fmov W(dst), s0),
                     P::F64 => dynasm!(ops ; .arch aarch64 ; fmov X(dst), d0),
                 },
-                F::Rem | F::Pow => unreachable!("complex float operations use helpers"),
+                F::Rem | F::Pow | F::Atan2 | F::Hypot => {
+                    unreachable!("complex float operations use helpers")
+                }
             }
         }
         MInst::FloatUnary {

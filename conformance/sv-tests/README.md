@@ -134,8 +134,12 @@ in 4state. No passing case regresses. The `12.7.3--foreach`, `12.7.4--while` and
 which is rejected because its element and character selects are not yet told
 apart.
 
-The `$realtime` extension updates two expectation rows: the `20.3--realtime`
-probe now passes elaboration in both state modes.
+The real system-function extension updates twenty expectation rows: `$realtime`
+passes elaboration and the nine `20.8` probes for `atan2`, `ceil`, `exp`, `floor`,
+`hypot`, `ln`, `log10`, `pow` and `sqrt` pass simulation in both state modes.
+The full pinned run reviewed all 2,054 rows, with 496 passing cases in 2state
+and 498 in 4state; no passing case regresses. The existing scanf probes retain
+their verdicts because their other unsupported constructs remain unchanged.
 
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains

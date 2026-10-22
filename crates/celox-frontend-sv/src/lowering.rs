@@ -6196,7 +6196,28 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         }
         // The random number and time functions need process state, and the
         // analyzer folds the other functions to constants.
-        SystemFunction::Rtoi
+        SystemFunction::Ln
+        | SystemFunction::Log10
+        | SystemFunction::Exp
+        | SystemFunction::Sqrt
+        | SystemFunction::Floor
+        | SystemFunction::Ceil
+        | SystemFunction::Sin
+        | SystemFunction::Cos
+        | SystemFunction::Tan
+        | SystemFunction::Asin
+        | SystemFunction::Acos
+        | SystemFunction::Atan
+        | SystemFunction::Sinh
+        | SystemFunction::Cosh
+        | SystemFunction::Tanh
+        | SystemFunction::Asinh
+        | SystemFunction::Acosh
+        | SystemFunction::Atanh
+        | SystemFunction::Pow
+        | SystemFunction::Atan2
+        | SystemFunction::Hypot
+        | SystemFunction::Rtoi
         | SystemFunction::Itor
         | SystemFunction::Realtobits
         | SystemFunction::Bitstoreal

@@ -570,10 +570,26 @@ impl SIRTranslator {
         } else {
             state.builder.ins().iconst(types::I64, 0)
         };
-        if !matches!(
+        if matches!(
             op,
-            FloatOperation::Binary(FB::Rem | FB::Pow)
-                | FloatOperation::Unary(FU::ToSigned { .. } | FU::ToUnsigned { .. })
+            FloatOperation::Binary(
+                FB::Add
+                    | FB::Sub
+                    | FB::Mul
+                    | FB::Div
+                    | FB::Eq
+                    | FB::Ne
+                    | FB::Lt
+                    | FB::Le
+                    | FB::Gt
+                    | FB::Ge
+            ) | FloatOperation::Unary(
+                FU::Neg
+                    | FU::ToBool
+                    | FU::FromSigned { .. }
+                    | FU::FromUnsigned { .. }
+                    | FU::Convert { .. }
+            )
         ) {
             let ty = if precision == FloatPrecision::F64 {
                 types::F64
