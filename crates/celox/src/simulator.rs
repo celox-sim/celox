@@ -320,7 +320,7 @@ mod host {
 
     /// A bounded continuation of the backend ring. Records remain unformatted
     /// until the eventual consumer supplies its scope/time context.
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct PendingRuntimeEvents {
         events: std::collections::VecDeque<RawRuntimeEvent>,
         missed: u64,
@@ -1187,6 +1187,44 @@ mod host {
                 },
                 capacity,
             );
+        }
+
+        /// The runtime events [`Self::drain_runtime_events`] would return
+        /// next, without taking them.
+        pub(crate) fn peek_runtime_events(&mut self) -> Vec<RuntimeEvent> {
+            self.stash_runtime_events();
+            let raw = self.pending_host_events.lock().unwrap().clone().drain();
+            raw.into_iter()
+                .filter_map(|raw| {
+                    render_raw_runtime_event(
+                        raw,
+                        &self.program.runtime_schema.runtime_event_sites,
+                        RuntimeFormatContext::default(),
+                    )
+                })
+                .collect()
+        }
+
+        /// Make the design state, the host state design code observes and
+        /// the undrained runtime events those of `other`, a simulator of the
+        /// same design. Host state outside the memory image, such as open
+        /// files, is not copied.
+        pub(crate) fn mirror(&mut self, other: &mut Self) {
+            other.stash_runtime_events();
+            self.stash_runtime_events();
+            let pending = other.pending_host_events.lock().unwrap().clone();
+            *self.pending_host_events.lock().unwrap() = pending;
+            let fingerprint = self.state_fingerprint();
+            crate::simulator::StateImage::capture(&other.backend, other.state_fingerprint())
+                .restore_into(&mut self.backend, fingerprint)
+                .expect("a simulator of the same design");
+            self.frozen = other.frozen;
+            self.dirty = other.dirty;
+            self.declaration_phase = other.declaration_phase;
+            self.comb_observer_snapshots
+                .clone_from(&other.comb_observer_snapshots);
+            self.comb_observer_initial_eval = other.comb_observer_initial_eval;
+            self.host_watch.set_log(other.host_watch.log().to_vec());
         }
 
         /// Move the events in the backend's buffer to the queue that
