@@ -1,1 +1,6 @@
-Replay dependent math changes after resolving #1734 master conflicts.
+Revision history for #1735:
+
+rev 2 (content) 2026-10-22 10:13 UTC — Replay dependent math changes after resolving #1734 master conflicts.
+rev 1 (initial) 2026-10-22 10:13 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1735,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"7894c4866c2d82033ff277fa8567b371a4083aee","timestamp_iso":"2026-10-22T10:13:15Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"7894c4866c2d82033ff277fa8567b371a4083aee","new_sha":"4930615e3fb8ed0cbf59a03588880db666703e92","timestamp_iso":"2026-10-22T10:13:15Z","reason":"Replay dependent math changes after resolving #1734 master conflicts.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/7894c4866c2d82033ff277fa8567b371a4083aee...4930615e3fb8ed0cbf59a03588880db666703e92"}]} -->
