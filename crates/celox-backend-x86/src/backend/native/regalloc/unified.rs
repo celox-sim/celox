@@ -369,6 +369,8 @@ fn next_use_bucket(next_use: u32) -> &'static str {
 
 fn inst_opcode(inst: &MInst) -> &'static str {
     match inst {
+        MInst::FloatBinary { .. } => "float_binary",
+        MInst::FloatUnary { .. } => "float_unary",
         MInst::X86Simd(X86SimdInst::Scratch128 { .. }) => "x86_scratch_v128",
         MInst::X86Simd(X86SimdInst::Zero128 { .. }) => "x86_zero_v128",
         MInst::X86Simd(X86SimdInst::Pack128 { .. }) => "x86_pack_v2i64",

@@ -1217,6 +1217,7 @@ fn unconstrained_schedulable_at(
 /// cannot silently turn it into a scheduling barrier (or make it movable).
 fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
     match inst {
+        MInst::FloatBinary { .. } | MInst::FloatUnary { .. } => true,
         MInst::Mov { .. }
         | MInst::X86Simd(_)
         | MInst::Mov32 { .. }

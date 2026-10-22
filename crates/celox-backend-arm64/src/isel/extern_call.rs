@@ -167,3 +167,57 @@ pub(super) fn lower_float(
     });
     define_extern_result(ctx, block, dst, result);
 }
+
+// Native FP operations keep the existing payload register/ABI convention.
+pub(super) fn lower_native_float_binary(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    dst: RegisterId,
+    lhs: RegisterId,
+    rhs: RegisterId,
+    op: celox_sir::FloatBinaryOp,
+    precision: celox_sir::FloatPrecision,
+) -> bool {
+    if matches!(
+        op,
+        celox_sir::FloatBinaryOp::Rem | celox_sir::FloatBinaryOp::Pow
+    ) {
+        return false;
+    }
+    let result = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::FloatBinary {
+        dst: result,
+        lhs: ctx.reg_map.get(lhs),
+        rhs: ctx.reg_map.get(rhs),
+        op,
+        precision,
+    });
+    define_extern_result(ctx, block, dst, result);
+    true
+}
+pub(super) fn lower_native_float_unary(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    dst: RegisterId,
+    src: RegisterId,
+    op: celox_sir::FloatUnaryOp,
+    precision: celox_sir::FloatPrecision,
+) -> bool {
+    if !matches!(
+        op,
+        celox_sir::FloatUnaryOp::Neg
+            | celox_sir::FloatUnaryOp::ToBool
+            | celox_sir::FloatUnaryOp::Convert { .. }
+    ) {
+        return false;
+    }
+    let result = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::FloatUnary {
+        dst: result,
+        src: ctx.reg_map.get(src),
+        op,
+        precision,
+    });
+    define_extern_result(ctx, block, dst, result);
+    true
+}

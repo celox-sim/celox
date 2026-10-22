@@ -15,6 +15,7 @@ mod arithmetic;
 mod control_flow;
 mod diagnostics;
 mod extern_call;
+mod floating;
 mod folded_operands;
 mod instruction;
 mod memory;
