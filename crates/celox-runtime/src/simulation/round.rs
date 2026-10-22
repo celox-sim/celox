@@ -1,4 +1,4 @@
-//! Rounds of a time slot with processes or counted signals: settling,
+//! Rounds of a time slot with processes: settling,
 //! derived-clock edges, domains evaluated before an inactive region and
 //! their publication.
 

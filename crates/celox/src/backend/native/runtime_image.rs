@@ -44,7 +44,10 @@ pub struct NativeProgramInstance {
     shared: Arc<SharedNativeCode>,
     backend: NativeBackend,
     runtime_event_read_seq: u64,
-    comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
+    comb_observer_snapshots: Vec<crate::comb_activation::ObserverSnapshot>,
+    /// Storage reused for the next snapshot.
+    comb_observer_scratch: Vec<crate::comb_activation::ObserverSnapshot>,
+    comb_observer_reads: crate::comb_activation::ObserverReads,
     comb_observer_initial_eval: bool,
     forced_values: crate::HashMap<NativeSignalIdentity, (BigUint, BigUint)>,
 }
@@ -63,11 +66,17 @@ impl NativeProgramInstance {
                 .map_err(NativeProgramLoadError::Attach)?,
         );
         let backend = NativeBackend::from_shared(Arc::clone(&shared));
+        let comb_observer_reads = crate::comb_activation::ObserverReads::new(
+            &backend,
+            &shared.program_image().runtime_schema().comb_observers,
+        );
         let mut instance = Self {
             shared,
             backend,
             runtime_event_read_seq: 0,
             comb_observer_snapshots: Vec::new(),
+            comb_observer_scratch: Vec::new(),
+            comb_observer_reads,
             comb_observer_initial_eval: true,
             forced_values: crate::HashMap::default(),
         };
@@ -421,37 +430,29 @@ impl NativeProgramInstance {
             return result;
         }
 
-        let before = self.snapshot_all_comb_observers();
-        let active_before = before
-            .iter()
-            .zip(&self.comb_observer_snapshots)
-            .map(|(current, previous)| current != previous)
-            .collect::<Vec<_>>();
-        let mut active_sites = vec![false; self.runtime_schema().runtime_event_sites.len()];
-        for (observer, active) in self
-            .runtime_schema()
-            .comb_observers
-            .iter()
-            .zip(active_before)
-        {
-            if active || self.comb_observer_initial_eval {
-                for group_observer in &self.runtime_schema().comb_observers {
-                    if group_observer.activation_group == observer.activation_group {
-                        active_sites[group_observer.site_id as usize] = true;
-                    }
-                }
-            }
-        }
+        let mut snapshots = std::mem::take(&mut self.comb_observer_scratch);
+        self.comb_observer_reads
+            .snapshot(&self.backend, &mut snapshots);
+        let active_sites = crate::comb_activation::active_sites(
+            &self.runtime_schema().comb_observers,
+            self.runtime_schema().runtime_event_sites.len(),
+            &self.comb_observer_reads,
+            &snapshots,
+            &self.comb_observer_snapshots,
+            self.comb_observer_initial_eval,
+        );
         self.backend.set_comb_capture_event_enabled(&active_sites);
         let result = self.eval_comb_backend();
-        let after = self.snapshot_all_comb_observers();
+        self.comb_observer_reads
+            .snapshot(&self.backend, &mut snapshots);
         self.backend.set_comb_capture_event_enabled(&vec![
             false;
             self.runtime_schema()
                 .runtime_event_sites
                 .len()
         ]);
-        self.comb_observer_snapshots = after;
+        self.comb_observer_scratch =
+            std::mem::replace(&mut self.comb_observer_snapshots, snapshots);
         self.comb_observer_initial_eval = false;
         self.check_fatal_events_since(start_seq, context)?;
         result
@@ -529,36 +530,7 @@ impl NativeProgramInstance {
         Ok(())
     }
 
-    fn snapshot_all_comb_observers(&self) -> Vec<Vec<(BigUint, BigUint)>> {
-        self.runtime_schema()
-            .comb_observers
-            .iter()
-            .map(|observer| {
-                observer
-                    .sensitivity
-                    .iter()
-                    .map(|atom| {
-                        let signal = self.backend.resolve_signal(&atom.id);
-                        let (value, mask) = if signal.is_4state {
-                            self.backend.get_four_state(signal)
-                        } else {
-                            (self.backend.get(signal), BigUint::default())
-                        };
-                        (
-                            slice_biguint(&value, atom.access.lsb, atom.access.msb),
-                            slice_biguint(&mask, atom.access.lsb, atom.access.msb),
-                        )
-                    })
-                    .collect()
-            })
-            .collect()
+    fn snapshot_all_comb_observers(&self) -> Vec<crate::comb_activation::ObserverSnapshot> {
+        self.comb_observer_reads.take(&self.backend)
     }
-}
-
-fn slice_biguint(value: &BigUint, least: usize, most: usize) -> BigUint {
-    if most < least {
-        return BigUint::default();
-    }
-    let width = most - least + 1;
-    (value >> least) & ((BigUint::from(1u8) << width) - BigUint::from(1u8))
 }

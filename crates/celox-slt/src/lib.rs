@@ -56,6 +56,10 @@ pub struct CombObserver<A> {
     pub args: Vec<NodeId>,
     pub loop_runner: Option<NodeId>,
     pub sensitivity: Vec<VarAtomBase<A>>,
+    /// Occurrence counters of sensitivity atoms, each paired with its atom.
+    /// Writers count every change, so a value that changes and changes back
+    /// between two activation checks still activates the observer.
+    pub sensitivity_counters: Vec<(VarAtomBase<A>, A)>,
     pub local_inputs: Vec<(A, NodeId)>,
     pub observed_inputs: Vec<VarAtomBase<A>>,
     pub position_inputs: Vec<VarAtomBase<A>>,

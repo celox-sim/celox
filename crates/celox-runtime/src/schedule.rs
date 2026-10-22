@@ -6,7 +6,7 @@ use fxhash::{FxHashMap, FxHashSet};
 use crate::{
     AbsoluteAddr, EventDomain, EventInfo, HostWatch, SignalRef,
     backend::{EventHandle, SimBackend},
-    timing::{CountedDomainRefs, CountedRefs, NbaSiteRefs, ProcessRefs, TermRefs},
+    timing::{CountedDomainRefs, CountedRefs, NbaSiteRefs, ProbeRefs, ProcessRefs, TermRefs},
 };
 
 /// The facts a timed simulation keeps but never changes: event signals,
@@ -24,13 +24,18 @@ pub struct ResolvedSchedule<B: SimBackend> {
     /// Counted signals and the domains their counters trigger.
     pub(crate) counted: Vec<CountedDomainRefs>,
     pub(crate) counted_by_offset: FxHashMap<usize, usize>,
+    /// Each counter that triggers a domain: the counter, the event id, and
+    /// where its last seen value is kept ([`ProcessState::domain_counters`]).
+    pub(crate) counted_triggers: Vec<CountedTrigger>,
+    /// Occurrence probes by the offset of their signal.
+    pub(crate) probes_by_offset: FxHashMap<usize, Vec<ProbeRefs>>,
     /// Whether any process has a nonblocking site with a pending flag.
     pub(crate) has_pending_nba_sites: bool,
     /// Per event ID, the event IDs of clocks computed combinationally from
     /// the event's signal. Empty when the design has none.
     pub(crate) combinational_derived: Vec<Box<[usize]>>,
-    /// The design has process kernels or counted signals. Without either, a
-    /// round is exactly the batch step and skips every process check.
+    /// The design has process kernels. Without them, a round is the batch
+    /// step and skips every process check.
     pub(crate) timed: bool,
     /// Canonical event IDs whose evaluation commits their blocking results.
     pub(crate) active_commits: bit_set::BitSet,
@@ -198,6 +203,34 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             .enumerate()
             .map(|(index, counted)| (counted.refs.signal.offset, index))
             .collect();
+        let counted_triggers = counted
+            .iter()
+            .enumerate()
+            .flat_map(|(index, counted)| {
+                counted
+                    .domains
+                    .iter()
+                    .map(move |&(id, kind)| CountedTrigger {
+                        counter: counted.refs.counter(kind),
+                        id,
+                        seen: (index, crate::timing::kind_index(kind)),
+                    })
+            })
+            .collect();
+        let mut probes_by_offset: FxHashMap<usize, Vec<ProbeRefs>> = FxHashMap::default();
+        for (source, counter) in &model.probes {
+            let probe = ProbeRefs {
+                lsb: source.access.lsb,
+                msb: source.access.msb,
+                counter: resolve(counter),
+            };
+            let probes = probes_by_offset
+                .entry(resolve(&source.id).offset)
+                .or_default();
+            if !probes.contains(&probe) {
+                probes.push(probe);
+            }
+        }
         Self {
             topo_signals,
             domain_kinds,
@@ -207,6 +240,8 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             processes,
             counted,
             counted_by_offset,
+            counted_triggers,
+            probes_by_offset,
             has_pending_nba_sites: model.has_pending_nba_sites,
             combinational_derived,
             timed: model.timed,
@@ -214,6 +249,15 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             time_slots: model.time_slots.iter().map(resolve).collect(),
         }
     }
+}
+
+/// A counter that triggers a domain.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CountedTrigger {
+    pub counter: SignalRef,
+    pub id: usize,
+    /// The index of the counted signal and of the counter kind.
+    pub seen: (usize, usize),
 }
 
 fn counted_refs<B: SimBackend>(
