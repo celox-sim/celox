@@ -2048,16 +2048,21 @@ fn uses_the_first_always_ff_event_as_a_negedge_clock() {
         .build_cranelift()
         .unwrap();
     let clk = sim.event("clk");
+    let clk_signal = sim.signal("clk");
     let rst = sim.signal("rst");
     let d = sim.signal("d");
     let q = sim.signal("q");
+    // A tick from the active level takes no active edge, so the clock idles
+    // high.
     sim.modify(|io| {
+        io.set(clk_signal, 1u8);
         io.set(rst, 0u8);
         io.set(d, 1u8);
     })
     .unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 1u8.into());
+    assert_eq!(sim.get(clk_signal), 1u8.into());
 }
 
 #[test]

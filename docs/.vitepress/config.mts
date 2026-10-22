@@ -67,6 +67,10 @@ export default defineConfig({
                   link: "/ja/guide/writing-tests",
                 },
                 {
+                  text: "実行の意味論",
+                  link: "/ja/guide/execution-semantics",
+                },
+                {
                   text: "celox CLIとcocotb",
                   link: "/ja/guide/cocotb",
                 },
@@ -185,6 +189,7 @@ export default defineConfig({
           text: "Testbenches",
           items: [
             { text: "Writing Tests", link: "/guide/writing-tests" },
+            { text: "Execution Semantics", link: "/guide/execution-semantics" },
             { text: "Celox CLI and cocotb", link: "/guide/cocotb" },
             { text: "4-State Simulation", link: "/guide/four-state" },
             { text: "Parameter Overrides", link: "/guide/parameter-overrides" },
