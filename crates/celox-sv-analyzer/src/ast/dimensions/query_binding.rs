@@ -865,6 +865,7 @@ mod tests {
                 signed: false,
                 is_2state: false,
                 string: false,
+                pattern_type: None,
             },
         );
         for declaration in &tree.declarations().data_declarations {

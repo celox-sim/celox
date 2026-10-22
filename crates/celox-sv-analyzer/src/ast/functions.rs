@@ -267,5 +267,17 @@ fn native_signature(
         }),
         return_signed: result.is_some_and(|ty| ty.signed),
         return_is_2state: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::Bit),
+        return_type: ty
+            .filter(|ty| {
+                !ty.members.is_empty()
+                    || !ty.unpacked_ranges.is_empty()
+                    || ty.packed_ranges.len() > 1
+            })
+            .and_then(|ty| {
+                ty.pattern_target(&const_functions::Environment {
+                    constants: &*context.const_env,
+                    functions: &tree.state.const_functions,
+                })
+            }),
     })
 }

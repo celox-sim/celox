@@ -185,9 +185,7 @@ use dimensions::{
 use expressions::guard_zero_divisions;
 use ff_process::ff_processes_from_scope;
 use functions::{functions_from_scope, procedural_truth_condition};
-use inlining::{
-    expand_expr_calls, expr_signedness, expr_signedness_with_return_types, substitute_expr_idents,
-};
+use inlining::{expand_expr_calls, expr_signedness_with_return_types, substitute_expr_idents};
 pub(crate) use instances::normalize_identifier;
 use instances::{collect_connected_nets, expr_ident_name, instances_from_scope};
 use parameters::{
@@ -1054,6 +1052,7 @@ impl Module {
                         signed: function.return_signed,
                         is_2state: function.return_is_2state,
                         string: function.return_string,
+                        pattern_type: function.return_type.clone(),
                     },
                 )
             }));
@@ -1072,6 +1071,7 @@ impl Module {
                         signed: r#type.is_signed(),
                         is_2state: !r#type.is_4state(),
                         string: false,
+                        pattern_type: None,
                     },
                 ))
             }));
@@ -1081,7 +1081,10 @@ impl Module {
         packed_dimensions.expression_signedness = expression_signedness.clone().into();
         for instance in &mut instances {
             for connection in &mut instance.port_connections {
-                connection.actual_expr = connection.actual_expr.take().map(|expr| {
+                if let Some(pattern) = &mut connection.bound_pattern {
+                    pattern.resolve_types(&packed_dimensions)?;
+                }
+                connection.map_expressions(|expr| {
                     let expr = expand_expr_calls(expr, &functions, &expression_signedness, 0, true);
                     substitute_expr_constants_with_parameter_literals(
                         &syntax_tree.state,
@@ -1214,6 +1217,11 @@ impl Module {
             if let Some(expr) = connection.actual_expr() {
                 collect_connected_nets(expr, &mut connected_nets);
             }
+            if let Some(pattern) = connection.bound_pattern() {
+                pattern.visit_expressions(&mut |expr| {
+                    collect_connected_nets(expr, &mut connected_nets)
+                });
+            }
         }
         if let Some(signal) = signals.iter().find(|signal| {
             !imported.declarations_only
@@ -1265,8 +1273,7 @@ impl Module {
             }
             for instance in &mut instances {
                 for connection in &mut instance.port_connections {
-                    connection.actual_expr =
-                        connection.actual_expr.take().map(|expr| rename.expr(expr));
+                    connection.map_expressions(|expr| rename.expr(expr));
                 }
             }
         }
@@ -1890,6 +1897,7 @@ pub struct PortConnection {
     formal: String,
     actual: String,
     actual_expr: Option<Expr>,
+    bound_pattern: Option<BoundPattern>,
 }
 
 impl PortConnection {
@@ -1898,6 +1906,20 @@ impl PortConnection {
             formal,
             actual,
             actual_expr,
+            bound_pattern: None,
+        }
+    }
+
+    /// An untyped assignment pattern with caller-owned values. The receiving
+    /// port supplies its element types after parameter specialization.
+    pub fn bound_pattern(&self) -> Option<&BoundPattern> {
+        self.bound_pattern.as_ref()
+    }
+
+    fn map_expressions(&mut self, mut map: impl FnMut(Expr) -> Expr) {
+        self.actual_expr = self.actual_expr.take().map(&mut map);
+        if let Some(pattern) = &mut self.bound_pattern {
+            pattern.map_expressions(&mut map);
         }
     }
 
@@ -2435,6 +2457,8 @@ impl ConditionalAssignment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Function {
+    /// The aggregate return type, frozen in its declaration scope.
+    return_type: Option<Type>,
     return_real: bool,
     /// Whether the function returns a `string`.
     return_string: bool,
@@ -2711,6 +2735,8 @@ struct FunctionReturnMetadata {
     is_2state: bool,
     /// The function returns a `string`.
     string: bool,
+    /// Declared aggregate type, available before function bodies are inlined.
+    pattern_type: Option<Type>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

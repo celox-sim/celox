@@ -200,6 +200,7 @@ pub(crate) struct LoweredSvPortConnection {
     pub formal: String,
     pub actual: String,
     pub actual_expr: Option<sv::ir::Expr>,
+    pub bound_pattern: Option<sv::ast::BoundPattern>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -3170,6 +3171,7 @@ fn lower_module_with_overrides(
                         formal: connection.formal().to_string(),
                         actual: connection.actual().to_string(),
                         actual_expr: connection.actual_expr().cloned(),
+                        bound_pattern: connection.bound_pattern().cloned(),
                     })
                     .collect(),
                 array_element,
@@ -3441,6 +3443,7 @@ fn array_element_connections(
                 return Ok(LoweredSvPortConnection {
                     formal: connection.formal.clone(),
                     actual: connection.actual.clone(),
+                    bound_pattern: None,
                     actual_expr: Some(sv::ir::Expr::Select {
                         expr: Box::new(actual_expr.clone()),
                         msb: sv::ir::ConstExpr::Literal((lsb + port_width - 1).to_string()),
@@ -3476,9 +3479,48 @@ fn array_element_connections(
                 formal: connection.formal.clone(),
                 actual: connection.actual.clone(),
                 actual_expr: Some(slice),
+                bound_pattern: None,
             })
         })
         .collect()
+}
+
+fn bind_port_patterns(
+    connections: &mut [LoweredSvPortConnection],
+    child: &LoweredSvModule,
+) -> Result<(), ParserError> {
+    for connection in connections {
+        let Some(pattern) = connection.bound_pattern.take() else {
+            continue;
+        };
+        let port = child
+            .source
+            .ports()
+            .iter()
+            .find(|port| port.name() == connection.formal)
+            .ok_or_else(|| {
+                ParserError::illegal_context(
+                    "systemverilog port assignment pattern",
+                    format!("unknown port `{}`", connection.formal),
+                    None,
+                )
+            })?;
+        if port.direction() != sv::ir::PortDirection::Input {
+            return Err(ParserError::illegal_context(
+                "systemverilog port assignment pattern",
+                "only input port assignment patterns are supported",
+                None,
+            ));
+        }
+        connection.actual_expr = Some(port.bind_pattern(&pattern).map_err(|error| {
+            ParserError::illegal_context(
+                "systemverilog port assignment pattern",
+                error.to_string(),
+                None,
+            )
+        })?);
+    }
+    Ok(())
 }
 
 pub(crate) fn attach_instance_glue(
@@ -3512,6 +3554,8 @@ pub(crate) fn attach_instance_glue(
         let Some(child) = lowered_modules.get(&child_id) else {
             return Err(unsupported_sv_instance(instance.module_name.clone()));
         };
+        let mut authored_connections = instance.port_connections.clone();
+        bind_port_patterns(&mut authored_connections, child)?;
         let connections = match instance.array_element {
             Some((position, count)) => {
                 module
@@ -3523,7 +3567,7 @@ pub(crate) fn attach_instance_glue(
                         .insert(instance.instance_name.clone(), instance.array_index_base);
                 }
                 array_element_connections(
-                    &instance.port_connections,
+                    &authored_connections,
                     child,
                     position,
                     count,
@@ -3533,7 +3577,7 @@ pub(crate) fn attach_instance_glue(
                     &lowered.parameter_types,
                 )?
             }
-            None => instance.port_connections.clone(),
+            None => authored_connections,
         };
         ensure_parent_output_signals(
             module,

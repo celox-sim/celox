@@ -12,6 +12,8 @@ pub(super) use selects::{select_member, whole_member};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct PackedMember {
+    /// Nominal aggregate identity (IEEE 1800-2023 6.22.1), retained through aliases.
+    owner: Arc<str>,
     name: String,
     offset: usize,
     r#type: Type,

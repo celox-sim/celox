@@ -367,6 +367,18 @@ fn return_metadata(
         signed: ty.is_some_and(Type::is_signed),
         is_2state: ty.is_some_and(|ty| ty.kind() == TypeKind::Bit),
         string: ty.is_some_and(|ty| ty.kind() == TypeKind::String),
+        pattern_type: ty
+            .filter(|ty| {
+                !ty.members.is_empty()
+                    || !ty.unpacked_ranges.is_empty()
+                    || ty.packed_ranges.len() > 1
+            })
+            .and_then(|ty| {
+                ty.pattern_target(&const_functions::Environment {
+                    constants: &*context.const_env,
+                    functions: &state.const_functions,
+                })
+            }),
     }
 }
 fn signature(
@@ -707,6 +719,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
                             signed: ty.is_signed(),
                             is_2state: !ty.is_4state(),
                             string: false,
+                            pattern_type: None,
                         },
                     );
                     publish(&tree.state.dimensions, &key, &context);

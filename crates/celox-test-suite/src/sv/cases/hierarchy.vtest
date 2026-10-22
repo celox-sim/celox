@@ -750,3 +750,499 @@
   (assert_eq y 0x12)
   (modify (set sel 1))
   (assert_eq y 0xa5))
+
+; IEEE 1800-2023 10.8 and 10.9: the input port supplies the assignment
+; context, including dimensions after parameter specialization.
+(case port_patterns_use_specialized_formal_shapes
+  (source "port_pattern_shapes.sv" #"
+    module Child #(parameter W=4, N=2)(
+      input logic [W-1:0] cfg[2:N+1], output wire [W*N-1:0] y);
+      for (genvar k=2; k<N+2; k=k+1) begin
+        assign y[(k-2)*W +: W] = cfg[k];
+      end
+    endmodule
+    module Top(output wire [14:0] named, output wire [13:0] ordered);
+      localparam N=99;
+      Child #(.W(5), .N(3)) a(.cfg('{3{'1}}), .y(named));
+      Child #(7, 2) b(('{default:'1}), ordered);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq named 0x7fff)
+  (assert_eq ordered 0x3fff))
+
+(case port_patterns_keep_caller_values_and_generated_names
+  (source "port_pattern_values.sv" #"
+    module Child #(parameter W=8)(input logic [W-1:0] cfg[2], output wire [2*W-1:0] y);
+      assign y = {cfg[1], cfg[0]};
+    endmodule
+    module Top(input logic signed [3:0] a, input logic [3:0] b,
+      output wire [15:0] y, calls, output wire [7:0] generated);
+      localparam KEY=1;
+      function automatic logic signed [3:0] neg(input logic signed [3:0] x);
+        return -x;
+      endfunction
+      Child c(.cfg('{KEY:b, default:a}), .y(y));
+      Child d(.cfg('{neg(a), b}), .y(calls));
+      for (genvar g=0; g<2; g=g+1) begin: bank
+        wire [3:0] v = b + g;
+        Child #(.W(2)) c(.cfg('{v, g+1}), .y(generated[4*g +: 4]));
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0xe) (set b 8))
+  (assert_eq y 0x08fe)
+  (assert_eq calls 0x0802)
+  (assert_eq generated 0x94)
+  (modify (set a 7) (set b 15))
+  (assert_eq y 0x0f07)
+  (assert_eq calls 0x0ff9)
+  (assert_eq generated 0x87))
+
+(case port_patterns_bind_nested_structure_elements
+  (source "port_pattern_structs.sv" #"
+    package P;
+      typedef struct packed {logic [3:0] tag; logic signed [7:0] data;} item_t;
+    endpackage
+    module Child(input P::item_t cfg[2], output wire [23:0] y);
+      assign y = {cfg[1], cfg[0]};
+    endmodule
+    module Top(input logic [3:0] tag, input logic signed [3:0] data,
+      output wire [23:0] y);
+      Child c(.cfg('{'{tag:tag, data:data}, '{default:'1}}), .y(y));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set tag 3) (set data 0xe))
+  (assert_eq y 0xfff3fe)
+  (modify (set tag 9) (set data 2))
+  (assert_eq y 0xfff902))
+
+(case port_patterns_preserve_four_state_elements
+  (four_state)
+  (source "port_pattern_unknowns.sv" #"
+    module Four(input logic [7:0] cfg[2], output wire [15:0] y);
+      assign y = {cfg[1], cfg[0]};
+    endmodule
+    module Two(input bit [7:0] cfg[2], output wire [15:0] y);
+      assign y = {cfg[1], cfg[0]};
+    endmodule
+    module Top(input logic [3:0] a, output wire [15:0] four, two);
+      Four f(.cfg('{a, 'x}), .y(four));
+      Two t(.cfg('{a, 'x}), .y(two));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a (fourstate 0xf 4)))
+  (assert_eq four (fourstate 0xff0f 0xff04))
+  (assert_eq two 0xb))
+
+(case port_patterns_reject_incorrect_element_counts
+  (source "port_pattern_count.sv" #"
+    module Child #(parameter N=3)(input logic [7:0] cfg[N], output wire [7:0] y);
+      assign y = cfg[0];
+    endmodule
+    module Top(output wire [7:0] y);
+      Child c(.cfg('{2{'0}}), .y(y));
+    endmodule
+  "#)
+  (top Top)
+  (expect reject))
+
+(case port_pattern_review_mixed_state_structs
+  (four_state)
+  (source "pattern_mixed_state.sv" #"
+    package P;
+      typedef struct packed {bit [3:0] a; logic [3:0] b;} item_t;
+      typedef item_t [1:0][1:0] quad_t;
+    endpackage
+    module Single(input P::item_t cfg, output wire [7:0] y);
+      assign y = cfg;
+    endmodule
+    module Array(input P::item_t cfg[2], output wire [15:0] y);
+      assign y = {cfg[1], cfg[0]};
+    endmodule
+    module Packed(input P::quad_t cfg, output wire [31:0] y);
+      assign y = cfg;
+    endmodule
+    module Top(input logic [3:0] a, output wire [7:0] direct, typed,
+      output wire [15:0] defaults, output wire [31:0] packed_default, packed_typed);
+      Single s(.cfg('{a:a, b:'x}), .y(direct));
+      Single t(.cfg(P::item_t'{a:a, b:'x}), .y(typed));
+      Array d(.cfg('{default:'x}), .y(defaults));
+      Packed p(.cfg('{default:'x}), .y(packed_default));
+      Packed pt(.cfg(P::quad_t'{default:'x}), .y(packed_typed));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a (fourstate 0xf 0xf)))
+  (assert_eq direct (fourstate 0x0f 0x0f))
+  (assert_eq typed (fourstate 0x0f 0x0f))
+  (assert_eq defaults (fourstate 0x0f0f 0x0f0f))
+  (assert_eq packed_default (fourstate 0x0f0f0f0f 0x0f0f0f0f))
+  (assert_eq packed_typed (fourstate 0x0f0f0f0f 0x0f0f0f0f))
+  (modify (set a (fourstate 0xa 0xc)))
+  (assert_eq direct (fourstate 0x2f 0x0f))
+  (assert_eq typed (fourstate 0x2f 0x0f)))
+
+(case port_pattern_review_member_key_collisions
+  (source "pattern_key_collision.sv" #"
+    package P;
+      typedef struct packed {logic [3:0] tag, data;} item_t;
+    endpackage
+    module StructChild(input P::item_t cfg, output wire [7:0] y);
+      assign y = cfg;
+    endmodule
+    module ArrayChild(input logic [3:0] cfg[2:3], output wire [7:0] y);
+      assign y = {cfg[2], cfg[3]};
+    endmodule
+    module Top(input logic [3:0] value, output wire [7:0] members, indices);
+      localparam tag=0, data=1, KEY=2;
+      StructChild s(.cfg('{tag:value, data:3}), .y(members));
+      ArrayChild a(.cfg('{KEY:value, default:3}), .y(indices));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set value 5))
+  (assert_eq members 0x53)
+  (assert_eq indices 0x53)
+  (modify (set value 0xe))
+  (assert_eq members 0xe3)
+  (assert_eq indices 0xe3))
+
+(case port_pattern_review_packed_struct_arrays
+  (source "pattern_struct_array.sv" #"
+    package P;
+      typedef struct packed {logic [1:0] a, b;} item_t;
+      typedef item_t [1:0] pair_t;
+    endpackage
+    module Child(input P::item_t [1:0] cfg, output wire [7:0] y);
+      assign y = cfg;
+    endmodule
+    module Top(output wire [7:0] defaults, nested, typed);
+      Child d(.cfg('{default:'1}), .y(defaults));
+      Child n(.cfg('{'{a:1,b:2}, '{a:2,b:3}}), .y(nested));
+      Child t(.cfg(P::pair_t'{default:'1}), .y(typed));
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq defaults 0xff)
+  (assert_eq nested 0x6b)
+  (assert_eq typed 0xff))
+
+(case port_pattern_review_interface_inputs
+  (source "pattern_interface_ports.sv" #"
+    interface Cfg #(parameter W=4, N=2)(input logic [W-1:0] cfg[N]);
+    endinterface
+    module Top(input logic [3:0] value,
+      output wire [7:0] defaults, runtime_values, array_values, generated,
+      output wire [9:0] specialized, output wire [7:0] function_values);
+      function automatic logic [3:0] plus_one(input logic [3:0] x);
+        return x+1;
+      endfunction
+      Cfg d(.cfg('{default:'1}));
+      Cfg r(.cfg('{value, '1}));
+      Cfg a[1:0](.cfg('{default:'1}));
+      Cfg #(.W(5)) s(.cfg('{value, '1}));
+      Cfg f(.cfg('{plus_one(value), '0}));
+      assign specialized = {s.cfg[1], s.cfg[0]};
+      assign function_values = {f.cfg[1], f.cfg[0]};
+      assign defaults = {d.cfg[1], d.cfg[0]};
+      assign runtime_values = {r.cfg[1], r.cfg[0]};
+      assign array_values = {a[1].cfg[0], a[0].cfg[1]};
+      for (genvar g=0; g<2; g=g+1) begin: bank
+        wire [3:0] v = value+g;
+        Cfg i(.cfg('{v, '0}));
+        assign generated[4*g +: 4] = i.cfg[0];
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set value 5))
+  (assert_eq defaults 0xff)
+  (assert_eq runtime_values 0xf5)
+  (assert_eq array_values 0xff)
+  (assert_eq generated 0x65)
+  (assert_eq specialized 0x3e5)
+  (assert_eq function_values 6)
+  (modify (set value 0xe))
+  (assert_eq runtime_values 0xfe)
+  (assert_eq generated 0xfe)
+  (assert_eq specialized 0x3ee)
+  (assert_eq function_values 0xf))
+
+(case port_pattern_review_aggregate_defaults
+  (source "pattern_aggregate_defaults.sv" #"
+    package P;
+      typedef struct packed {logic [3:0] a, b;} item_t;
+      typedef item_t items_t[2];
+      typedef struct packed {logic [3:0] a, b;} other_t;
+    endpackage
+    module Child(input P::item_t cfg[2], output wire [15:0] y);
+      assign y = {cfg[1], cfg[0]};
+    endmodule
+    module Other(input P::other_t cfg[2], output wire [15:0] y);
+      assign y = {cfg[1], cfg[0]};
+    endmodule
+    interface Cfg(input P::item_t cfg[2]);
+    endinterface
+    module Top(input P::item_t value, output wire [15:0] direct, typed, called, interfaced, distinct);
+      function automatic P::item_t identity(input P::item_t x);
+        return x;
+      endfunction
+      Child d(.cfg('{default:value}), .y(direct));
+      Child t(.cfg(P::items_t'{default:value}), .y(typed));
+      Child c(.cfg('{default:identity(value)}), .y(called));
+      Cfg i(.cfg('{default:value}));
+      Other o(.cfg('{default:value}), .y(distinct));
+      assign interfaced = {i.cfg[1], i.cfg[0]};
+    endmodule
+  "#)
+  (top Top)
+  (modify (set value 0x35))
+  (assert_eq direct 0x3535)
+  (assert_eq typed 0x3535)
+  (assert_eq called 0x3535)
+  (assert_eq interfaced 0x3535)
+  (assert_eq distinct 0x5555)
+  (modify (set value 0xa6))
+  (assert_eq direct 0xa6a6)
+  (assert_eq typed 0xa6a6)
+  (assert_eq called 0xa6a6)
+  (assert_eq interfaced 0xa6a6)
+  (assert_eq distinct 0x6666))
+
+(case port_pattern_review_packed_value_types
+  (source "pattern_packed_value_types.sv" #"
+    package P;
+      typedef logic [1:0][3:0] pair_t;
+      typedef pair_t items_t[2];
+    endpackage
+    module Child(input P::pair_t cfg[2], output wire [15:0] y);
+      assign y = {cfg[1],cfg[0]};
+    endmodule
+    interface Cfg(input P::pair_t cfg[2]);
+    endinterface
+    module Top(input P::pair_t a,b, input logic sel,
+      output wire [15:0] direct, typed, called, conditional, mixed, interfaced, selected, typed_call, cast_value, member_value, packed_select);
+      function automatic P::pair_t identity(input P::pair_t x);
+        return x;
+      endfunction
+      P::pair_t values[2];
+      struct packed {P::pair_t value;} wrapper;
+      logic [1:0][1:0][3:0] bank;
+      assign wrapper.value=a;
+      assign bank={a,b};
+      Child cv(.cfg('{default:P::pair_t'(a)}), .y(cast_value));
+      Child mv(.cfg('{default:wrapper.value}), .y(member_value));
+      Child ps(.cfg('{default:bank[1]}), .y(packed_select));
+      assign values[0]=a;
+      assign values[1]=b;
+      Child d(.cfg('{default:a}), .y(direct));
+      Child t(.cfg(P::items_t'{default:a}), .y(typed));
+      Child c(.cfg('{default:identity(a)}), .y(called));
+      Child tc(.cfg(P::items_t'{default:identity(a)}), .y(typed_call));
+      Child q(.cfg('{default:(sel ? a : b)}), .y(conditional));
+      Child m(.cfg('{default:(sel ? identity(a) : P::pair_t'(b))}), .y(mixed));
+      Child s(.cfg('{default:values[sel]}), .y(selected));
+      Cfg i(.cfg('{default:a}));
+      assign interfaced={i.cfg[1],i.cfg[0]};
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0xab) (set b 0x34) (set sel 1))
+  (assert_eq direct 0xabab)
+  (assert_eq cast_value 0xabab)
+  (assert_eq member_value 0xabab)
+  (assert_eq packed_select 0xabab)
+  (assert_eq typed 0xabab)
+  (assert_eq called 0xabab)
+  (assert_eq typed_call 0xabab)
+  (assert_eq conditional 0xabab)
+  (assert_eq mixed 0xabab)
+  (assert_eq selected 0x3434)
+  (assert_eq interfaced 0xabab)
+  (modify (set a 0x56) (set sel 0))
+  (assert_eq direct 0x5656)
+  (assert_eq cast_value 0x5656)
+  (assert_eq member_value 0x5656)
+  (assert_eq packed_select 0x5656)
+  (assert_eq typed 0x5656)
+  (assert_eq called 0x5656)
+  (assert_eq typed_call 0x5656)
+  (assert_eq conditional 0x3434)
+  (assert_eq mixed 0x3434)
+  (assert_eq selected 0x5656)
+  (assert_eq interfaced 0x5656))
+
+(case port_pattern_review_conditional_structs
+  (source "pattern_conditional_structs.sv" #"
+    package P;
+      typedef struct packed {logic [3:0] a,b;} item_t;
+      typedef item_t items_t[2];
+    endpackage
+    module Child(input P::item_t cfg[2], output wire [15:0] y);
+      assign y={cfg[1],cfg[0]};
+    endmodule
+    module Top(input P::item_t a,b, input logic sel,
+      output wire [15:0] direct, typed, called, mixed);
+      function automatic P::item_t identity(input P::item_t x);
+        return x;
+      endfunction
+      Child d(.cfg('{default:(sel ? a:b)}), .y(direct));
+      Child t(.cfg(P::items_t'{default:(sel ? a:b)}), .y(typed));
+      Child c(.cfg('{default:(sel ? identity(a):identity(b))}), .y(called));
+      Child m(.cfg('{default:(sel ? identity(a):P::item_t'(b))}), .y(mixed));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0x35) (set b 0xa6) (set sel 1))
+  (assert_eq direct 0x3535)
+  (assert_eq typed 0x3535)
+  (assert_eq called 0x3535)
+  (assert_eq mixed 0x3535)
+  (modify (set sel 0))
+  (assert_eq direct 0xa6a6)
+  (assert_eq typed 0xa6a6)
+  (assert_eq called 0xa6a6)
+  (assert_eq mixed 0xa6a6))
+
+(case port_pattern_review_subarray_items
+  (source "pattern_subarray_items.sv" #"
+    module Child(input logic [7:0] cfg[2][2], output wire [31:0] y);
+      assign y={cfg[1][1],cfg[1][0],cfg[0][1],cfg[0][0]};
+    endmodule
+    interface Cfg(input logic [7:0] cfg[2][2]);
+    endinterface
+    module Top(input logic [7:0] a,b, output wire [31:0] positional, keyed, repeated, interfaced);
+      logic [7:0] row[4:5];
+      assign row[4]=a;
+      assign row[5]=b;
+      Child p(.cfg('{row,row}), .y(positional));
+      Child k(.cfg('{0:row,1:row}), .y(keyed));
+      Child r(.cfg('{2{row}}), .y(repeated));
+      Cfg i(.cfg('{row,row}));
+      assign interfaced={i.cfg[1][1],i.cfg[1][0],i.cfg[0][1],i.cfg[0][0]};
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0x12) (set b 0x34))
+  (assert_eq positional 0x34123412)
+  (assert_eq keyed 0x34123412)
+  (assert_eq repeated 0x34123412)
+  (assert_eq interfaced 0x34123412)
+  (modify (set a 0xab) (set b 0xcd))
+  (assert_eq positional 0xcdabcdab)
+  (assert_eq keyed 0xcdabcdab)
+  (assert_eq repeated 0xcdabcdab)
+  (assert_eq interfaced 0xcdabcdab))
+
+(case port_pattern_constant_aggregate_defaults
+  (source "pattern_constant_aggregate_defaults.sv" #"
+    package P;
+      typedef struct packed {logic [3:0] a,b;} item_t;
+      typedef logic [1:0][3:0] pair_t;
+      typedef struct packed signed {logic [3:0] a,b;} signed_item_t;
+      localparam item_t PACKAGE_VALUE='{a:3,b:5};
+    endpackage
+    module Child #(parameter P::item_t CFG[2]='{default:'0})(output wire [15:0] y);
+      assign y={CFG[1],CFG[0]};
+    endmodule
+    module Packed #(parameter P::pair_t CFG[2]='{default:'0})(output wire [15:0] y);
+      assign y={CFG[1],CFG[0]};
+    endmodule
+    module Wide #(parameter logic [15:0] CFG[2]='{default:'0})(output wire [31:0] y);
+      assign y={CFG[1],CFG[0]};
+    endmodule
+    module Top(output wire [31:0] sign_extended, output wire [15:0] packaged, named, called, conditional, typed, cast_value, packed_value, local_value);
+      localparam P::item_t V='{a:3,b:5};
+      localparam P::item_t W='{a:10,b:6};
+      function automatic P::item_t identity(input P::item_t v); return v; endfunction
+      localparam P::pair_t PAIR=8'hab;
+      localparam P::signed_item_t SIGNED='{a:15,b:5};
+      Wide #(.CFG('{default:SIGNED})) sw(.y(sign_extended));
+      Child #(.CFG('{default:P::PACKAGE_VALUE})) pv(.y(packaged));
+      Child #(.CFG('{default:V})) n(.y(named));
+      Child #(.CFG('{default:identity(V)})) c(.y(called));
+      Child #(.CFG('{default:(1'b1 ? V : W)})) q(.y(conditional));
+      Child #(.CFG('{default:P::item_t'{a:3,b:5}})) t(.y(typed));
+      Child #(.CFG('{default:P::item_t'(8'h35)})) cv(.y(cast_value));
+      Child #(.CFG('{default:W})) l(.y(local_value));
+      Packed #(.CFG('{default:PAIR})) p(.y(packed_value));
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq sign_extended 0xfff5fff5)
+  (assert_eq packaged 0x3535)
+  (assert_eq named 0x3535)
+  (assert_eq called 0x3535)
+  (assert_eq conditional 0x3535)
+  (assert_eq typed 0x3535)
+  (assert_eq cast_value 0x3535)
+  (assert_eq local_value 0xa6a6)
+  (assert_eq packed_value 0xabab))
+
+(case port_pattern_default_bounds_require_matching_types
+  (source "pattern_default_bound_mismatch.sv" #"
+    module Child(input byte cfg[2][0:1], output wire [7:0] y);
+      assign y=cfg[0][0];
+    endmodule
+    module Top(output wire [7:0] y);
+      byte row[4:5];
+      Child c(.cfg('{default:row}), .y(y));
+    endmodule
+  "#)
+  (top Top)
+  (expect reject))
+
+(case port_pattern_constant_mixed_state_defaults
+  (four_state)
+  (source "pattern_constant_mixed_state.sv" #"
+    package P;
+      typedef struct packed {bit [3:0] a; logic [3:0] b;} item_t;
+    endpackage
+    module Child #(parameter P::item_t CFG[2]='{default:'0})(output wire [15:0] y);
+      assign y={CFG[1],CFG[0]};
+    endmodule
+    module Top(output wire [15:0] named, typed);
+      localparam P::item_t VALUE='{a:'x,b:'x};
+      Child #(.CFG('{default:VALUE})) n(.y(named));
+      Child #(.CFG('{default:P::item_t'{a:'x,b:'x}})) t(.y(typed));
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq named (fourstate 0x0f0f 0x0f0f))
+  (assert_eq typed (fourstate 0x0f0f 0x0f0f)))
+
+(case port_pattern_constant_literal_defaults
+  (source "pattern_constant_literal.sv" #"
+    package P;
+      typedef struct packed {logic [3:0] a,b;} item_t;
+    endpackage
+    module Child #(parameter P::item_t CFG[2]='{default:'0})(output wire [15:0] y);
+      assign y={CFG[1],CFG[0]};
+    endmodule
+    module Top(output wire [15:0] y);
+      localparam P::item_t VALUE=8'h35;
+      Child #(.CFG('{default:VALUE})) c(.y(y));
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq y 0x3535))
+
+(case port_pattern_constant_unpacked_defaults
+  (source "pattern_constant_unpacked_defaults.sv" #"
+    module Rows #(parameter logic [7:0] CFG[2][0:1]='{default:'0})(output wire [31:0] y);
+      assign y={CFG[1][1],CFG[1][0],CFG[0][1],CFG[0][0]};
+    endmodule
+    module Top(output wire [31:0] default_rows, explicit_rows);
+      localparam logic [7:0] ROW[0:1]='{8'h12,8'h34};
+      localparam logic [7:0] OTHER_ROW[4:5]='{8'hab,8'hcd};
+      Rows #(.CFG('{default:ROW})) dr(.y(default_rows));
+      Rows #(.CFG('{OTHER_ROW,OTHER_ROW})) er(.y(explicit_rows));
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq default_rows 0x34123412)
+  (assert_eq explicit_rows 0xcdabcdab))
