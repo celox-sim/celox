@@ -12,6 +12,7 @@
     "verilator/procedural.json",
     "verilator/random_plusargs.json",
     "verilator/review_regressions.json",
+    "verilator/string.json",
     "verilator/synthesizable.json",
     "verilator/system_functions.json",
     "verilator/timing.json",

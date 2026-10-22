@@ -247,6 +247,7 @@ fn native_signature(
         return_real: ty
             .as_ref()
             .is_some_and(|ty| matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal)),
+        return_string: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::String),
         name: instances::normalize_identifier(&native.name.spelling),
         params,
         body: None,

@@ -124,21 +124,30 @@ pub(super) fn emit_call_extern(
     } else {
         (&[rdi, rsi, rdx, rcx, r8, r9], 0)
     };
-    let arg_count = usize::from(arg_count);
+    // The heap helper takes the state pointer before the staged arguments.
+    let heap = func == celox_sir::extern_abi::HEAP_HELPER_ID;
+    let leading = usize::from(heap);
+    let arg_count = usize::from(arg_count) + leading;
     let stack_args = arg_count.saturating_sub(registers.len()) as i32;
     // Generated code is entered with RSP = 8 (mod 16) and never moves it.
     let frame = ((shadow + 8 * stack_args + 15) & !15) + 8;
     asm.sub(rsp, frame)?;
-    for slot in registers.len()..arg_count {
-        let slot = slot as i32;
+    // C argument `position` comes from call-area slot `position - leading`.
+    for position in registers.len()..arg_count {
+        let slot = (position - leading) as i32;
         asm.mov(rax, qword_ptr(rbx + (area + 8 * slot)))?;
         asm.mov(
-            qword_ptr(rsp + (shadow + 8 * (slot - registers.len() as i32))),
+            qword_ptr(rsp + (shadow + 8 * (position - registers.len()) as i32)),
             rax,
         )?;
     }
-    for (slot, &register) in registers.iter().enumerate().take(arg_count) {
-        asm.mov(register, qword_ptr(rbx + (area + 8 * slot as i32)))?;
+    for (position, &register) in registers.iter().enumerate().take(arg_count) {
+        if position < leading {
+            asm.mov(register, rbx)?;
+        } else {
+            let slot = (position - leading) as i32;
+            asm.mov(register, qword_ptr(rbx + (area + 8 * slot)))?;
+        }
     }
     asm.mov(
         rax,
@@ -146,6 +155,8 @@ pub(super) fn emit_call_extern(
     )?;
     let offset = if func == celox_sir::float::FLOAT_HELPER_ID {
         -8
+    } else if heap {
+        -16
     } else {
         i32::try_from(u64::from(func) * 8).expect("extern function index")
     };

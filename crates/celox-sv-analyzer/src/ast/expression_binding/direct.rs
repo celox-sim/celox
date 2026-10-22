@@ -136,6 +136,11 @@ pub(in crate::ast) fn cast_target_native(
 ) -> Converted<casts::RuntimeCastTarget> {
     let target = ungroup(target, native);
     if let ExprKind::Type(id) = native.expression(target).kind
+        && matches!(&native.data_type(id).kind, celox_sv_syntax::DataTypeKind::Builtin(name) if name == "string")
+    {
+        return Ok(casts::RuntimeCastTarget::String);
+    }
+    if let ExprKind::Type(id) = native.expression(target).kind
         && let Some(ty) = type_binding::binding::bind_in(id, native, tree, dimensions)?
         && matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal)
     {
@@ -225,6 +230,8 @@ enum Finish {
     Cast(casts::RuntimeCastTarget),
     Repeat,
     Inside(Vec<bool>),
+    /// A string operation on the bound children, see [`strings`].
+    StringCall(StringOp),
 }
 
 enum Job {
@@ -374,6 +381,34 @@ pub(in crate::ast) fn bind_value(
                         )?),
                         vec![(*expression, None)],
                     ),
+                    ExprKind::Call {
+                        expression,
+                        arguments: args,
+                    } if strings::method(*expression, native, dimensions).is_some() => {
+                        let (op, base) = strings::method(*expression, native, dimensions)
+                            .expect("checked by the guard");
+                        if op.updates_receiver() {
+                            return Err(unsupported(format!(
+                                "string method `{op}` used as a value"
+                            )));
+                        }
+                        let (_, count) = StringOp::method(&op.to_string()).expect("a method name");
+                        let values = args
+                            .iter()
+                            .map(|arg| arg.value.filter(|_| arg.name.is_none()))
+                            .collect::<Option<Vec<_>>>()
+                            .filter(|values| values.len() == count)
+                            .ok_or_else(|| {
+                                unsupported(format!("arguments of string method `{op}`"))
+                            })?;
+                        (
+                            Finish::StringCall(op),
+                            std::iter::once(base)
+                                .chain(values)
+                                .map(|id| (id, None))
+                                .collect(),
+                        )
+                    }
                     ExprKind::Call {
                         expression,
                         arguments: args,
@@ -608,6 +643,18 @@ pub(in crate::ast) fn bind_value(
                             Vec::new(),
                         )
                     }
+                    ExprKind::Select {
+                        expression,
+                        dimension,
+                    } if strings::native_string(*expression, native, dimensions) => {
+                        let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind else {
+                            return Err(unsupported("part-select of a string"));
+                        };
+                        (
+                            Finish::StringCall(StringOp::Getc),
+                            vec![(*expression, None), (index, None)],
+                        )
+                    }
                     ExprKind::Member { .. } | ExprKind::Select { .. } => {
                         values.push(selected_value(id, native, tree, dimensions)?);
                         continue;
@@ -678,6 +725,11 @@ pub(in crate::ast) fn bind_value(
                 let value = match finish {
                     Finish::Unary(op) => {
                         let operand = operands.pop().ok_or_else(disagreement)?;
+                        if strings::string_value(&operand, dimensions) {
+                            return Err(unsupported(format!(
+                                "operator `{op}` on a string operand"
+                            )));
+                        }
                         if real_value(&operand, dimensions)
                             && !matches!(op.as_str(), "+" | "-" | "!")
                         {
@@ -689,6 +741,12 @@ pub(in crate::ast) fn bind_value(
                     Finish::Binary(op) => {
                         let right = operands.pop().ok_or_else(disagreement)?;
                         let left = operands.pop().ok_or_else(disagreement)?;
+                        if strings::string_value(&left, dimensions)
+                            || strings::string_value(&right, dimensions)
+                        {
+                            values.push(strings::binary(&op, left, right, dimensions)?);
+                            continue;
+                        }
                         if (real_value(&left, dimensions) || real_value(&right, dimensions))
                             && !matches!(
                                 op.as_str(),
@@ -735,16 +793,32 @@ pub(in crate::ast) fn bind_value(
                         Expr::Literal(ty.width.to_string())
                     }
                     Finish::Mux => {
-                        let else_expr = operands.pop().ok_or_else(disagreement)?;
-                        let then_expr = operands.pop().ok_or_else(disagreement)?;
+                        let mut else_expr = operands.pop().ok_or_else(disagreement)?;
+                        let mut then_expr = operands.pop().ok_or_else(disagreement)?;
                         let condition = operands.pop().ok_or_else(disagreement)?;
+                        if strings::string_value(&then_expr, dimensions)
+                            || strings::string_value(&else_expr, dimensions)
+                        {
+                            then_expr = strings::to_string(then_expr, dimensions);
+                            else_expr = strings::to_string(else_expr, dimensions);
+                        }
                         Expr::Mux {
                             condition: Box::new(condition),
                             then_expr: Box::new(then_expr),
                             else_expr: Box::new(else_expr),
                         }
                     }
+                    Finish::Concat
+                        if operands
+                            .iter()
+                            .any(|operand| strings::string_value(operand, dimensions)) =>
+                    {
+                        strings::call(StringOp::Concat, operands)
+                    }
                     Finish::Concat => Expr::Concat(operands),
+                    Finish::StringCall(op) => {
+                        strings::call(op, strings::operands(op, operands, dimensions))
+                    }
                     Finish::Cast(target) => {
                         let operand = remove_real_division_guards(
                             guard_zero_divisions(
@@ -774,6 +848,21 @@ pub(in crate::ast) fn bind_value(
                                 dimensions,
                             )?
                         }
+                    }
+                    Finish::Repeat
+                        if operands[1..]
+                            .iter()
+                            .any(|operand| strings::string_value(operand, dimensions)) =>
+                    {
+                        // A string replication count need not be constant
+                        // (11.4.12.2).
+                        let count = operands.remove(0);
+                        let string = if operands.len() == 1 {
+                            strings::to_string(operands.remove(0), dimensions)
+                        } else {
+                            strings::call(StringOp::Concat, operands)
+                        };
+                        strings::call(StringOp::Replicate, vec![string, count])
                     }
                     Finish::Repeat => {
                         let count = operands.remove(0);

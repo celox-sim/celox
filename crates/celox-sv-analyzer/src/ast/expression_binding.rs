@@ -6,12 +6,16 @@ mod direct;
 mod lvalues;
 #[cfg(test)]
 mod selected;
+mod strings;
 pub(super) use calls::{statement as call_statement, statement_root as call_statement_root};
 pub(super) use direct::{
     arguments, bind_value, call_name as native_name, callable_name, cast_target_native, real_value,
     remove_real_division_guards, ungroup,
 };
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
+pub(super) use strings::{
+    call as string_call, method as string_method, native_string, to_string as string_operand,
+};
 fn disagreement() -> AnalyzerError {
     AnalyzerError::Parse("invalid native expression ownership".into())
 }
@@ -33,7 +37,14 @@ pub(super) fn expression(
         LValue::Ident(name) => dimensions.get(name),
         _ => None,
     };
-    bind_value(root, native, tree, dimensions, shape)
+    let value = bind_value(root, native, tree, dimensions, shape)?;
+    // A string literal or integral value assigned to a string becomes its
+    // bytes (IEEE 1800-2023 6.16).
+    Ok(if shape.is_some_and(|shape| shape.string) {
+        string_operand(value, dimensions)
+    } else {
+        value
+    })
 }
 pub(super) fn value(
     root: ExprId,

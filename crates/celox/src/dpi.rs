@@ -83,7 +83,7 @@ impl DpiSymbols {
         }
         // Internal helpers precede the user table so persisted machine code
         // resolves them in the loading process instead of embedding addresses.
-        let mut addresses = vec![celox_sir::float::evaluate as *const () as usize];
+        let mut addresses = internal_helpers();
         addresses.extend(
             functions
                 .iter()
@@ -170,16 +170,17 @@ pub(crate) struct ExternFunctionTable {
 impl Default for ExternFunctionTable {
     fn default() -> Self {
         Self {
-            addresses: vec![celox_sir::float::evaluate as *const () as usize].into(),
+            addresses: internal_helpers().into(),
         }
     }
 }
 
 impl ExternFunctionTable {
     /// The user table's address, which the state header holds. The internal
-    /// floating-point helper occupies the immediately preceding slot.
+    /// floating-point helper occupies the immediately preceding slot, and the
+    /// heap helper the one before it.
     pub(crate) fn as_ptr(&self) -> *const usize {
-        self.addresses.as_ptr().wrapping_add(1)
+        self.addresses.as_ptr().wrapping_add(INTERNAL_HELPERS)
     }
 
     /// Call function `func` with C integer arguments and return its C integer
@@ -191,8 +192,35 @@ impl ExternFunctionTable {
     /// integer or nothing, as its DPI-C import declares.
     pub(crate) unsafe fn call(&self, func: u32, args: &[u64]) -> u64 {
         // SAFETY: forwarded from the caller.
-        unsafe { call_c(self.addresses[func as usize + 1], args) }
+        unsafe { call_c(self.addresses[func as usize + INTERNAL_HELPERS], args) }
     }
+}
+
+/// The number of internal helpers in front of the user extern function table.
+const INTERNAL_HELPERS: usize = 2;
+
+/// The internal helpers, in table order: the heap helper, then the
+/// floating-point helper.
+fn internal_helpers() -> Vec<usize> {
+    vec![
+        heap_helper as *const () as usize,
+        celox_sir::float::evaluate as *const () as usize,
+    ]
+}
+
+/// The heap helper that compiled code calls for
+/// [`celox_sir::extern_abi::HEAP_HELPER_ID`], with the state pointer first.
+pub(crate) extern "C" fn heap_helper(state: *mut u8, code: u64, a: u64, b: u64, c: u64) -> u64 {
+    // SAFETY: compiled code passes the state pointer of an image whose
+    // header holds the address of its backend's live heap, and the backend
+    // runs no other code on that heap during the call.
+    let heap = unsafe {
+        &mut *state
+            .add(celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET)
+            .cast::<*mut celox_heap::Heap>()
+            .read()
+    };
+    heap.call(code, a, b, c)
 }
 
 /// Call the C function at `address` with integer arguments.

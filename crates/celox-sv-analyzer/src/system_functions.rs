@@ -498,12 +498,134 @@ impl fmt::Display for SystemTask {
     }
 }
 
+/// An operation on `string` values (IEEE 1800-2023 6.16, 11.4).
+///
+/// The analyzer rewrites string operators, methods and conversions into
+/// calls of these, so the frontend dispatches on them instead of on the
+/// integral operators that a string handle would otherwise reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StringOp {
+    /// A string holding the bytes of an integral operand, most significant
+    /// first, without NUL bytes: a cast to `string` (6.24.1), or a string
+    /// literal or integral value assigned to a string.
+    FromBits,
+    /// `{a, b, ...}` (11.4.12.2). Integral operands contribute their bytes.
+    Concat,
+    /// `{n{s}}` (11.4.12.2), with the arguments `s` and `n`.
+    Replicate,
+    /// `str.compare(s)` (6.16.6), and the ordering of relational operators.
+    Compare,
+    /// `str.icompare(s)` (6.16.7).
+    ICompare,
+    /// `str.len()` (6.16.1).
+    Len,
+    /// `str.getc(i)` and `str[i]` (6.16.3).
+    Getc,
+    /// `str.putc(i, c)` and `str[i] = c` (6.16.2), as the updated string.
+    Putc,
+    /// `str.substr(i, j)` (6.16.8).
+    Substr,
+    /// `str.toupper()` (6.16.4).
+    ToUpper,
+    /// `str.tolower()` (6.16.5).
+    ToLower,
+    /// `str.atoi()` and its radix variants (6.16.9).
+    Atoi(Radix),
+    /// `str.itoa(i)` and its radix variants (6.16.11-14), as the new string.
+    Itoa(Radix),
+}
+
+impl StringOp {
+    /// Whether the result is a string rather than an integral value.
+    pub fn returns_string(self) -> bool {
+        matches!(
+            self,
+            Self::FromBits
+                | Self::Concat
+                | Self::Replicate
+                | Self::Putc
+                | Self::Substr
+                | Self::ToUpper
+                | Self::ToLower
+                | Self::Itoa(_)
+        )
+    }
+
+    /// The width and signedness of the result; a string is a 32-bit handle.
+    pub fn result_type(self) -> (usize, bool) {
+        match self {
+            Self::Compare | Self::ICompare | Self::Len | Self::Atoi(_) => (32, true),
+            Self::Getc => (8, false),
+            _ => (32, false),
+        }
+    }
+
+    /// The method a call names on a string value, and its number of
+    /// arguments.
+    pub fn method(name: &str) -> Option<(Self, usize)> {
+        Some(match name {
+            "len" => (Self::Len, 0),
+            "getc" => (Self::Getc, 1),
+            "putc" => (Self::Putc, 2),
+            "toupper" => (Self::ToUpper, 0),
+            "tolower" => (Self::ToLower, 0),
+            "compare" => (Self::Compare, 1),
+            "icompare" => (Self::ICompare, 1),
+            "substr" => (Self::Substr, 2),
+            "atoi" => (Self::Atoi(Radix::Decimal), 0),
+            "atohex" => (Self::Atoi(Radix::Hexadecimal), 0),
+            "atooct" => (Self::Atoi(Radix::Octal), 0),
+            "atobin" => (Self::Atoi(Radix::Binary), 0),
+            "itoa" => (Self::Itoa(Radix::Decimal), 1),
+            "hextoa" => (Self::Itoa(Radix::Hexadecimal), 1),
+            "octtoa" => (Self::Itoa(Radix::Octal), 1),
+            "bintoa" => (Self::Itoa(Radix::Binary), 1),
+            _ => return None,
+        })
+    }
+
+    /// Whether the method updates the string it is called on instead of
+    /// returning a value (`putc` and the `itoa` family).
+    pub fn updates_receiver(self) -> bool {
+        matches!(self, Self::Putc | Self::Itoa(_))
+    }
+}
+
+impl fmt::Display for StringOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::FromBits => "string cast",
+            Self::Concat => "string concatenation",
+            Self::Replicate => "string replication",
+            Self::Compare => "compare",
+            Self::ICompare => "icompare",
+            Self::Len => "len",
+            Self::Getc => "getc",
+            Self::Putc => "putc",
+            Self::Substr => "substr",
+            Self::ToUpper => "toupper",
+            Self::ToLower => "tolower",
+            Self::Atoi(Radix::Decimal) => "atoi",
+            Self::Atoi(Radix::Hexadecimal) => "atohex",
+            Self::Atoi(Radix::Octal) => "atooct",
+            Self::Atoi(Radix::Binary) => "atobin",
+            Self::Itoa(Radix::Decimal) => "itoa",
+            Self::Itoa(Radix::Hexadecimal) => "hextoa",
+            Self::Itoa(Radix::Octal) => "octtoa",
+            Self::Itoa(Radix::Binary) => "bintoa",
+        };
+        f.write_str(name)
+    }
+}
+
 /// The subroutine a call expression calls.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Callee {
     /// A user function or a DPI import, by its resolved name.
     Subroutine(String),
     System(SystemFunction),
+    /// A string operation, see [`StringOp`].
+    String(StringOp),
 }
 
 impl Callee {
@@ -511,14 +633,14 @@ impl Callee {
     pub fn subroutine(&self) -> Option<&str> {
         match self {
             Self::Subroutine(name) => Some(name),
-            Self::System(_) => None,
+            Self::System(_) | Self::String(_) => None,
         }
     }
 
     /// The system function, if this is one.
     pub fn system(&self) -> Option<SystemFunction> {
         match self {
-            Self::Subroutine(_) => None,
+            Self::Subroutine(_) | Self::String(_) => None,
             Self::System(function) => Some(*function),
         }
     }
@@ -526,7 +648,10 @@ impl Callee {
     /// The width and signedness of a call of a system function that is
     /// lowered as an integral operation; see [`SystemFunction::result_type`].
     pub fn result_type(&self) -> Option<(usize, bool)> {
-        self.system()?.result_type()
+        match self {
+            Self::String(op) => Some(op.result_type()),
+            _ => self.system()?.result_type(),
+        }
     }
 
     /// Rename a user subroutine with `rename`.
@@ -534,6 +659,7 @@ impl Callee {
         match self {
             Self::Subroutine(name) => Self::Subroutine(rename(name)),
             Self::System(function) => Self::System(function),
+            Self::String(op) => Self::String(op),
         }
     }
 
@@ -550,6 +676,7 @@ impl fmt::Display for Callee {
         match self {
             Self::Subroutine(name) => f.write_str(name),
             Self::System(function) => f.write_str(function.name()),
+            Self::String(op) => op.fmt(f),
         }
     }
 }

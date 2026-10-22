@@ -239,7 +239,7 @@ fn rejects_inline_enum_ports_instead_of_scalarizing_them() {
 fn rejects_non_integral_ports_instead_of_scalarizing_them() {
     let error = cranelift_build_error(
         r#"
-        module Top(input string value, output logic y);
+        module Top(input chandle value, output logic y);
             assign y = 1'b0;
         endmodule
         "#,
@@ -6416,7 +6416,7 @@ fn rejects_unsupported_internal_data_types() {
     let error = cranelift_build_error(
         r#"
         module Top(output logic y);
-            string value;
+            chandle value;
             assign y = 1'b0;
         endmodule
         "#,

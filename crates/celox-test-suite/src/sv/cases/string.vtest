@@ -1,0 +1,173 @@
+(group string (category types))
+
+(case assignment_and_display
+  (source "string.sv" #"
+module Top(output bit done);
+    string s, t, empty;
+    initial begin
+        s = "hello";
+        t = s;
+        s = "bye";
+        $display("s=[%s] t=[%s] empty=[%s]", s, t, empty);
+        $display(t);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "s=[bye] t=[hello] empty=[]\nhello\n"))
+
+(case comparisons
+  (source "string.sv" #"
+module Top(output bit [7:0] flags);
+    string a, b;
+    initial begin
+        a = "apple";
+        b = "banana";
+        flags = {a == b, a != b, a < b, a <= b, a > b, a >= b, a == "apple", "apple" == a};
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 0x73))
+
+(case concatenation_and_replication
+  (source "string.sv" #"
+module Top(output bit done);
+    string a, b, joined, twice;
+    int n;
+    initial begin
+        a = "ab";
+        b = "cd";
+        joined = {a, "-", b};
+        n = 3;
+        twice = {n{a}};
+        $display("joined=[%s] repeated=[%s] len=%0d", joined, twice, joined.len());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "joined=[ab-cd] repeated=[ababab] len=5\n"))
+
+(case character_access
+  (source "string.sv" #"
+module Top(output bit [7:0] first, out_of_range, output bit done);
+    string s;
+    initial begin
+        s = "cat";
+        first = s[0];
+        out_of_range = s.getc(3);
+        s[0] = "b";
+        s.putc(2, "r");
+        s[1] = 0;
+        $display("s=[%s]", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (assert_eq first 0x63) (assert_eq out_of_range 0)
+  (expect_output "s=[bar]\n"))
+
+(case methods
+  (source "string.sv" #"
+module Top(output bit done);
+    string s, sub;
+    int cmp, icmp, value, hex;
+    initial begin
+        s = "Hello World";
+        sub = s.substr(6, 10);
+        cmp = s.compare("Hello");
+        icmp = s.icompare("HELLO WORLD");
+        $display("upper=[%s] lower=[%s] sub=[%s] cmp=%0d icmp=%0d bad=[%s]",
+                 s.toupper(), s.tolower(), sub, cmp > 0, icmp, s.substr(5, 2));
+        s = "12_34x";
+        value = s.atoi();
+        s = "fF";
+        hex = s.atohex();
+        $display("atoi=%0d atohex=%0d", value, hex);
+        s.itoa(-42);
+        $display("itoa=[%s]", s);
+        s.hextoa(255);
+        $display("hextoa=[%s]", s);
+        s.bintoa(5);
+        $display("bintoa=[%s]", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "upper=[HELLO WORLD] lower=[hello world] sub=[World] cmp=1 icmp=0 bad=[]\natoi=1234 atohex=255\nitoa=[-42]\nhextoa=[ff]\nbintoa=[101]\n"))
+
+(case casts_from_integral_values
+  (source "string.sv" #"
+module Top(output bit done);
+    string s;
+    bit [31:0] word;
+    initial begin
+        word = 32'h00414243;
+        s = string'(word);
+        $display("cast=[%s] len=%0d", s, s.len());
+        s = "x\0y";
+        $display("nul=[%s] len=%0d", s, s.len());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "cast=[ABC] len=3\nnul=[xy] len=2\n"))
+
+(case strings_across_clock_edges
+  (source "string.sv" #"
+module Top(output int count);
+    string history;
+    logic clk = 0;
+    always #5 clk = ~clk;
+    initial history = "";
+    always @(posedge clk) begin
+        history = {history, "x"};
+        count = history.len();
+        $display("[%s]", history);
+    end
+endmodule
+"#)
+  (top Top)
+  (run_until 30)
+  (assert_eq count 3)
+  (expect_output "[x]\n[xx]\n[xxx]\n"))
+
+(case strings_survive_heap_collections
+  (source "string.sv" #"
+module Top(output int n);
+    logic clk = 0;
+    always #1 clk = ~clk;
+    string kept, last;
+    initial kept = {"ke", "pt"};
+    always @(posedge clk) begin
+        last.itoa(n);
+        last = {"value ", last};
+        n = n + 1;
+    end
+    initial #6000 $display("[%s] [%s] %0d", kept, last, n);
+endmodule
+"#)
+  (top Top)
+  (run_until 6000)
+  (expect_output "[kept] [value 2999] 3000\n"))
+
+(case string_parameters_keep_their_text
+  (source "string.sv" #"
+module Top(output bit same, output bit done);
+    localparam string NAME = "a longer name";
+    localparam string SHORT = "ab";
+    string copy;
+    initial begin
+        copy = NAME;
+        same = NAME == "a longer name";
+        $display("[%s] [%s] [%s] %0d", NAME, SHORT, copy, copy.len());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq same 1)
+  (expect_output "[a longer name] [ab] [a longer name] 13\n"))

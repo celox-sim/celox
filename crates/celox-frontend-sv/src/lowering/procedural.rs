@@ -62,6 +62,37 @@ pub(super) struct MemoryWord {
 }
 
 impl<'a> ProcModule<'a> {
+    /// Whether `expr` has type `string`: a string variable, or an operation
+    /// or function that returns one.
+    pub fn expr_is_string(&self, expr: &sv::ir::Expr) -> bool {
+        match expr {
+            sv::ir::Expr::Ident(name) => self
+                .name_to_id
+                .get(name)
+                .and_then(|id| self.variables.get(id))
+                .is_some_and(|variable| variable.string),
+            sv::ir::Expr::Call {
+                callee: sv::ir::Callee::String(op),
+                ..
+            } => op.returns_string(),
+            sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Subroutine(name),
+                ..
+            } => self.subroutines.get(name).is_some_and(|subroutine| {
+                subroutine
+                    .return_type
+                    .as_ref()
+                    .is_some_and(|ty| ty.kind() == sv::ir::TypeKind::String)
+            }),
+            sv::ir::Expr::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => self.expr_is_string(then_expr) || self.expr_is_string(else_expr),
+            _ => false,
+        }
+    }
+
     pub fn expr_float_precision(&self, expr: &sv::ir::Expr) -> Option<celox_sir::FloatPrecision> {
         use celox_sir::FloatPrecision as P;
         use sv::ir::{BinaryOp, Expr};
@@ -216,6 +247,8 @@ impl<'a> ProcModule<'a> {
                     }
                     continue;
                 }
+                // String operations use the simulator's heap.
+                sv::ir::Callee::String(_) => return true,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             if let Some(subroutine) = self.subroutine(&name) {
@@ -645,6 +678,8 @@ impl<'a> ProcModule<'a> {
             id,
             SvVariable {
                 float: None,
+
+                string: false,
                 path: vec![name.clone()],
                 width: width.max(1),
                 signed,
@@ -713,6 +748,8 @@ impl<'a> ProcModule<'a> {
         }
         let variable = SvVariable {
             float: None,
+
+            string: false,
             path,
             width: 1,
             signed: false,
@@ -783,6 +820,7 @@ impl<'a> ProcModule<'a> {
     pub fn is_callee(&self, callee: &sv::ir::Callee) -> bool {
         match callee {
             sv::ir::Callee::System(function) => function.reads_simulation_state(),
+            sv::ir::Callee::String(_) => true,
             sv::ir::Callee::Subroutine(name) => {
                 self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
             }
@@ -1119,11 +1157,12 @@ pub(super) fn system_task_template(
                 {
                     text.push_str("#g");
                 } else {
-                    text.push(if matches!(value, sv::ir::SystemTaskArg::Str(_)) {
-                        's'
-                    } else {
-                        *radix
-                    });
+                    let string = match value {
+                        sv::ir::SystemTaskArg::Str(_) => true,
+                        sv::ir::SystemTaskArg::Expr(expr) => module.expr_is_string(expr),
+                        sv::ir::SystemTaskArg::Empty => false,
+                    };
+                    text.push(if string { 's' } else { *radix });
                 }
             }
             template = Some(text);
@@ -1172,6 +1211,8 @@ pub(super) fn register_locals(
             id,
             SvVariable {
                 float: type_info.float,
+
+                string: type_info.string,
                 path: vec![local.source_name.clone()],
                 width: type_info.width,
                 signed: type_info.signed,
