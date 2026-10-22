@@ -170,6 +170,91 @@
   (run_to_finish)
   (assert_eq y 9))
 
+(case explicit_list_of_every_read_waits_for_a_change
+  ; Like `always @*`, the list waits before its first run: neither the
+  ; declaration initializers nor the write of `y` wake it (9.4.2).
+  (source "level_list.sv" #"
+                module Top(output logic [7:0] y);
+                    logic [7:0] a = 8'd0;
+                    logic [7:0] b = 8'd0;
+                    initial y = 8'd1;
+                    always @(b, a) y = a + b;
+                    initial begin
+                        #2 a = 8'd3;
+                        #2 b = 8'd5;
+                        #2 $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq y 1)
+  (run_until 3)
+  (assert_eq y 3)
+  (run_to_finish)
+  (assert_eq y 8))
+
+(case list_missing_a_read_does_not_wake_on_it
+  (source "missing_read.sv" #"
+                module Top(output logic [7:0] y);
+                    logic [7:0] a = 8'd0;
+                    logic [7:0] b = 8'd0;
+                    initial y = 8'd0;
+                    always @(a) y = a + b;
+                    initial begin
+                        #2 a = 8'd3;
+                        #2 b = 8'd4;
+                        #2 a = 8'd5;
+                        #2 $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 3)
+  (assert_eq y 3)
+  (run_until 5)
+  (assert_eq y 3)
+  (run_to_finish)
+  (assert_eq y 9))
+
+(case list_with_an_extra_signal_wakes_on_it
+  (source "extra_signal.sv" #"
+                module Top;
+                    logic [7:0] a = 8'd0;
+                    logic [7:0] b = 8'd0;
+                    logic c = 1'b0;
+                    always @(a or b or c) $display("sum=%0d", a + b);
+                    initial begin
+                        #2 a = 8'd3;
+                        #2 c = 1'b1;
+                        #2 $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "sum=3\nsum=3\n"))
+
+(case list_of_every_read_with_a_nonblocking_body_runs
+  (source "nonblocking_list.sv" #"
+                module Top(output logic [7:0] y);
+                    logic [7:0] a = 8'd0;
+                    logic [7:0] b = 8'd0;
+                    initial y = 8'd0;
+                    always @(a or b) y <= a + b;
+                    initial begin
+                        #2 a = 8'd3;
+                        #2 b = 8'd5;
+                        #2 $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 3)
+  (assert_eq y 3)
+  (run_to_finish)
+  (assert_eq y 8))
+
 (case processes_wake_each_other_at_the_same_time
   (source "handshake.sv" #"
                 module Top(output logic [7:0] y);
@@ -577,6 +662,38 @@
   (run_until 2)
   (assert_eq a 4)
   (assert_eq b 3))
+
+(case list_in_a_loop_through_always_comb_converges
+  ; As `always @*` the list would close a combinational loop with the
+  ; always_comb, so it runs as a process and the loop converges.
+  (source "comb_feedback.sv" #"
+    module Top(output bit [7:0] a, b);
+      bit [7:0] s;
+      initial begin #1; s = 1; end
+      always @(s or b) a = (b < 4) ? b + s : b;
+      always_comb b = (a < 4) ? a : 8'd3;
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq a 4)
+  (assert_eq b 3))
+
+(case list_outside_a_loop_keeps_its_value
+  (source "partial_feedback.sv" #"
+    module Top(output bit [7:0] a, b, c);
+      bit [7:0] s;
+      initial begin #1; s = 1; end
+      always @(s or b) a = (b < 4) ? b + s : b;
+      assign b = (a < 4) ? a : 8'd3;
+      always @(b) c = b + 8'd10;
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq a 4)
+  (assert_eq b 3)
+  (assert_eq c 13))
 
 (case pure_function_rhs_preserves_distinct_write_times
  (source "pure-timed-writes.sv" #"

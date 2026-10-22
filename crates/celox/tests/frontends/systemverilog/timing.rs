@@ -64,6 +64,10 @@ timed_cases! {
     fn any_change_waits_wake_on_every_value_change = "timing::any_change_waits_wake_on_every_value_change";
     fn wait_statements_block_until_their_condition_holds = "timing::wait_statements_block_until_their_condition_holds";
     fn level_sensitive_always_runs_as_a_process = "timing::level_sensitive_always_runs_as_a_process";
+    fn explicit_list_of_every_read_waits_for_a_change = "timing::explicit_list_of_every_read_waits_for_a_change";
+    fn list_missing_a_read_does_not_wake_on_it = "timing::list_missing_a_read_does_not_wake_on_it";
+    fn list_with_an_extra_signal_wakes_on_it = "timing::list_with_an_extra_signal_wakes_on_it";
+    fn list_of_every_read_with_a_nonblocking_body_runs = "timing::list_of_every_read_with_a_nonblocking_body_runs";
     fn processes_wake_each_other_at_the_same_time = "timing::processes_wake_each_other_at_the_same_time";
     fn tasks_with_timing_controls_run_in_processes = "timing::tasks_with_timing_controls_run_in_processes";
     fn edge_waits_see_the_signals_the_script_drives = "timing::edge_waits_see_the_signals_the_script_drives";
@@ -87,6 +91,8 @@ timed_cases! {
     fn inactive_time_directives_do_not_change_scheduler_units = "timing::inactive_time_directives_do_not_change_scheduler_units";
     fn blocking_concatenation_publishes_one_event_update = "timing::blocking_concatenation_publishes_one_event_update";
     fn finite_active_feedback_preserves_convergence = "timing::finite_active_feedback_preserves_convergence";
+    fn list_in_a_loop_through_always_comb_converges = "timing::list_in_a_loop_through_always_comb_converges";
+    fn list_outside_a_loop_keeps_its_value = "timing::list_outside_a_loop_keeps_its_value";
     fn pure_function_rhs_preserves_distinct_write_times = "timing::pure_function_rhs_preserves_distinct_write_times";
     fn conditional_writes_preserve_distinct_activation_times = "timing::conditional_writes_preserve_distinct_activation_times";
     fn case_writes_preserve_distinct_activation_times = "timing::case_writes_preserve_distinct_activation_times";

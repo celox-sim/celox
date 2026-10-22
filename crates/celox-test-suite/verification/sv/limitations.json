@@ -1618,6 +1618,25 @@
     }
   },
   {
+    "id": "sv_verilator_event_list_timezero",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+    "reason": "Verilator executes an always procedure whose event control lists variables without edges at time zero, before any listed variable changes: y loses the value its initial procedure wrote, and a $display body prints once more. IEEE 1800-2023 6.8 initializes static declarations before initial/always processes start, and 9.4.2 makes the event control wait for a value change. Icarus passes the unchanged shared assertions; the adapter-free source reproduces the Verilator failure.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/event_list_declaration_startup_verilator.json",
+      "verification/repros/event_list_declaration_startup.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::explicit_list_of_every_read_waits_for_a_change",
+        "timing::list_with_an_extra_signal_wakes_on_it"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_latch_pulse_self_activation",
     "category": "simulator_disagreement",
     "phase": "execute",

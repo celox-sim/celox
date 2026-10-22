@@ -365,6 +365,15 @@ The same startup disagreement affects the complete body in
 and [standalone comparison](verification/repros/wildcard_task_sensitivity_verilator.json)
 show Verilator failing the startup assertion and Icarus completing it.
 
+Verilator 5.052 also executes an `always` with an edgeless variable event list
+at time zero, in `timing::explicit_list_of_every_read_waits_for_a_change` and
+`timing::list_with_an_extra_signal_wakes_on_it`. Its event control waits for a
+value change (IEEE 1800-2023 9.4.2), and declaration initializers precede it
+(6.8). The [adapter-free reproduction](verification/repros/event_list_declaration_startup.sv)
+fails its startup assertion in Verilator and passes in Icarus 13.0, which also
+passes the unchanged shared assertions. The [retained observation](verification/repros/event_list_declaration_startup_verilator.json)
+records both failures; `--include-ignored` retains their assertions.
+
 Verilator 5.052 repeats activation of the self-reading latch in
 `latch::guarded_activation`, producing 3 where one `seed`/`en` change should
 produce 1. The [adapter-free reproduction](verification/repros/latch_activation.sv)
