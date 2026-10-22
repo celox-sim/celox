@@ -1541,17 +1541,38 @@ pub(super) fn subroutine_argument_names(
                 handle.clone(),
                 None,
             );
-            for (native_id, is_static) in classes::declared_methods(tree, &class)? {
+            let mut methods = classes::declared_methods(tree, &class)?
+                .into_iter()
+                .map(|(native_id, is_static)| {
+                    let name = instances::normalize_identifier(
+                        &tree.declarations().subroutine(native_id).name.spelling,
+                    );
+                    (
+                        classes::Class::subroutine_name(&class, &name),
+                        native_id,
+                        is_static,
+                    )
+                })
+                .collect::<Vec<_>>();
+            // A class that cannot be laid out reports why where it is
+            // lowered.
+            if let Ok(layout) = classes::class(tree, &class, &item.env, &aliases) {
+                methods.extend(layout.dispatched_methods().map(|method| {
+                    (
+                        classes::Class::dispatcher_name(&class, &method.name),
+                        method.native,
+                        false,
+                    )
+                }));
+            }
+            for (name, native_id, is_static) in methods {
                 let native = tree.declarations().subroutine(native_id);
                 let mut params = subroutine_param_declarations(native, tree, &item.env, &aliases)?;
                 constructor |= native.kind == celox_sv_syntax::SubroutineKind::Constructor;
                 if !is_static {
                     params.insert(0, this.clone());
                 }
-                let qualified = item.name(&classes::Class::subroutine_name(
-                    &class,
-                    &instances::normalize_identifier(&native.name.spelling),
-                ));
+                let qualified = item.name(&name);
                 directions.insert(
                     qualified.clone(),
                     params.iter().map(|(_, direction, ..)| *direction).collect(),
@@ -1685,6 +1706,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
                 state,
                 item,
                 None,
+                None,
             );
             let subroutine = match (lowered, rejected.as_deref_mut()) {
                 (Ok(subroutine), _) => subroutine,
@@ -1747,16 +1769,18 @@ pub(super) fn lower_subroutine(
     state: &mut BodyState<'_>,
     item: &generate::Item,
     class: Option<&classes::Class>,
+    dispatch: Option<&[(String, Vec<u32>)]>,
 ) -> Converted<Subroutine> {
     let native = tree.declarations().subroutine(native_id);
     let name = instances::normalize_identifier(&native.name.spelling);
     let constructor = native.kind == celox_sv_syntax::SubroutineKind::Constructor;
-    let is_static = class.is_some_and(|class| {
-        class
-            .methods
-            .iter()
-            .any(|method| method.native == native_id && method.qualifiers.is_static)
-    });
+    let is_static = dispatch.is_none()
+        && class.is_some_and(|class| {
+            class
+                .methods
+                .iter()
+                .any(|method| method.native == native_id && method.qualifiers.is_static)
+        });
     let handle = class
         .map(|class| {
             classes::handle_type(tree, &class.name)
@@ -1902,7 +1926,14 @@ pub(super) fn lower_subroutine(
         prologue = builder.constructor_prologue(class, &this.name, result, arguments)?;
     }
     let mut body = prologue;
-    body.extend(builder.native_body(&items, &native.authored_statements)?);
+    match dispatch {
+        Some(targets) => body.push(dispatch_body(
+            targets,
+            &lowered_params,
+            return_var.as_deref(),
+        )),
+        None => body.extend(builder.native_body(&items, &native.authored_statements)?),
+    }
     builder.pop_scope();
     let static_types: HashMap<String, Type> = builder
         .state
@@ -1923,6 +1954,9 @@ pub(super) fn lower_subroutine(
     }
     let mut subroutine = Subroutine {
         name: item.name(&match class {
+            Some(class) if dispatch.is_some() => {
+                classes::Class::dispatcher_name(&class.name, &name)
+            }
             Some(class) => classes::Class::subroutine_name(&class.name, &name),
             None => name,
         }),
@@ -2053,6 +2087,66 @@ pub(super) fn lower_subroutine(
         subroutine.persistent_locals = kept;
     }
     Ok(subroutine)
+}
+
+/// The body of a dispatcher of a virtual method: a call of the override in
+/// `targets` for the class of `this`, the first of `params`, passing the
+/// formals on (IEEE 1800-2023 8.20). Every class an object can have is in
+/// `targets`, so any other class is that of `null`, whose dereference is an
+/// error (8.4).
+fn dispatch_body(
+    targets: &[(String, Vec<u32>)],
+    params: &[SubroutineParam],
+    result: Option<&str>,
+) -> Stmt {
+    let this = Expr::Ident(params[0].name.clone());
+    let args = params
+        .iter()
+        .map(|param| Some(Expr::Ident(param.name.clone())))
+        .collect::<Vec<_>>();
+    let items = targets
+        .iter()
+        .map(|(target, classes)| {
+            let call = match result {
+                Some(result) => Stmt::Assign {
+                    lhs: LValue::Ident(result.to_owned()),
+                    rhs: Expr::Call {
+                        callee: Callee::Subroutine(target.clone()),
+                        args: args.clone(),
+                        arg_order: Vec::new(),
+                    },
+                    nonblocking: false,
+                },
+                None => Stmt::Call {
+                    name: target.clone(),
+                    args: args.clone(),
+                    arg_order: Vec::new(),
+                },
+            };
+            CaseItemBase {
+                labels: classes
+                    .iter()
+                    .map(|id| CaseLabel::Value(Expr::Literal(format!("32'd{id}"))))
+                    .collect(),
+                body: vec![call],
+            }
+        })
+        .collect();
+    let null_dereference = classes::object_call(
+        system_functions::ObjectOp::Load(system_functions::ObjectField {
+            offset: 0,
+            width: 8,
+            signed: false,
+            handle: None,
+        }),
+        vec![this.clone()],
+    );
+    Stmt::Case {
+        kind: CaseKind::Exact,
+        selector: classes::object_call(system_functions::ObjectOp::ClassOf, vec![this]),
+        items,
+        default: Some(vec![Stmt::Eval(null_dereference)]),
+    }
 }
 
 /// The `super.new(args)` call that starts constructor body `items`, as its
@@ -2217,6 +2311,23 @@ fn lower_class(
             state,
             item,
             Some(&class),
+            None,
+        )?);
+    }
+    for method in class.dispatched_methods() {
+        let targets =
+            classes::dispatch_targets(tree, name, &method.name, declaration_env, type_aliases)?;
+        subroutines.push(lower_subroutine(
+            method.native,
+            tree,
+            declaration_env,
+            type_aliases,
+            item_dimensions,
+            literals,
+            state,
+            item,
+            Some(&class),
+            Some(&targets),
         )?);
     }
     if !constructor {

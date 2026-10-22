@@ -16,6 +16,10 @@ sv_backends! {
     fn class_inherited_properties_and_methods(sim) { @case "class::inherited_properties_and_methods"; }
     fn class_static_properties_and_methods(sim) { @case "class::static_properties_and_methods"; }
     fn class_constructors_chain_to_base(sim) { @case "class::constructors_chain_to_base"; }
+    fn class_virtual_methods_dispatch_on_object_class(sim) { @case "class::virtual_methods_dispatch_on_object_class"; }
+    fn class_abstract_classes_and_pure_virtual_methods(sim) { @case "class::abstract_classes_and_pure_virtual_methods"; }
+    fn class_methods_of_handle_array_elements(sim) { @case "class::methods_of_handle_array_elements"; }
+    fn class_classes_implementing_interface_classes(sim) { @case "class::classes_implementing_interface_classes"; }
 }
 
 sv_backends! {
@@ -28,6 +32,26 @@ sv_backends! {
                 C c;
                 initial begin
                     value = c.x;
+                    done = 1;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("null.sv"))], "Top");
+        let error = sim.run_until(0).unwrap_err().to_string();
+        assert!(error.contains("null object handle"), "{error}");
+    }
+
+    fn virtual_calls_through_null_are_runtime_errors(sim) {
+        @setup {
+            let source = r#"module Top(output int value, output bit done);
+                class C;
+                    virtual function int f();
+                        return 1;
+                    endfunction
+                endclass
+                C c;
+                initial begin
+                    value = c.f();
                     done = 1;
                 end
             endmodule"#;
@@ -91,7 +115,7 @@ fn four_state_properties_are_rejected() {
 }
 
 #[test]
-fn misplaced_super_new_and_static_misuse_are_rejected() {
+fn misplaced_super_new_static_misuse_and_unimplemented_methods_are_rejected() {
     for (body, want) in [
         (
             "class B; endclass class C extends B; int x; function new(); x = 1; super.new(); endfunction endclass",
@@ -104,6 +128,23 @@ fn misplaced_super_new_and_static_misuse_are_rejected() {
         (
             "class C; function int g(); return 1; endfunction static function int f(); return g(); endfunction endclass",
             "non-static method `g` called from a static method",
+        ),
+        (
+            "virtual class C; pure virtual function int f(); endclass class D extends C; endclass",
+            "does not implement pure virtual method `f`",
+        ),
+        (
+            "virtual class B; pure virtual function int f(); endclass class C extends B; function int f(); return super.f(); endfunction endclass",
+            "pure virtual method `f` called through `super`",
+        ),
+        ("virtual class C; endclass", "object of abstract class `C`"),
+        (
+            "interface class I; pure virtual function int f(); endclass virtual class B implements I; endclass class C extends B; endclass",
+            "does not implement interface class method `f`",
+        ),
+        (
+            "interface class I; pure virtual function int f(); endclass interface class J; pure virtual function void f(); endclass class C implements I, J; function int f(); return 1; endfunction endclass",
+            "whose return type differs from its interface class",
         ),
     ] {
         let source = format!("module Top; {body} C c; initial c = new; endmodule");

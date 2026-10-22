@@ -954,6 +954,9 @@ pub struct ClassDeclaration {
     pub interface: bool,
     /// `extends` of a class, not of an interface class.
     pub base: Option<ClassBase>,
+    /// The interface classes of `implements`, or those an interface class
+    /// extends (8.26).
+    pub interfaces: Vec<TypeId>,
     pub properties: Vec<ClassProperty>,
     pub methods: Vec<ClassMethod>,
     pub tokens: TokenRange,

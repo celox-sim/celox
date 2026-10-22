@@ -7,9 +7,9 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 1,
-    "mismatch": 15,
+    "mismatch": 16,
     "emission_error": 0,
-    "compile_error": 113,
+    "compile_error": 116,
     "runtime_error": 7,
     "unsupported": 0,
     "ignored": 0
@@ -1277,6 +1277,38 @@
       "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Malformed statement\n<case>/source_0.sv:26: syntax error\n<case>/source_0.sv:26: error: Malformed statement\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: Syntax in assignment statement l-value.\n",
       "expectation": "Simulation",
       "name": "class::static_properties_and_methods",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "class::virtual_methods_dispatch_on_object_class at 393:3: expect_output: expected [48, 32, 97, 114, 101, 97, 61, 57, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 49, 48, 48, 57, 32, 115, 99, 97, 108, 101, 100, 61, 57, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 49, 32, 97, 114, 101, 97, 61, 50, 52, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 50, 48, 50, 52, 32, 115, 99, 97, 108, 101, 100, 61, 50, 52, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 50, 32, 97, 114, 101, 97, 61, 48, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 57, 48, 48, 48, 32, 115, 99, 97, 108, 101, 100, 61, 49, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 51, 32, 97, 114, 101, 97, 61, 48, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 52, 48, 48, 48, 32, 115, 99, 97, 108, 101, 100, 61, 49, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 115, 113, 117, 97, 114, 101, 32, 97, 114, 101, 97, 61, 50, 52, 32, 112, 108, 97, 105, 110, 61, 50, 10], got [48, 32, 97, 114, 101, 97, 61, 48, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 49, 48, 48, 48, 32, 115, 99, 97, 108, 101, 100, 61, 49, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 49, 32, 97, 114, 101, 97, 61, 48, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 50, 48, 48, 48, 32, 115, 99, 97, 108, 101, 100, 61, 49, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 50, 32, 97, 114, 101, 97, 61, 48, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 57, 48, 48, 48, 32, 115, 99, 97, 108, 101, 100, 61, 49, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 51, 32, 97, 114, 101, 97, 61, 48, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 52, 48, 48, 48, 32, 115, 99, 97, 108, 101, 100, 61, 49, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 115, 113, 117, 97, 114, 101, 32, 97, 114, 101, 97, 61, 52, 32, 112, 108, 97, 105, 110, 61, 50, 10]",
+      "expectation": "Simulation",
+      "name": "class::virtual_methods_dispatch_on_object_class",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid class item.\n",
+      "expectation": "Simulation",
+      "name": "class::abstract_classes_and_pure_virtual_methods",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\nerror: Code generation had 2 error(s).\n",
+      "expectation": "Simulation",
+      "name": "class::methods_of_handle_array_elements",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 25; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:15: error: Invalid module item.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: I give up on this function definition.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:24: error: Invalid module item.\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: error: I give up on this function definition.\n<case>/source_0.sv:28: error: 'code' has already been declared in this scope.\n<case>/source_0.sv:20:      : It was declared here as a function.\n<case>/source_0.sv:31: syntax error\n<case>/source_0.sv:32: error: Invalid module item.\n<case>/source_0.sv:33: syntax error\n<case>/source_0.sv:33: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "class::classes_implementing_interface_classes",
       "phase": "compile",
       "status": "compile_error"
     }

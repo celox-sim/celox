@@ -1882,6 +1882,43 @@
     }
   },
   {
+    "id": "sv_icarus_virtual_dispatch",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 binds a virtual function called through a base-class handle to the handle's class instead of the object's: the shared case prints area=0 for every shape, and the adapter-free source prints 1 1 1 3 where IEEE 1800-2023 8.20 requires 2 3 4 4. Verilator and Celox print 2 3 4 4 and pass the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/virtual_dispatch_icarus.json",
+      "verification/repros/virtual_dispatch.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::virtual_methods_dispatch_on_object_class"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_abstract_and_interface_classes",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects pure virtual method declarations and interface classes with syntax errors (\"Invalid class item\", \"Invalid module item\") and fails code generation without a diagnostic (\"Code generation had 2 error(s)\") for a method called on an element of an array of class handles. IEEE 1800-2023 8.21 and 8.26 define pure virtual methods and interface classes, and 7.4 and 8.4 permit arrays of class handles. Verilator passes all three cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::abstract_classes_and_pure_virtual_methods",
+        "class::methods_of_handle_array_elements",
+        "class::classes_implementing_interface_classes"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_class_property_string_methods",
     "category": "simulator_compile_limitation",
     "phase": "compile",
