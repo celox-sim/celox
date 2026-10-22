@@ -6677,6 +6677,16 @@ mod bit_count_tests {
                         f64::MAX.to_bits()
                     },
                 ]);
+                for &value in &inputs {
+                    for op in [
+                        U::Neg,
+                        U::ToBool,
+                        U::Convert { to: P::F32 },
+                        U::Convert { to: P::F64 },
+                    ] {
+                        cases.push((op, p, p.width(), value, 0));
+                    }
+                }
                 for width in [1, 3, 8, 32, 64] {
                     for round in [false, true] {
                         for &value in &inputs {
@@ -6776,6 +6786,14 @@ mod bit_count_tests {
             for four_state in [false, true] {
                 for (op, a, b, expected) in [
                     (F::Add, 1.25, 2.5, 3.75),
+                    (F::Sub, 2.5, 1.25, 1.25),
+                    (F::Add, f64::NAN, 1.0, f64::NAN),
+                    (F::Eq, f64::NAN, 1.0, 0.0),
+                    (F::Ne, f64::NAN, 1.0, 1.0),
+                    (F::Lt, f64::NAN, 1.0, 0.0),
+                    (F::Le, -0.0, 0.0, 1.0),
+                    (F::Gt, -0.0, 0.0, 0.0),
+                    (F::Ge, -0.0, 0.0, 1.0),
                     (F::Div, 1.0, 0.0, f64::INFINITY),
                     (F::Mul, -0.0, 2.0, -0.0),
                 ] {
@@ -6833,14 +6851,47 @@ mod bit_count_tests {
                         register_map,
                     };
                     let layout = layout(width, four_state);
+                    let options = CompileOptions {
+                        four_state,
+                        emit_triggers: false,
+                        cranelift: CraneliftOptions::default(),
+                    };
+                    let mut engine = JitEngine::new(layout.clone(), &options).unwrap();
+                    let mut clif = String::new();
+                    engine
+                        .compile_units(std::slice::from_ref(&unit), Some(&mut clif), None, None)
+                        .unwrap();
+                    assert!(
+                        !clif.contains("call_indirect"),
+                        "basic FP operation used a helper: {clif}"
+                    );
                     for output in [
                         run_cranelift(&unit, &layout, four_state),
                         run_wasm(&unit, &layout, four_state),
                     ] {
-                        assert_eq!(
-                            read_bits_at(&output, OUTPUT_OFFSET, 0, width),
-                            BigUint::from(bits(expected))
-                        );
+                        let actual = read_bits_at(&output, OUTPUT_OFFSET, 0, width)
+                            .to_u64_digits()
+                            .first()
+                            .copied()
+                            .unwrap_or(0);
+                        if expected.is_nan() {
+                            assert!(if precision == P::F32 {
+                                f32::from_bits(actual as u32).is_nan()
+                            } else {
+                                f64::from_bits(actual).is_nan()
+                            });
+                        } else {
+                            let comparison =
+                                matches!(op, F::Eq | F::Ne | F::Lt | F::Le | F::Gt | F::Ge);
+                            assert_eq!(
+                                actual,
+                                if comparison {
+                                    expected as u64
+                                } else {
+                                    bits(expected)
+                                }
+                            );
+                        }
                     }
                 }
             }

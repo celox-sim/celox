@@ -132,6 +132,56 @@ pub(super) fn lower_float(
     rhs: Option<RegisterId>,
     code: u64,
 ) {
+    use celox_sir::{FloatBinaryOp as B, FloatPrecision as P, FloatUnaryOp as U};
+    let precision = if code & 256 == 0 { P::F32 } else { P::F64 };
+    let opcode = code & 255;
+    let binary = match opcode {
+        0 => Some(B::Add),
+        1 => Some(B::Sub),
+        2 => Some(B::Mul),
+        3 => Some(B::Div),
+        6 => Some(B::Eq),
+        7 => Some(B::Ne),
+        8 => Some(B::Lt),
+        9 => Some(B::Le),
+        10 => Some(B::Gt),
+        11 => Some(B::Ge),
+        _ => None,
+    };
+    let unary = match opcode {
+        32 => Some(U::Neg),
+        33 => Some(U::ToBool),
+        38 => Some(U::Convert { to: P::F32 }),
+        39 => Some(U::Convert { to: P::F64 }),
+        _ => None,
+    };
+    if let Some(op) = binary {
+        block.push(MInst::FloatBinary {
+            dst: ctx.reg_map.get(dst),
+            lhs: ctx.reg_map.get(lhs),
+            rhs: ctx.reg_map.get(rhs.expect("binary FP SIR operand")),
+            op,
+            precision,
+        });
+    } else if let Some(op) = unary {
+        block.push(MInst::FloatUnary {
+            dst: ctx.reg_map.get(dst),
+            src: ctx.reg_map.get(lhs),
+            op,
+            precision,
+        });
+    }
+    if binary.is_some() || unary.is_some() {
+        if ctx.four_state {
+            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm {
+                dst: zero,
+                value: 0,
+            });
+            ctx.set_mask(dst, zero);
+        }
+        return;
+    }
     let a = ctx.reg_map.get(lhs);
     let a = if ctx.four_state && matches!(code & 255, 34 | 35) {
         let mask = ctx.get_mask(lhs, block);

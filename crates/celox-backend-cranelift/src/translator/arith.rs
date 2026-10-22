@@ -304,7 +304,8 @@ impl SIRTranslator {
                 *dst,
                 *lhs,
                 Some(*rhs),
-                celox_sir::float::binary_code(*op, *precision),
+                super::core::FloatOperation::Binary(*op),
+                *precision,
             );
             return;
         }
@@ -1407,7 +1408,8 @@ impl SIRTranslator {
                 *dst,
                 *rhs,
                 None,
-                celox_sir::float::unary_code(*op, *precision),
+                super::core::FloatOperation::Unary(*op),
+                *precision,
             );
             return;
         }

@@ -1,3 +1,4 @@
+mod floating;
 mod partial_load;
 mod reductions;
 mod shifts;
