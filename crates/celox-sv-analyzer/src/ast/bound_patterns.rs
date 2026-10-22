@@ -13,6 +13,10 @@ pub struct BoundPattern {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Items {
     Value(Expr),
+    ArrayValue {
+        value: Expr,
+        ty: typecheck::UnpackedArrayType,
+    },
     List(Vec<Value>),
     Repeat(usize, Vec<Value>),
     Keyed(Vec<(Key, Value)>),
@@ -42,6 +46,24 @@ pub(super) fn from_param(
             items: Items::Value(value),
         }),
     }
+}
+
+pub(super) fn from_array_parameter(
+    root: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+    shape: &VariableDimensions,
+) -> Converted<BoundPattern> {
+    let ty = array_compatibility::unpacked_array_type(&tree.state, shape, dims)
+        .ok_or_else(|| unsupported("array parameter argument type"))?;
+    let value = substitute_expr_idents(
+        expression_binding::bind(root, tree, dims)?,
+        &dims.array_parameter_values,
+    );
+    let value = frozen(&tree.state, value, dims)?;
+    Ok(BoundPattern {
+        items: Items::ArrayValue { value, ty },
+    })
 }
 
 fn frozen(state: &AnalysisState, expr: Expr, dims: &PackedDimensions) -> Converted<Expr> {
@@ -174,6 +196,18 @@ impl BoundPattern {
         shape: &VariableDimensions,
         dims: &PackedDimensions,
     ) -> Converted<Expr> {
+        if let Items::ArrayValue { value, ty } = &self.items {
+            let target = array_compatibility::unpacked_array_type(state, shape, dims)
+                .ok_or_else(|| unsupported("unpacked array parameter supplied to a scalar"))?;
+            if !ty.is_assignment_compatible_with(&target) {
+                return Err(AnalyzerError::IncompatibleUnpackedArray {
+                    context: "module parameter override".into(),
+                    actual: ty.clone(),
+                    target,
+                });
+            }
+            return Ok(value.clone());
+        }
         if let Items::Value(value) = &self.items {
             return Ok(value.clone());
         }
@@ -269,7 +303,7 @@ impl BoundPattern {
             keys = (0..width).rev().map(|i| Key::Index(i as i128)).collect();
         }
         let selected = match &self.items {
-            Items::Value(value) => return Ok(value.clone()),
+            Items::Value(value) | Items::ArrayValue { value, .. } => return Ok(value.clone()),
             Items::Repeat(count, values) => {
                 if count.checked_mul(values.len()) != Some(shapes.len()) {
                     return Err(unsupported(

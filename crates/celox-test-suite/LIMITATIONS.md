@@ -345,6 +345,17 @@ records the native-runner result; the case stays enabled on all Celox backends.
 
 ## SystemVerilog suite
 
+Named unpacked array parameter forwarding is checked against IEEE 1800-2023
+6.20.2 and 7.6. Verilator 5.052 passes the whole-array forwarding case, but
+reverses elements across opposite declaration directions and rejects a constant
+subarray argument. Slang 12.0 accepts all four cases and confirms their parameter
+values. Icarus 13.0 explicitly reports unpacked array parameters as unsupported.
+Only these exact tool/case combinations are excluded; Celox runs every assertion.
+The focused [Verilator](verification/repros/named_array_parameters_verilator.json),
+[Icarus](verification/repros/named_array_parameters_icarus.json), and
+[Slang](verification/repros/named_array_parameters_slang.json) observations retain
+the failures and independent elaborated values.
+
 The new `$dist_uniform` seed-width case is excluded for Verilator 5.052 and
 Icarus 13.0. Verilator generates an invalid C++ reference binding for converted
 seed arguments; Icarus rejects the `shortint` seed at startup. IEEE 1800-2023

@@ -1,0 +1,66 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:2: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:4: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:10: sorry: unpacked array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "hierarchy::named_array_parameters_follow_caller_specialization",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:3: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:5: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:9: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "hierarchy::named_array_parameters_forward_package_subarrays",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:2: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:6: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:11: sorry: unpacked array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "hierarchy::named_array_parameters_forward_whole_values",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:2: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:7: sorry: unpacked array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "hierarchy::named_array_parameters_keep_four_state_values",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 4,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "include_ignored": true,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "note": "Focused observations before exact-case exclusions for named array parameter forwarding; shared assertions are preserved."
+}

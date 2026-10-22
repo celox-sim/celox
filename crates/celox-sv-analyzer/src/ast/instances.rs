@@ -382,6 +382,15 @@ fn parameter_override(
         }
         pending.extend(parameters::skipped::children(id, declarations));
     }
+    if let Some(shape) =
+        array_compatibility::native_unpacked_shape(native, declarations, packed_dimensions)
+    {
+        let pattern =
+            bound_patterns::from_array_parameter(native, syntax_tree, packed_dimensions, &shape)?;
+        let mut bound = ParameterOverride::new(name, None);
+        bound.bound_pattern = Some(pattern);
+        return Ok(bound);
+    }
     if let Some((type_name, dimensions)) = type_binding::argument_alias(native, declarations)
         && packed_dimensions.type_aliases.contains_key(&type_name)
         && !dimensions.is_empty()
