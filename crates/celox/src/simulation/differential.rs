@@ -503,6 +503,185 @@ mod tests {
         }
     }
 
+    /// Run `source` to `end` in every mode and compare the state files with
+    /// the reference's; at least one slot must run compiled.
+    fn agrees_with_the_reference(source: &str, end: u64) {
+        let mut reference = build_in(source, SchedulerMode::Reference);
+        reference.run_until(end).unwrap();
+        let expected = reference.save_state().unwrap();
+        for mode in MODES {
+            let mut sim = build_in(source, mode);
+            sim.run_until(end).unwrap();
+            assert_eq!(sim.save_state().unwrap(), expected, "{mode:?}");
+            let stats = sim.scheduler_stats();
+            assert!(stats.compiled_slots > 0, "{mode:?}: {stats:?}");
+        }
+    }
+
+    /// A kernel waiting for a clock edge writes what the domain of that edge
+    /// samples, blocking and nonblocking.
+    #[test]
+    fn clock_kernels_run_in_compiled_slots() {
+        for assign in ["=", "<="] {
+            let source = format!(
+                "`timescale 1ns/1ns
+                module Top(output logic [7:0] sum);
+                    logic clk = 1'b0;
+                    logic [7:0] stim = 8'd0;
+                    logic [7:0] r = 8'd0;
+                    always #5 clk = ~clk;
+                    initial forever @(posedge clk) stim {assign} stim + 8'd3;
+                    always_ff @(posedge clk) r <= r + stim;
+                    assign sum = r;
+                endmodule"
+            );
+            agrees_with_the_reference(&source, 1000);
+        }
+    }
+
+    /// Kernels woken in the middle of a pass, declared before and after the
+    /// clock kernels, and waits for falling and any edges.
+    #[test]
+    fn clock_kernels_wake_in_the_reference_order() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [7:0] seen);
+                logic a = 1'b0;
+                logic b = 1'b0;
+                logic [7:0] log = 8'd0;
+                logic [7:0] acc = 8'd0;
+                initial forever @(posedge a) log = log * 8'd3 + 8'd1;
+                always #5 a = ~a;
+                initial forever @(negedge a) log = log * 8'd5 + 8'd2;
+                always #5 b = ~b;
+                initial forever @(b) log = log * 8'd7 + 8'd3;
+                initial forever @(posedge b) acc <= acc + log;
+                assign seen = log + acc;
+            endmodule
+        "#;
+        agrees_with_the_reference(source, 200);
+    }
+
+    /// A clock kernel's `$finish` ends a compiled slot as the reference's.
+    #[test]
+    fn clock_kernels_finish_compiled_slots() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [7:0] n);
+                logic clk = 1'b0;
+                always #5 clk = ~clk;
+                initial begin
+                    n = 8'd0;
+                    forever @(posedge clk) begin
+                        n = n + 8'd1;
+                        if (n == 8'd7) $finish;
+                    end
+                end
+            endmodule
+        "#;
+        agrees_with_the_reference(source, 1000);
+    }
+
+    /// Compiled kernels declared after more than 64 others keep their own
+    /// bits in the ready mask.
+    #[test]
+    fn compiled_kernels_after_many_processes() {
+        let mut source = String::from(
+            "`timescale 1ns/1ns\nmodule Top(output logic [7:0] n);\nlogic clk = 1'b0;\n",
+        );
+        for index in 0..66 {
+            source.push_str(&format!(
+                "logic d{index} = 1'b0;\ninitial #0 d{index} = 1'b1;\n"
+            ));
+        }
+        source.push_str(
+            "always #5 clk = ~clk;\n\
+             initial begin n = 8'd0; forever @(posedge clk) n = n + 8'd1; end\n\
+             endmodule\n",
+        );
+        agrees_with_the_reference(&source, 200);
+    }
+
+    /// A kernel that waits and then loops without suspending yields now and
+    /// then, and keeps the reference loop.
+    #[test]
+    fn waiting_kernels_that_yield_fall_back() {
+        let reasons = |source: &str| -> Vec<String> {
+            build_in(source, SchedulerMode::Compiled)
+                .scheduler_stats()
+                .kernels
+                .into_iter()
+                .filter_map(|kernel| match kernel {
+                    crate::KernelSchedule::Reference(reason) => Some(reason),
+                    crate::KernelSchedule::Compiled => None,
+                })
+                .collect()
+        };
+        // A loop that does not suspend yields now and then.
+        let spinning = r#"
+            `timescale 1ns/1ns
+            module Top(output logic q);
+                logic clk = 1'b0;
+                always #5 clk = ~clk;
+                initial begin q = 1'b0; @(posedge clk); forever q <= ~q; end
+            endmodule
+        "#;
+        assert_eq!(
+            reasons(spinning),
+            ["the process suspends other than for one edge"]
+        );
+    }
+
+    /// A nonblocking site in a loop runs several times in one run of its
+    /// kernel. A loop the frontend keeps yields now and then, and the
+    /// copies of one it unrolls queue their values: either way the kernel
+    /// keeps the reference loop, and every mode leaves its state.
+    #[test]
+    fn nonblocking_sites_in_loops_keep_the_reference_loop() {
+        for (bound, reason) in [
+            ("n", "the process suspends other than for one edge"),
+            ("2", "a nonblocking site queues its values"),
+        ] {
+            for tail in ["", "$finish;"] {
+                let source = format!(
+                    "`timescale 1ns/1ns
+                    module Top(output logic [7:0] q);
+                        logic clk = 1'b0;
+                        int n = 2;
+                        always #5 clk = ~clk;
+                        initial begin
+                            q = 8'd0;
+                            forever begin
+                                @(posedge clk);
+                                for (int i = 0; i < {bound}; i++) q <= q + 8'(i) + 8'd1;
+                                {tail}
+                            end
+                        end
+                    endmodule"
+                );
+                let kernels = build_in(&source, SchedulerMode::Compiled)
+                    .scheduler_stats()
+                    .kernels;
+                assert!(
+                    kernels.contains(&crate::KernelSchedule::Reference(reason.into())),
+                    "{bound} {tail}: {kernels:?}"
+                );
+                let mut reference = build_in(&source, SchedulerMode::Reference);
+                reference.run_until(100).unwrap();
+                let expected = reference.save_state().unwrap();
+                for mode in MODES {
+                    let mut sim = build_in(&source, mode);
+                    sim.run_until(100).unwrap();
+                    assert_eq!(
+                        sim.save_state().unwrap(),
+                        expected,
+                        "{bound} {tail} {mode:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn differential_mode_reports_a_diverging_step() {
         let mut sim = build(SchedulerMode::Differential);

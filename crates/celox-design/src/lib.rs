@@ -850,10 +850,12 @@ pub struct RuntimeSchema<A> {
 
 /// Width of [`SchedulerSlots::limit`], [`SchedulerSlots::now`],
 /// [`SchedulerSlots::exit_arg`], [`SchedulerSlots::count`],
-/// [`SchedulerSlots::current`], [`SchedulerSlots::levels`] and every [`SchedulerSlots::wake`] object.
+/// [`SchedulerSlots::current`], [`SchedulerSlots::levels`],
+/// [`SchedulerSlots::ready`] and every [`SchedulerSlots::wake`] object.
 pub const SCHEDULER_TIME_WIDTH: usize = 64;
 /// Width of [`SchedulerSlots::exit`], [`SchedulerSlots::finish`],
-/// [`SchedulerSlots::cont`] and every [`SchedulerSlots::waiting`] object.
+/// [`SchedulerSlots::cont`] and every [`SchedulerSlots::waiting`] and
+/// [`SchedulerSlots::baseline`] object.
 pub const SCHEDULER_FLAG_WIDTH: usize = 8;
 
 /// Hidden state objects through which a compiled scheduler and the runtime
@@ -881,11 +883,16 @@ pub struct SchedulerSlots<A> {
     /// The levels of the event signals at the start of the last slot, one
     /// bit per event in event order.
     pub levels: A,
+    /// The kernels ready to run in the current slot, one bit per kernel in
+    /// kernel order.
+    pub ready: A,
     /// The time each process kernel resumes at, in kernel order, valid
     /// where [`Self::waiting`] is set.
     pub wake: Vec<A>,
-    /// Whether each process kernel waits for its wake time.
+    /// Whether each process kernel waits for its wake time or event.
     pub waiting: Vec<A>,
+    /// The level a kernel waiting for an event last saw its signal at.
+    pub baseline: Vec<A>,
 }
 
 impl<A> SchedulerSlots<A> {
@@ -900,8 +907,10 @@ impl<A> SchedulerSlots<A> {
             count: map(self.count),
             current: map(self.current),
             levels: map(self.levels),
+            ready: map(self.ready),
             wake: self.wake.into_iter().map(&mut map).collect(),
-            waiting: self.waiting.into_iter().map(map).collect(),
+            waiting: self.waiting.into_iter().map(&mut map).collect(),
+            baseline: self.baseline.into_iter().map(map).collect(),
         }
     }
 
@@ -917,10 +926,12 @@ impl<A> SchedulerSlots<A> {
             &self.count,
             &self.current,
             &self.levels,
+            &self.ready,
         ]
         .into_iter()
         .chain(&self.wake)
         .chain(&self.waiting)
+        .chain(&self.baseline)
     }
 }
 

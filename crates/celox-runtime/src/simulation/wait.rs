@@ -323,6 +323,15 @@ impl Waiters {
         self.register(process, driven, |slot| *slot = waiter);
     }
 
+    /// The wait of process `process`, if it waits.
+    pub fn get(&self, process: usize) -> Option<&Waiter> {
+        self.waiting
+            .get(process)
+            .copied()
+            .unwrap_or(false)
+            .then(|| &self.slots[process])
+    }
+
     /// Process `process` no longer waits.
     pub fn remove(&mut self, process: usize) {
         if self.waiting.get(process).copied().unwrap_or(false) {
