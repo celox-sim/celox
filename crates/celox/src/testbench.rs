@@ -2425,7 +2425,7 @@ fn clock_periods<B: SimBackend>(
     event: B::Event,
     count: u64,
 ) -> (u64, Result<(), crate::RuntimeErrorCode>) {
-    if sim.period_runs_only_own_domain(event) {
+    if sim.period_runs_only_active_edge(event) {
         return sim.tick_deferred_comb_many(event, count);
     }
     let result = sim

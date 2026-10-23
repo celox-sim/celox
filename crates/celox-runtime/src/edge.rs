@@ -13,7 +13,7 @@
 //! so the inactive edge of a clock that only clocks flip-flops costs no
 //! settle on the next active edge.
 
-use celox_design::{DomainKind, EventTopology, edges::LEVEL_UNKNOWN};
+use celox_design::{DomainKind, EventTopology, GateOp, edges::LEVEL_UNKNOWN};
 
 use crate::{
     AbsoluteAddr, SignalRef,
@@ -60,6 +60,12 @@ pub struct EventEdge {
     pub kind: Option<DomainKind>,
     /// Combinational logic reads the signal.
     pub comb_read: bool,
+    /// The edge opposite to [`Self::active_edge`] can run a domain: the
+    /// event's own, or that of a clock computed combinationally from the
+    /// signal that this edge can move to its active edge. When it cannot,
+    /// nothing commits on that edge, so no domain clocked from state runs
+    /// either, and a host only needs to store the level.
+    pub inactive_runs: bool,
 }
 
 impl EventEdge {
@@ -108,13 +114,126 @@ pub fn build_event_edges<B: SimBackend>(
         .iter()
         .map(|address| {
             let canonical = events.canonical(*address);
-            EventEdge {
+            let kind = kinds.get(&canonical).copied();
+            let mut info = EventEdge {
                 signal: backend.resolve_signal(&canonical),
-                kind: kinds.get(&canonical).copied(),
+                kind,
                 comb_read: events.combinationally_read.contains(&canonical),
-            }
+                inactive_runs: false,
+            };
+            let inactive = info.active_edge().opposite();
+            info.inactive_runs = info.can_fire(inactive)
+                || events
+                    .combinational_derived
+                    .get(&canonical)
+                    .into_iter()
+                    .flatten()
+                    // A clock without a domain of its own runs nothing.
+                    .filter(|clock| backend.resolve_event_opt(&clock.clock).is_some())
+                    .any(|clock| {
+                        let moves = clock
+                            .gate
+                            .as_deref()
+                            .and_then(dependence)
+                            .unwrap_or(Dependence::Mixed);
+                        moves.can_reach(inactive, kinds.get(&clock.clock).copied())
+                    });
+            info
         })
         .collect()
+}
+
+/// How a gate program's value depends on its source's level, bitwise:
+/// whether raising the source can only raise each bit, only lower it, or
+/// either. The operations it treats as monotone also are over the order
+/// 0 < x < 1 of four-state values, so it holds for four-state designs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dependence {
+    Independent,
+    Positive,
+    Negative,
+    Mixed,
+}
+
+impl Dependence {
+    fn invert(self) -> Self {
+        match self {
+            Dependence::Positive => Dependence::Negative,
+            Dependence::Negative => Dependence::Positive,
+            other => other,
+        }
+    }
+
+    /// A monotone function of both operands, such as `&` or `|`.
+    fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Dependence::Independent, other) | (other, Dependence::Independent) => other,
+            (lhs, rhs) if lhs == rhs => lhs,
+            _ => Dependence::Mixed,
+        }
+    }
+
+    /// A function of the operands that is not monotone, such as `^`.
+    fn scramble(self, other: Self) -> Self {
+        if self == Dependence::Independent && other == Dependence::Independent {
+            Dependence::Independent
+        } else {
+            Dependence::Mixed
+        }
+    }
+
+    /// Whether `edge` of the source can be an edge of a clock of `kind`
+    /// computed with this dependence.
+    fn can_reach(self, edge: Edge, kind: Option<DomainKind>) -> bool {
+        let moves = match self {
+            Dependence::Independent => return false,
+            Dependence::Mixed => return true,
+            Dependence::Positive => edge,
+            Dependence::Negative => edge.opposite(),
+        };
+        match kind {
+            Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => moves == Edge::Rising,
+            Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => moves == Edge::Falling,
+            _ => true,
+        }
+    }
+}
+
+/// The [`Dependence`] of a gate program's value on its source, or `None`
+/// for a malformed program.
+fn dependence<A>(ops: &[GateOp<A>]) -> Option<Dependence> {
+    let mut stack: Vec<Dependence> = Vec::new();
+    for op in ops {
+        let value = match op {
+            GateOp::Source => Dependence::Positive,
+            GateOp::Load { .. } | GateOp::Const(_) => Dependence::Independent,
+            GateOp::Not { .. } | GateOp::LogicNot => stack.pop()?.invert(),
+            GateOp::ReduceAnd { .. } | GateOp::ReduceOr | GateOp::Slice { .. } => stack.pop()?,
+            GateOp::ReduceXor => stack.pop()?.scramble(Dependence::Independent),
+            GateOp::And | GateOp::Or | GateOp::LogicAnd | GateOp::LogicOr => {
+                let rhs = stack.pop()?;
+                stack.pop()?.join(rhs)
+            }
+            GateOp::Xor | GateOp::Eq | GateOp::Ne => {
+                let rhs = stack.pop()?;
+                stack.pop()?.scramble(rhs)
+            }
+            GateOp::Mux => {
+                let otherwise = stack.pop()?;
+                let then = stack.pop()?;
+                match stack.pop()? {
+                    // A fixed condition selects one of two monotone values.
+                    Dependence::Independent => then.join(otherwise),
+                    _ => Dependence::Mixed,
+                }
+            }
+        };
+        stack.push(value);
+    }
+    match stack.as_slice() {
+        [value] => Some(*value),
+        _ => None,
+    }
 }
 
 /// What an edge did.
@@ -397,4 +516,70 @@ where
         executor.eval_comb()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Op = GateOp<()>;
+
+    const LOAD: Op = GateOp::Load {
+        address: (),
+        lsb: 0,
+        width: 1,
+    };
+
+    #[test]
+    fn gates_follow_their_source_through_monotone_operations() {
+        use Dependence::*;
+        let cases: [(&[Op], Dependence); 8] = [
+            (&[GateOp::Source, LOAD, GateOp::And], Positive),
+            (&[GateOp::Source, GateOp::Not { width: 1 }], Negative),
+            (
+                &[GateOp::Source, GateOp::LogicNot, LOAD, GateOp::LogicOr],
+                Negative,
+            ),
+            (&[LOAD, GateOp::Const(1), GateOp::Or], Independent),
+            (&[GateOp::Source, LOAD, GateOp::Xor], Mixed),
+            (
+                &[
+                    GateOp::Source,
+                    GateOp::Source,
+                    GateOp::Not { width: 1 },
+                    GateOp::Or,
+                ],
+                Mixed,
+            ),
+            (
+                &[LOAD, GateOp::Source, GateOp::Const(0), GateOp::Mux],
+                Positive,
+            ),
+            (
+                &[GateOp::Source, LOAD, GateOp::Const(0), GateOp::Mux],
+                Mixed,
+            ),
+        ];
+        for (ops, expected) in cases {
+            assert_eq!(dependence(ops), Some(expected), "{ops:?}");
+        }
+        assert_eq!(dependence::<()>(&[GateOp::And]), None);
+        assert_eq!(dependence::<()>(&[GateOp::Source, GateOp::Source]), None);
+    }
+
+    #[test]
+    fn a_clock_is_reached_by_the_edges_its_dependence_allows() {
+        use DomainKind::*;
+        let posedge = Some(ClockPosedge);
+        let negedge = Some(ClockNegedge);
+        // The falling edge of a positive-edge clock's source.
+        let edge = Edge::Falling;
+        assert!(!Dependence::Positive.can_reach(edge, posedge));
+        assert!(Dependence::Positive.can_reach(edge, negedge));
+        assert!(Dependence::Negative.can_reach(edge, posedge));
+        assert!(!Dependence::Negative.can_reach(edge, Some(ResetAsyncLow)));
+        assert!(Dependence::Positive.can_reach(edge, None));
+        assert!(!Dependence::Independent.can_reach(edge, None));
+        assert!(Dependence::Mixed.can_reach(edge, posedge));
+    }
 }

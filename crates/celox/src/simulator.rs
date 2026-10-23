@@ -1724,10 +1724,12 @@ mod host {
             let info = self.event_edges[event.id()];
             let active = info.active_edge();
             let inactive = active.opposite();
-            let plain = !matches!(self.derived_ticks.get(event.id()), Some(Some(_)));
-            if !(plain && self.host_watch.is_empty() && !info.can_fire(inactive)) {
+            if info.inactive_runs || !self.host_watch.is_empty() {
                 self.active_edge(event)?;
                 return self.inactive_edge(event);
+            }
+            if let Some(Some(_)) = self.derived_ticks.get(event.id()) {
+                return self.tick_derived_quiet(event);
             }
             // Everything is read before the domain runs: right after its
             // kernel, loads of host tables can wait behind the kernel's
@@ -1750,6 +1752,25 @@ mod host {
             }
             self.backend.set(info.signal, inactive.level());
             if info.comb_read || observers {
+                self.dirty = true;
+            }
+            Ok(())
+        }
+
+        /// [`Self::tick`] of an event with derived domains whose inactive
+        /// edge runs nothing: the active edge, then only the inactive level.
+        #[inline(never)]
+        fn tick_derived_quiet(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            self.active_edge(event)?;
+            let info = self.event_edges[event.id()];
+            if self.dirty {
+                // Combinational logic did not settle, so the inactive edge
+                // may still find a derived clock moved by the settle.
+                return self.inactive_edge(event);
+            }
+            self.backend
+                .set(info.signal, info.active_edge().opposite().level());
+            if info.comb_read || !self.program.runtime_schema.comb_observers.is_empty() {
                 self.dirty = true;
             }
             Ok(())
@@ -2037,22 +2058,39 @@ mod host {
                 return self.tick(*event);
             }
             let only_active_edges = self.host_watch.is_empty()
-                && events.iter().all(|event| {
-                    let info = self.event_edges[event.id()];
-                    !matches!(self.derived_ticks.get(event.id()), Some(Some(_)))
-                        && !info.can_fire(info.active_edge().opposite())
-                });
-            if !only_active_edges {
+                && events
+                    .iter()
+                    .all(|event| !self.event_edges[event.id()].inactive_runs);
+            let derived = events
+                .iter()
+                .any(|event| matches!(self.derived_ticks.get(event.id()), Some(Some(_))));
+            if !only_active_edges || derived {
+                let edges = std::sync::Arc::clone(&self.event_edges);
                 let moves = |edge: fn(celox_runtime::EventEdge) -> celox_runtime::Edge| {
                     events
                         .iter()
-                        .map(|&event| (event, edge(self.event_edges[event.id()])))
+                        .map(|&event| (event, edge(edges[event.id()])))
                         .collect::<Vec<_>>()
                 };
                 let active = moves(|info| info.active_edge());
-                let inactive = moves(|info| info.active_edge().opposite());
                 self.edges(&active)?;
-                return self.edges(&inactive);
+                if !only_active_edges || self.dirty {
+                    let inactive = moves(|info| info.active_edge().opposite());
+                    return self.edges(&inactive);
+                }
+                // The inactive edges run nothing and only store.
+                for &event in events {
+                    let info = self.event_edges[event.id()];
+                    self.backend
+                        .set(info.signal, info.active_edge().opposite().level());
+                    if info.comb_read {
+                        self.dirty = true;
+                    }
+                }
+                if !self.program.runtime_schema.comb_observers.is_empty() {
+                    self.dirty = true;
+                }
+                return Ok(());
             }
             // The inactive edges run nothing and only store.
             let mut fired = Vec::with_capacity(events.len());
@@ -2190,14 +2228,11 @@ mod host {
             Ok(())
         }
 
-        /// Whether a period of `event`'s signal, a rise and a fall, runs only
-        /// the event's own domain, once: no domain reacts to the other edge
-        /// and no clock derives from the signal.
-        pub(crate) fn period_runs_only_own_domain(&self, event: B::Event) -> bool {
-            let info = self.event_edges[event.id()];
-            !matches!(self.derived_ticks.get(event.id()), Some(Some(_)))
-                && !info.can_fire(info.active_edge().opposite())
-                && self.host_watch.is_empty()
+        /// Whether a period of `event`'s signal, a rise and a fall, runs
+        /// domains only at its active edge: the event's own and those derived
+        /// from it, while the inactive edge runs nothing.
+        pub(crate) fn period_runs_only_active_edge(&self, event: B::Event) -> bool {
+            !self.event_edges[event.id()].inactive_runs && self.host_watch.is_empty()
         }
 
         /// Advance a run of identical deferred-comb ticks. Native code may keep
