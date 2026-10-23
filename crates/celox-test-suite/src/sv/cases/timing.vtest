@@ -2593,3 +2593,172 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (top Top)
   (run_until 6)
   (assert_eq t 0x22))
+
+; An item with `iff` is an event only if the condition holds when the
+; occurrence happens; changes of the condition alone are no events
+; (IEEE 1800-2023 9.4.2.3).
+(case iff_events_occur_only_while_the_condition_holds
+  (source "iff.sv" #"
+                module Top;
+                  bit clk, en;
+                  int n, m;
+                  initial forever begin @(posedge clk iff en); n++; end
+                  initial forever begin @(clk iff en); m++; end
+                  initial begin
+                    #1 clk = 1;
+                    #1 clk = 0;
+                    #1 en = 1;
+                    #1 clk = 1;
+                    #1 en = 0;
+                    #1 en = 1;
+                    #1 clk = 0;
+                    #1 clk = 1;
+                    #1 $display("n=%0d m=%0d", n, m);
+                    $finish;
+                  end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "n=2 m=3\n"))
+
+; The process writes the condition before the clock: the edge occurs while
+; the condition holds.
+(case iff_conditions_see_writes_before_the_event
+  (source "iff_order.sv" #"
+                module Top;
+                  bit clk, en;
+                  int n;
+                  initial forever begin @(posedge clk iff en); n++; end
+                  initial begin
+                    #1 en = 1; clk = 1;
+                    #1 clk = 0;
+                    #1 en = 0;
+                    #1 clk = 1;
+                    #1 $display("n=%0d", n);
+                    $finish;
+                  end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "n=1\n"))
+
+; Each item has its own condition; the condition's operands are not
+; events of the wait.
+(case iff_conditions_apply_to_their_own_items
+  (source "iff_items.sv" #"
+                module Top;
+                  bit a, b, c;
+                  int n;
+                  initial forever begin @(a iff c or b); n++; end
+                  initial begin
+                    #1 a = 1;
+                    #1 b = 1;
+                    #1 c = 1;
+                    #1 a = 0;
+                    #1 c = 0;
+                    #1 a = 1;
+                    #1 $display("n=%0d", n);
+                    $finish;
+                  end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "n=2\n"))
+
+; A condition reading an automatic task argument uses the activation's
+; value.
+(case iff_conditions_read_automatic_task_arguments
+  (source "iff_task.sv" #"
+                module Top;
+                  bit clk, en;
+                  int n0, n1;
+                  task automatic w(input bit m, output int hits);
+                    hits = 0;
+                    repeat (3) begin @(posedge clk iff (en & m)); hits++; end
+                  endtask
+                  initial w(1, n1);
+                  initial w(0, n0);
+                  initial begin
+                    en = 1;
+                    repeat (4) begin #1 clk = 1; #1 clk = 0; end
+                    #1 $display("n1=%0d n0=%0d", n1, n0);
+                    $finish;
+                  end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "n1=3 n0=0\n"))
+
+; An X or Z condition is false.
+(case unknown_iff_conditions_are_false
+  (source "iff_unknown.sv" #"
+                module Top;
+                  logic en;
+                  bit clk;
+                  int n;
+                  initial forever begin @(posedge clk iff en); n++; end
+                  initial begin
+                    #1 clk = 1;
+                    #1 clk = 0;
+                    #1 en = 1'bz;
+                    #1 clk = 1;
+                    #1 clk = 0;
+                    #1 en = 1;
+                    #1 clk = 1;
+                    #1 $display("n=%0d", n);
+                    $finish;
+                  end
+                endmodule
+            "#)
+  (top Top)
+  (four_state)
+  (run_to_finish)
+  (expect_output "n=1\n"))
+
+; A plain always with an `iff` event runs as a process.
+(case plain_always_iff_events_run_as_processes
+  (source "iff_always.sv" #"
+                module Top;
+                  bit clk, en;
+                  int q;
+                  always @(posedge clk iff en) q <= q + 1;
+                  initial begin
+                    #1 clk = 1;
+                    #1 clk = 0; en = 1;
+                    #1 clk = 1;
+                    #1 clk = 0;
+                    #1 clk = 1;
+                    #1 clk = 0; en = 0;
+                    #1 clk = 1;
+                    #1 $display("q=%0d", q);
+                    $finish;
+                  end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "q=2\n"))
+
+; The condition is judged when the clock rises, before the edge process
+; that the same edge triggers writes it.
+(case iff_conditions_are_judged_before_edge_processes_run
+  (source "iff_edge.sv" #"
+                module Top;
+                  bit clk, g;
+                  int n;
+                  always @(posedge clk) g = ~g;
+                  initial forever begin @(posedge clk iff g); n++; end
+                  initial begin
+                    repeat (4) begin #1 clk = 1; #1 clk = 0; end
+                    #1 $display("n=%0d g=%0d", n, g);
+                    $finish;
+                  end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "n=2 g=0\n"))
