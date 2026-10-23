@@ -448,12 +448,22 @@ impl<B: SimBackend> SimulationState<B> {
         for (index, event) in events_to_process.iter().enumerate() {
             let signal = event.signal;
             let value = event.next_val;
-            if let Some(&counted) = self.model.counted_by_offset.get(&signal.offset) {
+            let counted = self.model.counted_by_offset.get(&signal.offset).copied();
+            let gated = (!self.model.gated_writes.is_empty())
+                .then(|| self.model.gated_writes.get(&signal.offset))
+                .flatten();
+            if counted.is_some() || gated.is_some() {
                 let backend = executor.backend_mut();
                 let old = read(backend, signal);
                 backend.set(signal, value);
                 let new = read(backend, signal);
-                self.model.counted[counted].refs.bump(backend, &old, &new);
+                if let Some(counted) = counted {
+                    self.model.counted[counted].refs.bump(backend, &old, &new);
+                }
+                // The gate as the scheduled values before this one left it.
+                for term in gated.into_iter().flatten() {
+                    term.bump(backend, &old, &new);
+                }
             } else {
                 executor.backend_mut().set(signal, value);
             }

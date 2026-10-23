@@ -29,6 +29,21 @@ pub struct WatchCode<A> {
     /// Whether the signal is held in four-state form.
     pub four_state: bool,
     pub counters: Vec<(CounterKind, A)>,
+    /// Gated wait terms on the signal, whose counters a write bumps.
+    pub gated: Vec<GatedCode<A>>,
+}
+
+/// A gated wait term on a watched signal (`celox_design::GateCounters`): a
+/// write that is an occurrence of `kind` bumps `all`, and `gated` too if
+/// the least significant bit of `gate` is a known 1 after it (IEEE
+/// 1800-2023 9.4.2.3).
+#[derive(Clone, Debug)]
+pub struct GatedCode<A> {
+    pub kind: CounterKind,
+    pub gate: A,
+    pub gate_four_state: bool,
+    pub gated: A,
+    pub all: A,
 }
 
 impl<A> WatchCode<A> {
@@ -44,6 +59,7 @@ impl<A> WatchCode<A> {
                 .counters()
                 .map(|(kind, counter)| (kind, address(counter)))
                 .collect(),
+            gated: Vec::new(),
         }
     }
 }
@@ -140,7 +156,7 @@ pub fn emit_watched<A: Clone>(
     // so no backend can re-read the written state for it.
     let old_lsb = lsb(b, old, watch.width, watch.four_state);
     b.emit(write);
-    if watch.counters.is_empty() {
+    if watch.counters.is_empty() && watch.gated.is_empty() {
         return;
     }
     let new = match stored {
@@ -164,6 +180,23 @@ pub fn emit_watched<A: Clone>(
             watch.four_state,
         );
         bump(b, counter, occurred);
+    }
+    for term in &watch.gated {
+        let occurred = occurrence(
+            b,
+            term.kind,
+            (old, old_lsb),
+            (new, new_lsb),
+            watch.width,
+            watch.four_state,
+        );
+        bump(b, &term.all, occurred);
+        let gate = load_range(b, &term.gate, SIROffset::Static(0), 1, term.gate_four_state);
+        let one = constant(b, 1, 1, term.gate_four_state);
+        // Case equality: an unknown gate does not hold.
+        let holds = binary(b, gate, BinaryOp::EqCase, one);
+        let counted = binary(b, occurred, BinaryOp::And, holds);
+        bump(b, &term.gated, counted);
     }
 }
 

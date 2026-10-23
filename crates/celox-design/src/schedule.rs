@@ -78,7 +78,7 @@ pub struct TermModel<A> {
     pub driven: bool,
     /// The term's `iff` condition ([`crate::WaitSite::gates`]).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub gate: Option<A>,
+    pub gate: Option<crate::WaitGate<A>>,
 }
 
 impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
