@@ -330,7 +330,7 @@ impl<'a> ProcModule<'a> {
     ) -> bool {
         let mut listed = HashSet::default();
         for item in items {
-            let sv::ir::Expr::Ident(name) = &item.expr else {
+            let (sv::ir::Expr::Ident(name), None) = (&item.expr, &item.iff) else {
                 return false;
             };
             let Some(id) = self.id(name).filter(|id| !self.is_hidden(*id)) else {

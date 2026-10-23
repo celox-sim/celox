@@ -1591,10 +1591,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             split_commits,
             &comb_sources,
             processes.iter().map(|process| &process.kernel),
-            timing
-                .wait_sites
-                .iter()
-                .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal)),
+            timing.wait_sites.iter().flat_map(WaitSite::reads),
             &events,
             &clock_domains,
         );
@@ -1744,7 +1741,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             let mut observed: HashSet<AbsoluteAddr> = timing
                 .wait_sites
                 .iter()
-                .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal))
+                .flat_map(WaitSite::reads)
                 .chain(timing.counter_slots.iter().map(|slots| slots.signal))
                 .chain(
                     clock_domains
@@ -2083,11 +2080,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 .map(|(_, counter)| counter)
                 .collect::<Vec<_>>()
         })
-        .chain(
-            wait_sites
-                .iter()
-                .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal)),
-        )
+        .chain(wait_sites.iter().flat_map(WaitSite::reads))
         .chain(
             nba_sites
                 .iter()

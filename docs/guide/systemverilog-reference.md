@@ -51,7 +51,7 @@ In a timed `Simulation`, `initial` and plain `always` processes can suspend:
 | Control | Supported |
 | --- | --- |
 | `#delay` | integral and real delays, `#(min:typ:max)` (the typical value), package-scoped values such as `#pkg::D`, and [time literals](#time-literal-delays); an X or Z delay counts as zero |
-| `@(...)` | variables, `posedge` / `negedge` / `edge`, items joined by `or` or `,`, bit, part and run-time index selects, any expression including calls of pure functions, and `@*` / `@(*)`, which waits on the variables its statement reads |
+| `@(...)` | variables, `posedge` / `negedge` / `edge`, items joined by `or` or `,`, bit, part and run-time index selects, any expression including calls of pure functions, `iff` conditions on items (not in `always_ff`), and `@*` / `@(*)`, which waits on the variables its statement reads |
 | `wait (condition)` | any condition; an X or Z condition counts as false |
 | Assignments | blocking and nonblocking, to any target a blocking assignment takes, including unpacked array elements and run-time positions; nonblocking updates take effect in the NBA region of the time slot, at the position evaluated when the assignment executes, and bits outside the target or at a position with an X or Z bit are not written |
 
@@ -175,9 +175,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Behavioral and verification constructs: `final`, intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events and `->`, `fork` / `join`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
-- Timing controls in processes: `iff` qualifiers ([#1444](https://github.com/celox-sim/celox/issues/1444)),
-  impure function calls in event expressions, and
-  `wait` or event expressions reading a static task argument.
+- Timing controls in processes: impure function calls in event expressions and
+  `iff` conditions, and `wait`, event expressions or `iff` conditions reading a static task argument.
 - Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset.
 - Inferred latches inside `always_comb` are rejected by default. Set `inferred_latch = "warn"` or `"allow"` in `celox.toml` under `[diagnostics]` to permit retained blocking assignments. Ordinary `always @*` and explicit `always_latch` do not require this option.
 - Ports and instances: non-ANSI port declarations ([#426](https://github.com/celox-sim/celox/issues/426)), `ref` ports
@@ -186,7 +185,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Declarations: variable declaration initializers of members of an interface
   array, ANSI port default values, tagged unions, unpacked unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   unpacked structs and `real`.
-- Sequential processes: `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)) in event lists, and in
+- Sequential processes: `iff` qualifiers in `always_ff` event lists ([#452](https://github.com/celox-sim/celox/issues/452)), and in
   `always_ff` edge operands other than a plain signal ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit
   edge signals, and several edges without an asynchronous reset.
 - Combinational processes: nonblocking assignments inside `always_comb`
@@ -468,6 +467,19 @@ unsupported, including when the inference option is enabled.
   before the edge and waits again before the nonblocking updates
   (IEEE 1800-2023 4.5). Icarus 13.0 gives the same values; Verilator 5.052
   resumes the waiter after the nonblocking updates.
+- An item `expr iff condition` is an event only if the condition is true
+  when the occurrence of `expr` is detected (IEEE 1800-2023 9.4.2.3): X and
+  Z are false, and an occurrence while the condition is false is consumed.
+  The wait does not watch the condition's operands, so `@(posedge clk iff
+  en)` does not wake when only `en` changes. Like an event expression, the
+  condition sees another process's writes when that process reaches a
+  timing control or ends (4.7), and so does the item's own event: with
+  `en = 1; clk = 1;` in one process, the edge occurs with `en` at 1, and
+  with `clk = 1; en = 0;` it occurs with `en` at 0 and is no event.
+  IEEE 1800-2023 judges the latter at the write of `clk`; Verilator 5.052
+  agrees with Celox.
+  A plain `always @(posedge clk iff en)` runs as a process; `always_ff`
+  rejects `iff` ([#452](https://github.com/celox-sim/celox/issues/452)).
 
 ### Variable lifetimes
 
