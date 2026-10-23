@@ -33,6 +33,8 @@ veryl-simulator = { workspace = true }
 
 [dev-dependencies]
 celox-design = { workspace = true }
+# Fairness tests read settle counts; keep profiling out of benchmark builds.
+veryl-simulator = { workspace = true, features = ["profile"] }
 
 [lints]
 workspace = true

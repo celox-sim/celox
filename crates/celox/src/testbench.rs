@@ -325,6 +325,42 @@ fn collect_testbench_heap<B: SimBackend>(
     sim.maybe_collect_heap(saved_roots);
 }
 
+fn sim_set_queue_target<B: SimBackend>(
+    sim: &mut crate::Simulator<B>,
+    target: &TestbenchTarget<SignalRef, celox_testbench::CompiledExpr>,
+    value: BigUint,
+    mask: BigUint,
+) {
+    let (value, mask) = if sim.backend.layout().four_state && target.signal.is_4state {
+        (value, mask)
+    } else {
+        // X/Z convert to zero when stored in a two-state destination.
+        (
+            value & (width_mask(target.width) ^ mask),
+            BigUint::default(),
+        )
+    };
+    let Some(selection) = &target.selection else {
+        sim.set_four_state(target.signal, value, mask);
+        return;
+    };
+    let offset = eval_expr(sim, &selection.offset).to_u64() as usize;
+    let width = selection
+        .width
+        .min(target.signal.width.saturating_sub(offset));
+    if width == 0 {
+        return;
+    }
+    let (old_value, old_mask) = sim.get_four_state(target.signal);
+    let field = width_mask(width);
+    let keep = width_mask(target.signal.width) ^ (&field << offset);
+    sim.set_four_state(
+        target.signal,
+        (old_value & &keep) | ((value & &field) << offset),
+        (old_mask & keep) | ((mask & field) << offset),
+    );
+}
+
 fn execution_random_seed(seed: Option<u64>) -> u64 {
     seed.unwrap_or_else(rand::random)
 }
@@ -1168,6 +1204,7 @@ fn run_testbench_limited<B: SimBackend>(
         scheduler_time: None,
         tick_limit,
         tick_limit_reached: false,
+        queues: HashMap::default(),
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
     };
     let mut result = if sim.components.finish_requested() {
@@ -1316,6 +1353,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         scheduler_time: None,
         tick_limit: None,
         tick_limit_reached: false,
+        queues: HashMap::default(),
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
     };
     let result = if sim.components.finish_requested() {
@@ -1348,6 +1386,7 @@ struct DetailedExecContext {
     tick_limit: Option<u64>,
     tick_limit_reached: bool,
     random: RandomTable,
+    queues: HashMap<String, std::collections::VecDeque<(BigUint, BigUint)>>,
 }
 
 impl DetailedExecContext {
@@ -2319,6 +2358,106 @@ fn exec_one_detailed<B: SimBackend>(
                     return ExecResult::Fail(format!("eval_comb: {e}"));
                 }
                 sim_set_target(sim, ret, TbValue::U64(seed));
+            }
+            ExecResult::Continue
+        }
+        GenericTestbenchStatement::Queue {
+            handle,
+            op,
+            value,
+            value_target,
+            value_mask,
+            value_width,
+            value_signed,
+            width,
+            signed,
+            four_state,
+            capacity,
+            ret,
+        } => {
+            use celox_testbench::QueueOp as Q;
+            if let Err(e) = sim.eval_comb() {
+                return ExecResult::Fail(format!("eval_comb: {e}"));
+            }
+            let value = value.as_ref().map(|value| {
+                let (bits, mask) = if let Some(target) = value_target {
+                    let (bits, mask) = sim.get_four_state(target.signal);
+                    let offset = target
+                        .selection
+                        .as_ref()
+                        .map_or(0, |s| eval_expr(sim, &s.offset).to_u64() as usize);
+                    (bits >> offset, mask >> offset)
+                } else {
+                    (eval_expr(sim, value).to_biguint(), value_mask.clone())
+                };
+                let bits =
+                    resize_component_return(bits, *value_width, *value_signed, *width as usize);
+                let mask =
+                    resize_component_return(mask, *value_width, *value_signed, *width as usize);
+                if *four_state {
+                    (bits, mask)
+                } else {
+                    (
+                        bits & (width_mask(*width as usize) ^ mask),
+                        BigUint::default(),
+                    )
+                }
+            });
+            let empty = || {
+                let unknown = if *four_state {
+                    width_mask(*width as usize)
+                } else {
+                    BigUint::default()
+                };
+                (unknown.clone(), unknown)
+            };
+            let queue = ctx.queues.entry(handle.clone()).or_default();
+            let full = *capacity != 0 && queue.len() >= *capacity as usize;
+            let result = match op {
+                Q::PushBack | Q::PushFront => {
+                    if !full && let Some(value) = value {
+                        if *op == Q::PushBack {
+                            queue.push_back(value);
+                        } else {
+                            queue.push_front(value);
+                        }
+                    }
+                    None
+                }
+                Q::PopFront => Some(queue.pop_front().unwrap_or_else(empty)),
+                Q::PopBack => Some(queue.pop_back().unwrap_or_else(empty)),
+                Q::DropFront => {
+                    queue.pop_front();
+                    None
+                }
+                Q::DropBack => {
+                    queue.pop_back();
+                    None
+                }
+                Q::Front => Some(queue.front().cloned().unwrap_or_else(empty)),
+                Q::Back => Some(queue.back().cloned().unwrap_or_else(empty)),
+                Q::Clear => {
+                    queue.clear();
+                    None
+                }
+                Q::Size => Some((BigUint::from(queue.len()), BigUint::default())),
+                Q::IsEmpty => Some((
+                    BigUint::from(u8::from(queue.is_empty())),
+                    BigUint::default(),
+                )),
+                Q::IsFull => Some((BigUint::from(u8::from(full)), BigUint::default())),
+            };
+            if let (Some(ret), Some((value, mask))) = (ret, result) {
+                let (source_width, signed) = match op {
+                    Q::Size => (32, false),
+                    Q::IsEmpty | Q::IsFull => (1, false),
+                    _ => (*width as usize, *signed),
+                };
+                let destination_width =
+                    ret.selection.as_ref().map_or(ret.signal.width, |s| s.width);
+                let value = resize_component_return(value, source_width, signed, destination_width);
+                let mask = resize_component_return(mask, source_width, signed, destination_width);
+                sim_set_queue_target(sim, ret, value, mask);
             }
             ExecResult::Continue
         }
