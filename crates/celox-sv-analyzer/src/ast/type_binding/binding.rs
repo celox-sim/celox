@@ -20,6 +20,7 @@ pub(in crate::ast) fn bind_in(
         Enter(TypeId),
         Enum(Vec<PackedRange>),
         Aggregate {
+            owner: Arc<str>,
             union: bool,
             signed: bool,
             names: Vec<String>,
@@ -112,7 +113,17 @@ pub(in crate::ast) fn bind_in(
                             }
                             names.push(name);
                         }
+                        let token = &native.tokens[data.tokens.start];
+                        let span = token.origin.spelling;
+                        let owner = Arc::from(format!(
+                            "{}:{}:{}:{}",
+                            tree.syntax_tree.root_name().unwrap_or_default(),
+                            native.sources.file(span.file).path.display(),
+                            span.start,
+                            data.tokens.start
+                        ));
                         jobs.push(Job::Aggregate {
+                            owner,
                             union: *union,
                             signed: data.signed.unwrap_or(false),
                             names,
@@ -156,6 +167,7 @@ pub(in crate::ast) fn bind_in(
                 values.push(ty);
             }
             Job::Aggregate {
+                owner,
                 union,
                 signed,
                 names,
@@ -170,6 +182,7 @@ pub(in crate::ast) fn bind_in(
                     &tree.state,
                     union,
                     signed,
+                    owner,
                     fields,
                     ranges,
                     &context.const_env,

@@ -360,6 +360,7 @@ pub struct Port {
     r#type: Type,
     is_net: bool,
     default: Option<ConstExpr>,
+    pattern_target: Option<crate::ast::Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,7 +418,24 @@ impl Port {
             r#type,
             is_net,
             default: None,
+            pattern_target: None,
         }
+    }
+
+    pub(crate) fn with_pattern_target(mut self, target: Option<crate::ast::Type>) -> Self {
+        self.pattern_target = target;
+        self
+    }
+
+    /// Bind caller-owned pattern values in this specialized port's type.
+    pub fn bind_pattern(
+        &self,
+        pattern: &crate::ast::BoundPattern,
+    ) -> Result<Expr, crate::AnalyzerError> {
+        let target = self.pattern_target.as_ref().ok_or_else(|| {
+            crate::AnalyzerError::Unsupported("assignment pattern port type".into())
+        })?;
+        pattern.bind_port(target)
     }
 
     pub fn name(&self) -> &str {
@@ -569,15 +587,28 @@ pub struct PortConnection {
     formal: String,
     actual: String,
     actual_expr: Option<Expr>,
+    bound_pattern: Option<crate::ast::BoundPattern>,
 }
 
 impl PortConnection {
-    pub(crate) fn new(formal: String, actual: String, actual_expr: Option<Expr>) -> Self {
+    pub(crate) fn new(
+        formal: String,
+        actual: String,
+        actual_expr: Option<Expr>,
+        bound_pattern: Option<crate::ast::BoundPattern>,
+    ) -> Self {
         Self {
             formal,
             actual,
             actual_expr,
+            bound_pattern,
         }
+    }
+
+    /// An untyped assignment pattern with caller-owned values. The receiving
+    /// port supplies its element types after parameter specialization.
+    pub fn bound_pattern(&self) -> Option<&crate::ast::BoundPattern> {
+        self.bound_pattern.as_ref()
     }
 
     pub fn formal(&self) -> &str {
