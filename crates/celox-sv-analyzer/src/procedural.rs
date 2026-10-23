@@ -18,6 +18,26 @@ pub struct SourceSpan {
     pub end: usize,
 }
 
+/// Where a process is written, for diagnostics about the process as a
+/// whole.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProcessSite {
+    /// The construct the process comes from: `initial`, `always`,
+    /// `always_ff`, or `declaration initializer`.
+    pub construct: &'static str,
+    pub path: std::path::PathBuf,
+    /// One-based physical line.
+    pub line: usize,
+    /// One-based byte column.
+    pub column: usize,
+}
+
+impl std::fmt::Display for ProcessSite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}:{}", self.path.display(), self.line, self.column)
+    }
+}
+
 /// One procedural statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StmtBase<E, L> {
@@ -87,6 +107,9 @@ pub enum StmtBase<E, L> {
         amount: E,
         /// Global-precision ticks in one time unit of the declaring scope.
         ticks_per_unit: u64,
+        /// Global-precision ticks in one time precision step of the
+        /// declaring scope, to which a real amount is rounded (3.14.1).
+        ticks_per_precision: u64,
     },
     /// `@(items)`: suspend the process until one of the events occurs
     /// (9.4.2).
@@ -304,9 +327,11 @@ impl<E, L> StmtBase<E, L> {
             StmtBase::Delay {
                 amount,
                 ticks_per_unit,
+                ticks_per_precision,
             } => StmtBase::Delay {
                 amount: fe(amount),
                 ticks_per_unit,
+                ticks_per_precision,
             },
             StmtBase::WaitEvent(items) => StmtBase::WaitEvent(
                 items
@@ -486,6 +511,8 @@ pub struct SubroutineBase<E, L, T> {
     pub is_task: bool,
     /// Automatic storage that needs a private activation when a task suspends.
     pub automatic_locals: Vec<String>,
+    /// Observable static storage shared by every call of this function.
+    pub persistent_locals: Vec<String>,
     /// `None` for a task or a `void` function.
     pub return_type: Option<T>,
     pub params: Vec<SubroutineParamBase<E, T>>,
@@ -518,6 +545,7 @@ impl<E, L, T> SubroutineBase<E, L, T> {
             name: self.name,
             is_task: self.is_task,
             automatic_locals: self.automatic_locals,
+            persistent_locals: self.persistent_locals,
             return_type: self.return_type.map(&mut *ft),
             params: self
                 .params

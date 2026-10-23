@@ -170,6 +170,91 @@
   (run_to_finish)
   (assert_eq y 9))
 
+(case explicit_list_of_every_read_waits_for_a_change
+  ; Like `always @*`, the list waits before its first run: neither the
+  ; declaration initializers nor the write of `y` wake it (9.4.2).
+  (source "level_list.sv" #"
+                module Top(output logic [7:0] y);
+                    logic [7:0] a = 8'd0;
+                    logic [7:0] b = 8'd0;
+                    initial y = 8'd1;
+                    always @(b, a) y = a + b;
+                    initial begin
+                        #2 a = 8'd3;
+                        #2 b = 8'd5;
+                        #2 $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq y 1)
+  (run_until 3)
+  (assert_eq y 3)
+  (run_to_finish)
+  (assert_eq y 8))
+
+(case list_missing_a_read_does_not_wake_on_it
+  (source "missing_read.sv" #"
+                module Top(output logic [7:0] y);
+                    logic [7:0] a = 8'd0;
+                    logic [7:0] b = 8'd0;
+                    initial y = 8'd0;
+                    always @(a) y = a + b;
+                    initial begin
+                        #2 a = 8'd3;
+                        #2 b = 8'd4;
+                        #2 a = 8'd5;
+                        #2 $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 3)
+  (assert_eq y 3)
+  (run_until 5)
+  (assert_eq y 3)
+  (run_to_finish)
+  (assert_eq y 9))
+
+(case list_with_an_extra_signal_wakes_on_it
+  (source "extra_signal.sv" #"
+                module Top;
+                    logic [7:0] a = 8'd0;
+                    logic [7:0] b = 8'd0;
+                    logic c = 1'b0;
+                    always @(a or b or c) $display("sum=%0d", a + b);
+                    initial begin
+                        #2 a = 8'd3;
+                        #2 c = 1'b1;
+                        #2 $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "sum=3\nsum=3\n"))
+
+(case list_of_every_read_with_a_nonblocking_body_runs
+  (source "nonblocking_list.sv" #"
+                module Top(output logic [7:0] y);
+                    logic [7:0] a = 8'd0;
+                    logic [7:0] b = 8'd0;
+                    initial y = 8'd0;
+                    always @(a or b) y <= a + b;
+                    initial begin
+                        #2 a = 8'd3;
+                        #2 b = 8'd5;
+                        #2 $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 3)
+  (assert_eq y 3)
+  (run_to_finish)
+  (assert_eq y 8))
+
 (case processes_wake_each_other_at_the_same_time
   (source "handshake.sv" #"
                 module Top(output logic [7:0] y);
@@ -496,6 +581,98 @@
   (assert_eq d 3)
   (assert_eq sampled 2 "the register samples the value before the edge's update"))
 
+(case staged_nonblocking_updates_keep_their_order
+  (source "staged_nba.sv" #"
+      module Top(output logic [7:0] last, count, early, two_sites, stim_seen, sampled);
+        logic [7:0] x = 8'd0, n = 8'd0, y = 8'd0, stim = 8'd0, r = 8'd0;
+        logic clk = 1'b0;
+        always #5 clk = ~clk;
+        initial begin
+          #1;
+          for (int i = 0; i < 3; i++) x <= 8'(i + 4);
+          repeat (2) n <= n + 8'd1;
+          for (int i = 0; i < 2; i++)
+            if (i == 1) y <= 8'd1;
+            else y <= 8'd2;
+          #0 early = x;
+        end
+        initial forever @(posedge clk) stim <= stim + 8'd3;
+        always_ff @(posedge clk) r <= stim;
+        assign last = x;
+        assign count = n;
+        assign two_sites = y;
+        assign stim_seen = stim;
+        assign sampled = r;
+      endmodule"#)
+  (top Top)
+  (run_until 1)
+  (assert_eq early 0 "a staged update lands after the inactive region")
+  (assert_eq last 6 "the last update of one site in a time slot wins")
+  (assert_eq count 1 "each update reads the value before the slot's updates")
+  (assert_eq two_sites 1 "updates of two sites land in the order they were issued")
+  (run_until 26)
+  (assert_eq stim_seen 9)
+  (assert_eq sampled 6 "the register samples the value before the edge's update"))
+
+(case narrow_nonblocking_updates_keep_the_other_bits
+  (source "narrow_nba.sv" #"
+      module Top(output logic [16:0] ps, pq, output logic [64:0] ws, wq,
+                 output logic [65:0] xs, xq);
+        logic [15:0] p = 16'hffff, q = 16'hffff;
+        logic [63:0] w = 64'd0, v = 64'd0;
+        logic [64:0] x = 65'd0, y = 65'd0;
+        initial begin
+          #1;
+          p[11:4] <= 8'ha5;
+          q[11:4] <= 8'h5a;
+          q[3:0] <= 4'h0;
+          w <= 64'hfedc_ba98_7654_3210;
+          v <= 64'h0123_4567_89ab_cdef;
+          v[63:60] <= 4'h8;
+          x <= {1'b1, 64'h8000_0000_0000_0001};
+          y[64:1] <= 64'hffff_ffff_ffff_ffff;
+          y[0] <= 1'b0;
+        end
+        // Extended, so that no target becomes a port.
+        assign ps = {1'b0, p};
+        assign pq = {1'b0, q};
+        assign ws = {1'b0, w};
+        assign wq = {1'b0, v};
+        assign xs = {1'b0, x};
+        assign xq = {1'b0, y};
+      endmodule"#)
+  (top Top)
+  (run_until 1)
+  (assert_eq ps 0xfa5f "a part select across a byte boundary keeps the other bits")
+  (assert_eq pq 0xf5a0)
+  (assert_eq ws 0xfedcba9876543210 "a 64-bit target takes all its bits")
+  (assert_eq wq 0x8123456789abcdef)
+  (assert_eq xs 0x18000000000000001 "a 65-bit target takes all its bits")
+  (assert_eq xq 0x1fffffffffffffffe))
+
+(case four_state_nonblocking_updates_keep_unknown_bits
+  (source "four_state_nba.sv" #"
+      module Top(output bit staged, queued, wide);
+        logic [15:0] p = 16'bx, q = 16'bx;
+        logic [64:0] x = 65'bx;
+        initial begin
+          #1;
+          p[11:4] <= 8'ha5;
+          q[11:4] <= 8'h5z;
+          q[3:0] <= 4'h1;
+          x[32:1] <= 32'h8000_0001;
+        end
+        assign staged = p === 16'bxxxx_1010_0101_xxxx;
+        assign queued = q === 16'bxxxx_0101_zzzz_0001;
+        assign wide = x === {32'bx, 32'h8000_0001, 1'bx};
+      endmodule"#)
+  (top Top)
+  (four_state)
+  (run_until 1)
+  (assert_eq staged 1 "an update keeps the unknown bits around it")
+  (assert_eq queued 1)
+  (assert_eq wide 1))
+
 (case nonblocking_ff_stores_remain_pending_during_inactive_work
   (source "nonblocking.sv" #"module Top(output bit [7:0] q, observed, derived_seen);
       bit clk; wire [7:0] derived=q+1;
@@ -577,6 +754,38 @@
   (run_until 2)
   (assert_eq a 4)
   (assert_eq b 3))
+
+(case list_in_a_loop_through_always_comb_converges
+  ; As `always @*` the list would close a combinational loop with the
+  ; always_comb, so it runs as a process and the loop converges.
+  (source "comb_feedback.sv" #"
+    module Top(output bit [7:0] a, b);
+      bit [7:0] s;
+      initial begin #1; s = 1; end
+      always @(s or b) a = (b < 4) ? b + s : b;
+      always_comb b = (a < 4) ? a : 8'd3;
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq a 4)
+  (assert_eq b 3))
+
+(case list_outside_a_loop_keeps_its_value
+  (source "partial_feedback.sv" #"
+    module Top(output bit [7:0] a, b, c);
+      bit [7:0] s;
+      initial begin #1; s = 1; end
+      always @(s or b) a = (b < 4) ? b + s : b;
+      assign b = (a < 4) ? a : 8'd3;
+      always @(b) c = b + 8'd10;
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq a 4)
+  (assert_eq b 3)
+  (assert_eq c 13))
 
 (case pure_function_rhs_preserves_distinct_write_times
  (source "pure-timed-writes.sv" #"
@@ -1056,3 +1265,752 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (top Top)
   (run_to_finish)
   (assert_eq count 8))
+
+(case real_delays_round_at_the_scope_precision
+  ; IEEE 1800-2023 3.14.1: a delay is rounded at the scope's precision, here
+  ; the default 1 ps, and 6.12.1 rounds a real tie away from zero: 0.0625 ns
+  ; waits 63 ps. A NaN delay counts as zero, as Icarus 13.0 and Verilator
+  ; 5.052 do.
+  (source "real_delays.sv" #"
+    module Top(output bit a_before, a_after, b_before, b_after, c_before,
+               c_after, d_after, e_before, e_after);
+      real r = 2.75, tie = 0.0625, zero = 0.0, nan;
+      shortreal quarter = 0.25;
+      bit a, b, c, d, e;
+      initial begin #r a = 1; end
+      initial begin #2749ps a_before = a; #2ps a_after = a; end
+      initial begin #3; #tie b = 1; end
+      initial begin #3062ps b_before = b; #2ps b_after = b; end
+      initial begin #5; #quarter c = 1; end
+      initial begin #5249ps c_before = c; #2ps c_after = c; end
+      initial begin nan = zero / zero; #6; #nan d = 1; end
+      initial begin #6001ps d_after = d; end
+      initial begin #7; #(r * 2) e = 1; end
+      initial begin #12499ps e_before = e; #2ps e_after = e; end
+      initial #20 $finish;
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq a_before 0)
+  (assert_eq a_after 1 "2.75 waits 2750 ps")
+  (assert_eq b_before 0)
+  (assert_eq b_after 1 "0.0625 waits 63 ps")
+  (assert_eq c_before 0)
+  (assert_eq c_after 1 "shortreal 0.25 waits 250 ps")
+  (assert_eq d_after 1 "a NaN delay waits zero")
+  (assert_eq e_before 0)
+  (assert_eq e_after 1 "r * 2 waits 5.5 ns"))
+
+(case negative_real_delays_wait_their_twos_complement
+  ; IEEE 1800-2023 9.4.1: a negative delay is read as a two's-complement
+  ; unsigned time, so -1.5 waits about 2^64 precision steps.
+  (source "negative_real_delay.sv" #"
+    module Top(output bit woke);
+      real r = -1.5;
+      initial begin #r woke = 1; end
+      initial #10 $finish;
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq woke 0))
+
+(case expression_events_see_pulses_within_a_time_slot
+  ; IEEE 1800-2023 9.4.2: each change of the expression's value is an
+  ; event, also one the slot undoes before it ends. The waits begin after
+  ; time 0, where Icarus 13.0 reports an event of a new expression.
+  (source "expression_pulse.sv" #"
+    module Top(output bit [7:0] count, output bit hit);
+      bit a, b;
+      initial begin #1; forever begin @(a ^ b); count = count + 8'd1; end end
+      initial begin #1; @(a ^ b); hit = 1; end
+      initial begin #2; a = 1; #0; a = 0; #1; b = 1; a = 1; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq count 0)
+  (run_until 2)
+  (assert_eq count 2 "the expression rose and fell at time 2")
+  (assert_eq hit 1)
+  (run_until 3)
+  (assert_eq count 2 "a and b changed together, so a ^ b did not change"))
+
+(case real_expression_events_see_fractional_changes
+  ; IEEE 1800-2023 9.4.2: a change of a real expression's value is an
+  ; event, also one that converting the value to an integer would lose.
+  (source "real_expression_event.sv" #"
+    module Top(output bit [7:0] count);
+      real r;
+      initial begin #1; forever begin @(r * 2.0); count = count + 8'd1; end end
+      initial begin #2; r = 0.125; #1; r = 0.25; #1; r = 0.25; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq count 0)
+  (run_until 3)
+  (assert_eq count 2 "r * 2.0 went to 0.25 and then to 0.5")
+  (run_until 4)
+  (assert_eq count 2 "writing the same value is no change"))
+
+(case bit_select_edges_follow_the_selected_bit
+  ; Table 9-2 judges an edge on the least significant bit of the
+  ; expression: of `v[3]`, not of `v`.
+  (source "bit_select_edge.sv" #"
+    module Top(output bit [7:0] selected, whole);
+      bit [3:0] v;
+      initial forever begin @(posedge v[3]); selected = selected + 8'd1; end
+      initial forever begin @(posedge v); whole = whole + 8'd1; end
+      initial begin #1; v = 4'b1000; #1; v = 4'b0000; #1; v = 4'b1000; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq selected 1)
+  (assert_eq whole 0)
+  (run_until 3)
+  (assert_eq selected 2)
+  (assert_eq whole 0))
+
+(case part_select_events_see_pulses_of_the_selected_bits
+  (source "part_select_pulse.sv" #"
+    module Top(output bit [7:0] count);
+      bit [3:0] v;
+      initial forever begin @(v[2:1]); count = count + 8'd1; end
+      initial begin #1; v[1] = 1; #0; v[1] = 0; #1; v[3] = 1; v[0] = 1; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq count 2 "v[2:1] went to 1 and back")
+  (run_until 2)
+  (assert_eq count 2 "bits outside the select are no events"))
+
+(case variable_index_events_follow_the_index
+  ; The value of `q[i]` changes when the index does, too.
+  (source "variable_index_event.sv" #"
+    module Top(output bit [7:0] count);
+      bit [3:0] q;
+      bit [1:0] i;
+      initial forever begin @(q[i]); count = count + 8'd1; end
+      initial begin #1; q[0] = 1; #1; i = 1; #1; q[0] = 0; #1; q[1] = 1; #1; i = 2; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1) (assert_eq count 1)
+  (run_until 2) (assert_eq count 2 "q[1] differs from q[0]")
+  (run_until 3) (assert_eq count 2 "q[0] is not selected")
+  (run_until 4) (assert_eq count 3)
+  (run_until 5) (assert_eq count 4))
+
+(case pure_function_events_change_with_the_result
+  (source "function_event.sv" #"
+    module Top(output bit [7:0] count);
+      bit [3:0] v;
+      function automatic bit [1:0] middle(bit [3:0] x);
+        return x[2:1];
+      endfunction
+      initial begin #1; forever begin @(middle(v)); count = count + 8'd1; end end
+      initial begin #2; v = 4'b0010; #1; v = 4'b1011; #1; v = 4'b1101; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 2) (assert_eq count 1)
+  (run_until 3) (assert_eq count 1 "the result stayed 1")
+  (run_until 4) (assert_eq count 2))
+
+(case event_expressions_read_automatic_task_locals
+  ; Each call waits on `q[i]` with its own `i`, sampled when the event
+  ; control begins: the second call does not wake because `q[1]` differs
+  ; from the `q[0]` the first one waited on.
+  (source "task_local_event.sv" #"
+    module Top(output int first, second);
+      bit [3:0] q;
+      task automatic await(input int i, output int at);
+        @(q[i]);
+        at = $time;
+      endtask
+      initial begin #2; await(0, first); await(1, second); end
+      initial begin #3; q[0] = 1; #3; q[1] = 1; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 3) (assert_eq first 3) (assert_eq second 0)
+  (run_until 5) (assert_eq second 0)
+  (run_until 6) (assert_eq second 6))
+
+(case event_controls_sample_the_expression_when_they_begin
+  ; IEEE 1800-2023 9.4.2: the process's own write before the event
+  ; control is no event of it.
+  (source "event_sample.sv" #"
+    module Top(output bit hit);
+      bit a, b;
+      initial begin #1; a = 1; @(a ^ b); hit = 1; end
+      initial begin #2; b = 1; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq hit 0)
+  (run_until 2)
+  (assert_eq hit 1))
+
+(case implicit_event_controls_in_processes_wait_on_their_reads
+  ; IEEE 1800-2023 9.4.2.2: `@*` waits on the variables the statement it
+  ; controls reads, not on those it writes.
+  (source "implicit_event.sv" #"
+    module Top(output bit [7:0] y, z, count);
+      bit [7:0] a, b;
+      initial forever @* begin y = a + b; count = count + 8'd1; end
+      always @* begin #1; z = a; end
+      initial begin #2; a = 3; #2; b = 4; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1) (assert_eq count 0) (assert_eq y 0)
+  (run_until 2) (assert_eq count 1) (assert_eq y 3)
+  (run_until 3) (assert_eq z 3)
+  (run_until 4) (assert_eq count 2) (assert_eq y 7) (assert_eq z 3))
+
+; Scheduling boundaries: processes that only delay, processes woken by one
+; clock edge, generated clocks feeding flip-flop domains, and the points where
+; a simulator may run them differently from other processes. Each case keeps
+; its result independent of the order the standard leaves open between
+; processes of one region (IEEE 1800-2023 4.5, 4.7).
+
+; A process resumed by `#0` runs in the inactive region, after the active
+; region has run the flip-flop domain its edge triggered.
+(case zero_delay_process_ends_a_pulse_after_its_edge_triggers
+  (source "pulse.sv" #"
+                module Top(output logic [7:0] count, output logic p);
+                    initial p = 1'b0;
+                    initial count = 8'd0;
+                    always begin #10 p = 1'b1; #0 p = 1'b0; end
+                    always_ff @(posedge p) count <= count + 8'd1;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 5)
+  (assert_eq count 0)
+  (run_until 35)
+  (assert_eq count 3 "every zero-width pulse is an edge")
+  (assert_eq p 0))
+
+; Edge waits count the same edges wherever the process that generates the
+; clock is declared, also for an edge no flip-flop domain uses.
+(case edge_waits_count_generated_clock_edges_in_any_declaration_order
+  (source "order.sv" #"
+                module Top(output logic [7:0] before_clock, after_clock, falls);
+                    logic clk = 1'b0;
+                    initial begin
+                        before_clock = 8'd0;
+                        forever @(posedge clk) before_clock = before_clock + 8'd1;
+                    end
+                    always #5 clk = ~clk;
+                    initial begin
+                        after_clock = 8'd0;
+                        forever @(posedge clk) after_clock = after_clock + 8'd1;
+                    end
+                    initial begin
+                        falls = 8'd0;
+                        forever @(negedge clk) falls = falls + 8'd1;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 4)
+  (assert_eq before_clock 0)
+  ; Rising edges at 5, 15, ..., 95; falling edges at 10, 20, ..., 100.
+  (run_until 100)
+  (assert_eq before_clock 10)
+  (assert_eq after_clock 10)
+  (assert_eq falls 10))
+
+; Nonblocking assignments of a process that only delays publish in the NBA
+; region of their own time, between the clock edges.
+(case delay_process_nonblocking_updates_reach_later_edges
+  (source "delay_nba.sv" #"
+                module Top(output logic [7:0] s, q);
+                    logic clk = 1'b0;
+                    always #5 clk = ~clk;
+                    initial begin
+                        s = 8'd0;
+                        #12 s <= 8'd5;
+                        #10 s <= s + 8'd1;
+                    end
+                    always_ff @(posedge clk) q <= s;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 12)
+  (assert_eq s 5)
+  (run_until 16)
+  (assert_eq q 5)
+  (run_until 26)
+  (assert_eq s 6)
+  (assert_eq q 6))
+
+; A clock whose half period is a variable: each delay reads it when the
+; process reaches the delay.
+(case variable_delay_clock_changes_its_period
+  (source "variable_period.sv" #"
+                module Top(output logic [7:0] count);
+                    logic clk = 1'b0;
+                    logic [7:0] half = 8'd5;
+                    initial count = 8'd0;
+                    always #(half) clk = ~clk;
+                    initial #37 half = 8'd10;
+                    always_ff @(posedge clk) count <= count + 8'd1;
+                endmodule
+            "#)
+  (top Top)
+  ; Rising edges at 5, 15, 25, 35, then 50 and 70.
+  (run_until 45)
+  (assert_eq count 4)
+  (run_until 75)
+  (assert_eq count 6))
+
+(case asynchronous_reset_driven_by_a_delay_process
+  (source "async_reset.sv" #"
+                module Top(output logic [7:0] q);
+                    logic clk = 1'b0;
+                    logic rst = 1'b0;
+                    always #5 clk = ~clk;
+                    initial begin
+                        #2 rst = 1'b1;
+                        #10 rst = 1'b0;
+                        #31 rst = 1'b1;
+                        #4 rst = 1'b0;
+                    end
+                    always_ff @(posedge clk or posedge rst)
+                        if (rst) q <= 8'd0;
+                        else q <= q + 8'd1;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 3)
+  (assert_eq q 0)
+  ; Counting edges at 15, 25 and 35.
+  (run_until 40)
+  (assert_eq q 3)
+  (run_until 44)
+  (assert_eq q 0 "the reset asserts between clock edges")
+  ; Held in reset at 45; counting again at 55.
+  (run_until 56)
+  (assert_eq q 1))
+
+; Two generated clocks rise at the same time: each domain samples the
+; other's registers from before the edge.
+(case generated_clocks_with_a_common_edge_sample_each_other
+  (source "two_clocks.sv" #"
+                module Top(output logic [7:0] a_count, b_count, a_seen, b_seen);
+                    logic a = 1'b0;
+                    logic b = 1'b0;
+                    always #5 a = ~a;
+                    always #15 b = ~b;
+                    initial begin
+                        a_count = 8'd0;
+                        b_count = 8'd0;
+                    end
+                    always_ff @(posedge a) begin
+                        a_count <= a_count + 8'd1;
+                        a_seen <= b_count;
+                    end
+                    always_ff @(posedge b) begin
+                        b_count <= b_count + 8'd1;
+                        b_seen <= a_count;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  ; a rises at 5, 15, 25, 35, 45; b at 15 and 45.
+  (run_until 50)
+  (assert_eq a_count 5)
+  (assert_eq b_count 2)
+  (assert_eq a_seen 1)
+  (assert_eq b_seen 4))
+
+; Inputs the script writes between runs reach combinational logic before the
+; next generated clock edge samples it.
+(case script_writes_between_runs_reach_generated_clock_domains
+  (source "host_comb.sv" #"
+                module Top(input logic [7:0] in, output logic [7:0] sum, q);
+                    logic clk = 1'b0;
+                    logic [7:0] r = 8'd0;
+                    always #5 clk = ~clk;
+                    assign sum = in + r;
+                    assign q = r;
+                    always_ff @(posedge clk) r <= sum;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 0)
+  (modify (set in 1))
+  (run_until 6)
+  (assert_eq q 1)
+  (assert_eq sum 2)
+  (modify (set in 3))
+  (run_until 7)
+  (assert_eq sum 4 "a write settles without a clock edge")
+  (run_until 16)
+  (assert_eq q 4)
+  (assert_eq sum 7))
+
+; An edge wait on an input the script drives, next to a generated clock.
+(case edge_waits_on_script_inputs_next_to_a_generated_clock
+  (source "host_wait.sv" #"
+                module Top(input logic go, output logic [7:0] ticks, at_go);
+                    logic clk = 1'b0;
+                    logic [7:0] n = 8'd0;
+                    always #5 clk = ~clk;
+                    always_ff @(posedge clk) n <= n + 8'd1;
+                    assign ticks = n;
+                    initial begin
+                        at_go = 8'd0;
+                        forever begin
+                            @(posedge go);
+                            at_go = n;
+                        end
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 0)
+  (modify (set go 0))
+  (run_until 22)
+  (modify (set go 1))
+  (run_until 23)
+  (assert_eq at_go 2)
+  (modify (set go 0))
+  (run_until 37)
+  (modify (set go 1))
+  (run_until 38)
+  (assert_eq at_go 4)
+  (assert_eq ticks 4))
+
+; `$finish` from a process that only delays ends the run between edges.
+(case finish_from_a_delay_process_between_clock_edges
+  (source "delay_finish.sv" #"
+                module Top(output logic [7:0] count);
+                    logic clk = 1'b0;
+                    initial count = 8'd0;
+                    always #5 clk = ~clk;
+                    always_ff @(posedge clk) count <= count + 8'd1;
+                    initial #27 $finish;
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq count 3))
+
+(case static_function_storage_is_shared_between_processes
+  (source "static_processes.sv" #"
+    module Top(output int first, second, third);
+      function int next_value();
+        static int saved = 11;
+        saved++;
+        return saved;
+      endfunction
+      initial begin
+        #1 first = next_value();
+        #2 third = next_value();
+      end
+      initial begin
+        #2 second = next_value();
+        #2 $finish;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq first 12) (assert_eq second 13) (assert_eq third 14))
+
+(case static_function_readonly_initializer_calls_execute_once
+  (source "static_initializer.sv" #"
+    module Top(output int cached, next, cached_again, next_again);
+      function int count();
+        static bit [31:0] value;
+        value++;
+        return value;
+      endfunction
+      function int remember();
+        static int value = count();
+        return value;
+      endfunction
+      initial begin
+        #1 cached = remember();
+        next = count();
+        #1 cached_again = remember();
+        next_again = count();
+        #1 $finish;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq cached 1) (assert_eq next 2)
+  (assert_eq cached_again 1) (assert_eq next_again 3))
+
+; A process waiting on a variable sees every store to it, including one a
+; later store of the same evaluation overwrites (IEEE 1800-2023 4.3, 9.4.2).
+(case intermediate_combinational_writes_wake_waiters
+  (source "comb.sv" #"
+                module Top;
+                    bit a, b, c, d, y1, y2;
+                    int n1, n2;
+                    always_comb begin y1 = 0; if (a) y1 = 1; c = b; end
+                    always @* begin y2 = 0; if (a) y2 = 1; d = b; end
+                    initial forever begin @(y1); n1++; end
+                    initial forever begin @(y2); n2++; end
+                    initial begin
+                        #1 a = 1;
+                        // While a is 1, each change of b rewrites y 1 -> 0 -> 1.
+                        #1 b = 1;
+                        #1 b = 0;
+                        #1 $display("comb=%0d star=%0d", n1, n2);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "comb=3 star=3\n"))
+
+; The processes share one clock, so a parallel build evaluates them as
+; separate parts. Nonblocking updates apply in the NBA region in issue
+; order, each its own update (IEEE 1800-2023 4.5, 10.4.2); edges are judged
+; on each update.
+(case intermediate_edge_process_writes_wake_waiters
+  (source "ff.sv" #"
+                module Top;
+                    bit a, clk, y3, y4, y5;
+                    int n3, n4, n5, p4, f5;
+                    always @(posedge clk) begin y3 = 0; if (a) y3 = 1; end
+                    always_ff @(posedge clk) begin y4 <= 0; if (a) y4 <= 1; end
+                    always @(posedge clk) begin y5 = 0; y5 = 1; end
+                    initial forever begin @(y3); n3++; end
+                    initial forever begin @(y4); n4++; end
+                    initial forever begin @(y5); n5++; end
+                    initial forever begin @(posedge y4); p4++; end
+                    initial forever begin @(negedge y5); f5++; end
+                    initial begin
+                        #1 a = 1;
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("blk=%0d nba=%0d const=%0d rise=%0d fall=%0d", n3, n4, n5, p4, f5);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "blk=3 nba=3 const=3 rise=3 fall=2\n"))
+
+; A variable written by blocking and nonblocking assignments of one process:
+; each nonblocking update, whole or partial, is its own update in the NBA
+; region. The blocking value equals the old one, so no waiter runs between
+; the regions.
+(case staged_nonblocking_writes_wake_waiters
+  (source "staged.sv" #"
+                module Top;
+                    bit clk, y = 1;
+                    bit [1:0] z = 2'b11;
+                    int n, m;
+                    always @(posedge clk) begin y = 1; y <= 0; y <= 1; end
+                    always @(posedge clk) begin
+                        z = 2'b11;
+                        z[0] <= 0;
+                        z[1] <= 0;
+                        z[0] <= 1;
+                        z[1] <= 1;
+                    end
+                    initial forever begin @(y); n++; end
+                    initial forever begin @(z); m++; end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("y=%0d z=%0d", n, m);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=3 z=3\n"))
+
+; The output port of a child is a continuous assignment to the parent's
+; net (IEEE 1800-2023 23.3.3), evaluated after the child's process yields,
+; so the parent may miss a pulse the child writes inside one evaluation
+; (4.7). Celox, like Verilator, sees only the settled value.
+(case child_port_pulses_reach_waiters_settled
+  (source "child.sv" #"
+                module Child(input bit a, b, output bit y, c);
+                    always_comb begin y = 0; if (a) y = 1; c = b; end
+                endmodule
+                module Top;
+                    bit a, b, y, c;
+                    int n;
+                    Child u(.a(a), .b(b), .y(y), .c(c));
+                    initial forever begin @(y); n++; end
+                    initial begin
+                        #1 a = 1;
+                        #1 b = 1;
+                        #1 b = 0;
+                        #1 $display("child=%0d", n);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "child=1\n"))
+
+; A process whose intermediate writes are counted drives only some bits of
+; its variable; the other bits keep their own drivers.
+(case intermediate_combinational_writes_keep_other_drivers
+  (source "drivers.sv" #"
+                module Top;
+                    logic a = 0, b = 0, e = 0, c, d;
+                    logic [7:0] y, z;
+                    int n, m;
+                    assign y[7:4] = 4'hA;
+                    always_comb begin y[3:0] = 0; if (a) y[3:0] = 1; c = b; end
+                    always_comb begin z[3:0] = 0; if (a) z[3:0] = 1; d = b; end
+                    always_comb z[7:4] = {4{e}};
+                    initial #1 forever begin @(y); n++; end
+                    initial #1 forever begin @(z); m++; end
+                    initial begin
+                        #2 a = 1;
+                        // While a is 1, each change of b rewrites y and z
+                        // 1 -> 0 -> 1 in their low bits.
+                        #1 b = 1;
+                        #1 e = 1;
+                        #1 $display("y=%h z=%h n=%0d m=%0d", y, z, n, m);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=a1 z=f1 n=2 m=3\n"))
+
+; One process pulses y[0] back to its value, and processes of the same clock
+; write the other bits of y unchanged. A parallel build evaluates every
+; process before any commits; the pulse still counts.
+(case parallel_flip_flop_parts_keep_pulses
+  (source "parts.sv" #"
+                module Top;
+                    bit clk;
+                    bit [2:0] y = 3'b001;
+                    bit [63:0] p, q, r, s;
+                    int n, f;
+                    always_ff @(posedge clk) y[2] <= y[2];
+                    always_ff @(posedge clk) begin y[0] <= 0; y[0] <= 1; end
+                    always_ff @(posedge clk) y[1] <= y[1];
+                    // Independent work, so that a parallel build splits the
+                    // processes into parts.
+                    always_ff @(posedge clk) p <= p * 64'd7 + (p >> 3) + 64'd1;
+                    always_ff @(posedge clk) q <= q * 64'd11 + (q >> 5) + 64'd3;
+                    always_ff @(posedge clk) r <= r * 64'd13 + (r >> 7) + 64'd5;
+                    always_ff @(posedge clk) s <= s * 64'd17 + (s >> 9) + 64'd9;
+                    initial forever begin @(y); n++; end
+                    initial forever begin @(negedge y); f++; end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("y=%b n=%0d f=%0d", y, n, f);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=001 n=2 f=2\n"))
+
+; The nonblocking updates apply after the blocking value was published:
+; y[0] <= 1 rises from the final blocking value 0, not from the 1 it held
+; when the update was issued. The blocking writes only fall, so the waiter
+; sees the rise in the NBA region.
+(case staged_nonblocking_writes_follow_later_blocking_writes
+  (source "staged_order.sv" #"
+                module Top;
+                    bit clk;
+                    bit [1:0] y = 2'b01;
+                    int r;
+                    always @(posedge clk) begin y[1] <= 0; y[0] <= 1; y = 2'b00; end
+                    initial forever begin @(posedge y); r++; end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("y=%b r=%0d", y, r);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=01 r=2\n"))
+
+; A reader of some bits of the counted variable splits its symbolic
+; definition at those bits; the imperative unit replaces every piece.
+(case intermediate_combinational_writes_replace_split_definitions
+  (source "split.sv" #"
+                module Top;
+                    logic [3:0] y, a = 4'b0101, b;
+                    logic [1:0] w;
+                    logic c = 0;
+                    int n;
+                    always_comb begin y = 4'b0; if (c) y = a; b = a; end
+                    assign w = y[1:0];
+                    initial #1 forever begin @(y); n++; end
+                    initial begin
+                        #2 c = 1;
+                        // While c is 1, each change of a rewrites y through 0.
+                        #1 a = 4'b0110;
+                        #1 a = 4'b0111;
+                        #1 $display("y=%b w=%b n=%0d", y, w, n);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=0111 w=11 n=3\n"))
+
+; The counted variable is an output port that the parent connects to a
+; concatenation.
+(case intermediate_combinational_writes_reach_concatenated_ports
+  (source "ports.sv" #"
+                module Child(input logic c, input logic [3:0] a, output logic [3:0] y);
+                    int n;
+                    always_comb begin y = 4'b0; if (c) y = a; end
+                    initial #1 forever begin @(y); n++; end
+                    initial #5 $display("y=%b n=%0d", y, n);
+                endmodule
+                module Top;
+                    logic [3:0] a = 4'b0101;
+                    logic [1:0] p, q;
+                    logic c = 0;
+                    Child u(.c(c), .a(a), .y({p, q}));
+                    initial begin
+                        #2 c = 1;
+                        #1 a = 4'b0110;
+                        #1 a = 4'b1001;
+                        #2 $display("p=%b q=%b", p, q);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=1001 n=3\np=10 q=01\n"))

@@ -3,6 +3,8 @@ mod arena;
 mod effect;
 mod expr;
 mod recover_unrolled;
+pub(crate) use recover_unrolled::proves_combinational;
+pub(crate) mod sensitivity;
 mod state;
 
 pub(crate) mod node {
@@ -319,6 +321,7 @@ pub fn parse_comb_with_loop_recovery(
                 };
 
                 paths.push(LogicPath::<VarId> {
+                    transparent_copy: false,
                     target: LogicPathTarget::Var(VarAtomBase::new(*id, lsb, msb)),
                     sources: sources.clone(),
                     previous_sources: sources
@@ -2532,7 +2535,17 @@ fn eval_assignment_rhs_effectful(
             bounds,
         ))
     } else {
-        eval_assignment_expression_effectful(module, store, &stmt.expr, arena, rhs_expected_width)
+        eval_assignment_expression_effectful(
+            module,
+            store,
+            &stmt
+                .dst
+                .first()
+                .map(|dst| crate::float::converted(&stmt.expr, &dst.comptime.r#type))
+                .unwrap_or(std::borrow::Cow::Borrowed(&stmt.expr)),
+            arena,
+            rhs_expected_width,
+        )
     }
 }
 
@@ -2938,6 +2951,18 @@ pub(super) fn apply_function_output(
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     let (output_expr, output_sources, output_is_2state) =
         function_output_value(module, arg_id, call, final_local_store, arena)?;
+    let output_expr = if let [destination] = dsts {
+        if let Some(op) = crate::float::conversion(
+            &module.variables[&arg_id].r#type,
+            &destination.comptime.r#type,
+        ) {
+            arena.alloc(SLTNode::Unary(op, output_expr))?
+        } else {
+            output_expr
+        }
+    } else {
+        output_expr
+    };
     // Copy-out reads the formal variable. Its declared signedness can differ
     // from the expression stored by the last assignment in the callee.
     let output_signed = module.variables[&arg_id].r#type.signed;

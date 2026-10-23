@@ -11,12 +11,24 @@ pub(super) fn ports_from_scope(
     let mut ports = Vec::new();
     let mut inherited_direction = PortDirection::Unspecified;
     let mut inherited_type = Type::implicit();
+    let mut inherited_variable = false;
     for native in port_owners::scope(selected, syntax_tree)? {
         let direction = native
             .direction
             .map(type_binding::port_direction)
             .unwrap_or(inherited_direction);
         let explicit = matches!(native.kind, celox_sv_syntax::PortKind::Explicit { .. });
+        // An output with an explicit data type defaults to a variable;
+        // input/inout and implicitly typed outputs default to nets unless
+        // `var` is present (IEEE 1800-2023 23.2.2.3).
+        let typed_output = direction == PortDirection::Output
+            && native.net_type.is_none()
+            && native.data_type.is_some_and(|id| {
+                !matches!(
+                    syntax_tree.declarations().data_type(id).kind,
+                    celox_sv_syntax::DataTypeKind::Implicit
+                )
+            });
         let base = match type_binding::port_type(native, syntax_tree, const_env, type_aliases)? {
             Some(ty) => ty,
             None if native.data_type.is_none() => inherited_type.clone(),
@@ -69,15 +81,23 @@ pub(super) fn ports_from_scope(
                 .ok_or_else(|| unsupported("nonconstant input port default"))
             })
             .transpose()?;
-        ports.push(
-            Port::new(
-                native_port_name(native)?,
-                direction,
-                ty,
-                !explicit && !native.variable,
-            )
-            .with_default(default),
-        );
+        let variable = native.variable
+            || typed_output
+            || (direction == PortDirection::Output
+                && native.net_type.is_none()
+                && native.direction.is_none()
+                && native.data_type.is_none()
+                && inherited_variable);
+        inherited_variable = variable;
+        let mut port = Port::new(
+            native_port_name(native)?,
+            direction,
+            ty,
+            !explicit && !variable,
+        )
+        .with_default(default);
+        port.randomizable = variable && direction != PortDirection::Input;
+        ports.push(port);
     }
     Ok(ports)
 }
@@ -147,8 +167,12 @@ pub(super) fn parameters_from_scope(
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<Vec<Parameter>, AnalyzerError> {
     let mut parameters = Vec::new();
-    let mut environment =
-        parameters::ParameterEnvironment::new(&syntax_tree.state, &parameters, base_const_env);
+    let mut environment = parameters::ParameterEnvironment::new(
+        &syntax_tree.state,
+        &parameters,
+        base_const_env,
+        &parameters::ownership::scope_names(syntax_tree)?,
+    );
     let header = syntax_tree
         .scope_handle()
         .unit(syntax_tree.declarations())
@@ -351,6 +375,11 @@ pub(super) fn signals_from_body_item(
             }
             values
         }
+        BodyItemKind::Unconverted { .. } => classes::item_statics(id, tree, env, aliases)
+            .into_iter()
+            .filter(|property| selected_name.is_none_or(|selected| selected == property.variable))
+            .map(|property| Signal::new(property.variable, property.r#type))
+            .collect(),
         _ => Vec::new(),
     };
     substitute_signal_local_constants(&mut declared, env);

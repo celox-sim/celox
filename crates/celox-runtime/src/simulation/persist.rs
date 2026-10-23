@@ -23,6 +23,7 @@ impl<B: SimBackend> SimulationState<B> {
             last_clock_unknown: self.last_clock_unknown.clone(),
             process_wakeups: self.process_wakeups.clone(),
             process_state: self.process_state.clone(),
+            declarations_pending: self.declarations_pending,
             host_pending: self.host_pending,
             finished: self.finished,
         }
@@ -59,6 +60,7 @@ impl<B: SimBackend> SimulationState<B> {
             .clone_from(&snapshot.last_clock_unknown);
         self.process_wakeups.clone_from(&snapshot.process_wakeups);
         self.process_state.clone_from(&snapshot.process_state);
+        self.declarations_pending = snapshot.declarations_pending;
         self.host_pending = snapshot.host_pending;
         self.finished = snapshot.finished;
         self.stopped = false;
@@ -185,6 +187,15 @@ impl<B: SimBackend> SimulationState<B> {
             .map(|(process, time)| Reverse((time, process)))
             .collect();
         self.process_state = parts.process_state;
+        self.declarations_pending = self
+            .process_wakeups
+            .iter()
+            .any(|Reverse((_, index))| self.model.processes[*index].is_initializer)
+            || self
+                .process_state
+                .ready
+                .iter()
+                .any(|&index| self.model.processes[index].is_initializer);
         self.host_pending = parts.host_pending;
         self.finished = parts.finished;
         self.stopped = false;
@@ -201,6 +212,7 @@ pub struct SimulationSnapshot<B: SimBackend> {
     last_clock_unknown: BitSet,
     process_wakeups: BinaryHeap<ProcessWakeup>,
     process_state: ProcessState,
+    declarations_pending: bool,
     host_pending: bool,
     finished: bool,
 }
@@ -215,6 +227,7 @@ impl<B: SimBackend> Clone for SimulationSnapshot<B> {
             last_clock_unknown: self.last_clock_unknown.clone(),
             process_wakeups: self.process_wakeups.clone(),
             process_state: self.process_state.clone(),
+            declarations_pending: self.declarations_pending,
             host_pending: self.host_pending,
             finished: self.finished,
         }
@@ -226,4 +239,87 @@ impl<B: SimBackend> SimulationSnapshot<B> {
     pub fn time(&self) -> u64 {
         self.time
     }
+}
+
+impl<B: SimBackend> SimulationState<B> {
+    /// The scheduling state in a form that compares equal between two
+    /// simulations of the same design exactly when they would continue
+    /// alike: events by id rather than handle, queues in order, and only the
+    /// waiting processes' waits.
+    #[doc(hidden)]
+    pub fn schedule_key(&self) -> ScheduleKey {
+        let mut events: Vec<_> = self
+            .scheduler
+            .event_queue
+            .iter()
+            .map(|event| {
+                (
+                    event.time,
+                    event.event_ref.id(),
+                    event.signal,
+                    event.next_val,
+                    event.periodic,
+                )
+            })
+            .collect();
+        events.sort_unstable();
+        let mut process_wakeups: Vec<_> = self
+            .process_wakeups
+            .iter()
+            .map(|Reverse(wakeup)| *wakeup)
+            .collect();
+        process_wakeups.sort_unstable();
+        let state = &self.process_state;
+        ScheduleKey {
+            time: self.scheduler.time,
+            clocks: self
+                .scheduler
+                .clocks
+                .iter()
+                .map(|clock| clock.as_ref().map(|clock| clock.period))
+                .collect(),
+            events,
+            high_events: self.last_clock_values.iter().collect(),
+            unknown_events: self.last_clock_unknown.iter().collect(),
+            process_wakeups,
+            waiters: state
+                .waiters
+                .iter()
+                .map(|(process, waiter)| (process, waiter.clone()))
+                .collect(),
+            ready: state.ready.iter().copied().collect(),
+            inactive: state.inactive.iter().copied().collect(),
+            nba_queue: state.nba_queue.clone(),
+            domain_counters: state.domain_counters.clone(),
+            declarations_pending: self.declarations_pending,
+            host_pending: self.host_pending,
+            finished: self.finished,
+            stopped: self.stopped,
+            suspended: self.suspended.is_some(),
+        }
+    }
+}
+
+/// See [`SimulationState::schedule_key`].
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduleKey {
+    pub time: u64,
+    pub clocks: Vec<Option<u64>>,
+    /// Pending events as (time, event id, signal, value, periodic).
+    pub events: Vec<(u64, usize, crate::SignalRef, u8, bool)>,
+    pub high_events: Vec<usize>,
+    pub unknown_events: Vec<usize>,
+    /// Processes waiting for a time, as (time, process).
+    pub process_wakeups: Vec<(u64, usize)>,
+    pub waiters: Vec<(usize, super::Waiter)>,
+    pub ready: Vec<usize>,
+    pub inactive: Vec<usize>,
+    pub nba_queue: Vec<super::NbaUpdate>,
+    pub domain_counters: Vec<[u32; 3]>,
+    pub declarations_pending: bool,
+    pub host_pending: bool,
+    pub finished: bool,
+    pub stopped: bool,
+    pub suspended: bool,
 }

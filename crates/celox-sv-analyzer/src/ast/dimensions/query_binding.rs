@@ -132,7 +132,7 @@ pub(in crate::ast) fn query_value(
                 Some(count)
             } else if let Some(shape) = &shape {
                 Some(if function == SystemFunction::Dimensions {
-                    shape.unpacked.len() + shape.packed.len()
+                    shape.unpacked.len() + if shape.real { 0 } else { shape.packed.len() }
                 } else {
                     shape.unpacked.len()
                 })
@@ -864,6 +864,7 @@ mod tests {
                 dimensions: Some(2),
                 signed: false,
                 is_2state: false,
+                string: false,
             },
         );
         for declaration in &tree.declarations().data_declarations {

@@ -45,7 +45,10 @@ pub(super) fn item(id: BodyItemId, tree: &SyntaxTree) -> Converted<Vec<Subroutin
         .into_iter()
         .filter(|id| {
             let routine = tree.declarations().subroutine(*id);
-            !routine.prototype && routine.kind != SubroutineKind::Constructor
+            // Out-of-block method definitions belong to their class.
+            !routine.prototype
+                && routine.kind != SubroutineKind::Constructor
+                && routine.scope.is_empty()
         })
         .collect())
 }

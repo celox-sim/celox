@@ -1,0 +1,528 @@
+(group class (category types))
+
+(case objects_properties_and_methods
+  (source "class.sv" #"
+module Top(output bit done);
+    class Counter;
+        int count = 5;
+        string label;
+        function new(string name);
+            label = name;
+        endfunction
+        function void bump(int by);
+            count += by;
+        endfunction
+        function int get();
+            return count;
+        endfunction
+    endclass
+    Counter c, d;
+    initial begin
+        if (c == null) $display("null");
+        c = new("first");
+        c.bump(3);
+        d = c;
+        d.bump(1);
+        $display("count=%0d get=%0d label=%s", c.count, d.get(), c.label);
+        c.count = 1;
+        $display("after=%0d", d.count);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "null\ncount=9 get=9 label=first\nafter=1\n"))
+
+(case implicit_constructors_and_this
+  (source "class.sv" #"
+module Top(output int sum, output bit done);
+    class Point;
+        int x, y = 2;
+        function void set(int x, int y);
+            this.x = x;
+            this.y = y;
+        endfunction
+        function int total();
+            return x + this.y;
+        endfunction
+    endclass
+    Point p;
+    initial begin
+        p = new;
+        sum = p.total();
+        p.set(10, 20);
+        sum = sum * 100 + p.total();
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq sum 230))
+
+(case objects_referring_to_objects
+  (source "class.sv" #"
+module Top(output int total, output bit done);
+    class Node;
+        int value;
+        Node next;
+        function new(int value, Node next = null);
+            this.value = value;
+            this.next = next;
+        endfunction
+    endclass
+    Node head, n;
+    initial begin
+        head = new(1);
+        head = new(2, head);
+        head = new(3, head);
+        n = head;
+        while (n != null) begin
+            total = total * 10 + n.value;
+            n = n.next;
+        end
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq total 321))
+
+(case extern_methods_and_tasks
+  (source "class.sv" #"
+module Top(output int result, output bit done);
+    class Accumulator;
+        int total;
+        extern function void add(int value);
+        task twice(int value);
+            add(value);
+            add(value);
+        endtask
+        function new();
+            total = 100;
+            return;
+        endfunction
+    endclass
+    function void Accumulator::add(int value);
+        total += value;
+    endfunction
+    Accumulator a;
+    initial begin
+        a = new;
+        a.twice(4);
+        a.add(1);
+        result = a.total;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq result 109))
+
+(case objects_survive_heap_collections
+  (source "class.sv" #"
+module Top(output int n);
+    class Box;
+        string text;
+        Box inner;
+    endclass
+    logic clk = 0;
+    always #1 clk = ~clk;
+    Box kept, last;
+    string number;
+    initial begin
+        kept = new;
+        kept.inner = new;
+        kept.inner.text = "inner";
+    end
+    always @(posedge clk) begin
+        last = new;
+        number.itoa(n);
+        last.text = number;
+        n = n + 1;
+    end
+    initial #6000 $display("[%s] [%s] %0d", kept.inner.text, last.text, n);
+endmodule
+"#)
+  (top Top)
+  (run_until 6000)
+  (expect_output "[inner] [2999] 3000\n"))
+
+
+(case string_methods_on_properties
+  (source "class.sv" #"
+module Top(output bit done);
+    class Named;
+        string name;
+        function string greeting();
+            return {"hi ", name};
+        endfunction
+    endclass
+    Named n;
+    initial begin
+        n = new;
+        n.name.itoa(42);
+        n.name = {n.name, "!"};
+        n.name.putc(0, "7");
+        $display("[%s] %0d %s", n.name, n.name.len(), n.name.toupper());
+        $display("%s %0d", {n.greeting(), "?"}, n.greeting() == "hi 72!");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "[72!] 3 72!\nhi 72!? 1\n"))
+
+(case derived_properties_hide_base_properties
+  (source "class.sv" #"
+module Top(output bit done);
+    class Base;
+        int a = 1;
+        function int base_a();
+            return a;
+        endfunction
+    endclass
+    class Derived extends Base;
+        int a = 2;
+        function int own_a();
+            return a;
+        endfunction
+    endclass
+    Derived d;
+    Base b;
+    initial begin
+        d = new;
+        b = d;
+        d.a = 5;
+        $display("%0d %0d %0d %0d", d.a, b.a, d.own_a(), d.base_a());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "5 1 5 1\n"))
+
+(case inherited_properties_and_methods
+  (source "class.sv" #"
+module Top(output int result, output bit same, output bit done);
+    class Base;
+        int a = 1;
+        function int twice();
+            return a * 2;
+        endfunction
+        function int describe();
+            return 10;
+        endfunction
+    endclass
+    class Derived extends Base;
+        int b = 5;
+        function int describe();
+            return 20 + a + b;
+        endfunction
+    endclass
+    Derived d;
+    Base b;
+    initial begin
+        d = new;
+        d.a = 3;
+        b = d;
+        same = b == d;
+        result = d.twice() * 1000 + d.describe() * 10 + b.describe() / 10;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq same 1) (assert_eq result 6281))
+
+(case static_properties_and_methods
+  (source "class.sv" #"
+module Top(output bit done);
+    class Counter;
+        static int created = 0;
+        static string last = "none";
+        int id;
+        function new();
+            created++;
+            id = created;
+        endfunction
+        static function int next(int by = 1);
+            created += by;
+            return created;
+        endfunction
+        function int peek();
+            return created * 10 + id;
+        endfunction
+    endclass
+    Counter a, b;
+    initial begin
+        a = new;
+        b = new;
+        $display("created=%0d a=%0d b=%0d", Counter::created, a.id, b.id);
+        a.created = 7;
+        $display("b.created=%0d peek=%0d", b.created, b.peek());
+        $display("next=%0d next=%0d", Counter::next(), a.next(3));
+        Counter::last = "set";
+        $display("last=%s", b.last);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "created=2 a=1 b=2\nb.created=7 peek=72\nnext=8 next=11\nlast=set\n"))
+
+(case constructors_chain_to_base
+  (source "class.sv" #"
+module Top(output bit done);
+    class Base;
+        int a = 1;
+        int b;
+        function new(int b = 2);
+            this.b = b + a;
+        endfunction
+        function int sum();
+            return a + b;
+        endfunction
+    endclass
+    class Derived extends Base;
+        int c = a * 100;
+        function new(int c0);
+            super.new(c0 * 2);
+            c += c0;
+        endfunction
+        function int sum();
+            return super.sum() * 1000 + c + super.b;
+        endfunction
+    endclass
+    class Fixed extends Base(40);
+    endclass
+    class Default extends Base;
+        int d = b;
+    endclass
+    Derived d;
+    Base b;
+    Fixed f;
+    Default e;
+    initial begin
+        d = new(3);
+        b = d;
+        $display("a=%0d b=%0d c=%0d", d.a, d.b, d.c);
+        $display("derived=%0d base=%0d", d.sum(), b.sum());
+        f = new;
+        e = Default::new;
+        $display("fixed=%0d default=%0d", f.b, e.d);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "a=1 b=7 c=103\nderived=8110 base=8\nfixed=41 default=3\n"))
+
+(case virtual_methods_dispatch_on_object_class
+  (source "class.sv" #"
+module Top(output bit done);
+    class Shape;
+        int id;
+        function new(int id);
+            this.id = id;
+        endfunction
+        virtual function int area();
+            return 0;
+        endfunction
+        function int describe();
+            return id * 1000 + area();
+        endfunction
+        virtual task scale(input int by, output int result);
+            result = by;
+        endtask
+        function int plain();
+            return 1;
+        endfunction
+    endclass
+    class Square extends Shape;
+        int side;
+        function new(int id, int side);
+            super.new(id);
+            this.side = side;
+        endfunction
+        function int area();
+            return side * side;
+        endfunction
+        task scale(input int by, output int result);
+            result = area() * by;
+        endtask
+        function int plain();
+            return 2;
+        endfunction
+    endclass
+    class Cube extends Square;
+        function new(int id, int side);
+            super.new(id, side);
+        endfunction
+        function int area();
+            return super.area() * 6;
+        endfunction
+    endclass
+    class Unchanged extends Shape;
+        function new();
+            super.new(9);
+        endfunction
+    endclass
+    Shape shapes[4];
+    Shape shape;
+    Square square;
+    Cube cube;
+    Unchanged unchanged;
+    int scaled;
+    initial begin
+        square = new(1, 3);
+        cube = new(2, 2);
+        unchanged = new;
+        shapes[0] = square;
+        shapes[1] = cube;
+        shapes[2] = unchanged;
+        shapes[3] = new(4);
+        foreach (shapes[i]) begin
+            shape = shapes[i];
+            shape.scale(10, scaled);
+            $display("%0d area=%0d describe=%0d scaled=%0d plain=%0d", i,
+                shape.area(), shape.describe(), scaled, shape.plain());
+        end
+        square = cube;
+        $display("square area=%0d plain=%0d", square.area(), square.plain());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "0 area=9 describe=1009 scaled=90 plain=1\n1 area=24 describe=2024 scaled=240 plain=1\n2 area=0 describe=9000 scaled=10 plain=1\n3 area=0 describe=4000 scaled=10 plain=1\nsquare area=24 plain=2\n"))
+
+(case abstract_classes_and_pure_virtual_methods
+  (source "class.sv" #"
+module Top(output bit done);
+    virtual class Animal;
+        string name;
+        function new(string name);
+            this.name = name;
+        endfunction
+        pure virtual function string sound();
+        function string speak();
+            return {name, " says ", sound()};
+        endfunction
+    endclass
+    class Dog extends Animal;
+        function new();
+            super.new("dog");
+        endfunction
+        virtual function string sound();
+            return "woof";
+        endfunction
+    endclass
+    virtual class Bird extends Animal;
+        function new(string name);
+            super.new(name);
+        endfunction
+    endclass
+    class Crow extends Bird;
+        function new();
+            super.new("crow");
+        endfunction
+        function string sound();
+            return "caw";
+        endfunction
+    endclass
+    Animal animal;
+    Dog dog;
+    Crow crow;
+    initial begin
+        dog = new;
+        crow = new;
+        animal = dog;
+        $display("%s", animal.speak());
+        animal = crow;
+        $display("%s / %s", animal.speak(), animal.sound());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "dog says woof\ncrow says caw / caw\n"))
+
+(case methods_of_handle_array_elements
+  (source "class.sv" #"
+module Top(output bit done);
+    class Item;
+        int value;
+        function new(int value);
+            this.value = value;
+        endfunction
+        virtual function int get();
+            return value;
+        endfunction
+    endclass
+    class Twice extends Item;
+        function new(int value);
+            super.new(value);
+        endfunction
+        function int get();
+            return value * 2;
+        endfunction
+    endclass
+    Item items[3];
+    Twice twice;
+    int sum;
+    initial begin
+        items[0] = new(1);
+        twice = new(5);
+        items[1] = twice;
+        items[2] = new(7);
+        foreach (items[i]) sum = sum * 100 + items[i].get();
+        $display("%0d %0d %0d", items[1].get(), items[1].value, sum);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "10 5 11007\n"))
+
+(case classes_implementing_interface_classes
+  (source "class.sv" #"
+module Top(output bit done);
+    interface class Named;
+        pure virtual function int code();
+    endclass
+    interface class Sized extends Named;
+        pure virtual function int size();
+    endclass
+    virtual class Partial implements Sized;
+        pure virtual function int code();
+        function int size();
+            return code() * 2;
+        endfunction
+    endclass
+    class Box extends Partial;
+        int n;
+        function new(int n);
+            this.n = n;
+        endfunction
+        function int code();
+            return n;
+        endfunction
+    endclass
+    class Crate extends Box;
+        function new();
+            super.new(4);
+        endfunction
+        function int code();
+            return 100;
+        endfunction
+    endclass
+    Box box;
+    Crate crate;
+    initial begin
+        box = new(3);
+        crate = new;
+        $display("%0d %0d", box.code(), box.size());
+        box = crate;
+        $display("%0d %0d", box.code(), box.size());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "3 6\n100 200\n"))

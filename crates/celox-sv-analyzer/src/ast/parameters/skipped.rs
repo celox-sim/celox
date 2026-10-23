@@ -279,7 +279,12 @@ pub(in crate::ast) fn validate(
                     let width = match cast {
                         casts::RuntimeCastTarget::Integral { target, .. }
                         | casts::RuntimeCastTarget::Zero(target) => Some(target.width),
-                        casts::RuntimeCastTarget::Signing(_) => None,
+                        casts::RuntimeCastTarget::Signing(_) | casts::RuntimeCastTarget::String => {
+                            None
+                        }
+                        casts::RuntimeCastTarget::Real { short } => {
+                            Some(if short { 32 } else { 64 })
+                        }
                     };
                     width.map(|width| {
                         let mut ty = Type::new(TypeKind::Logic);
@@ -459,6 +464,9 @@ fn pattern_items(
             left.min(right),
             left.max(right),
             VariableDimensions {
+                real: false,
+                string: false,
+                class: None,
                 unpacked: rest.to_vec(),
                 ..shape.clone()
             },
@@ -479,6 +487,9 @@ fn pattern_items(
             left.min(right),
             left.max(right),
             VariableDimensions {
+                real: false,
+                string: false,
+                class: None,
                 packed: rest.to_vec(),
                 ..shape.clone()
             },
@@ -490,6 +501,10 @@ fn pattern_items(
             0,
             count as i128 - 1,
             VariableDimensions {
+                randomizable: true,
+                real: false,
+                string: false,
+                class: None,
                 packed: Vec::new(),
                 unpacked: Vec::new(),
                 members: Vec::new(),

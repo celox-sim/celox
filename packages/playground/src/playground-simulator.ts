@@ -22,6 +22,7 @@ import {
 	runPlaygroundTicks,
 	writeSignalValue,
 } from "./playground-runtime-helpers.js";
+import { evaluateWasmFloat } from "./wasm-float.js";
 
 /** A clock edge, as `Simulator.edges()` of `@celox-sim/celox` names it. */
 export type PlaygroundClockEdge = "posedge" | "negedge";
@@ -70,7 +71,11 @@ class PlaygroundInstance {
 		initializeFourStateMemory(memory, compiled.fourStateInitRegions);
 		this.view = new DataView(memory.buffer);
 		const instantiate = (module: WebAssembly.Module) =>
-			runExport(new WebAssembly.Instance(module, { env: { memory } }));
+			runExport(
+				new WebAssembly.Instance(module, {
+					env: { memory, celox_extern_4294967295: evaluateWasmFloat },
+				}),
+			);
 		this.comb = instantiate(compiled.combModule);
 		const evalApply = new Map<string, KernelRun>();
 		for (const [name, module] of Object.entries(compiled.eventModules)) {

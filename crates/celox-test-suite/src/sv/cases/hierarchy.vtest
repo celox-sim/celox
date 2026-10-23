@@ -664,3 +664,89 @@
   (top Top)
   (assert_eq a 0xdc)
   (assert_eq b 0xedc))
+
+; IEEE 1800-2023 6.20.2 and 7.6: array values bind in the caller and
+; corresponding elements follow declaration order, independently of bounds.
+(case named_array_parameters_follow_caller_specialization
+  (source "named_array_parameters.sv" #"
+    module Child #(parameter byte Q[3:2] = '{1, 2})
+      (input logic sel, output logic [15:0] y, output byte selected);
+      localparam byte TABLE[2] = '{99, 98};
+      assign y = {Q[3], Q[2]};
+      assign selected = Q[3-sel];
+    endmodule
+    module Parent #(parameter byte B = -3)
+      (input logic sel, output logic [15:0] y, output byte selected);
+      localparam byte TABLE[0:1] = '{B, B-2};
+      Child #(.Q((TABLE))) child(sel, y, selected);
+    endmodule
+    module Top(input logic sel, output logic [15:0] a, b,
+      output byte a_selected, b_selected);
+      Parent #(.B(-3)) first(sel, a, a_selected);
+      Parent #(.B(7)) second(sel, b, b_selected);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq a 0xfdfb)
+  (assert_eq b 0x0705)
+  (assert_eq a_selected 0xfd)
+  (assert_eq b_selected 7)
+  (modify (set sel 1))
+  (assert_eq a_selected 0xfb)
+  (assert_eq b_selected 5))
+
+(case named_array_parameters_keep_four_state_values
+  (four_state)
+  (source "named_array_parameter_states.sv" #"
+    module Child #(parameter logic [3:0] Q[2] = '{0, 0})
+      (output logic [7:0] y);
+      assign y = {Q[0], Q[1]};
+    endmodule
+    module Top(output logic [7:0] y);
+      localparam logic [3:0] TABLE[2] = '{4'b10xz, 4'bz01x};
+      Child #(.Q(TABLE)) child(y);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq y (fourstate 0xa3 0x39)))
+
+(case named_array_parameters_forward_package_subarrays
+  (source "named_array_parameter_packages.sv" #"
+    package Values;
+      localparam logic [7:0] TABLE[2][2] = '{'{8'h12, 8'h34}, '{8'h56, 8'h78}};
+    endpackage
+    module Child #(parameter logic [7:0] Q[2] = '{0, 0})
+      (output logic [15:0] y);
+      assign y = {Q[0], Q[1]};
+    endmodule
+    module Middle #(parameter logic [7:0] Q[2][2] = '{default: 0})
+      (output logic [15:0] y);
+      Child #(.Q(Q[1])) child(y);
+    endmodule
+    module Top(output logic [15:0] y);
+      import Values::*;
+      Middle #(.Q(TABLE)) middle(y);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq y 0x5678))
+
+(case named_array_parameters_forward_whole_values
+  (source "named_array_parameter_whole_values.sv" #"
+    module Child #(parameter logic [7:0] Q[2] = '{0, 0})
+      (input logic sel, output logic [7:0] y);
+      assign y = Q[sel];
+    endmodule
+    module Middle #(parameter logic [7:0] Q[2] = '{0, 0})
+      (input logic sel, output logic [7:0] y);
+      Child #(.Q(Q)) child(sel, y);
+    endmodule
+    module Top(input logic sel, output logic [7:0] y);
+      localparam logic [7:0] TABLE[2] = '{8'h12, 8'ha5};
+      Middle #(.Q(TABLE)) middle(sel, y);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq y 0x12)
+  (modify (set sel 1))
+  (assert_eq y 0xa5))

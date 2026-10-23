@@ -24,6 +24,19 @@ pub trait UnitExecutor {
         Ok(self.backend_mut().run_process(index)?)
     }
 
+    /// Prepare the declaration-only state before runtime static initializers.
+    fn reset_declaration_startup(&mut self) -> Result<(), Halt> {
+        Ok(())
+    }
+    /// Arm wildcard sensitivity against the completed declaration state.
+    fn prime_declaration_startup(&mut self) -> Result<(), Halt> {
+        Ok(())
+    }
+    /// Publish folded ordinary initial writes after static initialization.
+    fn apply_declaration_startup(&mut self) -> Result<(), Halt> {
+        Ok(())
+    }
+
     /// Perform a synchronous request after a kernel has stored its
     /// arguments and before that kernel resumes. The timestamp is the
     /// current scheduler time in the design's precision units.

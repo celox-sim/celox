@@ -1736,3 +1736,127 @@
   (top Top)
   (assert_eq enumeration 10)
   (assert_eq width 10))
+
+(case runtime_indexed_bases_preserve_numeric_and_type_casts
+  (source "runtime_indexed_cast.sv" #"
+    module Top(input logic [63:0] data, input logic [1:0] offset,
+               input logic [3:0] index,
+               output logic [31:0] y, output logic [3:0] narrowed,
+               output logic [3:0] typed, output logic [63:0] written);
+        typedef logic [2:0] index_t;
+        assign y = data[3'(4-offset)*8 +: 32];
+        assign narrowed = data[2'(index) +: 4];
+        assign typed = data[index_t'(index) +: 4];
+        always_comb begin
+            written = data;
+            written[3'(4-offset)*8 +: 8] = 8'hff;
+        end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set data 0x0123456789abcdef))
+  (for offset_value (range 0 4)
+    (modify (set offset offset_value))
+    (assert_eq y (& (>> 0x0123456789abcdef (* (- 4 offset_value) 8)) 0xffffffff))
+    (assert_eq written (| 0x0123456789abcdef (<< 0xff (* (- 4 offset_value) 8)))))
+  (for index_value (range 0 16)
+    (modify (set index index_value))
+    (assert_eq narrowed (& (>> 0x0123456789abcdef (& index_value 3)) 15))
+    (assert_eq typed (& (>> 0x0123456789abcdef (& index_value 7)) 15))))
+
+; IEEE 1800-2023 11.5.1: an indexed select remains valid after selecting
+; a packed array element; procedural loop indices keep their own width/sign.
+(case procedural_loop_selects_packed_words
+  (source "loop_packed_words.sv" #"
+    module Top(input logic clk, input logic [3:0] be,
+      input logic [31:0] data,
+      output logic [31:0] down_plus, down_minus, up_plus, up_minus);
+      logic [1:0][31:0] down = '0;
+      logic [2:3][0:31] up = '0;
+      always_ff @(posedge clk) begin
+        for (integer i = 0; i < 4; i = i + 1) begin
+          if (be[i]) begin
+            down[1][i*8 +: 8] <= data[i*8 +: 8];
+            down[0][31-i*8 -: 8] <= data[31-i*8 -: 8];
+            up[2][i*8 +: 8] <= data[i*8 +: 8];
+            up[3][31-i*8 -: 8] <= data[31-i*8 -: 8];
+          end
+        end
+      end
+      assign down_plus = down[1];
+      assign down_minus = down[0];
+      assign up_plus = up[2];
+      assign up_minus = up[3];
+    endmodule
+  "#)
+  (top Top)
+  (modify (set be 15) (set data 0x12345678))
+  (tick clk)
+  (assert_eq down_plus 0x12345678)
+  (assert_eq down_minus 0x12345678)
+  (assert_eq up_plus 0x78563412)
+  (assert_eq up_minus 0x78563412)
+  (modify (set be 5) (set data 0xaabbccdd))
+  (tick clk)
+  (assert_eq down_plus 0x12bb56dd)
+  (assert_eq down_minus 0xaa34cc78)
+  (assert_eq up_plus 0xdd56bb12)
+  (assert_eq up_minus 0x78cc34aa))
+
+(case procedural_loop_reads_packed_words_into_memory
+  (source "loop_packed_memory.sv" #"
+    module Top(input logic clk, en, input logic [1:0] addr,
+      input logic [63:0] data, output logic [31:0] low_word, high_word);
+      wire [1:0][31:0] words = data;
+      wire [1:0][31:0] read_words;
+      for (genvar n = 0; n < 2; n = n + 1) begin : bank
+        logic [31:0] mem[4];
+        initial for (integer k = 0; k < 4; k = k + 1) mem[k] = 0;
+        always_ff @(posedge clk) begin
+          for (integer i = 0; i < 4; i = i + 1) begin
+            if (en) mem[addr][i*8 +: 8] <= words[n][i*8 +: 8];
+          end
+        end
+        assign read_words[n] = mem[addr];
+      end
+      assign low_word = read_words[0];
+      assign high_word = read_words[1];
+    endmodule
+  "#)
+  (top Top)
+  (modify (set en 1) (set addr 1) (set data 0x1234567889abcdef))
+  (tick clk)
+  (assert_eq low_word 0x89abcdef)
+  (assert_eq high_word 0x12345678)
+  (modify (set addr 2) (set data 0xfedcba9876543210))
+  (tick clk)
+  (assert_eq low_word 0x76543210)
+  (assert_eq high_word 0xfedcba98)
+  (modify (set en 0) (set addr 1))
+  (assert_eq low_word 0x89abcdef)
+  (assert_eq high_word 0x12345678))
+
+
+(case procedural_loop_selects_constant_packed_bytes
+  (source "loop_constant_packed_bytes.sv" #"
+    module Top(input logic [1:0] addr, output logic [7:0] q);
+      localparam ID = "ABCD";
+      logic [7:0] rom[4];
+      initial begin
+        integer last;
+        last = 3;
+        for (integer i = 0; i < 4; i = i + 1) begin
+          rom[i] = ID[8*(last-i) +: 8];
+        end
+      end
+      assign q = rom[addr];
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq q 0x41)
+  (modify (set addr 1))
+  (assert_eq q 0x42)
+  (modify (set addr 2))
+  (assert_eq q 0x43)
+  (modify (set addr 3))
+  (assert_eq q 0x44))

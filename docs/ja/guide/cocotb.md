@@ -30,8 +30,9 @@ target/release/celox run src/types.sv src/Dut.sv test/Top.sv --top Top
 target/release/celox run test/Top.veryl --top Top
 ```
 
-SVは`.sv`または`.v`をコンパイル順に指定します。既定では2値シミュレーションを使い（`--four-state`でX/Zを扱う4値に切り替え）、
+SVは`.sv`または`.v`をコンパイル順に指定します。既定では2値シミュレーションを使い、
 `$finish`または実行待ちイベントがなくなるまで実行します。
+X/Zを保持する場合は`--four-state`または`celox.toml`の`four_state = true`を指定します。
 Verylはプロジェクト内の1ファイルを指定すると、`Veryl.toml`から
 ソースと依存関係を収集します。単独のVerylファイルも使用でき、Verylも既定は2値です。
 `--top`にはnative testbenchのモジュール名を指定します。
@@ -186,6 +187,11 @@ package定義は利用側より先に指定してください。`Veryl.toml`や�
 ソースは自動探索しません。複数指定時はすべて`.sv`ファイルにする必要があります。
 Verylではプロジェクトの入口となるファイルを1つ指定します。
 `celox-vpi-compile`も同じソース一覧を受け付けます。
+
+設計はcocotbが駆動するため、生成した実行ファイルはHDLのプロセスを実行しません。
+`initial`プロセス、通常の`always`プロセスなど、Celoxがプロセスとして実行する
+手続きを含む設計はコンパイルに失敗し、最初のプロセスを示します。定数の`initial`
+ブロックと宣言初期化子は引き続き初期値を設定します。
 
 ## cocotbを実行する
 

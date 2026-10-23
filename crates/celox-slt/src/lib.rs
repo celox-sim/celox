@@ -27,7 +27,7 @@ pub use node::{
     SLTIndexKind, SLTLoopBound, SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
 };
 pub use node_facts::{SLTNodeFacts, SLTNodeFactsError};
-pub use path::{LogicPath, LogicPathId, LogicPathTarget};
+pub use path::{CombStartup, LogicPath, LogicPathId, LogicPathTarget};
 pub use range_store::{RangeStore, RangeStoreError};
 pub use scheduler::FfAccessSummary;
 pub use symbolic_store::SymbolicStore;

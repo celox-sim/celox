@@ -5,9 +5,9 @@ overrides:
   "@celox-sim/celox": "workspace:*"
   "@celox-sim/celox-napi": "workspace:*"
   "@celox-sim/vite-plugin": "workspace:*"
-  "@emnapi/core": "2.0.0-alpha.6"
-  "@emnapi/runtime": "2.0.0-alpha.6"
-  emnapi: "2.0.0-alpha.6"
+  "@emnapi/core": "2.0.0-beta.2"
+  "@emnapi/runtime": "2.0.0-beta.2"
+  emnapi: "2.0.0-beta.2"
 allowBuilds:
   esbuild: true
   lefthook: true
@@ -34,3 +34,8 @@ minimumReleaseAgeExclude:
   - "@rolldown/binding-win32-arm64-msvc@1.2.13"
   - "@rolldown/binding-openharmony-arm64@1.2.13"
   - "@rolldown/binding-linux-arm-gnueabihf@1.2.13"
+patchedDependencies:
+  # 1.2.5 bundles alpha-era plugins that access napiModule; beta.1 uses
+  # addonModule internally. Load the pinned core's own plugins in both formats.
+  # Remove when wasm-runtime ships compatible plugins (regression: emnapi-compatibility.test.mjs).
+  '@napi-rs/wasm-runtime@1.2.5': patches/@napi-rs__wasm-runtime@1.2.5.patch

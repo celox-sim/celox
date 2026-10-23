@@ -33,8 +33,9 @@ target/release/celox run test/Top.veryl --top Top
 ```
 
 For SystemVerilog, pass `.sv` or `.v` sources in compilation order. The command
-uses two-state simulation by default (`--four-state` enables X/Z tracking) and runs until `$finish` or no scheduled events
-remain. For Veryl, pass one project entry file: Celox discovers `Veryl.toml`
+uses two-state simulation by default and runs until `$finish` or no scheduled
+events remain. Use `--four-state` or `four_state = true` in `celox.toml` to retain
+X/Z values. For Veryl, pass one project entry file: Celox discovers `Veryl.toml`
 and collects the project's sources and dependencies. A standalone
 Veryl file also works. Both languages default to two-state simulation. Select the native testbench module with `--top`.
 Veryl uses the existing native testbench executor; a test may also complete by
@@ -211,6 +212,12 @@ List package definitions before their consumers. It does not discover a
 `Veryl.toml` project or additional SystemVerilog source files. Multiple inputs
 must all be `.sv` files; for Veryl, pass one project entry file. The
 `celox-vpi-compile` binary accepts the same source list.
+
+cocotb drives the design, so the compiled executable runs no HDL process.
+Compilation fails for a design with an `initial` process, an ordinary `always`
+process or another procedure Celox runs as a process, and names the first one;
+constant `initial` blocks and declaration initializers still set initial
+values.
 
 ## Run cocotb
 

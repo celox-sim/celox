@@ -1,0 +1,112 @@
+(group real_math (category combinational))
+
+; IEEE 1800-2023 20.8.2: real arguments/results, including integer promotion.
+(case runtime_functions
+  (source "real_math.sv" #"
+    module Top(input int number, output bit ok);
+      real x;
+      function automatic bit close(input real actual, expected);
+        return actual > expected - 1.0e-12 && actual < expected + 1.0e-12;
+      endfunction
+      always_comb begin
+        x = number;
+        ok = 1;
+        ok &= close($ln(x), 0.6931471805599453);
+        ok &= close($log10(x*50.0), 2.0);
+        ok &= close($exp(x-2.0), 1.0);
+        ok &= close($sqrt(x+7.0), 3.0);
+        ok &= close($pow(x,3.0), 8.0);
+        ok &= close($floor(-x-0.25), -3.0);
+        ok &= close($ceil(-x-0.25), -2.0);
+        ok &= close($sin(x/4.0), 0.479425538604203);
+        ok &= close($cos(x/4.0), 0.8775825618903728);
+        ok &= close($tan(x/4.0), 0.5463024898437905);
+        ok &= close($asin(x/4.0), 0.5235987755982989);
+        ok &= close($acos(x/4.0), 1.0471975511965979);
+        ok &= close($atan(x/4.0), 0.4636476090008061);
+        ok &= close($atan2(x,-x), 2.356194490192345);
+        ok &= close($hypot(x+1.0,x+2.0), 5.0);
+        ok &= close($sinh(x/4.0), 0.5210953054937474);
+        ok &= close($cosh(x/4.0), 1.1276259652063807);
+        ok &= close($tanh(x/4.0), 0.46211715726000974);
+        ok &= close($asinh(x/4.0), 0.48121182505960347);
+        ok &= close($acosh(x), 1.3169578969248166);
+        ok &= close($atanh(x/4.0), 0.5493061443340548);
+        ok &= $sqrt(number+7) == 3.0 && $pow(number,3) == 8.0;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (set number 2)
+  (eval)
+  (assert_eq ok 1))
+
+; IEEE 1800-2023 11.2.1: mathematical functions with constant arguments
+; evaluate at elaboration, retaining their real type until conversion.
+(case constant_functions
+  (source "real_math_constants.sv" #"
+    module Top(output bit ok);
+      localparam real x = 2.0;
+      localparam real M0 = $ln(x);
+      localparam real M1 = $log10(x*50.0);
+      localparam real M2 = $exp(x-2.0);
+      localparam real M3 = $sqrt(x+7.0);
+      localparam real M4 = $pow(x,3.0);
+      localparam real M5 = $floor(-x-0.25);
+      localparam real M6 = $ceil(-x-0.25);
+      localparam real M7 = $sin(x/4.0);
+      localparam real M8 = $cos(x/4.0);
+      localparam real M9 = $tan(x/4.0);
+      localparam real M10 = $asin(x/4.0);
+      localparam real M11 = $acos(x/4.0);
+      localparam real M12 = $atan(x/4.0);
+      localparam real M13 = $atan2(x,-x);
+      localparam real M14 = $hypot(x+1.0,x+2.0);
+      localparam real M15 = $sinh(x/4.0);
+      localparam real M16 = $cosh(x/4.0);
+      localparam real M17 = $tanh(x/4.0);
+      localparam real M18 = $asinh(x/4.0);
+      localparam real M19 = $acosh(x);
+      localparam real M20 = $atanh(x/4.0);
+      localparam IMPLICIT = $sqrt(2.0);
+      localparam int WIDTH = $ceil(3.1) + $floor(1.9);
+      localparam int TRUNCATED = $rtoi($sqrt(8.0));
+      localparam int ROUNDED = int'($sqrt(8.0));
+      localparam bit CONDITION = $sqrt(2.0) > 1.4;
+      localparam int CHOSEN = $ln($exp(0.25)) ? 7 : 9;
+      logic [WIDTH-1:0] data;
+      function automatic bit close(input real actual, expected);
+        return actual > expected - 1.0e-12 && actual < expected + 1.0e-12;
+      endfunction
+      initial begin
+        ok = 1;
+        ok &= close(M0, 0.6931471805599453);
+        ok &= close(M1, 2.0);
+        ok &= close(M2, 1.0);
+        ok &= close(M3, 3.0);
+        ok &= close(M4, 8.0);
+        ok &= close(M5, -3.0);
+        ok &= close(M6, -2.0);
+        ok &= close(M7, 0.479425538604203);
+        ok &= close(M8, 0.8775825618903728);
+        ok &= close(M9, 0.5463024898437905);
+        ok &= close(M10, 0.5235987755982989);
+        ok &= close(M11, 1.0471975511965979);
+        ok &= close(M12, 0.4636476090008061);
+        ok &= close(M13, 2.356194490192345);
+        ok &= close(M14, 5.0);
+        ok &= close(M15, 0.5210953054937474);
+        ok &= close(M16, 1.1276259652063807);
+        ok &= close(M17, 0.46211715726000974);
+        ok &= close(M18, 0.48121182505960347);
+        ok &= close(M19, 1.3169578969248166);
+        ok &= close(M20, 0.5493061443340548);
+        ok &= IMPLICIT > 1.414 && IMPLICIT < 1.415 && $bits(data) == 5;
+        ok &= TRUNCATED == 2 && ROUNDED == 3 && CONDITION && CHOSEN == 7;
+        ok &= $sqrt(1/2) == 0.0;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1))

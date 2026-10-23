@@ -1,0 +1,28 @@
+{
+  "schema_version": 3,
+  "suite_version": "0.11.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n",
+      "expectation": "Simulation",
+      "name": "latch::classic_star_declaration_startup",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "standard": "IEEE 1800-2023 6.8 initializes static declarations before initial/always procedures start; 9.2.2.2.2 says always @* waits for a sensitivity change. Declaration-initialized en=1, d=7 do not trigger this process, so q remains 0 until a later d change.",
+  "adapter_free": {
+    "source": "verification/repros/wildcard_declaration_startup.sv",
+    "verilator_command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <build-dir> wildcard_declaration_startup.sv",
+    "verilator_output": "[1] %Fatal: wildcard_declaration_startup.sv:7: Assertion failed in Top: declarations do not trigger wildcard process",
+    "icarus_command": "iverilog -g2012 -s Top -o <output> wildcard_declaration_startup.sv; vvp <output>",
+    "icarus_version": "Icarus Verilog version 13.0",
+    "icarus_output": "wildcard_declaration_startup.sv:10: $finish called at 2"
+  }
+}

@@ -18,9 +18,13 @@ pub(super) fn expr_signedness_with_return_types(
 ) -> Option<bool> {
     match expr {
         Expr::Ident(name) => identifiers.signedness(name),
-        Expr::Literal(literal) => {
-            typecheck::integral_literal_type_metadata(literal).map(|(_, signed)| signed)
-        }
+        Expr::Literal(literal) => typecheck::integral_literal_type_metadata(literal)
+            .map(|(_, signed)| signed)
+            .or_else(|| {
+                (literal.contains(['.', 'e', 'E'])
+                    && literal.replace('_', "").parse::<f64>().is_ok())
+                .then_some(true)
+            }),
         Expr::Select { signed, .. } => Some(*signed),
         Expr::Concat(_) | Expr::RepeatConcat { .. } => Some(false),
         Expr::Resize { signed, .. } => Some(*signed),
@@ -79,6 +83,20 @@ pub(super) fn expr_signedness_with_return_types(
                 )
             }
         }
+        // The internal zero-divisor arm represents an unknown value of the
+        // guarded operation's type, not a separate source-language operand.
+        Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } if matches!(&**then_expr, Expr::Literal(text) if text == crate::DIV_ZERO_UNKNOWN_LITERAL) => {
+            expr_signedness_with_return_types(
+                else_expr,
+                identifiers,
+                functions,
+                function_return_types,
+            )
+        }
         Expr::Mux {
             then_expr,
             else_expr,
@@ -101,6 +119,14 @@ pub(super) fn expr_signedness_with_return_types(
             callee: Callee::System(function),
             ..
         } => function.result_type().map(|(_, signed)| signed),
+        Expr::Call {
+            callee: Callee::String(op),
+            ..
+        } => Some(op.result_type().1),
+        Expr::Call {
+            callee: Callee::Object(op),
+            ..
+        } => Some(op.result_type().1),
         Expr::Call {
             callee: Callee::Subroutine(name),
             ..

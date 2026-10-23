@@ -89,16 +89,26 @@ fn bind_in_context(
             Job::Enter(id) => match &native.expression(id).kind {
                 ExprKind::Group(inner) => jobs.push(Job::Enter(*inner)),
                 ExprKind::Literal(text)
-                    if typecheck::integral_literal_type_metadata(text).is_some() =>
+                    if typecheck::integral_literal_type_metadata(text).is_some()
+                        || (text.contains(['.', 'e', 'E'])
+                            && text.replace('_', "").parse::<f64>().is_ok()) =>
                 {
                     values.push(ConstExpr::Literal(text.clone()))
                 }
                 ExprKind::Name(name) if name.spelling == "$" => {
                     values.push(ConstExpr::Literal("$".into()))
                 }
-                ExprKind::Name(name) if !name.spelling.starts_with('$') => values.push(
-                    ConstExpr::Ident(instances::normalize_identifier(&name.spelling)),
-                ),
+                ExprKind::Name(name) if !name.spelling.starts_with('$') => {
+                    let name = instances::normalize_identifier(&name.spelling);
+                    let literal = dimensions.parameter_values.get(&name).and_then(|value| {
+                        let Expr::Literal(text) = value else {
+                            return None;
+                        };
+                        (text.contains(['.', 'e', 'E']) && text.parse::<f64>().is_ok())
+                            .then(|| ConstExpr::Literal(text.clone()))
+                    });
+                    values.push(literal.unwrap_or(ConstExpr::Ident(name)));
+                }
                 ExprKind::Unary {
                     operator,
                     expression,
@@ -247,6 +257,22 @@ fn bind_in_context(
                         base = *expression;
                     }
                     if let ExprKind::Name(name) = &native.expression(base).kind {
+                        // Override expressions retain symbolic values, but a packed
+                        // element still has its declared width and coordinates.
+                        // The symbolic context deliberately has no numeric env.
+                        let name_key = instances::normalize_identifier(&name.spelling);
+                        if dimensions.const_env.is_empty()
+                            && query_dimensions.get(&name_key).is_some_and(|shape| {
+                                shape.packed.len() > 1 || !shape.unpacked.is_empty()
+                            })
+                        {
+                            let value = indexed_expression(id, native, tree, query_dimensions)?;
+                            values.push(
+                                expr_to_index_const(&tree.state, value, query_dimensions)
+                                    .ok_or_else(|| unsupported("parameter selection shape"))?,
+                            );
+                            continue;
+                        }
                         indices.reverse();
                         jobs.push(Job::Select(
                             instances::normalize_identifier(&name.spelling),

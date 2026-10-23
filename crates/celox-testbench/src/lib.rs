@@ -33,9 +33,6 @@ pub enum QueueOp {
     IsFull,
 }
 
-/// Dynamic string values, addressed by a bound variable and flattened array index.
-pub type TestbenchStrings = std::collections::BTreeMap<(usize, usize), Vec<u8>>;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StateLocation<A> {
     pub address: A,
@@ -291,6 +288,8 @@ pub struct SemanticArgument<A> {
     pub width: usize,
     pub signed: bool,
     pub is_string: bool,
+    #[serde(default)]
+    pub float_precision: Option<celox_design::FloatPrecision>,
 }
 
 pub type SemanticStatement<A> = TestbenchStatement<
@@ -500,6 +499,14 @@ pub enum ExprOpcode<L = usize> {
         width: usize,
     },
     BinOp(TestbenchOperator),
+    FloatBinary {
+        op: celox_design::FloatBinaryOp,
+        precision: celox_design::FloatPrecision,
+    },
+    FloatUnary {
+        op: celox_design::FloatUnaryOp,
+        precision: celox_design::FloatPrecision,
+    },
     TypedBinOp {
         op: TestbenchOperator,
         lhs_width: usize,
@@ -542,10 +549,14 @@ pub enum ExprOpcode<L = usize> {
         byte_size: usize,
     },
     ConstString(Vec<u8>),
+    /// Pop the bit offset of a string element within the variable at
+    /// `location`, which holds `elements` heap handles, and push its contents.
+    /// An offset past the last element reads `""`.
     LoadString {
         location: L,
         elements: usize,
     },
+    /// Pop a string and store its heap handle at `location`.
     StoreString {
         location: L,
     },
@@ -580,6 +591,7 @@ pub struct ExecutableArgument {
     pub width: usize,
     pub signed: bool,
     pub is_string: bool,
+    pub float_precision: Option<celox_design::FloatPrecision>,
 }
 
 pub type ExecutableAssertMessage = AssertMessage<ExecutableArgument>;
@@ -739,6 +751,12 @@ impl<A> ExprBytecode<StateLocation<A>> {
                     width,
                 },
                 ExprOpcode::BinOp(op) => ExprOpcode::BinOp(op),
+                ExprOpcode::FloatBinary { op, precision } => {
+                    ExprOpcode::FloatBinary { op, precision }
+                }
+                ExprOpcode::FloatUnary { op, precision } => {
+                    ExprOpcode::FloatUnary { op, precision }
+                }
                 ExprOpcode::TypedBinOp {
                     op,
                     lhs_width,

@@ -29,6 +29,17 @@ impl DiagnosticPolicy {
         self.0.insert(code.into(), level);
     }
 
+    /// Supply the legacy latch opt-in only when no explicit diagnostic setting exists.
+    /// Explicit per-code policy wins regardless of builder setter order.
+    pub fn with_inferred_latches(mut self, allow: bool) -> Self {
+        if allow {
+            self.0
+                .entry("inferred_latch".to_string())
+                .or_insert(DiagnosticLevel::Allow);
+        }
+        self
+    }
+
     /// Parse the CLI spelling `CODE=allow|warn|error`.
     pub fn set_override(&mut self, value: &str) -> Result<(), String> {
         let (code, level) = value
@@ -71,7 +82,13 @@ impl DiagnosticPolicy {
 
     pub(crate) fn level(&self, code: &str) -> DiagnosticLevel {
         self.0.get(code).copied().unwrap_or(
-            if matches!(code, "mixed_timescale" | "unpacked_port_default") {
+            if matches!(
+                code,
+                "mixed_timescale"
+                    | "unpacked_port_default"
+                    | "multiple_always_ff_drivers"
+                    | "inferred_latch"
+            ) {
                 DiagnosticLevel::Error
             } else {
                 DiagnosticLevel::Warn
@@ -80,9 +97,13 @@ impl DiagnosticPolicy {
     }
 
     #[cfg(feature = "systemverilog")]
-    pub(crate) fn sv_options(&self) -> celox_frontend_sv::AnalysisOptions {
+    pub(crate) fn sv_options(
+        &self,
+        timescale: Option<crate::SvTimescale>,
+    ) -> celox_frontend_sv::AnalysisOptions {
         celox_frontend_sv::AnalysisOptions {
             allow_mixed_timescales: self.level("mixed_timescale") != DiagnosticLevel::Error,
+            default_timescale: timescale.map(|scale| (scale.unit, scale.precision)),
         }
     }
 

@@ -291,6 +291,11 @@ impl Item {
             } else {
                 self.parameter_literals(&dimensions.parameter_values).into()
             };
+        if !self.shadowed.is_empty() || !self.names.is_empty() {
+            local
+                .array_parameter_values
+                .retain(|name, _| !self.shadowed.contains(name) && !self.names.contains_key(name));
+        }
         // Ordinary module items keep the module's function bindings. Rewriting
         // every function body for every item costs O(items * function size).
         if !self.shadowed.is_empty() || !self.names.is_empty() {
@@ -869,7 +874,9 @@ impl<'a> Elaborator<'a, '_> {
                         value
                             .variables
                             .iter()
-                            .filter(|variable| type_binding::ordinary_variable(variable, native))
+                            .filter(|variable| {
+                                type_binding::ordinary_variable(variable, value.data_type, native)
+                            })
                             .map(|variable| (&variable.name, variable.dimensions.as_slice()))
                             .collect(),
                     ),
@@ -1066,6 +1073,11 @@ impl<'a> Elaborator<'a, '_> {
                         &self.tree.state,
                         &scope.parameters,
                         &base,
+                        &pending
+                            .iter()
+                            .flatten()
+                            .map(|(name, _, _, _)| name.clone())
+                            .collect::<Vec<_>>(),
                     );
                     let mut types = parameter_types_from_const_env(&base);
                     let mut next = index;
@@ -1836,7 +1848,7 @@ mod tests {
             module Top();
                 if (1) begin : g
                     localparam A=B, B=A;
-                    localparam real R=1.0;
+                    localparam chandle R=null;
                 end
             endmodule
         "#,
@@ -2050,6 +2062,7 @@ mod tests {
             dimensions: Some(2),
             signed: false,
             is_2state: false,
+            string: false,
         };
         let inner = FunctionReturnMetadata {
             arguments: None,
@@ -2058,6 +2071,7 @@ mod tests {
             dimensions: Some(1),
             signed: true,
             is_2state: true,
+            string: false,
         };
         let dimensions = PackedDimensions {
             function_return_types: [

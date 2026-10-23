@@ -1,0 +1,68 @@
+diff --git a/runtime.cjs b/runtime.cjs
+index 3dc0d9776903bfc21a924f50ddff1def592062a8..b21ae20e5637e6593cf6b62d068ca42fef2cc43f 100644
+--- a/runtime.cjs
++++ b/runtime.cjs
+@@ -3,23 +3,11 @@ const {
+   instantiateNapiModuleSync,
+   instantiateNapiModule,
+ } = require('@emnapi/core')
+-// Single-threaded (non-shared-memory) WASI builds link an emnapi archive
+-// without the C async-work and threadsafe-function implementations (they are
+-// unconditional `napi_generic_failure` stubs without threads), so the
+-// generated loaders provide the JavaScript implementations through these
+-// plugins instead. Raw `instantiateNapiModule(Sync)` callers instantiating a
+-// single-threaded napi-rs wasm must pass them too:
+-// `plugins: [emnapiAsyncWorkPlugin, emnapiTSFNPlugin]` — without them
+-// instantiation fails with a LinkError naming the missing import. Threaded
+-// (shared-memory) builds link the C implementations and need no plugins;
+-// this mirrors the upstream @emnapi/core v2 plugin split (v1 bundled these
+-// implementations in the core runtime). The plugins are bundled into this
+-// package so loading the runtime with @emnapi/core v1 does not resolve the
+-// v2-only `@emnapi/core/plugins` package export.
++// Celox pins emnapi v2: use plugins matching its internal API.
+ const {
+-  emnapiAsyncWorkPlugin,
+-  emnapiTSFNPlugin,
+-} = require('./dist/emnapi-plugins.cjs')
++  asyncWork: emnapiAsyncWorkPlugin,
++  tsfn: emnapiTSFNPlugin,
++} = require('@emnapi/core/plugins')
+ const { createContext, getDefaultContext } = require('@emnapi/runtime')
+ const { WASI } = require('@tybys/wasm-util')
+ 
+diff --git a/runtime.js b/runtime.js
+index 7a727a04460d6fd507bcd5fe8c8bf4e13530ba04..5582340fc5ee937714efe4d05a5b4ac78fcaa8af 100644
+--- a/runtime.js
++++ b/runtime.js
+@@ -2,27 +2,15 @@ import * as emnapiCore from '@emnapi/core'
+ import * as emnapiRuntime from '@emnapi/runtime'
+ 
+ import {
+-  emnapiAsyncWorkPlugin,
+-  emnapiTSFNPlugin,
+-} from './dist/emnapi-plugins.js'
++  asyncWork as emnapiAsyncWorkPlugin,
++  tsfn as emnapiTSFNPlugin,
++} from '@emnapi/core/plugins'
+ 
+ const { instantiateNapiModuleSync, instantiateNapiModule, MessageHandler } =
+   emnapiCore
+ const { createContext, getDefaultContext } = emnapiRuntime
+ 
+-// Single-threaded (non-shared-memory) WASI builds link an emnapi archive
+-// without the C async-work and threadsafe-function implementations (they are
+-// unconditional `napi_generic_failure` stubs without threads), so the
+-// generated loaders provide the JavaScript implementations through these
+-// plugins instead. Raw `instantiateNapiModule(Sync)` callers instantiating a
+-// single-threaded napi-rs wasm must pass them too:
+-// `plugins: [emnapiAsyncWorkPlugin, emnapiTSFNPlugin]` — without them
+-// instantiation fails with a LinkError naming the missing import. Threaded
+-// (shared-memory) builds link the C implementations and need no plugins;
+-// this mirrors the upstream @emnapi/core v2 plugin split (v1 bundled these
+-// implementations in the core runtime). The plugins are bundled into this
+-// package so loading the runtime with @emnapi/core v1 does not resolve the
+-// v2-only `@emnapi/core/plugins` package export.
++// Celox pins emnapi v2: use plugins matching its internal API.
+ export {
+   MessageHandler,
+   createContext,

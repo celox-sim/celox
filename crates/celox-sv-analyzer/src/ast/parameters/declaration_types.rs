@@ -23,6 +23,9 @@ pub(super) fn prefix<'a>(
     let data = tree.declarations().data_type(data_type);
     let (alias, primitive) = match &data.kind {
         DataTypeKind::Implicit => (None, None),
+        // A string parameter is a constant, which keeps the packed value of
+        // its literal like an untyped one (IEEE 1800-2023 6.20.2).
+        DataTypeKind::Builtin(name) if name == "string" => (None, None),
         DataTypeKind::Builtin(name) => (
             None,
             Some(
@@ -49,6 +52,13 @@ pub(super) fn prefix<'a>(
 impl Prefix<'_> {
     pub fn has_declared_type(&self) -> bool {
         !matches!(self.data.kind, DataTypeKind::Implicit)
+    }
+    pub fn floating(&self) -> Option<TypeKind> {
+        self.alias
+            .as_ref()
+            .or(self.primitive.as_ref())
+            .map(|ty| ty.kind)
+            .filter(|kind| matches!(kind, TypeKind::Real | TypeKind::Shortreal))
     }
     pub fn signed(&self) -> bool {
         self.primitive

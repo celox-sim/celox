@@ -305,10 +305,12 @@ fn analyze(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     preserve_element_storage_layout: bool,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    _allow_inferred_latches: bool,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> (
     Result<OptimizedSir, SimulatorError>,
@@ -317,7 +319,7 @@ fn analyze(
     Vec<CompilationWarning>,
 ) {
     #[cfg(not(feature = "systemverilog"))]
-    let _ = diagnostic_policy;
+    let _ = (diagnostic_policy, sv_timescale);
     symbol_table::clear();
     attribute_table::clear();
 
@@ -399,7 +401,7 @@ fn analyze(
             sv_sources,
             Some(&references),
             &mut sv_probe_warnings,
-            diagnostic_policy.sv_options(),
+            diagnostic_policy.sv_options(sv_timescale),
         )
         .map_err(|error| match error {
             celox_frontend_sv::FrontendError::Analyzer(error) => parser::sv_analysis_error(error),
@@ -526,6 +528,7 @@ fn analyze(
 
     let top = veryl_parser::resource_table::insert_str(top);
     let mut build_config = BuildConfig::from(&metadata.build);
+    build_config.allow_inferred_latches = true;
     build_config.file_dependencies = file_dependencies.clone();
     if let Some(ct) = clock_type {
         build_config.clock_type = ct;
@@ -613,6 +616,7 @@ fn analyze(
                         optimize_options,
                         diagnostics,
                         diagnostic_policy,
+                        sv_timescale,
                         preserve_element_storage_layout,
                         testbench_random_seed,
                         component_libraries,
@@ -691,6 +695,11 @@ fn analyze(
     };
     #[cfg(not(feature = "systemverilog"))]
     let elaboration_warnings = Vec::new();
+    errors.retain(|error| {
+        !frontend_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.covers_uncovered_branch(error))
+    });
     (sir, errors, frontend_diagnostics, elaboration_warnings)
 }
 
@@ -764,7 +773,94 @@ pub fn compile_to_sir_with_file_dependencies(
     optimize_options: &crate::optimizer::OptimizeOptions,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
-    compile_to_sir_with_layout_mode(
+    compile_to_sir_with_latch_policy(
+        sources,
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        param_overrides,
+        optimize_options,
+        false,
+        file_dependencies,
+    )
+}
+
+/// Compile Veryl with an explicit inferred-latch policy and file lookup collector.
+///
+/// The default compilation APIs reject inferred latches. Pass `true` here to
+/// allow them, or use `SimulatorBuilder::allow_inferred_latches` on host targets.
+pub fn compile_to_sir_with_latch_policy(
+    sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    allow_inferred_latches: bool,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    compile_to_sir_with_diagnostic_policy(
+        sources,
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        param_overrides,
+        optimize_options,
+        &crate::DiagnosticPolicy::default().with_inferred_latches(allow_inferred_latches),
+        file_dependencies,
+    )
+}
+
+/// Compile Veryl with the same per-code policy used by host builders and celox.toml.
+pub fn compile_to_sir_with_diagnostic_policy(
+    sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostic_policy: &crate::DiagnosticPolicy,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    let result = compile_to_sir_with_layout_mode(
         sources,
         top,
         ignored_loops,
@@ -778,13 +874,19 @@ pub fn compile_to_sir_with_file_dependencies(
         param_overrides,
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
-        &crate::DiagnosticPolicy::default(),
+        diagnostic_policy,
+        None,
         &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
         false,
+        true,
         file_dependencies,
-    )
+    );
+    let (program, mut warnings) =
+        result.map_err(|error| error.apply_diagnostic_policy(diagnostic_policy))?;
+    diagnostic_policy.apply(&mut warnings)?;
+    Ok((program, warnings))
 }
 
 /// Compile an elaborated external-frontend artifact to optimized SIR.
@@ -895,10 +997,12 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    allow_inferred_latches: bool,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     // The testbench drives time itself and never resumes process kernels.
@@ -928,10 +1032,12 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
         optimize_options,
         diagnostics,
         diagnostic_policy,
+        sv_timescale,
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        allow_inferred_latches,
         file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
@@ -988,10 +1094,12 @@ fn compile_to_sir_with_layout_mode(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    allow_inferred_latches: bool,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics, elaboration_warnings) = analyze(
@@ -1011,10 +1119,12 @@ fn compile_to_sir_with_layout_mode(
         optimize_options,
         diagnostics,
         diagnostic_policy,
+        sv_timescale,
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        allow_inferred_latches,
         file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
@@ -1072,7 +1182,7 @@ pub fn compile_sv_to_sir(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
-    compile_sv_to_sir_with_layout_mode(
+    let result = compile_sv_to_sir_with_layout_mode(
         sources,
         top,
         ignored_loops,
@@ -1087,9 +1197,16 @@ pub fn compile_sv_to_sir(
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
         &crate::DiagnosticPolicy::default(),
+        None,
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
+        false,
         &[],
-    )
+        &[],
+    );
+    let policy = crate::DiagnosticPolicy::default();
+    let (program, mut warnings) = result.map_err(|error| error.apply_diagnostic_policy(&policy))?;
+    policy.apply(&mut warnings)?;
+    Ok((program, warnings))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1116,11 +1233,31 @@ fn compile_sv_to_sir_with_layout_mode(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+    _allow_inferred_latches: bool,
     force_signals: &[String],
+    sv_param_literals: &[(String, String)],
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    let mut parameters = param_overrides
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                celox_frontend_sv::analyzer_ir::ConstExpr::Literal(value.to_string()),
+            )
+        })
+        .collect::<Vec<_>>();
+    for (name, literal) in sv_param_literals {
+        let value = celox_frontend_sv::analyzer_typecheck::parse_parameter_literal(literal)
+            .ok_or_else(|| {
+                crate::CodegenError::message(format!("invalid SV parameter literal `{literal}`"))
+            })?;
+        parameters.push((name.clone(), value));
+    }
     let metadata = metadata.unwrap_or_else(|| Metadata::create_default("prj").unwrap());
     let mut build_config = BuildConfig::from(&metadata.build);
+    build_config.allow_inferred_latches = true;
     if let Some(clock_type) = clock_type {
         build_config.clock_type = clock_type;
     }
@@ -1132,7 +1269,7 @@ fn compile_sv_to_sir_with_layout_mode(
     let sir = parser::parse_sv(
         sources,
         top,
-        param_overrides,
+        &parameters,
         &build_config,
         ignored_loops,
         true_loops,
@@ -1142,6 +1279,7 @@ fn compile_sv_to_sir_with_layout_mode(
         optimize_options,
         diagnostics,
         diagnostic_policy,
+        sv_timescale,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         metadata.test.seed,
         component_libraries,
@@ -1233,7 +1371,7 @@ pub fn compile_mixed_to_sir_with_file_dependencies(
     optimize_options: &crate::optimizer::OptimizeOptions,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
-    compile_mixed_to_sir_with_layout_mode(
+    let result = compile_mixed_to_sir_with_layout_mode(
         sources,
         sv_sources,
         top,
@@ -1249,12 +1387,18 @@ pub fn compile_mixed_to_sir_with_file_dependencies(
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
         &crate::DiagnosticPolicy::default(),
+        None,
         &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
         false,
+        false,
         file_dependencies,
-    )
+    );
+    let policy = crate::DiagnosticPolicy::default();
+    let (program, mut warnings) = result.map_err(|error| error.apply_diagnostic_policy(&policy))?;
+    policy.apply(&mut warnings)?;
+    Ok((program, warnings))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1282,10 +1426,12 @@ fn compile_mixed_to_sir_with_layout_mode(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    allow_inferred_latches: bool,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics, elaboration_warnings) = analyze(
@@ -1305,10 +1451,12 @@ fn compile_mixed_to_sir_with_layout_mode(
         optimize_options,
         diagnostics,
         diagnostic_policy,
+        sv_timescale,
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        allow_inferred_latches,
         file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
@@ -1368,13 +1516,22 @@ fn compile_hdl_to_sir_with_layout_mode(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    allow_inferred_latches: bool,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
     force_signals: &[String],
+    sv_param_literals: &[(String, String)],
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    if !sv_param_literals.is_empty() && (!sources.is_empty() || sv_sources.is_empty()) {
+        return Err(crate::CodegenError::message(
+            "parameter literals require pure SystemVerilog sources",
+        )
+        .into());
+    }
     if !force_signals.is_empty() && !sources.is_empty() {
         return Err(crate::CodegenError::message(
             "force_signals currently require pure SystemVerilog sources",
@@ -1399,10 +1556,12 @@ fn compile_hdl_to_sir_with_layout_mode(
             optimize_options,
             diagnostics,
             diagnostic_policy,
+            sv_timescale,
             injected_manifests,
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            allow_inferred_latches,
             file_dependencies,
         )
     }
@@ -1423,10 +1582,12 @@ fn compile_hdl_to_sir_with_layout_mode(
             optimize_options,
             diagnostics,
             diagnostic_policy,
+            sv_timescale,
             injected_manifests,
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            allow_inferred_latches,
             file_dependencies,
         ),
         (true, false) => compile_sv_to_sir_with_layout_mode(
@@ -1444,8 +1605,11 @@ fn compile_hdl_to_sir_with_layout_mode(
             optimize_options,
             diagnostics,
             diagnostic_policy,
+            sv_timescale,
             layout_mode,
+            allow_inferred_latches,
             force_signals,
+            sv_param_literals,
         ),
         (false, false) => compile_mixed_to_sir_with_layout_mode(
             sources,
@@ -1463,10 +1627,12 @@ fn compile_hdl_to_sir_with_layout_mode(
             optimize_options,
             diagnostics,
             diagnostic_policy,
+            sv_timescale,
             injected_manifests,
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            allow_inferred_latches,
             file_dependencies,
         ),
     }
@@ -1516,6 +1682,8 @@ mod host {
         pub trace: crate::debug::TraceOptions,
         pub diagnostics: crate::RuntimeDiagnostics,
         pub diagnostic_policy: crate::DiagnosticPolicy,
+        /// Default SystemVerilog time unit and global scheduler precision.
+        pub sv_timescale: Option<crate::SvTimescale>,
         /// When true, JIT-compiled functions emit trigger detection code for
         /// edge-based event discovery. Only needed by [`crate::Simulation`].
         pub emit_triggers: bool,
@@ -1531,10 +1699,15 @@ mod host {
         /// Allow Celox to lower function side effects that Veryl rejects in
         /// `always_ff` for SystemVerilog compatibility.
         pub allow_always_ff_function_effects: bool,
+        /// Permit inferred latches in `always_comb`; disabled by default.
+        pub allow_inferred_latches: bool,
         /// Where the C functions of DPI-C imports are found.
         pub dpi: crate::DpiSymbols,
         /// Ordered command-line arguments for SystemVerilog plusargs queries.
         pub plusargs: Vec<String>,
+        /// The loop that runs the time slots of a [`crate::Simulation`].
+        #[doc(hidden)]
+        pub scheduler: crate::SchedulerMode,
     }
 
     /// A code-generated native program that has not been loaded into
@@ -1558,37 +1731,19 @@ mod host {
         injected_components: crate::InjectedComponents,
     }
 
-    fn validate_untimed_host_requests(
+    /// `Simulator` runs no process kernel, so a design with one would
+    /// simulate wrongly without any error.
+    fn validate_untimed_processes(
         program: &crate::ir::RuntimeProgram,
     ) -> Result<(), SimulatorError> {
-        if program
-            .runtime_schema
-            .host_request_sites
-            .iter()
-            .any(|site| site.kind == celox_design::HostRequestKind::Vcd)
-        {
-            return Err(SimulatorError::from(crate::RuntimeErrorCode::Runtime {
-                message: "source VCD controls require Simulation; Simulator does not execute initial process kernels".into(),
-                signals: Vec::new(),
-            }));
+        let schema = &program.runtime_schema;
+        if schema.processes.is_empty() {
+            return Ok(());
         }
-        if program
-            .runtime_schema
-            .processes
-            .iter()
-            .any(|slots| slots.requires_timed_simulation)
-            || program
-                .runtime_schema
-                .host_request_sites
-                .iter()
-                .any(|site| site.requires_timed_simulation)
-        {
-            return Err(SimulatorError::from(crate::RuntimeErrorCode::Runtime {
-                message: "edge procedures using system file I/O, plusargs, or VCD controls require Simulation; Simulator does not execute scheduled process kernels".into(),
-                signals: Vec::new(),
-            }));
-        }
-        Ok(())
+        let origin = schema.process_origins.first().cloned().unwrap_or_default();
+        Err(SimulatorError::new(
+            SimulatorErrorKind::ProcessRequiresSimulation(origin),
+        ))
     }
 
     #[cfg(any(
@@ -1604,7 +1759,7 @@ mod host {
         vcd_path: Option<std::path::PathBuf>,
         injected_components: crate::InjectedComponents,
     ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
-        validate_untimed_host_requests(&program)?;
+        validate_untimed_processes(&program)?;
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
@@ -1775,14 +1930,17 @@ mod host {
                 trace: Default::default(),
                 diagnostics: Default::default(),
                 diagnostic_policy: Default::default(),
+                sv_timescale: None,
                 emit_triggers: false,
                 native_force_support: false,
                 signal_access: crate::SignalAccessOptions::default(),
                 dead_store_policy: DeadStorePolicy::Off,
                 tier_promotion: TierPromotion::Always,
                 allow_always_ff_function_effects: false,
+                allow_inferred_latches: false,
                 dpi: crate::DpiSymbols::default(),
                 plusargs: Vec::new(),
+                scheduler: crate::SchedulerMode::default(),
             }
         }
     }
@@ -1812,6 +1970,7 @@ mod host {
         clock_type: Option<ClockType>,
         reset_type: Option<ResetType>,
         param_overrides: Vec<(String, u64)>,
+        sv_param_literals: Vec<(String, String)>,
         live_signals: Vec<(Vec<(String, usize)>, Vec<String>)>,
         injected_components: crate::InjectedComponents,
         frontend_artifact: Option<celox_frontend_sdk::FrontendArtifact>,
@@ -1893,7 +2052,19 @@ mod host {
 
         /// Override a top-level module parameter value.
         pub fn param(mut self, name: &str, value: u64) -> Self {
+            self.sv_param_literals.retain(|(key, _)| key != name);
             self.param_overrides.push((name.to_string(), value));
+            self
+        }
+
+        /// Override a pure SV top parameter with a literal, such as `-8`,
+        /// `8'hff`, `'1`, or `"XILINX"`. The literal's width and signedness
+        /// are preserved. Invalid literals are reported when building.
+        pub fn param_literal(mut self, name: &str, literal: &str) -> Self {
+            self.param_overrides.retain(|(key, _)| key != name);
+            self.sv_param_literals.retain(|(key, _)| key != name);
+            self.sv_param_literals
+                .push((name.to_string(), literal.to_string()));
             self
         }
 
@@ -1930,6 +2101,17 @@ mod host {
 
         pub fn four_state(mut self, enable: bool) -> Self {
             self.options.four_state = enable;
+            self
+        }
+
+        /// Allow incomplete assignments and retained values in `always_comb`.
+        ///
+        /// Disabled by default. When enabled, inferred latches retain their
+        /// value while closed and follow their inputs while open. Explicit
+        /// SystemVerilog `always_latch` and ordinary `always @*` processes do
+        /// not require this option.
+        pub fn allow_inferred_latches(mut self, enable: bool) -> Self {
+            self.options.allow_inferred_latches = enable;
             self
         }
 
@@ -2189,6 +2371,13 @@ mod host {
         }
 
         /// Override recoverable compilation diagnostic severities.
+        /// Set default SV timing and contribute its precision to the scheduler.
+        /// Explicit source time declarations retain their units and rounding.
+        pub fn sv_timescale(mut self, timescale: Option<crate::SvTimescale>) -> Self {
+            self.options.sv_timescale = timescale;
+            self
+        }
+
         pub fn diagnostic_policy(mut self, policy: crate::DiagnosticPolicy) -> Self {
             self.options.diagnostic_policy = policy;
             self
@@ -2340,6 +2529,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
@@ -2361,6 +2551,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
@@ -2383,6 +2574,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
@@ -2410,6 +2602,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
@@ -2436,6 +2629,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
@@ -2463,6 +2657,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
@@ -2506,6 +2701,11 @@ mod host {
             ),
             SimulatorError,
         > {
+            self.options.diagnostic_policy = self
+                .options
+                .diagnostic_policy
+                .clone()
+                .with_inferred_latches(self.options.allow_inferred_latches);
             // VCD descriptors currently describe packed whole objects. Apply
             // the same layout rule to every factory, including native images.
             let layout_mode = if self.vcd_path.is_some() {
@@ -2517,7 +2717,13 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let compile_start = phase_timing.then(crate::timing::now);
             let injected_manifests = self.injected_components.manifests();
-            let compiled = if let Some(artifact) = &self.frontend_artifact {
+            let compiled = if !self.sv_param_literals.is_empty() && self.frontend_artifact.is_some()
+            {
+                Err(crate::CodegenError::message(
+                    "parameter literals require pure SystemVerilog sources",
+                )
+                .into())
+            } else if let Some(artifact) = &self.frontend_artifact {
                 if self.sources.is_empty() {
                     compile_frontend_to_sir_with_layout_mode(
                         artifact,
@@ -2546,10 +2752,12 @@ mod host {
                         &self.options.optimize_options,
                         &self.options.diagnostics,
                         &self.options.diagnostic_policy,
+                        self.options.sv_timescale,
                         &injected_manifests,
                         layout_mode,
                         !self.options.native_force_support,
                         self.options.allow_always_ff_function_effects,
+                        self.options.allow_inferred_latches,
                         &self.file_dependencies,
                     )
                 }
@@ -2570,12 +2778,15 @@ mod host {
                     &self.options.optimize_options,
                     &self.options.diagnostics,
                     &self.options.diagnostic_policy,
+                    self.options.sv_timescale,
                     &injected_manifests,
                     layout_mode,
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
+                    self.options.allow_inferred_latches,
                     &self.file_dependencies,
                     &self.options.signal_access.force_signals,
+                    &self.sv_param_literals,
                 )
             };
             let (program, mut warnings) = compiled
@@ -2668,7 +2879,7 @@ mod host {
 
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
-            validate_untimed_host_requests(laid_out.runtime())?;
+            validate_untimed_processes(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2737,7 +2948,7 @@ mod host {
 
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
-            validate_untimed_host_requests(laid_out.runtime())?;
+            validate_untimed_processes(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2795,7 +3006,7 @@ mod host {
                     vcd_recording,
                 ))?
             };
-            validate_untimed_host_requests(laid_out.runtime())?;
+            validate_untimed_processes(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2865,7 +3076,7 @@ mod host {
                     vcd_recording,
                 ))?
             };
-            validate_untimed_host_requests(laid_out.runtime())?;
+            validate_untimed_processes(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2915,7 +3126,7 @@ mod host {
                 .into_laid_out_program(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 )?;
-            validate_untimed_host_requests(laid_out.runtime())?;
+            validate_untimed_processes(laid_out.runtime())?;
             if let Some(start) = sir_start {
                 tracing::debug!(
                     "[phase-timing] into_laid_out_program total: {:?}",
@@ -2959,7 +3170,7 @@ mod host {
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                     Some(&mut trace),
                 )?;
-            validate_untimed_host_requests(laid_out.runtime())?;
+            validate_untimed_processes(laid_out.runtime())?;
             if let Some(start) = sir_start {
                 tracing::debug!(
                     "[phase-timing] into_laid_out_program total: {:?}",
@@ -3085,7 +3296,7 @@ mod host {
         ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
-            validate_untimed_host_requests(laid_out.runtime())?;
+            validate_untimed_processes(laid_out.runtime())?;
             let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)
                 .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             let mut sim =
@@ -3152,6 +3363,11 @@ mod host {
         /// Compiles the Veryl source and constructs the core logic simulator,
         /// while capturing compilation trace data as configured by TraceOptions.
         pub fn build_with_trace(mut self) -> crate::debug::CompilationTraceResult {
+            self.options.diagnostic_policy = self
+                .options
+                .diagnostic_policy
+                .clone()
+                .with_inferred_latches(self.options.allow_inferred_latches);
             self.enforce_native_force_optimizer();
             let mut trace = crate::debug::CompilationTrace::default();
             #[cfg(any(
@@ -3170,23 +3386,54 @@ mod host {
                 layout_mode
             };
             let injected_manifests = self.injected_components.manifests();
-            let program_res = if let Some(artifact) = &self.frontend_artifact {
-                if self.sources.is_empty() {
-                    compile_frontend_to_sir_with_layout_mode(
-                        artifact,
-                        &self.ignored_loops,
-                        &self.true_loops,
-                        self.options.four_state,
-                        &self.options.trace,
-                        Some(&mut trace),
-                        &self.options.optimize_options,
-                        &self.options.diagnostics,
-                        layout_mode,
+            let program_res =
+                if !self.sv_param_literals.is_empty() && self.frontend_artifact.is_some() {
+                    Err(crate::CodegenError::message(
+                        "parameter literals require pure SystemVerilog sources",
                     )
+                    .into())
+                } else if let Some(artifact) = &self.frontend_artifact {
+                    if self.sources.is_empty() {
+                        compile_frontend_to_sir_with_layout_mode(
+                            artifact,
+                            &self.ignored_loops,
+                            &self.true_loops,
+                            self.options.four_state,
+                            &self.options.trace,
+                            Some(&mut trace),
+                            &self.options.optimize_options,
+                            &self.options.diagnostics,
+                            layout_mode,
+                        )
+                    } else {
+                        compile_frontend_testbench_to_sir_with_layout_mode(
+                            artifact,
+                            &self.sources,
+                            self.top,
+                            &self.ignored_loops,
+                            &self.true_loops,
+                            self.options.four_state,
+                            &self.options.trace,
+                            Some(&mut trace),
+                            self.metadata,
+                            self.clock_type,
+                            self.reset_type,
+                            &self.options.optimize_options,
+                            &self.options.diagnostics,
+                            &self.options.diagnostic_policy,
+                            self.options.sv_timescale,
+                            &injected_manifests,
+                            layout_mode,
+                            !self.options.native_force_support,
+                            self.options.allow_always_ff_function_effects,
+                            self.options.allow_inferred_latches,
+                            &self.file_dependencies,
+                        )
+                    }
                 } else {
-                    compile_frontend_testbench_to_sir_with_layout_mode(
-                        artifact,
+                    compile_hdl_to_sir_with_layout_mode(
                         &self.sources,
+                        &self.sv_sources,
                         self.top,
                         &self.ignored_loops,
                         &self.true_loops,
@@ -3196,41 +3443,21 @@ mod host {
                         self.metadata,
                         self.clock_type,
                         self.reset_type,
+                        &self.param_overrides,
                         &self.options.optimize_options,
                         &self.options.diagnostics,
                         &self.options.diagnostic_policy,
+                        self.options.sv_timescale,
                         &injected_manifests,
                         layout_mode,
                         !self.options.native_force_support,
                         self.options.allow_always_ff_function_effects,
+                        self.options.allow_inferred_latches,
                         &self.file_dependencies,
+                        &self.options.signal_access.force_signals,
+                        &self.sv_param_literals,
                     )
-                }
-            } else {
-                compile_hdl_to_sir_with_layout_mode(
-                    &self.sources,
-                    &self.sv_sources,
-                    self.top,
-                    &self.ignored_loops,
-                    &self.true_loops,
-                    self.options.four_state,
-                    &self.options.trace,
-                    Some(&mut trace),
-                    self.metadata,
-                    self.clock_type,
-                    self.reset_type,
-                    &self.param_overrides,
-                    &self.options.optimize_options,
-                    &self.options.diagnostics,
-                    &self.options.diagnostic_policy,
-                    &injected_manifests,
-                    layout_mode,
-                    !self.options.native_force_support,
-                    self.options.allow_always_ff_function_effects,
-                    &self.file_dependencies,
-                    &self.options.signal_access.force_signals,
-                )
-            };
+                };
 
             let program_res = program_res
                 .map_err(|error| error.apply_diagnostic_policy(&self.options.diagnostic_policy));
@@ -3249,7 +3476,7 @@ mod host {
                 };
                 let mut laid_out =
                     program.into_laid_out_with_mode(self.options.four_state, layout_mode);
-                validate_untimed_host_requests(laid_out.runtime())?;
+                validate_untimed_processes(laid_out.runtime())?;
                 if vcd_recording {
                     laid_out.enable_vcd_tracking();
                 }
@@ -3344,6 +3571,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
@@ -3365,6 +3593,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
@@ -3388,12 +3617,22 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
+        }
+
+        /// Select the loop that runs time slots. A test option:
+        /// [`crate::SchedulerMode::Differential`] compiles the design twice
+        /// and checks every step against a shadow simulation.
+        #[doc(hidden)]
+        pub fn scheduler_mode(mut self, mode: crate::SchedulerMode) -> Self {
+            self.options.scheduler = mode;
+            self
         }
 
         /// Compiles the design using the host's default backend.
@@ -3483,23 +3722,65 @@ mod host {
         fn build_with_backend<B: crate::SimBackend>(
             mut self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
-            compile: impl FnOnce(
-                &crate::ir::LaidOutProgram,
-                &SimulatorOptions,
-            ) -> Result<B, SimulatorError>,
+            compile: impl Fn(&crate::ir::LaidOutProgram, &SimulatorOptions) -> Result<B, SimulatorError>,
         ) -> Result<crate::Simulation<B>, SimulatorError> {
             self.options.emit_triggers = true;
             let (laid_out, mut warnings, options, vcd_path, injected_components) =
                 self.into_laid_out_program(layout_mode)?;
             let backend = compile(&laid_out, &options)
                 .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
-            // Initial kernels must keep their time-zero gates until the timed
-            // scheduler starts them; ordinary Simulator builders release them.
-            let mut sim = Simulator::with_backend_and_program_for_simulation(
+            let shadow = if options.scheduler != crate::SchedulerMode::Differential {
+                None
+            } else if !injected_components.definitions.is_empty() {
+                Some(Err("the design has external components"))
+            } else {
+                let mut shadow_options = options.clone();
+                shadow_options.trace = Default::default();
+                shadow_options.scheduler = crate::SchedulerMode::Reference;
+                let backend = compile(&laid_out, &shadow_options)?;
+                let shadow = Self::start_simulation(
+                    backend,
+                    laid_out.runtime.clone(),
+                    Vec::new(),
+                    &shadow_options,
+                    None,
+                    Default::default(),
+                )?;
+                // Host state outside the memory image, such as open files,
+                // cannot be shared with a shadow.
+                Some(match shadow.simulator.check_host_checkpoint_support() {
+                    Ok(()) => Ok(Box::new(shadow)),
+                    Err(_) => Err("the design keeps host state outside its memory image"),
+                })
+            };
+            let mut simulation = Self::start_simulation(
                 backend,
                 laid_out.into_runtime(),
                 warnings,
-            );
+                &options,
+                vcd_path,
+                injected_components,
+            )?;
+            if let Some(shadow) = shadow {
+                simulation.set_shadow(shadow);
+            }
+            Ok(simulation)
+        }
+
+        /// Initialize a timed simulation of `program` compiled into
+        /// `backend`.
+        fn start_simulation<B: crate::SimBackend>(
+            backend: B,
+            program: crate::ir::RuntimeProgram,
+            warnings: Vec<CompilationWarning>,
+            options: &SimulatorOptions,
+            vcd_path: Option<std::path::PathBuf>,
+            injected_components: crate::InjectedComponents,
+        ) -> Result<crate::Simulation<B>, SimulatorError> {
+            // Initial kernels must keep their time-zero gates until the timed
+            // scheduler starts them; ordinary Simulator builders release them.
+            let mut sim =
+                Simulator::with_backend_and_program_for_simulation(backend, program, warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
@@ -3517,10 +3798,27 @@ mod host {
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
-            sim.modify(|_| {}).map_err(|error| {
-                SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
-            })?;
-            Ok(crate::Simulation::new(sim))
+            // Runtime static declarations precede every comb activation.
+            if !sim
+                .program
+                .runtime_schema
+                .processes
+                .iter()
+                .any(|slots| slots.is_initializer)
+            {
+                sim.modify(|_| {}).map_err(|error| {
+                    SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
+            }
+            let warnings = std::mem::take(&mut sim.warnings);
+            match crate::Simulation::try_new(sim) {
+                Ok(mut simulation) => {
+                    simulation.simulator.warnings = warnings;
+                    simulation.state.set_scheduler_mode(options.scheduler);
+                    Ok(simulation)
+                }
+                Err(error) => Err(SimulatorError::from(error).with_warnings(warnings)),
+            }
         }
     }
 
@@ -3537,6 +3835,52 @@ mod host {
             }
         }
         Ok(())
+    }
+
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn extended_host_requests_survive_native_image_roundtrip() {
+        let source = r#"module Top(output bit ok);
+            int seed, value, parsed, count, real_count;
+            real fractional;
+            initial begin
+                seed = 17;
+                value = $dist_normal(seed, 0, 10);
+                count = $sscanf("42", "%d", parsed);
+                real_count = $sscanf("6.25", "%f", fractional);
+                ok = value == -4 && parsed == 42 && count == 1
+                    && real_count == 1 && $sqrt(fractional) == 2.5 && $realtime == 0.0;
+            end
+        endmodule"#;
+        let (program, warnings, options, _, _) = crate::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("host_image.sv"))],
+            "Top",
+        )
+        .emit_triggers()
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided)
+        .unwrap();
+        let image =
+            crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
+        let image =
+            crate::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+                .unwrap();
+        let runtime = image.runtime_program();
+        // SAFETY: this image was compiled from the trusted source above.
+        let backend = unsafe { crate::backend::native::NativeBackend::from_image(image) }.unwrap();
+        let mut simulator =
+            crate::Simulator::with_backend_and_program_for_simulation(backend, runtime, warnings);
+        simulator.apply_initial_values();
+        simulator.modify(|_| {}).unwrap();
+        let mut sim = crate::Simulation::new(simulator);
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("ok")), num_bigint::BigUint::from(1u8));
     }
 
     #[cfg(all(
@@ -3600,6 +3944,77 @@ mod host {
         assert!(text.contains("Top.u[1]"), "{text}");
         assert!(text.contains("\\state.value"), "{text}");
         assert!(text.contains("\\literal[0]"), "{text}");
+    }
+
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn runtime_declaration_startup_survives_native_image_roundtrip() {
+        let source = r#"module Top;
+            int a = $urandom | 1;
+            logic [31:0] q = 32'h55;
+            always @* q = a;
+            initial a = 0;
+            initial begin
+                #1;
+                if (a !== 0 || q !== 0) $fatal(1, "ordinary initial overwrite was lost");
+                a = 5;
+                #1;
+                if (q !== 5) $fatal(1, "later wildcard event was lost");
+                $finish;
+            end
+        endmodule"#;
+        for four_state in [false, true] {
+            let (program, warnings, options, _, _) = crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("native-declaration.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed)
+            .unwrap();
+            let image =
+                crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
+            let image = crate::NativeProgramImage::from_container_bytes(
+                &image.to_container_bytes().unwrap(),
+            )
+            .unwrap();
+            let runtime = image.runtime_program();
+            // SAFETY: this image was compiled from the trusted source above.
+            let backend =
+                unsafe { crate::backend::native::NativeBackend::from_image(image) }.unwrap();
+            let mut simulator = crate::Simulator::with_backend_and_program_for_simulation(
+                backend, runtime, warnings,
+            );
+            simulator.apply_initial_values();
+            // The constructor completes declarations, primes sensitivity, and
+            // replays folded ordinary writes before exposing the simulation.
+            let mut simulation = crate::Simulation::try_new(simulator).unwrap();
+            let a = simulation.signal("a");
+            let q = simulation.signal("q");
+            // Read storage directly: public get() would settle the pending
+            // ordinary write and wake the wildcard before these assertions.
+            assert_eq!(
+                crate::SimBackend::get(&simulation.simulator.backend, a),
+                0u8.into()
+            );
+            assert_eq!(
+                crate::SimBackend::get(&simulation.simulator.backend, q),
+                0x55u8.into()
+            );
+            for _ in 0..16 {
+                if simulation.is_finished() || simulation.step().unwrap().is_none() {
+                    break;
+                }
+            }
+            assert!(simulation.is_finished());
+            assert_eq!(simulation.get(q), 5u8.into());
+        }
     }
 
     /// Resolve user-specified `(instance_path, var_path)` to `AbsoluteAddr` and run DSE.

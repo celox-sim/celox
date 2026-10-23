@@ -1,5 +1,11 @@
 //! Type and width resolution helpers.
 
+mod real;
+pub(crate) use real::round_to_i128 as round_real_to_i128;
+pub(crate) use real::{
+    evaluate as eval_real_const_expr, has_real_type as const_expr_has_real_type,
+};
+
 use fxhash::FxHashMap as HashMap;
 
 use num_bigint::BigUint;
@@ -15,7 +21,7 @@ pub struct IntegralLiteral {
 }
 
 /// The type of a fixed-size unpacked array of an integral element type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UnpackedArrayType {
     /// The element count of each unpacked dimension, slowest varying first.
     pub dims: Vec<usize>,
@@ -144,6 +150,15 @@ pub(crate) fn eval_const_expr_in_env(
     expr: &ConstExpr,
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
+    // This evaluator serves integral-only bounds and selectors as well as
+    // numeric parameters. A real result is converted only by a caller with
+    // an explicit integer destination; truth/comparison results remain valid.
+    if real::has_real_type(expr) {
+        return None;
+    }
+    if real::needs_real_evaluation(expr) {
+        return real::evaluate(expr, constants).map(real::round_to_i128);
+    }
     match expr {
         ConstExpr::Literal(value) => literal_as_i128(value),
         ConstExpr::Ident(name) => constants.get(name).copied(),
@@ -177,7 +192,11 @@ pub(crate) fn eval_const_expr_in_env(
             if let Some(literal) = integral_literal_from_const_expr(expr) {
                 return integral_literal_as_i128(&literal, *signed);
             }
-            let value = eval_const_expr_in_env(operand, constants)?;
+            let value = if real::has_real_type(operand) {
+                real::round_to_i128(real::evaluate(operand, constants)?)
+            } else {
+                eval_const_expr_in_env(operand, constants)?
+            };
             literal_as_i128(&format_typed_constant_literal(value, *width, *signed))
         }
         ConstExpr::Select { expr, bit } => {
@@ -199,6 +218,7 @@ pub(crate) fn eval_const_expr_in_env(
                 crate::ast::const_functions::eval_call(name, args, constants)
             }
             Callee::System(function) => eval_system_function(*function, args, constants),
+            Callee::String(_) | Callee::Object(_) => None,
         },
         ConstExpr::Unary { op, expr: operand } => {
             if let Some(result) = integral_literal_from_const_expr(expr)
@@ -615,9 +635,21 @@ fn context_binary_operands(
     let (left_type, right_type) = integral_binary_operands(left, right)?;
     let width = left_type.width.max(right_type.width);
     let signed = left_type.signed && right_type.signed;
-    let left = eval_integral_in_context(left, width, signed)?;
-    let right = eval_integral_in_context(right, width, signed)?;
-    Some((left, right, signed))
+    // These values were already evaluated in their own expression contexts.
+    // IEEE 1800-2023 11.8.2 requires another descent only when the enclosing
+    // context changes their size or signedness.
+    let in_context = |expr, literal: IntegralLiteral| {
+        if literal.width == width && literal.signed == signed {
+            Some(literal)
+        } else {
+            eval_integral_in_context(expr, width, signed)
+        }
+    };
+    Some((
+        in_context(left, left_type)?,
+        in_context(right, right_type)?,
+        signed,
+    ))
 }
 
 fn eval_literal_binary(
@@ -884,6 +916,9 @@ pub(crate) fn integral_literal_truth(literal: &IntegralLiteral) -> Option<bool> 
 }
 
 fn eval_const_truth(expr: &ConstExpr, constants: &dyn ConstantEnvironment) -> Option<Option<bool>> {
+    if real::has_real_type(expr) {
+        return real::evaluate(expr, constants).map(|value| Some(value != 0.0));
+    }
     if let Some(literal) = integral_literal_from_const_expr(expr) {
         return Some(integral_literal_truth(&literal));
     }
@@ -987,8 +1022,11 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
                 return Some(literal);
             }
             let operand = self_determined_integral_literal(expr)?;
-            let operand =
-                eval_integral_in_context(expr, (*width).max(operand.width), operand.signed)?;
+            let operand = if *width <= operand.width {
+                operand
+            } else {
+                eval_integral_in_context(expr, *width, operand.signed)?
+            };
             let extension = signed_extension(&operand, operand.signed);
             Some(resize_integral_literal(operand, *width, *signed, extension))
         }
@@ -1341,6 +1379,28 @@ fn eval_system_function(
     args: &[ConstExpr],
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
+    if matches!(
+        function,
+        SystemFunction::Rtoi | SystemFunction::Realtobits | SystemFunction::Shortrealtobits
+    ) {
+        let [arg] = args else {
+            return None;
+        };
+        let value = real::evaluate(arg, constants)?;
+        return Some(match function {
+            SystemFunction::Rtoi => celox_design::eval_float_unary(
+                celox_design::FloatUnaryOp::ToSigned {
+                    width: 32,
+                    round: false,
+                },
+                celox_design::FloatPrecision::F64,
+                value.to_bits(),
+            ) as u32 as i32 as i128,
+            SystemFunction::Realtobits => i128::from(value.to_bits()),
+            SystemFunction::Shortrealtobits => i128::from((value as f32).to_bits()),
+            _ => unreachable!(),
+        });
+    }
     if function == SystemFunction::Countbits {
         let (arg, controls) = args.split_first()?;
         if controls.is_empty() {
@@ -1801,6 +1861,60 @@ fn extension_for_leading_digit(ch: char) -> (bool, bool) {
 #[cfg(test)]
 mod literal_tests {
     use super::*;
+
+    #[test]
+    fn evaluates_deep_constant_casts_without_repeated_context_walks() {
+        for (value, expected) in [("32'h12", "32'h12"), ("32'h1z", "32'h1x")] {
+            let mut expr = ConstExpr::Literal(value.into());
+            // Each layer used to evaluate every inner layer twice. Keep this
+            // deep enough to catch that growth without a wall-clock assertion.
+            for _ in 0..48 {
+                expr = ConstExpr::Resize {
+                    expr: Box::new(ConstExpr::Binary {
+                        left: Box::new(expr),
+                        op: BinaryOp::BitXor,
+                        right: Box::new(ConstExpr::Literal("32'hf".into())),
+                    }),
+                    width: 32,
+                    signed: false,
+                };
+            }
+            assert_eq!(
+                integral_literal_from_const_expr(&expr),
+                parse_integral_literal(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn changed_constant_contexts_recompute_width_and_signedness() {
+        let binary = |left, op, right| ConstExpr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let carry = binary(
+            ConstExpr::Literal("32'hffffffff".into()),
+            BinaryOp::Add,
+            ConstExpr::Literal("32'd1".into()),
+        );
+        let widened = binary(carry, BinaryOp::Add, ConstExpr::Literal("64'd0".into()));
+        assert_eq!(
+            integral_literal_from_const_expr(&widened),
+            parse_integral_literal("64'h100000000")
+        );
+
+        let quotient = binary(
+            ConstExpr::Literal("32'shffffffff".into()),
+            BinaryOp::Div,
+            ConstExpr::Literal("32'sd2".into()),
+        );
+        let unsigned = binary(quotient, BinaryOp::Add, ConstExpr::Literal("32'd0".into()));
+        assert_eq!(
+            integral_literal_from_const_expr(&unsigned),
+            parse_integral_literal("32'h7fffffff")
+        );
+    }
 
     #[test]
     fn evaluates_nested_logical_parameter_chains() {

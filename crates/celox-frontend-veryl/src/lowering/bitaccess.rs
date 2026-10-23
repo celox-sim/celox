@@ -228,7 +228,10 @@ fn collect_dims(module: &Module, var_id: VarId) -> Result<Vec<usize>, ParserErro
     // Enums and aggregates encode their packed width in TypeKind rather
     // than the width Shape. Even a one-bit struct/union needs that dimension:
     // Veryl represents member access as a select into the packed aggregate.
-    if width.is_empty() {
+    if var_type.is_string() {
+        // A string element is a handle into the simulator's heap.
+        dims.push(celox_design::HANDLE_WIDTH);
+    } else if width.is_empty() {
         if let Some(kind_width) = var_type.kind.width()
             && (kind_width > 1 || (kind_width == 1 && var_type.is_struct_union()))
         {

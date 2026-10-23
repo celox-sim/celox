@@ -12,6 +12,7 @@ rust-version.workspace = true
 [dependencies]
 celox-design = { workspace = true }
 celox-frontend-core = { workspace = true }
+celox-heap = { workspace = true }
 celox-sir = { workspace = true }
 celox-slt = { workspace = true }
 celox-sv-analyzer = { workspace = true }

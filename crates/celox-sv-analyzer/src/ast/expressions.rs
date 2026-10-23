@@ -3,6 +3,14 @@
 use super::*;
 
 pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
+    // Binding an enclosing expression can visit an already guarded operand.
+    // Its children were guarded when it was constructed. Wrapping it again
+    // loses the operation's type when the internal unknown arm is lowered.
+    if matches!(&expr, Expr::Mux { then_expr, .. }
+        if matches!(&**then_expr, Expr::Literal(text) if text == crate::DIV_ZERO_UNKNOWN_LITERAL))
+    {
+        return expr;
+    }
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => expr,
         Expr::Select {
@@ -131,7 +139,34 @@ pub(super) fn numeric_system_function(
                 signed: function == SystemFunction::Signed,
             })
         }
-        SystemFunction::Clog2
+        SystemFunction::Ln
+        | SystemFunction::Log10
+        | SystemFunction::Exp
+        | SystemFunction::Sqrt
+        | SystemFunction::Floor
+        | SystemFunction::Ceil
+        | SystemFunction::Sin
+        | SystemFunction::Cos
+        | SystemFunction::Tan
+        | SystemFunction::Asin
+        | SystemFunction::Acos
+        | SystemFunction::Atan
+        | SystemFunction::Sinh
+        | SystemFunction::Cosh
+        | SystemFunction::Tanh
+        | SystemFunction::Asinh
+        | SystemFunction::Acosh
+        | SystemFunction::Atanh
+        | SystemFunction::Pow
+        | SystemFunction::Atan2
+        | SystemFunction::Hypot
+        | SystemFunction::Rtoi
+        | SystemFunction::Itor
+        | SystemFunction::Realtobits
+        | SystemFunction::Bitstoreal
+        | SystemFunction::Shortrealtobits
+        | SystemFunction::Bitstoshortreal
+        | SystemFunction::Clog2
         | SystemFunction::Countones
         | SystemFunction::Onehot
         | SystemFunction::Onehot0

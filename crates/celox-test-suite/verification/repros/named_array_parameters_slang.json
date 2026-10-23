@@ -1,0 +1,62 @@
+{
+  "tool": "pyslang",
+  "version": "12.0.0",
+  "checks": [
+    {
+      "case": "hierarchy::named_array_parameters_follow_caller_specialization",
+      "source_sha256": "c8127334e666ab7dafd74cefc709ac9f1fdfe9cd5795faf618bb2deeabfdb5b9",
+      "errors": [],
+      "bindings": {
+        "first.child.Q": {
+          "type": "byte$[3:2]",
+          "value": "[-8'sd3,-8'sd5]"
+        },
+        "second.child.Q": {
+          "type": "byte$[3:2]",
+          "value": "[8'sd7,8'sd5]"
+        }
+      }
+    },
+    {
+      "case": "hierarchy::named_array_parameters_forward_package_subarrays",
+      "source_sha256": "87f67f23270f1e7615c93554ed10c7b2cbc9fc300d1f480e2d7ee041adc3cb14",
+      "errors": [],
+      "bindings": {
+        "middle.Q": {
+          "type": "logic[7:0]$[0:1][0:1]",
+          "value": "[[8'd18,8'd52],[8'd86,8'd120]]"
+        },
+        "middle.child.Q": {
+          "type": "logic[7:0]$[0:1]",
+          "value": "[8'd86,8'd120]"
+        }
+      }
+    },
+    {
+      "case": "hierarchy::named_array_parameters_forward_whole_values",
+      "source_sha256": "cf38282d49b23193fe91e1305785f18710377c4571b2b8753cb9483bf0416092",
+      "errors": [],
+      "bindings": {
+        "middle.Q": {
+          "type": "logic[7:0]$[0:1]",
+          "value": "[8'd18,8'd165]"
+        },
+        "middle.child.Q": {
+          "type": "logic[7:0]$[0:1]",
+          "value": "[8'd18,8'd165]"
+        }
+      }
+    },
+    {
+      "case": "hierarchy::named_array_parameters_keep_four_state_values",
+      "source_sha256": "c22969827d053f0d8c1382530727806db9e5c0179262e8c0ed8eb14b9c73e4e8",
+      "errors": [],
+      "bindings": {
+        "child.Q": {
+          "type": "logic[3:0]$[0:1]",
+          "value": "[4'b10xz,4'bz01x]"
+        }
+      }
+    }
+  ]
+}

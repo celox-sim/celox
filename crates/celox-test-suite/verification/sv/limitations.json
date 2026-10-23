@@ -1,5 +1,81 @@
 [
   {
+    "id": "sv_static_function_result_lifetime",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 and Icarus 13.0 reset a static function result on calls that do not assign it (0 for bit, X for logic in Icarus). IEEE 1800-2023 13.4.1 declares an implicit result variable, and 6.21/13.4.2 give it static lifetime. The standalone source reproduces the reset without the suite adapters. Celox retains the previous value.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_static_function_lifetimes.json",
+      "verification/repros/sv_static_function_lifetimes.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "procedural::static_function_result_keeps_value_between_calls"
+      ],
+      "icarus": [
+        "procedural::static_function_result_keeps_value_between_calls",
+        "procedural::static_function_four_state_result_retains_unknown_and_known_values"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_static_output_lifetime",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 resets a static output-only function argument when an early return leaves it unassigned. IEEE 1800-2023 6.21/13.4.2 give function arguments static lifetime, and 13.5 copies output values to actuals on return. The standalone source returns 0 after a previous call assigned 37; Celox retains 37.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_static_function_lifetimes.json",
+      "verification/repros/sv_static_function_lifetimes.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "procedural::static_function_output_formals_keep_value"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_explicit_static_function_local",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects an explicit static local in an automatic function: \"Overriding the default variable lifetime is not yet supported.\" IEEE 1800-2023 6.21 permits this declaration. Celox and Verilator execute the unchanged real-valued case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_static_function_lifetimes.json",
+      "verification/repros/sv_static_function_lifetimes.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "procedural::static_function_real_locals_and_results_keep_value"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_output_function_argument",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects the output argument of a void function: \"Function arguments must be input ports.\" IEEE 1800-2023 13.5 permits function output arguments. Celox executes the unchanged case; Verilator's separate lifetime disagreement is recorded independently.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_static_function_lifetimes.json",
+      "verification/repros/sv_static_function_lifetimes.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "procedural::static_function_output_formals_keep_value"
+      ]
+    }
+  },
+  {
     "id": "sv_icarus_genvar_dimensions",
     "category": "simulator_disagreement",
     "phase": "execute",
@@ -134,7 +210,9 @@
         "review_regressions::preserves_use_site_dimensions_in_function_alias_types",
         "system_functions::dimensions_is_independent_of_unknown_values",
         "system_functions::isunbounded_restores_procedural_parameter_type_metadata",
-        "types::packed_parameters_of_signed_named_types_have_signed_elements"
+        "types::packed_parameters_of_signed_named_types_have_signed_elements",
+        "aggregate_regressions::parameter_element_forwarding",
+        "aggregate_regressions::parameter_runtime_element_bit"
       ]
     }
   },
@@ -605,6 +683,7 @@
       "verification/sv/limitations/icarus.json",
       "verification/sv/limitations/interface-array-ports-icarus.json",
       "verification/sv/limitations/implicit-interface-ports-icarus.json",
+      "verification/repros/sv_mixed_interface_connections_icarus.json",
       "LIMITATIONS.md#systemverilog-suite"
     ],
     "cases": {
@@ -619,10 +698,47 @@
         "interfaces::drives_members_through_child_outputs_and_array_generate_regions",
         "interfaces::elaborates_net_members_typedefs_and_localparams",
         "interfaces::infers_directions_of_ports_without_modport",
+        "interfaces::mixes_module_contracts_with_local_interface_connections",
         "interfaces::overrides_body_parameters_and_drives_members_from_imported_functions",
         "interfaces::reads_undriven_interface_members_as_unknown",
         "interfaces::rewrites_nested_references_and_keeps_declaration_functions",
         "interfaces::runs_interface_processes_once_per_array_element"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_multidimensional_interface_connections",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 rejects a four-bit actual connected to a 2x2 interface instance array with scalar ports, requiring only 1 or 2 bits instead of 1 or 4. IEEE 1800-2023 23.3.3.5 distributes packed actuals across all instance dimensions, rightmost dimension first. Celox passes the unchanged shared assertions; Icarus separately rejects multidimensional instance arrays.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_interface_array_connections_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "interfaces::distributes_multidimensional_connections_to_interface_arrays"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_interface_array_connections",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects unpacked actuals distributed across interface instances (Array inputs needs an array index), aborts on interface array ports (assertion prts.size()==1), and rejects multidimensional instance arrays explicitly. IEEE 1800-2023 23.3.3.5 permits these connections. Verilator passes both unpacked cases; Celox passes all three.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_interface_array_connections_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "interfaces::distributes_array_port_connections_to_interface_arrays",
+        "interfaces::distributes_multidimensional_connections_to_interface_arrays",
+        "interfaces::distributes_unpacked_connections_to_interface_arrays"
       ]
     }
   },
@@ -1453,6 +1569,40 @@
     }
   },
   {
+    "id": "sv_icarus_expression_event_sample",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 wakes a process that writes an operand of an event expression and then waits on it (a = 1; @(a ^ b);). IEEE 1800-2023 9.4.2 synchronizes the statement with a value change of the expression; the write happened before the event control executed. Verilator 5.052 agrees with the expected value.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_expression_event_sample_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::event_controls_sample_the_expression_when_they_begin"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_implicit_event_in_process",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects @* in an initial forever (\"Unsupported: Event control with implicit sensitivity (@*) in this context\"), which IEEE 1800-2023 9.4.2.2 permits in any procedural timing control statement. Icarus 13.0 passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_implicit_event_in_process_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::implicit_event_controls_in_processes_wait_on_their_reads"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_dist_uniform_seed_width",
     "category": "simulator_compile_limitation",
     "phase": "compile",
@@ -1483,6 +1633,344 @@
     "cases": {
       "icarus": [
         "random_plusargs::dist_uniform_converts_wide_and_signed_seeds_to_int_formals"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_scope_randomize",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects std::randomize calls with syntax errors before executing the testbench. IEEE 1800-2023 18.12 defines scope randomization of variables without requiring a class. Verilator executes both the arbitrary-width and control-flow regressions successfully.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_scope_randomize_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::scope_randomize_fills_arbitrary_packed_widths",
+        "system_functions::scope_randomize_obeys_control_flow_and_statement_order"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_latch_self_activation",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+    "reason": "Verilator executes the self-reading always_comb latch more than once after seed/en change: the shared case expects q=1 and observes q=3. An adapter-free reproduction expects q=1 and observes q=2 in Verilator, while Icarus observes q=1 and passes unchanged-input and overwritten-read sensitivity checks. IEEE 1800-2023 9.2.2.2.1 excludes the written q expression from implicit sensitivity; its own write must not retrigger this process. Celox and Icarus pass the original shared assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/latch_activation_verilator.json",
+      "verification/repros/latch_activation.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "latch::guarded_activation"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_wildcard_timezero",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+    "reason": "Verilator executes always @* at time zero with declaration-initialized inputs for both retained and completely assigned outputs, changing q before a sensitivity event. IEEE 1800-2023 6.8 initializes static declarations before initial/always processes start, and 9.2.2.2.2 requires always @* to wait for a sensitivity change. Icarus passes the unchanged shared assertions; the adapter-free sources reproduce the Verilator failures.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/wildcard_declaration_startup_verilator.json",
+      "verification/repros/wildcard_declaration_startup.sv",
+      "LIMITATIONS.md#systemverilog-suite",
+      "verification/repros/wildcard_task_sensitivity_verilator.json",
+      "verification/repros/star_complete_declaration_startup.sv"
+    ],
+    "cases": {
+      "verilator": [
+        "latch::classic_star_declaration_startup",
+        "latch::star_complete_declaration_startup"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_event_list_timezero",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+    "reason": "Verilator executes an always procedure whose event control lists variables without edges at time zero, before any listed variable changes: y loses the value its initial procedure wrote, and a $display body prints once more. IEEE 1800-2023 6.8 initializes static declarations before initial/always processes start, and 9.4.2 makes the event control wait for a value change. Icarus passes the unchanged shared assertions; the adapter-free source reproduces the Verilator failure.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/event_list_declaration_startup_verilator.json",
+      "verification/repros/event_list_declaration_startup.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::explicit_list_of_every_read_waits_for_a_change",
+        "timing::list_with_an_extra_signal_wakes_on_it"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_latch_pulse_self_activation",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+    "reason": "Verilator 5.052 reports DIDNOTCONVERGE in the settle region for these self-reading @* / always_latch processes, before the timed pulse assertions. The unchanged adapter-free sources also fail to settle, while Icarus 13.0 completes both. IEEE 1800-2023 9.2.2.3 applies the always_comb written-expression sensitivity exclusion (9.2.2.2.1) to always_latch; an @* procedure waits at its event control and does not wait on its own blocking body writes (9.2.2.1, 9.4.2.2). A self-write must not produce an endless activation loop. This exclusion concerns the observed nonconvergence, not arbitrary ordering between independent active-region processes.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/latch_change_return_verilator.json",
+      "verification/repros/latch_change_return.sv",
+      "verification/repros/latch_hierarchy_change_return.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "latch::same_activation_change_return",
+        "latch::hierarchy_same_activation_change_return"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_task_body_sensitivity",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+    "reason": "Verilator wakes always_comb/always_latch when globals read only inside called task bodies change, failing the assertion that both outputs remain zero without an argument change. IEEE 1800-2023 9.2.2.2.1 adds task arguments but excludes task contents from implicit sensitivity; 9.2.2.3 applies the same rules to always_latch. Icarus passes both the unchanged-global-sensitivity assertion and the later argument-change assertion in the exact adapter-free shared source.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/wildcard_task_sensitivity_verilator.json",
+      "verification/repros/task_call_sensitivity.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "latch::task_call_sensitivity"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_string_methods",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not implement the string methods getc, putc, compare, icompare, toupper, tolower, substr, atoi/atohex/atooct/atobin and itoa/hextoa/octtoa/bintoa (\"Method getc is not a string method\"), and requires a constant replication count for a string (\"A reference to a net or variable is not allowed in a constant expression\"). IEEE 1800-2023 6.16 defines the methods and 11.4.12.2 permits a non-constant count for a string replication. Verilator passes the cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "string::character_access",
+        "string::concatenation_and_replication",
+        "string::methods"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_array_parameter_bounds",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 reverses the elements when an ascending caller array overrides a descending unpacked parameter. IEEE 1800-2023 6.20.2 and 7.6 require assignment by left-to-right element order, independently of the bounds. Slang 12.0 elaborates Q[3:2] as [-3,-5] and [7,5], matching Celox; Verilator returns 0xfbfd instead of 0xfdfb.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/named_array_parameters_verilator.json",
+      "verification/repros/named_array_parameters_slang.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "hierarchy::named_array_parameters_follow_caller_specialization"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_array_parameter_subarray",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects Q[1] in a child parameter argument as nonconstant when Q is a multidimensional array parameter. IEEE 1800-2023 6.20.2 permits aggregate parameter values and constant member expressions. Slang 12.0 accepts the unchanged source and elaborates the child Q to [86,120], matching Celox.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/named_array_parameters_verilator.json",
+      "verification/repros/named_array_parameters_slang.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "hierarchy::named_array_parameters_forward_package_subarrays"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_named_array_parameters",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 explicitly reports that unpacked array parameters are not supported. IEEE 1800-2023 6.20.2 permits these aggregate value parameters. Slang 12.0 accepts all four cases and confirms their parameter values; Verilator passes the whole-array forwarding case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/named_array_parameters_icarus.json",
+      "verification/repros/named_array_parameters_slang.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "hierarchy::named_array_parameters_follow_caller_specialization",
+        "hierarchy::named_array_parameters_forward_package_subarrays",
+        "hierarchy::named_array_parameters_forward_whole_values",
+        "hierarchy::named_array_parameters_keep_four_state_values"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_classes",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not support extern methods (\"sorry: External methods are not yet supported\") or string methods called on a class property (\"Can't find task itoa in class Named\") or comparisons of class handles (\"SORRY: Compare class handles not implemented\"), aborts on a failed assertion in dup_expr.cc while compiling objects_referring_to_objects, and crashes with a segmentation fault while compiling implicit_constructors_and_this. IEEE 1800-2023 8.4, 8.7, 8.8 and 8.24 define these constructs. Verilator passes all but the string-method case, see sv_verilator_class_property_string_methods.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::extern_methods_and_tasks",
+        "class::implicit_constructors_and_this",
+        "class::inherited_properties_and_methods",
+        "class::objects_referring_to_objects",
+        "class::string_methods_on_properties"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_nested_class_members",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 reads an empty string through a nested property path (kept.inner.text) after reporting \"sorry: Nested member path not yet supported for class properties\" for its assignment. IEEE 1800-2023 8.5 permits accessing a property of an object referred to by a property. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::objects_survive_heap_collections"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_class_scope_resolution",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects class scope resolution with a syntax error: reading a static property (Counter::created), calling a static method (Counter::next()) and assigning a static property (Counter::last = \"set\"). IEEE 1800-2023 8.9, 8.10 and 8.23 define these accesses. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::static_properties_and_methods"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_virtual_dispatch",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 binds a virtual function called through a base-class handle to the handle's class instead of the object's: the shared case prints area=0 for every shape, and the adapter-free source prints 1 1 1 3 where IEEE 1800-2023 8.20 requires 2 3 4 4. Verilator and Celox print 2 3 4 4 and pass the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/virtual_dispatch_icarus.json",
+      "verification/repros/virtual_dispatch.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::virtual_methods_dispatch_on_object_class"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_abstract_and_interface_classes",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects pure virtual method declarations and interface classes with syntax errors (\"Invalid class item\", \"Invalid module item\") and fails code generation without a diagnostic (\"Code generation had 2 error(s)\") for a method called on an element of an array of class handles. IEEE 1800-2023 8.21 and 8.26 define pure virtual methods and interface classes, and 7.4 and 8.4 permit arrays of class handles. Verilator passes all three cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::abstract_classes_and_pure_virtual_methods",
+        "class::methods_of_handle_array_elements",
+        "class::classes_implementing_interface_classes"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_class_property_string_methods",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 stops with an internal error (\"AstNode is not of expected type, but instead has type 'MEMBERSEL'\") on a string method called on a class property, n.name.itoa(42), which IEEE 1800-2023 6.16 and 8.5 permit. Icarus rejects the case too, see sv_icarus_classes.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::string_methods_on_properties"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_intermediate_writes",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 wakes a process waiting on a variable only for the value an evaluation leaves: an always_comb or edge-triggered body that rewrites a variable 1 -> 0 -> 1, and nonblocking updates `y <= 0; y <= 1;` from 1, wake no waiter, nor does a pulse that one always_ff writes to some bits of a variable while other processes write its other bits, or a nonblocking update that rises from the final blocking value. IEEE 1800-2023 4.3 and 9.4.2 make every store an update event that triggers the waiter, and 10.4.2 applies nonblocking updates in issue order, each its own update. Standalone probes print the spec counts in Icarus 13.0 and 1 or 0 in Verilator.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_intermediate_writes_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::intermediate_combinational_writes_wake_waiters",
+        "timing::intermediate_edge_process_writes_wake_waiters",
+        "timing::staged_nonblocking_writes_wake_waiters",
+        "timing::intermediate_combinational_writes_keep_other_drivers",
+        "timing::parallel_flip_flop_parts_keep_pulses",
+        "timing::staged_nonblocking_writes_follow_later_blocking_writes"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_port_pulses",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 collapses a child's output port with the parent's net, so a waiter in the parent sees each value the child's always_comb writes inside one evaluation and counts 3 instead of 1. Both are conforming: the port is a continuous assignment (IEEE 1800-2023 23.3.3), evaluated after the child's process yields, and 4.7 leaves that order open. The case asserts the settled count, which Verilator 5.052 and Celox give.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_port_pulses_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::child_port_pulses_reach_waiters_settled"
       ]
     }
   }

@@ -18,10 +18,40 @@ use crate::AnalyzerError;
 /// A system function the frontend supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SystemFunction {
+    Ln,
+    Log10,
+    Exp,
+    Sqrt,
+    Floor,
+    Ceil,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Sinh,
+    Cosh,
+    Tanh,
+    Asinh,
+    Acosh,
+    Atanh,
+    Pow,
+    Atan2,
+    Hypot,
+
+    Rtoi,
+    Itor,
+    Realtobits,
+    Bitstoreal,
+    Shortrealtobits,
+    Bitstoshortreal,
     /// `$time` (20.3.1).
     Time,
     /// `$stime` (20.3.2).
     Stime,
+    /// Real simulation time in the calling scope (20.3.3).
+    Realtime,
     /// `$timeunit` (20.4.2).
     Timeunit,
     /// `$timeprecision` (20.4.2).
@@ -58,16 +88,37 @@ pub enum SystemFunction {
     Random,
     /// `$dist_uniform` (20.14.2).
     DistUniform,
+    DistNormal,
+    DistExponential,
+    DistPoisson,
+    DistChiSquare,
+    DistT,
+    DistErlang,
+
     /// Command-line prefix query (21.6).
     TestPlusargs,
     /// Command-line value query (21.6).
     ValuePlusargs,
     /// `$urandom` (18.13.1).
     Urandom,
+    /// Scope randomization of packed variables, without constraints (18.12).
+    ScopeRandomize,
     /// `$urandom_range` (18.13.2).
     UrandomRange,
     /// `$fopen` (21.3.1).
     Fopen,
+    /// Binary input into packed integers or a static memory (21.3.4.4).
+    Fread,
+    /// File position and byte input functions (21.3.4–8).
+    Ftell,
+    Fseek,
+    Rewind,
+    Fgetc,
+    Ungetc,
+    Feof,
+    /// Integral formatted input (21.3.4.3).
+    Sscanf,
+    Fscanf,
 }
 
 /// An array query function that selects one bound of a dimension (20.7).
@@ -81,16 +132,121 @@ pub enum ArrayQuery {
 }
 
 impl SystemFunction {
-    /// Calls that return through the timed scheduler's host boundary.
-    pub fn is_host_request(self) -> bool {
-        matches!(self, Self::Fopen | Self::TestPlusargs | Self::ValuePlusargs)
+    /// IEEE 1800-2023 20.8.2: every real math call has real formals/result.
+    pub fn real_math_unary(self) -> Option<celox_design::FloatUnaryOp> {
+        Some(match self {
+            Self::Ln => celox_design::FloatUnaryOp::Ln,
+            Self::Log10 => celox_design::FloatUnaryOp::Log10,
+            Self::Exp => celox_design::FloatUnaryOp::Exp,
+            Self::Sqrt => celox_design::FloatUnaryOp::Sqrt,
+            Self::Floor => celox_design::FloatUnaryOp::Floor,
+            Self::Ceil => celox_design::FloatUnaryOp::Ceil,
+            Self::Sin => celox_design::FloatUnaryOp::Sin,
+            Self::Cos => celox_design::FloatUnaryOp::Cos,
+            Self::Tan => celox_design::FloatUnaryOp::Tan,
+            Self::Asin => celox_design::FloatUnaryOp::Asin,
+            Self::Acos => celox_design::FloatUnaryOp::Acos,
+            Self::Atan => celox_design::FloatUnaryOp::Atan,
+            Self::Sinh => celox_design::FloatUnaryOp::Sinh,
+            Self::Cosh => celox_design::FloatUnaryOp::Cosh,
+            Self::Tanh => celox_design::FloatUnaryOp::Tanh,
+            Self::Asinh => celox_design::FloatUnaryOp::Asinh,
+            Self::Acosh => celox_design::FloatUnaryOp::Acosh,
+            Self::Atanh => celox_design::FloatUnaryOp::Atanh,
+            _ => return None,
+        })
+    }
+    pub fn real_math_binary(self) -> Option<celox_design::FloatBinaryOp> {
+        Some(match self {
+            Self::Pow => celox_design::FloatBinaryOp::Pow,
+            Self::Atan2 => celox_design::FloatBinaryOp::Atan2,
+            Self::Hypot => celox_design::FloatBinaryOp::Hypot,
+            _ => return None,
+        })
+    }
+    pub fn is_real_math(self) -> bool {
+        self.real_math_unary().is_some() || self.real_math_binary().is_some()
+    }
+    pub fn eval_real_math(self, args: &[f64]) -> Option<f64> {
+        use celox_design::{FloatPrecision, eval_float_binary, eval_float_unary};
+        let bits = if let Some(op) = self.real_math_unary() {
+            let [arg] = args else {
+                return None;
+            };
+            eval_float_unary(op, FloatPrecision::F64, arg.to_bits())
+        } else {
+            let [left, right] = args else {
+                return None;
+            };
+            eval_float_binary(
+                self.real_math_binary()?,
+                FloatPrecision::F64,
+                left.to_bits(),
+                right.to_bits(),
+            )
+        };
+        Some(f64::from_bits(bits))
     }
 
-    /// The name, with its leading `$`.
+    /// Calls that return through the timed scheduler's host boundary.
+    pub fn is_host_request(self) -> bool {
+        matches!(
+            self,
+            Self::Fopen
+                | Self::Fread
+                | Self::Ftell
+                | Self::Fseek
+                | Self::Rewind
+                | Self::Fgetc
+                | Self::Ungetc
+                | Self::Feof
+                | Self::Sscanf
+                | Self::Fscanf
+                | Self::TestPlusargs
+                | Self::ValuePlusargs
+                | Self::DistNormal
+                | Self::DistExponential
+                | Self::DistPoisson
+                | Self::DistChiSquare
+                | Self::DistT
+                | Self::DistErlang
+        )
+    }
+
+    /// The built-in name (`$` functions or `std::randomize`).
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Ln => "$ln",
+            Self::Log10 => "$log10",
+            Self::Exp => "$exp",
+            Self::Sqrt => "$sqrt",
+            Self::Floor => "$floor",
+            Self::Ceil => "$ceil",
+            Self::Sin => "$sin",
+            Self::Cos => "$cos",
+            Self::Tan => "$tan",
+            Self::Asin => "$asin",
+            Self::Acos => "$acos",
+            Self::Atan => "$atan",
+            Self::Sinh => "$sinh",
+            Self::Cosh => "$cosh",
+            Self::Tanh => "$tanh",
+            Self::Asinh => "$asinh",
+            Self::Acosh => "$acosh",
+            Self::Atanh => "$atanh",
+            Self::Pow => "$pow",
+            Self::Atan2 => "$atan2",
+            Self::Hypot => "$hypot",
+
+            Self::Rtoi => "$rtoi",
+            Self::Itor => "$itor",
+            Self::Realtobits => "$realtobits",
+            Self::Bitstoreal => "$bitstoreal",
+            Self::Shortrealtobits => "$shortrealtobits",
+            Self::Bitstoshortreal => "$bitstoshortreal",
             Self::Time => "$time",
             Self::Stime => "$stime",
+            Self::Realtime => "$realtime",
             Self::Timeunit => "$timeunit",
             Self::Timeprecision => "$timeprecision",
             Self::Signed => "$signed",
@@ -113,11 +269,28 @@ impl SystemFunction {
             Self::Isunknown => "$isunknown",
             Self::Random => "$random",
             Self::DistUniform => "$dist_uniform",
+            Self::DistNormal => "$dist_normal",
+            Self::DistExponential => "$dist_exponential",
+            Self::DistPoisson => "$dist_poisson",
+            Self::DistChiSquare => "$dist_chi_square",
+            Self::DistT => "$dist_t",
+            Self::DistErlang => "$dist_erlang",
+
             Self::TestPlusargs => "$test$plusargs",
             Self::ValuePlusargs => "$value$plusargs",
             Self::Urandom => "$urandom",
+            Self::ScopeRandomize => "std::randomize",
             Self::UrandomRange => "$urandom_range",
             Self::Fopen => "$fopen",
+            Self::Fread => "$fread",
+            Self::Ftell => "$ftell",
+            Self::Fseek => "$fseek",
+            Self::Rewind => "$rewind",
+            Self::Fgetc => "$fgetc",
+            Self::Ungetc => "$ungetc",
+            Self::Feof => "$feof",
+            Self::Sscanf => "$sscanf",
+            Self::Fscanf => "$fscanf",
         }
     }
 
@@ -149,11 +322,27 @@ impl SystemFunction {
             self,
             Self::Random
                 | Self::DistUniform
+                | Self::DistNormal
+                | Self::DistExponential
+                | Self::DistPoisson
+                | Self::DistChiSquare
+                | Self::DistT
+                | Self::DistErlang
                 | Self::TestPlusargs
                 | Self::ValuePlusargs
                 | Self::Urandom
                 | Self::Fopen
+                | Self::Fread
+                | Self::Ftell
+                | Self::Fseek
+                | Self::Rewind
+                | Self::Fgetc
+                | Self::Ungetc
+                | Self::Feof
+                | Self::Sscanf
+                | Self::Fscanf
                 | Self::UrandomRange
+                | Self::ScopeRandomize
         )
     }
 
@@ -161,14 +350,27 @@ impl SystemFunction {
     /// or it returns the simulation time. Such a call is not a constant
     /// expression, and a process evaluates it where it runs.
     pub fn reads_simulation_state(self) -> bool {
-        self.is_effectful() || matches!(self, Self::Time | Self::Stime)
+        self.is_effectful() || matches!(self, Self::Time | Self::Stime | Self::Realtime)
     }
 
     /// Whether the call writes argument `position` back, as `$random(seed)`
     /// updates its seed variable.
     pub fn writes_argument(self, position: usize) -> bool {
-        (matches!(self, Self::Random | Self::DistUniform) && position == 0)
+        self == Self::ScopeRandomize
+            || (matches!(
+                self,
+                Self::Random
+                    | Self::DistUniform
+                    | Self::DistNormal
+                    | Self::DistExponential
+                    | Self::DistPoisson
+                    | Self::DistChiSquare
+                    | Self::DistT
+                    | Self::DistErlang
+            ) && position == 0)
             || (self == Self::ValuePlusargs && position == 1)
+            || (self == Self::Fread && position == 0)
+            || (matches!(self, Self::Sscanf | Self::Fscanf) && position >= 2)
     }
 
     /// The width and signedness of a call that is lowered as an integral
@@ -177,16 +379,58 @@ impl SystemFunction {
     /// literals where it converts them.
     pub fn result_type(self) -> Option<(usize, bool)> {
         match self {
+            Self::Ln
+            | Self::Log10
+            | Self::Exp
+            | Self::Sqrt
+            | Self::Floor
+            | Self::Ceil
+            | Self::Sin
+            | Self::Cos
+            | Self::Tan
+            | Self::Asin
+            | Self::Acos
+            | Self::Atan
+            | Self::Sinh
+            | Self::Cosh
+            | Self::Tanh
+            | Self::Asinh
+            | Self::Acosh
+            | Self::Atanh
+            | Self::Pow
+            | Self::Atan2
+            | Self::Hypot => Some((64, false)),
+
             Self::Timeunit
             | Self::Timeprecision
             | Self::Clog2
             | Self::Countbits
-            | Self::Countones => Some((32, true)),
+            | Self::Countones
+            | Self::ScopeRandomize => Some((32, true)),
             Self::Onehot | Self::Onehot0 | Self::Isunknown | Self::Isunbounded => Some((1, false)),
-            Self::Random | Self::DistUniform | Self::TestPlusargs | Self::ValuePlusargs => {
-                Some((32, true))
-            }
+            Self::Random
+            | Self::DistUniform
+            | Self::DistNormal
+            | Self::DistExponential
+            | Self::DistPoisson
+            | Self::DistChiSquare
+            | Self::DistT
+            | Self::DistErlang
+            | Self::TestPlusargs
+            | Self::ValuePlusargs
+            | Self::Fread
+            | Self::Ftell
+            | Self::Fseek
+            | Self::Rewind
+            | Self::Fgetc
+            | Self::Ungetc
+            | Self::Sscanf
+            | Self::Fscanf
+            | Self::Feof => Some((32, true)),
             Self::Urandom | Self::UrandomRange | Self::Stime | Self::Fopen => Some((32, false)),
+            Self::Rtoi => Some((32, true)),
+            Self::Itor | Self::Bitstoreal | Self::Realtobits | Self::Realtime => Some((64, false)),
+            Self::Shortrealtobits | Self::Bitstoshortreal => Some((32, false)),
             Self::Time => Some((64, false)),
             Self::Signed
             | Self::Unsigned
@@ -233,6 +477,8 @@ pub enum SystemTask {
     Vcd(VcdTask),
     /// File output tasks (21.3).
     Fclose,
+    /// Flush selected output files or all open files (21.3.6).
+    Fflush,
     Fdisplay(Radix),
     Fwrite(Radix),
     /// Memory snapshot output (21.5).
@@ -307,7 +553,12 @@ impl SystemTask {
     pub fn is_host_request(self) -> bool {
         matches!(
             self,
-            Self::Fclose | Self::Fdisplay(_) | Self::Fwrite(_) | Self::Writemem(_) | Self::Vcd(_)
+            Self::Fclose
+                | Self::Fflush
+                | Self::Fdisplay(_)
+                | Self::Fwrite(_)
+                | Self::Writemem(_)
+                | Self::Vcd(_)
         )
     }
 
@@ -332,6 +583,7 @@ impl SystemTask {
             Self::Write(Octal) => "$writeo",
             Self::Write(Hexadecimal) => "$writeh",
             Self::Fclose => "$fclose",
+            Self::Fflush => "$fflush",
             Self::Fdisplay(Decimal) => "$fdisplay",
             Self::Fdisplay(Binary) => "$fdisplayb",
             Self::Fdisplay(Octal) => "$fdisplayo",
@@ -371,12 +623,203 @@ impl fmt::Display for SystemTask {
     }
 }
 
+/// An operation on `string` values (IEEE 1800-2023 6.16, 11.4).
+///
+/// The analyzer rewrites string operators, methods and conversions into
+/// calls of these, so the frontend dispatches on them instead of on the
+/// integral operators that a string handle would otherwise reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StringOp {
+    /// A string holding the bytes of an integral operand, most significant
+    /// first, without NUL bytes: a cast to `string` (6.24.1), or a string
+    /// literal or integral value assigned to a string.
+    FromBits,
+    /// `{a, b, ...}` (11.4.12.2). Integral operands contribute their bytes.
+    Concat,
+    /// `{n{s}}` (11.4.12.2), with the arguments `s` and `n`.
+    Replicate,
+    /// `str.compare(s)` (6.16.6), and the ordering of relational operators.
+    Compare,
+    /// `str.icompare(s)` (6.16.7).
+    ICompare,
+    /// `str.len()` (6.16.1).
+    Len,
+    /// `str.getc(i)` and `str[i]` (6.16.3).
+    Getc,
+    /// `str.putc(i, c)` and `str[i] = c` (6.16.2), as the updated string.
+    Putc,
+    /// `str.substr(i, j)` (6.16.8).
+    Substr,
+    /// `str.toupper()` (6.16.4).
+    ToUpper,
+    /// `str.tolower()` (6.16.5).
+    ToLower,
+    /// `str.atoi()` and its radix variants (6.16.9).
+    Atoi(Radix),
+    /// `str.itoa(i)` and its radix variants (6.16.11-14), as the new string.
+    Itoa(Radix),
+}
+
+impl StringOp {
+    /// Whether the result is a string rather than an integral value.
+    pub fn returns_string(self) -> bool {
+        matches!(
+            self,
+            Self::FromBits
+                | Self::Concat
+                | Self::Replicate
+                | Self::Putc
+                | Self::Substr
+                | Self::ToUpper
+                | Self::ToLower
+                | Self::Itoa(_)
+        )
+    }
+
+    /// The width and signedness of the result; a string is a 32-bit handle.
+    pub fn result_type(self) -> (usize, bool) {
+        match self {
+            Self::Compare | Self::ICompare | Self::Len | Self::Atoi(_) => (32, true),
+            Self::Getc => (8, false),
+            _ => (32, false),
+        }
+    }
+
+    /// The method a call names on a string value, and its number of
+    /// arguments.
+    pub fn method(name: &str) -> Option<(Self, usize)> {
+        Some(match name {
+            "len" => (Self::Len, 0),
+            "getc" => (Self::Getc, 1),
+            "putc" => (Self::Putc, 2),
+            "toupper" => (Self::ToUpper, 0),
+            "tolower" => (Self::ToLower, 0),
+            "compare" => (Self::Compare, 1),
+            "icompare" => (Self::ICompare, 1),
+            "substr" => (Self::Substr, 2),
+            "atoi" => (Self::Atoi(Radix::Decimal), 0),
+            "atohex" => (Self::Atoi(Radix::Hexadecimal), 0),
+            "atooct" => (Self::Atoi(Radix::Octal), 0),
+            "atobin" => (Self::Atoi(Radix::Binary), 0),
+            "itoa" => (Self::Itoa(Radix::Decimal), 1),
+            "hextoa" => (Self::Itoa(Radix::Hexadecimal), 1),
+            "octtoa" => (Self::Itoa(Radix::Octal), 1),
+            "bintoa" => (Self::Itoa(Radix::Binary), 1),
+            _ => return None,
+        })
+    }
+
+    /// Whether the method updates the string it is called on instead of
+    /// returning a value (`putc` and the `itoa` family).
+    pub fn updates_receiver(self) -> bool {
+        matches!(self, Self::Putc | Self::Itoa(_))
+    }
+}
+
+impl fmt::Display for StringOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::FromBits => "string cast",
+            Self::Concat => "string concatenation",
+            Self::Replicate => "string replication",
+            Self::Compare => "compare",
+            Self::ICompare => "icompare",
+            Self::Len => "len",
+            Self::Getc => "getc",
+            Self::Putc => "putc",
+            Self::Substr => "substr",
+            Self::ToUpper => "toupper",
+            Self::ToLower => "tolower",
+            Self::Atoi(Radix::Decimal) => "atoi",
+            Self::Atoi(Radix::Hexadecimal) => "atohex",
+            Self::Atoi(Radix::Octal) => "atooct",
+            Self::Atoi(Radix::Binary) => "atobin",
+            Self::Itoa(Radix::Decimal) => "itoa",
+            Self::Itoa(Radix::Hexadecimal) => "hextoa",
+            Self::Itoa(Radix::Octal) => "octtoa",
+            Self::Itoa(Radix::Binary) => "bintoa",
+        };
+        f.write_str(name)
+    }
+}
+
+/// Where a property lives in an object and how it is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ObjectField {
+    /// Byte offset of the value.
+    pub offset: u32,
+    pub width: u32,
+    pub signed: bool,
+    /// What a handle property refers to.
+    pub handle: Option<HandleProperty>,
+}
+
+/// What a handle property refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HandleProperty {
+    String,
+    Object,
+}
+
+impl ObjectField {
+    /// Bytes of the value.
+    pub fn bytes(self) -> u32 {
+        self.width.div_ceil(8)
+    }
+}
+
+/// An operation on class objects (IEEE 1800-2023 clause 8). The analyzer
+/// lays out each class and writes the layout into the operation, so the
+/// frontend needs no class table.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ObjectOp {
+    /// A new object of `class` with `size` zeroed bytes, whose handle
+    /// properties are at the given offsets.
+    New {
+        class: u32,
+        size: u32,
+        handles: Vec<(u32, HandleProperty)>,
+    },
+    /// Read a property of the object in the argument.
+    Load(ObjectField),
+    /// Write the second argument into a property of the object in the first.
+    Store(ObjectField),
+    /// The run-time class of the object in the argument, 0 for `null`.
+    ClassOf,
+}
+
+impl ObjectOp {
+    /// The width and signedness of the result.
+    pub fn result_type(&self) -> (usize, bool) {
+        match self {
+            Self::Load(field) => (field.width as usize, field.signed),
+            Self::New { .. } | Self::ClassOf | Self::Store(_) => (32, false),
+        }
+    }
+}
+
+impl fmt::Display for ObjectOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::New { .. } => "new",
+            Self::Load(_) => "property read",
+            Self::Store(_) => "property write",
+            Self::ClassOf => "class query",
+        })
+    }
+}
+
 /// The subroutine a call expression calls.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Callee {
     /// A user function or a DPI import, by its resolved name.
     Subroutine(String),
     System(SystemFunction),
+    /// A string operation, see [`StringOp`].
+    String(StringOp),
+    /// A class object operation, see [`ObjectOp`].
+    /// Boxed to keep call expressions small.
+    Object(Box<ObjectOp>),
 }
 
 impl Callee {
@@ -384,14 +827,14 @@ impl Callee {
     pub fn subroutine(&self) -> Option<&str> {
         match self {
             Self::Subroutine(name) => Some(name),
-            Self::System(_) => None,
+            Self::System(_) | Self::String(_) | Self::Object(_) => None,
         }
     }
 
     /// The system function, if this is one.
     pub fn system(&self) -> Option<SystemFunction> {
         match self {
-            Self::Subroutine(_) => None,
+            Self::Subroutine(_) | Self::String(_) | Self::Object(_) => None,
             Self::System(function) => Some(*function),
         }
     }
@@ -399,7 +842,11 @@ impl Callee {
     /// The width and signedness of a call of a system function that is
     /// lowered as an integral operation; see [`SystemFunction::result_type`].
     pub fn result_type(&self) -> Option<(usize, bool)> {
-        self.system()?.result_type()
+        match self {
+            Self::String(op) => Some(op.result_type()),
+            Self::Object(op) => Some(op.result_type()),
+            _ => self.system()?.result_type(),
+        }
     }
 
     /// Rename a user subroutine with `rename`.
@@ -407,6 +854,8 @@ impl Callee {
         match self {
             Self::Subroutine(name) => Self::Subroutine(rename(name)),
             Self::System(function) => Self::System(function),
+            Self::String(op) => Self::String(op),
+            Self::Object(op) => Self::Object(op),
         }
     }
 
@@ -423,6 +872,8 @@ impl fmt::Display for Callee {
         match self {
             Self::Subroutine(name) => f.write_str(name),
             Self::System(function) => f.write_str(function.name()),
+            Self::String(op) => op.fmt(f),
+            Self::Object(op) => op.fmt(f),
         }
     }
 }
@@ -537,19 +988,19 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     // 20.3 Simulation time system functions
     function(SystemFunction::Time, 0, Some(0)),
     function(SystemFunction::Stime, 0, Some(0)),
-    unsupported("$realtime", Function),
+    function(SystemFunction::Realtime, 0, Some(0)),
     // 20.4 Timescale system tasks and system functions
     task(SystemTask::Printtimescale, ProceduralAndInitial, 0, Some(1)),
     unsupported("$timeformat", Task),
     function(SystemFunction::Timeunit, 0, Some(1)),
     function(SystemFunction::Timeprecision, 0, Some(1)),
     // 20.5 Conversion functions
-    unsupported("$rtoi", Function),
-    unsupported("$itor", Function),
-    unsupported("$realtobits", Function),
-    unsupported("$bitstoreal", Function),
-    unsupported("$shortrealtobits", Function),
-    unsupported("$bitstoshortreal", Function),
+    function(SystemFunction::Rtoi, 1, Some(1)),
+    function(SystemFunction::Itor, 1, Some(1)),
+    function(SystemFunction::Realtobits, 1, Some(1)),
+    function(SystemFunction::Bitstoreal, 1, Some(1)),
+    function(SystemFunction::Shortrealtobits, 1, Some(1)),
+    function(SystemFunction::Bitstoshortreal, 1, Some(1)),
     // 11.7 Signed expressions
     function(SystemFunction::Signed, 1, Some(1)),
     function(SystemFunction::Unsigned, 1, Some(1)),
@@ -574,27 +1025,27 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     function(SystemFunction::Size, 1, Some(2)),
     // 20.8 Math functions
     function(SystemFunction::Clog2, 1, Some(1)),
-    unsupported("$ln", Function),
-    unsupported("$log10", Function),
-    unsupported("$exp", Function),
-    unsupported("$sqrt", Function),
-    unsupported("$pow", Function),
-    unsupported("$floor", Function),
-    unsupported("$ceil", Function),
-    unsupported("$sin", Function),
-    unsupported("$cos", Function),
-    unsupported("$tan", Function),
-    unsupported("$asin", Function),
-    unsupported("$acos", Function),
-    unsupported("$atan", Function),
-    unsupported("$atan2", Function),
-    unsupported("$hypot", Function),
-    unsupported("$sinh", Function),
-    unsupported("$cosh", Function),
-    unsupported("$tanh", Function),
-    unsupported("$asinh", Function),
-    unsupported("$acosh", Function),
-    unsupported("$atanh", Function),
+    function(SystemFunction::Ln, 1, Some(1)),
+    function(SystemFunction::Log10, 1, Some(1)),
+    function(SystemFunction::Exp, 1, Some(1)),
+    function(SystemFunction::Sqrt, 1, Some(1)),
+    function(SystemFunction::Pow, 2, Some(2)),
+    function(SystemFunction::Floor, 1, Some(1)),
+    function(SystemFunction::Ceil, 1, Some(1)),
+    function(SystemFunction::Sin, 1, Some(1)),
+    function(SystemFunction::Cos, 1, Some(1)),
+    function(SystemFunction::Tan, 1, Some(1)),
+    function(SystemFunction::Asin, 1, Some(1)),
+    function(SystemFunction::Acos, 1, Some(1)),
+    function(SystemFunction::Atan, 1, Some(1)),
+    function(SystemFunction::Atan2, 2, Some(2)),
+    function(SystemFunction::Hypot, 2, Some(2)),
+    function(SystemFunction::Sinh, 1, Some(1)),
+    function(SystemFunction::Cosh, 1, Some(1)),
+    function(SystemFunction::Tanh, 1, Some(1)),
+    function(SystemFunction::Asinh, 1, Some(1)),
+    function(SystemFunction::Acosh, 1, Some(1)),
+    function(SystemFunction::Atanh, 1, Some(1)),
     // 20.9 Bit vector system functions
     function(SystemFunction::Countbits, 2, None),
     function(SystemFunction::Countones, 1, Some(1)),
@@ -662,12 +1113,12 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     // 20.14 Probabilistic distribution functions
     function(SystemFunction::Random, 0, Some(1)),
     function(SystemFunction::DistUniform, 3, Some(3)),
-    unsupported("$dist_normal", Function),
-    unsupported("$dist_exponential", Function),
-    unsupported("$dist_poisson", Function),
-    unsupported("$dist_chi_square", Function),
-    unsupported("$dist_t", Function),
-    unsupported("$dist_erlang", Function),
+    function(SystemFunction::DistNormal, 3, Some(3)),
+    function(SystemFunction::DistExponential, 2, Some(2)),
+    function(SystemFunction::DistPoisson, 2, Some(2)),
+    function(SystemFunction::DistChiSquare, 2, Some(2)),
+    function(SystemFunction::DistT, 2, Some(2)),
+    function(SystemFunction::DistErlang, 3, Some(3)),
     // 20.15 Stochastic analysis tasks and functions
     unsupported("$q_initialize", Task),
     unsupported("$q_add", Task),
@@ -818,18 +1269,18 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$swriteh", Task),
     unsupported("$sformat", Task),
     unsupported("$sformatf", Function),
-    unsupported("$fgetc", Function),
-    unsupported("$ungetc", Function),
+    function(SystemFunction::Fgetc, 1, Some(1)),
+    function(SystemFunction::Ungetc, 2, Some(2)),
     unsupported("$fgets", Function),
-    unsupported("$fscanf", Function),
-    unsupported("$sscanf", Function),
-    unsupported("$fread", Function),
-    unsupported("$ftell", Function),
-    unsupported("$fseek", Function),
-    unsupported("$rewind", Function),
-    unsupported("$fflush", Task),
+    function(SystemFunction::Fscanf, 2, None),
+    function(SystemFunction::Sscanf, 2, None),
+    function(SystemFunction::Fread, 2, Some(4)),
+    function(SystemFunction::Ftell, 1, Some(1)),
+    function(SystemFunction::Fseek, 3, Some(3)),
+    function(SystemFunction::Rewind, 1, Some(1)),
+    task(SystemTask::Fflush, ProceduralAndInitial, 0, Some(1)),
     unsupported("$ferror", Function),
-    unsupported("$feof", Function),
+    function(SystemFunction::Feof, 1, Some(1)),
     // 21.4 Loading memory array data from a file
     task(
         SystemTask::Readmem(MemoryFormat::Binary),
@@ -1044,10 +1495,13 @@ pub fn check_call(
             detail: format!("expected {}, found {count}", expected_arguments(tf)),
         });
     }
-    // A function takes a value for each argument; only tasks such as
-    // `$display(a,,b)` may leave one out.
+    // Functions require values, except the optional addressing operands of
+    // `$fread` (21.3.4.4). Tasks such as `$display(a,,b)` may omit operands.
     if tf.kind != Task
-        && let Some(position) = args.iter().position(|arg| *arg == Arg::Omitted)
+        && let Some(position) = args.iter().enumerate().position(|(position, arg)| {
+            *arg == Arg::Omitted
+                && !(checked == SystemCall::Function(SystemFunction::Fread) && position >= 2)
+        })
     {
         return Err(AnalyzerError::InvalidSystemTfCall {
             name: name.to_string(),
@@ -1081,6 +1535,24 @@ fn expected_arguments(tf: &SystemTf) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fread_allows_only_optional_address_operands_to_be_omitted() {
+        use Arg::{Given, Omitted};
+        for args in [
+            vec![Given, Given, Omitted, Given],
+            vec![Given, Given, Given, Omitted],
+        ] {
+            assert_eq!(
+                check_function_call("$fread", Some(&args)).unwrap(),
+                SystemFunction::Fread
+            );
+        }
+        for args in [vec![Omitted, Given], vec![Given, Omitted]] {
+            assert!(check_function_call("$fread", Some(&args)).is_err());
+        }
+        assert!(check_function_call("$fseek", Some(&[Given, Omitted, Given])).is_err());
+    }
 
     #[test]
     fn names_are_unique_and_well_formed() {

@@ -497,8 +497,11 @@ fn initial_vcd_tasks_require_timed_simulation_on_every_backend() {
         ];
         for error in errors {
             assert!(
-                format!("{error:?}").contains("source VCD controls require Simulation"),
-                "{error:?}"
+                matches!(
+                    error.kind(),
+                    celox::SimulatorErrorKind::ProcessRequiresSimulation(_)
+                ),
+                "{error}"
             );
         }
     }

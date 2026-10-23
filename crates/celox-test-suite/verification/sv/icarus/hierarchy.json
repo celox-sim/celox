@@ -373,6 +373,102 @@
       },
       "phase": "skip",
       "status": "ignored"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 explicitly reports that unpacked array parameters are not supported. IEEE 1800-2023 6.20.2 permits these aggregate value parameters. Slang 12.0 accepts all four cases and confirms their parameter values; Verilator passes the whole-array forwarding case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/named_array_parameters_icarus.json",
+          "verification/repros/named_array_parameters_slang.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_named_array_parameters",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "phase": "compile",
+        "reason": "Icarus 13.0 explicitly reports that unpacked array parameters are not supported. IEEE 1800-2023 6.20.2 permits these aggregate value parameters. Slang 12.0 accepts all four cases and confirms their parameter values; Verilator passes the whole-array forwarding case.",
+        "upstream": []
+      },
+      "name": "hierarchy::named_array_parameters_follow_caller_specialization",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 explicitly reports that unpacked array parameters are not supported. IEEE 1800-2023 6.20.2 permits these aggregate value parameters. Slang 12.0 accepts all four cases and confirms their parameter values; Verilator passes the whole-array forwarding case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/named_array_parameters_icarus.json",
+          "verification/repros/named_array_parameters_slang.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_named_array_parameters",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "phase": "compile",
+        "reason": "Icarus 13.0 explicitly reports that unpacked array parameters are not supported. IEEE 1800-2023 6.20.2 permits these aggregate value parameters. Slang 12.0 accepts all four cases and confirms their parameter values; Verilator passes the whole-array forwarding case.",
+        "upstream": []
+      },
+      "name": "hierarchy::named_array_parameters_forward_package_subarrays",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 explicitly reports that unpacked array parameters are not supported. IEEE 1800-2023 6.20.2 permits these aggregate value parameters. Slang 12.0 accepts all four cases and confirms their parameter values; Verilator passes the whole-array forwarding case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/named_array_parameters_icarus.json",
+          "verification/repros/named_array_parameters_slang.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_named_array_parameters",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "phase": "compile",
+        "reason": "Icarus 13.0 explicitly reports that unpacked array parameters are not supported. IEEE 1800-2023 6.20.2 permits these aggregate value parameters. Slang 12.0 accepts all four cases and confirms their parameter values; Verilator passes the whole-array forwarding case.",
+        "upstream": []
+      },
+      "name": "hierarchy::named_array_parameters_forward_whole_values",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 explicitly reports that unpacked array parameters are not supported. IEEE 1800-2023 6.20.2 permits these aggregate value parameters. Slang 12.0 accepts all four cases and confirms their parameter values; Verilator passes the whole-array forwarding case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/named_array_parameters_icarus.json",
+          "verification/repros/named_array_parameters_slang.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_named_array_parameters",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "phase": "compile",
+        "reason": "Icarus 13.0 explicitly reports that unpacked array parameters are not supported. IEEE 1800-2023 6.20.2 permits these aggregate value parameters. Slang 12.0 accepts all four cases and confirms their parameter values; Verilator passes the whole-array forwarding case.",
+        "upstream": []
+      },
+      "name": "hierarchy::named_array_parameters_keep_four_state_values",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

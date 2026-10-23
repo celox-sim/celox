@@ -1,0 +1,308 @@
+(group latch (category sequential))
+
+(case explicit_latch
+  (source "latch.sv" #"
+module Top(input logic en, input logic [7:0] d, output logic [7:0] q);
+    always_latch if (en) q = d;
+endmodule
+"#)
+  (top Top)
+  (modify (set en 1) (set d 7))
+  (assert_eq q 7)
+  (modify (set d 13))
+  (assert_eq q 13)
+  (modify (set en 0) (set d 99))
+  (assert_eq q 13)
+  (eval)
+  (eval)
+  (assert_eq q 13)
+  (modify (set en 1))
+  (assert_eq q 99))
+
+(case classic_star_latch
+  (source "latch.sv" #"
+module Top(input logic en, input logic [7:0] d, output logic [7:0] q);
+    always @* if (en) q = d;
+endmodule
+"#)
+  (top Top)
+  (modify (set en 1) (set d 7))
+  (assert_eq q 7)
+  (modify (set d 13))
+  (assert_eq q 13)
+  (modify (set en 0) (set d 99))
+  (assert_eq q 13)
+  (eval)
+  (eval)
+  (assert_eq q 13)
+  (modify (set en 1))
+  (assert_eq q 99))
+
+(case guarded_activation
+  (allow_inferred_latches)
+  (source "guarded_latch.sv" #"
+module Top(input logic seed, en, trigger, unrelated, output logic [7:0] q, output logic ignored);
+    always_comb begin
+        logic overwritten;
+        overwritten = trigger;
+        overwritten = 0;
+        if (seed) q = 0;
+        else if (en) q = q + 1;
+    end
+    assign ignored = unrelated;
+endmodule
+"#)
+  (top Top)
+  (modify (set seed 1) (set en 0) (set trigger 0) (set unrelated 0))
+  (assert_eq q 0)
+  (modify (set seed 0) (set en 1))
+  (assert_eq q 1)
+  (eval)
+  (eval)
+  (assert_eq q 1)
+  (modify (set unrelated 1))
+  (assert_eq q 1)
+  (modify (set unrelated 0))
+  (assert_eq q 1)
+  (modify (set trigger 1))
+  (assert_eq q 2))
+
+(case four_state_latch
+  (four_state)
+  (source "four_state_latch.sv" #"
+module Top(input logic en, input logic [7:0] d, output logic [7:0] q);
+    always_latch if (en) q = d;
+endmodule
+"#)
+  (top Top)
+  (modify (set en 0) (set d 0))
+  (assert_eq q (fourstate 0xff 0xff))
+  (modify (set en 1) (set d 0xa5))
+  (assert_eq q (fourstate 0xa5 0))
+  (modify (set en (fourstate 1 1)) (set d 0x3c))
+  (assert_eq q (fourstate 0xa5 0))
+  (modify (set en (fourstate 0 1)))
+  (assert_eq q (fourstate 0xa5 0)))
+
+(case timed_initial_drives_latch
+  (source "initial_latch.sv" #"
+module Top;
+    logic en;
+    logic [7:0] d, q;
+    always_latch if (en) q = d;
+    initial begin
+        en = 0; d = 0;
+        #1; en = 1; d = 7;
+        #1; if (q !== 7) $fatal(1, "latch open");
+        d = 13;
+        #1; if (q !== 13) $fatal(1, "transparent data");
+        en = 0; d = 99;
+        #1; if (q !== 13) $fatal(1, "latch hold");
+        $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish))
+
+(case classic_star_declaration_startup
+  (source "declaration_startup.sv" #"
+module Top;
+    logic en = 1;
+    logic [7:0] d = 7, q = 0;
+    always @* if (en) q = d;
+    initial begin
+        #1; if (q !== 0) $fatal(1, "declarations do not trigger wildcard process");
+        d = 13;
+        #1; if (q !== 13) $fatal(1, "later data change triggers wildcard process");
+        $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish))
+
+(case classic_star_initial_startup
+  (source "initial_startup.sv" #"
+module Top;
+    logic en;
+    logic [7:0] d, q = 0;
+    always @* if (en) q = d;
+    initial begin en = 1; d = 7; end
+    initial begin
+        #1; if (q !== 7) $fatal(1, "initial writes trigger wildcard process");
+        $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish))
+
+(case classic_star_continuous_startup
+  (source "continuous_startup.sv" #"
+module Top;
+    wire en = 1;
+    wire [7:0] d = 7;
+    logic [7:0] q = 0;
+    always @* if (en) q = d;
+    initial begin
+        #1; if (q !== 7) $fatal(1, "continuous drivers trigger wildcard process");
+        $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish))
+
+(case classic_star_hierarchy_declaration_startup
+  (source "hierarchy_startup.sv" #"
+module Latch(input wire en, input wire [7:0] d, output wire [7:0] q);
+    logic [7:0] held = 0;
+    assign q = held;
+    always @* if (en) held = d;
+endmodule
+module Top;
+    logic en = 1;
+    logic [7:0] d = 7;
+    wire [7:0] q;
+    Latch dut(en, d, q);
+    initial begin
+        #1; d = 13;
+        #1; if (q !== 13) $fatal(1, "aliased data change triggers wildcard process");
+        en = 0; d = 99;
+        #1; if (q !== 13) $fatal(1, "aliased gate closes");
+        $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish))
+
+(case same_activation_change_return
+  (source "change_return.sv" #"
+module Top;
+    logic [7:0] qc = 0, ql = 0, qs = 0;
+    logic a = 0;
+    logic [1:0] bus = 0;
+    always @* if (!a) qc = qc + 1;
+    always_latch if (!a) ql = ql + 1;
+    always_latch if (!bus[0]) qs = qs + 1;
+    initial begin
+        #1;
+        if (qc !== 0 || ql !== 1 || qs !== 1) $fatal(1, "startup");
+        a = 1; a = 0;
+        #1;
+        if (qc !== 1 || ql !== 2 || qs !== 1) $fatal(1, "whole sensitivity pulse");
+        bus[0] = 1; bus[0] = 0;
+        #1;
+        if (qc !== 1 || ql !== 2 || qs !== 2) $fatal(1, "slice sensitivity pulse or own write retrigger");
+        $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish))
+
+(case hierarchy_same_activation_change_return
+  (source "hierarchy_change_return.sv" #"
+module Latch(input wire a, output wire [7:0] q);
+    logic [7:0] held = 0;
+    assign q = held;
+    always @* if (!a) held = held + 1;
+endmodule
+module Top(output wire [7:0] q);
+    logic a = 0;
+    wire b;
+    assign b = a;
+    Latch dut(b, q);
+    initial begin
+        #1; if (q !== 0) $fatal(1, "wildcard startup");
+        a = 1; a = 0;
+        #1; if (q !== 1) $fatal(1, "hierarchical sensitivity pulse");
+        $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish))
+
+(case star_select_sensitivity
+  (source "star_select_sensitivity.sv" #"
+module Top;
+    logic [3:0] bus = 0;
+    logic q_bit = 0, q_part = 0;
+    always @* if (!bus[0]) q_bit = 1;
+    always @* if (bus[1:0] == 0) q_part = 1;
+    initial begin
+        #1; q_bit = 0; q_part = 0;
+        bus[3] = 1;
+        #1;
+        if (q_bit !== 1 || q_part !== 1) $fatal(1, "wildcard reads the selected variable, not only selected bits");
+        $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish))
+
+(case star_complete_declaration_startup
+  (source "star_complete_declaration_startup.sv" #"
+module Top;
+    logic a = 1, q = 0;
+    always @* q = a;
+    initial begin
+        #1; if (q !== 0) $fatal(1, "complete wildcard process waits after declaration initialization");
+        a = 0;
+        #1; a = 1;
+        #1; if (q !== 1) $fatal(1, "complete wildcard process observes later source changes");
+        $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish))
+
+(case task_call_sensitivity
+  (source "task_call_sensitivity.sv" #"
+module Top;
+    logic trigger = 0, en = 0, g = 0;
+    logic q_comb = 0, q_latch = 0;
+    task copy_comb(input logic unused);
+        q_comb = g;
+    endtask
+    task copy_latch(input logic unused);
+        if (en) q_latch = g;
+    endtask
+    always_comb copy_comb(trigger);
+    always_latch copy_latch(trigger);
+    initial begin
+        #1; en = 1; g = 1;
+        #1;
+        if (q_comb !== 0 || q_latch !== 0) $fatal(1, "task body globals do not add sensitivity");
+        trigger = 1;
+        #1;
+        if (q_comb !== 1 || q_latch !== 1) $fatal(1, "task argument changes do add sensitivity");
+        $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish))
+
+(case star_unpacked_select_sensitivity
+  (source "star_unpacked_select_sensitivity.sv" #"
+module Top;
+    logic [7:0] mem [0:1][0:1];
+    logic q = 0;
+    always @* if (mem[0][0] == 0) q = 1;
+    initial begin
+        mem[0][0] = 0; mem[0][1] = 0;
+        mem[1][0] = 0; mem[1][1] = 0;
+        #1; q = 0; mem[1][1] = 1;
+        #1; if (q !== 1) $fatal(1, "wildcard array read includes changes to other elements");
+        $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish))

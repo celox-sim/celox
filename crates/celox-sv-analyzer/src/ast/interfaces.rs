@@ -89,7 +89,7 @@ pub fn interface_prototypes_with_options(
                 .zip(sources)
                 .map(|(file, (_, path))| (&file.syntax_tree, *path))
                 .collect::<Vec<_>>(),
-            options.allow_mixed_timescales,
+            options,
         )?)
     };
     let trees = files
@@ -97,9 +97,8 @@ pub fn interface_prototypes_with_options(
         .zip(sources)
         .map(|(file, (_, path))| (&file.syntax_tree, *path))
         .collect::<Vec<_>>();
-    let packages =
-        packages::Packages::analyze_with_options(&trees, None, options.allow_mixed_timescales)
-            .map_err(|error| error.with_warnings(source_warnings))?;
+    let packages = packages::Packages::analyze_with_options(&trees, None, options)
+        .map_err(|error| error.with_warnings(source_warnings))?;
     let package_warnings = packages.warnings().to_vec();
     let mut used_names = design
         .modules
@@ -3118,7 +3117,63 @@ pub fn plan_interfaces_with_member_paths(
         .iter()
         .map(|(code, path)| File::new(code, path))
         .collect::<Converted<Vec<_>>>()?;
-    let design = Design::collect(&files)?;
+    // Local interface instances are bound from their original declarations by
+    // interface_binding. A structural plan is needed only for module interface
+    // ports; collecting full contracts here rejects ordinary interface ports.
+    let mut interface_names = HashSet::default();
+    let mut contract_names = HashSet::default();
+    let mut module_names = HashSet::default();
+    for file in &files {
+        let native = file.syntax_tree.declarations();
+        for (_, unit) in roots(&file.syntax_tree)? {
+            let name = native_name(&unit.name);
+            match unit.kind {
+                native::UnitKind::Interface => {
+                    if unit.ports.is_empty() {
+                        contract_names.insert(name.clone());
+                    }
+                    if !interface_names.insert(name.clone()) || module_names.contains(&name) {
+                        return Err(AnalyzerError::DuplicateModule { name });
+                    }
+                }
+                native::UnitKind::Module => {
+                    if interface_names.contains(&name) {
+                        return Err(AnalyzerError::DuplicateModule { name });
+                    }
+                    module_names.insert(name);
+                    for port in &unit.ports {
+                        if port.direction.is_some() || port.net_type.is_some() || port.variable {
+                            continue;
+                        }
+                        if let Some(id) = port.data_type {
+                            match &native.data_type(id).kind {
+                                native::DataTypeKind::Interface {
+                                    name: Some(name), ..
+                                } => {
+                                    contract_names.insert(native_name(name));
+                                }
+                                native::DataTypeKind::Named(path) if path.len() == 1 => {
+                                    contract_names.insert(native_name(&path[0].name));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for (_, _, supplied) in bindings {
+        contract_names.extend(supplied.iter().map(|(_, interface)| interface.clone()));
+    }
+    let design = if !module_names.is_empty() {
+        // Ordinary module contracts still need planning when local interfaces
+        // have ports. Collect those contracts independently of native locals.
+        Design::collect_selected(&files, Some(&contract_names))?
+    } else {
+        Design::collect(&files)?
+    };
     let mut result = NativeInterfacePlan::default();
     let mut reflected_paths = HashMap::default();
     if design.interfaces.is_empty() {

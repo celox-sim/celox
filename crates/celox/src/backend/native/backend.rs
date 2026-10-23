@@ -399,7 +399,9 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) dead_store_policy: celox_design::DeadStorePolicy,
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) live_signals: std::collections::BTreeSet<AbsoluteAddr>,
+    pub(crate) declaration_startup: Option<celox_design::DeclarationStartup<AbsoluteAddr>>,
     pub(crate) processes: Vec<celox_design::ProcessSlots<AbsoluteAddr>>,
+    pub(crate) process_origins: Vec<celox_design::ProcessOrigin>,
     pub(crate) watches: Vec<celox_design::EventWatch<AbsoluteAddr>>,
     pub(crate) wait_sites: Vec<celox_design::WaitSite<AbsoluteAddr>>,
     pub(crate) nba_sites: Vec<celox_design::NbaSite<AbsoluteAddr>>,
@@ -509,9 +511,11 @@ impl NativeProgramImage {
                 // The image retains the final classification in comb_writes;
                 // optimization-time classification roots are no longer used.
                 persistent_comb_state: Default::default(),
+                declaration_startup: self.runtime_schema.declaration_startup.clone(),
                 dead_store_policy: self.runtime_schema.dead_store_policy,
                 live_signals: self.runtime_schema.live_signals.iter().copied().collect(),
                 processes: self.runtime_schema.processes.clone(),
+                process_origins: self.runtime_schema.process_origins.clone(),
                 watches: self.runtime_schema.watches.clone(),
                 wait_sites: self.runtime_schema.wait_sites.clone(),
                 nba_sites: self.runtime_schema.nba_sites.clone(),
@@ -2409,10 +2413,12 @@ fn compile_program(
                     .copied()
                     .collect(),
                 processes: sir.runtime().runtime_schema.processes.clone(),
+                process_origins: sir.runtime().runtime_schema.process_origins.clone(),
                 watches: sir.runtime().runtime_schema.watches.clone(),
                 wait_sites: sir.runtime().runtime_schema.wait_sites.clone(),
                 nba_sites: sir.runtime().runtime_schema.nba_sites.clone(),
                 host_request_sites: sir.runtime().runtime_schema.host_request_sites.clone(),
+                declaration_startup: sir.runtime().runtime_schema.declaration_startup.clone(),
                 active_commits: sir.runtime().runtime_schema.active_commits.clone(),
                 time_slots: sir.runtime().runtime_schema.time_slots.clone(),
             },
@@ -2441,6 +2447,8 @@ pub struct NativeBackend {
     memory: MemoryImage,
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
     comb_capture_enabled: Vec<u8>,
+    /// Boxed so the address in the state header survives moves.
+    heap: Box<celox_heap::Heap>,
     execution_timing: Option<NativeExecutionTiming>,
     /// Worker threads for lane-partitioned kernels, started on first use.
     lane_pool: Option<celox_runtime::parallel::LanePool>,
@@ -2665,6 +2673,7 @@ impl NativeBackend {
             memory,
             runtime_event_buffer,
             comb_capture_enabled,
+            heap: Default::default(),
             execution_timing: None,
             lane_pool: None,
             lane_selectors: Default::default(),
@@ -2686,12 +2695,14 @@ impl NativeBackend {
         memory: MemoryImage,
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
         comb_capture_enabled: Vec<u8>,
+        heap: Box<celox_heap::Heap>,
     ) -> Self {
         let mut backend = Self {
             compiled: shared,
             memory,
             runtime_event_buffer,
             comb_capture_enabled,
+            heap,
             execution_timing: None,
             lane_pool: None,
             lane_selectors: Default::default(),
@@ -2699,6 +2710,7 @@ impl NativeBackend {
         // The state names the previous tier's extern function table; point it
         // at the one this code owns.
         backend.install_extern_functions();
+        backend.install_heap();
         backend
     }
 
@@ -2822,6 +2834,14 @@ impl NativeBackend {
             self.comb_capture_enabled.as_ptr() as u64,
         );
         self.install_extern_functions();
+        self.install_heap();
+    }
+
+    fn install_heap(&mut self) {
+        self.memory.write_header_word(
+            celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET,
+            std::ptr::from_mut(&mut *self.heap) as u64,
+        );
     }
 
     fn install_extern_functions(&mut self) {
@@ -2900,7 +2920,7 @@ impl NativeBackend {
         let element_bytes = get_byte_size(array.element_width);
         let element_mask = (BigUint::from(1u8) << array.element_width) - BigUint::from(1u8);
         let bytes = self.mem_bytes_mut();
-        bytes[plane_offset..plane_offset + array.plane_size].fill(0);
+        bytes[plane_offset..plane_offset + array.element_count * array.element_stride].fill(0);
         for element in 0..array.element_count {
             let element_value = (value >> (element * array.element_width)) & &element_mask;
             let value_bytes = element_value.to_bytes_le();
@@ -3387,6 +3407,14 @@ impl super::super::SimBackend for NativeBackend {
 
     fn layout(&self) -> &MemoryLayout {
         &self.compiled.layout
+    }
+
+    fn heap(&self) -> &celox_heap::Heap {
+        &self.heap
+    }
+
+    fn heap_mut(&mut self) -> &mut celox_heap::Heap {
+        &mut self.heap
     }
 
     fn id_to_addr_slice(&self) -> &[AbsoluteAddr] {

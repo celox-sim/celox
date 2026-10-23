@@ -573,8 +573,8 @@ pub fn parse(
 pub fn parse_sv(
     sources: &[(&str, &std::path::Path)],
     top: &str,
-    parameter_overrides: &[(String, u64)],
-    _config: &BuildConfig,
+    parameter_overrides: &[(String, celox_frontend_sv::analyzer_ir::ConstExpr)],
+    config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
         (Vec<(String, usize)>, Vec<String>),
@@ -590,6 +590,7 @@ pub fn parse_sv(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
@@ -599,24 +600,26 @@ pub fn parse_sv(
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
     let frontend_trace_options = trace_opts.frontend(diagnostics);
     let mut frontend_trace = celox_frontend_core::FrontendTrace::default();
-    let scheduled = celox_frontend_sv::schedule_sources_with_force_signals(
-        sources,
-        top,
-        parameter_overrides,
-        ignored_loops,
-        true_loops,
-        four_state,
-        &crate::optimizer::parallel_schedule_options(optimize_options),
-        &frontend_trace_options,
-        trace.is_some().then_some(&mut frontend_trace),
-        warnings,
-        diagnostic_policy.sv_options(),
-        force_signals,
-    )
-    .map_err(|error| match error {
-        celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
-        celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
-    })?;
+    let scheduled =
+        celox_frontend_sv::schedule_sources_with_parameter_expressions_and_latch_policy(
+            sources,
+            top,
+            parameter_overrides,
+            ignored_loops,
+            true_loops,
+            four_state,
+            &crate::optimizer::parallel_schedule_options(optimize_options),
+            &frontend_trace_options,
+            trace.is_some().then_some(&mut frontend_trace),
+            config.allow_inferred_latches,
+            warnings,
+            diagnostic_policy.sv_options(sv_timescale),
+            force_signals,
+        )
+        .map_err(|error| match error {
+            celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
+            celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
+        })?;
     if let Some(trace) = trace.as_deref_mut() {
         trace.absorb_frontend(frontend_trace);
     }
@@ -685,6 +688,7 @@ pub fn parse_mixed(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
@@ -824,7 +828,7 @@ pub fn parse_mixed(
                 Ok(signature)
             };
         let external =
-            celox_frontend_sv::prepare_external_hierarchy_with_foreign_resolver_with_options(
+            celox_frontend_sv::prepare_external_hierarchy_with_foreign_resolver_with_options_and_latch_policy(
                 &borrowed_sources,
                 &external_roots,
                 &foreign,
@@ -833,8 +837,9 @@ pub fn parse_mixed(
                 Some(&mut resolver),
                 sv_top_parameters,
                 &requests,
+                config.allow_inferred_latches,
                 &mut warnings,
-                diagnostic_policy.sv_options(),
+                diagnostic_policy.sv_options(sv_timescale),
             );
         let external = match external {
             Ok(external) => external,

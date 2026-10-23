@@ -60,33 +60,39 @@ fn veryl_assert_unknown_conditions_are_eager_on_interpreter() {
     }
 }
 
-const URANDOM_SKIPPED_INITIAL_SOURCE: &str = r#"
+const URANDOM_COMB_SOURCE: &str = r#"
     module Top(input int seed, output int unsigned value, reference);
-      initial $display("skipped initial");
       always_comb value = $urandom(seed);
       always_comb reference = $urandom(17);
     endmodule
 "#;
 
 #[test]
-fn urandom_comb_skipped_initials_work_on_interpreter_and_tiered() {
-    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+fn urandom_comb_runs_next_to_an_initial_process_on_interpreter_and_tiered() {
+    const SOURCE: &str = r#"
+        module Top(input int seed, output int unsigned value, reference);
+          initial $display("initial");
+          always_comb value = $urandom(seed);
+          always_comb reference = $urandom(17);
+        endmodule
+    "#;
+    fn check<B: celox::SimBackend>(mut sim: celox::Simulation<B>) {
+        sim.run_until(0).unwrap();
         let value = sim.signal("value");
         assert_ne!(sim.get(value), 0u8.into());
         let seed = sim.signal("seed");
         sim.modify(|io| io.set(seed, 17u8)).unwrap();
         assert_eq!(sim.get(value), sim.get(sim.signal("reference")));
-        assert!(sim.drain_runtime_events().is_empty());
+        assert_eq!(
+            sim.drain_runtime_events(),
+            vec![celox::RuntimeEvent::Display {
+                message: b"initial".to_vec()
+            }]
+        );
     }
     let builder = || {
-        Simulator::from_sv_sources(
-            vec![(
-                URANDOM_SKIPPED_INITIAL_SOURCE,
-                Path::new("random_skipped_initial.sv"),
-            )],
-            "Top",
-        )
-        .four_state(true)
+        celox::Simulation::from_sv_sources(vec![(SOURCE, Path::new("random_initial.sv"))], "Top")
+            .four_state(true)
     };
     check(builder().build_interpreter().unwrap());
     check(builder().build_tiered().unwrap());
@@ -142,9 +148,9 @@ sv_backends! {
         assert_eq!(sim.get(b), second);
     }
 
-    fn urandom_comb_runs_when_untimed_initials_are_skipped(sim) {
-        @setup { let source = URANDOM_SKIPPED_INITIAL_SOURCE; }
-        @build Simulator::from_sv_sources(vec![(source, Path::new("random_skipped_initial.sv"))], "Top").four_state(true);
+    fn urandom_comb_runs_untimed(sim) {
+        @setup { let source = URANDOM_COMB_SOURCE; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("random_comb.sv"))], "Top").four_state(true);
         let value = sim.signal("value");
         let seed = sim.signal("seed");
         assert_ne!(sim.get(value), 0u8.into());
@@ -158,6 +164,38 @@ sv_backends! {
         sim.eval_comb().unwrap();
         assert_eq!(sim.get(value), first);
         assert!(sim.drain_runtime_events().is_empty());
+    }
+
+    fn scope_randomize_fills_arbitrary_packed_widths(sim) {
+        @case "system_functions::scope_randomize_fills_arbitrary_packed_widths";
+    }
+
+    fn scope_randomize_obeys_control_flow_and_statement_order(sim) {
+        @case "system_functions::scope_randomize_obeys_control_flow_and_statement_order";
+    }
+
+    fn scope_randomize_preserves_four_state_storage_and_checkpoint(sim) {
+        @setup { let source = r#"
+            module Top(input bit clk, output logic signed [2048:0] value);
+                always @(posedge clk) void'(std::randomize(value));
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("randomize_checkpoint.sv"))], "Top").four_state(true);
+        let clk = sim.event("clk");
+        let value = sim.signal("value");
+        let saved = sim.checkpoint().unwrap();
+        sim.tick(clk).unwrap();
+        let (first, mask) = sim.get_four_state(value);
+        assert_eq!(mask, 0u8.into());
+        assert!(first.bits() > 2000, "upper words must receive random bits");
+        sim.tick(clk).unwrap();
+        let second = sim.get(value);
+        assert_ne!(first, second);
+        sim.restore(&saved).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(value), first);
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(value), second);
     }
 
     fn urandom_extends_signed_seed_values(sim) {
@@ -439,6 +477,15 @@ sv_backends! {
     }
     fn dist_uniform_bounds_seed_and_replay(sim) {
         @case "random_plusargs::dist_uniform_bounds_seed_and_replay";
+    }
+}
+
+sv_backends! {
+    fn distribution_annex_n_reference_values(sim) {
+        @case "distributions::annex_n_reference_values";
+    }
+    fn distribution_replay_and_normal_parameters(sim) {
+        @case "distributions::replay_and_normal_parameters";
     }
     fn dist_uniform_reference_sequence(sim) {
         @case "random_plusargs::dist_uniform_reference_sequence";
@@ -1786,13 +1833,13 @@ fn rejects_unknown_system_functions_in_every_context() {
 fn reports_where_a_known_system_function_is_not_supported() {
     let cases = [
         (
-            "system function `$realtime` in an expression",
-            "module Top(output logic [63:0] y); assign y = $realtime; endmodule",
+            "system function `$fgets` in an expression",
+            "module Top(output logic [63:0] y); assign y = $fgets(y, 0); endmodule",
         ),
         (
-            "system function `$sqrt` in an expression",
+            "system function `$q_full` in an expression",
             "module Top(output logic y);
-                localparam int P = $sqrt(4);
+                localparam int P = $q_full(0);
                 assign y = 1'b0;
             endmodule",
         ),
@@ -3048,5 +3095,42 @@ sv_backends! {
         assert_eq!(warnings.len(), 1, "{:?}", sim.warnings());
         assert_eq!(warnings[0].0, "specialized.sv");
         assert_eq!(warnings[0].1, source_line(&source, "$readmemh"));
+    }
+}
+
+#[test]
+fn scope_randomize_survives_all_optimization_levels() {
+    let source = r#"
+        module Top(input bit clk, output logic [980:0] value);
+            always @(posedge clk) void'(std::randomize(value));
+        endmodule
+    "#;
+    for level in [
+        celox::OptLevel::O0,
+        celox::OptLevel::O1,
+        celox::OptLevel::O2,
+    ] {
+        for four_state in [false, true] {
+            let mut sim = Simulator::from_sv_sources(
+                vec![(source, Path::new("randomize_optimization.sv"))],
+                "Top",
+            )
+            .opt_level(level)
+            .four_state(four_state)
+            .build_native()
+            .unwrap();
+            let value = sim.signal("value");
+            let clk = sim.event("clk");
+            let checkpoint = sim.checkpoint().unwrap();
+            sim.tick(clk).unwrap();
+            let first = sim.get(value);
+            assert!(first.bits() > 64, "{level:?} four_state={four_state}");
+            if four_state {
+                assert_eq!(sim.get_four_state(value).1, 0u8.into());
+            }
+            sim.restore(&checkpoint).unwrap();
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get(value), first, "{level:?} four_state={four_state}");
+        }
     }
 }

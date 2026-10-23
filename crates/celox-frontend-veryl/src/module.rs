@@ -49,6 +49,8 @@ pub struct ModuleParser<'a> {
     slicer: BitSlicer,
     store: SymbolicStore<VarId>,
     comb_blocks: Vec<LogicPath<VarId>>,
+    comb_process_ranges: Vec<crate::artifact::CombProcess>,
+    allow_inferred_latches: bool,
     comb_observers: Vec<CombObserver<VarId>>,
     comb_runtime_event_sites: Vec<RuntimeEventSite>,
     comb_boundaries: HashMap<VarId, BTreeSet<usize>>,
@@ -603,6 +605,7 @@ fn build_parent_effect_glue(
                 paths.push((
                     vec![*id],
                     LogicPath {
+                        transparent_copy: false,
                         target: LogicPathTarget::Var(target),
                         expr: mapped,
                         sources,
@@ -905,6 +908,8 @@ impl<'a> ModuleParser<'a> {
             slicer: BitSlicer::new(module)?,
             store: SymbolicStore::default(),
             comb_blocks: Vec::new(),
+            comb_process_ranges: Vec::new(),
+            allow_inferred_latches: config.allow_inferred_latches,
             comb_observers: Vec::new(),
             comb_runtime_event_sites: Vec::new(),
             comb_boundaries: HashMap::default(),
@@ -946,6 +951,47 @@ impl<'a> ModuleParser<'a> {
         let arena_end = self.arena.len();
         remap_for_effect_site_ids(&mut self.arena, arena_start..arena_end, site_offset)?;
         self.store.extend(store);
+        // Veryl's IR uses CombDeclaration for both continuous declarations
+        // and procedural blocks. Continuous assignments retain their `assign`
+        // (or `connect`/`let`) declaration token; procedural assignment tokens
+        // start at their destination. Only procedural blocks may infer state.
+        let continuous = decl.statements.iter().all(|statement| {
+            matches!(statement, Statement::Assign(assign) if matches!(
+                veryl_parser::resource_table::get_str_value(assign.token.beg.text).as_deref(),
+                Some("assign" | "connect" | "let")
+            ))
+        });
+        if self.allow_inferred_latches && !continuous {
+            self.comb_process_ranges.push(crate::artifact::CombProcess {
+                paths: self.comb_blocks.len()..self.comb_blocks.len() + paths.len(),
+                reads: crate::logic_tree::sensitivity::implicit_reads(
+                    self.module,
+                    &decl.statements,
+                )?,
+                token: decl
+                    .statements
+                    .iter()
+                    .filter_map(|statement| match statement {
+                        Statement::Assign(x) => Some(x.token),
+                        Statement::If(x) => Some(x.token),
+                        Statement::IfReset(x) => Some(x.token),
+                        Statement::Case(x) => Some(x.token),
+                        Statement::For(x) => Some(x.token),
+                        _ => None,
+                    })
+                    .reduce(|mut range, token| {
+                        if token.beg.pos < range.beg.pos {
+                            range.beg = token.beg;
+                        }
+                        if token.end.pos + token.end.length > range.end.pos + range.end.length {
+                            range.end = token.end;
+                        }
+                        range
+                    })
+                    .unwrap_or(self.module.token),
+                proven_combinational: crate::logic_tree::proves_combinational(&paths, &self.arena),
+            });
+        }
         self.comb_blocks.extend(paths);
         self.comb_observers.extend(observers);
         self.comb_runtime_event_sites.extend(sites);
@@ -1070,7 +1116,14 @@ impl<'a> ModuleParser<'a> {
             let ((expr_node, expr_sources), _bounds) = eval_assignment_expression_effectful(
                 self.module,
                 &mut connection_store,
-                expression,
+                &crate::float::converted(
+                    expression,
+                    &child_module
+                        .variables
+                        .get(&child_port_id)
+                        .expect("resolved child input")
+                        .r#type,
+                ),
                 &mut self.arena,
                 width,
             )?;
@@ -1139,6 +1192,7 @@ impl<'a> ModuleParser<'a> {
             )?;
 
             let path = LogicPath {
+                transparent_copy: false,
                 target: LogicPathTarget::Var(VarAtomBase::new(
                     GlueAddr::Child(child_port_id),
                     0,
@@ -1262,7 +1316,16 @@ impl<'a> ModuleParser<'a> {
                 let geometry = select_geometry(self.module, dst.id, &dst.index, &dst.select)?;
                 let prefix_access =
                     eval_var_select_with_geometry(&dst.index, &dst.select, &geometry)?;
-                let part_width = geometry.selected_width;
+                let conversion = if output.dst.len() == 1 && child_elements == 1 {
+                    crate::float::conversion(&child_port.r#type, &dst.comptime.r#type)
+                } else {
+                    None
+                };
+                let part_width = if conversion.is_some() {
+                    width
+                } else {
+                    geometry.selected_width
+                };
 
                 // Extract this part from rhs_node
                 let slice_end = current_offset.checked_add(part_width).ok_or_else(|| {
@@ -1303,6 +1366,16 @@ impl<'a> ModuleParser<'a> {
                         access: slice_access,
                     })?
                 };
+                let rhs_part = if let Some(op) = conversion {
+                    glue_arena.alloc(SLTNode::Unary(op, rhs_part))?
+                } else {
+                    rhs_part
+                };
+                let preview_rhs_part = if let Some(op) = conversion {
+                    destination_arena.alloc(SLTNode::Unary(op, preview_rhs_part))?
+                } else {
+                    preview_rhs_part
+                };
                 let preview_rhs_sources: HashSet<_> = std::iter::once(VarAtomBase::new(
                     child_port_id,
                     slice_access.lsb,
@@ -1324,6 +1397,7 @@ impl<'a> ModuleParser<'a> {
                 );
 
                 let path = LogicPath {
+                    transparent_copy: false,
                     target: LogicPathTarget::Var(VarAtomBase::new(
                         GlueAddr::Parent(dst.id),
                         access.lsb,
@@ -1643,6 +1717,7 @@ impl<'a> ModuleParser<'a> {
                     input_ports.push((
                         vec![parent_dst.id],
                         LogicPath {
+                            transparent_copy: false,
                             target: LogicPathTarget::Var(VarAtomBase::new(
                                 GlueAddr::Child(projected_child_id),
                                 0,
@@ -1708,6 +1783,7 @@ impl<'a> ModuleParser<'a> {
                     output_ports.push((
                         vec![parent_dst.id],
                         LogicPath {
+                            transparent_copy: false,
                             target: LogicPathTarget::Var(VarAtomBase::new(
                                 GlueAddr::Parent(parent_dst.id),
                                 parent_access.lsb,
@@ -2068,6 +2144,7 @@ impl<'a> ModuleParser<'a> {
             eval_apply_ff_blocks,
             parallel_ff_parts,
             comb_blocks: self.comb_blocks,
+            comb_process_ranges: self.comb_process_ranges,
             comb_observers: self.comb_observers,
             runtime_errors: self.ff_parser.runtime_errors().clone(),
             runtime_event_sites,

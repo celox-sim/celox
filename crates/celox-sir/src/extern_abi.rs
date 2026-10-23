@@ -8,6 +8,18 @@
 
 use crate::RegisterType;
 
+/// The `func` of an extern call to the heap helper.
+///
+/// Its four arguments are an opcode word and three operands of a
+/// `celox_heap::ops` operation. Unlike a user function, backends pass the
+/// state pointer before them, and the helper finds the simulator's heap
+/// through the state header. The helper's address sits two slots before the
+/// user extern function table.
+pub const HEAP_HELPER_ID: u32 = u32::MAX - 1;
+
+/// The number of arguments of an extern call to [`HEAP_HELPER_ID`].
+pub const HEAP_HELPER_ARGUMENTS: usize = 4;
+
 /// The bit of an `svLogic` that holds the mask: `value | mask << 1`.
 pub const SV_LOGIC_MASK_SHIFT: u32 = 1;
 

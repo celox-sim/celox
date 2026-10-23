@@ -4,13 +4,23 @@ use celox_sv_syntax::{Declarations, DimensionKind, ExprId, ExprKind};
 mod calls;
 mod direct;
 mod lvalues;
+mod objects;
 #[cfg(test)]
 mod selected;
+mod strings;
 pub(super) use calls::{statement as call_statement, statement_root as call_statement_root};
 pub(super) use direct::{
-    arguments, bind_value, call_name as native_name, callable_name, cast_target_native, ungroup,
+    arguments, bind_value, call_name as native_name, callable_name, cast_target_native, real_value,
+    remove_real_division_guards, ungroup,
 };
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
+pub(super) use objects::{
+    Receiver as ObjectReceiver, constructor as object_constructor, method as object_method,
+    property as object_property, receiver as object_receiver, this as object_this,
+};
+pub(super) use strings::{
+    call as string_call, method as string_method, native_string, to_string as string_operand,
+};
 fn disagreement() -> AnalyzerError {
     AnalyzerError::Parse("invalid native expression ownership".into())
 }
@@ -32,7 +42,33 @@ pub(super) fn expression(
         LValue::Ident(name) => dimensions.get(name),
         _ => None,
     };
-    bind_value(root, native, tree, dimensions, shape)
+    // `new` creates an object of the class of the variable or of the
+    // element of an array of handles (IEEE 1800-2023 8.7).
+    let class = match lhs {
+        LValue::Ident(_) => shape.and_then(|shape| shape.class.as_deref()),
+        LValue::Select {
+            name,
+            array_slice_width: None,
+            ..
+        } => dimensions
+            .get(name)
+            .filter(|shape| !shape.unpacked.is_empty())
+            .and_then(|shape| shape.class.as_deref()),
+        LValue::Select { .. } => None,
+    };
+    if let Some(class) = class
+        && let Some(call) = objects::constructor(tree, root, native, dimensions, class)?
+    {
+        return Ok(call);
+    }
+    let value = bind_value(root, native, tree, dimensions, shape)?;
+    // A string literal or integral value assigned to a string becomes its
+    // bytes (IEEE 1800-2023 6.16).
+    Ok(if shape.is_some_and(|shape| shape.string) {
+        string_operand(value, dimensions)
+    } else {
+        value
+    })
 }
 pub(super) fn value(
     root: ExprId,

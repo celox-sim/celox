@@ -10,13 +10,12 @@ pub(super) enum AlwaysKind {
     /// A process that runs its statement forever, suspending at its timing
     /// controls (IEEE 1800-2023 9.2.2.1).
     Process,
-    Unsupported,
 }
 
 /// `always_comb` and `always @*` are combinational; `always_ff` and an
 /// `always` sensitive to clock edges are sequential, as long as their body
 /// has no timing control of its own. Every other `always` is a process.
-/// `always_latch` is not supported.
+/// `always_latch` has the execution and sensitivity rules of `always_comb`.
 pub(super) fn always_kind(
     procedure: &celox_sv_syntax::Procedure,
     native: &celox_sv_syntax::Declarations,
@@ -25,9 +24,8 @@ pub(super) fn always_kind(
         EventControl, ProcedureKind, StatementKind, TimingControlKind, TimingEdge,
     };
     Ok(match procedure.kind {
-        ProcedureKind::AlwaysComb => AlwaysKind::Comb,
+        ProcedureKind::AlwaysComb | ProcedureKind::AlwaysLatch => AlwaysKind::Comb,
         ProcedureKind::AlwaysFf => AlwaysKind::Ff,
-        ProcedureKind::AlwaysLatch => AlwaysKind::Unsupported,
         ProcedureKind::Always => {
             let StatementKind::Timing { control, body } = native.statement(procedure.body).kind
             else {
@@ -96,7 +94,10 @@ pub(super) fn always_comb_body(
     if always_kind(procedure, native)? != AlwaysKind::Comb {
         return Ok(None);
     }
-    if procedure.kind == ProcedureKind::AlwaysComb {
+    if matches!(
+        procedure.kind,
+        ProcedureKind::AlwaysComb | ProcedureKind::AlwaysLatch
+    ) {
         return Ok(Some(procedure.body));
     }
     let StatementKind::Timing { control, body } = native.statement(procedure.body).kind else {
@@ -123,9 +124,6 @@ fn validate_procedure(
         ProcedureKind::Final => return Err(unsupported("final construct")),
         _ => always_kind(procedure, native)?,
     };
-    if kind == AlwaysKind::Unsupported {
-        return Err(unsupported("always_latch process"));
-    }
     let mut pending = vec![procedure.body];
     while let Some(id) = pending.pop() {
         let statement = native.statement(id);
@@ -133,7 +131,13 @@ fn validate_procedure(
             StatementKind::Assignment {
                 nonblocking: true, ..
             } if kind == AlwaysKind::Comb => {
-                return Err(unsupported("nonblocking assignment inside always_comb"));
+                return Err(unsupported(
+                    if procedure.kind == ProcedureKind::AlwaysLatch {
+                        "nonblocking assignment inside always_latch"
+                    } else {
+                        "nonblocking assignment inside always_comb"
+                    },
+                ));
             }
             StatementKind::Timing { control, .. }
             | StatementKind::Assignment {
@@ -466,12 +470,11 @@ fn validate_scope(
                 return Err(unsupported("mintypmax expression"));
             }
             ExprKind::Select { dimension, .. } => {
-                if let DimensionKind::Indexed { base, width, .. } = dimension.kind {
+                if let DimensionKind::Indexed { width, .. } = dimension.kind {
                     if parameter_ranges.iter().any(|range| contains(*range, dimension.tokens)) { continue; }
-                    let mut dimensions = indexed_dimensions.clone();
-                    dimensions.constant_indexed_base = true;
-                    let value = expression_binding::value(base, native, syntax_tree, &dimensions)?;
-                    selects::indexed_expression_value(&syntax_tree.state, value, &dimensions).ok_or_else(|| unsupported("index expression"))?;
+                    // IEEE 1800-2023 11.5.1 permits a variable base. Its
+                    // expression is bound after variable types are available;
+                    // only the width requires constant validation here.
                     check_indexed_width(width, syntax_tree, indexed_dimensions)?;
                 }
             }
@@ -874,12 +877,12 @@ mod traversal_tests {
     fn validates_native_owners_without_visiting_inactive_generate_bodies() {
         for (body, accepted) in [
             (
-                "logic visible; if (0) begin : hidden always_latch visible = 1; end",
+                "logic visible; if (0) begin : hidden always_latch visible <= 1; end",
                 true,
             ),
-            ("logic visible; always_latch visible = 1;", false),
+            ("logic visible; always_latch visible <= 1;", false),
             (
-                "logic visible; if (1) begin : active always_latch visible = 1; end",
+                "logic visible; if (1) begin : active always_latch visible <= 1; end",
                 false,
             ),
         ] {
@@ -900,7 +903,7 @@ mod traversal_tests {
                 result.unwrap();
             } else {
                 assert!(
-                    matches!(result, Err(AnalyzerError::Unsupported(ref reason)) if reason == "always_latch process")
+                    matches!(result, Err(AnalyzerError::Unsupported(ref reason)) if reason == "nonblocking assignment inside always_latch")
                 );
             }
         }

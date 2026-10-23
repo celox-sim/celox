@@ -89,6 +89,7 @@ fn bind_assert_arg<B: SimBackend>(
         width: arg.width,
         signed: arg.signed,
         is_string: arg.is_string,
+        float_precision: arg.float_precision,
     })
 }
 

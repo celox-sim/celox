@@ -273,178 +273,155 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
         return found.clone();
     }
 
-    let deps = match arena.get(node) {
-        crate::SLTNode::Input {
-            variable, index, ..
-        } => {
-            let mut set = HashSet::default();
-            set.insert(*variable);
-            for idx in index {
-                set.extend(collect_node_input_deps(idx.node, arena, memo, inverse_memo));
-            }
-            set
+    // Arena edges point to older nodes. Visit only uncached reachable nodes,
+    // then evaluate each node once in dependency order on the heap.
+    let root = node;
+    let mut pending = vec![root];
+    let mut seen = HashSet::default();
+    let mut reachable = Vec::new();
+    while let Some(current) = pending.pop() {
+        if memo.contains_key(&current) || !seen.insert(current) {
+            continue;
         }
-        crate::SLTNode::Slice { expr, .. } => {
-            collect_node_input_deps(*expr, arena, memo, inverse_memo)
-        }
-        crate::SLTNode::Concat(parts) => {
-            let mut set = HashSet::default();
-            for (part, _) in parts {
-                set.extend(collect_node_input_deps(*part, arena, memo, inverse_memo));
-            }
-            set
-        }
-        crate::SLTNode::Binary(lhs, _, rhs) => {
-            let mut set = collect_node_input_deps(*lhs, arena, memo, inverse_memo);
-            set.extend(collect_node_input_deps(*rhs, arena, memo, inverse_memo));
-            set
-        }
-        crate::SLTNode::Unary(_, inner) => {
-            collect_node_input_deps(*inner, arena, memo, inverse_memo)
-        }
-        crate::SLTNode::Capture { expr, .. } => {
-            collect_node_input_deps(*expr, arena, memo, inverse_memo)
-        }
-        crate::SLTNode::Mux {
-            cond,
-            then_expr,
-            else_expr,
-        } => {
-            let mut set = collect_node_input_deps(*cond, arena, memo, inverse_memo);
-            set.extend(collect_node_input_deps(
-                *then_expr,
-                arena,
-                memo,
-                inverse_memo,
-            ));
-            set.extend(collect_node_input_deps(
-                *else_expr,
-                arena,
-                memo,
-                inverse_memo,
-            ));
-            set
-        }
-        crate::SLTNode::ForFold {
-            loop_var,
-            start,
-            end,
-            result,
-            initials,
-            updates,
-            effects,
-            continue_cond,
-            ..
-        } => {
-            let mut set = HashSet::default();
-            match start {
-                crate::SLTLoopBound::Const(_) => {}
-                crate::SLTLoopBound::Expr(node) | crate::SLTLoopBound::TypedExpr { node, .. } => {
-                    set.extend(collect_node_input_deps(*node, arena, memo, inverse_memo));
-                }
-            }
-            match end {
-                crate::SLTLoopBound::Const(_) => {}
-                crate::SLTLoopBound::Expr(node) | crate::SLTLoopBound::TypedExpr { node, .. } => {
-                    set.extend(collect_node_input_deps(*node, arena, memo, inverse_memo));
-                }
-            }
-            if let crate::SLTForFoldResult::Transient { initial, update } = result {
-                set.extend(collect_node_input_deps(*initial, arena, memo, inverse_memo));
-                set.extend(collect_node_input_deps(*update, arena, memo, inverse_memo));
-            }
-            for init in initials {
-                set.extend(collect_node_input_deps(
-                    init.expr,
-                    arena,
-                    memo,
-                    inverse_memo,
-                ));
-            }
-            for update in updates {
-                set.extend(collect_node_input_deps(
-                    update.expr,
-                    arena,
-                    memo,
-                    inverse_memo,
-                ));
-            }
-            for effect in effects {
-                match effect {
-                    crate::SLTForEffect::Event { guard, args, .. } => {
-                        if let Some(guard) = guard {
-                            set.extend(collect_node_input_deps(*guard, arena, memo, inverse_memo));
-                        }
-                        for arg in args {
-                            set.extend(collect_node_input_deps(*arg, arena, memo, inverse_memo));
-                        }
-                    }
-                    crate::SLTForEffect::Runner(runner) => {
-                        set.extend(collect_node_input_deps(*runner, arena, memo, inverse_memo));
-                    }
-                }
-            }
-            set.remove(loop_var);
-            set.extend(collect_node_input_deps(
-                *continue_cond,
-                arena,
-                memo,
-                inverse_memo,
-            ));
-            set.remove(loop_var);
-            set
-        }
-        crate::SLTNode::ForFoldGroup {
-            loop_var,
-            entry_guard,
-            states,
-            ..
-        } => {
-            let mut set = collect_node_input_deps(*entry_guard, arena, memo, inverse_memo);
-            for state in states {
-                set.extend(collect_node_input_deps(
-                    state.initial,
-                    arena,
-                    memo,
-                    inverse_memo,
-                ));
-            }
-            let mut update_deps = HashSet::default();
-            for state in states {
-                update_deps.extend(collect_node_input_deps(
-                    state.update,
-                    arena,
-                    memo,
-                    inverse_memo,
-                ));
-            }
-            update_deps.remove(loop_var);
-
-            let mut state_ranges: HashMap<Addr, Vec<BitAccess>> = HashMap::default();
-            for state in states {
-                state_ranges
-                    .entry(state.target.id)
-                    .or_default()
-                    .push(state.target.access);
-            }
-            for (state_id, ranges) in state_ranges {
-                if states.iter().all(|state| {
-                    node_reads_only_covered_ranges(state.update, &state_id, &ranges, arena)
-                }) {
-                    update_deps.remove(&state_id);
-                }
-            }
-            set.extend(update_deps);
-            set
-        }
-        crate::SLTNode::Constant(_, _, _, _) => HashSet::default(),
-    };
-
-    for &addr in &deps {
-        inverse_memo.entry(addr).or_default().insert(node);
+        pending.extend(crate::SLTToSIRLowerer::node_children(current, arena));
+        reachable.push(current);
     }
-    memo.insert(node, deps.clone());
-    deps
+    reachable.sort_unstable();
+    for node in reachable {
+        let deps = match arena.get(node) {
+            crate::SLTNode::Input {
+                variable, index, ..
+            } => {
+                let mut set = HashSet::default();
+                set.insert(*variable);
+                for idx in index {
+                    set.extend(memo[&idx.node].clone());
+                }
+                set
+            }
+            crate::SLTNode::Slice { expr, .. } => memo[expr].clone(),
+            crate::SLTNode::Concat(parts) => {
+                let mut set = HashSet::default();
+                for (part, _) in parts {
+                    set.extend(memo[part].clone());
+                }
+                set
+            }
+            crate::SLTNode::Binary(lhs, _, rhs) => {
+                let mut set = memo[lhs].clone();
+                set.extend(memo[rhs].clone());
+                set
+            }
+            crate::SLTNode::Unary(_, inner) => memo[inner].clone(),
+            crate::SLTNode::Capture { expr, .. } => memo[expr].clone(),
+            crate::SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                let mut set = memo[cond].clone();
+                set.extend(memo[then_expr].clone());
+                set.extend(memo[else_expr].clone());
+                set
+            }
+            crate::SLTNode::ForFold {
+                loop_var,
+                start,
+                end,
+                result,
+                initials,
+                updates,
+                effects,
+                continue_cond,
+                ..
+            } => {
+                let mut set = HashSet::default();
+                match start {
+                    crate::SLTLoopBound::Const(_) => {}
+                    crate::SLTLoopBound::Expr(node)
+                    | crate::SLTLoopBound::TypedExpr { node, .. } => {
+                        set.extend(memo[node].clone());
+                    }
+                }
+                match end {
+                    crate::SLTLoopBound::Const(_) => {}
+                    crate::SLTLoopBound::Expr(node)
+                    | crate::SLTLoopBound::TypedExpr { node, .. } => {
+                        set.extend(memo[node].clone());
+                    }
+                }
+                if let crate::SLTForFoldResult::Transient { initial, update } = result {
+                    set.extend(memo[initial].clone());
+                    set.extend(memo[update].clone());
+                }
+                for init in initials {
+                    set.extend(memo[&init.expr].clone());
+                }
+                for update in updates {
+                    set.extend(memo[&update.expr].clone());
+                }
+                for effect in effects {
+                    match effect {
+                        crate::SLTForEffect::Event { guard, args, .. } => {
+                            if let Some(guard) = guard {
+                                set.extend(memo[guard].clone());
+                            }
+                            for arg in args {
+                                set.extend(memo[arg].clone());
+                            }
+                        }
+                        crate::SLTForEffect::Runner(runner) => {
+                            set.extend(memo[runner].clone());
+                        }
+                    }
+                }
+                set.remove(loop_var);
+                set.extend(memo[continue_cond].clone());
+                set.remove(loop_var);
+                set
+            }
+            crate::SLTNode::ForFoldGroup {
+                loop_var,
+                entry_guard,
+                states,
+                ..
+            } => {
+                let mut set = memo[entry_guard].clone();
+                for state in states {
+                    set.extend(memo[&state.initial].clone());
+                }
+                let mut update_deps = HashSet::default();
+                for state in states {
+                    update_deps.extend(memo[&state.update].clone());
+                }
+                update_deps.remove(loop_var);
+
+                let mut state_ranges: HashMap<Addr, Vec<BitAccess>> = HashMap::default();
+                for state in states {
+                    state_ranges
+                        .entry(state.target.id)
+                        .or_default()
+                        .push(state.target.access);
+                }
+                for (state_id, ranges) in state_ranges {
+                    if states.iter().all(|state| {
+                        node_reads_only_covered_ranges(state.update, &state_id, &ranges, arena)
+                    }) {
+                        update_deps.remove(&state_id);
+                    }
+                }
+                set.extend(update_deps);
+                set
+            }
+            crate::SLTNode::Constant(_, _, _, _) => HashSet::default(),
+        };
+
+        for &addr in &deps {
+            inverse_memo.entry(addr).or_default().insert(node);
+        }
+        memo.insert(node, deps.clone());
+    }
+    memo[&root].clone()
 }
 
 fn collect_logic_path_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
@@ -4099,6 +4076,47 @@ mod tests {
     use celox_sir::{SIRBuilder, SIRInstruction, SIRTerminator};
 
     #[test]
+    fn deep_input_dependencies_use_heap_and_preserve_inverse_index() {
+        std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(|| {
+                let mut arena = SLTNodeArena::<usize>::new();
+                let input = |variable| SLTNode::Input {
+                    variable,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, 0),
+                    signed: false,
+                };
+                let data = arena.alloc(input(0)).unwrap();
+                let cond = arena.alloc(input(1)).unwrap();
+                let mut root = data;
+                for _ in 0..8192 {
+                    root = arena
+                        .alloc(SLTNode::Mux {
+                            cond,
+                            then_expr: root,
+                            else_expr: data,
+                        })
+                        .unwrap();
+                }
+                let mut memo = HashMap::default();
+                let mut inverse = HashMap::default();
+                let deps = collect_node_input_deps(root, &arena, &mut memo, &mut inverse);
+                assert_eq!(deps, HashSet::from_iter([0, 1]));
+                assert!(inverse[&0].contains(&root));
+                assert!(inverse[&1].contains(&root));
+                assert_eq!(memo.len(), 8194);
+                assert_eq!(
+                    collect_node_input_deps(root, &arena, &mut memo, &mut inverse),
+                    deps
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn stable_scc_order_preserves_source_order_when_dependencies_allow_it() {
         // 0 and 1 are initially ready, both feed 2, and 2 feeds 3. Tarjan is
         // free to return components in any order; lowering remains stable.
@@ -4196,6 +4214,7 @@ mod tests {
                 .unwrap()
         };
         LogicPath {
+            transparent_copy: false,
             target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 7)),
             sources: source
                 .map(|source| [VarAtomBase::new(source, 0, 7)].into_iter().collect())
@@ -4248,6 +4267,7 @@ mod tests {
                 })
                 .unwrap();
             paths.push(LogicPath {
+                transparent_copy: false,
                 target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 7)),
                 sources: [VarAtomBase::new(100, 0, 0)].into_iter().collect(),
                 previous_sources: crate::HashSet::default(),
@@ -4391,6 +4411,7 @@ mod tests {
                 })
                 .unwrap();
             paths.push(LogicPath {
+                transparent_copy: false,
                 target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 7)),
                 sources: [
                     VarAtomBase::new(100, 0, 0),
@@ -4794,6 +4815,7 @@ mod tests {
             })
             .unwrap();
         LogicPath {
+            transparent_copy: false,
             target: LogicPathTarget::Var(target),
             sources: [VarAtomBase::new(external, 0, 63)].into_iter().collect(),
             previous_sources: crate::HashSet::default(),
@@ -5274,6 +5296,7 @@ mod tests {
             })
             .unwrap();
         let path = |target, expr| LogicPath {
+            transparent_copy: false,
             target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 7)),
             // Keep the scheduling graph acyclic in this focused cache test;
             // dependency memoization still sees both initial reads.

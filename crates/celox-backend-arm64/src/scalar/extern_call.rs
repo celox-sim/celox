@@ -54,10 +54,15 @@ pub(super) fn emit_call_extern(
     saved: &[u8],
     pinned_fp: &[u8],
 ) -> Result<(), EmitError> {
-    let register_args = args.len().min(REGISTER_ARGS);
+    // The heap helper takes the state pointer before the arguments, so C
+    // argument `position` is `args[position - leading]`.
+    let heap = func == celox_sir::extern_abi::HEAP_HELPER_ID;
+    let leading = usize::from(heap);
+    let positions = args.len() + leading;
+    let register_args = positions.min(REGISTER_ARGS);
     // Outgoing stack arguments sit at SP, followed by the staged register
     // arguments and the save areas.
-    let staging = args.len().saturating_sub(REGISTER_ARGS) * 8;
+    let staging = positions.saturating_sub(REGISTER_ARGS) * 8;
     let gpr_save = staging + register_args * 8;
     let fp_save = gpr_save + saved.len() * 8;
     let frame = (fp_save + pinned_fp.len() * 8 + 15) & !15;
@@ -80,10 +85,11 @@ pub(super) fn emit_call_extern(
     // Write every argument before overwriting any argument register, so
     // the moves into x0-x7 cannot clobber a source.
     for (index, &value) in args.iter().enumerate() {
-        let offset = if index < REGISTER_ARGS {
-            staging + index * 8
+        let position = index + leading;
+        let offset = if position < REGISTER_ARGS {
+            staging + position * 8
         } else {
-            (index - REGISTER_ARGS) * 8
+            (position - REGISTER_ARGS) * 8
         };
         emit_store_at(
             ops,
@@ -93,7 +99,7 @@ pub(super) fn emit_call_extern(
             OpSize::S64,
         );
     }
-    for index in 0..register_args {
+    for index in leading..register_args {
         emit_load_at(
             ops,
             index as u8,
@@ -101,6 +107,10 @@ pub(super) fn emit_call_extern(
             (staging + index * 8) as i64,
             OpSize::S64,
         );
+    }
+    if heap {
+        // The state pointer is the saved x0.
+        emit_load_at(ops, 0, 31, gpr_save as i64, OpSize::S64);
     }
 
     // The state pointer is the saved x0.
@@ -112,7 +122,14 @@ pub(super) fn emit_call_extern(
         celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET as i64,
         OpSize::S64,
     );
-    emit_load_at(ops, SCRATCH1, SCRATCH1, i64::from(func) * 8, OpSize::S64);
+    let offset = if func == celox_sir::float::FLOAT_HELPER_ID {
+        -8
+    } else if heap {
+        -16
+    } else {
+        i64::from(func) * 8
+    };
+    emit_load_at(ops, SCRATCH1, SCRATCH1, offset, OpSize::S64);
     dynasm!(ops ; .arch aarch64 ; blr x17);
 
     // The result interferes with every value live across the call, so the

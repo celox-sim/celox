@@ -159,3 +159,77 @@ fn trace_contains_the_exact_fused_native_pipeline() {
         "trace must not independently re-lower source execution units"
     );
 }
+
+/// FP ports keep the test free of integer-conversion helpers: the complete
+/// frontend -> optimized SIR -> MIR path must preserve numeric FP operations.
+#[test]
+fn scalar_float_arithmetic_stays_explicit_in_mir() {
+    for (ty, precision) in [("f32", "F32"), ("f64", "F64")] {
+        for optimize in [false, true] {
+            let source = format!(
+                r#"module Top(a: input {ty}, b: input {ty},
+                    y_add: output {ty}, y_sub: output {ty},
+                    y_mul: output {ty}, y_div: output {ty},
+                    y_neg: output {ty}, y_lt: output bit, y_ne: output bit) {{
+                    assign y_add = a + b;
+                    assign y_sub = a - b;
+                    assign y_mul = a * b;
+                    assign y_div = a / b;
+                    assign y_neg = -a;
+                    assign y_lt = a <: b;
+                    assign y_ne = a != b;
+                }}"#
+            );
+            let result = SimulatorBuilder::new(&source, "Top")
+                .optimize(optimize)
+                .trace_mir()
+                .build_with_trace();
+            if let Err(error) = &result.res {
+                panic!("FP source compilation failed: {error:?}");
+            }
+            let mir = result.trace.mir.as_deref().expect("native MIR trace");
+            for op in ["Add", "Sub", "Mul", "Div", "Neg", "Lt", "Ne"] {
+                assert!(
+                    mir.contains(&format!("fp.{op}.{precision}"))
+                        || (mir.contains(&format!("op: {op},"))
+                            && mir.contains(&format!("precision: {precision},"))),
+                    "missing {op} ({ty}, optimize={optimize}):\n{mir}"
+                );
+            }
+            assert!(
+                !mir.contains("extern") && !mir.contains("CallExtern"),
+                "unexpected FP helper:\n{mir}"
+            );
+            let mut sim = result.unwrap();
+            let a = sim.signal("a");
+            let b = sim.signal("b");
+            let bits = |x: f64| {
+                if ty == "f32" {
+                    (x as f32).to_bits() as u64
+                } else {
+                    x.to_bits()
+                }
+            };
+            sim.modify(|io| {
+                io.set(a, bits(3.5));
+                io.set(b, bits(-2.0));
+            })
+            .unwrap();
+            for (name, expected) in [
+                ("y_add", 1.5),
+                ("y_sub", 5.5),
+                ("y_mul", -7.0),
+                ("y_div", -1.75),
+                ("y_neg", -3.5),
+            ] {
+                assert_eq!(
+                    sim.get(sim.signal(name)),
+                    bits(expected).into(),
+                    "{name} ({ty})"
+                );
+            }
+            assert_eq!(sim.get(sim.signal("y_lt")), 0u32.into());
+            assert_eq!(sim.get(sim.signal("y_ne")), 1u32.into());
+        }
+    }
+}
