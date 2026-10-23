@@ -408,6 +408,7 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) host_request_sites: Vec<celox_design::HostRequestSite<AbsoluteAddr>>,
     pub(crate) active_commits: Vec<AbsoluteAddr>,
     pub(crate) time_slots: Vec<AbsoluteAddr>,
+    pub(crate) scheduler: Option<celox_design::SchedulerSchema<AbsoluteAddr>>,
 }
 
 /// Pointer-free native compiler artifact which can be attached to the
@@ -522,6 +523,7 @@ impl NativeProgramImage {
                 host_request_sites: self.runtime_schema.host_request_sites.clone(),
                 active_commits: self.runtime_schema.active_commits.clone(),
                 time_slots: self.runtime_schema.time_slots.clone(),
+                scheduler: self.runtime_schema.scheduler.clone(),
             },
             testbench: self.testbench.clone(),
         }
@@ -604,7 +606,26 @@ impl NativeProgramImage {
         {
             return Err("a process kernel offset does not name an image entry".into());
         }
-        if self.process_offsets.len() != self.runtime_schema.processes.len() {
+        // A generated scheduler unit follows the kernels.
+        let scheduler_units = self
+            .runtime_schema
+            .scheduler
+            .as_ref()
+            .and_then(|scheduler| scheduler.unit)
+            .map_or(0, |unit| {
+                if unit == self.runtime_schema.processes.len() {
+                    1
+                } else {
+                    usize::MAX
+                }
+            });
+        if self.process_offsets.len()
+            != self
+                .runtime_schema
+                .processes
+                .len()
+                .saturating_add(scheduler_units)
+        {
             return Err("process kernels and their control slots disagree".into());
         }
         if self.required_native_features & !KNOWN_NATIVE_FEATURES != 0 {
@@ -2418,6 +2439,7 @@ fn compile_program(
                 declaration_startup: sir.runtime().runtime_schema.declaration_startup.clone(),
                 active_commits: sir.runtime().runtime_schema.active_commits.clone(),
                 time_slots: sir.runtime().runtime_schema.time_slots.clone(),
+                scheduler: sir.runtime().runtime_schema.scheduler.clone(),
             },
             layout: layout.clone(),
             native_memory_size,

@@ -842,6 +842,141 @@ pub struct RuntimeSchema<A> {
     /// most one per module instance. Before each round a timed scheduler
     /// stores the current time into each, as [`TIME_SLOT_WIDTH`] bits.
     pub time_slots: Vec<A>,
+    /// The state a compiled scheduler exchanges with the runtime, and the
+    /// scheduler itself once one is generated. Present when the design has
+    /// process kernels.
+    pub scheduler: Option<SchedulerSchema<A>>,
+}
+
+/// Width of [`SchedulerSlots::limit`], [`SchedulerSlots::now`],
+/// [`SchedulerSlots::exit_arg`], [`SchedulerSlots::count`],
+/// [`SchedulerSlots::current`], [`SchedulerSlots::levels`] and every [`SchedulerSlots::wake`] object.
+pub const SCHEDULER_TIME_WIDTH: usize = 64;
+/// Width of [`SchedulerSlots::exit`], [`SchedulerSlots::finish`],
+/// [`SchedulerSlots::cont`] and every [`SchedulerSlots::waiting`] object.
+pub const SCHEDULER_FLAG_WIDTH: usize = 8;
+
+/// Hidden state objects through which a compiled scheduler and the runtime
+/// exchange a run of time slots. Between runs they hold no state: the
+/// runtime's scheduling state is the source of truth, so state files leave
+/// them out.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SchedulerSlots<A> {
+    /// The last time the run may reach.
+    pub limit: A,
+    /// The time of the last slot the run reached.
+    pub now: A,
+    /// Why the run returned, a [`SchedulerExit`] code.
+    pub exit: A,
+    /// The process an exit concerns.
+    pub exit_arg: A,
+    /// Set when a `$finish` record was emitted in the unit just run.
+    pub finish: A,
+    /// Where a shared combinational settle continues.
+    pub cont: A,
+    /// The number of time slots the run ran.
+    pub count: A,
+    /// The kernel running when the run returned, `u64::MAX` for none.
+    pub current: A,
+    /// The levels of the event signals at the start of the last slot, one
+    /// bit per event in event order.
+    pub levels: A,
+    /// The time each process kernel resumes at, in kernel order, valid
+    /// where [`Self::waiting`] is set.
+    pub wake: Vec<A>,
+    /// Whether each process kernel waits for its wake time.
+    pub waiting: Vec<A>,
+}
+
+impl<A> SchedulerSlots<A> {
+    pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> SchedulerSlots<B> {
+        SchedulerSlots {
+            limit: map(self.limit),
+            now: map(self.now),
+            exit: map(self.exit),
+            exit_arg: map(self.exit_arg),
+            finish: map(self.finish),
+            cont: map(self.cont),
+            count: map(self.count),
+            current: map(self.current),
+            levels: map(self.levels),
+            wake: self.wake.into_iter().map(&mut map).collect(),
+            waiting: self.waiting.into_iter().map(map).collect(),
+        }
+    }
+
+    /// Every slot.
+    pub fn iter(&self) -> impl Iterator<Item = &A> {
+        [
+            &self.limit,
+            &self.now,
+            &self.exit,
+            &self.exit_arg,
+            &self.finish,
+            &self.cont,
+            &self.count,
+            &self.current,
+            &self.levels,
+        ]
+        .into_iter()
+        .chain(&self.wake)
+        .chain(&self.waiting)
+    }
+}
+
+/// Why a run of the compiled scheduler returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum SchedulerExit {
+    /// The next time slot is after the limit.
+    Limit = 0,
+    /// A process or a `$finish` record finished the simulation.
+    Finish = 1,
+    /// The delay of process [`SchedulerSlots::exit_arg`] overflows the
+    /// simulation time.
+    DelayOverflow = 2,
+    /// A process suspended in a way the scheduler does not compile.
+    Internal = 3,
+}
+
+impl SchedulerExit {
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Limit),
+            1 => Some(Self::Finish),
+            2 => Some(Self::DelayOverflow),
+            3 => Some(Self::Internal),
+            _ => None,
+        }
+    }
+}
+
+/// A design's compiled scheduler: the process unit that runs time slots of
+/// the kernels it compiles, and its slots.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SchedulerSchema<A> {
+    pub slots: SchedulerSlots<A>,
+    /// The index of the scheduler unit among the process units, after the
+    /// kernels; `None` when no scheduler was generated.
+    pub unit: Option<usize>,
+    /// Per process kernel, why the scheduler does not run it, or `None` when
+    /// it does.
+    pub fallback: Vec<Option<String>>,
+    /// The event signals the scheduler's kernels write, in the order of
+    /// the bits of [`SchedulerSlots::levels`].
+    pub events: Vec<A>,
+}
+
+impl<A> SchedulerSchema<A> {
+    pub fn map<B>(self, map: impl FnMut(A) -> B) -> SchedulerSchema<B> {
+        let mut map = map;
+        SchedulerSchema {
+            slots: self.slots.map(&mut map),
+            unit: self.unit,
+            fallback: self.fallback,
+            events: self.events.into_iter().map(map).collect(),
+        }
+    }
 }
 
 /// Width of every [`RuntimeSchema::time_slots`] object.
@@ -869,6 +1004,7 @@ impl<A> Default for RuntimeSchema<A> {
             host_request_sites: Vec::new(),
             active_commits: Vec::new(),
             time_slots: Vec::new(),
+            scheduler: None,
         }
     }
 }

@@ -30,6 +30,10 @@ impl<B: SimBackend> Simulation<B> {
         }
     }
 
+    pub(super) fn mode(&self) -> crate::SchedulerMode {
+        self.state.scheduler_stats().mode
+    }
+
     /// The scheduler mode, the steps checked against a shadow and how each
     /// process kernel is scheduled.
     #[doc(hidden)]
@@ -45,6 +49,9 @@ impl<B: SimBackend> Simulation<B> {
 /// Checks each step of a primary simulation against a shadow.
 pub(super) struct ShadowCheck<'a, B: SimBackend> {
     shadow: &'a mut Simulation<B>,
+    /// Compiled runs take one slot each; otherwise the shadow catches up
+    /// with a longer run slot by slot.
+    one_slot: bool,
     /// The time the step in progress started from.
     start: u64,
     /// Steps checked.
@@ -52,9 +59,10 @@ pub(super) struct ShadowCheck<'a, B: SimBackend> {
 }
 
 impl<'a, B: SimBackend> ShadowCheck<'a, B> {
-    pub(super) fn new(shadow: &'a mut Simulation<B>) -> Self {
+    pub(super) fn new(shadow: &'a mut Simulation<B>, mode: crate::SchedulerMode) -> Self {
         Self {
             shadow,
+            one_slot: mode != crate::SchedulerMode::DifferentialRuns,
             start: 0,
             checked: 0,
         }
@@ -62,6 +70,10 @@ impl<'a, B: SimBackend> ShadowCheck<'a, B> {
 }
 
 impl<B: SimBackend> StepObserver<Simulator<B>> for ShadowCheck<'_, B> {
+    fn one_slot(&self) -> bool {
+        self.one_slot
+    }
+
     fn before_step(&mut self, state: &SimulationState<B>, primary: &mut Simulator<B>) {
         self.start = state.time();
         let shadow = &mut *self.shadow;
@@ -87,7 +99,23 @@ impl<B: SimBackend> StepObserver<Simulator<B>> for ShadowCheck<'_, B> {
         result: &Result<Option<u64>, RuntimeErrorCode>,
     ) -> Result<(), RuntimeErrorCode> {
         let shadow = &mut *self.shadow;
-        let reference = shadow.state.step_until(&mut shadow.simulator, limit);
+        let mut reference = shadow.state.step_until(&mut shadow.simulator, limit);
+        // A compiled run of several slots: the shadow runs them one by one.
+        if let Ok(Some(time)) = result {
+            while let Ok(Some(reached)) = reference {
+                if reached >= *time
+                    || shadow.state.is_finished()
+                    || shadow.state.is_stopped()
+                    || shadow
+                        .state
+                        .next_event_time()
+                        .is_none_or(|next| next > *time)
+                {
+                    break;
+                }
+                reference = shadow.state.step_until(&mut shadow.simulator, limit);
+            }
+        }
         self.checked += 1;
         match difference(state, primary, shadow, result, &reference) {
             None => Ok(()),
@@ -128,7 +156,20 @@ fn difference<B: SimBackend>(
             "scheduling state {key:?}, the reference {reference:?}"
         ));
     }
-    if let Some(offset) = first_difference(&primary.backend, &shadow.simulator.backend) {
+    // The compiled scheduler's slots hold nothing between runs.
+    let scheduler: Vec<_> = primary
+        .program
+        .runtime_schema
+        .scheduler
+        .iter()
+        .flat_map(|scheduler| scheduler.slots.iter())
+        .map(|address| {
+            let signal = primary.backend.resolve_signal(address);
+            signal.offset..signal.offset + celox_state_layout::get_byte_size(signal.width)
+        })
+        .collect();
+    if let Some(offset) = first_difference(&primary.backend, &shadow.simulator.backend, &scheduler)
+    {
         let signal = primary
             .named_signals()
             .into_iter()
@@ -158,9 +199,13 @@ fn difference<B: SimBackend>(
     None
 }
 
-/// The first byte of design state that differs between two backends of the
-/// same design.
-fn first_difference<B: SimBackend>(primary: &B, shadow: &B) -> Option<usize> {
+/// The first byte of design state outside `excluded` that differs between
+/// two backends of the same design.
+fn first_difference<B: SimBackend>(
+    primary: &B,
+    shadow: &B,
+    excluded: &[std::ops::Range<usize>],
+) -> Option<usize> {
     let range = celox_state_layout::STATE_HEADER_SIZE..primary.layout().total_size;
     let bytes = |backend: &B| {
         let (ptr, len) = backend.memory_as_ptr();
@@ -173,8 +218,10 @@ fn first_difference<B: SimBackend>(primary: &B, shadow: &B) -> Option<usize> {
     primary
         .iter()
         .zip(&shadow)
-        .position(|(a, b)| a != b)
-        .map(|index| range.start + index)
+        .enumerate()
+        .map(|(index, pair)| (range.start + index, pair))
+        .find(|(offset, (a, b))| a != b && !excluded.iter().any(|r| r.contains(offset)))
+        .map(|(offset, _)| offset)
 }
 
 #[cfg(all(test, feature = "systemverilog"))]
@@ -281,6 +328,178 @@ mod tests {
             let id = event.event_ref.id();
             assert_eq!(event.event_ref.func as usize, own[id].func as usize);
             assert_ne!(event.event_ref.func as usize, primary[id].func as usize);
+        }
+    }
+
+    #[test]
+    fn the_compiled_scheduler_runs_delay_only_kernels() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [7:0] count);
+                logic clk = 1'b0;
+                always #5 clk = ~clk;
+                initial count = 8'd0;
+                always_ff @(posedge clk) count <= count + 8'd1;
+            endmodule
+        "#;
+        for mode in [
+            SchedulerMode::Compiled,
+            SchedulerMode::Differential,
+            SchedulerMode::DifferentialRuns,
+            SchedulerMode::Reference,
+        ] {
+            let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+                .scheduler_mode(mode)
+                .build()
+                .unwrap();
+            sim.run_until(1000).unwrap();
+            let count = sim.signal("count");
+            assert_eq!(sim.get(count), 100u8.into(), "{mode:?}");
+            let stats = sim.scheduler_stats();
+            if mode == SchedulerMode::Reference {
+                assert_eq!(stats.compiled_slots, 0);
+            } else {
+                assert!(stats.compiled_slots > 0, "{mode:?}: {stats:?}");
+            }
+            match mode {
+                SchedulerMode::Differential => {
+                    assert!(stats.checked_steps >= stats.compiled_slots)
+                }
+                // One run takes all the slots up to the target.
+                SchedulerMode::DifferentialRuns => {
+                    assert!(stats.checked_steps < stats.compiled_slots, "{stats:?}")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A kernel whose writes no event domain listens to: the scheduler
+    /// runs its slots without any domain to dispatch.
+    #[test]
+    fn the_compiled_scheduler_runs_kernels_without_event_writes() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [7:0] seen);
+                logic tick = 1'b0;
+                logic [7:0] count = 8'd0;
+                always #5 begin
+                    tick = ~tick;
+                    count = count + 8'd1;
+                end
+                assign seen = count + {7'd0, tick};
+            endmodule
+        "#;
+        for mode in [SchedulerMode::Differential, SchedulerMode::DifferentialRuns] {
+            let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+                .scheduler_mode(mode)
+                .build()
+                .unwrap();
+            sim.run_until(52).unwrap();
+            let seen = sim.signal("seen");
+            assert_eq!(sim.get(seen), 10u8.into(), "{mode:?}");
+            assert!(sim.scheduler_stats().compiled_slots > 0, "{mode:?}");
+        }
+    }
+
+    const MODES: [SchedulerMode; 3] = [
+        SchedulerMode::Compiled,
+        SchedulerMode::Differential,
+        SchedulerMode::DifferentialRuns,
+    ];
+
+    fn build_in(source: &str, mode: SchedulerMode) -> Simulation {
+        Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+            .scheduler_mode(mode)
+            .build()
+            .unwrap()
+    }
+
+    /// A `$finish` in a domain the scheduler inlines, with two sites.
+    #[test]
+    fn compiled_slots_end_at_a_finish_in_a_domain() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(input logic err, output logic [7:0] n);
+                logic clk = 1'b0;
+                always #5 clk = ~clk;
+                initial n = 8'd0;
+                always_ff @(posedge clk) begin
+                    n <= n + 8'd1;
+                    if (n == 8'd3) $finish;
+                    if (err) $finish;
+                end
+            endmodule
+        "#;
+        let mut reference = build_in(source, SchedulerMode::Reference);
+        reference.run_until(100).unwrap();
+        assert!(reference.is_finished());
+        for mode in MODES {
+            let mut sim = build_in(source, mode);
+            sim.run_until(100).unwrap();
+            assert!(sim.is_finished(), "{mode:?}");
+            assert_eq!(sim.time(), reference.time(), "{mode:?}");
+            let n = sim.signal("n");
+            assert_eq!(sim.get(n), reference.get(n), "{mode:?}");
+            assert!(sim.scheduler_stats().compiled_slots > 0, "{mode:?}");
+        }
+    }
+
+    /// A compiled kernel's `$finish` leaves the state the reference leaves:
+    /// a kernel due in the same slot that did not run yet is still ready,
+    /// and a state file taken afterwards is the same.
+    #[test]
+    fn compiled_slots_end_at_a_kernel_finish_as_the_reference_does() {
+        let clock = "always #5 clk = ~clk;";
+        for finish in ["initial #27 $finish;", "initial #30 $finish;"] {
+            for order in [[finish, clock], [clock, finish]] {
+                let source = format!(
+                    "`timescale 1ns/1ns
+                    module Top(output logic [7:0] count);
+                        logic clk = 1'b0;
+                        {}
+                        {}
+                        initial count = 8'd0;
+                        always_ff @(posedge clk) count <= count + 8'd1;
+                    endmodule",
+                    order[0], order[1]
+                );
+                let mut reference = build_in(&source, SchedulerMode::Reference);
+                reference.run_until(100).unwrap();
+                let expected = reference.save_state().unwrap();
+                for mode in MODES {
+                    let mut sim = build_in(&source, mode);
+                    sim.run_until(100).unwrap();
+                    assert!(sim.is_finished(), "{mode:?} {order:?}");
+                    assert!(sim.scheduler_stats().compiled_slots > 0, "{mode:?}");
+                    assert_eq!(sim.save_state().unwrap(), expected, "{mode:?} {order:?}");
+                    assert!(sim.checkpoint().is_ok());
+                }
+            }
+        }
+    }
+
+    /// A kernel may wake at the last representable time.
+    #[test]
+    fn compiled_kernels_may_wake_at_the_last_time() {
+        let source = r#"
+            `timescale 1fs/1fs
+            module Top(output logic [7:0] x);
+                initial begin
+                    x = 8'd0;
+                    #10 x = 8'd1;
+                    #(64'd18446744073709551605) x = 8'd2;
+                end
+            endmodule
+        "#;
+        for mode in MODES {
+            let mut sim = build_in(source, mode);
+            sim.run_until(100).unwrap();
+            let x = sim.signal("x");
+            assert_eq!(sim.get(x), 1u8.into(), "{mode:?}");
+            assert_eq!(sim.next_event_time(), Some(u64::MAX), "{mode:?}");
+            sim.run_until(u64::MAX).unwrap();
+            assert_eq!(sim.get(x), 2u8.into(), "{mode:?}");
         }
     }
 
