@@ -61,6 +61,13 @@ pub const OBJECT_LOAD: u64 = 50;
 pub const OBJECT_STORE: u64 = 51;
 /// `class_of(object)`: its class, or 0 for `null`.
 pub const OBJECT_CLASS: u64 = 52;
+/// `random(object)`: 64 random bits from the object's RNG.
+pub const OBJECT_RANDOM: u64 = 53;
+/// `seed(object, seed)`: reset the object's RNG using the low 32 bits.
+pub const OBJECT_SEED: u64 = 54;
+/// `check(object)`: record a fault for an invalid receiver or, when the
+/// parameter is nonzero, a different runtime class. Return 1 on success, 0 on failure.
+pub const OBJECT_CHECK: u64 = 55;
 
 /// The opcode word of `op` with parameter `parameter`.
 pub const fn encode(op: u64, parameter: u64) -> u64 {
@@ -168,6 +175,12 @@ impl Heap {
                 0
             }
             OBJECT_CLASS => self.class_of(a as Handle).into(),
+            OBJECT_RANDOM => self.random_object(a as Handle),
+            OBJECT_SEED => {
+                self.seed_object(a as Handle, b as u32);
+                0
+            }
+            OBJECT_CHECK => u64::from(self.check_object(a as Handle, parameter as u32)),
             other => panic!("unknown heap operation {other}"),
         }
     }

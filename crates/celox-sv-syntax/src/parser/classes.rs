@@ -91,7 +91,8 @@ impl Parser<'_> {
             "extern" => &mut qualifiers.is_extern,
             "local" => &mut qualifiers.local,
             "protected" => &mut qualifiers.protected,
-            "rand" | "randc" => &mut qualifiers.rand,
+            "rand" => &mut qualifiers.rand,
+            "randc" => &mut qualifiers.randc,
             _ => return false,
         };
         *flag = true;
@@ -206,6 +207,7 @@ impl Parser<'_> {
             interface,
             base,
             interfaces,
+            has_constraints: false,
             properties: Vec::new(),
             methods: Vec::new(),
             tokens: TokenRange { start, end: start },

@@ -711,3 +711,82 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "1 8\n1 1\n0 8\n"))
+
+(case unconstrained_randomize
+  (source "randomize.sv" #"
+module Top(output bit done, output int errors);
+    class Sample;
+        rand bit flag;
+        rand bit signed [6:0] narrow;
+        rand bit [63:0] wide;
+        int untouched = 42;
+        int phase;
+        bit [63:0] observed;
+        function void pre_randomize();
+            if (phase != 0) untouched = -1;
+            phase = 1;
+        endfunction
+        function void post_randomize();
+            if (phase != 1) untouched = -2;
+            observed = wide;
+            phase = 0;
+        endfunction
+        function int again();
+            return randomize();
+        endfunction
+    endclass
+    Sample a, b, alias_a;
+    bit [63:0] saved, changed;
+    bit saved_flag;
+    bit signed [6:0] saved_small;
+    int ignored;
+    initial begin
+        a = new;
+        b = new;
+        alias_a = a;
+        a.srandom(0);
+        if (a.randomize() != 1) errors++;
+        saved = a.wide;
+        saved_flag = a.flag;
+        saved_small = a.narrow;
+        if (a.observed != saved || a.untouched != 42 || a.phase != 0) errors++;
+        changed = 0;
+        repeat (12) begin
+            if (a.again() != 1) errors++;
+            changed |= saved ^ a.wide;
+        end
+        if (changed[63:32] == 0 || changed[31:0] == 0) errors++;
+        alias_a.srandom(0);
+        repeat (5) begin
+            ignored = $urandom;
+            ignored = b.randomize();
+        end
+        if (a.randomize() != 1) errors++;
+        if (a.wide != saved || a.flag != saved_flag || a.narrow != saved_small) errors++;
+        if (a.observed != saved || a.untouched != 42 || a.phase != 0) errors++;
+        b.srandom(0);
+        if (b.randomize() != 1 || b.wide != saved) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomize_without_rand_members
+  (source "randomize_empty.sv" #"
+module Top(output bit done, output int errors);
+    class Empty;
+        int value = 5;
+        function void pre_randomize(); value += 1; endfunction
+        function void post_randomize(); value *= 2; endfunction
+    endclass
+    Empty object;
+    initial begin
+        object = new;
+        if (object.randomize() != 1 || object.value != 12) errors++;
+        if (object.randomize() != 1 || object.value != 26) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))

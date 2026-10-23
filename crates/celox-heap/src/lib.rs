@@ -150,14 +150,17 @@ impl Heap {
         self.strings.contains_key(&handle)
     }
 
-    /// Whether `other` holds the same strings under the same handles, the
-    /// same strings under construction, and names new strings alike.
+    /// Whether `other` holds the same strings and objects under the same
+    /// handles, including object RNG state and strings under construction,
+    /// and assigns the same handles to future allocations.
     pub fn same_contents(&self, other: &Heap) -> bool {
         self.strings == other.strings
             && self.next == other.next
             && self.buffers == other.buffers
             && self.free_buffers == other.free_buffers
             && self.pinned == other.pinned
+            && self.objects == other.objects
+            && self.next_object == other.next_object
     }
 
     /// The number of live strings, including `""`.
@@ -260,6 +263,35 @@ impl Heap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comparison_detects_object_rng_divergence_before_a_property_write() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(7, 8);
+        heap.seed_object(object, 42);
+        let mut other = heap.clone();
+        assert!(heap.same_contents(&other));
+        let drawn = other.random_object(object);
+        assert_eq!(heap.load(object, 0, 8), other.load(object, 0, 8));
+        assert!(!heap.same_contents(&other));
+        assert_eq!(heap.random_object(object), drawn);
+        assert!(heap.same_contents(&other));
+    }
+
+    #[test]
+    fn comparison_detects_object_contents_and_allocation_state() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(7, 8);
+        let mut other = heap.clone();
+        other.store(object, 0, 8, 99);
+        assert!(!heap.same_contents(&other));
+        heap.store(object, 0, 8, 99);
+        assert!(heap.same_contents(&other));
+        other.new_object(7, 8);
+        other.collect([Root::object(object)]);
+        // The same live object remains, but future allocation handles differ.
+        assert!(!heap.same_contents(&other));
+    }
 
     #[test]
     fn interning_gives_equal_contents_equal_handles() {
