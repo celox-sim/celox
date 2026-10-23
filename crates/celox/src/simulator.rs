@@ -150,6 +150,9 @@ mod host {
         comb_observer_scratch: Vec<crate::comb_activation::ObserverSnapshot>,
         comb_observer_reads: crate::comb_activation::ObserverReads,
         pub(super) comb_observer_initial_eval: bool,
+        /// The design has deferred assertions, whose actions mature at the
+        /// end of each time slot.
+        pub(crate) deferred_assertions: bool,
         /// Identity of the state layout, computed on first checkpoint use.
         pub(super) checkpoint_fingerprint: std::sync::OnceLock<u64>,
         /// State objects as state files name them, built on first use.
@@ -390,6 +393,21 @@ mod host {
     struct PendingRuntimeEvents {
         events: std::collections::VecDeque<RawRuntimeEvent>,
         missed: u64,
+        deferred: DeferredQueues,
+    }
+
+    /// The actions of deferred assertions that wait in the queue of their
+    /// process until they mature (IEEE 1800-2023 16.4.1).
+    #[derive(Clone, Default)]
+    struct DeferredQueues {
+        /// How the events of each site are deferred, and whether the site is
+        /// fatal, by site id. Empty without deferred assertions.
+        sites: Vec<Option<(celox_design::DeferredSite, bool)>>,
+        /// Waiting actions in issue order, with their queue and region.
+        waiting: Vec<(u32, celox_design::AssertionDeferral, RawRuntimeEvent)>,
+        /// Events lost to the ring since the last maturity, in a design with
+        /// fatal deferred actions: they may have held one.
+        missed: u64,
     }
 
     impl PendingRuntimeEvents {
@@ -399,7 +417,63 @@ mod host {
             }
         }
 
+        /// Queue the event, unless it is the action of a deferred assertion,
+        /// which waits, or a flush point, which discards the actions waiting
+        /// in its queue (16.4.2).
         fn push(&mut self, event: RawRuntimeEvent, capacity: usize) {
+            if let RawRuntimeEvent::Event { site_id, .. } = &event
+                && let Some(Some((deferred, _))) = self.deferred.sites.get(*site_id)
+            {
+                let site = *site_id as u32;
+                match *deferred {
+                    celox_design::DeferredSite::FlushPoint => {
+                        self.deferred.waiting.retain(|&(queue, ..)| queue != site);
+                    }
+                    celox_design::DeferredSite::Action { queue, region } => {
+                        self.deferred.waiting.push((queue, region, event));
+                    }
+                }
+                return;
+            }
+            if let RawRuntimeEvent::Missed { count } = event
+                && self
+                    .deferred
+                    .sites
+                    .iter()
+                    .flatten()
+                    .any(|&(_, fatal)| fatal)
+            {
+                self.deferred.missed += count;
+            }
+            self.push_ready(event, capacity);
+        }
+
+        /// The time slot ends: queue the waiting actions, those of the
+        /// Observed region (`#0`) before those of the Postponed region
+        /// (`final`). Returns the first fatal one, or [`RawRuntimeEvent::Missed`]
+        /// when events that may have been one were lost.
+        fn mature(&mut self, capacity: usize) -> Option<RawRuntimeEvent> {
+            let waiting = std::mem::take(&mut self.deferred.waiting);
+            let missed = std::mem::take(&mut self.deferred.missed);
+            let mut fatal = (missed > 0).then_some(RawRuntimeEvent::Missed { count: missed });
+            for region in [
+                celox_design::AssertionDeferral::Observed,
+                celox_design::AssertionDeferral::Final,
+            ] {
+                for (_, _, event) in waiting.iter().filter(|(_, r, _)| *r == region) {
+                    if fatal.is_none()
+                        && let RawRuntimeEvent::Event { site_id, .. } = event
+                        && let Some(Some((_, true))) = self.deferred.sites.get(*site_id)
+                    {
+                        fatal = Some(event.clone());
+                    }
+                    self.push_ready(event.clone(), capacity);
+                }
+            }
+            fatal
+        }
+
+        fn push_ready(&mut self, event: RawRuntimeEvent, capacity: usize) {
             if let RawRuntimeEvent::Missed { count } = event {
                 // Ring overwrite means every older pending record also lies
                 // outside the latest `capacity` records of the combined stream.
@@ -925,6 +999,18 @@ mod host {
                 &backend,
                 &program.runtime_schema.comb_observers,
             );
+            let sites = &program.runtime_schema.runtime_event_sites;
+            let deferred_sites = if sites.iter().any(|site| site.deferred.is_some()) {
+                sites
+                    .iter()
+                    .map(|site| {
+                        site.deferred
+                            .map(|deferred| (deferred, site.kind.is_fatal()))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let mut sim = Self {
                 backend,
                 program,
@@ -937,7 +1023,14 @@ mod host {
                 handle_slots: Default::default(),
                 heap_safepoints_blocked: false,
                 file_io: Default::default(),
-                pending_host_events: Default::default(),
+                pending_host_events: Arc::new(std::sync::Mutex::new(PendingRuntimeEvents {
+                    deferred: DeferredQueues {
+                        sites: deferred_sites.clone(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })),
+                deferred_assertions: !deferred_sites.is_empty(),
                 components: Default::default(),
                 component_simulation: None,
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
@@ -1305,6 +1398,39 @@ mod host {
                 .clone_from(&other.comb_observer_snapshots);
             self.comb_observer_initial_eval = other.comb_observer_initial_eval;
             self.host_watch.set_log(other.host_watch.log().to_vec());
+        }
+
+        /// The time slot ends: the actions of deferred assertions that their
+        /// process did not flush mature, `#0` before `final` (IEEE 1800-2023
+        /// 16.4). A fatal one ends the simulation with an error.
+        pub(crate) fn mature_deferred_assertions(&mut self) -> Result<(), RuntimeErrorCode> {
+            if !self.deferred_assertions {
+                return Ok(());
+            }
+            self.stash_runtime_events();
+            let capacity = self.backend.layout().runtime_event_capacity;
+            let fatal = self.pending_host_events.lock().unwrap().mature(capacity);
+            if let Some(RawRuntimeEvent::Missed { count }) = fatal {
+                return Err(RuntimeErrorCode::Runtime {
+                    message: format!(
+                        "missed {count} runtime events, which may have held a deferred $fatal"
+                    ),
+                    signals: Vec::new(),
+                });
+            }
+            let Some(RuntimeEvent::Report(report)) = fatal.and_then(|raw| {
+                render_raw_runtime_event(
+                    raw,
+                    &self.program.runtime_schema.runtime_event_sites,
+                    RuntimeFormatContext::default(),
+                )
+            }) else {
+                return Ok(());
+            };
+            Err(RuntimeErrorCode::Runtime {
+                message: message_diagnostic(&report.message),
+                signals: Vec::new(),
+            })
         }
 
         /// Move the events in the backend's buffer to the queue that
@@ -1839,7 +1965,8 @@ mod host {
         fn fire(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
             let result = self.fire_unit(event);
             self.heap_safepoint();
-            result.and(self.take_heap_fault())
+            result.and(self.take_heap_fault())?;
+            self.mature_deferred_assertions()
         }
 
         fn fire_unit(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
@@ -2000,6 +2127,9 @@ mod host {
             self.note_edge(Ok(outcome))
         }
 
+        /// Settle the outcome of [`celox_runtime::run_edge`] or
+        /// [`celox_runtime::run_edges`], and mature the deferred assertions
+        /// they ran.
         fn note_edge(
             &mut self,
             outcome: Result<celox_runtime::EdgeOutcome, celox_runtime::Halt>,
@@ -2021,7 +2151,8 @@ mod host {
                 Err(celox_runtime::Halt::Finish | celox_runtime::Halt::Stop) => self.dirty = true,
                 Err(celox_runtime::Halt::Error(error)) => return Err(error),
             }
-            Ok(())
+            // The edges are a time slot, as a tick is.
+            self.mature_deferred_assertions()
         }
 
         /// A rising edge of `event`'s signal; see [`Self::edge`].
@@ -2225,6 +2356,7 @@ mod host {
             let result = self.tick_events_unit(&fired);
             self.heap_safepoint();
             result.and(self.take_heap_fault())?;
+            self.mature_deferred_assertions()?;
             for &event in events {
                 let info = self.event_edges[event.id()];
                 self.backend

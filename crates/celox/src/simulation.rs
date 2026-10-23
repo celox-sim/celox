@@ -233,7 +233,13 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
 
     fn compiled_slots(&self) -> celox_runtime::CompiledSlots {
         use celox_runtime::CompiledSlots;
-        if self.frozen || !self.components.is_empty() || !self.backend.runs_compiled_scheduler() {
+        // Deferred assertions mature when a slot is over, which the
+        // runtime's loop tells apart from the end of a step.
+        if self.frozen
+            || !self.components.is_empty()
+            || self.deferred_assertions
+            || !self.backend.runs_compiled_scheduler()
+        {
             return CompiledSlots::None;
         }
         // Waveforms record, and the heap collects, at every slot boundary.
@@ -252,6 +258,12 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
     fn finish_timed_step(&mut self, timestamp: u64) {
         self.dirty = false;
         self.dump_unless_rewound(timestamp);
+    }
+
+    /// Deferred assertions mature in the Observed and Postponed regions of
+    /// the slot (IEEE 1800-2023 16.4).
+    fn try_end_time_slot(&mut self, _timestamp: u64) -> Result<(), Halt> {
+        self.mature_deferred_assertions().map_err(Halt::Error)
     }
 
     fn try_finish_timed_step(&mut self, timestamp: u64) -> Result<(), Halt> {

@@ -555,6 +555,7 @@ impl<'a> FfParser<'a> {
             scope: None,
             location: None,
             assertion: None,
+            deferred: None,
             arg_widths: value_args
                 .iter()
                 .map(|arg| self.get_expression_width(&arg.0))

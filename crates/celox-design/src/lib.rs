@@ -157,6 +157,22 @@ pub enum AssertionDeferral {
     Final,
 }
 
+/// How the host defers the events of a site (IEEE 1800-2023 16.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DeferredSite {
+    /// A flush point of a process with deferred assertions (16.4.2): the
+    /// actions its queue holds are discarded. The events of this site are
+    /// not shown.
+    FlushPoint,
+    /// The action of a deferred assertion: its event waits in the queue of
+    /// the flush-point site `queue` of the same instance, numbered like the
+    /// sites of its module, until `region` of the time slot.
+    Action {
+        queue: u32,
+        region: AssertionDeferral,
+    },
+}
+
 /// Which action block of an assertion issues a report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AssertionOutcome {
@@ -191,6 +207,10 @@ pub struct RuntimeEventSite {
     /// The assertion whose action issues this report.
     #[serde(default)]
     pub assertion: Option<AssertionSite>,
+    /// How the host defers the events of this site, for the processes of
+    /// deferred assertions.
+    #[serde(default)]
+    pub deferred: Option<DeferredSite>,
     pub arg_widths: Vec<usize>,
     pub arg_signed: Vec<bool>,
     pub arg_is_string: Vec<bool>,
@@ -1962,6 +1982,7 @@ mod tests {
             scope: None,
             location: None,
             assertion: None,
+            deferred: None,
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),
