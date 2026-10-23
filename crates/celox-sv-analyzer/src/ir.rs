@@ -77,7 +77,21 @@ pub struct Module {
 impl Module {
     /// Represent selected edge procedures as scheduled processes. A host
     /// request must finish synchronously before the following statement runs.
-    pub fn schedule_edge_processes(mut self, mut select: impl FnMut(&FfProcess) -> bool) -> Self {
+    pub fn schedule_edge_processes(self, select: impl FnMut(&FfProcess) -> bool) -> Self {
+        self.edge_processes_as_processes(select, true)
+    }
+
+    /// Run selected plain `always` edge procedures as ordinary processes that
+    /// wait on the same events, for those that do not fit the flip-flop shape.
+    pub fn run_edge_processes_as_processes(self, select: impl FnMut(&FfProcess) -> bool) -> Self {
+        self.edge_processes_as_processes(select, false)
+    }
+
+    fn edge_processes_as_processes(
+        mut self,
+        mut select: impl FnMut(&FfProcess) -> bool,
+        scheduled_edge: bool,
+    ) -> Self {
         let mut retained = Vec::new();
         for process in std::mem::take(&mut self.ff_processes) {
             if !select(&process) {
@@ -101,7 +115,7 @@ impl Module {
             self.initial_processes.push(InitialProcess {
                 creation_order: process.creation_order,
                 site: process.site,
-                scheduled_edge: true,
+                scheduled_edge,
                 condition: None,
                 body: vec![Stmt::Loop {
                     kind: LoopKind::Forever,

@@ -2701,7 +2701,8 @@ pub(super) fn initial_processes_from_scope(
             celox_sv_syntax::ProcedureKind::Initial => false,
             celox_sv_syntax::ProcedureKind::Always
                 if validation::always_kind(procedure, tree.declarations())?
-                    == validation::AlwaysKind::Process =>
+                    == validation::AlwaysKind::Process
+                    || ff_process::always_falls_back_to_process(procedure, tree)? =>
             {
                 true
             }

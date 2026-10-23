@@ -1607,8 +1607,8 @@ chapter-9/9.4.1--delay_control-two-blocks-sim.sv	2state	pass
 chapter-9/9.4.1--delay_control-two-blocks-sim.sv	4state	pass
 chapter-9/9.4.1--delay_control.sv	2state	pass
 chapter-9/9.4.1--delay_control.sv	4state	pass
-chapter-9/9.4.2--event_control_edge.sv	2state	fail
-chapter-9/9.4.2--event_control_edge.sv	4state	fail
+chapter-9/9.4.2--event_control_edge.sv	2state	pass
+chapter-9/9.4.2--event_control_edge.sv	4state	pass
 chapter-9/9.4.2--event_control_negedge.sv	2state	pass
 chapter-9/9.4.2--event_control_negedge.sv	4state	pass
 chapter-9/9.4.2--event_control_posedge.sv	2state	pass

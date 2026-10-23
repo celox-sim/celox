@@ -160,6 +160,9 @@ timed_cases! {
     fn blocking_write_waiters_run_before_nonblocking_updates = "timing::blocking_write_waiters_run_before_nonblocking_updates";
     fn blocking_write_waiters_rearm_before_nonblocking_updates = "timing::blocking_write_waiters_rearm_before_nonblocking_updates";
     fn blocking_write_edges_read_values_before_nonblocking_updates = "timing::blocking_write_edges_read_values_before_nonblocking_updates";
+    fn plain_always_expression_edges_run_as_processes = "timing::plain_always_expression_edges_run_as_processes";
+    fn plain_always_multi_bit_edges_follow_the_lsb = "timing::plain_always_multi_bit_edges_follow_the_lsb";
+    fn plain_always_edges_without_a_reset_run_as_processes = "timing::plain_always_edges_without_a_reset_run_as_processes";
 }
 
 #[test]
@@ -474,19 +477,19 @@ fn unimplemented_timing_features_are_rejected() {
             "delayed continuous assignment",
             444,
         ),
-        // #1708: a plain `always` that is not a flip-flop runs as a process.
+        // A plain `always` of these forms runs as a process.
         (
-            "bit [3:0] v; int n; always @(posedge v[0]) n++;",
+            "bit [3:0] v; int n; always_ff @(posedge v[0]) n <= n + 1;",
             "always_ff event expression",
             464,
         ),
         (
-            "bit [3:0] v; int n; always @(posedge v) n++;",
+            "bit [3:0] v; int n; always_ff @(posedge v) n <= n + 1;",
             "multi-bit always_ff event signal",
             88,
         ),
         (
-            "bit a, b; int n; always @(posedge a or posedge b) n <= n + 1;",
+            "bit a, b; int n; always_ff @(posedge a or posedge b) n <= n + 1;",
             "always_ff event control",
             88,
         ),
@@ -534,6 +537,39 @@ fn unimplemented_timing_features_are_rejected() {
             "{body}: {error}"
         );
     }
+}
+
+/// A real has no least significant bit, so no edge event control applies to
+/// one (IEEE 1800-2023 6.12); a change of its value is an event.
+#[test]
+fn edge_events_of_reals_are_errors() {
+    for (body, edge) in [
+        ("real r; initial @(posedge r);", "posedge"),
+        ("real r; int n; always @(negedge r) n++;", "negedge"),
+        ("real r; initial @(edge (r * 2.0));", "edge"),
+        (
+            "shortreal r; bit c; int n; always @(posedge c or posedge r) n++;",
+            "posedge",
+        ),
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("real_edge.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("`{body}` must be rejected"))
+        .to_string();
+        assert!(
+            error.contains(&format!("`{edge}` of a real expression")),
+            "{body}: {error}"
+        );
+    }
+    let source = "module Top; real r; initial @(r); endmodule";
+    celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("real.sv"))], "Top")
+        .build()
+        .expect("a change of a real is an event");
 }
 
 /// Only `initial` and `always` processes may suspend (IEEE 1800-2023
