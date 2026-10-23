@@ -60,6 +60,9 @@ pub struct EventEdge {
     pub kind: Option<DomainKind>,
     /// Combinational logic reads the signal.
     pub comb_read: bool,
+    /// A run of the event's own domain can observe the signal's level:
+    /// combinational logic or one of the domain's flip-flops reads it.
+    pub level_read: bool,
     /// The edge opposite to [`Self::active_edge`] can run a domain: the
     /// event's own, or that of a clock computed combinationally from the
     /// signal that this edge can move to its active edge. When it cannot,
@@ -115,10 +118,12 @@ pub fn build_event_edges<B: SimBackend>(
         .map(|address| {
             let canonical = events.canonical(*address);
             let kind = kinds.get(&canonical).copied();
+            let comb_read = events.combinationally_read.contains(&canonical);
             let mut info = EventEdge {
                 signal: backend.resolve_signal(&canonical),
                 kind,
-                comb_read: events.combinationally_read.contains(&canonical),
+                comb_read,
+                level_read: comb_read || !events.level_unread_by_domain.contains(&canonical),
                 inactive_runs: false,
             };
             let inactive = info.active_edge().opposite();
@@ -291,6 +296,12 @@ impl<B, F: FnMut(&mut B, SignalRef, u8)> SignalWrite<B> for F {
 /// A plain write of the level, for hosts that observe nothing.
 pub fn set_level<B: SimBackend>(backend: &mut B, signal: SignalRef, level: u8) {
     backend.set(signal, level);
+}
+
+/// Whether `info`'s signal is at the known level `edge` leaves it at.
+#[inline]
+pub fn at_level<B: SimBackend>(backend: &B, info: &EventEdge, edge: Edge) -> bool {
+    level(backend, info.signal) == edge.level()
 }
 
 /// Move `info`'s signal to the level of `edge` through `write`. Returns the

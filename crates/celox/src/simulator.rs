@@ -1736,6 +1736,15 @@ mod host {
             // stores (4 KiB aliasing), which made a period cost almost two
             // domain runs. The inactive edge runs nothing and only stores.
             let observers = !self.program.runtime_schema.comb_observers.is_empty();
+            if !info.level_read
+                && !observers
+                && celox_runtime::at_level(&self.backend, &info, inactive)
+            {
+                // Nothing the domain runs reads the level, which is the
+                // inactive one before and after the period: both stores are
+                // unobservable, and the period is one run of the domain.
+                return self.fire(event);
+            }
             let moved = celox_runtime::move_signal(
                 &mut self.backend,
                 &info,

@@ -131,6 +131,26 @@ module Dut (
 endmodule
 "#;
 
+/// A plain clock nothing reads as data, and one a flip-flop samples.
+const PLAIN: &str = r#"
+`timescale 1ns/1ns
+module Dut (
+    input  logic       clk,
+    input  logic       clk2,
+    input  logic       en,
+    input  logic       rst,
+    output logic [7:0] p,
+    output logic [7:0] q
+);
+    always_ff @(posedge clk or posedge rst)
+        if (rst) p <= 8'd0;
+        else p <= p + 8'd1;
+    always_ff @(posedge clk2 or posedge rst)
+        if (rst) q <= 8'd0;
+        else q <= {6'd0, clk2, en};
+endmodule
+"#;
+
 #[derive(Clone, Copy, Debug)]
 enum Op {
     Set(&'static str, u8),
@@ -334,4 +354,32 @@ fn an_inverted_clock_domain_runs_on_the_inactive_edge() {
 #[test]
 fn a_divided_domain_runs_only_when_the_divider_rises() {
     check(DIVIDER, &["p", "d", "lvl"], false, PERIODS);
+}
+
+/// A plain tick whose level stores nothing observes is one run of the
+/// domain; a domain that samples its clock still sees it high. A tick from
+/// an unknown or active level still moves the signal.
+#[test]
+fn a_plain_tick_skips_only_unobservable_level_stores() {
+    for four_state in [false, true] {
+        let sim = Simulator::from_sv_sources(vec![(PLAIN, Path::new("dut.sv"))], "Dut")
+            .four_state(four_state)
+            .build()
+            .unwrap();
+        let level_read = |name| sim.event_edges()[sim.event(name).id()].level_read;
+        assert!(!level_read("clk"), "nothing reads the level of clk");
+        assert!(level_read("clk2"), "a flip-flop samples clk2");
+    }
+    let mut ops = PERIODS.to_vec();
+    ops.extend([
+        Op::Tick(&["clk2"]),
+        Op::Set("en", 1),
+        Op::Tick(&["clk2"]),
+        Op::Edge("clk", 1),
+        Op::Tick(&["clk"]),
+        Op::Tick(&["clk"]),
+        Op::Edge("clk2", 1),
+        Op::Tick(&["clk2"]),
+    ]);
+    check(PLAIN, &["p", "q"], false, &ops);
 }

@@ -924,6 +924,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         combinational_derived,
         independent_derived,
         combinationally_read,
+        level_unread_by_domain,
     } = timed_sub!(
         "analyze_clock_dependencies",
         analyze_clock_dependencies(
@@ -1770,6 +1771,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             .collect(),
         independent_derived: independent_derived.into_iter().map(project).collect(),
         combinationally_read: combinationally_read.into_iter().map(project).collect(),
+        level_unread_by_domain: level_unread_by_domain.into_iter().map(project).collect(),
         combinational_derived: combinational_derived
             .into_iter()
             .map(|(event, clocks)| {
@@ -4396,6 +4398,8 @@ struct ClockAnalysis {
     independent_derived: BTreeSet<AbsoluteAddr>,
     /// Events whose signal combinational logic reads.
     combinationally_read: BTreeSet<AbsoluteAddr>,
+    /// Events whose own domain does not read their signal.
+    level_unread_by_domain: BTreeSet<AbsoluteAddr>,
 }
 
 fn analyze_clock_dependencies(
@@ -4790,6 +4794,27 @@ fn analyze_clock_dependencies(
         }
         Some((reads, writes))
     };
+    // A domain reads its own clock's level when a flip-flop samples it as
+    // data. An external call may read anything.
+    let canonical = |address: AbsoluteAddr| clock_domains.get(&address).copied().unwrap_or(address);
+    let level_unread_by_domain: BTreeSet<AbsoluteAddr> = eval_apply_ffs
+        .iter()
+        .filter(|(domain, units)| {
+            let domain = canonical(**domain);
+            !units
+                .iter()
+                .flat_map(|unit| unit.blocks.values())
+                .flat_map(|block| &block.instructions)
+                .any(|instruction| match instruction {
+                    SIRInstruction::Load(_, address, ..) | SIRInstruction::Commit(address, ..) => {
+                        canonical(address.absolute_addr()) == domain
+                    }
+                    SIRInstruction::ExternCall { .. } => true,
+                    _ => false,
+                })
+        })
+        .map(|(domain, _)| canonical(*domain))
+        .collect();
     let mut independent_derived = BTreeSet::new();
     let combinationally_read: BTreeSet<AbsoluteAddr> = comb_deps
         .values()
@@ -4837,6 +4862,7 @@ fn analyze_clock_dependencies(
         combinational_derived,
         independent_derived,
         combinationally_read,
+        level_unread_by_domain,
     }
 }
 
