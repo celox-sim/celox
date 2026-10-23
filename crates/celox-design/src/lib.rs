@@ -880,10 +880,19 @@ pub struct RuntimeSchema<A> {
 
 /// Width of [`SchedulerSlots::limit`], [`SchedulerSlots::now`],
 /// [`SchedulerSlots::exit_arg`], [`SchedulerSlots::count`],
-/// [`SchedulerSlots::current`], [`SchedulerSlots::levels`] and every [`SchedulerSlots::wake`] object.
+/// [`SchedulerSlots::current`], [`SchedulerSlots::levels`],
+/// [`SchedulerSlots::ready`], [`SchedulerSlots::clock_value`],
+/// [`SchedulerSlots::clock_armed`] and every
+/// [`SchedulerSlots::wake`] object, and of each element of
+/// [`SchedulerSlots::clock_next`] and [`SchedulerSlots::clock_period`].
 pub const SCHEDULER_TIME_WIDTH: usize = 64;
+/// The most host periodic clocks a compiled scheduler runs: one element of
+/// [`SchedulerSlots::clock_next`] and [`SchedulerSlots::clock_period`], and
+/// one bit of the clock masks, per entry of [`SchedulerSchema::clocks`].
+pub const SCHEDULER_CLOCKS: usize = 64;
 /// Width of [`SchedulerSlots::exit`], [`SchedulerSlots::finish`],
-/// [`SchedulerSlots::cont`] and every [`SchedulerSlots::waiting`] object.
+/// [`SchedulerSlots::cont`] and every [`SchedulerSlots::waiting`] and
+/// [`SchedulerSlots::baseline`] object.
 pub const SCHEDULER_FLAG_WIDTH: usize = 8;
 
 /// Hidden state objects through which a compiled scheduler and the runtime
@@ -911,11 +920,25 @@ pub struct SchedulerSlots<A> {
     /// The levels of the event signals at the start of the last slot, one
     /// bit per event in event order.
     pub levels: A,
+    /// The kernels ready to run in the current slot, one bit per kernel in
+    /// kernel order.
+    pub ready: A,
     /// The time each process kernel resumes at, in kernel order, valid
     /// where [`Self::waiting`] is set.
     pub wake: Vec<A>,
-    /// Whether each process kernel waits for its wake time.
+    /// Whether each process kernel waits for its wake time or event.
     pub waiting: Vec<A>,
+    /// The level a kernel waiting for an event last saw its signal at.
+    pub baseline: Vec<A>,
+    /// The time of each host clock's next edge, one element per entry of
+    /// [`SchedulerSchema::clocks`], valid where [`Self::clock_armed`] is set.
+    pub clock_next: A,
+    /// The period of each host clock, one element per clock.
+    pub clock_period: A,
+    /// The level each host clock's next edge sets, one bit per clock.
+    pub clock_value: A,
+    /// Whether each host clock has a next edge, one bit per clock.
+    pub clock_armed: A,
 }
 
 impl<A> SchedulerSlots<A> {
@@ -930,8 +953,14 @@ impl<A> SchedulerSlots<A> {
             count: map(self.count),
             current: map(self.current),
             levels: map(self.levels),
+            ready: map(self.ready),
             wake: self.wake.into_iter().map(&mut map).collect(),
-            waiting: self.waiting.into_iter().map(map).collect(),
+            waiting: self.waiting.into_iter().map(&mut map).collect(),
+            baseline: self.baseline.into_iter().map(&mut map).collect(),
+            clock_next: map(self.clock_next),
+            clock_period: map(self.clock_period),
+            clock_value: map(self.clock_value),
+            clock_armed: map(self.clock_armed),
         }
     }
 
@@ -947,10 +976,16 @@ impl<A> SchedulerSlots<A> {
             &self.count,
             &self.current,
             &self.levels,
+            &self.ready,
+            &self.clock_next,
+            &self.clock_period,
+            &self.clock_value,
+            &self.clock_armed,
         ]
         .into_iter()
         .chain(&self.wake)
         .chain(&self.waiting)
+        .chain(&self.baseline)
     }
 }
 
@@ -967,6 +1002,9 @@ pub enum SchedulerExit {
     DelayOverflow = 2,
     /// A process suspended in a way the scheduler does not compile.
     Internal = 3,
+    /// The next edge of host clock [`SchedulerSlots::exit_arg`] overflows
+    /// the simulation time.
+    ClockOverflow = 4,
 }
 
 impl SchedulerExit {
@@ -976,6 +1014,7 @@ impl SchedulerExit {
             1 => Some(Self::Finish),
             2 => Some(Self::DelayOverflow),
             3 => Some(Self::Internal),
+            4 => Some(Self::ClockOverflow),
             _ => None,
         }
     }
@@ -992,9 +1031,12 @@ pub struct SchedulerSchema<A> {
     /// Per process kernel, why the scheduler does not run it, or `None` when
     /// it does.
     pub fallback: Vec<Option<String>>,
-    /// The event signals the scheduler's kernels write, in the order of
-    /// the bits of [`SchedulerSlots::levels`].
+    /// The event signals the scheduler's kernels write or its host clocks
+    /// may drive, in the order of the bits of [`SchedulerSlots::levels`].
     pub events: Vec<A>,
+    /// The event signals a host periodic clock may drive inside the
+    /// scheduler's slots, in the order of its clock slots.
+    pub clocks: Vec<A>,
 }
 
 impl<A> SchedulerSchema<A> {
@@ -1004,7 +1046,8 @@ impl<A> SchedulerSchema<A> {
             slots: self.slots.map(&mut map),
             unit: self.unit,
             fallback: self.fallback,
-            events: self.events.into_iter().map(map).collect(),
+            events: self.events.into_iter().map(&mut map).collect(),
+            clocks: self.clocks.into_iter().map(map).collect(),
         }
     }
 }
