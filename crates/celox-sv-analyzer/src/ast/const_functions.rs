@@ -175,6 +175,8 @@ impl ConstantFunctions {
             ) => std::cmp::Ordering::Equal,
             (super::warnings::AnalyzerWarning::MixedTimescale, _) => std::cmp::Ordering::Less,
             (_, super::warnings::AnalyzerWarning::MixedTimescale) => std::cmp::Ordering::Greater,
+            // This collector emits only ExitOutsideProgram warnings.
+            _ => std::cmp::Ordering::Equal,
         });
         warnings
     }

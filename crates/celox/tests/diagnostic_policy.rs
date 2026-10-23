@@ -614,3 +614,122 @@ mod inferred_latch {
         );
     }
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn interface_array_queries_require_a_recoverable_diagnostic_override() {
+    use std::path::Path;
+    let source = "interface Lane; logic v; endinterface module Top(output wire [7:0] y); Lane lanes[3:2](); assign y=$size(lanes); endmodule";
+    let build =
+        || Simulator::from_sv_sources(vec![(source, Path::new("size_extension.sv"))], "Top");
+    let error = build().build_cranelift().err().unwrap();
+    assert!(
+        matches!(error.kind(), SimulatorErrorKind::DiagnosticPolicy(_)),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("interface_array_query"),
+        "{error}"
+    );
+    for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
+        let mut sim = build()
+            .diagnostic_policy(policy("interface_array_query", level))
+            .build_cranelift()
+            .unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+        assert_eq!(
+            sim.warnings().len(),
+            usize::from(level == DiagnosticLevel::Warn)
+        );
+        if let Some(warning) = sim.warnings().first() {
+            let rendered = celox::render_diagnostic(warning);
+            assert!(rendered.contains("size_extension.sv"), "{rendered}");
+        }
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn interface_array_extension_keeps_interfaces_out_of_data_expressions() {
+    use std::path::Path;
+    for expression in [
+        "$bits(lanes)",
+        "$left(lanes)",
+        "$size(lanes[0])",
+        "$size(lanes,missing)",
+        "$size(lanes,dim)",
+        "lanes",
+    ] {
+        let source = format!(
+            "interface Lane; logic v; endinterface module Top(input int dim,output wire [31:0] y); Lane lanes[2](); assign y={expression}; endmodule"
+        );
+        assert!(
+            Simulator::from_sv_sources(vec![(&source, Path::new("bad_interface_query.sv"))], "Top")
+                .diagnostic_policy(policy("interface_array_query", DiagnosticLevel::Allow))
+                .build_cranelift()
+                .is_err(),
+            "{expression}"
+        );
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn interface_array_query_warning_survives_a_later_analysis_error() {
+    use std::path::Path;
+    let source = "interface Lane; logic v; endinterface module Top(output wire y); Lane lanes[2](); localparam N=$size(lanes); assign y=missing; endmodule";
+    let error = Simulator::from_sv_sources(vec![(source, Path::new("later_error.sv"))], "Top")
+        .diagnostic_policy(policy("interface_array_query", DiagnosticLevel::Warn))
+        .build_cranelift()
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("missing"), "{error}");
+    assert_eq!(error.warnings().len(), 1, "{error}");
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn interface_array_query_policy_covers_formals_and_generated_scopes() {
+    use std::path::Path;
+    for source in [
+        "interface Lane; logic v; endinterface module Reader(Lane ports[2],output wire [7:0] y); assign y=$size(ports); endmodule module Top(output wire [7:0] y); Lane lanes[2](); Reader r(.ports(lanes),.y(y)); endmodule",
+        "interface Lane; logic v; endinterface module Top(output wire [7:0] y); if(1) begin: bank Lane lanes[2](); assign y=$size(lanes); end endmodule",
+        "interface Lane; logic v; endinterface module Top(output wire [7:0] y); Lane lanes[2](); function automatic int count(); return $size(lanes); endfunction assign y=count(); endmodule",
+    ] {
+        let error = Simulator::from_sv_sources(vec![(source, Path::new("query_scope.sv"))], "Top")
+            .build_cranelift()
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().contains("interface_array_query"),
+            "{error}"
+        );
+        let mut sim =
+            Simulator::from_sv_sources(vec![(source, Path::new("query_scope.sv"))], "Top")
+                .diagnostic_policy(policy("interface_array_query", DiagnosticLevel::Allow))
+                .build_cranelift()
+                .unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn invalid_interface_array_query_dimensions_return_integer_unknowns() {
+    use std::path::Path;
+    let source = "interface Lane; logic v; endinterface module Top(output wire [31:0] zero,extra,output wire [63:0] wide); Lane lanes[2](); assign zero=$size(lanes,0); assign extra=$size(lanes,2); assign wide=$size(lanes,2); endmodule";
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("query_rank.sv"))], "Top")
+        .four_state(true)
+        .diagnostic_policy(policy("interface_array_query", DiagnosticLevel::Allow))
+        .build_cranelift()
+        .unwrap();
+    let wide = sim.signal("wide");
+    assert_eq!(sim.get_four_state(wide), (u64::MAX.into(), u64::MAX.into()));
+    for name in ["zero", "extra"] {
+        let signal = sim.signal(name);
+        assert_eq!(
+            sim.get_four_state(signal),
+            (u32::MAX.into(), u32::MAX.into())
+        );
+    }
+}

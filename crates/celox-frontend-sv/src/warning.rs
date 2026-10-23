@@ -40,6 +40,8 @@ pub enum FrontendWarningKind {
     /// IEEE 1800-2023 3.14.2.3 requires consistent explicit timing declarations.
     #[error("mixed explicit and default time units or precisions across design elements")]
     MixedTimescale,
+    #[error("`$size` on an interface array is a language extension")]
+    InterfaceArrayQuery,
     /// IEEE 1800-2023 9.2.2.4 restricts writes by other processes.
     #[error("multiple variable drivers for `{signal}` in `{module}` include an always_ff process")]
     MultipleAlwaysFfDrivers { module: String, signal: String },
@@ -96,6 +98,9 @@ pub(crate) fn analyzer_warnings(
     found: &[celox_sv_analyzer::ir::AnalyzerWarning],
 ) -> impl Iterator<Item = PendingWarning> + '_ {
     found.iter().map(|warning| match warning {
+        celox_sv_analyzer::ir::AnalyzerWarning::InterfaceArrayQuery { site } => {
+            (FrontendWarningKind::InterfaceArrayQuery, site.clone())
+        }
         celox_sv_analyzer::ir::AnalyzerWarning::MixedTimescale => {
             (FrontendWarningKind::MixedTimescale, None)
         }
@@ -149,6 +154,7 @@ impl miette::Diagnostic for FrontendWarning {
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self.kind {
             FrontendWarningKind::MixedTimescale => "mixed_timescale",
+            FrontendWarningKind::InterfaceArrayQuery => "interface_array_query",
             FrontendWarningKind::MultipleAlwaysFfDrivers { .. } => "multiple_always_ff_drivers",
             FrontendWarningKind::UnpackedPortDefault { .. } => "unpacked_port_default",
             FrontendWarningKind::InferredLatch => "inferred_latch",
@@ -165,6 +171,9 @@ impl miette::Diagnostic for FrontendWarning {
         Some(Box::new(match self.kind {
             FrontendWarningKind::InferredLatch => {
                 "assign every output on every path, or configure diagnostics.inferred_latch as warn or allow"
+            }
+            FrontendWarningKind::InterfaceArrayQuery => {
+                "interface arrays are not data arrays in IEEE 1800-2023 20.7; set interface_array_query=warn or allow for compatibility"
             }
             FrontendWarningKind::MixedTimescale => {
                 "declare timeunit/timeprecision consistently; undeclared scopes use 1ns/1ps when this check is relaxed"
