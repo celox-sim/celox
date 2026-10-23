@@ -94,6 +94,10 @@ timed_cases! {
     fn blocking_ff_clock_edges_trigger_their_domains_before_inactive_work = "timing::blocking_ff_clock_edges_trigger_their_domains_before_inactive_work";
     fn nonblocking_assignments_in_processes_update_in_the_nba_region = "timing::nonblocking_assignments_in_processes_update_in_the_nba_region";
     fn staged_nonblocking_updates_keep_their_order = "timing::staged_nonblocking_updates_keep_their_order";
+    fn process_nonblocking_assignments_to_array_elements = "timing::process_nonblocking_assignments_to_array_elements";
+    fn process_nonblocking_assignments_at_run_time_positions = "timing::process_nonblocking_assignments_at_run_time_positions";
+    fn process_nonblocking_assignments_outside_their_target = "timing::process_nonblocking_assignments_outside_their_target";
+    fn process_nonblocking_assignments_at_unknown_positions = "timing::process_nonblocking_assignments_at_unknown_positions";
     fn narrow_nonblocking_updates_keep_the_other_bits = "timing::narrow_nonblocking_updates_keep_the_other_bits";
     fn four_state_nonblocking_updates_keep_unknown_bits = "timing::four_state_nonblocking_updates_keep_unknown_bits";
     fn nonblocking_ff_stores_remain_pending_during_inactive_work = "timing::nonblocking_ff_stores_remain_pending_during_inactive_work";
@@ -493,22 +497,6 @@ fn unimplemented_timing_features_are_rejected() {
             "always_ff event control",
             88,
         ),
-        // #1709
-        (
-            "bit [7:0] m[4]; initial #1 m[1] <= 5;",
-            "nonblocking assignment to an unpacked array in a process",
-            88,
-        ),
-        (
-            "bit [3:0] q; int i = 2; initial #1 q[i] <= 1;",
-            "nonblocking assignment with a run-time position in a process",
-            88,
-        ),
-        (
-            "bit [3:0] q; initial #1 q[5] <= 1;",
-            "nonblocking assignment outside its target",
-            88,
-        ),
         // #1710
         (
             "bit q; task t(); #1 q = 1; endtask always @* t();",
@@ -868,4 +856,93 @@ fn counted_wait_baselines_survive_a_state_file() {
         loaded.run_until(10).unwrap();
         assert_eq!(counts(&mut loaded), expected, "four_state={four_state}");
     }
+}
+
+/// The run-time position cases cover staged and queued sites alike.
+#[test]
+fn run_time_nonblocking_positions_cover_staged_and_queued_sites() {
+    for (case, staged, queued) in [
+        (
+            "timing::process_nonblocking_assignments_at_run_time_positions",
+            &["r", "p"][..],
+            &["q"][..],
+        ),
+        (
+            "timing::process_nonblocking_assignments_to_array_elements",
+            &[][..],
+            &["m", "grid", "mem"][..],
+        ),
+    ] {
+        let design = celox_test_suite::sv::cases()
+            .find(|candidate| candidate.name == case)
+            .unwrap()
+            .design();
+        let sources = design
+            .sources
+            .iter()
+            .map(|source| (source.text.as_str(), source.path.as_path()))
+            .collect::<Vec<_>>();
+        let simulation = celox::Simulation::from_sv_sources(sources, &design.top)
+            .build()
+            .unwrap();
+        let program = simulation.program();
+        let sites = |name: &str| {
+            let target = program.get_addr(&[], &[name]).unwrap();
+            let sites = program
+                .runtime_schema
+                .nba_sites
+                .iter()
+                .filter(|site| site.target == target)
+                .collect::<Vec<_>>();
+            assert!(
+                sites.iter().any(|site| site.position.is_some()),
+                "{name} has a run-time position"
+            );
+            sites
+        };
+        for name in staged {
+            assert!(
+                sites(name).iter().all(|site| site.pending.is_some()),
+                "{name} stages its updates"
+            );
+        }
+        for name in queued {
+            assert!(
+                sites(name).iter().all(|site| site.pending.is_none()),
+                "{name} queues its updates"
+            );
+        }
+    }
+}
+
+/// A nonblocking assignment to a slice of an unpacked array whose range
+/// runs against the array's takes the elements in reverse order, as a
+/// blocking one does (IEEE 1800-2023 7.6). Neither Icarus nor Verilator
+/// compiles the slice.
+#[test]
+fn nonblocking_assignments_to_reversed_array_slices_reverse_the_elements() {
+    let source = r#"
+        module Top(output logic [31:0] elements);
+            timeunit 1ps / 1ps;
+            logic [7:0] m [4];
+            logic [7:0] w [2];
+            assign elements = {m[3], m[2], m[1], m[0]};
+            initial begin
+                m[0] = 8'd1; m[1] = 8'd2; m[2] = 8'd3; m[3] = 8'd4;
+                w[0] = 8'haa; w[1] = 8'hbb;
+                #1;
+                m[1:0] <= w;
+                m[3:2] = w;
+            end
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("reversed_slice.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(2).unwrap();
+    // m[1:0] <= w writes w[0] to m[1], as m[3:2] = w writes w[0] to m[3].
+    assert_eq!(sim.get(sim.signal("elements")), 0xaabb_aabbu32.into());
 }

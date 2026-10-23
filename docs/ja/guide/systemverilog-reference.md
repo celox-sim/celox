@@ -52,7 +52,7 @@ outline: [2, 3]
 | `#delay` | 整数と実数の遅延、`#(min:typ:max)`（typ の値）、[時間リテラル](#time-literal-delays)。X / Z の遅延は 0 として扱う |
 | `@(...)` | 変数、`posedge` / `negedge` / `edge`、`or` または `,` で並べた項目、ビット選択・部分選択・実行時添字の選択、pure な関数呼び出しを含む任意の式、文が読む変数を待つ `@*` / `@(*)` |
 | `wait (condition)` | 任意の条件。X / Z の条件は偽として扱う |
-| 代入 | ブロッキング代入とノンブロッキング代入。ノンブロッキング代入はそのタイムスロットの NBA 領域で反映 |
+| 代入 | ブロッキング代入とノンブロッキング代入。代入先はブロッキング代入と同じで、unpacked 配列の要素や実行時に決まる位置も使えます。ノンブロッキング代入は代入を実行した時点で評価した位置に、そのタイムスロットの NBA 領域で反映します。代入先の範囲外のビットと、X や Z のビットを含む位置には書き込みません |
 
 文が読む変数をちょうど並べたセンシティビティリスト（`@*` が求めるもの、IEEE 1800-2023 9.4.2.2）を持つ
 `always` は、`always @(a or b) y = a + b;` や `always @(b, a) y = a + b;` のように、
@@ -131,9 +131,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 - プロセス内のタイミング制御：`iff` 修飾（[#1444](https://github.com/celox-sim/celox/issues/1444)）、
   package スコープの遅延値
   （[#1710](https://github.com/celox-sim/celox/issues/1710)）、イベント式内の impure な関数呼び出し、
-  static task 引数を読む `wait` 条件とイベント式。プロセス内のノンブロッキング代入は、
-  unpacked 配列の要素、実行時に決まる位置、代入先の範囲外の定数位置をまだ代入先にできません
-  （[#1709](https://github.com/celox-sim/celox/issues/1709)）。
+  static task 引数を読む `wait` 条件とイベント式。
 - `always_latch` 内のノンブロッキング代入（[#431](https://github.com/celox-sim/celox/issues/431)）。対応するラッチではブロッキング代入を使用してください。
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
