@@ -1,1 +1,6 @@
-Fix sv-tests regression: defer unsupported unused class layouts during randomization signature discovery. Preserve the existing conformance baseline; validate all 2054 mode runs locally.
+Revision history for #1787:
+
+rev 2 (content) 2026-10-23 02:37 UTC — Fix sv-tests regression: defer unsupported unused class layouts during randomization signature discovery. Preserve the existing conformance baseline; validate all 2054 mode runs locally.
+rev 1 (initial) 2026-10-23 02:37 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1787,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"5c1a97b365ffc87af106f61eb596345e8f7f9398","timestamp_iso":"2026-10-23T02:37:13Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"5c1a97b365ffc87af106f61eb596345e8f7f9398","new_sha":"aad228888b74d2de780cc68a83eed63b9c1aacb6","timestamp_iso":"2026-10-23T02:37:13Z","reason":"Fix sv-tests regression: defer unsupported unused class layouts during randomization signature discovery. Preserve the existing conformance baseline; validate all 2054 mode runs locally.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/5c1a97b365ffc87af106f61eb596345e8f7f9398...aad228888b74d2de780cc68a83eed63b9c1aacb6"}]} -->
