@@ -60,14 +60,42 @@ impl Ff<'_, '_> {
                 let value = self.integer_of_width(&args[1], field.width as usize, field.signed)?;
                 self.heap_call(ops::OBJECT_STORE, &[object, place, value])
             }
-            ObjectOp::Random | ObjectOp::Check(_) => {
+            ObjectOp::Random
+            | ObjectOp::Check(_)
+            | ObjectOp::ModeGet(..)
+            | ObjectOp::ModePush
+            | ObjectOp::ModePop
+            | ObjectOp::ModeSelected(_) => {
                 let object = self.handle(&args[0])?;
                 self.heap_call(
                     match op {
                         ObjectOp::Check(class) => ops::encode(ops::OBJECT_CHECK, u64::from(*class)),
+                        ObjectOp::ModeGet(offset, random) => ops::encode(
+                            ops::OBJECT_MODE_GET,
+                            u64::from(*offset) | (u64::from(*random) << 32),
+                        ),
+                        ObjectOp::ModePush => ops::OBJECT_MODE_PUSH,
+                        ObjectOp::ModePop => ops::OBJECT_MODE_POP,
+                        ObjectOp::ModeSelected(offset) => {
+                            ops::encode(ops::OBJECT_MODE_SELECTED, u64::from(*offset))
+                        }
                         _ => ops::OBJECT_RANDOM,
                     },
                     &[object],
+                )
+            }
+            ObjectOp::ModeSet(offset) | ObjectOp::ModeSelect(offset, _) => {
+                let object = self.handle(&args[0])?;
+                let enabled = self.integer_of_width(&args[1], 1, false)?;
+                self.heap_call(
+                    match op {
+                        ObjectOp::ModeSelect(_, random) => ops::encode(
+                            ops::OBJECT_MODE_SELECT,
+                            u64::from(*offset) | (u64::from(*random) << 32),
+                        ),
+                        _ => ops::encode(ops::OBJECT_MODE_SET, u64::from(*offset)),
+                    },
+                    &[object, enabled],
                 )
             }
             ObjectOp::Seed => {
@@ -94,7 +122,13 @@ impl Ff<'_, '_> {
             | ObjectOp::ClassOf
             | ObjectOp::Random
             | ObjectOp::Seed
-            | ObjectOp::Check(_) => None,
+            | ObjectOp::Check(_)
+            | ObjectOp::ModeGet(..)
+            | ObjectOp::ModePush
+            | ObjectOp::ModePop
+            | ObjectOp::ModeSelect(..)
+            | ObjectOp::ModeSelected(_)
+            | ObjectOp::ModeSet(_) => None,
         };
         if let Some(kind) = kind {
             self.m.variables.get_mut(&temp).unwrap().value_kind = kind;

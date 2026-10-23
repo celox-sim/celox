@@ -15,9 +15,18 @@ pub const NULL: Handle = 0;
 pub(crate) struct Object {
     class: u32,
     random_state: u64,
+    random_modes: RandomModes,
+    saved_random_modes: Vec<RandomModes>,
     bytes: Box<[u8]>,
     /// Byte offsets of the handle properties, with what they refer to.
     pub(crate) handles: Vec<(u32, HandleKind)>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RandomModes {
+    overrides: fxhash::FxHashMap<u32, bool>,
+    /// Non-rand properties temporarily made random by an argument list.
+    selected: fxhash::FxHashSet<u32>,
 }
 
 impl Object {
@@ -60,6 +69,8 @@ impl Heap {
             Object {
                 class,
                 random_state: 0,
+                random_modes: RandomModes::default(),
+                saved_random_modes: Vec::new(),
                 bytes: vec![0; size].into(),
                 handles: Vec::new(),
             },
@@ -86,6 +97,56 @@ impl Heap {
         word = (word ^ (word >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
         word = (word ^ (word >> 27)).wrapping_mul(0x94d049bb133111eb);
         word ^ (word >> 31)
+    }
+
+    /// Random properties start enabled. Modes are shared by aliases of an
+    /// object and are part of its checkpoint and differential state.
+    pub fn random_mode(&mut self, handle: Handle, offset: u32, random: bool) -> bool {
+        self.object_mut(handle).is_some_and(|object| {
+            object
+                .random_modes
+                .overrides
+                .get(&offset)
+                .copied()
+                .unwrap_or(random)
+        })
+    }
+
+    pub fn set_random_mode(&mut self, handle: Handle, offset: u32, enabled: bool) {
+        if let Some(object) = self.object_mut(handle) {
+            object.random_modes.overrides.insert(offset, enabled);
+        }
+    }
+
+    pub fn push_random_modes(&mut self, handle: Handle) {
+        if let Some(object) = self.object_mut(handle) {
+            object.saved_random_modes.push(object.random_modes.clone());
+        }
+    }
+
+    pub fn pop_random_modes(&mut self, handle: Handle) {
+        if let Some(object) = self.object_mut(handle) {
+            object.random_modes = object
+                .saved_random_modes
+                .pop()
+                .expect("paired random mode scope");
+        }
+    }
+
+    pub fn select_random_mode(&mut self, handle: Handle, offset: u32, random: bool, enabled: bool) {
+        if let Some(object) = self.object_mut(handle) {
+            object.random_modes.overrides.insert(offset, enabled);
+            if enabled && !random {
+                object.random_modes.selected.insert(offset);
+            } else {
+                object.random_modes.selected.remove(&offset);
+            }
+        }
+    }
+
+    pub fn selected_random_mode(&mut self, handle: Handle, offset: u32) -> bool {
+        self.object_mut(handle)
+            .is_some_and(|object| object.random_modes.selected.contains(&offset))
     }
 
     pub(crate) fn check_object(&mut self, handle: Handle, class: u32) -> bool {

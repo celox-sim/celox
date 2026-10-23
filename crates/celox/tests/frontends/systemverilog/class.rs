@@ -314,3 +314,67 @@ sv_backends! {
         }
     }
 }
+
+sv_backends! {
+    fn class_randomization_mode_bit_argument(sim) { @case "class::randomization_mode_bit_argument"; }
+    fn class_randomization_inheritance(sim) { @case "class::randomization_inheritance"; }
+    fn class_randomization_modes_and_selection(sim) { @case "class::randomization_modes_and_selection"; }
+    fn class_randomization_pre_hook_controls_modes(sim) { @case "class::randomization_pre_hook_controls_modes"; }
+}
+
+sv_backends! {
+    fn class_random_modes_checkpoint_four_state(sim) {
+        @setup { let source = r#"
+            module Top(input bit enable, output int mode, output bit [63:0] value);
+                timeunit 1ps / 1ps;
+                class C; rand bit [63:0] x = 17; endclass
+                C c;
+                initial begin
+                    c = new;
+                    c.x.rand_mode(0);
+                    #10 if (enable) c.x.rand_mode(1);
+                    #10;
+                    void'(c.randomize());
+                    value = c.x;
+                    mode = c.x.rand_mode();
+                end
+            endmodule
+        "#; }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("mode_checkpoint.sv"))], "Top").four_state(true);
+        sim.run_until(5).unwrap();
+        let saved = sim.checkpoint().unwrap();
+        let enable = sim.signal("enable");
+        sim.modify(|io| io.set(enable, 1u8)).unwrap();
+        sim.run_until(25).unwrap();
+        assert_eq!(sim.get(sim.signal("mode")), 1u8.into());
+        sim.restore(&saved).unwrap();
+        sim.run_until(25).unwrap();
+        assert_eq!(sim.get(sim.signal("mode")), 0u8.into());
+        assert_eq!(sim.get_four_state(sim.signal("value")), (17u8.into(), 0u8.into()));
+    }
+
+    fn class_random_selection_spans_multiple_words(sim) {
+        @setup {
+            let properties = (0..70).map(|i| format!("p{i}")).collect::<Vec<_>>().join(", ");
+            let source = format!(r#"
+                module Top(output bit done, output int errors);
+                    class C;
+                        bit [63:0] {properties};
+                    endclass
+                    C c, reference;
+                    initial begin
+                        c = new; reference = new;
+                        c.srandom(71); reference.srandom(71);
+                        if (!c.randomize(p69) || !reference.randomize(p0)) errors++;
+                        if (c.p69 != reference.p0 || c.p0 != 0 || c.p68 != 0) errors++;
+                        done = 1;
+                    end
+                endmodule
+            "#);
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("wide_selection.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("errors")), 0u8.into());
+    }
+}

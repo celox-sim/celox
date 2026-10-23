@@ -704,6 +704,23 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         root: celox_sv_syntax::ExprId,
     ) -> Result<Option<Stmt>, AnalyzerError> {
         let native = self.tree.declarations();
+        if let Some(mut call) =
+            expression_binding::object_rand_mode_call(self.tree, root, native, &self.dims, true)?
+        {
+            self.rename_expr(&mut call);
+            return Ok(Some(match call {
+                Expr::Call {
+                    callee: Callee::Subroutine(name),
+                    args,
+                    arg_order,
+                } => Stmt::Call {
+                    name,
+                    args,
+                    arg_order,
+                },
+                call => Stmt::Eval(call),
+            }));
+        }
         let call = match native.expression(root).kind {
             celox_sv_syntax::ExprKind::Call { expression, .. } => {
                 if expression_binding::object_method(self.tree, expression, native, &self.dims)?
@@ -728,6 +745,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     }
                     expression_binding::ObjectReceiver::Static => Vec::new(),
                 };
+                if name.ends_with("::randomize") {
+                    args.push(Some(Expr::Literal("1'b0".into())));
+                }
                 if name.ends_with("::srandom") {
                     return Err(unsupported("srandom requires a seed argument"));
                 }
@@ -1650,14 +1670,23 @@ pub(super) fn subroutine_argument_names(
                     params.into_iter().map(|(name, ..)| name).collect(),
                 );
             }
-            for method in ["randomize", "srandom"] {
+            for method in ["randomize", "srandom", "rand_mode"] {
                 let qualified = item.name(&classes::Class::subroutine_name(&class, method));
                 let mut param_names = vec![classes::THIS.to_owned()];
                 let mut param_shapes = vec![dimensions_from_type(&handle)];
-                if method == "srandom" {
-                    param_names.push("seed".into());
-                    param_shapes.push(dimensions_from_type(&int_type()));
-                }
+                let (argument, ty) = match method {
+                    "randomize" => (
+                        "$selection",
+                        layout.as_ref().map_or_else(
+                            || classes::unsigned_type(1),
+                            |layout| layout.selection_type(),
+                        ),
+                    ),
+                    "srandom" => ("seed", int_type()),
+                    _ => ("on_off", classes::unsigned_type(1)),
+                };
+                param_names.push(argument.into());
+                param_shapes.push(dimensions_from_type(&ty));
                 directions.insert(
                     qualified.clone(),
                     vec![ParamDirection::Input; param_names.len()],

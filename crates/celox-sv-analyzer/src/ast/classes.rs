@@ -22,6 +22,10 @@ pub(super) const THIS: &str = "this";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Property {
     pub name: String,
+    pub owner: String,
+    pub constant: bool,
+    pub local: bool,
+    pub protected: bool,
     pub r#type: Type,
     pub field: ObjectField,
     pub rand: bool,
@@ -93,14 +97,26 @@ pub(super) struct Class {
     pub has_constraints: bool,
 }
 
+/// An internal unsigned packed argument of a generated method.
+pub(super) fn unsigned_type(width: usize) -> Type {
+    let mut ty = procedural::int_type();
+    ty.is_signed = false;
+    ty.packed_ranges = vec![PackedRange::new(
+        ConstExpr::Literal((width - 1).to_string()),
+        ConstExpr::Literal("0".into()),
+    )];
+    ty
+}
+
 impl Class {
+    pub fn selection_type(&self) -> Type {
+        unsigned_type(self.properties.len() + 1)
+    }
+
     /// Validate the supported unconstrained subset before binding a call.
     pub fn check_randomize(&self, tree: &AnalysisContext<'_>) -> Converted<()> {
         if self.has_constraints {
             return Err(unsupported("class randomize with constraints"));
-        }
-        if self.base.is_some() {
-            return Err(unsupported("class randomize with inheritance"));
         }
         for property in &self.properties {
             if property.randc {
@@ -428,11 +444,16 @@ pub(super) fn class(
                 });
                 continue;
             }
+            let owner = name.to_owned();
             let name = property_name;
             let field = field(&tree.state, &ty, env, size)?;
             size = field.offset + field.bytes();
             properties.push(Property {
                 name,
+                owner,
+                constant: property.declaration.constant,
+                local: property.qualifiers.local,
+                protected: property.qualifiers.protected,
                 r#type: ty.clone(),
                 field,
                 rand: property.qualifiers.rand,
@@ -451,7 +472,7 @@ pub(super) fn class(
     for method in &declaration.methods {
         let subroutine = native.subroutine(method.subroutine);
         let method_name = instances::normalize_identifier(&subroutine.name.spelling);
-        if matches!(method_name.as_str(), "randomize" | "srandom") {
+        if matches!(method_name.as_str(), "randomize" | "srandom" | "rand_mode") {
             return Err(unsupported(
                 "overriding built-in class randomization methods",
             ));

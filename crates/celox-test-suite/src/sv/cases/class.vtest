@@ -790,3 +790,142 @@ module Top(output bit done, output int errors);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomization_inheritance
+  (source "randomization_inheritance.sv" #"
+module Top(output bit done, output int errors);
+    class Base;
+        rand bit [63:0] x;
+        int pre, post;
+        function void pre_randomize(); pre += 1; endfunction
+        function void post_randomize(); post += 1; endfunction
+        function bit [63:0] base_x(); return x; endfunction
+        function int again(); return randomize(); endfunction
+    endclass
+    class Child extends Base;
+        rand bit [63:0] x;
+        rand bit [63:0] y;
+        function void pre_randomize(); super.pre_randomize(); pre += 10; endfunction
+        function void post_randomize(); super.post_randomize(); post += 10; endfunction
+    endclass
+    class Grandchild extends Child; endclass
+    Base b;
+    Grandchild c;
+    bit [63:0] bx, cx, cy;
+    initial begin
+        c = new;
+        b = c;
+        c.srandom(31);
+        if (!c.randomize()) errors++;
+        bx = c.base_x(); cx = c.x; cy = c.y;
+        b.srandom(31);
+        if (!b.again()) errors++;
+        if (b.x != bx || c.x != cx || c.y != cy) errors++;
+        if (b.pre != 22 || b.post != 22) errors++;
+        b.rand_mode(0);
+        if (b.x.rand_mode() || c.x.rand_mode() || c.y.rand_mode()) errors++;
+        if (!b.randomize() || b.x != bx || c.x != cx || c.y != cy) errors++;
+        // Inline selection is resolved in the static receiver class.
+        b.srandom(31);
+        if (!b.randomize(x) || b.x != bx || c.x != cx || c.y != cy) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomization_modes_and_selection
+  (source "randomization_modes.sv" #"
+module Top(output bit done, output int errors);
+    class C;
+        rand bit [63:0] x, y;
+        bit [63:0] plain = 19;
+        int hooks;
+        function void pre_randomize(); hooks++; endfunction
+        function void post_randomize(); hooks++; endfunction
+        function int select_plain(); return randomize(plain); endfunction
+        function void disable_x(); x.rand_mode(0); endfunction
+    endclass
+    C c, alias_c, reference;
+    int plain = 99;
+    bit [63:0] x, y, p;
+    initial begin
+        c = new; reference = new; alias_c = c;
+        if (c.x.rand_mode() != 1 || c.y.rand_mode() != 1) errors |= 1;
+        c.disable_x();
+        c.srandom(42); reference.srandom(42);
+        if (!c.randomize() || !reference.randomize(y)) errors |= 2;
+        if (c.x != 0 || c.y != reference.y || c.plain != 19) errors |= 4;
+        c.rand_mode(0);
+        x = c.x; y = c.y;
+        if (!c.randomize() || c.x != x || c.y != y) errors |= 8;
+        alias_c.x.rand_mode(1);
+        if (c.x.rand_mode() != 1 || c.y.rand_mode() != 0) errors |= 16;
+        c.x.rand_mode(0);
+        if (c.x.rand_mode() != 0) errors |= 32;
+        c.srandom(9); reference.srandom(9);
+        if (!c.randomize(plain) || !reference.randomize(plain)) errors |= 64;
+        if (plain != 99 || c.plain != reference.plain || c.x != x || c.y != y) errors |= 128;
+        if (c.x.rand_mode() || c.y.rand_mode()) errors |= 256;
+        p = c.plain;
+        if (!c.randomize(null) || c.x != x || c.y != y || c.plain != p) errors |= 512;
+        if (c.hooks != 8) errors |= 1024;
+        c.srandom(7); reference.srandom(7);
+        if (!c.select_plain() || !reference.randomize(plain)) errors |= 2048;
+        if (c.plain != reference.plain) errors |= 4096;
+        c.rand_mode(1);
+        if (!c.x.rand_mode() || !c.y.rand_mode()) errors |= 8192;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomization_pre_hook_controls_modes
+  (source "randomization_hook.sv" #"
+module Top(output bit done, output int errors);
+    class C;
+        rand bit [63:0] x;
+        bit disable_randomization;
+        int seen;
+        function void pre_randomize();
+            seen = x.rand_mode();
+            if (disable_randomization) rand_mode(0);
+        endfunction
+    endclass
+    C c, reference;
+    initial begin
+        c = new; reference = new;
+        c.disable_randomization = 1;
+        if (!c.randomize() || c.x != 0 || c.x.rand_mode()) errors++;
+        c.srandom(8); reference.srandom(8);
+        if (!c.randomize(x) || !reference.randomize()) errors++;
+        if (c.x != 0 || c.x.rand_mode() || c.seen != 1) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+
+(case randomization_mode_bit_argument
+  (source "mode_bit_argument.sv" #"
+module Top(output bit done, output int errors);
+    class C; rand int x; endclass
+    C c;
+    initial begin
+        c = new;
+        c.x.rand_mode(2);
+        if (c.x.rand_mode() != 0) errors++;
+        c.x.rand_mode(3);
+        if (c.x.rand_mode() != 1) errors++;
+        c.rand_mode(2);
+        if (c.x.rand_mode() != 0) errors++;
+        c.rand_mode(3);
+        if (c.x.rand_mode() != 1) errors++;
+        if (c.x.rand_mode() < -1) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))

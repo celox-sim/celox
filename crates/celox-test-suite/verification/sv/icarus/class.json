@@ -311,6 +311,98 @@
     },
     {
       "category": "Types",
+      "expectation": "Simulation",
+      "name": "class::randomization_inheritance",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "detail": "Icarus 13.0 rejects randomize, srandom and rand_mode calls, including property rand_mode calls (\"Method name nesting is not supported yet\"). IEEE 1800-2023 18.6, 18.8 and 18.11 define these class methods and inline member selection.",
+      "known_issue": {
+        "id": "sv_icarus_randomization_control",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects randomize, srandom and rand_mode calls, including property rand_mode calls (\"Method name nesting is not supported yet\"). IEEE 1800-2023 18.6, 18.8 and 18.11 define these class methods and inline member selection.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_randomization_control_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "phase": "skip",
+      "status": "ignored"
+    },
+    {
+      "category": "Types",
+      "expectation": "Simulation",
+      "name": "class::randomization_mode_bit_argument",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "detail": "Icarus 13.0 rejects randomize, srandom and rand_mode calls, including property rand_mode calls (\"Method name nesting is not supported yet\"). IEEE 1800-2023 18.6, 18.8 and 18.11 define these class methods and inline member selection.",
+      "known_issue": {
+        "id": "sv_icarus_randomization_control",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects randomize, srandom and rand_mode calls, including property rand_mode calls (\"Method name nesting is not supported yet\"). IEEE 1800-2023 18.6, 18.8 and 18.11 define these class methods and inline member selection.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_randomization_control_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "phase": "skip",
+      "status": "ignored"
+    },
+    {
+      "category": "Types",
+      "expectation": "Simulation",
+      "name": "class::randomization_modes_and_selection",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "detail": "Icarus 13.0 rejects randomize, srandom and rand_mode calls, including property rand_mode calls (\"Method name nesting is not supported yet\"). IEEE 1800-2023 18.6, 18.8 and 18.11 define these class methods and inline member selection.",
+      "known_issue": {
+        "id": "sv_icarus_randomization_control",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects randomize, srandom and rand_mode calls, including property rand_mode calls (\"Method name nesting is not supported yet\"). IEEE 1800-2023 18.6, 18.8 and 18.11 define these class methods and inline member selection.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_randomization_control_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "phase": "skip",
+      "status": "ignored"
+    },
+    {
+      "category": "Types",
+      "expectation": "Simulation",
+      "name": "class::randomization_pre_hook_controls_modes",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "detail": "Icarus 13.0 rejects randomize, srandom and rand_mode calls, including property rand_mode calls (\"Method name nesting is not supported yet\"). IEEE 1800-2023 18.6, 18.8 and 18.11 define these class methods and inline member selection.",
+      "known_issue": {
+        "id": "sv_icarus_randomization_control",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects randomize, srandom and rand_mode calls, including property rand_mode calls (\"Method name nesting is not supported yet\"). IEEE 1800-2023 18.6, 18.8 and 18.11 define these class methods and inline member selection.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_randomization_control_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "phase": "skip",
+      "status": "ignored"
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects the built-in class randomize and srandom methods during elaboration. IEEE 1800-2023 18.6 and 18.13.3 define these methods. Verilator executes both shared cases successfully, including hooks and independent object random streams.",
       "expectation": "Simulation",
       "known_issue": {

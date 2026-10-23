@@ -192,6 +192,52 @@
     },
     {
       "category": "Types",
+      "expectation": "Simulation",
+      "name": "class::randomization_inheritance",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "detail": "Verilator 5.052 reports duplicate declarations of the built-in srandom member/function when this inherited randomization case seeds the same object through both derived and base handles. IEEE 1800-2023 18.6.2 and 18.13.3 permit dynamic class randomization and object seeding. Celox preserves the assertions for inherited hidden members and hook dispatch.",
+      "known_issue": {
+        "id": "sv_verilator_inherited_srandom",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 reports duplicate declarations of the built-in srandom member/function when this inherited randomization case seeds the same object through both derived and base handles. IEEE 1800-2023 18.6.2 and 18.13.3 permit dynamic class randomization and object seeding. Celox preserves the assertions for inherited hidden members and hook dispatch.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_randomization_control_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "phase": "skip",
+      "status": "ignored"
+    },
+    {
+      "category": "Types",
+      "expectation": "Simulation",
+      "name": "class::randomization_mode_bit_argument",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "detail": "Verilator 5.052 treats rand_mode(2) as enabled for both member and object-wide setters. IEEE 1800-2023 18.8 declares a bit on_off formal, so integral 2 truncates to zero. The case records two assertion failures; generated C++ sets the mode to 1 for these calls. Celox retains the required bit conversion.",
+      "known_issue": {
+        "id": "sv_verilator_rand_mode_bit_argument",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 treats rand_mode(2) as enabled for both member and object-wide setters. IEEE 1800-2023 18.8 declares a bit on_off formal, so integral 2 truncates to zero. The case records two assertion failures; generated C++ sets the mode to 1 for these calls. Celox retains the required bit conversion.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_randomization_control_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "phase": "skip",
+      "status": "ignored"
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::static_properties_and_methods",
