@@ -157,6 +157,9 @@ struct Plan {
     fallback: Vec<Option<String>>,
     /// Runtime event sites that record a `$finish`.
     finish_sites: HashSet<u32>,
+    /// The storage combinational logic reads, when a settle whose inputs did
+    /// not change may be skipped; `None` when every settle runs.
+    settle_reads: Option<HashSet<AbsoluteAddr>>,
 }
 
 impl Plan {
@@ -501,12 +504,48 @@ impl Plan {
             .filter(|(_, site)| matches!(site.kind, RuntimeEventKind::Finish))
             .map(|(index, _)| index as u32)
             .collect();
+        // A settle is the same function of the state it reads every time,
+        // unless combinational logic has effects of its own: records,
+        // captures, external calls or trigger marks.
+        let effects = sir.eval_comb.iter().any(|unit| {
+            instructions(unit).any(|inst| match inst {
+                SIRInstruction::RuntimeEvent { .. }
+                | SIRInstruction::CombCaptureEvent { .. }
+                | SIRInstruction::CombCaptureEnableIfChanged { .. }
+                | SIRInstruction::ExternCall { .. } => true,
+                SIRInstruction::Store(_, _, _, _, triggers, sites) => {
+                    !triggers.is_empty() || !sites.is_empty()
+                }
+                SIRInstruction::Commit(_, _, _, _, triggers) => !triggers.is_empty(),
+                _ => false,
+            })
+        });
+        // Dirty tracking compares stable homes by their representative
+        // (`shared_storage`), which groups addresses only by an equal start
+        // offset: no two homes may overlap from different offsets.
+        debug_assert!(
+            homes_overlap_only_whole(program.layout()),
+            "stable homes overlap at different offsets"
+        );
+        let settle_reads = (!effects).then(|| {
+            sir.eval_comb
+                .iter()
+                .flat_map(instructions)
+                .filter_map(|inst| match inst {
+                    SIRInstruction::Load(_, source, ..) | SIRInstruction::Commit(source, ..) => {
+                        Some(storage(source.absolute_addr()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        });
         Ok(Self {
             events,
             kernels,
             clocks,
             fallback,
             finish_sites,
+            settle_reads,
         })
     }
 
@@ -542,6 +581,8 @@ impl Plan {
             slots,
             finish_sites: &self.finish_sites,
             exits: Vec::new(),
+            settle_reads: self.settle_reads.as_ref(),
+            shared: program.shared_storage(),
         };
         let waits: Vec<(usize, &Wait)> = self
             .kernels
@@ -559,6 +600,12 @@ impl Plan {
         // The bit of each kernel in the ready mask: its place among the
         // kernels the scheduler runs, in kernel order.
         let ordinals = ordinals(&self.kernels);
+        // Every run starts dirty, and this mark is required, not a margin:
+        // it is the only cover for a unit that exited to the `$finish` exit
+        // partway through, whose mark after the unit never ran, and for
+        // state a checkpoint or a state file restored between runs, which
+        // no mark sees.
+        g.mark_dirty();
         let header = g.b.new_block();
         g.b.seal_block(SIRTerminator::Jump(header, Vec::new()));
 
@@ -627,6 +674,9 @@ impl Plan {
         g.store(slots.count, SCHEDULER_TIME_WIDTH, count);
         for &slot in &schema.time_slots {
             g.store(slot, TIME_SLOT_WIDTH, time);
+        }
+        if schema.time_slots.iter().any(|&slot| g.settle_reads(slot)) {
+            g.mark_dirty();
         }
         // The levels the slot starts from, the baseline of its edges, for an
         // exit in the middle of the slot; those of the clocks' events below,
@@ -701,6 +751,9 @@ impl Plan {
                 let is = g.b.alloc_bit(1, false);
                 g.b.emit(SIRInstruction::Mux(is, due, value, was));
                 g.store(event.signal, 1, is);
+                if g.settle_reads(event.signal) {
+                    g.mark_dirty();
+                }
                 let changed = g.binary(1, was, BinaryOp::Ne, is);
                 let active = g.equals(is, u64::from(event.active));
                 let edge = g.binary(1, changed, BinaryOp::And, active);
@@ -784,7 +837,7 @@ impl Plan {
             let enter = g.b.new_block();
             g.b.seal_block(SIRTerminator::Jump(enter, Vec::new()));
             g.b.switch_to_block(enter);
-            g.inline(&program.sir.processes[index], finish_exit);
+            g.inline_writer(&program.sir.processes[index], finish_exit);
             let status = g.load(process.status, celox_design::PROCESS_STATUS_WIDTH);
             let code = |status: ProcessStatus| u64::from(status.code());
             let finished = g.equals(status, code(ProcessStatus::Finish));
@@ -904,9 +957,32 @@ impl Plan {
         let comb = g.b.new_block();
         g.call_comb(comb, 1);
 
+        // A settle whose inputs did not change since the last one would
+        // write what combinational logic already holds: it is skipped.
         g.b.switch_to_block(comb);
-        for unit in &program.sir.eval_comb {
-            g.inline(unit, finish_exit);
+        if g.settle_reads.is_some() {
+            let dirty = g.load(slots.dirty, SCHEDULER_FLAG_WIDTH);
+            let zero = g.constant(0, SCHEDULER_FLAG_WIDTH);
+            let changed = g.binary(1, dirty, BinaryOp::Ne, zero);
+            let settle = g.b.new_block();
+            let settled = g.b.new_block();
+            g.b.seal_block(SIRTerminator::Branch {
+                cond: changed,
+                true_block: (settle, Vec::new()),
+                false_block: (settled, Vec::new()),
+            });
+            g.b.switch_to_block(settle);
+            for unit in &program.sir.eval_comb {
+                g.inline(unit, finish_exit);
+            }
+            let clean = g.constant(0, SCHEDULER_FLAG_WIDTH);
+            g.store(slots.dirty, SCHEDULER_FLAG_WIDTH, clean);
+            g.b.seal_block(SIRTerminator::Jump(settled, Vec::new()));
+            g.b.switch_to_block(settled);
+        } else {
+            for unit in &program.sir.eval_comb {
+                g.inline(unit, finish_exit);
+            }
         }
         let continuation = g.load(slots.cont, SCHEDULER_FLAG_WIDTH);
         let settled = g.b.new_block();
@@ -1011,7 +1087,7 @@ impl Plan {
                 });
                 g.b.switch_to_block(unit);
                 for unit in &event.eval_apply {
-                    g.inline(unit, finish_exit);
+                    g.inline_writer(unit, finish_exit);
                 }
                 g.b.seal_block(SIRTerminator::Jump(evaluated, Vec::new()));
                 g.b.switch_to_block(next);
@@ -1042,7 +1118,7 @@ impl Plan {
                             Phase::Apply => &event.apply,
                         };
                         for unit in units {
-                            g.inline(unit, finish_exit);
+                            g.inline_writer(unit, finish_exit);
                         }
                         g.b.seal_block(SIRTerminator::Jump(next, Vec::new()));
                         g.b.switch_to_block(next);
@@ -1152,6 +1228,9 @@ struct Generator<'a> {
     finish_sites: &'a HashSet<u32>,
     /// Exit blocks not yet emitted.
     exits: Vec<(celox_sir::BlockId, SchedulerExit)>,
+    /// See [`Plan::settle_reads`].
+    settle_reads: Option<&'a HashSet<AbsoluteAddr>>,
+    shared: HashMap<AbsoluteAddr, AbsoluteAddr>,
 }
 
 impl Generator<'_> {
@@ -1339,8 +1418,42 @@ impl Generator<'_> {
                 Vec::new(),
                 Vec::new(),
             ));
+            if self.settle_reads(site.target) {
+                self.mark_dirty();
+            }
             self.b.seal_block(SIRTerminator::Jump(next, Vec::new()));
             self.b.switch_to_block(next);
+        }
+    }
+
+    /// Whether combinational logic reads `address`, when settles may be
+    /// skipped.
+    fn settle_reads(&self, address: AbsoluteAddr) -> bool {
+        let storage = self.shared.get(&address).copied().unwrap_or(address);
+        self.settle_reads
+            .is_some_and(|reads| reads.contains(&storage))
+    }
+
+    /// Record that state combinational logic reads may have changed.
+    fn mark_dirty(&mut self) {
+        if self.settle_reads.is_some() {
+            let one = self.constant(1, SCHEDULER_FLAG_WIDTH);
+            self.store(self.slots.dirty, SCHEDULER_FLAG_WIDTH, one);
+        }
+    }
+
+    /// Inline `unit` as [`Self::inline`] does, and record a change of what
+    /// combinational logic reads after it when it may write any.
+    fn inline_writer(&mut self, unit: &Unit, finish_exit: celox_sir::BlockId) {
+        self.inline(unit, finish_exit);
+        let writes = instructions(unit).any(|inst| match inst {
+            SIRInstruction::Store(target, ..) | SIRInstruction::Commit(_, target, ..) => {
+                self.settle_reads(target.absolute_addr())
+            }
+            _ => false,
+        });
+        if writes {
+            self.mark_dirty();
         }
     }
 
@@ -1471,6 +1584,29 @@ fn ordinals(kernels: &[Option<Kernel>]) -> Vec<usize> {
             ordinal
         })
         .collect()
+}
+
+/// Whether every two stable homes of `layout` either start at the same
+/// offset or do not overlap.
+fn homes_overlap_only_whole(layout: &crate::backend::MemoryLayout) -> bool {
+    let mut homes: Vec<(usize, usize)> = layout
+        .offsets
+        .iter()
+        .map(|(address, &offset)| {
+            let bytes = match layout.unpacked_arrays.get(address) {
+                Some(array) => array.plane_size,
+                None => layout
+                    .widths
+                    .get(address)
+                    .map_or(0, |width| width.div_ceil(8)),
+            };
+            (offset, offset + bytes)
+        })
+        .collect();
+    // The widest of the homes that start at one offset stands for them.
+    homes.sort_unstable_by_key(|&(start, end)| (start, std::cmp::Reverse(end)));
+    homes.dedup_by_key(|home| home.0);
+    homes.windows(2).all(|pair| pair[0].1 <= pair[1].0)
 }
 
 fn stable(address: AbsoluteAddr) -> RegionedAbsoluteAddr {

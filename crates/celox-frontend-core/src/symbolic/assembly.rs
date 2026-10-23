@@ -2266,6 +2266,7 @@ fn declare_scheduler_slots(
         exit_arg: declare("exit_arg".into(), TIME),
         finish: declare("finish".into(), FLAG),
         cont: declare("cont".into(), FLAG),
+        dirty: declare("dirty".into(), FLAG),
         count: declare("count".into(), TIME),
         current: declare("current".into(), TIME),
         levels: declare("levels".into(), TIME),
