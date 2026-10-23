@@ -2082,3 +2082,80 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (top Top)
   (run_to_finish)
   (expect_output "q=2 r=1 s=1\n"))
+
+(case plain_always_expression_edges_run_as_processes
+  ; IEEE 1800-2023 9.2.2.4 restricts only always_ff to the flip-flop shape.
+  ; A plain always waits on its event control like any other process: an
+  ; edge of a select or an expression, or `edge` (9.4.2).
+  (source "always_expression_edges.sv" #"
+    module Top(output bit [7:0] selected, both, any);
+      bit [3:0] v;
+      bit a, b;
+      always @(posedge v[1]) selected = selected + 8'd1;
+      always @(posedge (a & b)) both = both + 8'd1;
+      always @(edge a) any = any + 8'd1;
+      initial begin
+        #1; v = 4'b0010; a = 1;
+        #1; b = 1;
+        #1; v = 4'b0000; a = 0;
+        #1; v = 4'b0010; a = 1;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq selected 1)
+  (assert_eq both 0)
+  (assert_eq any 1)
+  (run_until 2)
+  (assert_eq both 1 "a & b rose")
+  (run_until 4)
+  (assert_eq selected 2)
+  (assert_eq both 2)
+  (assert_eq any 3 "a rose, fell and rose"))
+
+(case plain_always_multi_bit_edges_follow_the_lsb
+  ; Table 9-2 judges the edge of a multi-bit expression on its least
+  ; significant bit.
+  (source "always_multi_bit_edge.sv" #"
+    module Top(output bit [7:0] count);
+      bit [3:0] bus;
+      always @(posedge bus) count = count + 8'd1;
+      initial begin
+        #1; bus = 4'b0010;
+        #1; bus = 4'b0011;
+        #1; bus = 4'b0000;
+        #1; bus = 4'b0001;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq count 0 "the least significant bit stayed 0")
+  (run_until 2)
+  (assert_eq count 1)
+  (run_until 4)
+  (assert_eq count 2))
+
+(case plain_always_edges_without_a_reset_run_as_processes
+  ; Neither edge is tested in the body, so neither is an asynchronous
+  ; reset: the process wakes on each of them.
+  (source "always_two_edges.sv" #"
+    module Top(output bit [7:0] count);
+      bit c, d;
+      always @(posedge c or posedge d) count <= count + 8'd1;
+      initial begin
+        #1; c = 1;
+        #1; d = 1;
+        #1; c = 0; d = 0;
+        #1; c = 1;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq count 1)
+  (run_until 2)
+  (assert_eq count 2)
+  (run_until 4)
+  (assert_eq count 3))

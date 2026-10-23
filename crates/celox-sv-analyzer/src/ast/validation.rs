@@ -14,7 +14,10 @@ pub(super) enum AlwaysKind {
 
 /// `always_comb` and `always @*` are combinational; `always_ff` and an
 /// `always` sensitive to clock edges are sequential, as long as their body
-/// has no timing control of its own. Every other `always` is a process.
+/// has no timing control of its own. Every other `always` is a process, and
+/// so is an edge-sensitive `always` whose events are not edges of variables
+/// (`ff_process::always_falls_back_to_process`). The frontend runs one whose
+/// events are not a one-bit clock and resets as a process too.
 /// `always_latch` has the execution and sensitivity rules of `always_comb`.
 pub(super) fn always_kind(
     procedure: &celox_sv_syntax::Procedure,
