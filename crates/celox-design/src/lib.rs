@@ -891,7 +891,7 @@ pub const SCHEDULER_TIME_WIDTH: usize = 64;
 /// one bit of the clock masks, per entry of [`SchedulerSchema::clocks`].
 pub const SCHEDULER_CLOCKS: usize = 64;
 /// Width of [`SchedulerSlots::exit`], [`SchedulerSlots::finish`],
-/// [`SchedulerSlots::cont`] and every [`SchedulerSlots::waiting`] and
+/// [`SchedulerSlots::cont`], [`SchedulerSlots::dirty`] and every [`SchedulerSlots::waiting`] and
 /// [`SchedulerSlots::baseline`] object.
 pub const SCHEDULER_FLAG_WIDTH: usize = 8;
 
@@ -913,6 +913,9 @@ pub struct SchedulerSlots<A> {
     pub finish: A,
     /// Where a shared combinational settle continues.
     pub cont: A,
+    /// Set when state combinational logic reads may have changed since its
+    /// last settle.
+    pub dirty: A,
     /// The number of time slots the run ran.
     pub count: A,
     /// The kernel running when the run returned, `u64::MAX` for none.
@@ -950,6 +953,7 @@ impl<A> SchedulerSlots<A> {
             exit_arg: map(self.exit_arg),
             finish: map(self.finish),
             cont: map(self.cont),
+            dirty: map(self.dirty),
             count: map(self.count),
             current: map(self.current),
             levels: map(self.levels),
@@ -973,6 +977,7 @@ impl<A> SchedulerSlots<A> {
             &self.exit_arg,
             &self.finish,
             &self.cont,
+            &self.dirty,
             &self.count,
             &self.current,
             &self.levels,

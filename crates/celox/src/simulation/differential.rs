@@ -1025,6 +1025,42 @@ mod tests {
         }
     }
 
+    /// Combinational logic reads what each writer changes, on slots where
+    /// no domain triggers: a kernel's blocking write, a published
+    /// nonblocking value, a host clock's level and a host input written
+    /// between runs, besides a domain's registers. Each change reaches the
+    /// combinational outputs in the state file as in the reference.
+    #[test]
+    fn settles_follow_every_write() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(input logic h, input logic [7:0] k, output logic [7:0] y);
+                logic clk = 1'b0;
+                logic [7:0] stim = 8'd0;
+                logic [7:0] staged = 8'd0;
+                logic [7:0] r = 8'd0;
+                logic [7:0] rh = 8'd0;
+                logic [7:0] w;
+                always #5 clk = ~clk;
+                initial forever @(negedge clk) stim = stim + 8'd1;
+                initial forever @(negedge clk) staged <= staged + 8'd2;
+                always_ff @(posedge clk) r <= r + w;
+                always_ff @(posedge h) rh <= rh + 8'd1;
+                assign w = stim * 8'd3 + staged + k + {7'd0, h};
+                assign y = w ^ r ^ rh;
+            endmodule
+        "#;
+        host_driven_agrees(
+            source,
+            &[
+                (100, &[Host::Set("k", 1)]),
+                (200, &[Host::Clock("h", 7, 3)]),
+                (300, &[Host::Set("k", 9)]),
+                (400, &[]),
+            ],
+        );
+    }
+
     /// A clock on an event a kernel drives, or added twice to one event,
     /// stays with the reference loop and bounds the compiled runs.
     #[test]
