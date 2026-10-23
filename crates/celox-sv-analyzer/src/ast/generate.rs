@@ -2063,6 +2063,7 @@ mod tests {
             signed: false,
             is_2state: false,
             string: false,
+            pattern_type: None,
         };
         let inner = FunctionReturnMetadata {
             arguments: None,
@@ -2072,6 +2073,7 @@ mod tests {
             signed: true,
             is_2state: true,
             string: false,
+            pattern_type: None,
         };
         let dimensions = PackedDimensions {
             function_return_types: [

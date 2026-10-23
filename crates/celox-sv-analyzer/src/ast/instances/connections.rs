@@ -50,14 +50,7 @@ pub(super) fn connections(
                 continue;
             }
             if let Some(id) = value {
-                let actual_expr =
-                    expression_binding::value(id, tree.declarations(), tree, dimensions)?;
-                let actual = expr_ident_name(&actual_expr).unwrap_or_else(|| formal.clone());
-                lowered.push(PortConnection::new(
-                    formal.clone(),
-                    actual,
-                    Some(actual_expr),
-                ));
+                lowered.push(expression_connection(formal.clone(), id, tree, dimensions)?);
             }
         }
     } else {
@@ -70,6 +63,10 @@ pub(super) fn connections(
                         binding.and_then(|binding| binding.connections.get(&formal))
                     {
                         lowered.extend(connections.iter().cloned());
+                        continue;
+                    }
+                    if let ConnectionValue::Expression(id) = value {
+                        lowered.push(expression_connection(formal, *id, tree, dimensions)?);
                         continue;
                     }
                     let actual_expr = match value {
@@ -93,4 +90,25 @@ pub(super) fn connections(
         }
     }
     Ok(lowered)
+}
+
+fn expression_connection(
+    formal: String,
+    root: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+) -> Converted<PortConnection> {
+    let native = tree.declarations();
+    let root = expression_binding::ungroup(root, native);
+    if matches!(
+        native.expression(root).kind,
+        celox_sv_syntax::ExprKind::Pattern { target: None, .. }
+    ) {
+        let mut connection = PortConnection::new(formal.clone(), formal, None);
+        connection.bound_pattern = Some(bound_patterns::from_port(root, tree, dims)?);
+        return Ok(connection);
+    }
+    let expr = expression_binding::value(root, native, tree, dims)?;
+    let actual = expr_ident_name(&expr).unwrap_or_else(|| formal.clone());
+    Ok(PortConnection::new(formal, actual, Some(expr)))
 }
