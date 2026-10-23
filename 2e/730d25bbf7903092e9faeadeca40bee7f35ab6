@@ -1,0 +1,1 @@
+Review: watch each slot of host-write settling on its own, and count missed events as a failure
