@@ -1,1 +1,1 @@
-Resolve master conflicts and fix review P1: register constructor RNG consumption before FF target selection; add checkpoint replay regression.
+Resolve conflicts with master d7bb5a329 while preserving new class features. Fix P1 constructor RNG checkpoint persistence and P2 invalid-receiver side effects, with reproductions before fixes and regression coverage across backends. Local unit, class, urandom, retained-report, lint and NAPI/JS checks pass.
