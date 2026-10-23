@@ -238,6 +238,8 @@ pub fn schedule_symbolic_rtl(
     })
 }
 
+/// The period of every `$tb::clock_gen` instance of `module`.
+///
 /// Veryl 0.22 keeps clock configuration on instance symbols, but only copies it
 /// into ClockNext IR. Recover it while the analyzer symbols are still available,
 /// using the specialization's overrides rather than a parameter's default.
@@ -262,11 +264,14 @@ fn configured_clock_periods(
         let SymbolKind::Instance(instance) = &symbol.found.kind else {
             continue;
         };
+        // A clock variable declared by an instance is a `$tb::clock_gen`;
+        // without a `period` it has the default period.
         let Some((_, target)) = instance
             .parameter_connects
             .iter()
             .find(|(name, _)| name.text.to_string() == "period")
         else {
+            periods.insert(symbol.found.token.text, 2);
             continue;
         };
         let context = context.get_or_insert_with(|| {

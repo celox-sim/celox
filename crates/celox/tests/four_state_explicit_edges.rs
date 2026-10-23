@@ -70,8 +70,8 @@ fn check<B: SimBackend>(mut sim: Simulator<B>, backend: &str) {
     set(&mut sim, "clkn", X);
     edge(&mut sim, "clkn", Edge::Rising);
     assert_eq!(counts(&mut sim), [1, 1, 0, 0], "{backend}: inactive from x");
-    sim.cycle(sim.event("clkp")).unwrap();
-    assert_eq!(counts(&mut sim), [2, 1, 0, 0], "{backend}: cycle after x");
+    sim.tick(sim.event("clkp")).unwrap();
+    assert_eq!(counts(&mut sim), [2, 1, 0, 0], "{backend}: tick after x");
 
     // A gated clock: `x & 1` -> `1 & 1` rises; `x & x` -> `1 & x` stays x.
     set(&mut sim, "en", ONE);
@@ -103,7 +103,7 @@ fn check<B: SimBackend>(mut sim: Simulator<B>, backend: &str) {
     edge(&mut sim, "clkd", Edge::Rising);
     assert_eq!(counts(&mut sim)[3], 2, "{backend}: register x -> 1");
     set(&mut sim, "d", ZERO);
-    sim.cycle(sim.event("clkd")).unwrap();
+    sim.tick(sim.event("clkd")).unwrap();
     assert_eq!(counts(&mut sim)[3], 2, "{backend}: register 1 -> 0");
 
     // Coincident edges from x judge the gated clock from x too.

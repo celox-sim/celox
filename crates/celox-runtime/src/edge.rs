@@ -42,6 +42,14 @@ impl Edge {
             Edge::Falling => 0,
         }
     }
+
+    /// The other transition.
+    pub fn opposite(self) -> Edge {
+        match self {
+            Edge::Rising => Edge::Falling,
+            Edge::Falling => Edge::Rising,
+        }
+    }
 }
 
 /// What an edge needs to know about one event.
@@ -345,4 +353,48 @@ where
     } else {
         moved_only(comb_read)
     })
+}
+
+/// One tick of `event`: a clock period of its signal, defined as the
+/// SystemVerilog statements
+///
+/// ```systemverilog
+/// s <= A; #H;
+/// s <= I; #L;
+/// ```
+///
+/// where `A` and `I` are the event's active and inactive levels: the active
+/// edge, then the inactive edge, each running every domain sensitive to it.
+/// Combinational logic is settled afterwards. `dirty` says whether it has
+/// pending changes; `write` moves the signal.
+#[allow(clippy::too_many_arguments)]
+pub fn run_tick<X, E>(
+    executor: &mut X,
+    plan: Option<&DerivedTickPlan<E>>,
+    info: EventEdge,
+    scratch: &mut DerivedTickScratch,
+    event: E,
+    dirty: bool,
+    mut write: impl FnMut(&mut X::Backend, SignalRef, u8),
+) -> Result<(), Halt>
+where
+    X: TickExecutor,
+    X::Backend: SimBackend<Event = E>,
+    E: EventHandle,
+{
+    let active = info.active_edge();
+    let mut dirty = dirty;
+    for edge in [active, active.opposite()] {
+        dirty = match run_edge(
+            executor, plan, info, scratch, event, edge, dirty, &mut write,
+        )? {
+            EdgeOutcome::Unchanged | EdgeOutcome::Stored => dirty,
+            EdgeOutcome::Moved => true,
+            EdgeOutcome::Settled => false,
+        };
+    }
+    if dirty {
+        executor.eval_comb()?;
+    }
+    Ok(())
 }

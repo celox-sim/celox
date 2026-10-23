@@ -25,7 +25,7 @@ pub use derived_tick::{
 };
 pub use edge::{
     Edge, EdgeOutcome, EventEdge, EventEdges, SignalWrite, build_event_edges, move_signal,
-    run_edge, run_edges, set_level,
+    run_edge, run_edges, run_tick, set_level,
 };
 pub use error::{SimulatorErrorCode, comb_fatal_code, comb_fatal_site};
 pub use event_buffer::RuntimeEventBuffer;
