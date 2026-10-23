@@ -103,6 +103,7 @@ fn register_comb_runtime_event_site<'a>(
         scope: None,
         location: None,
         assertion: None,
+        deferred: None,
         arg_widths: value_args
             .iter()
             .map(|arg| arg.0.comptime().r#type.total_width().unwrap_or(1))

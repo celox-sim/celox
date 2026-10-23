@@ -37,8 +37,15 @@ fn assigned_literal(statements: &[Stmt]) -> &str {
 }
 #[test]
 fn native_immediate_and_deferred_predicate_operators_drive_real_conditions() {
-    for keyword in ["assert", "assume", "cover", "assert #0", "assume final"] {
-        let mut tree = parsed(&format!("{keyword}(a+1) y=1;"));
+    for (keyword, action) in [
+        ("assert", "y=1;"),
+        ("assume", "y=1;"),
+        ("cover", "y=1;"),
+        // A deferred action is one subroutine call (IEEE 1800-2023 16.4).
+        ("assert #0", "$info(\"p\");"),
+        ("assume final", "$info(\"p\");"),
+    ] {
+        let mut tree = parsed(&format!("{keyword}(a+1) {action}"));
         subtract(&mut tree);
         let source = Source::from_syntax(&tree).unwrap();
         let Stmt::If { condition, .. } = &source.modules()[0].initial_processes()[0].body()[0]
@@ -132,7 +139,7 @@ fn native_assertion_default_failure_cover_and_else_only_actions_keep_contracts()
 #[test]
 fn native_assertion_header_and_action_roles_are_authoritative() {
     for change_deferral in [false, true] {
-        let mut tree = parsed("assert #0(a) y=1; else y=2;");
+        let mut tree = parsed("assert(a) y=1; else y=2;");
         for statement in &mut tree.declarations.statements {
             if let StatementKind::Assertion {
                 header, success, ..
@@ -148,6 +155,16 @@ fn native_assertion_header_and_action_roles_are_authoritative() {
                 }
             }
         }
+        // The native header decides the deferral: a deferred action must be
+        // one subroutine call (IEEE 1800-2023 16.4).
+        if change_deferral {
+            let error = Source::from_syntax(&tree).unwrap_err();
+            assert!(
+                error.to_string().contains("deferred assertion action"),
+                "{error}"
+            );
+            continue;
+        }
         let source = Source::from_syntax(&tree).unwrap();
         let Stmt::If {
             then_body,
@@ -157,11 +174,7 @@ fn native_assertion_header_and_action_roles_are_authoritative() {
         else {
             panic!()
         };
-        if change_deferral {
-            assert_eq!(assigned_literal(then_body), "1");
-        } else {
-            assert!(then_body.is_empty());
-        }
+        assert!(then_body.is_empty());
         assert_eq!(assigned_literal(else_body), "2");
     }
 }

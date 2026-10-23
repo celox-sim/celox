@@ -17,7 +17,9 @@ mod strings;
 
 use super::procedural::*;
 use super::*;
-use celox_design::{CounterKind, NbaPosition, NbaSite, SPARSE_WORKING_REGION, WaitSite};
+use celox_design::{
+    CounterKind, DeferredSite, NbaPosition, NbaSite, SPARSE_WORKING_REGION, WaitSite,
+};
 use celox_frontend_core::process::{NBA_POSITION_WIDTH, ProcessKernelBuilder, ProcessKernelError};
 use celox_sir::{RegisterId, RegisterType};
 use celox_slt::SLTToSIRLowerer;
@@ -92,6 +94,9 @@ pub(super) struct Ff<'p, 'a> {
     /// Whether a combinational process also reruns for occurrences of its
     /// inputs that left their value unchanged.
     input_occurrences: bool,
+    /// The flush-point site of a process with deferred assertions, whose
+    /// queue their actions wait in.
+    flush_site: Option<u32>,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -147,7 +152,84 @@ impl<'p, 'a> Ff<'p, 'a> {
             nba_sites: Vec::new(),
             host_request_sites: Vec::new(),
             nba_switches: Vec::new(),
+            flush_site: None,
         }
+    }
+
+    /// Whether `stmts`, or a subroutine they call, including in timing
+    /// controls and the defaults of omitted arguments, hold a deferred
+    /// assertion.
+    fn has_deferred_assertions(
+        &self,
+        stmts: &[sv::ir::Stmt],
+        visited: &mut HashSet<String>,
+    ) -> bool {
+        let mut found = false;
+        let mut calls = Vec::new();
+        for stmt in stmts {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::SystemTask {
+                    assertion: Some(assertion),
+                    ..
+                } = stmt
+                    && assertion.deferral != celox_design::AssertionDeferral::None
+                {
+                    found = true;
+                }
+                stmt_calls(stmt, &mut calls);
+                // Timing controls evaluate their expressions too.
+                match stmt {
+                    sv::ir::Stmt::Wait(condition) => collect_calls(condition, &mut calls),
+                    sv::ir::Stmt::WaitEvent(items) => {
+                        for item in items {
+                            collect_calls(&item.expr, &mut calls);
+                        }
+                    }
+                    sv::ir::Stmt::Delay { amount, .. } => collect_calls(amount, &mut calls),
+                    _ => {}
+                }
+            });
+        }
+        if found {
+            return true;
+        }
+        while let Some((callee, args)) = calls.pop() {
+            let sv::ir::Callee::Subroutine(name) = callee else {
+                continue;
+            };
+            let Some(subroutine) = self.m.subroutine(&name).cloned() else {
+                continue;
+            };
+            default_calls(&subroutine, &args, &mut calls);
+            if visited.insert(name) && self.has_deferred_assertions(&subroutine.body, visited) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// For a process with deferred assertions, its flush-point site (IEEE
+    /// 1800-2023 16.4.2), whose queue their actions wait in.
+    fn deferred_flush_site(&mut self, body: &[sv::ir::Stmt]) -> Option<u32> {
+        if !self.has_deferred_assertions(body, &mut HashSet::default()) {
+            return None;
+        }
+        let site = self.m.event_site(RuntimeEventSite {
+            kind: RuntimeEventKind::Write,
+            template: None,
+            sizing: DisplaySizing::Ieee,
+            scope: None,
+            location: None,
+            assertion: None,
+            deferred: Some(DeferredSite::FlushPoint),
+            arg_widths: Vec::new(),
+            arg_signed: Vec::new(),
+            arg_is_string: Vec::new(),
+            arg_float_precision: Vec::new(),
+            arg_is_handle: Vec::new(),
+        });
+        self.flush_site = Some(site);
+        Some(site)
     }
 
     /// Lower a combinational process that reruns only when an input value
@@ -3173,6 +3255,13 @@ impl<'p, 'a> Ff<'p, 'a> {
             _ => None,
         };
         let event_kind = kind.event_kind();
+        // The action of a deferred assertion waits in its process's queue
+        // until the assertion matures (IEEE 1800-2023 16.4.1).
+        let deferred = assertion_site
+            .map(|assertion| assertion.deferral)
+            .filter(|&region| region != celox_design::AssertionDeferral::None)
+            .zip(self.flush_site)
+            .map(|(region, queue)| DeferredSite::Action { queue, region });
         let site_id = self.m.event_site(RuntimeEventSite {
             kind: event_kind,
             template: template.clone(),
@@ -3180,6 +3269,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             scope: None,
             location: report_location(site),
             assertion: assertion_site.cloned(),
+            deferred,
             arg_widths,
             arg_signed,
             arg_is_string,
@@ -3190,7 +3280,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             site_id,
             args: regs,
         });
-        if kind.is_fatal() {
+        // A deferred `$fatal` ends the simulation when it matures.
+        if kind.is_fatal() && deferred.is_none() {
             let code = self
                 .m
                 .runtime_error(template.unwrap_or_else(|| sv::ir::SystemTask::Fatal.to_string()));
@@ -4272,6 +4363,13 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ));
             }
         }
+        // Each evaluation resumes the process from its event control.
+        if let Some(site_id) = self.deferred_flush_site(&body) {
+            self.b.emit(SIRInstruction::RuntimeEvent {
+                site_id,
+                args: Vec::new(),
+            });
+        }
         if self.exec_block(&body)? {
             self.b.seal_block(SIRTerminator::Return);
         }
@@ -4710,6 +4808,9 @@ impl Ff<'_, '_> {
     ) -> Result<KernelUnit, sv::AnalyzerError> {
         self.process = process;
         let mut kernel = ProcessKernelBuilder::new(slots);
+        if let Some(site) = self.deferred_flush_site(body) {
+            kernel.flush_deferred_at(site);
+        }
         std::mem::swap(&mut self.b, kernel.builder());
         self.kernel = Some(kernel);
         self.exec_block(body)?;

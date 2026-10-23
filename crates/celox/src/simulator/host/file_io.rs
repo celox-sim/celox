@@ -103,6 +103,7 @@ impl<B: SimBackend> Simulator<B> {
                     scope,
                     location: None,
                     assertion: None,
+                    deferred: None,
                     arg_widths: Vec::new(),
                     arg_signed: Vec::new(),
                     arg_is_string: Vec::new(),

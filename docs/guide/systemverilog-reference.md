@@ -623,6 +623,25 @@ host does at each callback, or the time step of the report while
 and the `celox` command print it. Only `$error` and `$fatal` fail a `celox`
 run; `$fatal` also ends the simulation with an error.
 
+### Deferred assertions
+
+In an `initial` or `always` process with a timing control, and in an
+edge-triggered `always` or `always_ff` process, the action of `assert #0`,
+`assume #0`, `assert final` and `assume final` waits in the process's
+deferred assertion report queue (IEEE 1800-2023 16.4). Its arguments are
+evaluated when the assertion executes. The process flushes the queue each
+time it resumes from an event control or a wait, and an edge-triggered
+process each time it runs; a resume after a delay is no flush point
+(16.4.2). When the time slot is over, the actions still waiting are
+executed: those of `#0` ones first, then those of `final` ones. A deferred
+`$fatal` ends the simulation then. An action is one display or severity
+task call; a user subroutine, or more than one statement, is rejected.
+
+The same assertions in `always_comb`, `always_latch` or a process lowered as
+combinational logic (an `always` whose only timing control is its leading
+event control) still report at once, like simple immediate assertions.
+Deferred assertions as module items and deferred cover are rejected.
+
 ### Constant functions
 
 Constant functions ignore the display and severity tasks they call.

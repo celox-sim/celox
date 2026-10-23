@@ -1623,9 +1623,33 @@ fn assertion_failure(keyword: &str, site: Option<crate::procedural::SourceSpan>)
     }]
 }
 
-/// Attribute the severity tasks of an assertion's action block to it. Tasks
-/// in subroutines the block calls are not attributed, and the tasks of a
-/// nested assertion keep its own attribution.
+/// Check the action of a deferred assertion: one subroutine call (IEEE
+/// 1800-2023 16.4). Only display and severity tasks are supported, since
+/// a user subroutine would run in the Reactive region and could wake
+/// processes there.
+fn deferred_action(body: &[Stmt]) -> Result<(), AnalyzerError> {
+    match body {
+        [] => Ok(()),
+        [
+            Stmt::SystemTask {
+                task:
+                    SystemTask::Display(_)
+                    | SystemTask::Write(_)
+                    | SystemTask::Severity(_)
+                    | SystemTask::Fatal,
+                ..
+            },
+        ] => Ok(()),
+        _ => Err(unsupported(
+            "deferred assertion action other than one display or severity task call",
+        )),
+    }
+}
+
+/// Attribute the severity tasks of an assertion's action block to it, and
+/// for a deferred assertion its display tasks, which wait in the same
+/// queue. Tasks in subroutines the block calls are not attributed, and the
+/// tasks of a nested assertion keep its own attribution.
 fn attribute_reports(
     body: &mut [Stmt],
     assertion: &celox_design::AssertionSite,
@@ -1633,11 +1657,14 @@ fn attribute_reports(
 ) {
     for stmt in body {
         stmt.walk_mut(&mut |stmt| {
+            let deferred = assertion.deferral != celox_design::AssertionDeferral::None;
             if let Stmt::SystemTask {
-                task: SystemTask::Severity(_) | SystemTask::Fatal,
+                task,
                 assertion: attributed @ None,
                 ..
             } = stmt
+                && (matches!(task, SystemTask::Severity(_) | SystemTask::Fatal)
+                    || deferred && matches!(task, SystemTask::Display(_) | SystemTask::Write(_)))
             {
                 *attributed = Some(celox_design::AssertionSite {
                     outcome,

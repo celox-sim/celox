@@ -210,6 +210,11 @@ impl<B: SimBackend> SimulationState<B> {
         if executor.take_slot_writes() {
             self.host_pending = true;
         }
+        // The slot is over when nothing more is due at its time, host
+        // writes included.
+        if !self.host_pending && self.next_work_time() != Some(current_time) {
+            executor.try_end_time_slot(current_time)?;
+        }
         Ok(())
     }
 
