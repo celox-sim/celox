@@ -1054,6 +1054,12 @@ pub struct EventTopology<A> {
     /// a signal needs a settle before its domains evaluate.
     #[serde(default)]
     pub combinationally_read: BTreeSet<A>,
+    /// Canonical events whose own domain reads no level of their signal: its
+    /// flip-flops do not sample the signal as data. With
+    /// [`Self::combinationally_read`] it says whether a run of the domain
+    /// observes the signal's level. Absent means it may.
+    #[serde(default)]
+    pub level_unread_by_domain: BTreeSet<A>,
 }
 
 /// A clock computed combinationally from an event's signal.
@@ -1149,6 +1155,7 @@ impl<A> Default for EventTopology<A> {
             combinational_derived: BTreeMap::new(),
             independent_derived: BTreeSet::new(),
             combinationally_read: BTreeSet::new(),
+            level_unread_by_domain: BTreeSet::new(),
         }
     }
 }
