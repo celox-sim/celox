@@ -535,6 +535,7 @@ fn analyze_package_scope(
     } else {
         let ir = crate::analyze::analyze_source(Source {
             modules: vec![module],
+            diagnostics: Vec::new(),
         })?;
         ir.modules().first().cloned()
     };

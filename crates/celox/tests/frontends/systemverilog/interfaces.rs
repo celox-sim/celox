@@ -141,3 +141,59 @@ sv_backends! {
         }
     }
 }
+
+// Interface objects are not IEEE 20.7 data arrays. This opt-in compatibility
+// behavior belongs to Celox's harness rather than the portable language suite.
+sv_backends! {
+    fn queries_interface_array_sizes_as_an_explicit_extension(sim) {
+        @setup {
+            let source = r#"
+                interface Lane; logic value; endinterface
+                module Child #(parameter N=1)(output wire [7:0] y); assign y=N; endmodule
+                module Reader(Lane ports[3:2], output wire [7:0] y);
+                    assign y=$size(ports);
+                endmodule
+                module Top(output wire [7:0] local_count, param_count, formal_count,
+                    first_count, second_count, selected_count, generated_count, shadow_count, member_shadow_count,
+                    output wire [1:0] generated);
+                    Lane lanes[3:2]();
+                    Lane matrix[1:0][4:2]();
+                    localparam N=$size(lanes);
+                    assign local_count=N;
+                    Child #(.N($size(lanes))) c(.y(param_count));
+                    Reader r(.ports(lanes), .y(formal_count));
+                    assign first_count=$size(matrix,1);
+                    assign second_count=$size(matrix,2);
+                    assign selected_count=$size(matrix[0]);
+                    for(genvar i=0;i<$size(lanes);i=i+1) begin: bits_out
+                        assign generated[i]=1'b1;
+                    end
+                    if(1) begin: bank
+                        Lane local_lanes[5:7]();
+                        assign generated_count=$size(local_lanes);
+                    end
+                    function automatic int shadow();
+                        int lanes[5];
+                        return $size(lanes);
+                    endfunction
+                    assign shadow_count=shadow();
+                    function automatic int shadow_member();
+                        struct packed {logic [4:0] local_lanes;} bank;
+                        return $size(bank.local_lanes);
+                    endfunction
+                    assign member_shadow_count=shadow_member();
+                endmodule
+            "#;
+            let mut policy=celox::DiagnosticPolicy::default();
+            policy.set("interface_array_query",celox::DiagnosticLevel::Warn);
+        }
+        @build Simulator::from_sv_sources(vec![(source,Path::new("interface_array_size.sv"))],"Top")
+            .diagnostic_policy(policy);
+        for (name,expected) in [("local_count",2u8),("param_count",2),("formal_count",2),
+            ("first_count",2),("second_count",3),("selected_count",3),
+            ("generated_count",3),("shadow_count",5),("member_shadow_count",5),("generated",3)] {
+            assert_eq!(sim.get(sim.signal(name)),BigUint::from(expected),"{name}");
+        }
+        assert!(!sim.warnings().is_empty());
+    }
+}
