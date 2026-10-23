@@ -2694,6 +2694,41 @@ fn class_header_defaults_keep_captured_native_ownership() {
         ));
         assert_eq!(syntax.units[0].parameters, None);
         assert_eq!(items.len(), 2);
+        // The class records its parameter port list and body parameters.
+        let class = &syntax.classes[0];
+        let BodyItemKind::Parameter(body) = syntax.body_item(items[1]).kind else {
+            panic!("body parameter owner missing")
+        };
+        assert!(
+            matches!(class.parameter_ports, Some(id) if syntax.parameter_declaration(id) == header)
+        );
+        assert_eq!(class.parameters, [body]);
+        assert!(class.type_aliases.is_empty());
+    }
+}
+
+#[test]
+fn class_body_typedefs_and_parameters_belong_to_their_class() {
+    for source in [
+        "class C; typedef int count_t; parameter int N = 2; function int f(); localparam L = 1; return L; endfunction endclass module M; endmodule",
+        "module M; class C; typedef int count_t; parameter int N = 2; function int f(); localparam L = 1; return L; endfunction endclass endmodule",
+    ] {
+        let syntax = parse(source);
+        let class = &syntax.classes[0];
+        assert_eq!(class.parameter_ports, None);
+        assert_eq!(class.type_aliases.len(), 1);
+        assert_eq!(
+            syntax.type_alias(class.type_aliases[0]).name.value(),
+            "count_t"
+        );
+        // A parameter of a method is not one of the class.
+        assert_eq!(class.parameters.len(), 1);
+        assert_eq!(
+            syntax.parameter_declaration(class.parameters[0]).parameters[0]
+                .name
+                .value(),
+            "N"
+        );
     }
 }
 

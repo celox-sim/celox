@@ -1925,7 +1925,7 @@
     "category": "simulator_compile_limitation",
     "phase": "compile",
     "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
-    "reason": "Icarus 13.0 rejects pure virtual method declarations and interface classes with syntax errors (\"Invalid class item\", \"Invalid module item\") and fails code generation without a diagnostic (\"Code generation had 2 error(s)\") for a method called on an element of an array of class handles. IEEE 1800-2023 8.21 and 8.26 define pure virtual methods and interface classes, and 7.4 and 8.4 permit arrays of class handles. Verilator passes the first three cases; see sv_verilator_interface_class_casts and sv_verilator_extended_interface_class_methods for the others.",
+    "reason": "Icarus 13.0 rejects pure virtual method declarations and interface classes with syntax errors (\"Invalid class item\", \"Invalid module item\") and fails code generation without a diagnostic (\"Code generation had 2 error(s)\") for a method called on an element of an array of class handles. IEEE 1800-2023 8.21 and 8.26 define pure virtual methods and interface classes, and 7.4 and 8.4 permit arrays of class handles. Verilator passes all but two cases; see sv_verilator_interface_class_casts and sv_verilator_extended_interface_class_methods.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
@@ -1938,7 +1938,8 @@
         "class::classes_implementing_interface_classes",
         "class::methods_called_through_interface_class_handles",
         "class::inherited_methods_of_extended_interface_classes",
-        "class::casts_from_interface_class_handles"
+        "class::casts_from_interface_class_handles",
+        "class::typedefs_of_interface_classes"
       ]
     }
   },
@@ -1991,6 +1992,70 @@
     "cases": {
       "icarus": [
         "class::casts_of_class_handles"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_class_specialization_identity",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 makes a separate specialization of a parameterized class for each way a parameter value assignment is written, so Box#(2, int)::made and Box#(.N(2), .T(int))::made read 0 after an object of Box#(.T(int), .N(2)) was constructed; the adapter-free source prints 0 1 0 where IEEE 1800-2023 8.25 requires 1 1 1, as the three assignments give the same values. Celox prints 1 1 1. Icarus rejects parameterized classes, see sv_icarus_parameterized_classes.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/class_specialization_identity_verilator.json",
+      "verification/repros/class_specialization_identity.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::specializations_are_named_by_parameter_values"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_untyped_class_parameters",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 gives a class parameter declared without a type the 32-bit type of its default even when a specialization assigns it a sized value, so $bits(V) of Sized#(8'h1) is 32; the adapter-free source prints 32 32 where IEEE 1800-2023 6.20.2 requires 8 32, as the parameter takes the type of its final value after overrides. Celox prints 8 32. Icarus rejects parameterized classes, see sv_icarus_parameterized_classes.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/untyped_class_parameters_verilator.json",
+      "verification/repros/untyped_class_parameters.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::untyped_class_parameters_take_the_type_of_their_value"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_parameterized_classes",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not parse a parameter port list of a class (class Box #(int N = 4); is a syntax error), which IEEE 1800-2023 8.25 defines; each case declares a parameterized class. Verilator passes all but two cases, see sv_verilator_class_specialization_identity and sv_verilator_untyped_class_parameters.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::specializations_of_parameterized_classes",
+        "class::specializations_are_named_by_parameter_values",
+        "class::specializations_with_their_own_handles",
+        "class::class_scoped_parameters_and_types",
+        "class::specializations_of_interface_classes",
+        "class::named_constructor_arguments",
+        "class::specializations_in_generate_blocks",
+        "class::specializations_keep_their_parameter_scopes",
+        "class::untyped_class_parameters_take_the_type_of_their_value",
+        "class::class_declarations_bind_in_their_scopes",
+        "class::parameter_defaults_bind_where_the_class_is_declared",
+        "class::specialization_keys_follow_the_bound_parameters"
       ]
     }
   },
