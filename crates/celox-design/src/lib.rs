@@ -617,6 +617,12 @@ pub struct WaitSite<A> {
     /// checks a condition at its resume point decides itself whether it
     /// continues.
     pub terms: Vec<(A, CounterKind)>,
+    /// The `iff` condition of each term, as a signal whose least significant
+    /// bit holds it, or empty when no term has one. An occurrence of a term
+    /// with a gate satisfies the wait only if the gate is a known 1 when the
+    /// occurrence is detected (IEEE 1800-2023 9.4.2.3).
+    #[serde(default = "Vec::new", skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<Option<A>>,
 }
 
 impl<A: Copy> WaitSite<A> {
@@ -628,7 +634,22 @@ impl<A: Copy> WaitSite<A> {
                 .iter()
                 .map(|&(signal, kind)| (map(signal), kind))
                 .collect(),
+            gates: self.gates.iter().map(|gate| gate.map(&mut map)).collect(),
         }
+    }
+
+    /// The gate of term `index`.
+    pub fn gate(&self, index: usize) -> Option<A> {
+        self.gates.get(index).copied().flatten()
+    }
+
+    /// The signals the runtime reads to judge the wait: its terms' signals
+    /// and gates.
+    pub fn reads(&self) -> impl Iterator<Item = A> + '_ {
+        self.terms
+            .iter()
+            .map(|&(signal, _)| signal)
+            .chain(self.gates.iter().flatten().copied())
     }
 }
 

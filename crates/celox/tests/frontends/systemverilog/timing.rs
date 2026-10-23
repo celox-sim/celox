@@ -435,7 +435,6 @@ fn event_expressions_with_effects_are_rejected() {
 #[test]
 fn unimplemented_timing_features_are_rejected() {
     for (body, construct, issue) in [
-        ("bit a; initial @(a iff a);", "iff-qualified event", 1444),
         ("initial fork #1; join", "fork-join block", 88),
         ("initial fork #1; join_none", "fork-join block", 88),
         ("event e; initial -> e;", "named event", 88),

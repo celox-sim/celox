@@ -170,7 +170,9 @@ kernel に compile され、delay の満了や wait の成立で simulation の 
 IEEE 1800-2023 4.5 の region に従います。edge で起こされた process も含めて
 process は active region で実行され、その edge の register が nonblocking 代入を
 反映する前に動きます。そのため `@(posedge clk)` で起きた process は edge 前の
-register 出力を読みます。0 の `InactiveDelay` の process は active region の後に
+register 出力を読みます。register domain のブロッキング書き込みで起きた process も
+active region で実行され、その domain の nonblocking 代入の反映より前に動きます。
+0 の `InactiveDelay` の process は active region の後に
 実行され、nonblocking 代入は両方が空になってから反映されます。同じ edge で
 register の入力を駆動する process は、SystemVerilog と同じく register と race
 します。

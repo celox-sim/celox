@@ -379,7 +379,7 @@ impl<B: SimBackend> SimulationState<B> {
                         executor.apply_ff_at(event)?;
                     }
                     self.record_transitions(executor.backend(), round);
-                    self.observe_driven(executor.backend());
+                    self.observe_driven_unsettled(executor.backend());
                 }
             }
             restore_working_image(executor.backend_mut(), &live);
@@ -644,7 +644,7 @@ impl<B: SimBackend> SimulationState<B> {
             if newly_triggered.is_empty() && !any_new_outer_loop_trigger {
                 if published {
                     self.finish_publications(executor.backend_mut(), &mut round);
-                    self.observe_driven(executor.backend());
+                    self.observe_driven_unsettled(executor.backend());
                 }
                 // The NBA region still publishes the processes' assignments,
                 // which may trigger further domains.
@@ -662,7 +662,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
             if round.publishing {
                 self.finish_publications(executor.backend_mut(), &mut round);
-                self.observe_driven(executor.backend());
+                self.observe_driven_unsettled(executor.backend());
             }
             for id in &newly_triggered {
                 if let Some(event) = self.model.event_info[*id].eval_ff_event {

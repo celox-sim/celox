@@ -21,6 +21,10 @@ pub struct ResolvedSchedule<B: SimBackend> {
     pub(crate) signal_to_id: FxHashMap<SignalRef, usize>,
     pub(crate) signal_index_by_id: Vec<usize>,
     pub(crate) processes: Vec<ProcessRefs>,
+    /// The `iff` gate of each term, in its least significant bit, by
+    /// process, wait site and term; empty when no wait has one, and a site
+    /// without one has no entries.
+    pub(crate) wait_gates: Vec<Vec<Vec<Option<SignalRef>>>>,
     /// Counted signals and the domains their counters trigger.
     pub(crate) counted: Vec<CountedDomainRefs>,
     pub(crate) counted_by_offset: FxHashMap<usize, usize>,
@@ -185,6 +189,34 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                 .find(|counted| counted.refs.signal == signal)
                 .map(|counted| counted.refs.counter(kind))
         };
+        let wait_gates: Vec<Vec<Vec<Option<SignalRef>>>> = if model
+            .processes
+            .iter()
+            .flat_map(|process| process.waits.iter().flatten())
+            .any(|term| term.gate.is_some())
+        {
+            model
+                .processes
+                .iter()
+                .map(|process| {
+                    process
+                        .waits
+                        .iter()
+                        .map(|terms| {
+                            if terms.iter().all(|term| term.gate.is_none()) {
+                                return Vec::new();
+                            }
+                            terms
+                                .iter()
+                                .map(|term| term.gate.as_ref().map(resolve))
+                                .collect()
+                        })
+                        .collect()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let processes: Vec<ProcessRefs> = model
             .processes
             .iter()
@@ -300,6 +332,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             signal_to_id,
             signal_index_by_id,
             processes,
+            wait_gates,
             counted,
             counted_by_offset,
             counted_triggers,

@@ -5240,6 +5240,7 @@ impl Ff<'_, '_> {
     /// control samples as it begins.
     fn wait_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
         let mut terms = Vec::new();
+        let mut gates = Vec::new();
         let mut samples = Vec::new();
         self.event_terms(items, &mut terms, &mut samples)?;
         self.suspend_on(terms, samples)
@@ -5323,6 +5324,10 @@ impl Ff<'_, '_> {
                 },
                 _ => self.event_expression(&expr, samples)?,
             };
+            let gate = match &item.iff {
+                Some(iff) => Some(self.event_gate(iff, &mut samples)?),
+                None => None,
+            };
             match item.edge {
                 sv::ir::EventEdge::Any => terms.push((id, CounterKind::Changes)),
                 sv::ir::EventEdge::Pos => terms.push((id, CounterKind::Rises)),
@@ -5330,8 +5335,10 @@ impl Ff<'_, '_> {
                 sv::ir::EventEdge::Both => {
                     terms.push((id, CounterKind::Rises));
                     terms.push((id, CounterKind::Falls));
+                    gates.push(gate);
                 }
             }
+            gates.push(gate);
         }
         Ok(())
     }
@@ -5345,7 +5352,10 @@ impl Ff<'_, '_> {
         for (target, value) in samples {
             self.assign(&sv::ir::LValue::Ident(target), &value)?;
         }
-        let site = self.wait_site(terms);
+        if gates.iter().all(Option::is_none) {
+            gates.clear();
+        }
+        let site = self.wait_site(terms, gates);
         self.with_kernel(|kernel| -> Result<(), ProcessKernelError> {
             kernel.suspend_wait(site)?;
             let woken = kernel.builder().alloc_bit(1, false);
@@ -5356,6 +5366,33 @@ impl Ff<'_, '_> {
             Ok(())
         })
         .map_err(kernel_error)
+    }
+
+    /// The signal whose least significant bit is the `iff` condition `iff`
+    /// of an event item (IEEE 1800-2023 9.4.2.3): a one-bit variable itself,
+    /// or the variable `$event[k]` of the condition's truth value. Its
+    /// operands are not terms of the wait; the runtime reads it when it
+    /// detects an occurrence.
+    fn event_gate(
+        &mut self,
+        iff: &sv::ir::Expr,
+        samples: &mut Vec<(String, sv::ir::Expr)>,
+    ) -> Result<SourceVarId, sv::AnalyzerError> {
+        let iff = self.propagate(iff);
+        if let sv::ir::Expr::Ident(name) = &iff
+            && let Some(id) = self.m.id(name)
+            && !self.m.is_hidden(id)
+            && self.m.var(id).width == 1
+            && self.m.var(id).float.is_none()
+            && self.m.var(id).array_dims.is_empty()
+        {
+            return Ok(id);
+        }
+        let not = |expr| sv::ir::Expr::Unary {
+            op: sv::ir::UnaryOp::LogicNot,
+            expr: Box::new(expr),
+        };
+        self.event_expression(&not(not(iff)), samples)
     }
 
     /// The variable `$event[k]` of a new event expression `expr`, with its
@@ -5498,6 +5535,7 @@ impl Ff<'_, '_> {
             ids.into_iter()
                 .map(|id| (id, CounterKind::Changes))
                 .collect(),
+            Vec::new(),
         );
         // The condition is lowered once per check: before the process
         // suspends and at every resume.
@@ -5527,11 +5565,16 @@ impl Ff<'_, '_> {
 
     /// Declare a wait site of the process with the given terms and return
     /// its local index.
-    fn wait_site(&mut self, terms: Vec<(SourceVarId, CounterKind)>) -> u32 {
+    fn wait_site(
+        &mut self,
+        terms: Vec<(SourceVarId, CounterKind)>,
+        gates: Vec<Option<SourceVarId>>,
+    ) -> u32 {
         let index = self.wait_sites.len() as u32;
         self.wait_sites.push(WaitSite {
             process: self.process,
             terms,
+            gates,
         });
         index
     }

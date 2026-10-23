@@ -76,6 +76,9 @@ pub struct TermModel<A> {
     /// Design code may write the signal. Otherwise only the host and the
     /// scheduler do.
     pub driven: bool,
+    /// The term's `iff` condition ([`crate::WaitSite::gates`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate: Option<A>,
 }
 
 impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
@@ -112,10 +115,17 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
             let terms = site
                 .terms
                 .iter()
-                .map(|&(signal, kind)| TermModel {
-                    signal,
-                    kind,
-                    driven: driven.contains(&signal),
+                .enumerate()
+                .map(|(index, &(signal, kind))| {
+                    let gate = site.gate(index);
+                    TermModel {
+                        signal,
+                        kind,
+                        // A gated term is judged at checks after settling,
+                        // which only check driven terms.
+                        driven: driven.contains(&signal) || gate.is_some(),
+                        gate,
+                    }
                 })
                 .collect();
             processes[site.process].waits.push(terms);

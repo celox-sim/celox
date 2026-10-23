@@ -50,7 +50,7 @@ outline: [2, 3]
 | 制御 | 対応範囲 |
 | --- | --- |
 | `#delay` | 整数と実数の遅延、`#(min:typ:max)`（typ の値）、`#pkg::D` のような package スコープの値、[時間リテラル](#time-literal-delays)。X / Z の遅延は 0 として扱う |
-| `@(...)` | 変数、`posedge` / `negedge` / `edge`、`or` または `,` で並べた項目、ビット選択・部分選択・実行時添字の選択、pure な関数呼び出しを含む任意の式、文が読む変数を待つ `@*` / `@(*)` |
+| `@(...)` | 変数、`posedge` / `negedge` / `edge`、`or` または `,` で並べた項目、ビット選択・部分選択・実行時添字の選択、pure な関数呼び出しを含む任意の式、項目の `iff` 条件（`always_ff` を除く）、文が読む変数を待つ `@*` / `@(*)` |
 | `wait (condition)` | 任意の条件。X / Z の条件は偽として扱う |
 | 代入 | ブロッキング代入とノンブロッキング代入。代入先はブロッキング代入と同じで、unpacked 配列の要素や実行時に決まる位置も使えます。ノンブロッキング代入は代入を実行した時点で評価した位置に、そのタイムスロットの NBA 領域で反映します。代入先の範囲外のビットと、X や Z のビットを含む位置には書き込みません |
 
@@ -163,15 +163,14 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   再帰する特殊化と64段を超える入れ子は拒否します。細かな制約は[英語版の一覧](/guide/systemverilog-reference#interface-restrictions)を参照してください。
 - 振る舞い記述・検証向けの構文：`final`、代入内のタイミング制御（`a = #1 b`）、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
   named event と `->`、`fork` / `join`、`wait fork` / `disable fork`、並行アサーション、`force` / `release`。
-- プロセス内のタイミング制御：`iff` 修飾（[#1444](https://github.com/celox-sim/celox/issues/1444)）、
-  イベント式内の impure な関数呼び出し、
-  static task 引数を読む `wait` 条件とイベント式。
+- プロセス内のタイミング制御：イベント式と `iff` 条件内の impure な関数呼び出し、
+  static task 引数を読む `wait` 条件、イベント式、`iff` 条件。
 - `always_latch` 内のノンブロッキング代入（[#431](https://github.com/celox-sim/celox/issues/431)）。対応するラッチではブロッキング代入を使用してください。
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
 - 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、`real`。
-- 順序回路のプロセス：イベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）、および `always_ff` での
+- 順序回路のプロセス：`always_ff` のイベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）、および `always_ff` での
   単純な信号以外のエッジオペランド（[#464](https://github.com/celox-sim/celox/issues/464)）、複数ビットのエッジ信号、
   非同期リセットを持たない複数のエッジ。
 - 組み合わせ回路のプロセス：`always_comb` 内のノンブロッキング代入（[#453](https://github.com/celox-sim/celox/issues/453)）。
@@ -342,6 +341,19 @@ Rust の `.allow_inferred_latches(true)` と JavaScript の `allowInferredLatche
   更新は NBA 領域で発行順に適用し、それぞれが1回の更新です（10.4.2）。子モジュールの出力ポートは
   親のネットへの継続代入なので（23.3.3）、親の待ちは前の項目と同じく確定した値だけを見ます。
   Verilator 5.052 は評価の最終値だけを見ます。Icarus 13.0 はポートを通したパルスも見ます。
+- エッジで起動する `always` のブロッキング代入は active 領域の更新です。それで起きたプロセスは、
+  同じエッジのノンブロッキングの更新より前に実行されます。`y = ~y; q <= q + 1;` では、`@(y)` の
+  待ちはエッジ前の `q` を読み、ノンブロッキングの更新より前に再び待ちに入ります（IEEE 1800-2023 4.5）。
+  Icarus 13.0 は同じ値になり、Verilator 5.052 はノンブロッキングの更新の後で待ちを再開します。
+- 項目 `expr iff condition` は、`expr` の発生を検出した時点で条件が真のときだけイベントになります
+  （IEEE 1800-2023 9.4.2.3）。X と Z は偽で、条件が偽の間の発生は消費されます。条件のオペランドは
+  待ちの対象ではないので、`@(posedge clk iff en)` は `en` だけが変化しても起きません。条件は
+  イベント式と同じく、他のプロセスの書き込みをそのプロセスがタイミング制御に達するか終了した時点で
+  参照し（4.7）、項目のイベント自体も同様です。1つのプロセスで `en = 1; clk = 1;` と書くと、
+  エッジは `en` が 1 の状態で発生し、`clk = 1; en = 0;` と書くと `en` が 0 の状態で発生して
+  イベントになりません。IEEE 1800-2023 は後者を `clk` への書き込みの時点で判定します。
+  Verilator 5.052 は Celox と同じ結果になります。単純な `always @(posedge clk iff en)` はプロセスとして
+  実行し、`always_ff` の `iff` は拒否します（[#452](https://github.com/celox-sim/celox/issues/452)）。
 
 ### 変数の寿命
 
