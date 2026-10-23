@@ -918,36 +918,46 @@ enum HandleDerivedTicks {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl HandleBackend {
-    /// Tick an event as `Simulator::tick` does: settle, run its domain,
-    /// settle, and run the derived clock domains the tick reaches.
+    /// Tick an event as `Simulator::tick` does: a pulse of its signal to
+    /// the active level, running every domain sensitive to its edges.
     fn tick(
         &mut self,
         event_id: usize,
         derived: &HandleDerivedTicks,
+        event_edges: &celox::EventEdges,
         scratch: &mut celox::DerivedTickScratch,
     ) -> std::result::Result<(), celox::RuntimeErrorCode> {
         fn tick_with<B: celox::SimBackend>(
             backend: &mut B,
             event_id: usize,
             plans: &celox::DerivedTickPlans<B::Event>,
+            event_edges: &celox::EventEdges,
             scratch: &mut celox::DerivedTickScratch,
         ) -> std::result::Result<(), celox::RuntimeErrorCode> {
             let event = backend.id_to_event_slice()[event_id];
-            match plans.get(event_id) {
-                Some(Some(plan)) => plan.tick(&mut celox::BackendExecutor(backend), scratch, true),
-                _ => {
-                    backend.eval_comb()?;
-                    backend.eval_apply_ff_at(event)?;
-                    backend.eval_comb()
-                }
+            let plan = plans.get(event_id).and_then(Option::as_ref);
+            match celox::run_tick(
+                &mut celox::BackendExecutor(backend),
+                plan,
+                event_edges[event_id],
+                scratch,
+                event,
+                true,
+                celox::set_level,
+            ) {
+                Ok(()) => Ok(()),
+                // A bare backend reports no `$finish` or `$stop`; what ran
+                // settles here.
+                Err(celox::Halt::Finish | celox::Halt::Stop) => backend.eval_comb(),
+                Err(celox::Halt::Error(error)) => Err(error),
             }
         }
         match (self, derived) {
             (Self::Default(backend), HandleDerivedTicks::Default(plans)) => {
-                tick_with(backend, event_id, plans, scratch)
+                tick_with(backend, event_id, plans, event_edges, scratch)
             }
             (Self::Tiered(backend), HandleDerivedTicks::Tiered(plans)) => {
-                tick_with(backend.as_mut(), event_id, plans, scratch)
+                tick_with(backend.as_mut(), event_id, plans, event_edges, scratch)
             }
             _ => unreachable!("derived tick plans belong to the handle's backend"),
         }
@@ -1544,6 +1554,7 @@ impl NativeSimulatorHandle {
         b.tick(
             event_id as usize,
             &self.derived_ticks,
+            &self.event_edges,
             &mut self.derived_scratch,
         )
         .map_err(|e| napi_runtime_error(&runtime_errors, e))
@@ -1620,6 +1631,7 @@ impl NativeSimulatorHandle {
             b.tick(
                 event_id as usize,
                 &self.derived_ticks,
+                &self.event_edges,
                 &mut self.derived_scratch,
             )
             .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
@@ -3958,9 +3970,13 @@ mod tests {
 
     #[test]
     fn native_handle_dumps_consume_activity_until_memory_is_exposed() {
+        // A tick writes `clk` as well as `q`. The wide inputs keep those two
+        // trace groups below half of the design, where a dump scans every
+        // signal.
         let source = "module Top (
             clk: input clock, q: output logic<64>,
             a: input logic<512>, b: input logic<512>, c: input logic<512>,
+            d: input logic<512>, e: input logic<512>,
         ) { always_ff (clk) { q += 1; } }";
         let dir = tempfile::tempdir().unwrap();
         // Warm the uninstrumented cache first. A traced build must not reuse it.

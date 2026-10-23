@@ -66,10 +66,11 @@ describe("explicit clock edges", () => {
 				sim.negedge(clk);
 				expect(counters()).toEqual([1n, 1n, 1n]);
 				sim.dut.en = 0n;
-				sim.cycle(clk);
-				expect(counters()).toEqual([2n, 2n, 1n]);
 				sim.tick(clk);
-				expect(counters()).toEqual([3n, 2n, 1n]);
+				expect(counters()).toEqual([2n, 2n, 1n]);
+				sim.dut.en = 1n;
+				sim.tick(clk);
+				expect(counters()).toEqual([3n, 3n, 2n]);
 			} finally {
 				sim.dispose();
 			}
@@ -159,7 +160,7 @@ module Top (
 			reset(sim);
 			const observed = enables.map((enable) => {
 				sim.dut.en_in = enable;
-				sim.cycle(clk);
+				sim.tick(clk);
 				return [sim.dut.a_out, sim.dut.b_out, sim.dut.d_out];
 			});
 			expect(observed).toEqual(expected);

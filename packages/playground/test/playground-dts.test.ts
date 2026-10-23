@@ -45,7 +45,7 @@ describe("celox declarations for Monaco", () => {
 			"negedge(",
 			"activeEdge(",
 			"inactiveEdge(",
-			"cycle(",
+			"tick(",
 			"edges(",
 		]) {
 			expect(simulator?.content).toContain(method);

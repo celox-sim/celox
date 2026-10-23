@@ -7,9 +7,8 @@
 //! 9.4.2 defines, evaluating against the state before the edge (4.4.2,
 //! 10.4.2), and that the copy is invisible.
 //!
-//! Event-based `Simulator` tests with explicit edges belong here too, once the
-//! `Simulator` can drive a falling edge: a `tick` is the rising edge only and
-//! does not run falling-edge domains.
+//! The event-based `Simulator`, whose `tick` is a clock period, is covered by
+//! `tick_semantics.rs`.
 
 #![cfg(feature = "systemverilog")]
 

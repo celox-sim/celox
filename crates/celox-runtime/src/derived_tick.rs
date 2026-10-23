@@ -1,7 +1,7 @@
-//! Derived clock domains of an event-based tick.
+//! Derived clock domains of an event-based edge.
 //!
-//! A tick is one active edge of an event. Clocks derived from the event run
-//! with the rules of the timed scheduler:
+//! A plan runs the domains one edge of an event reaches. Clocks derived from
+//! the event run with the rules of the timed scheduler:
 //!
 //! - A clock computed combinationally from the event's signal, such as
 //!   `clk & enable`, changes at the same instant as the event. Its edge is
@@ -17,9 +17,9 @@
 //!   commit raises while the clock is high is a further edge. Each domain
 //!   fires at most once per phase.
 //!
-//! A tick is the event's active edge only and does not change the event's
-//! signal. Domains that react to the signal's opposite edge, such as one
-//! clocked by `~clk` or by a falling `clk & en`, do not run on a tick.
+//! A plan's [`DerivedTickPlan::tick`] is the event's active edge with its
+//! signal left as it is; the edge APIs move the signal around it, and a
+//! `Simulator::tick` takes the active edge and then the inactive one.
 //!
 //! What an event can reach is computed when the simulator is built
 //! ([`celox_design::EventTopology::derived_events`] and
