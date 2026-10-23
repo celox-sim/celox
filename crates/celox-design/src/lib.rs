@@ -617,12 +617,56 @@ pub struct WaitSite<A> {
     /// checks a condition at its resume point decides itself whether it
     /// continues.
     pub terms: Vec<(A, CounterKind)>,
-    /// The `iff` condition of each term, as a signal whose least significant
-    /// bit holds it, or empty when no term has one. An occurrence of a term
-    /// with a gate satisfies the wait only if the gate is a known 1 when the
-    /// occurrence is detected (IEEE 1800-2023 9.4.2.3).
+    /// The `iff` condition of each term, or empty when no term has one. An
+    /// occurrence of a term with a gate satisfies the wait only if the gate
+    /// is a known 1 when the occurrence happens (IEEE 1800-2023 9.4.2.3).
     #[serde(default = "Vec::new", skip_serializing_if = "Vec::is_empty")]
-    pub gates: Vec<Option<A>>,
+    pub gates: Vec<Option<WaitGate<A>>>,
+}
+
+/// The `iff` condition of a wait term: a signal whose least significant bit
+/// holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WaitGate<A> {
+    pub signal: A,
+    /// Counters that the writes of the term's signal bump at the write
+    /// itself, judging the gate there. Without them the gate is read when
+    /// the runtime detects the occurrence, after combinational logic
+    /// settled: for a gate or a signal that a continuous assignment or a
+    /// flip-flop drives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counters: Option<GateCounters<A>>,
+}
+
+/// The occurrences of a gated term's kind that writes caused: `gated` those
+/// while the gate was a known 1, `all` every one. A change of the signal
+/// that neither counted, such as a raw host write, is judged with the gate
+/// when it is detected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GateCounters<A> {
+    pub gated: A,
+    pub all: A,
+}
+
+impl<A: Copy> WaitGate<A> {
+    pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> WaitGate<B> {
+        WaitGate {
+            signal: map(self.signal),
+            counters: self.counters.map(|counters| GateCounters {
+                gated: map(counters.gated),
+                all: map(counters.all),
+            }),
+        }
+    }
+
+    /// The gate's signal and counters.
+    pub fn reads(&self) -> impl Iterator<Item = A> {
+        std::iter::once(self.signal).chain(
+            self.counters
+                .into_iter()
+                .flat_map(|counters| [counters.gated, counters.all]),
+        )
+    }
 }
 
 impl<A: Copy> WaitSite<A> {
@@ -634,22 +678,26 @@ impl<A: Copy> WaitSite<A> {
                 .iter()
                 .map(|&(signal, kind)| (map(signal), kind))
                 .collect(),
-            gates: self.gates.iter().map(|gate| gate.map(&mut map)).collect(),
+            gates: self
+                .gates
+                .iter()
+                .map(|gate| gate.as_ref().map(|gate| gate.map(&mut map)))
+                .collect(),
         }
     }
 
     /// The gate of term `index`.
-    pub fn gate(&self, index: usize) -> Option<A> {
+    pub fn gate(&self, index: usize) -> Option<WaitGate<A>> {
         self.gates.get(index).copied().flatten()
     }
 
-    /// The signals the runtime reads to judge the wait: its terms' signals
-    /// and gates.
+    /// The signals the runtime reads to judge the wait: its terms' signals,
+    /// gates and gate counters.
     pub fn reads(&self) -> impl Iterator<Item = A> + '_ {
         self.terms
             .iter()
             .map(|&(signal, _)| signal)
-            .chain(self.gates.iter().flatten().copied())
+            .chain(self.gates.iter().flatten().flat_map(WaitGate::reads))
     }
 }
 

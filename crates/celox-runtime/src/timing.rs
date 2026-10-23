@@ -104,6 +104,54 @@ impl CountedRefs {
     }
 }
 
+/// The `iff` gate of a wait term ([`celox_design::WaitGate`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GateRefs {
+    pub signal: SignalRef,
+    /// The counters of a gate judged at each write
+    /// ([`celox_design::GateCounters`]).
+    pub counters: Option<GateCounterRefs>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GateCounterRefs {
+    pub gated: SignalRef,
+    pub all: SignalRef,
+}
+
+/// Whether the least significant bit of `gate` is a known 1.
+pub fn gate_holds<B: SimBackend>(backend: &B, gate: SignalRef) -> bool {
+    let (value, unknown) = read(backend, gate);
+    value.bit(0) && !unknown.bit(0)
+}
+
+/// A gated term whose counters a write of its signal by the runtime or the
+/// host bumps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GatedWriteRefs {
+    pub kind: CounterKind,
+    pub gate: SignalRef,
+    pub counters: GateCounterRefs,
+}
+
+impl GatedWriteRefs {
+    /// Count a change from `old` to `new`, judging the gate after it.
+    pub fn bump<B: SimBackend>(&self, backend: &mut B, old: &Value, new: &Value) {
+        if !occurs(self.kind, old, new) {
+            return;
+        }
+        let mut increment = |counter: SignalRef| {
+            let value: u32 = backend.get_as(counter);
+            backend.set(counter, value.wrapping_add(1));
+        };
+        increment(self.counters.all);
+        if gate_holds(backend, self.gate) {
+            let value: u32 = backend.get_as(self.counters.gated);
+            backend.set(self.counters.gated, value.wrapping_add(1));
+        }
+    }
+}
+
 /// A bit range whose changes bump an occurrence counter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProbeRefs {

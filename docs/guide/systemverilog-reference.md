@@ -468,16 +468,23 @@ unsupported, including when the inference option is enabled.
   (IEEE 1800-2023 4.5). Icarus 13.0 gives the same values; Verilator 5.052
   resumes the waiter after the nonblocking updates.
 - An item `expr iff condition` is an event only if the condition is true
-  when the occurrence of `expr` is detected (IEEE 1800-2023 9.4.2.3): X and
-  Z are false, and an occurrence while the condition is false is consumed.
+  when the occurrence of `expr` happens (IEEE 1800-2023 9.4.2.3): X and Z
+  are false, and an occurrence while the condition is false is consumed.
   The wait does not watch the condition's operands, so `@(posedge clk iff
-  en)` does not wake when only `en` changes. Like an event expression, the
-  condition sees another process's writes when that process reaches a
-  timing control or ends (4.7), and so does the item's own event: with
-  `en = 1; clk = 1;` in one process, the edge occurs with `en` at 1, and
-  with `clk = 1; en = 0;` it occurs with `en` at 0 and is no event.
-  IEEE 1800-2023 judges the latter at the write of `clk`; Verilator 5.052
-  agrees with Celox.
+  en)` does not wake when only `en` changes. When `expr` and the condition
+  are both variables, the condition is judged at each write of `expr`: by
+  a process or a combinational process, by nonblocking updates in issue
+  order, by scheduled clock edges and by host writes. In one process,
+  `clk = 1; en = 0;` is an event and `en = 0; clk = 1;` is none.
+  Verilator 5.052 judges the condition later, after the process suspends,
+  and gives the opposite results. A condition that is an expression or a
+  net, an `expr` other than a variable, and a variable that a flip-flop
+  domain writes ([#1830](https://github.com/celox-sim/celox/issues/1830))
+  are judged when the occurrence is detected, after combinational logic
+  settles: like an event expression, they see a process's writes when the
+  process reaches a timing control or ends (4.7). A raw memory write the
+  host notes with `Simulation::note_raw_writes` is judged with the
+  condition as the writes left it.
   A plain `always @(posedge clk iff en)` runs as a process; `always_ff`
   rejects `iff` ([#452](https://github.com/celox-sim/celox/issues/452)).
 
