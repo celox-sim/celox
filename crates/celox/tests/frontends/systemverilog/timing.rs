@@ -432,12 +432,7 @@ fn unimplemented_timing_features_are_rejected() {
         ("bit a; initial @(a iff a);", "iff-qualified event", 1444),
         ("initial fork #1; join", "fork-join block", 88),
         ("initial fork #1; join_none", "fork-join block", 88),
-        // #1711 names the construct.
-        (
-            "event e; initial -> e;",
-            "unsupported internal data type",
-            88,
-        ),
+        ("event e; initial -> e;", "named event", 88),
         (
             "bit a, b; initial a = #1 b;",
             "intra-assignment timing control",
@@ -454,8 +449,7 @@ fn unimplemented_timing_features_are_rejected() {
             88,
         ),
         ("initial wait fork;", "wait fork statement", 88),
-        // #1711 names the construct.
-        ("initial disable fork;", "disable statement", 88),
+        ("initial disable fork;", "disable fork statement", 88),
         (
             "bit a; task t(input bit x); wait (a ^ x); endtask initial t(0);",
             "wait condition reading a static task argument",
@@ -573,10 +567,9 @@ fn timing_controls_outside_suspendable_processes_are_rejected() {
             "bit clk, a, q; always_ff @(posedge clk) begin @(a); q <= a; end",
             "event control in an always_comb or always_ff body",
         ),
-        // #1711 reports this as illegal rather than unsupported.
         (
             "bit a; function automatic bit f(); #1; return a; endfunction",
-            "delay control in a subroutine",
+            "delay control in a function",
         ),
     ] {
         let source = format!("module Top; {body} endmodule");
