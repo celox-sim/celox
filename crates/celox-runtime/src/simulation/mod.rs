@@ -2,6 +2,7 @@
 //! batch step of designs without processes.
 
 mod batch;
+mod compiled;
 mod edges;
 mod host;
 mod nba;
@@ -18,7 +19,7 @@ use bit_set::BitSet;
 use celox_design::CounterKind;
 
 pub(crate) use batch::{edge_level, event_level};
-pub use host::{HostBoundary, HostWatch, SimulationExecutor, UnitExecutor};
+pub use host::{CompiledSlots, HostBoundary, HostWatch, SimulationExecutor, UnitExecutor};
 pub use nba::NbaUpdate;
 pub use persist::{ScheduleKey, ScheduleParts, SimulationSnapshot};
 pub use stats::{KernelSchedule, SchedulerMode, SchedulerStats};
@@ -87,6 +88,12 @@ struct Suspended<B: SimBackend> {
 /// Sees the steps of [`SimulationState::run_until_observed`] and
 /// [`SimulationState::step_until_observed`].
 pub trait StepObserver<E: SimulationExecutor> {
+    /// Whether a run of the compiled scheduler takes one slot at a time, so
+    /// that every slot is a step the observer sees.
+    fn one_slot(&self) -> bool {
+        false
+    }
+
     /// Called before a step, with the state it starts from.
     fn before_step(&mut self, state: &SimulationState<E::Backend>, executor: &mut E);
 
@@ -207,10 +214,13 @@ impl<B: SimBackend> SimulationState<B> {
             slot_passes: 0,
             stats: SchedulerStats::default(),
         };
-        state.stats.kernels = vec![
-            KernelSchedule::Reference("the design has no compiled scheduler");
-            state.model.processes.len()
-        ];
+        state.stats.kernels = (0..state.model.processes.len())
+            .map(|index| match state.model.kernel_fallback.get(index) {
+                Some(None) if state.model.scheduler.is_some() => KernelSchedule::Compiled,
+                Some(Some(reason)) => KernelSchedule::Reference(reason.clone()),
+                _ => KernelSchedule::Reference("the design has no compiled scheduler".into()),
+            })
+            .collect();
         state.synchronize_event_values(backend);
         state
     }
@@ -284,11 +294,25 @@ impl<B: SimBackend> SimulationState<B> {
             // describing different moments, so an earlier target is a no-op.
             return Ok(false);
         }
+        let compiles = self.compiles_slots();
         while let Some(next_time) = self.next_event_time() {
             if next_time > end {
                 break;
             }
-            self.step_until_observed(executor, end, observer)?;
+            // A waiting process keeps the slot in the reference loop; test
+            // that first, as fallback designs fail it at every step.
+            let compiled = if compiles && self.process_state.waiters.is_empty() {
+                self.compiled_limit(executor, end, observer.one_slot())
+            } else {
+                None
+            };
+            observer.before_step(self, executor);
+            let result = match compiled {
+                Some(limit) => self.run_compiled(executor, limit),
+                None => self.step_until(executor, end),
+            };
+            observer.after_step(self, executor, end, &result)?;
+            result?;
             if self.stopped {
                 return Ok(false);
             }
