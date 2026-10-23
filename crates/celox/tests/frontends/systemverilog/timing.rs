@@ -784,3 +784,88 @@ fn runtime_error_before_a_commit_leaves_no_held_writes() {
         }
     }
 }
+
+/// The baselines of waits on a counted variable survive a state file: a
+/// simulation loaded between two pulses of `y` wakes the waiters as the
+/// uninterrupted one does, and saves the same baselines again.
+#[test]
+fn counted_wait_baselines_survive_a_state_file() {
+    let source = r#"
+        module Top(output int n, r);
+            timeunit 1ns / 1ns;
+            bit a, b, c;
+            logic y;
+            always_comb begin y = 0; if (a) y = 1; c = b; end
+            initial #1 forever begin @(y); n++; end
+            initial #1 forever begin @(posedge y); r++; end
+            initial begin
+                #2 a = 1;
+                #1 b = 1;
+                #1 b = 0;
+                #1 b = 1;
+                #1 a = 0;
+            end
+        endmodule
+    "#;
+    let build = |four_state: bool| {
+        celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("counted_state.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap()
+    };
+    let through_bytes = |file: &celox::StateFile| {
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        celox::StateFile::read_from(bytes.as_slice()).unwrap()
+    };
+    for four_state in [false, true] {
+        let counts = |sim: &mut celox::Simulation| {
+            ["n", "r"].map(|name| {
+                let signal = sim.signal(name);
+                sim.get(signal)
+            })
+        };
+        let mut whole = build(four_state);
+        whole.run_until(10).unwrap();
+        let expected = counts(&mut whole);
+        assert_eq!(
+            expected,
+            [5u32.into(), 4u32.into()],
+            "four_state={four_state}"
+        );
+
+        let mut first = build(four_state);
+        first.run_until(3).unwrap();
+        let file = through_bytes(&first.save_state().unwrap());
+        assert!(
+            file.schedule
+                .as_ref()
+                .unwrap()
+                .processes
+                .waiters
+                .iter()
+                .flat_map(|waiter| &waiter.baselines)
+                .any(|baseline| matches!(baseline, celox::BaselineRecord::Counter { .. })),
+            "four_state={four_state}: `y` is counted"
+        );
+        let mut loaded = build(four_state);
+        loaded.load_state(&file).unwrap();
+        assert_eq!(
+            through_bytes(&loaded.save_state().unwrap()),
+            file,
+            "four_state={four_state}"
+        );
+        loaded.run_until(10).unwrap();
+        assert_eq!(counts(&mut loaded), expected, "four_state={four_state}");
+        // A baseline taken at a check in this run saves as the loaded one.
+        first.run_until(4).unwrap();
+        loaded = build(four_state);
+        let file = through_bytes(&first.save_state().unwrap());
+        loaded.load_state(&file).unwrap();
+        loaded.run_until(10).unwrap();
+        assert_eq!(counts(&mut loaded), expected, "four_state={four_state}");
+    }
+}
