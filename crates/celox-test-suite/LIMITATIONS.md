@@ -407,6 +407,32 @@ both checks in Verilator and passes in Icarus 13.0, which also passes the
 unchanged shared assertions. The [retained observation](verification/repros/process_nba_positions_verilator.json)
 records both failures; `--include-ignored` retains their assertions.
 
+Verilator 5.052 schedules an `always @*` that calls a timed task differently
+from its event control in `timing::always_star_timed_task_calls_run_as_processes`:
+the call for `a = 5` at 3 ns writes `y` at 6 ns instead of 5 ns, and in
+`timing::always_star_timed_task_calls_assign_nonblocking` a nonblocking update
+after the task's 1 ns delay lands at 2 ns instead of 3 ns. A standalone
+probe also shows it rerunning the call for a change made while the task was
+suspended and for variables only the task body reads. IEEE 1800-2023 9.4.2.2
+makes the implicit event list the variables the statement reads, and 9.4.2
+waits only for changes after the event control is reached. Icarus 13.0 passes
+the unchanged shared assertions.
+
+IEEE 1800-2023 9.4.2.2 defines the event list of an `always @*` by the
+identifiers that appear in its statement, so a branch that constant folding
+removes still contributes, and Celox's combinational and process `always @*`
+count it, with the reads of the defaults of omitted arguments. Icarus 13.0
+leaves the folded branch out in
+`timing::always_star_timed_task_calls_wait_on_folded_branch_reads`. Verilator
+5.052 leaves out both the folded branch and the default of a nested call in
+`timing::always_star_timed_task_calls_wait_on_nested_call_defaults`, and runs
+the process at time zero; Icarus passes the nested-default case.
+
+Icarus 13.0 reports a syntax error for an unparenthesized package-scoped delay
+value (`#delays::D;`) in `timing::package_scoped_delay_values_wait_their_value`;
+IEEE 1800-2023 A.6.5 permits a `ps_identifier` as a `delay_value`. Verilator
+passes the case.
+
 Verilator 5.052 repeats activation of the self-reading latch in
 `latch::guarded_activation`, producing 3 where one `seed`/`en` change should
 produce 1. The [adapter-free reproduction](verification/repros/latch_activation.sv)

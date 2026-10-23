@@ -131,9 +131,12 @@ fn validate_procedure(
     while let Some(id) = pending.pop() {
         let statement = native.statement(id);
         match &statement.kind {
+            // A plain `always @*` that calls a timed task runs as a process,
+            // which may assign nonblocking; timed task classification
+            // rejects the assignment in one that stays combinational.
             StatementKind::Assignment {
                 nonblocking: true, ..
-            } if kind == AlwaysKind::Comb => {
+            } if kind == AlwaysKind::Comb && procedure.kind != ProcedureKind::Always => {
                 return Err(unsupported(
                     if procedure.kind == ProcedureKind::AlwaysLatch {
                         "nonblocking assignment inside always_latch"
