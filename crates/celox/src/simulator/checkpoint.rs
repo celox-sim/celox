@@ -9,7 +9,6 @@
 //! state header in front of it holds host pointers and is never copied.
 
 use celox_state_layout::STATE_HEADER_SIZE;
-use num_bigint::BigUint;
 
 use super::host::Simulator;
 use crate::backend::SimBackend;
@@ -98,7 +97,7 @@ fn state_range<B: SimBackend>(backend: &B) -> std::ops::Range<usize> {
 #[derive(Clone)]
 pub struct Checkpoint {
     image: StateImage,
-    comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
+    comb_observer_snapshots: Vec<crate::comb_activation::ObserverSnapshot>,
     comb_observer_initial_eval: bool,
     /// Whether the design had finished a timed simulation.
     frozen: bool,

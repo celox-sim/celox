@@ -1,12 +1,17 @@
-//! The round of a design without processes and counted signals, and the
-//! stable-edge helpers it calls, kept in one module.
+//! The round of a design without processes, and the stable-edge helpers it
+//! calls, kept in one module.
 
 use bit_set::BitSet;
 use celox_design::edges::{LEVEL_UNKNOWN, settled_edge};
 
 use super::SimulationState;
 use super::host::SimulationExecutor;
-use crate::{SignalRef, backend::SimBackend, scheduler::SimEvent, timing::Halt};
+use crate::{
+    SignalRef,
+    backend::SimBackend,
+    scheduler::SimEvent,
+    timing::{Halt, read},
+};
 
 /// The level of an event signal: its value bits, without the unused bits
 /// above its width that share its storage byte. Backends need not keep those
@@ -101,9 +106,10 @@ impl<B: SimBackend> SimulationState<B> {
         }
     }
 
-    /// The round of a design without processes and counted signals: the
-    /// batch step as it was before process rounds, kept apart from
-    /// [`Self::step_round`] so that such designs run its code unchanged.
+    /// The round of a design without processes: the batch step as it was
+    /// before process rounds, kept apart from [`Self::step_round`] so that
+    /// such designs run its code unchanged. Counted signals add only a
+    /// check of their counters after each evaluation.
     pub(super) fn batch_round<E>(
         &mut self,
         executor: &mut E,
@@ -116,8 +122,21 @@ impl<B: SimBackend> SimulationState<B> {
         self.scheduler.time = current_time;
 
         let num_events = executor.backend().num_events();
+        let counted = !self.model.counted.is_empty();
         for event in &events_to_process {
-            executor.backend_mut().set(event.signal, event.next_val);
+            let backend = executor.backend_mut();
+            match counted
+                .then(|| self.model.counted_by_offset.get(&event.signal.offset))
+                .flatten()
+            {
+                Some(&counted) => {
+                    let old = read(backend, event.signal);
+                    backend.set(event.signal, event.next_val);
+                    let new = read(backend, event.signal);
+                    self.model.counted[counted].refs.bump(backend, &old, &new);
+                }
+                None => backend.set(event.signal, event.next_val),
+            }
         }
 
         let mut triggered_domains = BitSet::with_capacity(num_events);
@@ -181,6 +200,9 @@ impl<B: SimBackend> SimulationState<B> {
         // with the edge) gives a further edge, as the update events of the
         // NBA region do.
         let mut edge_approved: Option<BitSet> = None;
+        if counted {
+            self.mark_counted_domains_in_batch(executor.backend_mut(), &mut edge_approved);
+        }
         for &source in &gating_sources {
             for index in 0..self.model.combinational_derived[source].len() {
                 let id = self.model.combinational_derived[source][index];
@@ -229,6 +251,12 @@ impl<B: SimBackend> SimulationState<B> {
                             executor.eval_comb()?;
                             if track_stable_edges {
                                 self.replace_triggers_with_stable_edges(executor.backend_mut());
+                            }
+                            if counted {
+                                self.mark_counted_domains_in_batch(
+                                    executor.backend_mut(),
+                                    &mut edge_approved,
+                                );
                             }
                             comb_already_done = true;
                             break;
@@ -300,6 +328,9 @@ impl<B: SimBackend> SimulationState<B> {
                 executor.eval_comb()?;
                 if track_stable_edges {
                     self.replace_triggers_with_stable_edges(executor.backend_mut());
+                }
+                if counted {
+                    self.mark_counted_domains_in_batch(executor.backend_mut(), &mut edge_approved);
                 }
             }
         }

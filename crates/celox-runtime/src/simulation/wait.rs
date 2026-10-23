@@ -95,18 +95,33 @@ impl<B: SimBackend> SimulationState<B> {
         signal: SignalRef,
         write: impl FnOnce(&mut B),
     ) {
-        if self.model.counted.is_empty() && self.process_state.waiters.is_empty() {
+        if self.model.counted.is_empty()
+            && self.model.probes_by_offset.is_empty()
+            && self.process_state.waiters.is_empty()
+        {
             write(backend);
             return;
         }
-        match self.model.counted_by_offset.get(&signal.offset).copied() {
-            Some(counted) => {
-                let old = read(backend, signal);
-                write(backend);
-                let new = read(backend, signal);
+        let counted = self.model.counted_by_offset.get(&signal.offset).copied();
+        let probes = self.model.probes_by_offset.get(&signal.offset);
+        if counted.is_none() && probes.is_none() {
+            write(backend);
+        } else {
+            let old = read(backend, signal);
+            write(backend);
+            let new = read(backend, signal);
+            if let Some(counted) = counted {
                 self.model.counted[counted].refs.bump(backend, &old, &new);
             }
-            None => write(backend),
+            // One counter can observe several ranges of the signal; a write
+            // is one occurrence.
+            let mut bumped: Vec<SignalRef> = Vec::new();
+            for probe in probes.into_iter().flatten() {
+                if !bumped.contains(&probe.counter) && probe.changed(&old, &new) {
+                    probe.bump(backend);
+                    bumped.push(probe.counter);
+                }
+            }
         }
         if !self.process_state.waiters.is_empty() {
             self.observe(backend, Some(signal));

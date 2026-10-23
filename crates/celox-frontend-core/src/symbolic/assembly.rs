@@ -738,6 +738,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         })
         .collect();
     let declaration_probes;
+    let occurrence_probes: Vec<(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)>;
     let counted = {
         // Flip-flop event domains and the aliases that resolve to them.
         let event_addresses: HashSet<AbsoluteAddr> = eval_apply_ffs
@@ -771,6 +772,13 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     if !probes.contains(&(source, counter)) {
                         probes.push((source, counter));
                     }
+                }
+            }
+        }
+        for observer in &comb_observers {
+            for &(source, counter) in &observer.sensitivity_counters {
+                if !probes.contains(&(source, counter)) {
+                    probes.push((source, counter));
                 }
             }
         }
@@ -821,6 +829,13 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             }
         }
         declaration_probes = probes.clone();
+        occurrence_probes = probes.clone();
+        // Signals a flip-flop evaluation may store twice in its working
+        // state. Each store is an update event (IEEE 1800-2023 4.3, 10.4.2)
+        // that the commit of the final value alone would not show; the
+        // working state is seeded with the stable value first, so a store
+        // compares with the value its update replaces.
+        let ff_multi_stored = ff_multi_stored(&eval_apply_ffs, &eval_only_ffs, &parallel_ff_units);
         for (source, counter) in probes {
             let width = source.access.msb - source.access.lsb + 1;
             let four_state = four_state && variables[&source.id].1;
@@ -867,6 +882,27 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     crate::watch::instrument_unit(&mut part.apply, code);
                 }
             }
+            if ff_multi_stored.contains(&source.id) {
+                let working =
+                    |address| RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, address);
+                let code = |address: &RegionedAbsoluteAddr| {
+                    (address.region == WORKING_REGION && address.absolute_addr() == source.id).then(
+                        || crate::watch::WatchCode {
+                            signal: working(source.id),
+                            width,
+                            offset: offset.clone(),
+                            four_state,
+                            counters: vec![(CounterKind::Changes, stable(counter))],
+                        },
+                    )
+                };
+                for_each_ff_evaluation(
+                    &mut eval_apply_ffs,
+                    &mut eval_only_ffs,
+                    &mut parallel_ff_units,
+                    |unit| instrument_stores(unit, code),
+                );
+            }
             for path in &mut comb_blocks {
                 if let LogicPathTarget::Process { unit, .. } = &mut path.target {
                     crate::watch::instrument_unit(unit, |address| {
@@ -899,7 +935,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     .flatten()
                     .flat_map(|split| [&mut split.active, &mut split.nba]),
             );
-        instrument_counted_signals(
+        let counted = instrument_counted_signals(
             &timing,
             counted,
             &variables,
@@ -907,7 +943,43 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             &mut processes,
             &mut comb_blocks,
             ff_units,
-        )
+        );
+        // A counted signal without pending slots (a design without waits)
+        // is counted at its commit, which sees only the final value. Count
+        // each store of an evaluation that may store it twice as well.
+        let pending: HashSet<AbsoluteAddr> = timing
+            .pending_slots
+            .iter()
+            .map(|slots| slots.signal)
+            .collect();
+        for (signal, slots) in &counted {
+            if !ff_multi_stored.contains(signal) || pending.contains(signal) {
+                continue;
+            }
+            let (width, is_4state) = variables[signal];
+            let regioned = RegionedAbsoluteAddr::from_absolute_addr;
+            let code = |address: &RegionedAbsoluteAddr| {
+                (address.region == WORKING_REGION && address.absolute_addr() == *signal).then(
+                    || crate::watch::WatchCode {
+                        signal: regioned(WORKING_REGION, *signal),
+                        offset: celox_sir::SIROffset::Static(0),
+                        width,
+                        four_state: four_state && is_4state,
+                        counters: CounterKind::ALL
+                            .into_iter()
+                            .map(|kind| (kind, regioned(STABLE_REGION, slots.counter(kind))))
+                            .collect(),
+                    },
+                )
+            };
+            for_each_ff_evaluation(
+                &mut eval_apply_ffs,
+                &mut eval_only_ffs,
+                &mut parallel_ff_units,
+                |unit| instrument_stores(unit, code),
+            );
+        }
+        counted
     };
     // Combinational values and the variables they are computed from.
     let comb_sources = comb_sources(&comb_blocks, &global_arena);
@@ -1654,6 +1726,11 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             site_id: observer.site_id,
             activation_group: observer.activation_group,
             sensitivity: observer.sensitivity.clone(),
+            occurrence_counters: observer
+                .sensitivity_counters
+                .iter()
+                .map(|&(_, counter)| counter)
+                .collect(),
             written_inputs: observer.written_inputs.clone(),
         })
         .collect();
@@ -1869,6 +1946,11 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     access: atom.access,
                 })
                 .collect(),
+            occurrence_counters: observer
+                .occurrence_counters
+                .into_iter()
+                .map(project)
+                .collect(),
             written_inputs: observer.written_inputs.into_iter().map(project).collect(),
         })
         .collect();
@@ -2014,6 +2096,24 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .chain(host_request_sites.iter().flat_map(|site| site.slots()))
         .collect();
     let declaration_startup = declaration_startup.map(|startup| startup.map(project));
+    let occurrence_probes: Vec<(VarAtomBase<StateAddr>, StateAddr)> = occurrence_probes
+        .into_iter()
+        .map(|(source, counter)| {
+            (
+                VarAtomBase {
+                    id: project(source.id),
+                    access: source.access,
+                },
+                project(counter),
+            )
+        })
+        .collect();
+    // The runtime counts the occurrences its own writes cause.
+    timing_read_roots.extend(
+        occurrence_probes
+            .iter()
+            .flat_map(|(source, counter)| [source.id, *counter]),
+    );
     if let Some(startup) = &declaration_startup {
         timing_read_roots.extend(
             startup
@@ -2086,6 +2186,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             processes: process_slots,
             process_origins,
             watches,
+            occurrence_probes,
             wait_sites,
             nba_sites,
             host_request_sites,
@@ -3694,6 +3795,65 @@ fn relocate_timing(
         );
     }
     metadata
+}
+
+type FfUnits = HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>;
+type FfParts = HashMap<AbsoluteAddr, Vec<(InstanceId, FfPart<RegionedAbsoluteAddr>)>>;
+
+/// The signals some flip-flop evaluation may store twice in its working
+/// state in one execution.
+fn ff_multi_stored(
+    eval_apply_ffs: &FfUnits,
+    eval_only_ffs: &FfUnits,
+    parallel_ff_units: &FfParts,
+) -> HashSet<AbsoluteAddr> {
+    let working = |address: &RegionedAbsoluteAddr| {
+        (address.region == WORKING_REGION).then(|| address.absolute_addr())
+    };
+    eval_apply_ffs
+        .values()
+        .chain(eval_only_ffs.values())
+        .flatten()
+        .chain(
+            parallel_ff_units
+                .values()
+                .flatten()
+                .map(|(_, part)| &part.evaluate),
+        )
+        .flat_map(|unit| crate::watch::multi_store_only_candidates(unit, working))
+        .collect()
+}
+
+/// [`crate::watch::instrument_unit`] for the stores alone: the commits that
+/// seed a flip-flop evaluation's working state are not writes of the
+/// process.
+fn instrument_stores(
+    unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    watch_for: impl Fn(&RegionedAbsoluteAddr) -> Option<crate::watch::WatchCode<RegionedAbsoluteAddr>>,
+) {
+    crate::watch::instrument_writes(unit, |instruction| match instruction {
+        SIRInstruction::Store(address, ..) => watch_for(address),
+        _ => None,
+    });
+}
+
+/// Run `f` on every flip-flop evaluation.
+fn for_each_ff_evaluation(
+    eval_apply_ffs: &mut FfUnits,
+    eval_only_ffs: &mut FfUnits,
+    parallel_ff_units: &mut FfParts,
+    mut f: impl FnMut(&mut ExecutionUnit<RegionedAbsoluteAddr>),
+) {
+    for unit in eval_apply_ffs
+        .values_mut()
+        .chain(eval_only_ffs.values_mut())
+        .flatten()
+    {
+        f(unit);
+    }
+    for (_, part) in parallel_ff_units.values_mut().flatten() {
+        f(&mut part.evaluate);
+    }
 }
 
 /// Counted signals: those a unit may store twice between two runtime checks
