@@ -2205,7 +2205,7 @@ struct TokenReference {
 /// The interface handle an actual names, optionally selected and qualified by a modport.
 fn actual_handle(expression: ExprId, file: &File<'_>) -> Converted<Option<Actual>> {
     let native = file.syntax_tree.declarations();
-    let mut base = expression;
+    let mut base = expression_binding::ungroup(expression, native);
     let mut modport = None;
     if let native::ExprKind::Member {
         expression,
@@ -2217,13 +2217,13 @@ fn actual_handle(expression: ExprId, file: &File<'_>) -> Converted<Option<Actual
             return Ok(None);
         }
         modport = Some(native_name(name));
-        base = *expression;
+        base = expression_binding::ungroup(*expression, native);
     }
     let end = native.expression(base).tokens.end;
     let mut selected = false;
     while let native::ExprKind::Select { expression, .. } = &native.expression(base).kind {
         selected = true;
-        base = *expression;
+        base = expression_binding::ungroup(*expression, native);
     }
     let native::ExprKind::Name(name) = &native.expression(base).kind else {
         return Ok(None);
