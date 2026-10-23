@@ -43,6 +43,9 @@ pub struct ScheduleModel<A> {
     /// Objects the scheduler stores the current time into
     /// ([`RuntimeSchema::time_slots`]).
     pub time_slots: Vec<A>,
+    /// The compiled scheduler, if one was generated
+    /// ([`RuntimeSchema::scheduler`]).
+    pub scheduler: Option<crate::SchedulerSchema<A>>,
 }
 
 /// A counted signal and the canonical domains its counters trigger.
@@ -142,6 +145,7 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
                 .any(|site| matches!(site.kind, RuntimeEventKind::Finish)),
             active_commits: schema.active_commits.clone(),
             time_slots: schema.time_slots.clone(),
+            scheduler: schema.scheduler.clone(),
         }
     }
 

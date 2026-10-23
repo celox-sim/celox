@@ -2824,6 +2824,15 @@ mod host {
                 }
             }
 
+            // A timed simulation runs the slots of kernels that only delay
+            // in a compiled scheduler, generated from the final units.
+            #[cfg(feature = "host-runtime")]
+            if self.options.emit_triggers
+                && self.options.scheduler != crate::SchedulerMode::Reference
+            {
+                crate::scheduler::attach(&mut laid_out);
+            }
+
             // Link DPI-C imports before code generation, so a missing C
             // function fails the build early; the backends reuse the result.
             self.options
@@ -3721,7 +3730,10 @@ mod host {
                 self.into_laid_out_program(layout_mode)?;
             let backend = compile(&laid_out, &options)
                 .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
-            let shadow = if options.scheduler != crate::SchedulerMode::Differential {
+            let shadow = if !matches!(
+                options.scheduler,
+                crate::SchedulerMode::Differential | crate::SchedulerMode::DifferentialRuns
+            ) {
                 None
             } else if !injected_components.definitions.is_empty() {
                 Some(Err("the design has external components"))
