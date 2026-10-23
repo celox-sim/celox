@@ -2090,7 +2090,14 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .chain(
             nba_sites
                 .iter()
-                .flat_map(|site| [Some(site.value), site.offset, site.pending])
+                .flat_map(|site| {
+                    [
+                        Some(site.value),
+                        site.position.map(|position| position.offset),
+                        site.position.map(|position| position.width),
+                        site.pending,
+                    ]
+                })
                 .flatten(),
         )
         .chain(host_request_sites.iter().flat_map(|site| site.slots()))
@@ -3645,6 +3652,7 @@ fn select_nba_paths(
         };
         if !staged.contains(&switch.switch) {
             site.value = switch.queued;
+            site.position = switch.queued_position;
             site.pending = None;
         }
     }

@@ -394,6 +394,19 @@ fails its startup assertion in Verilator and passes in Icarus 13.0, which also
 passes the unchanged shared assertions. The [retained observation](verification/repros/event_list_declaration_startup_verilator.json)
 records both failures; `--include-ignored` retains their assertions.
 
+Verilator 5.052 keeps only the last of the nonblocking updates that an inner
+loop issues to overlapping part-selects at run-time positions when an outer loop
+delays between iterations, in
+`timing::process_nonblocking_assignments_at_run_time_positions`, and writes a
+nonblocking update of `q[8]` of `logic [7:0] q` into bit 0, in
+`timing::process_nonblocking_assignments_outside_their_target`. Each
+nonblocking assignment is its own update in issue order (IEEE 1800-2023 10.4.2),
+and bits outside the target are not written (11.5.1, 7.4.6). The
+[adapter-free reproduction](verification/repros/process_nba_positions.sv) fails
+both checks in Verilator and passes in Icarus 13.0, which also passes the
+unchanged shared assertions. The [retained observation](verification/repros/process_nba_positions_verilator.json)
+records both failures; `--include-ignored` retains their assertions.
+
 Verilator 5.052 repeats activation of the self-reading latch in
 `latch::guarded_activation`, producing 3 where one `seed`/`en` change should
 produce 1. The [adapter-free reproduction](verification/repros/latch_activation.sv)

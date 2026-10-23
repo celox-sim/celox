@@ -2049,5 +2049,24 @@
         "timing::blocking_write_waiters_rearm_before_nonblocking_updates"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_process_nba_positions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+    "reason": "Verilator keeps only the last of the nonblocking updates that an inner loop issues to overlapping part-selects at run-time positions when an outer loop delays between iterations (p is 1400 instead of 14e4), and writes a nonblocking update of q[8] of logic [7:0] q into bit 0. IEEE 1800-2023 10.4.2 schedules every nonblocking assignment as its own update in issue order; 11.5.1 and 7.4.6 make bits outside the target unwritten. Icarus passes the unchanged shared assertions; the adapter-free source reproduces both Verilator failures.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/process_nba_positions_verilator.json",
+      "verification/repros/process_nba_positions.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::process_nonblocking_assignments_at_run_time_positions",
+        "timing::process_nonblocking_assignments_outside_their_target"
+      ]
+    }
   }
 ]
