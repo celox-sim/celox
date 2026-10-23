@@ -2014,3 +2014,71 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (top Top)
   (run_to_finish)
   (expect_output "y=1001 n=3\np=10 q=01\n"))
+
+; A blocking write of an edge process is an update of the active region:
+; the process waiting on it runs there, before the NBA region applies the
+; same edge's nonblocking update (IEEE 1800-2023 4.5, 9.4.2).
+(case blocking_write_waiters_run_before_nonblocking_updates
+  (source "active.sv" #"
+                module Top;
+                    bit clk, y;
+                    int q;
+                    always @(posedge clk) begin y = ~y; q <= q + 1; end
+                    initial forever begin @(y); $display("y=%0d q=%0d", y, q); end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=1 q=0\ny=0 q=1\n"))
+
+; The waiter the blocking write wakes waits again before the nonblocking
+; updates, so they wake it once more.
+(case blocking_write_waiters_rearm_before_nonblocking_updates
+  (source "rearm.sv" #"
+                module Top;
+                    bit clk, y;
+                    int n, r;
+                    always @(posedge clk) begin y = 1; y <= 0; y <= 1; end
+                    initial forever begin @(y); n++; end
+                    initial forever begin @(posedge y); r++; end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("n=%0d r=%0d", n, r);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "n=3 r=3\n"))
+
+; Processes and edge processes woken by the blocking write read the
+; variables the same edge updates nonblocking before the update.
+(case blocking_write_edges_read_values_before_nonblocking_updates
+  (source "derived.sv" #"
+                module Top;
+                    bit clk, g;
+                    int q, r, s;
+                    always @(posedge clk) begin g = ~g; q <= q + 1; end
+                    always @(g) r <= q;
+                    initial forever begin @(g); s = q; end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("q=%0d r=%0d s=%0d", q, r, s);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "q=2 r=1 s=1\n"))

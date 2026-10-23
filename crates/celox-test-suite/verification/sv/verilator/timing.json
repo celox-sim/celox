@@ -501,6 +501,63 @@
     },
     {
       "category": "Sequential",
+      "detail": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_active_region_waiters_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_active_region_waiters",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
+        "upstream": []
+      },
+      "name": "timing::blocking_write_waiters_run_before_nonblocking_updates",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_active_region_waiters_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_active_region_waiters",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
+        "upstream": []
+      },
+      "name": "timing::blocking_write_waiters_rearm_before_nonblocking_updates",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::blocking_write_edges_read_values_before_nonblocking_updates",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::intermediate_combinational_writes_replace_split_definitions",

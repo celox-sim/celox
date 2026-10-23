@@ -401,6 +401,12 @@ unsupported, including when the inference option is enabled.
   in the parent sees only the settled value, as in the previous item.
   Verilator 5.052 sees only the final value of an evaluation; Icarus 13.0
   also sees the pulse through the port.
+- A blocking write of an edge-triggered `always` is an update of the active
+  region: the processes it wakes run before the same edge's nonblocking
+  updates. With `y = ~y; q <= q + 1;`, a waiter on `@(y)` reads `q` from
+  before the edge and waits again before the nonblocking updates
+  (IEEE 1800-2023 4.5). Icarus 13.0 gives the same values; Verilator 5.052
+  resumes the waiter after the nonblocking updates.
 
 ### Variable lifetimes
 
