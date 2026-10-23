@@ -1,0 +1,7 @@
+Revision history for #1796:
+
+rev 3 (content) 2026-10-23 06:58 UTC — Docs: generate-dependent parameter value assignments are supported; removed the stale caveat.
+rev 2 (content) 2026-10-23 06:25 UTC — Rebased onto master; merged the Verilator limitations report with the part-select cases from #1782.
+rev 1 (initial) 2026-10-23 06:25 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1796,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"2203a0e3dcc6ca27609910c7d164cc297929e2cf","timestamp_iso":"2026-10-23T06:25:06Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"2203a0e3dcc6ca27609910c7d164cc297929e2cf","new_sha":"1fd053a548598ad9a8655687297bd2f0c3782a13","timestamp_iso":"2026-10-23T06:25:06Z","reason":"Rebased onto master; merged the Verilator limitations report with the part-select cases from #1782.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/2203a0e3dcc6ca27609910c7d164cc297929e2cf...1fd053a548598ad9a8655687297bd2f0c3782a13"},{"number":3,"change_type":"content","old_sha":"1fd053a548598ad9a8655687297bd2f0c3782a13","new_sha":"c1e74bea28e15e4822ee3f5f071736c9f5ee1ae7","timestamp_iso":"2026-10-23T06:58:50Z","reason":"Docs: generate-dependent parameter value assignments are supported; removed the stale caveat.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/1fd053a548598ad9a8655687297bd2f0c3782a13...c1e74bea28e15e4822ee3f5f071736c9f5ee1ae7"}]} -->
