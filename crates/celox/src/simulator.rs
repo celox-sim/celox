@@ -144,7 +144,10 @@ mod host {
         pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
         runtime_event_read_seq: Arc<AtomicU64>,
         runtime_event_drain_active: Arc<AtomicBool>,
-        pub(super) comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
+        pub(super) comb_observer_snapshots: Vec<crate::comb_activation::ObserverSnapshot>,
+        /// Storage reused for the next snapshot.
+        comb_observer_scratch: Vec<crate::comb_activation::ObserverSnapshot>,
+        comb_observer_reads: crate::comb_activation::ObserverReads,
         pub(super) comb_observer_initial_eval: bool,
         /// Identity of the state layout, computed on first checkpoint use.
         pub(super) checkpoint_fingerprint: std::sync::OnceLock<u64>,
@@ -372,21 +375,6 @@ mod host {
         } else {
             BigUint::from(0u8)
         }
-    }
-
-    fn mask_width(value: BigUint, width: usize) -> BigUint {
-        if width == 0 {
-            BigUint::from(0u8)
-        } else {
-            value & ((BigUint::from(1u8) << width) - BigUint::from(1u8))
-        }
-    }
-
-    fn slice_biguint(value: &BigUint, lsb: usize, msb: usize) -> BigUint {
-        if msb < lsb {
-            return BigUint::from(0u8);
-        }
-        mask_width(value >> lsb, msb - lsb + 1)
     }
 
     fn write_bits_to_memory(mem: &mut [u8], dst_bit_offset: usize, bit_width: usize, src: &[u8]) {
@@ -862,6 +850,10 @@ mod host {
                 celox_runtime::build_derived_tick_plans(&backend, &schedule);
             let event_edges =
                 celox_runtime::build_event_edges(&backend, &schedule.events, &schedule.kinds);
+            let comb_observer_reads = crate::comb_activation::ObserverReads::new(
+                &backend,
+                &program.runtime_schema.comb_observers,
+            );
             let mut sim = Self {
                 backend,
                 program,
@@ -880,6 +872,8 @@ mod host {
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
                 runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
                 comb_observer_snapshots: Vec::new(),
+                comb_observer_scratch: Vec::new(),
+                comb_observer_reads,
                 comb_observer_initial_eval: true,
                 checkpoint_fingerprint: std::sync::OnceLock::new(),
                 state_schema: std::sync::OnceLock::new(),
@@ -1573,33 +1567,21 @@ mod host {
                 return (result, events);
             }
 
-            let before = self.snapshot_all_comb_observers();
-            let active_before: Vec<bool> = before
-                .iter()
-                .zip(&self.comb_observer_snapshots)
-                .map(|(now, prev)| now != prev)
-                .collect();
-            let mut active_sites =
-                vec![false; self.program.runtime_schema.runtime_event_sites.len()];
-            for (observer, is_active) in self
-                .program
-                .runtime_schema
-                .comb_observers
-                .iter()
-                .zip(active_before.iter().copied())
-            {
-                if is_active || self.comb_observer_initial_eval {
-                    let group = observer.activation_group;
-                    for group_observer in &self.program.runtime_schema.comb_observers {
-                        if group_observer.activation_group == group {
-                            active_sites[group_observer.site_id as usize] = true;
-                        }
-                    }
-                }
-            }
+            let mut snapshots = std::mem::take(&mut self.comb_observer_scratch);
+            self.comb_observer_reads
+                .snapshot(&self.backend, &mut snapshots);
+            let active_sites = crate::comb_activation::active_sites(
+                &self.program.runtime_schema.comb_observers,
+                self.program.runtime_schema.runtime_event_sites.len(),
+                &self.comb_observer_reads,
+                &snapshots,
+                &self.comb_observer_snapshots,
+                self.comb_observer_initial_eval,
+            );
             self.backend.set_comb_capture_event_enabled(&active_sites);
             let eval_result = self.backend.eval_comb();
-            let after = self.snapshot_all_comb_observers();
+            self.comb_observer_reads
+                .snapshot(&self.backend, &mut snapshots);
             let runtime_events = self.peek_backend_runtime_events_from(runtime_event_start_seq);
             self.backend.set_comb_capture_event_enabled(&vec![
                 false;
@@ -1608,35 +1590,16 @@ mod host {
                     .runtime_event_sites
                     .len()
             ]);
-            self.comb_observer_snapshots = after;
+            self.comb_observer_scratch =
+                std::mem::replace(&mut self.comb_observer_snapshots, snapshots);
             self.comb_observer_initial_eval = false;
             (eval_result, runtime_events)
         }
 
-        pub(super) fn snapshot_all_comb_observers(&self) -> Vec<Vec<(BigUint, BigUint)>> {
-            self.program
-                .runtime_schema
-                .comb_observers
-                .iter()
-                .map(|observer| {
-                    observer
-                        .sensitivity
-                        .iter()
-                        .map(|atom| {
-                            let signal = self.backend.resolve_signal(&atom.id);
-                            let (value, mask) = if signal.is_4state {
-                                self.backend.get_four_state(signal)
-                            } else {
-                                (self.backend.get(signal), BigUint::default())
-                            };
-                            (
-                                slice_biguint(&value, atom.access.lsb, atom.access.msb),
-                                slice_biguint(&mask, atom.access.lsb, atom.access.msb),
-                            )
-                        })
-                        .collect()
-                })
-                .collect()
+        pub(super) fn snapshot_all_comb_observers(
+            &self,
+        ) -> Vec<crate::comb_activation::ObserverSnapshot> {
+            self.comb_observer_reads.take(&self.backend)
         }
 
         fn fatal_comb_capture_error(&self, events: &[RawRuntimeEvent]) -> Option<RuntimeErrorCode> {

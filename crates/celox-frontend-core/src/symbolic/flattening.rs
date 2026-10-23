@@ -1050,6 +1050,16 @@ fn convert_comb_observer<
             .iter()
             .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
             .collect(),
+        sensitivity_counters: observer
+            .sensitivity_counters
+            .iter()
+            .map(|(v, counter)| {
+                (
+                    VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb),
+                    f(counter),
+                )
+            })
+            .collect(),
         local_inputs: observer
             .local_inputs
             .iter()

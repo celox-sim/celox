@@ -373,6 +373,19 @@ pub fn multi_store_candidates<A, K: Eq + std::hash::Hash + Clone>(
     })
 }
 
+/// Like [`multi_store_candidates`], over the stores alone. A flip-flop
+/// evaluation seeds its working state with commits; only its stores are
+/// writes of the process.
+pub fn multi_store_only_candidates<A, K: Eq + std::hash::Hash + Clone>(
+    unit: &ExecutionUnit<A>,
+    key: impl Fn(&A) -> Option<K>,
+) -> Vec<K> {
+    multi_write_candidates(unit, |instruction| match instruction {
+        SIRInstruction::Store(address, ..) => key(address),
+        _ => None,
+    })
+}
+
 /// [`multi_store_candidates`] with the written key of each instruction
 /// given by `key`, for callers that count only some kinds of writes.
 pub fn multi_write_candidates<A, K: Eq + std::hash::Hash + Clone>(
