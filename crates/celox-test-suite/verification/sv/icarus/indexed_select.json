@@ -2,6 +2,17 @@
   "cases": [
     {
       "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "indexed_select::ascending_part_selects_partly_outside_write_the_bits_inside",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
       "detail": "Icarus 13.0 rejects both packed array parameter declarations before the X/Z-index regression can execute. IEEE 1800-2023 11.5.1 requires sized X results for unknown indices of four-state operands and zero for two-state operands. Verilator cannot validate this case's four-state expectations.",
       "expectation": "Simulation",
       "known_issue": {
@@ -43,6 +54,17 @@
       "name": "indexed_select::constant_part_select_indices_of_concatenations",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "indexed_select::constant_part_selects_partly_outside_write_the_bits_inside",
+      "phase": "execute",
+      "status": "passed",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -370,6 +392,17 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "indexed_select::indexed_widths_preserve_parameter_selections",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "indexed_select::known_run_time_selects_stay_within_their_element",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,

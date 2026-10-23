@@ -216,15 +216,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.m.constants,
                 self.m.parameter_types,
             ))
-            .and_then(|(msb, lsb)| {
-                Some((
-                    packed_index_offset(variable, msb)?,
-                    packed_index_offset(variable, lsb)?,
-                ))
-            })
-            .map_or(whole, |(msb, lsb)| {
-                BitAccess::new(msb.min(lsb), msb.max(lsb))
-            }),
+            .and_then(|(msb, lsb)| constant_select_write(variable, msb, lsb)?.0)
+            .unwrap_or(whole),
         };
         self.targets.push((id, access));
     }
@@ -354,13 +347,20 @@ impl<'p, 'a> Ff<'p, 'a> {
                 lsb,
                 array_slice_width,
                 array_slice_reversed,
-            } => sv::ir::LValue::Select {
-                name: name.clone(),
-                msb: substitute_overlay_const(msb, &self.overlay),
-                lsb: substitute_overlay_const(lsb, &self.overlay),
-                array_slice_width: array_slice_width.clone(),
-                array_slice_reversed: *array_slice_reversed,
-            },
+            } => keep_element_window(
+                lvalue,
+                sv::ir::LValue::Select {
+                    name: name.clone(),
+                    msb: substitute_overlay_const(msb, &self.overlay),
+                    lsb: substitute_overlay_const(lsb, &self.overlay),
+                    array_slice_width: array_slice_width.clone(),
+                    array_slice_reversed: *array_slice_reversed,
+                },
+                self.m.variables,
+                self.m.name_to_id,
+                self.m.constants,
+                self.m.parameter_types,
+            ),
         }
     }
 
@@ -2245,15 +2245,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                     sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types),
                     sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types),
                 ) {
-                    let variable = self.m.var(id);
-                    let (Some(msb), Some(lsb)) = (
-                        packed_index_offset(variable, msb),
-                        packed_index_offset(variable, lsb),
-                    ) else {
+                    let (access, drop) = constant_select_write(self.m.var(id), msb, lsb)
+                        .ok_or_else(|| unsupported("assignment position"))?;
+                    let Some(access) = access else {
                         return Ok(());
                     };
-                    let low = msb.min(lsb);
-                    let node = permute_reversed_lvalue_rhs_slt(
+                    let mut node = permute_reversed_lvalue_rhs_slt(
                         lhs,
                         node,
                         width,
@@ -2262,9 +2259,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                         arena,
                     )
                     .ok_or_else(|| unsupported("assignment lvalue order"))?;
+                    let written = access.msb - access.lsb + 1;
+                    if written != width {
+                        node = arena
+                            .alloc(SLTNode::Slice {
+                                expr: node,
+                                access: BitAccess::new(drop, drop + written - 1),
+                            })
+                            .map_err(slt_error)?;
+                    }
                     let value = self.lower_slt(arena, node)?;
-                    let offset = sv_memory_offset(self.m.var(id), low, width);
-                    self.store(id, offset, width, value);
+                    let offset = sv_memory_offset(self.m.var(id), access.lsb, written);
+                    self.store(id, offset, written, value);
                     return Ok(());
                 }
                 if let Some((_, element_width, offset, access)) = dynamic_array_element_lvalue(
