@@ -1219,6 +1219,12 @@ impl Drop for TieredBackend {
 }
 
 impl SimBackend for TieredBackend {
+    /// Only generated code runs the scheduler unit faster than the
+    /// runtime's loop.
+    fn runs_compiled_scheduler(&self) -> bool {
+        matches!(self.phase, Phase::Compiled(_))
+    }
+
     type Event = TieredEventRef;
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {

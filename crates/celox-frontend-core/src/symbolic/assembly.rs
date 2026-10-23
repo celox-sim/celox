@@ -613,7 +613,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             .expect("source program identity exhausted").to_string())
     .entered();
     let SymbolicRtl {
-        modules,
+        mut modules,
         module_names,
         root_id,
         packages,
@@ -645,6 +645,11 @@ pub fn schedule_symbolic_rtl_reporting_loops(
 
     let (mut expanded, mut instance_modules, indexed_instances) =
         timed_sub!("expand_hierarchy", expand_hierarchy(&root_id, &modules));
+    let process_count = instance_modules
+        .values()
+        .map(|module| modules[module].processes.len())
+        .sum();
+    let scheduler_slots = declare_scheduler_slots(&mut modules, root_id, process_count);
     // Each package with variables is one instance outside the hierarchy,
     // named by a path segment no instance name can take.
     let mut package_instances = HashMap::default();
@@ -1971,6 +1976,18 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .collect();
     let active_commits: Vec<StateAddr> = active_commits.into_iter().map(project).collect();
     let time_slots: Vec<StateAddr> = time_slots.into_iter().map(project).collect();
+    let root_instance = expanded[&InstancePath(Vec::new())];
+    let scheduler = scheduler_slots.map(|slots| celox_design::SchedulerSchema {
+        slots: slots.map(|var_id| {
+            project(AbsoluteAddr {
+                instance_id: root_instance,
+                var_id,
+            })
+        }),
+        unit: None,
+        fallback: Vec::new(),
+        events: Vec::new(),
+    });
     // The runtime reads counters, the signals waits watch and staged
     // nonblocking values directly; no unit loads a wait's signal.
     let mut timing_read_roots: HashSet<StateAddr> = watches
@@ -2072,6 +2089,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             host_request_sites,
             active_commits,
             time_slots,
+            scheduler,
         },
     };
 
@@ -2086,6 +2104,64 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     Ok(ScheduledRtlOutput {
         scheduled,
         fused_optimization_hints: FusedSirOptimizationHints { direct_ff_writes },
+    })
+}
+
+/// Declare the hidden objects a compiled scheduler exchanges with the
+/// runtime (`RuntimeSchema::scheduler`) as variables of the top module,
+/// when the design has `process_count` process kernels.
+fn declare_scheduler_slots(
+    modules: &mut HashMap<ModuleId, SimModule>,
+    root: ModuleId,
+    process_count: usize,
+) -> Option<celox_design::SchedulerSlots<SourceVarId>> {
+    if process_count == 0 {
+        return None;
+    }
+    let variables = &mut modules.get_mut(&root)?.variables;
+    let mut next = variables.keys().map(|id| id.0 + 1).max().unwrap_or(0);
+    let mut declare = |name: String, width: usize| {
+        let id = SourceVarId(next);
+        next += 1;
+        variables.insert(
+            id,
+            crate::symbolic::artifact::SymbolicVariable {
+                path: vec!["$scheduler".to_string(), name],
+                kind: crate::VariableKind::Variable,
+                signed: false,
+                metadata: VariableMetadata {
+                    width,
+                    is_4state: false,
+                    kind: DomainKind::Other,
+                    type_kind: celox_design::PortTypeKind::Bit,
+                    array_dims: Vec::new(),
+                    value_kind: Default::default(),
+                },
+                packed_dims: vec![width],
+                unpacked_ranges: Vec::new(),
+                source: None,
+                module_affiliated: false,
+            },
+        );
+        id
+    };
+    use celox_design::{SCHEDULER_FLAG_WIDTH as FLAG, SCHEDULER_TIME_WIDTH as TIME};
+    Some(celox_design::SchedulerSlots {
+        limit: declare("limit".into(), TIME),
+        now: declare("now".into(), TIME),
+        exit: declare("exit".into(), FLAG),
+        exit_arg: declare("exit_arg".into(), TIME),
+        finish: declare("finish".into(), FLAG),
+        cont: declare("cont".into(), FLAG),
+        count: declare("count".into(), TIME),
+        current: declare("current".into(), TIME),
+        levels: declare("levels".into(), TIME),
+        wake: (0..process_count)
+            .map(|index| declare(format!("wake[{index}]"), TIME))
+            .collect(),
+        waiting: (0..process_count)
+            .map(|index| declare(format!("waiting[{index}]"), FLAG))
+            .collect(),
     })
 }
 
