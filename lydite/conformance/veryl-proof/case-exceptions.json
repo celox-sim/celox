@@ -54,6 +54,41 @@
   "reason": "Veryl rejects a negative constant for-range bound (InvalidForRange::NegativeBound).",
   "panic": "compile flip_flop::test_ff_constant_signed_bounds_in_unrolled_loops: analyzer-diagnostics:{\"detail\":\"[InvalidForRange { kind: NegativeBound, help: \\\"for-loop range bounds are elaborated as unsigned; rewrite the range to start at 0 and offset inside the body\\\", input: MultiSources { sources: [Source { path: \\\"test.veryl\\\", text: \\\"\\\\n        module Top (\\\\n            clk: input clock,\\\\n            q_fwd: output logic<32>,\\\\n            q_rev_last: output logic<32>\\\\n        ) {\\\\n            always_ff (clk) {\\\\n                q_fwd = 0;\\\\n                for i in (0 - 1)..=1 {\\\\n                    q_fwd += i as 32;\\\\n                }\\\\n\\\\n                q_rev_last = 32'hdead_beef;\\\\n                for i in rev (0 - 1)..=1 {\\\\n                    q_rev_last = (i + 1) as 32;\\\\n                }\\\\n            }\\\\n        }\\\\n    \\\\n\\\", line_offset: 0 }] }, error_location: SourceSpan { offset: SourceOffset(224), length: 11 }, token_source: File { path: PathId(0), text: TextId(1) }, instance: None }, InvalidForRange { kind: NegativeBound, help: \\\"for-loop range bounds are elaborated as unsigned; rewrite the range to start at 0 and offset inside the body\\\", input: MultiSources { sources: [Source { path: \\\"test.veryl\\\", text: \\\"\\\\n        module Top (\\\\n            clk: input clock,\\\\n            q_fwd: output logic<32>,\\\\n            q_rev_last: output logic<32>\\\\n        ) {\\\\n            always_ff (clk) {\\\\n                q_fwd = 0;\\\\n                for i in (0 - 1)..=1 {\\\\n                    q_fwd += i as 32;\\\\n                }\\\\n\\\\n                q_rev_last = 32'hdead_beef;\\\\n                for i in rev (0 - 1)..=1 {\\\\n                    q_rev_last = (i + 1) as 32;\\\\n                }\\\\n            }\\\\n        }\\\\n    \\\\n\\\", line_offset: 0 }] }, error_location: SourceSpan { offset: SourceOffset(368), length: 11 }, token_source: File { path: PathId(0), text: TextId(1) }, instance: None }]\",\"diagnostics\":[{\"code\":\"InvalidForRange\",\"kind\":\"NegativeBound\"},{\"code\":\"InvalidForRange\",\"kind\":\"NegativeBound\"}],\"stage\":\"analyzer\"}"
  },
+ "floating_point::arithmetic_and_rounding": {
+  "kind": "proof_backend_unsupported",
+  "reason": "The finite proof backend models integer SIR only and explicitly refuses floating-point SIR operations before proof execution. Celox scalar FP execution is covered by the shared simulator cases; this case remains an unproved proof-backend limitation.",
+  "panic": "compile floating_point::arithmetic_and_rounding: proof backend unsupported: floating-point SIR operations"
+ },
+ "floating_point::f32_precision_and_conversion": {
+  "kind": "proof_backend_unsupported",
+  "reason": "The finite proof backend models integer SIR only and explicitly refuses floating-point SIR operations before proof execution. Celox scalar FP execution is covered by the shared simulator cases; this case remains an unproved proof-backend limitation.",
+  "panic": "compile floating_point::f32_precision_and_conversion: proof backend unsupported: floating-point SIR operations"
+ },
+ "floating_point::formatted_display_and_write": {
+  "kind": "proof_backend_unsupported",
+  "reason": "The finite proof backend models integer SIR only and explicitly refuses floating-point SIR operations before proof execution. Celox scalar FP execution is covered by the shared simulator cases; this case remains an unproved proof-backend limitation.",
+  "panic": "compile floating_point::formatted_display_and_write: proof backend unsupported: floating-point SIR operations"
+ },
+ "floating_point::integral_constants_from_float": {
+  "kind": "known_celox_failure",
+  "reason": "Upstream Veryl 0.22 misfolds negative f32 constants (#1657), producing integer SIR values -1 and 4 instead of -2 and 3. Celox ignores this exact shared case on every backend in crates/celox/tests/floating_point.rs; the proof executor correctly exposes the incorrect frontend constant.",
+  "panic": "floating_point::integral_constants_from_float at 132:3: assert_eq direct: expected 0xfffffffe, got 0xffffffff"
+ },
+ "floating_point::scalar_port_and_function_conversions": {
+  "kind": "proof_backend_unsupported",
+  "reason": "The finite proof backend models integer SIR only and explicitly refuses floating-point SIR operations before proof execution. Celox scalar FP execution is covered by the shared simulator cases; this case remains an unproved proof-backend limitation.",
+  "panic": "compile floating_point::scalar_port_and_function_conversions: proof backend unsupported: floating-point SIR operations"
+ },
+ "floating_point::sequential_float": {
+  "kind": "proof_backend_unsupported",
+  "reason": "The finite proof backend models integer SIR only and explicitly refuses floating-point SIR operations before proof execution. Celox scalar FP execution is covered by the shared simulator cases; this case remains an unproved proof-backend limitation.",
+  "panic": "compile floating_point::sequential_float: proof backend unsupported: floating-point SIR operations"
+ },
+ "floating_point::unknown_integer_conversion": {
+  "kind": "proof_backend_unsupported",
+  "reason": "The finite proof backend models integer SIR only and explicitly refuses floating-point SIR operations before proof execution. Celox scalar FP execution is covered by the shared simulator cases; this case remains an unproved proof-backend limitation.",
+  "panic": "compile floating_point::unknown_integer_conversion: proof backend unsupported: floating-point SIR operations"
+ },
  "hierarchical_assignment::disjoint_loop": {
   "kind": "unsupported_by_proof_backend",
   "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",

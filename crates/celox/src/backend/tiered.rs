@@ -151,6 +151,7 @@ impl CompiledTier {
         mut memory: MemoryImage,
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
         comb_capture_enabled: Vec<u8>,
+        heap: Box<celox_heap::Heap>,
     ) -> Self {
         debug_assert!(memory.capacity_words() >= code.required_image_words());
         if memory.len_words() < code.required_image_words() {
@@ -163,6 +164,7 @@ impl CompiledTier {
                     memory,
                     runtime_event_buffer,
                     comb_capture_enabled,
+                    heap,
                 )))
             }
             #[cfg(any(
@@ -176,6 +178,7 @@ impl CompiledTier {
                     memory,
                     runtime_event_buffer,
                     comb_capture_enabled,
+                    heap,
                 ),
             )),
         }
@@ -1094,13 +1097,15 @@ impl TieredBackend {
         let mut adopted = None;
         if let Phase::Interpreting(slot) = &mut self.phase {
             if let Some(mut interp) = slot.take() {
-                let (memory, runtime_event_buffer, comb_capture_enabled) = interp.tier_transfer();
+                let (memory, runtime_event_buffer, comb_capture_enabled, heap) =
+                    interp.tier_transfer();
                 drop(interp);
                 adopted = Some(CompiledTier::adopt(
                     code,
                     memory,
                     runtime_event_buffer,
                     comb_capture_enabled,
+                    heap,
                 ));
             }
         }
@@ -1692,6 +1697,34 @@ impl SimBackend for TieredBackend {
                 target_arch = "aarch64"
             ))]
             Phase::Compiled(CompiledTier::Native(native)) => native.layout(),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
+    fn heap(&self) -> &celox_heap::Heap {
+        match &self.phase {
+            Phase::Interpreting(Some(interp)) => interp.heap(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.heap(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.heap(),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
+    fn heap_mut(&mut self) -> &mut celox_heap::Heap {
+        match &mut self.phase {
+            Phase::Interpreting(Some(interp)) => interp.heap_mut(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.heap_mut(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.heap_mut(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }

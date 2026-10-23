@@ -695,6 +695,9 @@ impl<'a> FfParser<'a> {
     }
 
     fn coerce_function_expression_to_type(expr: Expression, target_type: &Type) -> Expression {
+        if crate::float::conversion(&expr.comptime().r#type, target_type).is_some() {
+            return crate::float::converted(&expr, target_type).into_owned();
+        }
         let source_type = &expr.comptime().r#type;
         if source_type.total_width() == target_type.total_width()
             && source_type.signed == target_type.signed
@@ -1793,6 +1796,19 @@ impl<'a> FfParser<'a> {
         dsts: &[AssignDestination],
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<RegisterId, ParserError> {
+        if let [destination] = dsts {
+            if let Some(op) = crate::float::conversion(
+                &self.module.variables[&formal_id].r#type,
+                &destination.comptime.r#type,
+            ) {
+                let result = ir_builder.alloc_bit(
+                    destination.comptime.r#type.total_width().unwrap(),
+                    destination.comptime.r#type.signed,
+                );
+                ir_builder.emit(SIRInstruction::Unary(result, op, reg));
+                return Ok(result);
+            }
+        }
         let width = dsts
             .iter()
             .map(|dst| get_access_width(self.module, dst.id, &dst.index, &dst.select))

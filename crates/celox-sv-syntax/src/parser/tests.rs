@@ -2736,3 +2736,53 @@ fn module_deferred_assertions_do_not_become_final_procedures() {
         }
     }
 }
+
+#[test]
+fn class_declarations_record_names_bases_properties_and_method_qualifiers() {
+    for wrap in [
+        ("module M;", "endmodule"),
+        ("package P;", "endpackage"),
+        ("", ""),
+    ] {
+        let syntax = parse(&format!(
+            "{} virtual class B; int b; pure virtual function int f(); endclass \
+             class C extends B(3); static int count = 1; local logic [3:0] x, y; \
+             function new(int v); x = v; endfunction \
+             virtual function int f(); return x; endfunction \
+             static task t(); endtask extern function void g(); endclass:C {}",
+            wrap.0, wrap.1
+        ));
+        let [base, class] = &syntax.classes[..] else {
+            panic!("{wrap:?}: {:?}", syntax.classes)
+        };
+        assert_eq!(base.name.spelling, "B");
+        assert!(base.virtual_class && base.base.is_none());
+        assert!(base.methods[0].qualifiers.is_pure && base.methods[0].qualifiers.is_virtual);
+        assert_eq!(class.name.spelling, "C");
+        assert!(!class.virtual_class);
+        let extends = class.base.as_ref().unwrap();
+        assert_eq!(extends.arguments.as_ref().unwrap().len(), 1);
+        assert_eq!(class.properties.len(), 2);
+        assert!(class.properties[0].qualifiers.is_static);
+        assert!(class.properties[1].qualifiers.local);
+        assert_eq!(class.properties[1].declaration.variables.len(), 2);
+        let methods: Vec<_> = class
+            .methods
+            .iter()
+            .map(|method| {
+                let subroutine = syntax.subroutine(method.subroutine);
+                (subroutine.name.spelling.as_str(), method.qualifiers)
+            })
+            .collect();
+        assert_eq!(methods.len(), 4);
+        assert_eq!(methods[0].0, "new");
+        assert!(methods[1].1.is_virtual && !methods[1].1.is_static);
+        assert!(methods[2].1.is_static);
+        assert!(methods[3].1.is_extern);
+        let text = syntax.token_text(class.tokens);
+        assert!(
+            text.starts_with("class C") && text.ends_with("endclass"),
+            "{text}"
+        );
+    }
+}

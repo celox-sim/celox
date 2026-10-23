@@ -52,15 +52,18 @@ assert_eq!(sim.get(q), 1u8.into());
 | テストで行いたいこと | API |
 | --- | --- |
 | Rust から入力を設定し、論理を評価してクロックイベントを進める | `Simulator::from_sv_sources` |
-| シミュレーション時刻を進め、対応する `initial` プロセスを実行する | `Simulation::from_sv_sources` |
+| シミュレーション時刻を進め、タイミング制御を持つ `initial` / `always` プロセスを実行する | `Simulation::from_sv_sources` |
 | Veryl と SystemVerilog のソースを一緒に扱う | `Simulator::from_mixed_sources` |
 
 `Simulator::tick` は指定イベントの立ち上がりエッジを駆動します。
 `Simulation` は時刻を管理し、スケジュールされたエッジを実行します。
-定数による初期化はどちらにも適用されますが、デザインの状態を読む、またはシステムタスクを呼ぶ
-`initial` ブロックをプロセスとして実行するには `Simulation` が必要です。
-SV の `initial` 内のタイミング制御には制約があるため、
-[未対応の構文](./systemverilog-reference#what-is-not-supported)も確認してください。
+定数による初期化はどちらにも適用されます。デザインの状態を読む、またはシステムタスクを呼ぶ
+`initial` ブロック、タイミング制御を持つプロセス、`@*` でも
+[文が読む変数](./systemverilog-reference#timing-controls)でもないセンシティビティリストを持つ
+`always` はプロセスとして実行するため `Simulation` が必要です。`Simulator` はプロセスを実行しないため、
+このようなデザインでは `SimulatorErrorKind::ProcessRequiresSimulation` でビルドに失敗し、
+最初のプロセスとそのソース位置を示します。Veryl と混在する階層では
+`Simulation::from_sources(veryl).with_sv_sources(sv)` で `Simulation` を作成します。
 
 X/Z を扱う場合は builder に `.four_state(true)` を指定します。
 状態モデルは [4 値シミュレーション](./four-state)、時刻、`$stop`、メモリの読み込みなどは
@@ -74,7 +77,8 @@ X/Z を扱う場合は builder に `.four_state(true)` を指定します。
 | --- | --- |
 | デザイン構造 | モジュール階層、パラメータ、generate、package、interface と modport |
 | データ | packed ベクタ、多次元 packed 配列、構造体、enum、unpacked メモリ |
-| RTL のプロセス | `assign`、`always_comb`、`always @*`、エッジで起動する `always` と `always_ff` |
+| RTL のプロセス | `assign`、`always_comb`、`always @*`、ブロッキング代入の `always_latch`、エッジで起動する `always` と `always_ff` |
+| 時間を持つプロセス | `#delay`（`#5ns` などの時間リテラルを含む）、変数・エッジ・選択・式・`@*` に対する `@(...)`、`wait (...)`、ノンブロッキング代入、タイミング制御を持つ task 呼び出しを使う `initial` と `always` |
 | 演算と制御 | 算術、部分選択、assignment pattern、分岐、ループ、関数 |
 | シミュレーション補助 | 即時アサーション、表示タスク、`$readmemh` / `$readmemb`、時刻の取得、乱数 |
 
@@ -85,10 +89,12 @@ X/Z を扱う場合は builder に `.four_state(true)` を指定します。
 
 デザインの変更が必要になりやすいのは、次の機能です。
 
-- クラスを使う検証、並行アサーション、タイミング制御を持つ task。
-- ラッチ、複数ドライバ、トライステートバス。
+- [単純なクラス](./systemverilog-reference#classes)を超えるクラスを使う検証、並行アサーション。
+- `fork` / `join`、named event、`a = #1 b` のような代入内のタイミング制御、
+  イベント制御の `iff`（[#1444](https://github.com/celox-sim/celox/issues/1444)）。
+- ラッチ内のノンブロッキング代入、複数ドライバ、トライステートバス。`always_comb` の暗黙のラッチ推論は 共通の `[diagnostics]` 設定で `inferred_latch = "warn"` または `"allow"` を指定して許可します。
 - 非 ANSI モジュールポート、ワイルドカード `.*` 接続、ゲートプリミティブ、`bind`。
-- 文字列、`real`、unpacked 構造体、interface の一部の機能。
+- `real`、unpacked 構造体、interface の一部の機能。
 
 [制約の一覧](./systemverilog-reference#what-is-not-supported)に、より細かな条件と追跡 issue をまとめています。
 未対応の構文は、構文名と追跡 issue を含む診断を返します。
@@ -113,6 +119,7 @@ C と SV の型を一致させる必要があるため、どちらも `unsafe` A
 ## 個別の挙動を調べる {#知っておくべき挙動}
 
 - [初期化、スコープ、変数の寿命、メモリファイル](./systemverilog-reference#semantics-worth-knowing)
+- [プロセス内のイベント待ちとレベル待ち](./systemverilog-reference#timing-semantics)
 - [時間単位、精度、時刻の取得](./systemverilog-reference#time-and-precision)
 - [乱数のシードと再現性](./systemverilog-reference#random-numbers)
 

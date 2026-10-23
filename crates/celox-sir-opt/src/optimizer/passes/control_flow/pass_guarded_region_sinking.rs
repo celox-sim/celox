@@ -2816,6 +2816,9 @@ fn best_same_predicate_plan(
 ) -> Option<SamePredicatePlan> {
     let block = eu.blocks.get(&block_id)?;
     let mut best: Option<SamePredicatePlan> = None;
+    // Every candidate reads the same immutable input block. Build its def
+    // index once, and only if a predicate has enough sources to plan.
+    let mut block_definitions = None;
     let mut segment_start = 0usize;
     while segment_start < block.instructions.len() {
         while segment_start < block.instructions.len()
@@ -2845,6 +2848,14 @@ fn best_same_predicate_plan(
             if muxes.len() < 2 {
                 continue;
             }
+            let local_defs = block_definitions.get_or_insert_with(|| {
+                block
+                    .instructions
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, inst)| def_reg(inst).map(|reg| (reg, index)))
+                    .collect::<HashMap<_, _>>()
+            });
             let Some(candidate) = plan_same_predicate_region(
                 eu,
                 block_id,
@@ -2853,6 +2864,7 @@ fn best_same_predicate_plan(
                 condition,
                 &muxes,
                 uses,
+                local_defs,
             ) else {
                 continue;
             };
@@ -2880,17 +2892,12 @@ fn plan_same_predicate_region(
     condition: RegisterId,
     mux_indices: &[usize],
     uses: &HashMap<RegisterId, Vec<UseSite>>,
+    local_defs: &HashMap<RegisterId, usize>,
 ) -> Option<SamePredicatePlan> {
     let block = eu.blocks.get(&block_id)?;
     if eu.register_map.get(&condition).map(RegisterType::width) != Some(1) {
         return None;
     }
-    let local_defs = block
-        .instructions
-        .iter()
-        .enumerate()
-        .filter_map(|(index, inst)| def_reg(inst).map(|reg| (reg, index)))
-        .collect::<HashMap<_, _>>();
     let mut muxes = mux_indices.iter().copied().collect::<HashSet<_>>();
 
     // Forward-cofactor every pure value which depends on a group Mux. This is
@@ -2938,24 +2945,10 @@ fn plan_same_predicate_region(
     // recovers the control dependence without first materializing another
     // select instruction.
     let (true_muxes, true_cofactor) = specialize_region_needed(
-        eu,
-        condition,
-        &live_outs,
-        true,
-        &muxes,
-        &cofactor,
-        &local_defs,
-        block,
+        eu, condition, &live_outs, true, &muxes, &cofactor, local_defs, block,
     );
     let (false_muxes, false_cofactor) = specialize_region_needed(
-        eu,
-        condition,
-        &live_outs,
-        false,
-        &muxes,
-        &cofactor,
-        &local_defs,
-        block,
+        eu, condition, &live_outs, false, &muxes, &cofactor, local_defs, block,
     );
     muxes = true_muxes
         .union(&false_muxes)
@@ -2991,7 +2984,7 @@ fn plan_same_predicate_region(
         &true_roots,
         segment_start,
         segment_end,
-        &local_defs,
+        local_defs,
         block,
         &muxes,
     );
@@ -2999,7 +2992,7 @@ fn plan_same_predicate_region(
         &false_roots,
         segment_start,
         segment_end,
-        &local_defs,
+        local_defs,
         block,
         &muxes,
     );

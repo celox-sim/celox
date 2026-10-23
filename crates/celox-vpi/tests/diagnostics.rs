@@ -34,9 +34,17 @@ fn run_and_build_share_project_target_and_cli_diagnostic_precedence() {
         "module Plain(output logic y); assign y = 1; endmodule",
     )
     .unwrap();
-    fs::write(project.path().join("top.sv"), "module Top(output logic y); timeunit 1ns / 1ps; Plain child(y); initial #1 $finish; endmodule").unwrap();
     fs::write(&config, "sources = ['plain.sv', 'top.sv']\ntop = 'Top'\n[diagnostics]\nmixed_timescale = 'error'\n[targets.compat.diagnostics]\nmixed_timescale = 'warn'\n").unwrap();
     for build in [false, true] {
+        // A VPI image runs no process.
+        let finish = if build { "" } else { "initial #1 $finish;" };
+        fs::write(
+            project.path().join("top.sv"),
+            format!(
+                "module Top(output logic y); timeunit 1ns / 1ps; Plain child(y); {finish} endmodule"
+            ),
+        )
+        .unwrap();
         let compile = |target: bool, overrides: &[&str], discover: bool| {
             let mut command = Command::new(env!("CARGO_BIN_EXE_celox"));
             if build {
@@ -144,4 +152,70 @@ fn aggregate_input_defaults_can_be_enabled_with_diagnostic_policy() {
     let rejected = run(&["--diagnostic", "unpacked_port_default=error"]);
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("unpacked_port_default"));
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn inferred_latch_uses_common_diagnostics_for_run_and_build() {
+    let project = tempfile::tempdir().unwrap();
+    let config = project.path().join("celox.toml");
+    fs::write(&config, "sources = ['top.sv']\ntop = 'Top'\n[diagnostics]\ninferred_latch = 'error'\n[targets.compat.diagnostics]\ninferred_latch = 'warn'\n").unwrap();
+    for build in [false, true] {
+        // A VPI image runs no process.
+        let source = if build {
+            r#"module Top(input logic en, input logic [7:0] d, output logic [7:0] q);
+        timeunit 1ns / 1ps;
+        always_comb if (en) q = d;
+    endmodule"#
+        } else {
+            r#"module Top;
+        timeunit 1ns / 1ps;
+        logic en; logic [7:0] d, q;
+        always_comb if (en) q = d;
+        initial begin
+            en = 1; d = 7; #1;
+            assert (q == 7) else $fatal(1, "open latch");
+            en = 0; d = 99; #1;
+            assert (q == 7) else $fatal(1, "closed latch");
+            $finish;
+        end
+    endmodule"#
+        };
+        fs::write(project.path().join("top.sv"), source).unwrap();
+        let compile = |target: bool, overrides: &[&str]| {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_celox"));
+            if build {
+                command
+                    .args(["vpi", "build", "--output"])
+                    .arg(project.path().join("top-sim"));
+            } else {
+                command.args(["run", "-O", "O2"]);
+            }
+            command.arg("--project").arg(&config);
+            if target {
+                command.args(["--target", "compat"]);
+            }
+            for value in overrides {
+                command.args(["--diagnostic", value]);
+            }
+            command.output().unwrap()
+        };
+        for (target, overrides, success, diagnostic) in [
+            (false, vec![], false, true),
+            (true, vec![], true, true),
+            (false, vec!["inferred_latch=allow"], true, false),
+            (
+                true,
+                vec!["inferred_latch=error", "inferred_latch=allow"],
+                true,
+                false,
+            ),
+            (true, vec!["inferred_latch=error"], false, true),
+        ] {
+            let result = compile(target, &overrides);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert_eq!(result.status.success(), success, "{stderr}");
+            assert_eq!(stderr.contains("inferred_latch"), diagnostic, "{stderr}");
+        }
+    }
 }

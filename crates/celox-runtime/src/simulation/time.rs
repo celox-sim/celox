@@ -89,6 +89,13 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        if self.finished {
+            return Ok(None);
+        }
+        self.initialize_declarations_inner(executor)?;
+        if self.finished || self.stopped {
+            return Ok(Some(self.scheduler.time));
+        }
         // A suspended time slot continues where the `$stop` left it.
         if let Some(mut suspended) = self.suspended.take() {
             let current_time = self.scheduler.time;

@@ -79,6 +79,7 @@ pub struct Declarations {
     pub statements: Vec<Statement>,
     pub timing_controls: Vec<TimingControl>,
     pub subroutines: Vec<Subroutine>,
+    pub classes: Vec<ClassDeclaration>,
 }
 
 impl Declarations {
@@ -128,6 +129,8 @@ impl Declarations {
             statements: Vec::new(),
             timing_controls: Vec::new(),
             subroutines: Vec::new(),
+            class_stack: Vec::new(),
+            classes: Vec::new(),
         };
         let units = parser.units()?;
         let source_items = parser.source_items;
@@ -151,6 +154,7 @@ impl Declarations {
         let statements = parser.statements;
         let timing_controls = parser.timing_controls;
         let subroutines = parser.subroutines;
+        let classes = parser.classes;
         Ok(Self {
             source_items,
             expressions,
@@ -173,6 +177,7 @@ impl Declarations {
             statements,
             timing_controls,
             subroutines,
+            classes,
             sources,
             tokens,
             units,
@@ -272,6 +277,11 @@ impl Declarations {
         &self.statements[id.0]
     }
 
+    /// Every subroutine, in declaration order.
+    pub fn subroutine_ids(&self) -> impl Iterator<Item = SubroutineId> + use<> {
+        (0..self.subroutines.len()).map(SubroutineId)
+    }
+
     pub fn subroutine(&self, id: SubroutineId) -> &Subroutine {
         &self.subroutines[id.0]
     }
@@ -334,6 +344,9 @@ struct Parser<'a> {
     statements: Vec<Statement>,
     timing_controls: Vec<TimingControl>,
     subroutines: Vec<Subroutine>,
+    /// Classes whose `endclass` is still ahead, innermost last.
+    class_stack: Vec<ClassDeclaration>,
+    classes: Vec<ClassDeclaration>,
 }
 
 impl Parser<'_> {

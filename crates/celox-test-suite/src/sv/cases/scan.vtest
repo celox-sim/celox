@@ -1,0 +1,79 @@
+(group scan (category sequential))
+
+; IEEE 1800-2023 21.3.4.3: field widths, suppressed fields, literal
+; delimiters, character fields, and input/matching failures.
+(case sscanf_integral_fields_and_failure_counts
+  (source "sscanf_fields.sv" #"
+    module Top(output logic ok);
+      int a,b,c,n,keep;
+      logic [3:0] narrow;
+      logic [67:0] wide;
+      initial begin
+        n=$sscanf(" 12,99 ffQ","%2d,%*d %h%c",a,b,c);
+        ok=n==3 && a==12 && b==255 && c==81;
+        n=$sscanf("123","%d",narrow); ok &= n==1 && narrow==11;
+        n=$sscanf("fffffffffffffffff","%h",wide); ok &= n==1 && wide=='1;
+        keep=77; n=$sscanf("","%d",keep); ok &= n==-1 && keep==77;
+        n=$sscanf("bad","%d",keep); ok &= n==0 && keep==77;
+        n=$sscanf("5bad","%d%d",a,keep); ok &= n==1 && a==5 && keep==77;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1))
+
+(case sscanf_multiple_outputs_and_packed_input
+  (source "sscanf_outputs.sv" #"
+    module Top(output logic ok);
+      int a[0:1]; int n,value; logic [63:0] source;
+      initial begin
+        n=$sscanf("7 8","%d%d",a[0],a[1]);
+        ok=n==2 && a[0]==7 && a[1]==8;
+        value=1; n=$sscanf("9bad","%d%d",value,value); ok &= n==1 && value==9;
+        source="42";n=$sscanf(source,"%d",value);ok &= n==1 && value==42;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1))
+
+(case sscanf_radix_unknowns_and_unknown_input
+  (four_state)
+  (source "sscanf_unknown.sv" #"
+    module Top(output logic ok);
+      logic [7:0] value; logic [31:0] source; int n;
+      initial begin
+        n=$sscanf("1z","%h",value);ok=n==1 && value===8'h1z;
+        n=$sscanf("x","%d",value);ok &= n==1 && value===8'hxx;
+        n=$sscanf("z","%b",value);ok &= n==1 && value===8'hzz;
+        source='x;value=77;n=$sscanf(source,"%d",value);ok &= n==-1 && value==77;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1))
+
+
+(case sscanf_real_fields_width_and_suppression
+  (source "scan_real.sv" #"
+    module Top(output bit ok);
+      real a,b,c,keep; int n,number,eof,mismatch,partial;
+      initial begin
+        n=$sscanf(" -1.25e+2 .5 2.","%e%f%g",a,b,c);
+        ok=n==3 && a==-125.0 && b==0.5 && c==2.0;
+        n=$sscanf("1.25Q7","%4fQ%d",a,number);
+        ok &= n==2 && a==1.25 && number==7;
+        n=$sscanf("3.5e1,2.25","%*g,%f",b);
+        ok &= n==1 && b==2.25;
+        keep=9.5;eof=$sscanf("","%f",keep);mismatch=$sscanf("bad","%e",keep);
+        partial=$sscanf("8 1.5 bad","%d%g%f",number,a,keep);
+        ok &= eof==-1 && mismatch==0 && partial==2 && number==8 && a==1.5 && keep==9.5;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1))

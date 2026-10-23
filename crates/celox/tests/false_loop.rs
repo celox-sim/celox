@@ -167,8 +167,11 @@ fn test_struct_member_dynamic_access_false_loop() {
     }
     "#;
 
+    // Dynamic element writes intentionally retain the other elements.
     // This is expected to panic with CombinationalLoop because of the false dependency.
-    let result = Simulator::builder(code, "Top").build();
+    let result = Simulator::builder(code, "Top")
+        .allow_inferred_latches(true)
+        .build();
     assert!(result.is_err());
 
     let code = r#"
@@ -189,7 +192,9 @@ fn test_struct_member_dynamic_access_false_loop() {
     }
     "#;
 
-    let result = Simulator::builder(code, "Top").build();
+    let result = Simulator::builder(code, "Top")
+        .allow_inferred_latches(true)
+        .build();
 
     assert!(result.is_ok());
 }

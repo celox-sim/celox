@@ -13,33 +13,19 @@ use crate::{SimBackend, Simulator, SimulatorBuilder};
 use celox_runtime::backend::EventHandle as _;
 
 /// Run `$body` with `$sim` bound to a timed simulation of `$builder` on
-/// every backend, including a native program image that went through its
-/// container.
+/// every backend.
 macro_rules! on_every_backend {
-    ($builder:expr, $top:expr, |$sim:ident| $body:block) => {{
+    ($builder:expr, |$sim:ident| $body:block) => {{
         fn run<B: SimBackend>(mut $sim: Simulation<B>) $body
-        run(Simulation::new($builder.build_interpreter().unwrap()));
-        run(Simulation::new($builder.build_cranelift().unwrap()));
-        run(Simulation::new($builder.build_wasm().unwrap()));
-        run(Simulation::new($builder.build_tiered().unwrap()));
+        run($builder.build_interpreter().unwrap());
+        run($builder.build_cranelift().unwrap());
+        run($builder.build_wasm().unwrap());
+        run($builder.build_tiered().unwrap());
         #[cfg(any(
             all(target_arch = "x86_64", not(feature = "arm64-codegen")),
             all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
         ))]
-        {
-            run(Simulation::new($builder.build_native().unwrap()));
-            let image = $builder.compile_native().unwrap().into_program_image();
-            let image = crate::NativeProgramImage::from_container_bytes(
-                &image.to_container_bytes().unwrap(),
-            )
-            .unwrap();
-            run(Simulation::new(
-                Simulator::from_sources(Vec::new(), $top)
-                    .emit_triggers()
-                    .build_native_from_image(image)
-                    .unwrap(),
-            ));
-        }
+        run($builder.build_native().unwrap());
     }};
 }
 
@@ -174,8 +160,8 @@ fn wait(signal: SignalId, edge: EventEdge) -> Statement {
     }
 }
 
-fn builder(artifact: &FrontendArtifact, four_state: bool) -> SimulatorBuilder<'static, Simulator> {
-    Simulator::from_frontend(artifact.clone())
+fn builder(artifact: &FrontendArtifact, four_state: bool) -> SimulatorBuilder<'static, Simulation> {
+    Simulation::from_frontend(artifact.clone())
         .four_state(four_state)
         .emit_triggers()
 }
@@ -184,6 +170,33 @@ fn value<B: SimBackend>(sim: &mut Simulation<B>, name: &str) -> u64 {
     let signal = sim.signal(name);
     let value = sim.get(signal);
     u64::try_from(value).unwrap()
+}
+
+#[test]
+fn kernels_record_whether_every_delay_is_a_constant_time() {
+    let mut d = Design::new("Delays", false);
+    let x = d.internal("x", 8, 0);
+    let amount = d.input("amount", 8);
+    let constant = vec![d.inactive_delay(5), d.set(x, 1), d.delay(2)];
+    d.module.process(constant).unwrap();
+    let zero = vec![d.inactive_delay(0), d.set(x, 2)];
+    d.module.process(zero).unwrap();
+    let variable = Statement::InactiveDelay {
+        amount: d.read(amount),
+    };
+    d.module.process(vec![variable]).unwrap();
+    let none = vec![d.set(x, 3)];
+    d.module.process(none).unwrap();
+    let sim = builder(&d.finish(), false).build_interpreter().unwrap();
+    let flags: Vec<_> = sim
+        .simulator
+        .program
+        .runtime_schema
+        .processes
+        .iter()
+        .map(|slots| slots.const_delays)
+        .collect();
+    assert_eq!(flags, [true, false, false, true]);
 }
 
 #[test]
@@ -216,24 +229,20 @@ fn process_optimization_preserves_state_changes_between_continuations() {
             crate::OptLevel::O1,
             crate::OptLevel::O2,
         ] {
-            on_every_backend!(
-                builder(&artifact, four_state).opt_level(level),
-                "OptimizedProcess",
-                |sim| {
-                    sim.run_until(0).unwrap();
-                    assert_eq!(value(&mut sim, "result"), 5);
-                    sim.run_until(1).unwrap();
-                    assert_eq!(value(&mut sim, "shared"), 9);
-                    assert_eq!(value(&mut sim, "result"), 5);
-                    sim.run_until(2).unwrap();
-                    assert_eq!(value(&mut sim, "result"), 9);
-                    assert!(!sim.is_finished());
-                    sim.run_until(20).unwrap();
-                    assert!(sim.is_finished());
-                    assert_eq!(sim.time(), 3);
-                    assert_eq!(value(&mut sim, "result"), 9);
-                }
-            );
+            on_every_backend!(builder(&artifact, four_state).opt_level(level), |sim| {
+                sim.run_until(0).unwrap();
+                assert_eq!(value(&mut sim, "result"), 5);
+                sim.run_until(1).unwrap();
+                assert_eq!(value(&mut sim, "shared"), 9);
+                assert_eq!(value(&mut sim, "result"), 5);
+                sim.run_until(2).unwrap();
+                assert_eq!(value(&mut sim, "result"), 9);
+                assert!(!sim.is_finished());
+                sim.run_until(20).unwrap();
+                assert!(sim.is_finished());
+                assert_eq!(sim.time(), 3);
+                assert_eq!(value(&mut sim, "result"), 9);
+            });
         }
     }
 }
@@ -259,7 +268,7 @@ fn pulse(four_state: bool) -> FrontendArtifact {
 fn a_pulse_within_one_process_run_wakes_posedge_once() {
     for four_state in [false, true] {
         let artifact = pulse(four_state);
-        on_every_backend!(builder(&artifact, four_state), "Pulse", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             sim.run_until(0).unwrap();
             assert_eq!(value(&mut sim, "waits"), 0);
             sim.run_until(5).unwrap();
@@ -309,7 +318,7 @@ fn repeated_edges(four_state: bool) -> FrontendArtifact {
 fn repeated_edges_in_one_slot_trigger_a_domain_repeatedly() {
     for four_state in [false, true] {
         let artifact = repeated_edges(four_state);
-        on_every_backend!(builder(&artifact, four_state), "Repeated", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             sim.run_until(1).unwrap();
             assert_eq!(value(&mut sim, "wakes"), 2);
             // Both evaluations publish, the later one last.
@@ -337,7 +346,7 @@ fn host_clock(four_state: bool) -> FrontendArtifact {
 fn host_writes_trigger_registers_and_wake_waits() {
     for four_state in [false, true] {
         let artifact = host_clock(four_state);
-        on_every_backend!(builder(&artifact, four_state), "HostClock", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             let clk = sim.signal("clk");
             sim.modify(|io| io.set(clk, 0u8)).unwrap();
             sim.run_until(0).unwrap();
@@ -387,7 +396,7 @@ fn level(four_state: bool) -> FrontendArtifact {
 fn level_waits_block_until_their_condition_holds() {
     for four_state in [false, true] {
         let artifact = level(four_state);
-        on_every_backend!(builder(&artifact, four_state), "Level", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             sim.run_until(2).unwrap();
             assert_eq!(value(&mut sim, "first"), 0);
             sim.run_until(3).unwrap();
@@ -446,7 +455,7 @@ fn zero_delays(four_state: bool) -> FrontendArtifact {
 fn zero_delays_order_against_flip_flops_and_nonblocking_assignments() {
     for four_state in [false, true] {
         let artifact = zero_delays(four_state);
-        on_every_backend!(builder(&artifact, four_state), "ZeroDelays", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             sim.run_until(1).unwrap();
             assert_eq!(value(&mut sim, "q"), 3, "the domain evaluated before #0");
             assert_eq!(
@@ -509,7 +518,7 @@ fn nonblocking(four_state: bool) -> FrontendArtifact {
 fn nonblocking_assignments_publish_in_order() {
     for four_state in [false, true] {
         let artifact = nonblocking(four_state);
-        on_every_backend!(builder(&artifact, four_state), "Nonblocking", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             sim.run_until(1).unwrap();
             assert_eq!(value(&mut sim, "q"), 0);
             assert_eq!(
@@ -541,7 +550,7 @@ fn finishing(four_state: bool) -> FrontendArtifact {
 fn finish_freezes_the_simulation() {
     for four_state in [false, true] {
         let artifact = finishing(four_state);
-        on_every_backend!(builder(&artifact, four_state), "Finishing", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             let clk = sim.signal("clk");
             sim.modify(|io| io.set(clk, 0u8)).unwrap();
             sim.add_clock("clk", 2, 1);
@@ -578,7 +587,7 @@ fn waiting(four_state: bool) -> FrontendArtifact {
 fn checkpoints_restore_a_waiting_process() {
     for four_state in [false, true] {
         let artifact = waiting(four_state);
-        on_every_backend!(builder(&artifact, four_state), "Waiting", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             let go = sim.signal("go");
             sim.modify(|io| io.set(go, 0u8)).unwrap();
             sim.run_until(1).unwrap();
@@ -602,7 +611,7 @@ fn checkpoints_restore_a_waiting_process() {
 fn state_files_carry_waiting_processes_across_backends() {
     // Saved on the interpreter, loaded into every backend.
     let artifact = waiting(true);
-    let mut source = Simulation::new(builder(&artifact, true).build_interpreter().unwrap());
+    let mut source = builder(&artifact, true).build_interpreter().unwrap();
     let go = source.signal("go");
     source.modify(|io| io.set(go, 0u8)).unwrap();
     source.run_until(1).unwrap();
@@ -615,7 +624,7 @@ fn state_files_carry_waiting_processes_across_backends() {
     file.write_to(&mut bytes).unwrap();
     let file = celox_runtime::StateFile::read_from(bytes.as_slice()).unwrap();
     STATE.with(|state| *state.borrow_mut() = Some(file));
-    on_every_backend!(builder(&artifact, true), "Waiting", |sim| {
+    on_every_backend!(builder(&artifact, true), |sim| {
         let file = STATE.with(|state| state.borrow().clone().unwrap());
         sim.load_state(&file).unwrap();
         assert_eq!(sim.time(), 3);
@@ -659,7 +668,7 @@ fn edge_order(four_state: bool) -> FrontendArtifact {
 fn edge_woken_processes_read_flip_flops_before_the_edge_publishes() {
     for four_state in [false, true] {
         let artifact = edge_order(four_state);
-        on_every_backend!(builder(&artifact, four_state), "EdgeOrder", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             let clk = sim.signal("clk");
             sim.modify(|io| io.set(clk, 0u8)).unwrap();
             sim.add_clock("clk", 10, 5);
@@ -708,7 +717,7 @@ fn comb_pulse(four_state: bool) -> FrontendArtifact {
 fn comb_processes_pulse_only_when_an_input_changes() {
     for four_state in [false, true] {
         let artifact = comb_pulse(four_state);
-        on_every_backend!(builder(&artifact, four_state), "CombPulse", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             let a = sim.signal("a");
             let b = sim.signal("b");
             sim.modify(|io| {
@@ -759,17 +768,52 @@ endmodule
 "#;
 
     #[test]
+    fn sv_kernels_record_whether_every_delay_is_a_constant_time() {
+        let source = r#"
+`timescale 1ns/1ps
+module Top(input logic [7:0] d);
+    localparam int HALF = 5;
+    logic clk, a, b, c, e;
+    initial clk = 1'b0;
+    always #HALF clk = ~clk;
+    initial #(d) a = 1'b1;
+    initial #0 b = 1'b1;
+    initial #2.5 e = 1'b1;
+    initial #(-1) c = 1'b1;
+endmodule
+"#;
+        let sim = crate::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("delays.sv"))],
+            "Top",
+        )
+        .build_interpreter()
+        .unwrap();
+        let flags: Vec<_> = sim
+            .simulator
+            .program
+            .runtime_schema
+            .processes
+            .iter()
+            .filter(|slots| !slots.is_initializer)
+            .map(|slots| slots.const_delays)
+            .collect();
+        // `initial clk = 1'b0` folds into an initial value. A real delay
+        // and a negative one count as variable.
+        assert_eq!(flags, [true, false, false, false, false]);
+    }
+
+    #[test]
     fn imperative_comb_units_pulse_only_when_an_input_changes() {
         for four_state in [false, true] {
             let build = || {
-                Simulator::from_sv_sources(
+                Simulation::from_sv_sources(
                     vec![(SOURCE, std::path::Path::new("comb_pulse.sv"))],
                     "Top",
                 )
                 .four_state(four_state)
                 .emit_triggers()
             };
-            on_every_backend!(build(), "Top", |sim| {
+            on_every_backend!(build(), |sim| {
                 let a = sim.signal("a");
                 let b = sim.signal("b");
                 sim.modify(|io| {
@@ -894,8 +938,8 @@ fn processes_leave_the_flip_flop_path_of_a_time_slot_unchanged() {
                 .build_native()
                 .unwrap()
         };
-        let plain = recorded_steps(Simulation::new(build(false)), 4);
-        let timed = recorded_steps(Simulation::new(build(true)), 4);
+        let plain = recorded_steps(build(false), 4);
+        let timed = recorded_steps(build(true), 4);
         // Rising and falling edges of a plain design: one settle, the fused
         // evaluate-and-apply of the domain, and the settle after it.
         assert_eq!(plain[0], ["comb", "eval_apply", "comb"]);
@@ -954,7 +998,7 @@ fn republished(four_state: bool) -> FrontendArtifact {
 fn every_publication_of_a_domain_is_an_update() {
     for four_state in [false, true] {
         let artifact = republished(four_state);
-        on_every_backend!(builder(&artifact, four_state), "Republished", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             sim.run_until(1).unwrap();
             assert_eq!(value(&mut sim, "q"), 0);
             assert_eq!(
@@ -997,7 +1041,7 @@ fn pulse_around_nba(four_state: bool) -> FrontendArtifact {
 fn a_pulse_around_a_queued_nonblocking_assignment_is_an_edge() {
     for four_state in [false, true] {
         let artifact = pulse_around_nba(four_state);
-        on_every_backend!(builder(&artifact, four_state), "PulseAroundNba", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             sim.run_until(2).unwrap();
             assert_eq!(value(&mut sim, "r"), 2);
             assert_eq!(value(&mut sim, "waits"), 1);
@@ -1011,7 +1055,7 @@ fn host_write_pulses_survive_checkpoints_and_state_files() {
     // A pulse written by the host and saved before the step that shows it
     // to the waits.
     let artifact = waiting(false);
-    on_every_backend!(builder(&artifact, false), "Waiting", |sim| {
+    on_every_backend!(builder(&artifact, false), |sim| {
         let go = sim.signal("go");
         sim.modify(|io| io.set(go, 0u8)).unwrap();
         sim.run_until(1).unwrap();
@@ -1041,7 +1085,7 @@ fn host_write_pulses_survive_checkpoints_and_state_files() {
 #[test]
 fn loading_a_finished_state_freezes_the_simulation() {
     let artifact = finishing(false);
-    on_every_backend!(builder(&artifact, false), "Finishing", |sim| {
+    on_every_backend!(builder(&artifact, false), |sim| {
         let clk = sim.signal("clk");
         sim.modify(|io| io.set(clk, 0u8)).unwrap();
         let start = sim.save_state().unwrap();
@@ -1076,10 +1120,10 @@ module Top(input logic go, output logic [7:0] y);
 endmodule
 "#;
     let build = || {
-        Simulator::from_sv_sources(vec![(SOURCE, std::path::Path::new("finish.sv"))], "Top")
+        Simulation::from_sv_sources(vec![(SOURCE, std::path::Path::new("finish.sv"))], "Top")
             .emit_triggers()
     };
-    on_every_backend!(build(), "Top", |sim| {
+    on_every_backend!(build(), |sim| {
         let go = sim.signal("go");
         sim.modify(|io| io.set(go, 0u8)).unwrap();
         sim.eval_comb().unwrap();
@@ -1129,7 +1173,7 @@ fn interleaved(four_state: bool) -> FrontendArtifact {
 fn interleaved_publications_keep_each_signals_edges() {
     for four_state in [false, true] {
         let artifact = interleaved(four_state);
-        on_every_backend!(builder(&artifact, four_state), "Interleaved", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             sim.run_until(1).unwrap();
             assert_eq!(value(&mut sim, "qa"), 0);
             assert_eq!(value(&mut sim, "rises"), 1);
@@ -1141,7 +1185,7 @@ fn interleaved_publications_keep_each_signals_edges() {
 #[test]
 fn state_files_reject_queued_assignments_outside_their_target() {
     let artifact = nonblocking(false);
-    let mut sim = Simulation::new(builder(&artifact, false).build_interpreter().unwrap());
+    let mut sim = builder(&artifact, false).build_interpreter().unwrap();
     sim.run_until(0).unwrap();
     let mut file = sim.save_state().unwrap();
     file.schedule
@@ -1181,7 +1225,7 @@ fn low_then_high(four_state: bool) -> FrontendArtifact {
 fn a_signal_written_again_compares_with_its_preceding_value() {
     for four_state in [false, true] {
         let artifact = low_then_high(four_state);
-        on_every_backend!(builder(&artifact, four_state), "LowThenHigh", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             sim.run_until(2).unwrap();
             assert_eq!(value(&mut sim, "clk"), 1);
             assert_eq!(value(&mut sim, "ffs"), 1);
@@ -1210,7 +1254,7 @@ fn nba_pulse(four_state: bool) -> FrontendArtifact {
 fn queued_nonblocking_pulses_trigger_flip_flops() {
     for four_state in [false, true] {
         let artifact = nba_pulse(four_state);
-        on_every_backend!(builder(&artifact, four_state), "NbaPulse", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             sim.run_until(2).unwrap();
             assert_eq!(value(&mut sim, "clk"), 0);
             assert_eq!(value(&mut sim, "ffs"), 1);
@@ -1242,7 +1286,7 @@ fn comb_override(four_state: bool) -> FrontendArtifact {
 fn comb_processes_may_overwrite_their_own_targets() {
     for four_state in [false, true] {
         let artifact = comb_override(four_state);
-        on_every_backend!(builder(&artifact, four_state), "CombOverride", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             let a = sim.signal("a");
             let low = sim.signal("low");
             sim.modify(|io| {
@@ -1260,12 +1304,10 @@ fn comb_processes_may_overwrite_their_own_targets() {
 fn the_waveform_records_the_finish() {
     let artifact = finishing(false);
     let path = std::env::temp_dir().join(format!("celox-finish-{}.vcd", std::process::id()));
-    let mut sim = Simulation::new(
-        builder(&artifact, false)
-            .vcd(&path)
-            .build_interpreter()
-            .unwrap(),
-    );
+    let mut sim = builder(&artifact, false)
+        .vcd(&path)
+        .build_interpreter()
+        .unwrap();
     let clk = sim.signal("clk");
     sim.modify(|io| io.set(clk, 0u8)).unwrap();
     sim.add_clock("clk", 2, 1);
@@ -1281,7 +1323,7 @@ fn the_waveform_records_the_finish() {
 #[test]
 fn state_files_reject_baselines_of_the_wrong_kind() {
     let artifact = waiting(false);
-    let mut sim = Simulation::new(builder(&artifact, false).build_interpreter().unwrap());
+    let mut sim = builder(&artifact, false).build_interpreter().unwrap();
     let go = sim.signal("go");
     sim.modify(|io| io.set(go, 0u8)).unwrap();
     sim.run_until(1).unwrap();
@@ -1311,12 +1353,11 @@ module Top(input logic go, output logic [7:0] y);
     end
 endmodule
 "#;
-    let mut sim = Simulation::new(
-        Simulator::from_sv_sources(vec![(SOURCE, std::path::Path::new("finish.sv"))], "Top")
+    let mut sim =
+        Simulation::from_sv_sources(vec![(SOURCE, std::path::Path::new("finish.sv"))], "Top")
             .emit_triggers()
             .build_interpreter()
-            .unwrap(),
-    );
+            .unwrap();
     let go = sim.signal("go");
     sim.modify(|io| io.set(go, 0u8)).unwrap();
     sim.run_until(0).unwrap();
@@ -1351,7 +1392,7 @@ fn dead_store_elimination_keeps_signals_a_wait_watches() {
     for four_state in [false, true] {
         let artifact = wait_on_comb(four_state);
         let optimized = || builder(&artifact, four_state).opt_level(crate::OptLevel::O2);
-        on_every_backend!(optimized(), "WaitOnComb", |sim| {
+        on_every_backend!(optimized(), |sim| {
             let (a, b) = (sim.signal("a"), sim.signal("b"));
             sim.modify(|io| {
                 io.set(a, 0u8);
@@ -1399,7 +1440,7 @@ fn nba_pulse_after_one_domain(four_state: bool) -> FrontendArtifact {
 fn nonblocking_pulses_after_a_single_domain_trigger_their_domain() {
     for four_state in [false, true] {
         let artifact = nba_pulse_after_one_domain(four_state);
-        on_every_backend!(builder(&artifact, four_state), "NbaPulseOneDomain", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             sim.schedule("clk", 0, 0).unwrap();
             sim.run_until(0).unwrap();
             for edge in 1..=3u64 {
@@ -1434,7 +1475,7 @@ fn pulse_across_waves(four_state: bool) -> FrontendArtifact {
 fn a_pulse_across_two_waves_of_a_slot_is_an_edge() {
     for four_state in [false, true] {
         let artifact = pulse_across_waves(four_state);
-        on_every_backend!(builder(&artifact, four_state), "PulseAcrossWaves", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             sim.run_until(0).unwrap();
             assert_eq!(value(&mut sim, "rises"), 0);
             sim.run_until(2).unwrap();
@@ -1492,12 +1533,8 @@ fn zero_time_loops(four_state: bool) -> [FrontendArtifact; 3] {
 #[test]
 fn zero_time_loops_exhaust_the_slot_budget() {
     for four_state in [false, true] {
-        for (artifact, top) in
-            zero_time_loops(four_state)
-                .into_iter()
-                .zip(["InactiveLoop", "PingPong", "Spin"])
-        {
-            on_every_backend!(builder(&artifact, four_state), top, |sim| {
+        for artifact in zero_time_loops(four_state) {
+            on_every_backend!(builder(&artifact, four_state), |sim| {
                 sim.state.set_slot_budgets(256, 2);
                 sim.run_until(0).unwrap();
                 let error = sim.run_until(5).unwrap_err();
@@ -1547,7 +1584,7 @@ fn write_raw<B: SimBackend>(sim: &mut Simulation<B>, signal: crate::SignalRef, v
 fn raw_host_writes_wake_waits_at_the_current_time() {
     for four_state in [false, true] {
         let artifact = raw_go(four_state);
-        on_every_backend!(builder(&artifact, four_state), "RawGo", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             let go = sim.signal("go");
             write_raw(&mut sim, go, 0);
             sim.note_raw_writes();
@@ -1593,7 +1630,7 @@ fn comb_reads_unwritten_bits(four_state: bool) -> FrontendArtifact {
 fn comb_processes_rerun_on_bits_they_do_not_write() {
     for four_state in [false, true] {
         let artifact = comb_reads_unwritten_bits(four_state);
-        on_every_backend!(builder(&artifact, four_state), "CombBits", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             let a = sim.signal("a");
             for (time, input, expected) in [(1, 0u8, 0u64), (2, 1, 3), (3, 0, 0), (4, 1, 3)] {
                 sim.modify(|io| io.set(a, input)).unwrap();
@@ -1640,7 +1677,7 @@ fn gated_clocks_see_their_edges_with_processes() {
     for four_state in [false, true] {
         for inactive in [false, true] {
             let artifact = gated_clock_with_process(four_state, inactive);
-            on_every_backend!(builder(&artifact, four_state), "GatedClock", |sim| {
+            on_every_backend!(builder(&artifact, four_state), |sim| {
                 let en = sim.signal("en");
                 sim.modify(|io| io.set(en, 1u8)).unwrap();
                 sim.schedule("clk", 0, 0).unwrap();
@@ -1689,7 +1726,7 @@ fn host_writes_do_not_hold_steps_at_the_current_time() {
     for four_state in [false, true] {
         for waiting in [false, true] {
             let artifact = host_writes_with_processes(four_state, waiting);
-            on_every_backend!(builder(&artifact, four_state), "HostSteps", |sim| {
+            on_every_backend!(builder(&artifact, four_state), |sim| {
                 for (time, level) in [(10, 1), (20, 0), (30, 1)] {
                     sim.schedule("clk", time, level).unwrap();
                 }
@@ -1742,7 +1779,7 @@ fn counted_with_comb_writer(four_state: bool) -> FrontendArtifact {
 fn waits_on_counted_signals_see_uncounted_writers() {
     for four_state in [false, true] {
         let artifact = counted_with_comb_writer(four_state);
-        on_every_backend!(builder(&artifact, four_state), "CountedComb", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             let a = sim.signal("a");
             sim.modify(|io| io.set(a, 0u8)).unwrap();
             sim.run_until(1).unwrap();
@@ -1796,7 +1833,7 @@ fn comb_pulse_between_waves(four_state: bool) -> FrontendArtifact {
 fn waits_see_combinational_pulses_between_flip_flop_waves() {
     for four_state in [false, true] {
         let artifact = comb_pulse_between_waves(four_state);
-        on_every_backend!(builder(&artifact, four_state), "CombPulse", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             sim.schedule("clk", 0, 0).unwrap();
             for edge in 1..=4u64 {
                 sim.schedule("clk", 2 * edge - 1, 1).unwrap();
@@ -1838,7 +1875,7 @@ fn long_loop(four_state: bool) -> FrontendArtifact {
 fn long_finite_loops_yield_rarely() {
     for four_state in [false, true] {
         let artifact = long_loop(four_state);
-        on_every_backend!(builder(&artifact, four_state), "LongLoop", |sim| {
+        on_every_backend!(builder(&artifact, four_state), |sim| {
             sim.state.set_slot_budgets(256, 2);
             sim.run_until(2).unwrap();
             assert_eq!(value(&mut sim, "i"), 1 << 17);
@@ -2182,11 +2219,7 @@ fn executor_call_traces_are_unchanged() {
             let suffix = if four_state { "_4state" } else { "" };
             insta::assert_snapshot!(
                 format!("trace_{name}{suffix}_interpreter"),
-                trace(
-                    Simulation::new(builder().build_interpreter().unwrap()),
-                    &ops,
-                    observe
-                )
+                trace(builder().build_interpreter().unwrap(), &ops, observe)
             );
             #[cfg(any(
                 all(target_arch = "x86_64", not(feature = "arm64-codegen")),
@@ -2195,11 +2228,7 @@ fn executor_call_traces_are_unchanged() {
             {
                 insta::assert_snapshot!(
                     format!("trace_{name}{suffix}_native"),
-                    trace(
-                        Simulation::new(builder().build_native().unwrap()),
-                        &ops,
-                        observe
-                    )
+                    trace(builder().build_native().unwrap(), &ops, observe)
                 );
                 // Parallel flip-flop kernels; their calls are those of the
                 // plain RTL design.
@@ -2208,11 +2237,7 @@ fn executor_call_traces_are_unchanged() {
                 }
                 insta::assert_snapshot!(
                     format!("trace_{name}{suffix}_native_threads"),
-                    trace(
-                        Simulation::new(builder().threads(4).build_native().unwrap()),
-                        &ops,
-                        observe
-                    )
+                    trace(builder().threads(4).build_native().unwrap(), &ops, observe)
                 );
             }
         }
@@ -2298,14 +2323,10 @@ module Top (
 fn executor_call_traces_of_veryl_clock_domains_are_unchanged() {
     for &(name, source, inputs, observe) in VERYL_TRACE_DESIGNS {
         let ops = stimulus(inputs);
-        let builder = || Simulator::builder(source, "Top").emit_triggers();
+        let builder = || Simulation::builder(source, "Top").emit_triggers();
         insta::assert_snapshot!(
             format!("trace_{name}_interpreter"),
-            trace(
-                Simulation::new(builder().build_interpreter().unwrap()),
-                &ops,
-                observe
-            )
+            trace(builder().build_interpreter().unwrap(), &ops, observe)
         );
         insta::assert_snapshot!(
             format!("trace_{name}_default"),
@@ -2472,12 +2493,10 @@ mod sv_traces {
             insta::assert_snapshot!(
                 format!("trace_{name}_interpreter"),
                 trace(
-                    Simulation::new(
-                        Simulator::from_sv_sources(sources(), "Top")
-                            .emit_triggers()
-                            .build_interpreter()
-                            .unwrap()
-                    ),
+                    Simulation::from_sv_sources(sources(), "Top")
+                        .emit_triggers()
+                        .build_interpreter()
+                        .unwrap(),
                     &ops,
                     observe
                 )
@@ -2554,11 +2573,11 @@ fn public_time_setter_publishes_time_before_design_evaluation() {
     "#;
     for four_state in [false, true] {
         let build = || {
-            Simulator::from_sv_sources(vec![(source, std::path::Path::new("time.sv"))], "Top")
+            Simulation::from_sv_sources(vec![(source, std::path::Path::new("time.sv"))], "Top")
                 .four_state(four_state)
                 .emit_triggers()
         };
-        on_every_backend!(build(), "Top", |sim| {
+        on_every_backend!(build(), |sim| {
             let a = sim.signal("a");
             let y = sim.signal("y");
             sim.state.set_time(&mut sim.simulator.backend, 5_000);

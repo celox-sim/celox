@@ -1,0 +1,91 @@
+{
+  "schema_version": 3,
+  "suite": "sv",
+  "note": "Focused unexcluded observations. IEEE 1800-2023 6.21 and 13.4.2 give function items static lifetime; 13.4.1 declares the implicit result variable, and 13.5 copies output arguments only on return. The expected retained results follow from these rules. Constant calls are separately initialized under 13.4.3. Verilator is two-state, so its logic output is 0 rather than X.",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "cases": [
+        {
+          "category": "ControlFlow",
+          "detail": "procedural::static_function_output_formals_keep_value at 890:14: assert_eq result: expected 0x25, got 0x0",
+          "expectation": "Simulation",
+          "name": "procedural::static_function_output_formals_keep_value",
+          "phase": "execute",
+          "status": "mismatch",
+          "stronger_than_sv": false,
+          "tag_reasons": {},
+          "tags": []
+        },
+        {
+          "category": "ControlFlow",
+          "detail": "procedural::static_function_result_keeps_value_between_calls at 842:14: assert_eq result: expected 0x17, got 0x0",
+          "expectation": "Simulation",
+          "name": "procedural::static_function_result_keeps_value_between_calls",
+          "phase": "execute",
+          "status": "mismatch",
+          "stronger_than_sv": false,
+          "tag_reasons": {},
+          "tags": []
+        }
+      ]
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+      "cases": [
+        {
+          "category": "ControlFlow",
+          "detail": "procedural::static_function_four_state_result_retains_unknown_and_known_values at 978:32: assert_eq result: expected 0x1, got 0xX",
+          "expectation": "Simulation",
+          "name": "procedural::static_function_four_state_result_retains_unknown_and_known_values",
+          "phase": "execute",
+          "status": "mismatch",
+          "stronger_than_sv": false,
+          "tag_reasons": {},
+          "tags": []
+        },
+        {
+          "category": "ControlFlow",
+          "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: error: Function celox_suite_tb.dut.remember port saved is not an input port.\n<case>/source_0.sv:3:      : Function arguments must be input ports.\n<case>/source_0.sv:3: warning: user task (remember) must be automatic to be synthesized in an always_ff process.\n1 error(s) during elaboration.\n",
+          "expectation": "Simulation",
+          "name": "procedural::static_function_output_formals_keep_value",
+          "phase": "compile",
+          "status": "compile_error",
+          "stronger_than_sv": false,
+          "tag_reasons": {},
+          "tags": []
+        },
+        {
+          "category": "ControlFlow",
+          "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:4: sorry: Overriding the default variable lifetime is not yet supported.\n",
+          "expectation": "Simulation",
+          "name": "procedural::static_function_real_locals_and_results_keep_value",
+          "phase": "compile",
+          "status": "compile_error",
+          "stronger_than_sv": false,
+          "tag_reasons": {},
+          "tags": []
+        },
+        {
+          "category": "ControlFlow",
+          "detail": "procedural::static_function_result_keeps_value_between_calls at 842:14: assert_eq result: expected 0x17, got 0x0",
+          "expectation": "Simulation",
+          "name": "procedural::static_function_result_keeps_value_between_calls",
+          "phase": "execute",
+          "status": "mismatch",
+          "stronger_than_sv": false,
+          "tag_reasons": {},
+          "tags": []
+        }
+      ]
+    }
+  ],
+  "standalone": {
+    "source": "verification/repros/sv_static_function_lifetimes.sv",
+    "verilator_stdout": "bit    23\nbit     0\nlogic    23\nlogic     0\noutput          37\noutput           0\n- work/static-functions/static-lifetime-probe.sv:20: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 0s; walltime 0.000 s; speed 0.000 s/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n",
+    "icarus_return_only_source": "module Top;\n  function static bit [15:0] saved(input bit enable, input bit [15:0] value);\n    if (enable) saved = value;\n  endfunction\n  function static logic [15:0] saved_logic(input bit enable, input bit [15:0] value);\n    if (enable) saved_logic = value;\n  endfunction\n  initial begin\n    $display(\"bit %d\", saved(1, 23));\n    $display(\"bit %d\", saved(0, 91));\n    $display(\"logic %d\", saved_logic(1, 23));\n    $display(\"logic %d\", saved_logic(0, 91));\n  end\nendmodule\n",
+    "icarus_return_only_stdout": "bit    23\nbit     0\nlogic    23\nlogic     x\n"
+  }
+}

@@ -2,8 +2,8 @@ use crate::HashMap;
 use crate::*;
 
 use crate::cost_model::{
-    CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD, estimate_clif_cost, estimate_eu_cost,
-    estimate_eu_value_count, estimate_units_cost,
+    CLIF_INST_THRESHOLD, FUNCTION_VALUE_THRESHOLD, block_param_cost, estimate_clif_cost,
+    estimate_eu_cost, estimate_eu_value_count, estimate_units_cost,
 };
 
 /// A chunk in the tail-call chain.
@@ -29,6 +29,8 @@ pub struct TailCallChunk {
 #[derive(Debug, Clone)]
 pub struct MemorySpilledPlan {
     pub chunks: Vec<SpilledChunk>,
+    /// Entry chunk for each original execution unit, in execution order.
+    pub entry_chunks: Vec<usize>,
     /// Total scratch memory needed (bytes).
     pub scratch_bytes: usize,
 }
@@ -42,6 +44,9 @@ pub struct SpilledChunk {
     pub incoming_spills: Vec<SpillSlot>,
     /// Registers to store to scratch memory before cross-chunk tail-calls.
     pub outgoing_spills: Vec<SpillSlot>,
+    /// Outgoing spills whose definitions dominate each cross-chunk exit.
+    /// A union across exits can reference a value defined on another branch.
+    pub outgoing_spills_at: HashMap<BlockId, Vec<SpillSlot>>,
     /// Detailed cross-chunk edge info including param→scratch mappings.
     /// Also encodes cross-chunk targets: if a BlockId is a key here, the terminator
     /// must emit a spill + tail-call to `edge.target_chunk_index` instead of a local jump.
@@ -76,7 +81,12 @@ pub fn split_if_needed(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     four_state: bool,
 ) -> Option<Vec<TailCallChunk>> {
-    split_with_threshold(units, four_state, CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD)
+    split_with_threshold(
+        units,
+        four_state,
+        CLIF_INST_THRESHOLD,
+        FUNCTION_VALUE_THRESHOLD,
+    )
 }
 
 /// Internal version with configurable thresholds (for testing).
@@ -470,7 +480,12 @@ pub fn split_if_needed_spilled(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     four_state: bool,
 ) -> Option<MemorySpilledPlan> {
-    split_multi_block_with_threshold(units, four_state, CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD)
+    split_multi_block_with_threshold(
+        units,
+        four_state,
+        CLIF_INST_THRESHOLD,
+        FUNCTION_VALUE_THRESHOLD,
+    )
 }
 
 pub(crate) fn split_multi_block_with_threshold(
@@ -479,16 +494,18 @@ pub(crate) fn split_multi_block_with_threshold(
     inst_threshold: usize,
     value_threshold: usize,
 ) -> Option<MemorySpilledPlan> {
-    // Process ALL multi-block EUs that exceed either threshold.
-    // (In practice, split_if_needed_spilled is called when split_if_needed returned None,
-    //  meaning all units are in a single oversized chunk — typically one multi-block EU.)
+    // Preserve every EU: roots return to an ordered wrapper, while cross-chunk
+    // control flow inside each EU uses tail calls.
     let mut combined_chunks: Vec<SpilledChunk> = Vec::new();
+    let mut entry_chunks = Vec::new();
     let mut combined_scratch_bytes = 0usize;
+    let mut did_split = false;
 
     for eu in units {
         let eu_cost = estimate_eu_cost(eu, four_state);
         let eu_values = estimate_eu_value_count(eu, four_state);
-        if (eu_cost > inst_threshold || eu_values > value_threshold) && eu.blocks.len() > 1 {
+        entry_chunks.push(combined_chunks.len());
+        if eu_cost > inst_threshold || eu_values > value_threshold {
             if let Some(plan) = split_multi_block_eu(
                 eu,
                 four_state,
@@ -497,17 +514,33 @@ pub(crate) fn split_multi_block_with_threshold(
                 combined_scratch_bytes,
             ) {
                 combined_scratch_bytes = plan.scratch_bytes;
-                combined_chunks.extend(plan.chunks);
+                let base = combined_chunks.len();
+                for mut chunk in plan.chunks {
+                    for edge in chunk.cross_chunk_edges.values_mut() {
+                        edge.target_chunk_index += base;
+                    }
+                    combined_chunks.push(chunk);
+                }
+                did_split = true;
+                continue;
             }
         }
+        combined_chunks.push(SpilledChunk {
+            eu: eu.clone(),
+            incoming_spills: Vec::new(),
+            outgoing_spills: Vec::new(),
+            outgoing_spills_at: HashMap::default(),
+            cross_chunk_edges: HashMap::default(),
+        });
     }
 
-    if combined_chunks.is_empty() {
+    if !did_split {
         return None;
     }
 
     Some(MemorySpilledPlan {
         chunks: combined_chunks,
+        entry_chunks,
         scratch_bytes: combined_scratch_bytes,
     })
 }
@@ -523,7 +556,8 @@ fn split_multi_block_eu(
 
     let mut modified_eu = eu.clone();
 
-    // 1. Split oversized individual blocks at Store boundaries
+    // 1. Split oversized individual blocks at instruction boundaries. Values
+    // live across a cut are preserved by the same spill analysis as CFG edges.
     let mut next_block_id = modified_eu.blocks.keys().map(|b| b.0).max().unwrap_or(0) + 1;
     let block_ids_to_check: Vec<BlockId> = modified_eu.blocks.keys().copied().collect();
     for bid in block_ids_to_check {
@@ -572,6 +606,19 @@ fn split_multi_block_eu(
 
     if chunk_groups.len() <= 1 {
         return None;
+    }
+
+    let dominance = celox_sir::cfg::SirDominance::analyze(&modified_eu).ok()?;
+    let mut definition_blocks = HashMap::default();
+    for (&id, block) in &modified_eu.blocks {
+        for &param in &block.params {
+            definition_blocks.insert(param, id);
+        }
+        for instruction in &block.instructions {
+            if let Some(reg) = def_reg(instruction) {
+                definition_blocks.insert(reg, id);
+            }
+        }
     }
 
     // 5. Block→chunk mapping
@@ -758,6 +805,26 @@ fn split_multi_block_eu(
             .cloned()
             .collect();
 
+        let mut outgoing_spills_at = HashMap::default();
+        for &id in group {
+            let block = &modified_eu.blocks[&id];
+            if block_successors(&block.terminator)
+                .iter()
+                .any(|target| !group_set.contains(target))
+            {
+                let spills = outgoing_spills
+                    .iter()
+                    .filter(|slot| {
+                        definition_blocks
+                            .get(&slot.reg_id)
+                            .is_some_and(|&definition| dominance.dominates(definition, id))
+                    })
+                    .cloned()
+                    .collect();
+                outgoing_spills_at.insert(id, spills);
+            }
+        }
+
         // Cross-chunk edges: map target block → (chunk index, param scratch offsets)
         // Every target block param gets a scratch offset (no filter_map dropping).
         let mut cross_chunk_edges: HashMap<BlockId, CrossChunkEdge> = HashMap::default();
@@ -786,12 +853,14 @@ fn split_multi_block_eu(
             eu: sub_eu,
             incoming_spills,
             outgoing_spills,
+            outgoing_spills_at,
             cross_chunk_edges,
         });
     }
 
     Some(MemorySpilledPlan {
         chunks,
+        entry_chunks: vec![0],
         scratch_bytes,
     })
 }
@@ -801,9 +870,8 @@ fn estimate_block_cost(
     block_id: BlockId,
     four_state: bool,
 ) -> usize {
-    let state_mul = if four_state { 2 } else { 1 };
     let block = &eu.blocks[&block_id];
-    let mut cost = block.params.len() * state_mul;
+    let mut cost = block_param_cost(&block.params, &eu.register_map, four_state);
     for inst in &block.instructions {
         cost += estimate_clif_cost(inst, &eu.register_map, four_state);
     }
@@ -822,17 +890,9 @@ fn estimate_block_value_count(
     block_id: BlockId,
     four_state: bool,
 ) -> usize {
-    let state_mul = if four_state { 2 } else { 1 };
-    let block = &eu.blocks[&block_id];
-    let mut count = block.params.len() * state_mul;
-    for inst in &block.instructions {
-        count += estimate_clif_cost(inst, &eu.register_map, four_state);
-    }
-    count += match &block.terminator {
-        SIRTerminator::Branch { .. } | SIRTerminator::Switch { .. } => 1,
-        _ => 0,
-    };
-    count
+    // Keep the per-block estimate additive with estimate_eu_value_count,
+    // which uses the same instruction-cost proxy including terminators.
+    estimate_block_cost(eu, block_id, four_state)
 }
 
 /// Return a deterministic reverse-postorder CFG layout.
@@ -1030,7 +1090,9 @@ fn partition_single_pass(
     groups
 }
 
-/// Split an oversized block at Store boundaries into sub-blocks within the EU.
+/// Split an oversized block at instruction boundaries into sub-blocks within
+/// the EU. The later inter-chunk spill analysis preserves register snapshots;
+/// a Store is not required to make an instruction boundary safe.
 fn split_oversized_block(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     block_id: BlockId,
@@ -1042,45 +1104,20 @@ fn split_oversized_block(
     let block = &eu.blocks[&block_id];
     let instructions = &block.instructions;
 
-    // Find Store boundary candidates
-    let mut candidates: Vec<usize> = Vec::new();
-    for (i, inst) in instructions.iter().enumerate() {
-        if matches!(inst, SIRInstruction::Store(..)) {
-            candidates.push(i + 1);
-        }
-    }
-    candidates.retain(|&c| c < instructions.len());
-    if candidates.is_empty() {
-        return;
-    }
-
-    // Prefix costs for both metrics
-    let inst_costs: Vec<usize> = instructions
-        .iter()
-        .map(|inst| estimate_clif_cost(inst, &eu.register_map, four_state))
-        .collect();
-    // Value costs = inst costs (see estimate_eu_value_count doc comment).
-    let value_costs = inst_costs.clone();
-    let mut prefix_inst = vec![0usize; instructions.len() + 1];
-    let mut prefix_value = vec![0usize; instructions.len() + 1];
-    for (i, (&ic, &vc)) in inst_costs.iter().zip(value_costs.iter()).enumerate() {
-        prefix_inst[i + 1] = prefix_inst[i] + ic;
-        prefix_value[i + 1] = prefix_value[i] + vc;
-    }
-
-    // Greedy: cut when segment exceeds either threshold
+    // Both metrics use the same cost proxy. Reserve the largest terminator
+    // cost for each segment, and retain parameters only on the first one.
+    let threshold = inst_threshold.min(value_threshold);
+    let mut cost = 2 + block_param_cost(&block.params, &eu.register_map, four_state);
     let mut split_positions: Vec<usize> = Vec::new();
     let mut seg_start = 0;
-    let mut prev_cand = 0;
-
-    for &cand in &candidates {
-        let seg_inst = prefix_inst[cand] - prefix_inst[seg_start];
-        let seg_val = prefix_value[cand] - prefix_value[seg_start];
-        if (seg_inst > inst_threshold || seg_val > value_threshold) && prev_cand > seg_start {
-            split_positions.push(prev_cand);
-            seg_start = prev_cand;
+    for (index, instruction) in instructions.iter().enumerate() {
+        let instruction_cost = estimate_clif_cost(instruction, &eu.register_map, four_state);
+        if cost.saturating_add(instruction_cost) > threshold && index > seg_start {
+            split_positions.push(index);
+            seg_start = index;
+            cost = 2;
         }
-        prev_cand = cand;
+        cost = cost.saturating_add(instruction_cost);
     }
 
     if split_positions.is_empty() {
@@ -1428,6 +1465,73 @@ mod tests {
         assert!(result.is_some());
         let chunks = result.unwrap();
         assert!(chunks.len() >= 2);
+    }
+
+    #[test]
+    fn spilled_single_block_accounts_for_the_final_store_remainder() {
+        for four_state in [false, true] {
+            let threshold = estimate_eu_cost(&make_large_eu(2), four_state);
+            let eu = make_large_eu(3);
+            let instructions = eu.blocks[&BlockId(0)].instructions.len();
+            let plan = split_multi_block_with_threshold(&[eu], four_state, threshold, threshold)
+                .expect("the final third Store must trigger a cut");
+            assert_eq!(plan.entry_chunks, vec![0]);
+            assert_eq!(plan.chunks.len(), 2);
+            assert_eq!(
+                plan.chunks
+                    .iter()
+                    .flat_map(|chunk| chunk.eu.blocks.values())
+                    .map(|block| block.instructions.len())
+                    .sum::<usize>(),
+                instructions
+            );
+            for chunk in &plan.chunks {
+                assert!(estimate_eu_value_count(&chunk.eu, four_state) <= threshold);
+            }
+        }
+    }
+
+    #[test]
+    fn spilled_mixed_units_split_single_block_siblings_too() {
+        for four_state in [false, true] {
+            let threshold = estimate_eu_cost(&make_large_eu(2), four_state);
+            let units = [
+                make_large_eu(9),
+                make_multi_block_chain_eu(5, 1),
+                make_large_eu(7),
+            ];
+            let instructions: usize = units
+                .iter()
+                .flat_map(|eu| eu.blocks.values())
+                .map(|block| block.instructions.len())
+                .sum();
+            let plan = split_multi_block_with_threshold(&units, four_state, threshold, threshold)
+                .expect("all three oversized units must be split");
+            assert_eq!(plan.entry_chunks.len(), 3);
+            let ends = plan
+                .entry_chunks
+                .iter()
+                .copied()
+                .skip(1)
+                .chain([plan.chunks.len()]);
+            for (&start, end) in plan.entry_chunks.iter().zip(ends) {
+                assert!(
+                    end - start > 1,
+                    "single-block siblings must not remain oversized"
+                );
+            }
+            assert_eq!(
+                plan.chunks
+                    .iter()
+                    .flat_map(|chunk| chunk.eu.blocks.values())
+                    .map(|block| block.instructions.len())
+                    .sum::<usize>(),
+                instructions
+            );
+            for chunk in &plan.chunks {
+                assert!(estimate_eu_value_count(&chunk.eu, four_state) <= threshold);
+            }
+        }
     }
 
     /// Create a multi-block EU with a chain: b0 → b1 → b2 → ... → bN (Return).

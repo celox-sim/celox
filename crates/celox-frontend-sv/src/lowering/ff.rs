@@ -10,10 +10,14 @@
 //! four-state semantics identical to the combinational lowering.
 
 mod file_io;
+mod fread;
+mod objects;
+mod scan;
+mod strings;
 
 use super::procedural::*;
 use super::*;
-use celox_design::{CounterKind, NbaSite, WaitSite};
+use celox_design::{CounterKind, NbaSite, SPARSE_WORKING_REGION, WaitSite};
 use celox_frontend_core::process::{ProcessKernelBuilder, ProcessKernelError};
 use celox_sir::{RegisterId, RegisterType};
 use celox_slt::SLTToSIRLowerer;
@@ -34,6 +38,7 @@ struct FunctionBlocks {
 
 pub(super) struct Ff<'p, 'a> {
     pub m: &'p mut ProcModule<'a>,
+    sparse_memories: HashSet<SourceVarId>,
     b: SIRBuilder<Addr>,
     /// Variables read from the working region.
     working: HashSet<SourceVarId>,
@@ -69,7 +74,12 @@ pub(super) struct Ff<'p, 'a> {
     /// The nonblocking assignment sites of the process, by local index.
     nba_sites: Vec<NbaSite<SourceVarId>>,
     host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
+    /// The nonblocking sites with a staged and a queued path.
+    nba_switches: Vec<NbaSwitch<SourceVarId>>,
     direct: bool,
+    /// Whether a combinational process also reruns for occurrences of its
+    /// inputs that left their value unchanged.
+    input_occurrences: bool,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -97,6 +107,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         Self {
             m,
+            sparse_memories: HashSet::default(),
             b: SIRBuilder::new(),
             working: HashSet::default(),
             nonblocking: HashSet::default(),
@@ -114,11 +125,26 @@ impl<'p, 'a> Ff<'p, 'a> {
             dist_seed: None,
             kernel: None,
             direct: false,
+            input_occurrences: true,
             process: 0,
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
             host_request_sites: Vec::new(),
+            nba_switches: Vec::new(),
         }
+    }
+
+    /// Lower a combinational process that reruns only when an input value
+    /// changed. Its inputs then need no occurrence counters, so the units
+    /// that write them stay unchanged.
+    pub fn without_input_occurrences(mut self) -> Self {
+        self.input_occurrences = false;
+        self
+    }
+
+    pub fn with_sparse_memories(mut self, names: &HashSet<String>) -> Self {
+        self.sparse_memories = names.iter().filter_map(|name| self.m.id(name)).collect();
+        self
     }
 
     /// Where a write of `id`, and a read of a value the process wrote, go:
@@ -239,7 +265,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 sv::ir::Callee::System(function) => {
                     use sv::ir::SystemFunction;
                     match function {
-                        SystemFunction::Urandom | SystemFunction::UrandomRange => {
+                        SystemFunction::ScopeRandomize
+                        | SystemFunction::Urandom
+                        | SystemFunction::UrandomRange => {
                             self.urandom_state();
                         }
                         SystemFunction::Random if args.is_empty() => {
@@ -252,6 +280,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     }
                     continue;
                 }
+                sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
@@ -388,7 +417,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         expr: &sv::ir::Expr,
     ) -> Result<(RegisterId, Option<bool>), sv::AnalyzerError> {
         let mut arena = SLTNodeArena::new();
-        let node = self.expr_slt(expr, None, &mut arena)?;
+        let node = self.expr_slt(
+            &floating::condition(expr, self.m.variables, self.m.name_to_id),
+            None,
+            &mut arena,
+        )?;
         let truth = slt_truth(&mut arena, node)?;
         let constant = slt_bool(&arena, &mut ConstCache::default(), truth);
         Ok((self.lower_slt(&arena, truth)?, constant))
@@ -397,7 +430,11 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// Whether an expression is not logically false, as a one-bit register.
     fn eval_not_false(&mut self, expr: &sv::ir::Expr) -> Result<RegisterId, sv::AnalyzerError> {
         let mut arena = SLTNodeArena::new();
-        let node = self.expr_slt(expr, None, &mut arena)?;
+        let node = self.expr_slt(
+            &floating::condition(expr, self.m.variables, self.m.name_to_id),
+            None,
+            &mut arena,
+        )?;
         let not_false = slt_not_false(&mut arena, node)?;
         self.lower_slt(&arena, not_false)
     }
@@ -819,10 +856,71 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         Ok(match expr {
             Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fread),
+                args,
+                ..
+            } => self.fread(args)?,
+            Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
+                        function @ (sv::ir::SystemFunction::Ftell
+                        | sv::ir::SystemFunction::Fseek
+                        | sv::ir::SystemFunction::Rewind
+                        | sv::ir::SystemFunction::Fgetc
+                        | sv::ir::SystemFunction::Ungetc
+                        | sv::ir::SystemFunction::Feof),
+                    ),
+                args,
+                ..
+            } => self.file_function(*function, args)?,
+            Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
+                        function
+                        @ (sv::ir::SystemFunction::Sscanf | sv::ir::SystemFunction::Fscanf),
+                    ),
+                args,
+                ..
+            } => self.scan_function(*function, args)?,
+            Expr::Call {
+                callee: sv::ir::Callee::String(op),
+                args,
+                ..
+            } => self.string_call(*op, args)?,
+            Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                args,
+                ..
+            } => self.object_call(op, args)?,
+            Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fopen),
                 args,
                 ..
             } => self.fopen(args)?,
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::ScopeRandomize),
+                args,
+                ..
+            } => {
+                for arg in args.iter().flatten() {
+                    let Expr::Ident(name) = arg else {
+                        return Err(unsupported("scope randomize variable"));
+                    };
+                    let target = sv::ir::LValue::Ident(name.clone());
+                    let width = self.lvalue_width(&target)?;
+                    let mut words = Vec::with_capacity(width.div_ceil(32));
+                    for offset in (0..width).step_by(32) {
+                        words.push(Expr::Resize {
+                            expr: Box::new(self.randomize_word()?),
+                            width: (width - offset).min(32),
+                            signed: false,
+                        });
+                    }
+                    words.reverse();
+                    self.assign(&target, &Expr::Concat(words))?;
+                }
+                Expr::Literal("32'sd1".into())
+            }
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Urandom),
                 args,
@@ -849,6 +947,19 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ..
             } => self.plusargs(*function, args)?,
             Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
+                        function @ (sv::ir::SystemFunction::DistNormal
+                        | sv::ir::SystemFunction::DistExponential
+                        | sv::ir::SystemFunction::DistPoisson
+                        | sv::ir::SystemFunction::DistChiSquare
+                        | sv::ir::SystemFunction::DistT
+                        | sv::ir::SystemFunction::DistErlang),
+                    ),
+                args,
+                ..
+            } => self.distribution(*function, args)?,
+            Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::DistUniform),
                 args,
                 ..
@@ -861,7 +972,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             Expr::Call {
                 callee:
                     sv::ir::Callee::System(
-                        function @ (sv::ir::SystemFunction::Time | sv::ir::SystemFunction::Stime),
+                        function @ (sv::ir::SystemFunction::Time
+                        | sv::ir::SystemFunction::Stime
+                        | sv::ir::SystemFunction::Realtime),
                     ),
                 args,
                 ..
@@ -909,6 +1022,16 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let (width, signed, is_4state) = self.m.type_shape(&r#type)?;
                 let result = self.call(name, &args, arg_order)?;
                 let (temp, temp_name) = self.m.temp("call", width, signed, is_4state);
+                self.m.variables.get_mut(&temp).unwrap().float = match r#type.kind() {
+                    sv::ir::TypeKind::Real => Some(celox_sir::FloatPrecision::F64),
+                    sv::ir::TypeKind::Shortreal => Some(celox_sir::FloatPrecision::F32),
+                    _ => None,
+                };
+                self.m.variables.get_mut(&temp).unwrap().value_kind = match r#type.kind() {
+                    sv::ir::TypeKind::String => celox_design::ValueKind::StrRef,
+                    sv::ir::TypeKind::Object => celox_design::ValueKind::ObjRef,
+                    _ => celox_design::ValueKind::Bits,
+                };
                 let Some(result) = result else {
                     return Err(unsupported(format!(
                         "void function `{name}` used as a value"
@@ -1181,6 +1304,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let (id, _) = self.m.temp("vcd_argument", width, signed, is_4state);
             self.store(id, SIROffset::Static(0), width, reg);
             values.push(HostRequestValue {
+                float_precision: None,
                 id,
                 width,
                 signed,
@@ -1195,7 +1319,6 @@ impl<'p, 'a> Ff<'p, 'a> {
         self.host_request_sites.push(HostRequestSite {
             process: self.process,
             kind: HostRequestKind::Vcd,
-            requires_timed_simulation: false,
             operation: operation as u32,
             args: values,
             results: Vec::new(),
@@ -1283,6 +1406,44 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok(result)
     }
 
+    /// A bijective 32-bit output permutation of the process RNG. Mixing
+    /// high bits into low bits prevents the LCG's short low-bit periods from
+    /// freezing bits when a wide variable consumes an even number of words.
+    fn randomize_word(&mut self) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        let mut word = self.urandom(None)?;
+        for (shift, multiplier) in [(16, 0x7feb352du32), (15, 0x846ca68bu32)] {
+            let mixed = Expr::Binary {
+                left: Box::new(word.clone()),
+                op: BinaryOp::BitXor,
+                right: Box::new(Expr::Binary {
+                    left: Box::new(word),
+                    op: BinaryOp::Shr,
+                    right: Box::new(Expr::Literal(shift.to_string())),
+                }),
+            };
+            word = self.hidden(
+                "randomize_mix",
+                &Expr::Binary {
+                    left: Box::new(mixed),
+                    op: BinaryOp::Mul,
+                    right: Box::new(Expr::Literal(format!("32'd{multiplier}"))),
+                },
+                false,
+            )?;
+        }
+        let mixed = Expr::Binary {
+            left: Box::new(word.clone()),
+            op: BinaryOp::BitXor,
+            right: Box::new(Expr::Binary {
+                left: Box::new(word),
+                op: BinaryOp::Shr,
+                right: Box::new(Expr::Literal("16".into())),
+            }),
+        };
+        self.hidden("randomize_word", &mixed, false)
+    }
+
     /// IEEE 1800-2023 18.13.2: a number of the `$urandom` stream between the
     /// two bounds, in either order, inclusive.
     fn urandom_range(
@@ -1361,6 +1522,22 @@ impl<'p, 'a> Ff<'p, 'a> {
             right: Box::new(right),
         };
         let time = Expr::Ident(self.m.time_slot());
+        if function == sv::ir::SystemFunction::Realtime {
+            // 20.3.3 returns the fractional scope time. Convert the entire
+            // unsigned 64-bit tick counter, rather than the 32-bit $itor formal.
+            let real = |value| {
+                let call = |function, value| Expr::Call {
+                    callee: sv::ir::Callee::System(function),
+                    args: vec![Some(value)],
+                    arg_order: Vec::new(),
+                };
+                call(
+                    sv::ir::SystemFunction::Bitstoreal,
+                    call(sv::ir::SystemFunction::Realtobits, value),
+                )
+            };
+            return Ok(binary(real(time), BinaryOp::Div, real(divisor)));
+        }
         let time = if divisor == Expr::Literal("64'd1".into()) {
             time
         } else {
@@ -1708,6 +1885,78 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok((id, sv::ir::Expr::Ident(name)))
     }
 
+    fn distribution(
+        &mut self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue};
+        use sv::ir::{Expr, SystemFunction as F};
+        if self.kernel.is_none() {
+            return Err(unsupported(format!(
+                "{} outside a timed process",
+                function.name()
+            )));
+        }
+        let operation = match function {
+            F::DistNormal => 0,
+            F::DistExponential => 1,
+            F::DistPoisson => 2,
+            F::DistChiSquare => 3,
+            F::DistT => 4,
+            F::DistErlang => 5,
+            _ => unreachable!(),
+        };
+        let seed = args
+            .first()
+            .and_then(Option::as_ref)
+            .ok_or_else(|| unsupported("distribution seed"))?;
+        // Capture selectors once before evaluating the other actuals, and
+        // suspend with an int formal rather than writing the caller's storage.
+        let (lvalues, captured) = self.capture_system_actual(seed)?;
+        let formal = self.int_formal(captured);
+        let (seed_id, seed_result) =
+            self.host_hidden("distribution_seed", &formal, 32, true, true)?;
+        let value = |id| HostRequestValue {
+            float_precision: None,
+            id,
+            width: 32,
+            signed: true,
+            is_string: false,
+        };
+        let mut operands = vec![value(seed_id)];
+        for arg in args.iter().skip(1) {
+            let arg = self.hoist(
+                arg.as_ref()
+                    .ok_or_else(|| unsupported("distribution argument"))?,
+            )?;
+            let formal = self.int_formal(arg);
+            let (id, _) = self.host_hidden("distribution_arg", &formal, 32, true, true)?;
+            operands.push(value(id));
+        }
+        let (ret_id, ret_name) = self.m.temp("distribution_result", 32, true, false);
+        let site = self
+            .host_request_sites
+            .iter()
+            .filter(|site| site.kind == HostRequestKind::Distribution)
+            .count() as u32;
+        self.host_request_sites.push(HostRequestSite {
+            process: 0,
+            kind: HostRequestKind::Distribution,
+            operation,
+            args: operands,
+            results: vec![value(ret_id), value(seed_id)],
+            strings: Vec::new(),
+        });
+        self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Distribution, site))
+            .map_err(kernel_error)?;
+        match lvalues.as_slice() {
+            [lvalue] => self.assign(lvalue, &seed_result)?,
+            parts => self.assign_concat(parts, &seed_result)?,
+        }
+        Ok(Expr::Ident(ret_name))
+    }
+
     fn plusargs(
         &mut self,
         function: sv::ir::SystemFunction,
@@ -1735,6 +1984,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut results = Vec::new();
         let (ret_id, ret_name) = self.m.temp("plusargs_result", 32, true, false);
         results.push(HostRequestValue {
+            float_precision: None,
             id: ret_id,
             width: 32,
             signed: true,
@@ -1752,6 +2002,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .ok_or_else(|| unsupported("integral plusargs destination"))?;
             let (id, result) = self.host_hidden("plusargs_value", &captured, width, false, true)?;
             results.push(HostRequestValue {
+                float_precision: None,
                 id,
                 width,
                 signed: false,
@@ -1769,9 +2020,9 @@ impl<'p, 'a> Ff<'p, 'a> {
         self.host_request_sites.push(HostRequestSite {
             process: 0,
             kind: HostRequestKind::Plusargs,
-            requires_timed_simulation: false,
             operation: u32::from(value_query),
             args: vec![HostRequestValue {
+                float_precision: None,
                 id: query_id,
                 width,
                 signed: false,
@@ -1867,10 +2118,49 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<(), sv::AnalyzerError> {
         let lhs = self.propagate_lvalue(lhs);
         let lhs = self.hoist_lvalue(&lhs)?;
+        let converted = match self.m.id(lhs.name()) {
+            Some(id) if matches!(lhs, sv::ir::LValue::Ident(_)) => {
+                self.string_conversion(id, rhs.clone())
+            }
+            _ => rhs.clone(),
+        };
+        let rhs = &converted;
+        let owned_rhs = if self.m.calls(rhs) {
+            self.hoist(rhs)?
+        } else {
+            rhs.clone()
+        };
+        let rhs = &owned_rhs;
         let width = self.lvalue_width(&lhs)?;
         let signed = self.expr_signed(rhs);
         let mut arena = SLTNodeArena::new();
-        let node = self.expr_slt(rhs, Some((width, signed)), &mut arena)?;
+        let from = floating::precision(rhs, self.m.variables, self.m.name_to_id);
+        let target_var = self.m.id(lhs.name()).map(|id| self.m.var(id));
+        let to = target_var.and_then(|v| v.float);
+        let target_signed = target_var.is_some_and(|v| v.signed);
+        let node = self.expr_slt(
+            rhs,
+            if from.is_some() || to.is_some() {
+                None
+            } else {
+                Some((width, signed))
+            },
+            &mut arena,
+        )?;
+        let node = floating::convert(
+            &mut arena,
+            node,
+            from,
+            to,
+            width,
+            if from.is_none() {
+                signed
+            } else {
+                target_signed
+            },
+            true,
+        )
+        .ok_or_else(|| unsupported("real assignment conversion"))?;
         self.write(&lhs, &mut arena, node, signed, rhs)
     }
 
@@ -2203,6 +2493,20 @@ impl<'p, 'a> Ff<'p, 'a> {
                     bit_offset: 0,
                     dynamic_bit_offset: None,
                 };
+                if self.sparse_memories.contains(&id) {
+                    let part = self.b.alloc_logic(packed_element_width);
+                    self.b.emit(SIRInstruction::Slice(
+                        part,
+                        value,
+                        inner_index * packed_element_width,
+                        packed_element_width,
+                    ));
+                    self.when(valid, |this| {
+                        this.store(id, offset, packed_element_width, part);
+                        Ok(())
+                    })?;
+                    continue;
+                }
                 let old = self.b.alloc_logic(packed_element_width);
                 let target = self.target(id);
                 self.b.emit(SIRInstruction::Load(
@@ -2230,6 +2534,12 @@ impl<'p, 'a> Ff<'p, 'a> {
             bit_offset: access.lsb,
             dynamic_bit_offset: None,
         };
+        if self.sparse_memories.contains(&id) {
+            return self.when(valid, |this| {
+                this.store(id, offset, target_width, value);
+                Ok(())
+            });
+        }
         let old = self.b.alloc_logic(target_width);
         let target = self.target(id);
         self.b.emit(SIRInstruction::Load(
@@ -2345,8 +2655,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             sv::ir::Stmt::Delay {
                 amount,
                 ticks_per_unit,
+                ticks_per_precision,
             } => {
-                self.delay(amount, *ticks_per_unit)?;
+                self.delay(amount, *ticks_per_unit, *ticks_per_precision)?;
                 Ok(true)
             }
             sv::ir::Stmt::WaitEvent(items) => {
@@ -2491,6 +2802,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         if matches!(
             task,
             sv::ir::SystemTask::Fclose
+                | sv::ir::SystemTask::Fflush
                 | sv::ir::SystemTask::Fdisplay(_)
                 | sv::ir::SystemTask::Fwrite(_)
                 | sv::ir::SystemTask::Writemem(_)
@@ -2570,16 +2882,33 @@ impl<'p, 'a> Ff<'p, 'a> {
         } else {
             None
         };
-        let (template, values) = system_task_template(&kind, args);
+        let (template, values) = system_task_template(self.m, &kind, args);
         let mut regs = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
         let mut arg_signed = Vec::with_capacity(values.len());
         let mut arg_is_string = Vec::with_capacity(values.len());
+        let mut arg_float_precision = Vec::with_capacity(values.len());
+        let mut arg_is_handle = Vec::with_capacity(values.len());
         for value in &values {
             match value {
                 sv::ir::SystemTaskArg::Expr(expr) => {
-                    let signed = self.expr_signed(expr);
-                    let reg = self.eval(expr, None)?;
+                    let expr = if self.m.calls(expr) {
+                        self.hoist(expr)?
+                    } else {
+                        expr.clone()
+                    };
+                    let signed = self.expr_signed(&expr);
+                    arg_is_handle.push(reads_string_variable(
+                        &expr,
+                        self.m.variables,
+                        self.m.name_to_id,
+                    ));
+                    arg_float_precision.push(floating::precision(
+                        &expr,
+                        self.m.variables,
+                        self.m.name_to_id,
+                    ));
+                    let reg = self.eval(&expr, None)?;
                     arg_widths.push(self.b.register(&reg).width());
                     arg_signed.push(signed);
                     arg_is_string.push(false);
@@ -2596,6 +2925,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                     arg_widths.push(width);
                     arg_signed.push(false);
                     arg_is_string.push(true);
+                    arg_float_precision.push(None);
+                    arg_is_handle.push(false);
                     regs.push(reg);
                 }
                 sv::ir::SystemTaskArg::Empty => {
@@ -2635,6 +2966,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             arg_widths,
             arg_signed,
             arg_is_string,
+            arg_float_precision,
+            arg_is_handle,
         });
         self.b.emit(SIRInstruction::RuntimeEvent {
             site_id,
@@ -3166,10 +3499,40 @@ impl<'p, 'a> Ff<'p, 'a> {
                         param.source_name
                     ))
                 })?;
+                let actual = self.string_conversion(id, actual);
+                let actual = if self.m.calls(&actual) {
+                    self.hoist(&actual)?
+                } else {
+                    actual
+                };
                 let width = self.m.var(id).width;
                 let signed = self.expr_signed(&actual);
+                let from = floating::precision(&actual, self.m.variables, self.m.name_to_id);
+                let to = self.m.var(id).float;
                 let mut arena = SLTNodeArena::new();
-                let node = self.expr_slt(&actual, Some((width, signed)), &mut arena)?;
+                let node = self.expr_slt(
+                    &actual,
+                    if from.is_some() || to.is_some() {
+                        None
+                    } else {
+                        Some((width, signed))
+                    },
+                    &mut arena,
+                )?;
+                let node = floating::convert(
+                    &mut arena,
+                    node,
+                    from,
+                    to,
+                    width,
+                    if from.is_none() {
+                        signed
+                    } else {
+                        self.m.var(id).signed
+                    },
+                    true,
+                )
+                .ok_or_else(|| unsupported("real argument conversion"))?;
                 let mut node =
                     coerce_node_width(&mut arena, node, Some(width), signed).map_err(slt_error)?;
                 if !self.m.var(id).is_4state {
@@ -3178,9 +3541,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                         .map_err(slt_error)?;
                 }
                 inputs.push((id, self.lower_slt(&arena, node)?));
-            } else if self.kernel.is_none()
-                || !subroutine.is_task
-                || subroutine.automatic_locals.contains(&param.name)
+            } else if !subroutine.persistent_locals.contains(&param.name)
+                && (self.kernel.is_none()
+                    || !subroutine.is_task
+                    || subroutine.automatic_locals.contains(&param.name))
             {
                 let value = self.default_reg(id);
                 inputs.push((id, value));
@@ -3196,7 +3560,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .m
                 .id(return_var)
                 .ok_or_else(|| unsupported(format!("result of `{name}`")))?;
-            self.init_default(id);
+            if !subroutine.persistent_locals.contains(return_var) {
+                self.init_default(id);
+            }
         }
         let return_block = self.b.new_block();
         self.functions.push(FunctionBlocks {
@@ -3239,6 +3605,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         body: &[sv::ir::Stmt],
         sensitivity_body: &[sv::ir::Stmt],
         kind: sv::ir::CombProcessKind,
+        allow_inferred_latches: bool,
+        site: Option<&sv::ir::SourceSpan>,
         explicit_targets: &[SourceVarId],
         arena: &mut SLTNodeArena<SourceVarId>,
     ) -> Result<Vec<LogicPath<SourceVarId>>, sv::AnalyzerError> {
@@ -3273,6 +3641,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.b.seal_block(SIRTerminator::Return);
         }
         let body_unit = seal_drained(std::mem::replace(&mut self.b, SIRBuilder::new()));
+        // The analyzer promotes static locals whose entry value is observable
+        // to module signals (lifetimes::keep_static_locals). Remaining hidden
+        // locals are initialized per activation; they cannot retain old state.
         let mut targets: Vec<_> = self
             .targets
             .iter()
@@ -3290,6 +3661,21 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
         }
         let mut targets = merged;
+        if kind == sv::ir::CombProcessKind::AlwaysComb
+            && super::comb_retention::retains_state(
+                &body_unit,
+                &targets,
+                &targets
+                    .iter()
+                    .map(|target| (target.id, self.m.var(target.id).width))
+                    .collect(),
+            )
+        {
+            if !allow_inferred_latches {
+                return Err(unsupported("latch inference inside always_comb"));
+            }
+            self.m.warn(crate::FrontendWarningKind::InferredLatch, site);
+        }
         let dependencies = super::comb::subtract_written_sensitivity(reads.clone(), &targets);
         let mut sources: Vec<_> = if always_comb {
             dependencies.clone()
@@ -3311,6 +3697,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         self.b
             .emit(SIRInstruction::Imm(changed, SIRValue::new(0u8)));
         let mut snapshots = Vec::new();
+        let mut sensitivity_counters = Vec::new();
+        let mut counter_snapshots = Vec::new();
         for source in &sources {
             let width = source.access.msb - source.access.lsb + 1;
             let (saved, _) = self.m.temp(
@@ -3346,6 +3734,43 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .emit(SIRInstruction::Binary(next, changed, BinaryOp::Or, differs));
             changed = next;
             snapshots.push((saved, width, current));
+            if !self.input_occurrences {
+                continue;
+            }
+            // A source can change and return to its saved value inside one
+            // initial activation. Count occurrences around stores before
+            // optimization, rather than relying only on the settled value.
+            let bits = celox_design::EVENT_COUNTER_WIDTH;
+            let (counter, _) = self.m.temp("comb_occurrences", bits, false, false);
+            let (saved_counter, _) = self.m.temp("comb_seen", bits, false, false);
+            let current_counter = self.b.alloc_bit(bits, false);
+            let previous_counter = self.b.alloc_bit(bits, false);
+            self.b.emit(SIRInstruction::Load(
+                current_counter,
+                stable(counter),
+                SIROffset::Static(0),
+                bits,
+            ));
+            self.b.emit(SIRInstruction::Load(
+                previous_counter,
+                stable(saved_counter),
+                SIROffset::Static(0),
+                bits,
+            ));
+            let differs = self.b.alloc_bit(1, false);
+            self.b.emit(SIRInstruction::Binary(
+                differs,
+                current_counter,
+                BinaryOp::NeCase,
+                previous_counter,
+            ));
+            let next = self.b.alloc_bit(1, false);
+            self.b
+                .emit(SIRInstruction::Binary(next, changed, BinaryOp::Or, differs));
+            changed = next;
+            self.store(saved_counter, SIROffset::Static(0), bits, current_counter);
+            sensitivity_counters.push((*source, counter));
+            counter_snapshots.push((counter, saved_counter));
         }
         let run = self.b.alloc_bit(1, false);
         if always_comb {
@@ -3387,6 +3812,21 @@ impl<'p, 'a> Ff<'p, 'a> {
                     width,
                 ));
                 self.store(saved, SIROffset::Static(0), width, current);
+            }
+        }
+        if !always_comb {
+            // The event control is rearmed after its body, so occurrences
+            // caused by this activation itself are already consumed.
+            for &(counter, saved) in &counter_snapshots {
+                let bits = celox_design::EVENT_COUNTER_WIDTH;
+                let current = self.b.alloc_bit(bits, false);
+                self.b.emit(SIRInstruction::Load(
+                    current,
+                    stable(counter),
+                    SIROffset::Static(0),
+                    bits,
+                ));
+                self.store(saved, SIROffset::Static(0), bits, current);
             }
         }
         self.jump(done);
@@ -3436,9 +3876,23 @@ impl<'p, 'a> Ff<'p, 'a> {
                 })
                 .map_err(slt_error)?;
             paths.push(LogicPath {
+                transparent_copy: false,
                 target: LogicPathTarget::Process {
                     process: initialized,
-                    after_initials: kind == sv::ir::CombProcessKind::AlwaysComb,
+                    sensitivity_counters: sensitivity_counters.clone(),
+                    startup: (!always_comb).then(|| celox_slt::CombStartup {
+                        initialized,
+                        counters: counter_snapshots.clone(),
+                        inputs: sources
+                            .iter()
+                            .cloned()
+                            .zip(snapshots.iter().map(|&(saved, _, _)| saved))
+                            .collect(),
+                    }),
+                    after_initials: matches!(
+                        kind,
+                        sv::ir::CombProcessKind::AlwaysComb | sv::ir::CombProcessKind::AlwaysLatch
+                    ),
                     target,
                     unit: Box::new(unit.clone()),
                 },
@@ -3463,6 +3917,15 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<FfProcessUnits, sv::AnalyzerError> {
         let mut visited = HashSet::default();
         self.scan(body, &mut visited);
+        if self
+            .working
+            .iter()
+            .any(|id| self.sparse_memories.contains(id))
+        {
+            return Err(unsupported(
+                "blocking writes to a shared edge-triggered memory",
+            ));
+        }
         // Merge the written ranges of each variable.
         let mut ranges: HashMap<SourceVarId, Vec<BitAccess>> = HashMap::default();
         for (id, access) in std::mem::take(&mut self.targets) {
@@ -3517,7 +3980,12 @@ impl<'p, 'a> Ff<'p, 'a> {
         } else {
             stage_nonblocking(body, &staged, self.m)
         };
-        emit_ff_seeds(&mut self.b, &targets);
+        let ordinary_targets: Vec<_> = targets
+            .iter()
+            .copied()
+            .filter(|target| !self.sparse_memories.contains(&target.id))
+            .collect();
+        emit_ff_seeds(&mut self.b, &ordinary_targets);
         for stage in &staged {
             let width = self.m.var(stage.mask).width;
             let zero = self.b.alloc_bit(width, false);
@@ -3527,18 +3995,44 @@ impl<'p, 'a> Ff<'p, 'a> {
         if self.exec_block(&body)? {
             self.b.seal_block(SIRTerminator::Return);
         }
-        let eval = seal_drained(self.b);
+        let mut eval = seal_drained(self.b);
+        if eval.blocks.values().flat_map(|block| &block.instructions).any(|instruction| {
+            matches!(instruction, SIRInstruction::Load(_, address, ..)
+                if address.region == WORKING_REGION && self.sparse_memories.contains(&address.var_id))
+        }) {
+            return Err(unsupported("read-modify-write destination in a shared FF memory"));
+        }
+        for block in eval.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                if let SIRInstruction::Store(address, ..) = instruction
+                    && address.region == WORKING_REGION
+                    && self.sparse_memories.contains(&address.var_id)
+                {
+                    address.region = SPARSE_WORKING_REGION;
+                }
+            }
+        }
         let (active_targets, nba_targets): (Vec<_>, Vec<_>) = targets
             .iter()
             .copied()
             .partition(|target| self.working.contains(&target.id));
         let mut apply = SIRBuilder::new();
-        emit_ff_commits(&mut apply, &targets);
+        emit_sparse_memory_commits(
+            &mut apply,
+            &targets,
+            &self.sparse_memories,
+            self.m.variables,
+        );
         emit_nba_merges(&mut apply, &staged, self.m);
         let mut active = SIRBuilder::new();
         emit_ff_commits(&mut active, &active_targets);
         let mut nba = SIRBuilder::new();
-        emit_ff_commits(&mut nba, &nba_targets);
+        emit_sparse_memory_commits(
+            &mut nba,
+            &nba_targets,
+            &self.sparse_memories,
+            self.m.variables,
+        );
         emit_nba_merges(&mut nba, &staged, self.m);
         Ok(FfProcessUnits {
             eval,
@@ -3546,7 +4040,45 @@ impl<'p, 'a> Ff<'p, 'a> {
             active: seal_builder(active),
             nba: seal_builder(nba),
             targets,
+            staged: staged
+                .iter()
+                .map(|stage| (stage.id, stage.value, stage.mask))
+                .collect(),
         })
+    }
+}
+
+/// Reuse the sparse next-state protocol used by the Veryl frontend: no whole
+/// memory seed, and publication touches only the dirty ranges.
+fn emit_sparse_memory_commits(
+    builder: &mut SIRBuilder<Addr>,
+    targets: &[VarAtomBase<SourceVarId>],
+    sparse: &HashSet<SourceVarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+) {
+    let mut committed = HashSet::default();
+    for target in targets {
+        if sparse.contains(&target.id) {
+            if !committed.insert(target.id) {
+                continue;
+            }
+            // Sparse publication consumes this memory's complete dirty set,
+            // including updates from other processes evaluated before commit.
+            // Describe the full object, and publish it once even if this
+            // process writes several disjoint static ranges.
+            builder.emit(SIRInstruction::Commit(
+                Addr {
+                    region: SPARSE_WORKING_REGION,
+                    var_id: target.id,
+                },
+                stable(target.id),
+                SIROffset::Static(0),
+                variables[&target.id].width,
+                Vec::new(),
+            ));
+        } else {
+            emit_ff_commits(builder, std::slice::from_ref(target));
+        }
     }
 }
 
@@ -3559,6 +4091,8 @@ pub(super) struct FfProcessUnits {
     pub active: ExecutionUnit<Addr>,
     pub nba: ExecutionUnit<Addr>,
     pub targets: Vec<VarAtomBase<SourceVarId>>,
+    /// The staged variables, as (variable, staging value, staging mask).
+    pub staged: Vec<(SourceVarId, SourceVarId, SourceVarId)>,
 }
 
 /// The staging of a variable a process writes both by blocking and by
@@ -3775,13 +4309,16 @@ impl Ff<'_, '_> {
         self.exec_block(body)?;
         let mut kernel = self.kernel.take().expect("lowering a process kernel");
         std::mem::swap(&mut self.b, kernel.builder());
+        let slots = kernel.slots();
         let mut unit = kernel.build();
         prune_unreachable_blocks(&mut unit);
         Ok(KernelUnit {
             unit,
+            slots,
             wait_sites: self.wait_sites,
             nba_sites: self.nba_sites,
             host_request_sites: self.host_request_sites,
+            nba_switches: self.nba_switches,
         })
     }
 
@@ -3819,19 +4356,25 @@ impl Ff<'_, '_> {
                 },
             )?;
             high = low;
+            // The staged value has an object of its own: a value still
+            // staged from earlier in the time slot is queued before it is
+            // replaced. Assembly keeps the staged or the queued path.
+            let staged_four_state = self.m.var(staged).is_4state;
+            let (value, _) = self.m.temp("nba_value", width, false, staged_four_state);
+            let (pending, _) = self.m.temp("nba_pending", 1, false, false);
+            let (switch, _) = self.m.temp("nba_staged", 1, false, false);
             let site = NbaSite {
                 process: self.process,
                 target: id,
                 lsb,
                 width,
-                value: staged,
+                value,
                 offset: None,
-                pending: None,
+                pending: Some(pending),
             };
             let index = self.nba_sites.len() as u32;
-            let staged_four_state = self.m.var(staged).is_4state;
             self.with_kernel(|kernel| {
-                kernel.nonblocking(index, &site, |builder| {
+                kernel.nonblocking_switched(index, &site, switch, |builder| {
                     let value = if staged_four_state {
                         builder.alloc_logic(width)
                     } else {
@@ -3847,6 +4390,11 @@ impl Ff<'_, '_> {
                 })
             })
             .map_err(kernel_error)?;
+            self.nba_switches.push(NbaSwitch {
+                value,
+                switch,
+                queued: staged,
+            });
             self.nba_sites.push(site);
         }
         Ok(())
@@ -3907,21 +4455,40 @@ impl Ff<'_, '_> {
         &mut self,
         amount: &sv::ir::Expr,
         ticks_per_unit: u64,
+        ticks_per_precision: u64,
     ) -> Result<(), sv::AnalyzerError> {
-        let signed = self.expr_signed(amount);
-        let mut arena = SLTNodeArena::new();
-        let node = self.expr_slt(amount, None, &mut arena)?;
-        let original = self.lower_slt(&arena, node)?;
-        let node = coerce_node_width(&mut arena, node, Some(PROCESS_DELAY_WIDTH), signed)
-            .map_err(slt_error)?;
-        let delay = self.lower_slt(&arena, node)?;
-        let mut delay = self.zero_if_unknown(delay, original);
-        if ticks_per_unit > 1 {
+        // Only integral constants are recorded; a real delay counts as
+        // variable.
+        let mut constant = None;
+        let (mut delay, ticks_per_step) = match self.m.expr_float_precision(amount) {
+            Some(precision) => (
+                self.real_delay(amount, precision, ticks_per_unit / ticks_per_precision)?,
+                ticks_per_precision,
+            ),
+            None => {
+                let signed = self.expr_signed(amount);
+                constant = self
+                    .eval_const(amount)?
+                    .filter(|(value, width)| {
+                        !(signed && *width > 0 && value.bit(*width as u64 - 1))
+                    })
+                    .and_then(|(value, _)| u64::try_from(&value).ok())
+                    .and_then(|value| value.checked_mul(ticks_per_unit));
+                let mut arena = SLTNodeArena::new();
+                let node = self.expr_slt(amount, None, &mut arena)?;
+                let original = self.lower_slt(&arena, node)?;
+                let node = coerce_node_width(&mut arena, node, Some(PROCESS_DELAY_WIDTH), signed)
+                    .map_err(slt_error)?;
+                let delay = self.lower_slt(&arena, node)?;
+                (self.zero_if_unknown(delay, original), ticks_per_unit)
+            }
+        };
+        if ticks_per_step > 1 {
             // Check before multiplying so the 64-bit delay slot cannot wrap.
             let limit = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
             self.b.emit(SIRInstruction::Imm(
                 limit,
-                SIRValue::new(u64::MAX / ticks_per_unit),
+                SIRValue::new(u64::MAX / ticks_per_step),
             ));
             let overflow = self.b.alloc_bit(1, false);
             self.b.emit(SIRInstruction::Binary(
@@ -3945,7 +4512,7 @@ impl Ff<'_, '_> {
             self.b.switch_to_block(scaled);
             let factor = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
             self.b
-                .emit(SIRInstruction::Imm(factor, SIRValue::new(ticks_per_unit)));
+                .emit(SIRInstruction::Imm(factor, SIRValue::new(ticks_per_step)));
             let product = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
             self.b.emit(SIRInstruction::Binary(
                 product,
@@ -3955,8 +4522,44 @@ impl Ff<'_, '_> {
             ));
             delay = product;
         }
-        self.with_kernel(|kernel| kernel.inactive_delay(delay))
+        self.with_kernel(|kernel| kernel.inactive_delay(delay, constant))
             .map_err(kernel_error)
+    }
+
+    /// A real delay `amount` in precision steps of the declaring scope:
+    /// scaled from time units by `steps_per_unit`, rounded to the nearest
+    /// step with ties away from zero (3.14.1, 6.12.1), and read as an
+    /// unsigned 64-bit time like an integral delay (9.4.1). A NaN or
+    /// infinite delay is zero, as an unknown integral one is.
+    fn real_delay(
+        &mut self,
+        amount: &sv::ir::Expr,
+        precision: celox_sir::FloatPrecision,
+        steps_per_unit: u64,
+    ) -> Result<RegisterId, sv::AnalyzerError> {
+        let scaled = if steps_per_unit > 1 {
+            sv::ir::Expr::Binary {
+                left: Box::new(amount.clone()),
+                op: sv::ir::BinaryOp::Mul,
+                right: Box::new(sv::ir::Expr::Literal(format!("{steps_per_unit}.0"))),
+            }
+        } else {
+            amount.clone()
+        };
+        let precision = self.m.expr_float_precision(&scaled).unwrap_or(precision);
+        let mut arena = SLTNodeArena::new();
+        let node = self.expr_slt(&scaled, None, &mut arena)?;
+        let node = floating::convert(
+            &mut arena,
+            node,
+            Some(precision),
+            None,
+            PROCESS_DELAY_WIDTH,
+            true,
+            true,
+        )
+        .ok_or_else(|| unsupported("real delay conversion"))?;
+        self.lower_slt(&arena, node)
     }
 
     /// `value` as a two-state register that is zero when `source` has an
@@ -4010,14 +4613,29 @@ impl Ff<'_, '_> {
     /// `@(items)` (IEEE 1800-2023 9.4.2): the process waits for an
     /// occurrence of any item, which the runtime detects on the watched
     /// signals themselves, so nothing is left to check when it resumes.
+    ///
+    /// An item other than a variable of the module is watched through the
+    /// variable `$event[k]` of a continuous assignment of the expression:
+    /// each update of its value is an occurrence, and an edge is one of the
+    /// least significant bit of the expression (Table 9-2). Before it
+    /// suspends, the process copies the process-local operands the
+    /// assignment reads and stores the expression's value, which the event
+    /// control samples as it begins.
     fn wait_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
         let mut terms = Vec::new();
+        let mut samples = Vec::new();
         for item in items {
-            let id = match &item.expr {
-                sv::ir::Expr::Ident(name) => self.m.id(name).filter(|&id| !self.m.is_hidden(id)),
-                _ => None,
-            }
-            .ok_or_else(|| unsupported("event expression other than a variable"))?;
+            let expr = self.propagate(&item.expr);
+            let id = match &expr {
+                sv::ir::Expr::Ident(name) => match self.m.id(name) {
+                    Some(id) if !self.m.is_hidden(id) => id,
+                    Some(_) => self.event_expression(&expr, &mut samples)?,
+                    // A constant never changes.
+                    None if self.m.constants.contains_key(name) => continue,
+                    None => return Err(unsupported(format!("event expression `{name}`"))),
+                },
+                _ => self.event_expression(&expr, &mut samples)?,
+            };
             match item.edge {
                 sv::ir::EventEdge::Any => terms.push((id, CounterKind::Changes)),
                 sv::ir::EventEdge::Pos => terms.push((id, CounterKind::Rises)),
@@ -4027,6 +4645,9 @@ impl Ff<'_, '_> {
                     terms.push((id, CounterKind::Falls));
                 }
             }
+        }
+        for (target, value) in samples {
+            self.assign(&sv::ir::LValue::Ident(target), &value)?;
         }
         let site = self.wait_site(terms);
         self.with_kernel(|kernel| -> Result<(), ProcessKernelError> {
@@ -4041,6 +4662,117 @@ impl Ff<'_, '_> {
         .map_err(kernel_error)
     }
 
+    /// The variable `$event[k]` of a new event expression `expr`, with its
+    /// continuous assignment added to the module. `samples` gets the
+    /// assignments the process makes before it suspends: the copies of the
+    /// process-local operands, then `$event[k]` itself.
+    fn event_expression(
+        &mut self,
+        expr: &sv::ir::Expr,
+        samples: &mut Vec<(String, sv::ir::Expr)>,
+    ) -> Result<SourceVarId, sv::AnalyzerError> {
+        if let Some(name) = impure_call(self.m, expr) {
+            return Err(unsupported(format!(
+                "impure call `{name}` in an event expression"
+            )));
+        }
+        // A real expression keeps its payload bits, so a change too small
+        // to survive an integer conversion still wakes the process.
+        let float = self.m.expr_float_precision(expr);
+        let width = match float {
+            Some(celox_sir::FloatPrecision::F64) => 64,
+            Some(celox_sir::FloatPrecision::F32) => 32,
+            None => sv_expr_natural_width(
+                &self.m.typed_calls(expr),
+                self.m.variables,
+                self.m.name_to_id,
+                self.m.constants,
+                self.m.parameter_types,
+            )
+            .ok_or_else(|| unsupported("event expression of unknown width"))?,
+        };
+        let signed = self.expr_signed(expr);
+        let mut names = HashSet::default();
+        expr_idents(expr, &mut names);
+        let mut locals: Vec<_> = names
+            .into_iter()
+            .filter_map(|name| {
+                let id = self.m.id(&name)?;
+                self.m.is_hidden(id).then_some((name, id))
+            })
+            .collect();
+        locals.sort_unstable();
+        // Another call can copy a new argument into a static formal while
+        // the process waits, which a copy taken now would not see.
+        if locals.iter().any(|&(_, id)| self.is_static_task_formal(id)) {
+            return Err(unsupported(
+                "event expression reading a static task argument",
+            ));
+        }
+        let index = self.m.next_event_index();
+        let (event, event_name) = self.m.event_variable(
+            index,
+            None,
+            SvVariable {
+                float,
+                path: Vec::new(),
+                width,
+                signed,
+                is_4state: float.is_none(),
+                packed_ranges: vec![(width as i128 - 1, 0)],
+                array_dims: Vec::new(),
+                unpacked_ranges: Vec::new(),
+                domain_kind: DomainKind::Other,
+                kind: VariableKind::Variable,
+                type_kind: if float.is_some() {
+                    PortTypeKind::Bit
+                } else {
+                    PortTypeKind::Logic
+                },
+                source: None,
+                hidden: true,
+                force_control: None,
+                value_kind: Default::default(),
+            },
+        );
+        let mut renames = HashMap::default();
+        for (position, (name, id)) in locals.into_iter().enumerate() {
+            let variable = self.m.var(id).clone();
+            let (copy, copy_name) =
+                self.m
+                    .event_variable(index, Some(format!("arg[{position}]")), variable);
+            if let Some(width) = self.element_widths.get(&stable(id)).copied() {
+                self.element_widths.insert(stable(copy), width);
+                self.element_widths.insert(working(copy), width);
+            }
+            samples.push((copy_name.clone(), sv::ir::Expr::Ident(name.clone())));
+            renames.insert(name, copy_name);
+        }
+        let value = rename_idents(expr, &renames);
+        samples.push((event_name.clone(), value.clone()));
+        self.m.event_assignments.push((
+            event,
+            vec![sv::ir::Stmt::Assign {
+                lhs: sv::ir::LValue::Ident(event_name),
+                rhs: value,
+                nonblocking: false,
+            }],
+        ));
+        Ok(event)
+    }
+
+    /// Whether `id` is a static formal of a task, which keeps one
+    /// module-wide address for every call.
+    fn is_static_task_formal(&self, id: SourceVarId) -> bool {
+        self.m.subroutines.values().any(|subroutine| {
+            subroutine.is_task
+                && subroutine.params.iter().any(|param| {
+                    !subroutine.automatic_locals.contains(&param.name)
+                        && self.m.id(&param.name) == Some(id)
+                })
+        })
+    }
+
     /// `wait (condition)` (IEEE 1800-2023 9.4.3): the process goes on at once
     /// if the condition holds, and otherwise checks it again whenever a
     /// variable it reads changes.
@@ -4052,16 +4784,10 @@ impl Ff<'_, '_> {
         // in, but hidden local storage has no observable change counters yet.
         // Do not compile a wait that would silently miss that wakeup, including
         // dependencies read indirectly by a function in the condition.
-        if self.m.subroutines.values().any(|subroutine| {
-            subroutine.is_task
-                && subroutine.params.iter().any(|param| {
-                    !subroutine.automatic_locals.contains(&param.name)
-                        && names.iter().any(|name| {
-                            self.m.id(name).is_some_and(|id| {
-                                self.m.is_hidden(id) && Some(id) == self.m.id(&param.name)
-                            })
-                        })
-                })
+        if names.iter().any(|name| {
+            self.m
+                .id(name)
+                .is_some_and(|id| self.m.is_hidden(id) && self.is_static_task_formal(id))
         }) {
             return Err(unsupported("wait condition reading a static task argument"));
         }
@@ -4156,9 +4882,11 @@ impl Ff<'_, '_> {
 /// The kernel of a process and its wait and nonblocking assignment sites.
 pub(super) struct KernelUnit {
     pub unit: ExecutionUnit<Addr>,
+    pub slots: ProcessSlots<SourceVarId>,
     pub wait_sites: Vec<WaitSite<SourceVarId>>,
     pub nba_sites: Vec<NbaSite<SourceVarId>>,
     pub host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
+    pub nba_switches: Vec<NbaSwitch<SourceVarId>>,
 }
 
 /// Iterations, as a power of two, between the yields of a kernel loop that
@@ -4209,6 +4937,230 @@ fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSe
                 }
             });
         }
+    }
+}
+
+/// The name of a call in `expr` that has an effect or reads the state of the
+/// simulation, directly or through the functions it calls: an event
+/// expression must be a value of the variables it reads.
+fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
+    let mut pending = vec![expr.clone()];
+    let mut visited = HashSet::default();
+    while let Some(expr) = pending.pop() {
+        let callees = std::cell::RefCell::new(Vec::new());
+        expr_calls(&expr, &|callee| {
+            callees.borrow_mut().push(callee.clone());
+            false
+        });
+        for callee in callees.into_inner() {
+            let name = match callee {
+                sv::ir::Callee::System(function) => {
+                    if function.reads_simulation_state() {
+                        return Some(function.name().to_string());
+                    }
+                    continue;
+                }
+                // A string operation is a value of its operands.
+                sv::ir::Callee::String(_) => continue,
+                // A property can change without the handle changing.
+                sv::ir::Callee::Object(op) => return Some(op.to_string()),
+                sv::ir::Callee::Subroutine(name) => name,
+            };
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            if let Some(import) = pm.dpi_imports.get(&name) {
+                if !import.is_pure() {
+                    return Some(name);
+                }
+                continue;
+            }
+            let Some(subroutine) = pm.subroutine(&name) else {
+                return Some(name);
+            };
+            if subroutine.is_task
+                || subroutine
+                    .params
+                    .iter()
+                    .any(|param| param.direction.is_written())
+            {
+                return Some(name);
+            }
+            pending.extend(
+                subroutine
+                    .params
+                    .iter()
+                    .filter_map(|param| param.default.clone()),
+            );
+            // Only the function's own variables may be written.
+            let local =
+                |lvalue: &sv::ir::LValue| pm.id(lvalue.name()).is_some_and(|id| pm.is_hidden(id));
+            let mut effect = false;
+            for stmt in &subroutine.body {
+                stmt.walk(&mut |stmt| match stmt {
+                    sv::ir::Stmt::Assign { lhs, .. } => effect |= !local(lhs),
+                    sv::ir::Stmt::AssignConcat { parts, .. } => effect |= !parts.iter().all(local),
+                    sv::ir::Stmt::Call {
+                        name,
+                        args,
+                        arg_order,
+                    } => pending.push(sv::ir::Expr::Call {
+                        callee: sv::ir::Callee::Subroutine(name.clone()),
+                        args: args.clone(),
+                        arg_order: arg_order.clone(),
+                    }),
+                    sv::ir::Stmt::SystemTask { .. }
+                    | sv::ir::Stmt::Delay { .. }
+                    | sv::ir::Stmt::WaitEvent(_)
+                    | sv::ir::Stmt::Wait(_) => effect = true,
+                    _ => {}
+                });
+                stmt.clone().visit_mut(
+                    &mut |expr| pending.push(expr.clone()),
+                    &mut |_| {},
+                    &mut |_| {},
+                );
+            }
+            if effect {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// `expr` with the identifiers in `renames` replaced.
+fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::ir::Expr {
+    fn constant(expr: &sv::ir::ConstExpr, renames: &HashMap<String, String>) -> sv::ir::ConstExpr {
+        use sv::ir::ConstExpr;
+        let go = |expr: &ConstExpr| Box::new(constant(expr, renames));
+        match expr {
+            ConstExpr::Ident(name) => ConstExpr::Ident(renames.get(name).unwrap_or(name).clone()),
+            ConstExpr::Literal(_) => expr.clone(),
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: go(expr),
+                msb: go(msb),
+                lsb: go(lsb),
+                signed: *signed,
+            },
+            ConstExpr::Select { expr, bit } => ConstExpr::Select {
+                expr: go(expr),
+                bit: go(bit),
+            },
+            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee: callee.clone(),
+                site: *site,
+                args: args.iter().map(|arg| constant(arg, renames)).collect(),
+            },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: go(expr),
+                width: *width,
+                signed: *signed,
+            },
+            ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+                op: *op,
+                expr: go(expr),
+            },
+            ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+                left: go(left),
+                op: *op,
+                right: go(right),
+            },
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => ConstExpr::Mux {
+                condition: go(condition),
+                then_expr: go(then_expr),
+                else_expr: go(else_expr),
+            },
+        }
+    }
+    use sv::ir::Expr;
+    let go = |expr: &Expr| Box::new(rename_idents(expr, renames));
+    match expr {
+        Expr::Ident(name) => Expr::Ident(renames.get(name).unwrap_or(name).clone()),
+        Expr::Literal(_) => expr.clone(),
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
+            expr: go(expr),
+            msb: constant(msb, renames),
+            lsb: constant(lsb, renames),
+            signed: *signed,
+        },
+        Expr::Concat(parts) => Expr::Concat(
+            parts
+                .iter()
+                .map(|part| rename_idents(part, renames))
+                .collect(),
+        ),
+        Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
+            count: constant(count, renames),
+            parts: parts
+                .iter()
+                .map(|part| rename_idents(part, renames))
+                .collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: go(expr),
+            width: *width,
+            signed: *signed,
+        },
+        Expr::Unary { op, expr } => Expr::Unary {
+            op: *op,
+            expr: go(expr),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: go(left),
+            op: *op,
+            right: go(right),
+        },
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expr::Mux {
+            condition: go(condition),
+            then_expr: go(then_expr),
+            else_expr: go(else_expr),
+        },
+        Expr::Call {
+            callee,
+            args,
+            arg_order,
+        } => Expr::Call {
+            callee: callee.clone(),
+            args: args
+                .iter()
+                .map(|arg| arg.as_ref().map(|arg| rename_idents(arg, renames)))
+                .collect(),
+            arg_order: arg_order.clone(),
+        },
+        Expr::Inside { expr, items } => Expr::Inside {
+            expr: go(expr),
+            items: items
+                .iter()
+                .map(|item| item.map(&mut |operand| rename_idents(operand, renames)))
+                .collect(),
+        },
     }
 }
 

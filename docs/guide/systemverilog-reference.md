@@ -29,6 +29,8 @@ synthesis and is tested at the design level.
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
+| Strings | `string` variables, function arguments and results: assignment of strings, string literals and casts (`string'(x)`), `==`, `!=` and ordering comparisons, concatenation and replication (with a run-time count), character reads and writes (`s[i]`), and the methods `len`, `getc`, `putc`, `toupper`, `tolower`, `compare`, `icompare`, `substr`, `atoi` / `atohex` / `atooct` / `atobin` and `itoa` / `hextoa` / `octtoa` / `bintoa`; `%s` and format-less display of string values. See [strings](#strings) |
+| Classes | classes declared in a module: properties of 2-state integral types up to 64 bits, `string` and class handle types, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles. See [classes](#classes) |
 | Parameters | integral parameters and overrides preserving widths beyond 128 bits and X/Z values, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 
 ### Processes and control flow
@@ -36,11 +38,33 @@ synthesis and is tested at the design level.
 | Area | Supported |
 | --- | --- |
 | Continuous logic | `assign`, `wire w = expr;` |
-| Combinational processes | `always_comb`, `always @*`, block-local variables, sequential and dependent blocking assignments, reads of a variable before the process writes it (its previous value) |
+| Combinational processes | `always_comb`, `always @*`, blocking `always_latch`, block-local variables, sequential and dependent blocking assignments, reads of a variable before the process writes it (its previous value) |
 | Sequential processes | `always_ff @(posedge clk)`, `always @(posedge clk or negedge rst_n)` and the like, blocking and nonblocking assignments, concatenated targets, four-state clock and reset signals, one asynchronous reset shared by several clock domains, processes at both edges of one clock or reset, and one signal as the clock of some processes and the asynchronous reset of others (a timed `Simulation` runs every edge; `Simulator::tick` is the rising edge of its event only) |
-| Initial blocks | `initial` blocks and variable declaration initializers (`logic [7:0] v = 8'h5a;`, also of interface members); initializers take effect before the `initial` blocks. One whose writes have constant values, with constant `if` / `for` and `$readmemh` / `$readmemb`, defines the initial state. Any other, such as one that reads design state or calls a system task, runs as a process from time zero in a timed `Simulation`; a `Simulator` does not run processes |
+| Initial blocks | `initial` blocks and variable declaration initializers (`logic [7:0] v = 8'h5a;`, also of interface members); initializers take effect before the `initial` blocks. One whose writes have constant values, with constant `if` / `for` and `$readmemh` / `$readmemb`, defines the initial state. Any other, such as one that reads design state or calls a system task, runs as a process from time zero in a timed `Simulation`; a `Simulator` does not run processes, so building one for such a design fails with `SimulatorErrorKind::ProcessRequiresSimulation` |
 | Statements | `if` / `else`, `case`, `casez`, `casex`, `case ... inside`, `unique` / `priority`, `for`, `while`, `do ... while`, `repeat`, `forever` and `foreach` (unrolled when the trip count is constant, otherwise executed at run time), `break` / `continue` / `return`, immediate assertions |
 | Functions | `function` and `task` with `input`, `output` and `inout` arguments, `return` or assignment to the function name, local variables and `localparam`s, selected and composite assignments; calls are inlined. Calls with constant arguments in constant expressions (parameters, ranges) are evaluated during elaboration |
+
+### Timing controls {#timing-controls}
+
+In a timed `Simulation`, `initial` and plain `always` processes can suspend:
+
+| Control | Supported |
+| --- | --- |
+| `#delay` | integral and real delays, `#(min:typ:max)` (the typical value) and [time literals](#time-literal-delays); an X or Z delay counts as zero |
+| `@(...)` | variables, `posedge` / `negedge` / `edge`, items joined by `or` or `,`, bit, part and run-time index selects, any expression including calls of pure functions, and `@*` / `@(*)`, which waits on the variables its statement reads |
+| `wait (condition)` | any condition; an X or Z condition counts as false |
+| Assignments | blocking and nonblocking; nonblocking updates take effect in the NBA region of the time slot |
+
+An `always` whose sensitivity list names exactly the variables its statement
+reads, as `@*` would (IEEE 1800-2023 9.4.2.2), simulates like `always @*` in
+both `Simulator` and `Simulation`: `always @(a or b) y = a + b;` or
+`always @(b, a) y = a + b;`. The statement must not contain a timing control
+or a nonblocking assignment. Any other sensitivity list without edges runs as
+a process: `always @(a) y = a + b;` leaves `y` unchanged when only `b`
+changes. So does a list that, as `always @*`, would close a combinational
+loop with other logic. A `Simulator` runs no processes, so building one for
+such a design fails with `SimulatorErrorKind::ProcessRequiresSimulation`; use
+`Simulation`, or write `always @*` or `always_comb`.
 
 ### Timed task calls
 
@@ -48,8 +72,8 @@ An `initial` or ordinary `always` process can call tasks containing `#delay`,
 `@(event)` and `wait (condition)`, including through nested tasks. Calls are
 inlined into the caller's resumable state machine. A normal edge-sensitive
 `always` that calls a timed task waits for that task to return before rearming
-its event control. Functions, `always_comb`, `always @*` and `always_ff` cannot
-call a timed task.
+its event control. Functions, `always_comb` and `always_ff` cannot call a timed
+task, and `always @*` cannot yet ([#1710](https://github.com/celox-sim/celox/issues/1710)).
 
 Automatic task arguments and locals have separate storage for each activation
 and survive suspension. Module-local static task arguments remain shared. Inputs and inouts
@@ -61,12 +85,27 @@ until shared argument storage and its change notifications are supported.
 Event expressions have the same restrictions
 as waits written directly in a process.
 
-### Time literal delays
+### Scope randomization
+
+`randomize(a, b)` and `std::randomize(a, b)` support unconstrained whole packed
+variables, including signed vectors and packed structures, at any supported
+width. Each call fills every word with random zero/one bits and returns the
+signed `int` success value `1`. An empty argument list succeeds without writing a
+variable or advancing the random stream. Calls follow procedural statement order
+and short-circuit evaluation, and use the calling process's persistent random
+stream (IEEE 1800-2023 18.12).
+
+Constraints (`with`), class methods, enum variables, unpacked arrays, nets,
+constants, selects and concatenation arguments are unsupported and rejected.
+
+### Time literal delays {#time-literal-delays}
 
 Standalone delay controls accept time literals such as `#5ns`, `#(2.75ns)` and
 `#40ps`, with all six units from `fs` to `s`. Values round at the declaring
-scope's precision before conversion to scheduler ticks (5.8, 3.14.1). Real-valued
-arithmetic expressions remain unsupported.
+scope's precision before conversion to scheduler ticks (5.8, 3.14.1). A real
+delay such as `#1.5` or `#r` rounds the same way, with ties away from zero
+(6.12.1); a negative one waits its two's complement (9.4.1), and a NaN one
+waits zero.
 
 ### Built-in functions and tasks
 
@@ -74,7 +113,7 @@ arithmetic expressions remain unsupported.
 | --- | --- |
 | System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | Random numbers | `$urandom`, `$urandom_range`, `$random` and `$dist_uniform` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
-| Simulation time | `$time` and `$stime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
+| Simulation time | `$time`, `$stime` and `$realtime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop`, `$exit` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | Runtime I/O | `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb`, and [VCD controls](./vcd#systemverilog-source-controls) in timed processes |
 | State | two-state and four-state simulation |
@@ -89,19 +128,29 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Classes. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
-- Behavioral and verification constructs: `final`, intra-assignment timing controls,
+- Class features beyond those [listed](#classes): method calls through an interface class handle, `$cast`, classes declared in packages, parameterized classes, named constructor arguments, shallow copies (`new h`), and properties that are 4-state, `real`, arrays or wider than 64 bits. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
+- Behavioral and verification constructs: `final`, intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
-  named events, `fork` / `join`, concurrent assertions, `force` / `release`.
-- `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)) and incomplete combinational assignments that would infer a latch.
+  named events and `->`, `fork` / `join`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
+- Timing controls in processes: `iff` qualifiers ([#1444](https://github.com/celox-sim/celox/issues/1444)),
+  package-scoped delay values
+  ([#1710](https://github.com/celox-sim/celox/issues/1710)), impure function calls in event expressions, and
+  `wait` or event expressions reading a static task argument. Nonblocking
+  assignments in a process cannot yet target an unpacked array element, a
+  run-time position or a constant position outside the target
+  ([#1709](https://github.com/celox-sim/celox/issues/1709)).
+- Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset.
+- Inferred latches inside `always_comb` are rejected by default. Set `inferred_latch = "warn"` or `"allow"` in `celox.toml` under `[diagnostics]` to permit retained blocking assignments. Ordinary `always @*` and explicit `always_latch` do not require this option.
 - Ports and instances: non-ANSI port declarations ([#426](https://github.com/celox-sim/celox/issues/426)), `ref` ports
   ([#427](https://github.com/celox-sim/celox/issues/427)), wildcard `.*` connections ([#442](https://github.com/celox-sim/celox/issues/442)), gate primitives ([#457](https://github.com/celox-sim/celox/issues/457)),
   `bind`.
 - Declarations: variable declaration initializers of members of an interface
   array, ANSI port default values, tagged unions, soft packed unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
-  unpacked structs, strings and `real`.
+  unpacked structs and `real`.
 - Sequential processes: `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)) and edge operands other than a
-  plain signal ([#464](https://github.com/celox-sim/celox/issues/464)) in event lists.
+  plain signal ([#464](https://github.com/celox-sim/celox/issues/464)) in event lists. A plain `always` with
+  such an edge, a multi-bit edge signal, or several edges without a reset is
+  rejected too, until it runs as a process ([#1708](https://github.com/celox-sim/celox/issues/1708)).
 - Combinational processes: nonblocking assignments inside `always_comb`
   ([#453](https://github.com/celox-sim/celox/issues/453)).
 - Loops: a procedural loop unrolls at most 10,000 iterations; a combinational
@@ -112,7 +161,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   ([#456](https://github.com/celox-sim/celox/issues/456)).
 - System tasks and functions: Celox knows every name IEEE 1800-2023
   defines, including the optional ones of its Annex D. One it does not support where it is called, such as
-  `$realtime` in an expression or `$fgetc`, is
+  `$fgets`, is
   reported with its name wherever it is written, including in an unused
   parameter and in a function body. A `$` name that is not a system task or
   function, a call with the wrong number of arguments, an omitted argument
@@ -156,6 +205,47 @@ Elements are addressed by their declared
 index: `child_signal(&[("u", 3)], "y")` and `dut.u[3]` reach `u[3]` of
 `Child u[3:2](...)`, and `InstanceHierarchy::index` holds the index. Arrays
 with a negative bound are rejected.
+
+### Strings {#strings}
+
+A `string` variable holds a reference to text in the simulator's heap, so
+assigning, comparing for equality and detecting a change of a string cost the
+same as for a 32-bit integer; operations that read or build text call into the
+runtime. Strings are collected between time slots and after each `tick`.
+As IEEE 1800-2023 6.16 requires, NUL bytes are removed when text becomes a
+string, and an integral value assigned or cast to a string contributes its
+bytes from the most significant one.
+
+Not yet supported: `$sformat` / `$sformatf`, `atoreal` / `realtoa`, string
+arguments of `$value$plusargs`, file I/O and DPI-C, and string values in VPI,
+VCD output and the TypeScript API.
+
+### Classes {#classes}
+
+A class variable holds a handle of an object in the simulator's heap, `null`
+until a constructor runs. Like a string, a handle costs the same as a 32-bit
+integer to copy or compare; reading or writing a property and creating an
+object call into the runtime. Objects that no variable or other object refers
+to are collected between time slots and after each `tick`. A method is called
+with the object it was called on, so it can be a function or a task, and
+calls are bound to the method of the variable's class (IEEE 1800-2023 8.6).
+A call of a virtual method runs the override of the object's class instead,
+except `super.m(...)`, which runs the base's implementation (8.15, 8.20); it
+selects the override by the class of the object, so it costs one more call
+into the runtime. Reading or writing a property or calling a method through
+`null` is a runtime error. Constructing an abstract class and a class that
+leaves a pure virtual method unimplemented are rejected (8.21). A class that
+implements an interface class implements each of its methods with the same
+return type, or, if it is abstract, re-declares it pure (8.26).
+
+A constructor calls the constructor of the base class first, with the
+arguments of `super.new(...)` or of the `extends` clause, then runs the
+initializers of the properties its class declares, then its body (IEEE
+1800-2023 8.17). A static property is a variable of the module that declares
+the class, so each instance of the module has its own.
+
+Checkpoints keep objects. State files record strings but not objects, so
+saving a state file fails while any variable holds an object.
 
 ### Out-of-range selects
 
@@ -248,25 +338,90 @@ values transfer by bits, so struct member names and field divisions may differ
 in the child. Typed scalar patterns can override a parameter whose default is
 an ordinary value. Unpacked patterns retain their positional array shape.
 
+### Latches
+
+Explicit `always_latch` and ordinary `always @*` support retained blocking
+assignments. Incomplete assignments in SystemVerilog or Veryl `always_comb`
+require `inferred_latch = "warn"` or `"allow"` in the common
+[`[diagnostics]` table](./celox-toml.md#diagnostics). The default is `error`.
+The Rust `.allow_inferred_latches(true)` and JavaScript `allowInferredLatches: true`
+options remain available; an explicit diagnostic setting takes precedence.
+Latches work with ordinary `eval_comb` and with `initial` testbenches; a gate
+that remains open follows changes to its data, and a closed gate retains its
+last value. In four-state mode an uninitialized latch starts at X, and an X
+or Z procedural `if` condition does not execute the true branch.
+
+`always_comb` and `always_latch` also execute once at time zero; `always @*`
+waits for a sensitivity change, including changes caused by initial blocks or
+continuous drivers. Repeated `eval_comb` calls with unchanged sensitivity inputs
+do not execute a self-reading process again. As with
+`always_comb`, written expressions are excluded from the sensitivity of
+`always_latch` (IEEE 1800-2023 9.2.2.2 and 9.2.2.3). Cross-process feedback
+still requires the existing explicit loop configuration. The option does not
+suppress Veryl analyzer errors for explicit combinational arithmetic feedback.
+For a selected read such as `bus[0]`, `always @*` watches the whole variable,
+while `always_comb` and `always_latch` watch the longest static prefix.
+The latter include reads inside called functions; task calls contribute only
+their argument expressions (IEEE 1800-2023 9.4.2.2 and 9.2.2.2.1).
+Nonblocking latch assignments (`<=`) require NBA scheduling and remain
+unsupported, including when the inference option is enabled.
+
+### Event and level waits {#timing-semantics}
+
+- An event control waits for a change that happens after it begins
+  (IEEE 1800-2023 9.4.2). In `a = 1; @(a ^ b);` the write to `a` is not an
+  event of the wait; the process resumes when `a` or `b` changes later.
+  Icarus 13.0 wakes on the earlier write; Verilator 5.052 agrees with Celox.
+- `posedge` and `negedge` of a multi-bit expression follow its least
+  significant bit (Table 9-2): `@(posedge v)` ignores `v[3]`, and
+  `@(posedge v[3])` follows it. Transitions through X and Z count as in that
+  table, so `0` to `x` is a `posedge`.
+- Continuous assignments, combinational processes and event expressions see
+  a process's writes when that process reaches a timing control or ends.
+  After `b = 1; a = 1;`, `a ^ b` has not changed, and a pulse
+  `a = 1; a = 0;` wakes `@(a)` but not `@(a ^ b)`; write `#0` between the
+  writes to make the pulse visible. IEEE 1800-2023 4.7 permits this order;
+  Icarus evaluates the expression at each write.
+- A waiter sees every value that one evaluation of `always_comb`,
+  `always @*`, an edge-triggered `always` or `always_ff` writes, including
+  one that a later write overwrites: with `a` at 1, `y = 0; if (a) y = 1;`
+  wakes `@(y)` (IEEE 1800-2023 4.3, 9.4.2). Nonblocking updates apply in the
+  NBA region in issue order, each its own update (10.4.2). A child's output
+  port is a continuous assignment to the parent's net (23.3.3), so a waiter
+  in the parent sees only the settled value, as in the previous item.
+  Verilator 5.052 sees only the final value of an evaluation; Icarus 13.0
+  also sees the pulse through the port.
+
 ### Variable lifetimes
 
-Variable lifetimes follow IEEE 1800-2023 6.21. A variable declared in a
-procedural block, function or task is static unless it, its subroutine or
-its module (`module automatic`) is declared `automatic`. A static local of a
-block keeps its value from one execution of the block to the next, and its
+Variable lifetimes follow IEEE 1800-2023 6.21. Outside classes, a variable
+declared in a procedural block, function or task is static unless it, its
+subroutine or its module (`module automatic`) is declared `automatic`.
+Class methods have automatic lifetime (8.6). A static local of a block
+keeps its value from one execution of the block to the next, and its
 initializer runs once at time zero: in `always_ff`, `int count; count++;`
 counts. An automatic local is initialized on every entry. A static local
 whose value on entry is never read, because every path writes it before
 reading it, behaves the same either way. Because a static local keeps its
 value, a local of `always_comb` that only some paths write is a latch, and
-is rejected like any other latch. A static local of a function or task
-that keeps its value between calls is not supported, nor is a static local
-whose initializer is not constant; declare them `automatic`. The result of
-a static function is static too, so one with a path that does not assign
-it (other than a `case` whose items cover every value of a two-state
-argument) is
-rejected as well. An interface
-whose default lifetime (`interface automatic`) differs from that of the
+requires relaxing `inferred_latch` like other inferred latches.
+
+Static function locals and result variables keep their values between calls
+(13.4.2), including scalar `real` values and packed/unpacked integral storage.
+An explicit `static` local of an automatic function is shared too; automatic
+locals are initialized on each call. Static output arguments retain their
+previous values on paths that leave them unassigned. Observable static storage
+is shared by call sites and timed processes, and module-local storage is separate
+for each module instance. Declaration initializers run once at time zero,
+including when the function has not been called. Initializers that call a
+stateful function require `Simulation` or a native testbench to execute the
+initialization process. Constant function calls use
+fresh values and do not affect runtime storage (13.4.3).
+
+Task locals that keep their values and nonconstant static initializers remain
+unsupported; declare those locals `automatic`. Package function state follows
+the existing package-variable restrictions on multiple procedural drivers.
+An interface whose default lifetime (`interface automatic`) differs from that of the
 module it is used in is rejected.
 
 ### Run-time loops
@@ -327,6 +482,50 @@ are absolute array indices. An address directive outside the requested range
 is an error. Without directives, a word-count mismatch is a compilation
 warning (`Simulator::warnings()`): excess words are ignored, and missing words
 leave memory unchanged.
+
+### Binary input
+
+`$fread` reads big-endian bytes into a packed integral destination or a
+one-dimensional static integral memory (IEEE 1800-2023 21.3.4.4). Memory reads
+start at the lowest index by default and proceed through increasing indices;
+optional start and count operands select the range. Packed destinations ignore
+those operands. Partial reads preserve bits that received no input, including
+X/Z bits. The return value is the number of bytes read, or zero on an I/O error.
+
+### Byte input and file positioning
+
+`$fgetc(fd)` returns the next byte as an integer from 0 to 255, or -1 on EOF
+or error. `$ungetc(character, fd)` pushes back one byte without modifying the
+file and returns zero, or -1 on error. One byte of pushback is supported.
+`$feof(fd)` tests whether a previous read detected EOF; reading the final byte
+alone does not set it. Successful pushback and repositioning clear EOF.
+
+`$ftell(fd)` returns the logical byte position, accounting for pushback, or -1
+on error. `$fseek(fd, offset, operation)` accepts signed 32-bit offsets relative
+to the start (0), current position (1), or end (2). `$rewind(fd)` seeks to the
+start. Both positioning functions return zero on success or -1 on error;
+successful seeks discard pushback. Position results beyond signed 32-bit range
+return -1. `$fflush(fd_or_mcd)` flushes selected output channels; `$fflush()`
+flushes all open files. Invalid flush descriptors produce a runtime error.
+These operations run in timed `Simulation` processes and use file descriptors
+for input and positioning; multichannel descriptors support output and flush.
+
+### Formatted input
+
+`$sscanf(source, format, outputs...)` and `$fscanf(fd, format, outputs...)`
+support integral `%d`, `%h`/`%x`, `%o`, `%b`, and `%c` conversions and real
+`%e`/`%f`/`%g` conversions, numeric field widths, assignment suppression,
+literal matching and whitespace (IEEE 1800-2023
+21.3.4.3). Source and format can be string literals or packed integral values.
+The result counts assigned outputs; unmatched outputs retain their values.
+Real conversions accept `real`, `realtime` and `shortreal` destinations, including
+signed decimal inputs with an optional decimal point and exponent. `shortreal`
+rounds directly to binary32; overflow produces signed infinity and negative zero
+is preserved. Incomplete signs or exponents fail without assigning the output.
+Integral conversions require integral destinations; real conversions require real
+destinations. `%s` string outputs and `%t` time scaling are unsupported.
+Both functions require timed `Simulation` execution. Pure `$sscanf` state can
+be checkpointed; `$fscanf` uses external file state and prevents checkpoints.
 
 ### Runtime file output
 
@@ -421,8 +620,12 @@ returns the time in the time unit of the scope that calls it, rounded to an
 integer, halves up (20.3.1); a package function uses its package's unit.
 `$stime` returns the low 32 bits of that value (20.3.2). Combinational logic
 reads the time when its inputs change, not when only the time does. A
-`Simulator`, which has no time, returns 0. `$realtime` waits for `real`
-support.
+`Simulator`, which has no time, returns 0. `$realtime` returns a `real` in
+the calling scope's time unit without integer rounding (20.3.3). For example,
+at 1.25 ns in a scope with a 1 ns time unit, `$realtime` returns 1.25 and
+`$time` returns 1. Real values have IEEE 754 double precision; large tick
+counts may lose precision when converted to `real`. Time queries follow the
+simulation clock when a checkpoint is restored.
 
 ## Random numbers {#random-numbers}
 
@@ -449,6 +652,32 @@ the whole design.
 `$dist_uniform(seed, start, end)` uses the Annex N uniform distribution, updates
 its integral seed variable and includes both bounds. Equal or reversed bounds
 return `start` without advancing the seed.
+
+`$dist_normal`, `$dist_exponential`, `$dist_poisson`, `$dist_chi_square`,
+`$dist_t` and `$dist_erlang` use the Annex N distributions in timed
+`Simulation` processes and their subroutines. Arguments and results are signed
+32-bit integers; the integral inout seed is converted to an int and copied
+back once, including when its actual is an indexed element. Exponential and
+Poisson means, chi-square and t degrees of freedom, and both Erlang parameters
+must be positive; invalid parameters report a runtime error without updating
+the seed. Normal accepts any integer mean and standard deviation. These
+functions do not require an SV `real` type. Their seed is design state, so
+checkpoints replay their sequence.
+
+## Real mathematical functions {#real-math}
+
+`$ln`, `$log10`, `$exp`, `$sqrt`, `$pow`, `$floor`, `$ceil`, `$sin`, `$cos`,
+`$tan`, `$asin`, `$acos`, `$atan`, `$atan2`, `$hypot`, `$sinh`, `$cosh`, `$tanh`,
+`$asinh`, `$acosh` and `$atanh` accept real arguments and return a real result,
+following the C math functions in IEEE 1800-2023 20.8.2. Integral and shortreal
+arguments are converted to real before the call; `$floor` and `$ceil` also
+return real, and `$atan2(y, x)` preserves that operand order. Domain and range
+cases produce the corresponding floating-point NaN or infinity.
+
+These pure functions work in combinational, clocked and timed processes, and
+with constant arguments at elaboration (11.2.1). Real parameters retain their
+precision through nested calls; integer assignments and casts convert only the
+final result. All simulator backends use the same math operation evaluator.
 
 ## Mixing Veryl and SystemVerilog {#mixed-language}
 

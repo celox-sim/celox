@@ -55,14 +55,18 @@ compilation unit; choose the top by its SystemVerilog module name.
 | What your test needs | API |
 | --- | --- |
 | Set inputs, evaluate logic and advance clock events from Rust | `Simulator::from_sv_sources` |
-| Advance simulation time and run supported `initial` processes | `Simulation::from_sv_sources` |
+| Advance simulation time and run `initial` and `always` processes with timing controls | `Simulation::from_sv_sources` |
 | Include both Veryl and SystemVerilog sources | `Simulator::from_mixed_sources` |
 
 `Simulator::tick` drives the rising edge of the selected event. `Simulation`
-tracks time and runs scheduled edges. Constant initialization applies to both;
-`initial` blocks that read design state or call system tasks need `Simulation`
-to execute as processes. Timing controls within SV `initial` blocks remain
-restricted; see [unsupported constructs](./systemverilog-reference#what-is-not-supported).
+tracks time and runs scheduled edges. Constant initialization applies to both.
+`initial` blocks that read design state or call system tasks, processes with
+timing controls and `always` blocks whose sensitivity list is neither `@*` nor
+[the variables they read](./systemverilog-reference#timing-controls) run as
+processes and need `Simulation`. A `Simulator` runs no process, so building
+one for such a design fails with `SimulatorErrorKind::ProcessRequiresSimulation`,
+which names the first process and its source location. For a mixed hierarchy,
+build the `Simulation` with `Simulation::from_sources(veryl).with_sv_sources(sv)`.
 
 Use `.four_state(true)` on the builder when your test needs X/Z values. The
 [4-state guide](./four-state) explains the state model. For time units,
@@ -77,7 +81,8 @@ The main supported areas are:
 | --- | --- |
 | Design structure | Modules, hierarchy, parameters, generate blocks, packages, interfaces and modports |
 | Data | Packed vectors, multidimensional packed arrays, structs, enums and unpacked memories |
-| RTL processes | `assign`, `always_comb`, `always @*`, edge-triggered `always` and `always_ff` |
+| RTL processes | `assign`, `always_comb`, `always @*`, blocking `always_latch`, edge-triggered `always` and `always_ff` |
+| Timed processes | `initial` and `always` with `#delay` (also time literals such as `#5ns`), `@(...)` on variables, edges, selects, expressions and `@*`, `wait (...)`, nonblocking assignments and task calls with timing controls |
 | Computation | Arithmetic, selects, assignment patterns, branches, loops and functions |
 | Simulation helpers | Immediate assertions, display tasks, `$readmemh` / `$readmemb`, time queries and random numbers |
 
@@ -89,10 +94,12 @@ ports, types, statements or system functions before porting a design.
 
 Common reasons a design needs changes are:
 
-- Class-based verification, concurrent assertions and tasks with timing controls.
-- Latches, multiple drivers and tri-state buses.
+- Class-based verification beyond [simple classes](./systemverilog-reference#classes) and concurrent assertions.
+- `fork` / `join`, named events, intra-assignment timing such as `a = #1 b`
+  and `iff` in event controls ([#1444](https://github.com/celox-sim/celox/issues/1444)).
+- Nonblocking latch assignments, multiple drivers and tri-state buses. Inferred latches in `always_comb` require `inferred_latch = "warn"` or `"allow"` in the common `[diagnostics]` configuration.
 - Non-ANSI module ports, wildcard `.*` connections, gate primitives and `bind`.
-- Strings, `real`, unpacked structs and several interface features.
+- `real`, unpacked structs and several interface features.
 
 The [complete limitations list](./systemverilog-reference#what-is-not-supported)
 includes narrower restrictions and tracking issues. Unsupported constructs
@@ -120,6 +127,7 @@ and the supported types and call sites.
 ## Find a specific behavior {#semantics-worth-knowing}
 
 - [Initialization, scopes, variable lifetimes and memory files](./systemverilog-reference#semantics-worth-knowing)
+- [Event and level waits in processes](./systemverilog-reference#timing-semantics)
 - [Time units, precision and time queries](./systemverilog-reference#time-and-precision)
 - [Random seeds and reproducibility](./systemverilog-reference#random-numbers)
 

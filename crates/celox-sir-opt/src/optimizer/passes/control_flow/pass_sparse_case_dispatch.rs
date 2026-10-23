@@ -1670,6 +1670,7 @@ fn runtime_instruction_cost(
         SIRInstruction::Binary(dst, lhs, op, rhs) => {
             let n = chunks(width(*dst).max(width(*lhs)).max(width(*rhs)));
             match op {
+                BinaryOp::Float { .. } => 32,
                 BinaryOp::And
                 | BinaryOp::Or
                 | BinaryOp::Xor

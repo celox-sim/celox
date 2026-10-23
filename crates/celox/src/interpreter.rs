@@ -771,6 +771,9 @@ fn alu_binary_u64(
     };
     let promoted_rhs = rhs & mask_u64(common);
     let result = match op {
+        BinaryOp::Float { op, precision } => {
+            celox_design::eval_float_binary(*op, *precision, lhs, rhs)
+        }
         BinaryOp::Add => promoted_lhs.wrapping_add(promoted_rhs),
         BinaryOp::Sub => promoted_lhs.wrapping_sub(promoted_rhs),
         BinaryOp::Mul => promoted_lhs.wrapping_mul(promoted_rhs),
@@ -837,6 +840,7 @@ fn alu_unary_u64(
 ) -> u64 {
     let src = src & mask_u64(src_width);
     let result = match op {
+        UnaryOp::Float { op, precision } => celox_design::eval_float_unary(*op, *precision, src),
         UnaryOp::Ident => {
             if src_signed {
                 sign_extend_u64(src, src_width, dst_width)
@@ -904,6 +908,12 @@ fn alu_binary(
     four_state: bool,
 ) -> Result<SIRValue, InterpError> {
     let out = match op {
+        BinaryOp::Float { op, precision } => SIRValue::new(celox_design::eval_float_binary(
+            *op,
+            *precision,
+            known_ones(lhs, lhs_width).to_u64().unwrap_or(0),
+            known_ones(rhs, rhs_width).to_u64().unwrap_or(0),
+        )),
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
             // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
             // Operands are promoted to the common width with the compiled
@@ -1344,6 +1354,11 @@ fn alu_unary(
     dst_width: usize,
 ) -> Result<SIRValue, InterpError> {
     let out = match op {
+        UnaryOp::Float { op, precision } => SIRValue::new(celox_design::eval_float_unary(
+            *op,
+            *precision,
+            known_ones(src, src_width).to_u64().unwrap_or(0),
+        )),
         UnaryOp::Ident => {
             // Identity casts widen with the operand's declared signedness,
             // matching the compiled narrow promotion: widening a signed

@@ -92,6 +92,101 @@ assigning a specparam to a value parameter is rejected, as required by 6.20.5;
 an unreferenced specparam declaration remains accepted. No other expectation rows
 are changed for these repairs.
 
+The scalar floating-point implementation updates twenty reviewed expectation
+rows: both state modes for `5.7.2-real-constants`, `5.7.2-real-token`,
+`6.12--real`, `6.12--realtime`, `6.12--shortreal`, `6.24.1--cast_op`,
+`20.5--itor`, `20.5--rtoi`, `20.5--real-bits-conv`, and
+`20.5--shortreal-bits-conv` change from fail to pass. Full official runs at the
+pinned revision report 472 passing cases in 2state and 474 in 4state, ten more
+in each mode. No passing case regresses. The negative real-select and real-edge
+cases retain their verdicts. The pinned `real_bit_select_idx` input is rejected
+earlier for its undriven net, so a separate analyzer regression uses a driven
+input to check that real-valued indices themselves are rejected.
+
+Static function storage support updates the two rows for
+`13.4.2--function-static` from fail to pass in both state modes. The official
+runner selects elaboration for this probe: its local accumulator now has
+persistent storage rather than being rejected. Runtime retention is exercised
+by the shared static-function simulation cases. The full pinned run matches
+the reviewed expectations in both state modes.
+
+Blocking latch support changes ten expectation rows: `12.4--if`,
+`12.4.1--if_else_if`, and the three `12.4.2` priority/unique conditional probes
+now pass elaboration in both state modes. These sources use ordinary
+`always @*`, whose retained assignments are accepted by default. The unmodified
+runner and default driver require no inference option; `always_comb` remains
+strict by default. The `9.2.2.3--always_latch` probe still fails because it uses
+an unsupported nonblocking latch assignment (`<=`). The full pinned run reviewed
+all 2054 case/mode rows; no other expectation rows changed.
+
+The integral file-input extension updates six expectation rows: `21.3--feof`,
+`21.3--fflush` and `21.3--fpos` now pass simulation in both state modes. The
+remaining file-input probes retain their measured verdicts; several still use
+unsupported `final` constructs.
+
+The six Annex N distribution probes (`20.15--dist_normal`, `dist_exponential`,
+`dist_poisson`, `dist_chi_square`, `dist_t` and `dist_erlang`) now pass simulation
+in both state modes, updating twelve more expectation rows. The scanner probes
+retain failures caused by unsupported `final` constructs or internal data types;
+no scanner expectation is changed.
+
+The `string` implementation updates forty-two reviewed expectation rows: both
+state modes for `5.13-builtin-methods-strings`, `6.16--string`, the sixteen
+`6.16.*` method cases, `6.20.4--localparam_string`,
+`11.4.12.2--string_concat_op` and `11.4.12.2--string_repl_op` change from fail
+to pass. Each was simulated and its values checked, not only elaborated. Full
+official runs at the pinned revision report 507 passing cases in 2state and 509
+in 4state. No passing case regresses. The `12.7.3--foreach`, `12.7.4--while` and
+`12.7.5--dowhile` cases keep failing: they use an unpacked array of strings,
+which is rejected because its element and character selects are not yet told
+apart.
+
+The real system-function extension updates twenty expectation rows: `$realtime`
+passes elaboration and the nine `20.8` probes for `atan2`, `ceil`, `exp`, `floor`,
+`hypot`, `ln`, `log10`, `pow` and `sqrt` pass simulation in both state modes.
+The full pinned run reviewed all 2,054 rows, with 496 passing cases in 2state
+and 498 in 4state; no passing case regresses. The existing scanf probes retain
+their verdicts because their other unsupported constructs remain unchanged.
+
+Classes update fourteen reviewed expectation rows: both state modes for
+`8.4--instantiation`, `8.5--properties`, `8.6--methods`, `8.12--assignment`,
+`8.24--out_of_block_methods`, `8.26.5--implemented_class_handle` and
+`6.20.6--const` change from fail to pass. The simulated cases were run and their
+values checked, including the shared object behind two handles in
+`8.12--assignment`. Full official runs at the pinned revision report 524 passing
+cases in 2state and 526 in 4state. No passing case regresses: classes that are
+declared but never constructed, interface classes and pure virtual methods are
+not lowered. `8.7--constructor` keeps failing because it initializes an
+implicitly static procedural variable without the `static` keyword, which IEEE
+1800-2023 6.21 requires; `8.7--constructor_param` fails for the same reason.
+
+Base constructors, `super`, static members and `C::` scope resolution update
+eighteen more rows: both state modes for `8.7--constructor_super`,
+`8.8--typed_constructor`, `8.9--static_properties`, `8.10--static_methods`,
+`8.13--inheritance`, `8.14--override_member`, `8.15--super`,
+`8.17--constructor_const_arg` and `8.23--scope_resolution` change from fail to
+pass. Each was simulated and its displayed values checked, including the base
+method that a base-class handle calls in `8.14--override_member`. Full official
+runs at the pinned revision report 534 passing cases in 2state and 536 in
+4state, with no passing case regressing. Virtual dispatch, abstract and
+interface classes, classes in packages, parameterized classes and shallow copies
+stay unsupported.
+
+Virtual methods, abstract classes and classes implementing interface classes
+update eighteen more rows: both state modes for `8.15--super-default-new`,
+`8.20--virtual_method`, `8.21--abstract_class`, `8.22--dynamic_method_lookup`,
+`8.26.2--implements`, `8.26.2--implements_extends`,
+`8.26.2--implements_multiple`, `8.26.6.1--name_conflict_resolved` and
+`8.26.7--partial_implementation` change from fail to pass. Each was simulated
+and its displayed values checked: the override of the object's class runs
+through base-class handles and an array of them, and the shadowed property of
+`8.20--virtual_method` reads the derived class's value. Full official runs at
+the pinned revision report 543 passing cases in 2state and 545 in 4state, with
+no passing case regressing. `8.26.6.1--name_conflict_unresolved` stays a
+passing negative case: its return types conflict, which is rejected. Calls
+through interface class handles, `$cast`, parameterized classes and shallow
+copies stay unsupported.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.

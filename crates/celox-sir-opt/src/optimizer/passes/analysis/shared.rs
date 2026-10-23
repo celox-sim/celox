@@ -192,7 +192,10 @@ pub(in crate::optimizer) fn hoist_common_branch_loads(
 ) {
     let mut reg_counter: usize = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
 
-    #[derive(Clone, Copy)]
+    let Ok(cfg) = crate::ir::cfg::SirCfg::analyze(eu) else {
+        return;
+    };
+    #[derive(Clone)]
     struct Candidate {
         pred: BlockId,
         true_block: BlockId,
@@ -202,6 +205,7 @@ pub(in crate::optimizer) fn hoist_common_branch_loads(
         dst_true: RegisterId,
         dst_false: RegisterId,
         addr: RegionedAbsoluteAddr,
+        result_type: RegisterType,
     }
 
     loop {
@@ -222,6 +226,18 @@ pub(in crate::optimizer) fn hoist_common_branch_loads(
                 continue;
             };
 
+            // A single new definition in the predecessor must dominate every
+            // use formerly reached through either successor's load.
+            if true_block.0 == false_block.0
+                || true_block.0 == bid
+                || false_block.0 == bid
+                || [true_block.0, false_block.0].iter().any(|successor| {
+                    *successor == eu.entry_block_id
+                        || cfg.predecessors[cfg.index[successor]].as_slice() != [cfg.index[&bid]]
+                })
+            {
+                continue;
+            }
             let Some(t_block) = eu.blocks.get(&true_block.0) else {
                 continue;
             };
@@ -240,7 +256,11 @@ pub(in crate::optimizer) fn hoist_common_branch_loads(
                 continue;
             };
 
-            if addr_t == addr_f && off_t == off_f && bits_t == bits_f {
+            if addr_t == addr_f
+                && off_t == off_f
+                && bits_t == bits_f
+                && eu.register_map.get(dst_t) == eu.register_map.get(dst_f)
+            {
                 candidates.push(Candidate {
                     pred: bid,
                     true_block: true_block.0,
@@ -250,6 +270,7 @@ pub(in crate::optimizer) fn hoist_common_branch_loads(
                     dst_true: *dst_t,
                     dst_false: *dst_f,
                     addr: *addr_t,
+                    result_type: eu.register_map[dst_t].clone(),
                 });
             }
         }
@@ -286,20 +307,34 @@ pub(in crate::optimizer) fn hoist_common_branch_loads(
             }
 
             let existing_reg = eu.blocks.get(&c.pred).and_then(|pred_block| {
-                pred_block.instructions.iter().find_map(|inst| match inst {
-                    SIRInstruction::Load(dst, addr, SIROffset::Static(off), bits)
-                        if *addr == c.addr && *off == c.offset && *bits == c.bits =>
-                    {
-                        Some(*dst)
+                for inst in pred_block.instructions.iter().rev() {
+                    if inst.is_host_interaction() {
+                        return None;
                     }
-                    _ => None,
-                })
+                    if let Some(write) = inst.memory_write()
+                        && *write.addr == c.addr
+                        && write.offset.constant_bit_offset().is_none_or(|offset| {
+                            offset < c.offset.saturating_add(c.bits)
+                                && c.offset < offset.saturating_add(write.width)
+                        })
+                    {
+                        return None;
+                    }
+                    if let SIRInstruction::Load(dst, addr, SIROffset::Static(off), bits) = inst
+                        && *addr == c.addr
+                        && *off == c.offset
+                        && *bits == c.bits
+                        && eu.register_map.get(dst) == Some(&c.result_type)
+                    {
+                        return Some(*dst);
+                    }
+                }
+                None
             });
 
             let hoisted_reg = existing_reg.unwrap_or_else(|| {
                 let new_reg = next_register_id(&mut eu.register_map, &mut reg_counter);
-                eu.register_map
-                    .insert(new_reg, RegisterType::Logic { width: c.bits });
+                eu.register_map.insert(new_reg, c.result_type.clone());
 
                 if let Some(pred_block) = eu.blocks.get_mut(&c.pred) {
                     pred_block.instructions.push(SIRInstruction::Load(
@@ -406,5 +441,171 @@ pub(in crate::optimizer) fn batch_replace_in_terminator(
             }
         }
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod hoist_tests {
+    use super::*;
+    use celox_design::{InstanceId, StateObjectId};
+    fn fixture(
+        old_type: RegisterType,
+        branch_type: RegisterType,
+    ) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let addr = RegionedAbsoluteAddr::from_absolute_addr(
+            STABLE_REGION,
+            AbsoluteAddr {
+                instance_id: InstanceId(0),
+                var_id: StateObjectId::default(),
+            },
+        );
+        let bit = |width| RegisterType::Bit {
+            width,
+            signed: false,
+        };
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            register_map: [
+                (RegisterId(0), old_type),
+                (RegisterId(1), bit(64)),
+                (RegisterId(2), bit(1)),
+                (RegisterId(3), branch_type.clone()),
+                (RegisterId(4), branch_type),
+            ]
+            .into_iter()
+            .collect(),
+            blocks: [
+                (
+                    BlockId(0),
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: vec![],
+                        instructions: vec![
+                            SIRInstruction::Load(RegisterId(0), addr, SIROffset::Static(0), 64),
+                            SIRInstruction::Imm(RegisterId(1), SIRValue::new(1.5f64.to_bits())),
+                            SIRInstruction::Store(
+                                addr,
+                                SIROffset::Static(0),
+                                64,
+                                RegisterId(1),
+                                vec![],
+                                vec![],
+                            ),
+                            SIRInstruction::Imm(RegisterId(2), SIRValue::new(1u8)),
+                        ],
+                        terminator: SIRTerminator::Branch {
+                            cond: RegisterId(2),
+                            true_block: (BlockId(1), vec![]),
+                            false_block: (BlockId(2), vec![]),
+                        },
+                    },
+                ),
+                (
+                    BlockId(1),
+                    BasicBlock {
+                        id: BlockId(1),
+                        params: vec![],
+                        instructions: vec![
+                            SIRInstruction::Load(RegisterId(3), addr, SIROffset::Static(0), 64),
+                            SIRInstruction::RuntimeEvent {
+                                site_id: 0,
+                                args: vec![RegisterId(3)],
+                            },
+                        ],
+                        terminator: SIRTerminator::Return,
+                    },
+                ),
+                (
+                    BlockId(2),
+                    BasicBlock {
+                        id: BlockId(2),
+                        params: vec![],
+                        instructions: vec![
+                            SIRInstruction::Load(RegisterId(4), addr, SIROffset::Static(0), 64),
+                            SIRInstruction::RuntimeEvent {
+                                site_id: 0,
+                                args: vec![RegisterId(4)],
+                            },
+                        ],
+                        terminator: SIRTerminator::Return,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
+    #[test]
+    fn hoisting_preserves_read_after_write_and_bit_logic_result_types() {
+        for old_type in [
+            RegisterType::Bit {
+                width: 64,
+                signed: false,
+            },
+            RegisterType::Logic { width: 64 },
+        ] {
+            for branch_type in [
+                RegisterType::Bit {
+                    width: 64,
+                    signed: false,
+                },
+                RegisterType::Logic { width: 64 },
+            ] {
+                let mut unit = fixture(old_type.clone(), branch_type.clone());
+                unit.verify();
+                hoist_common_branch_loads(&mut unit);
+                unit.verify();
+                let pred = &unit.blocks[&BlockId(0)];
+                let store = pred
+                    .instructions
+                    .iter()
+                    .position(|inst| matches!(inst, SIRInstruction::Store(..)))
+                    .unwrap();
+                let SIRInstruction::Load(new, _, _, _) = pred.instructions.last().unwrap() else {
+                    panic!("fresh load must follow the write")
+                };
+                assert!(store < pred.instructions.len() - 1);
+                assert_ne!(*new, RegisterId(0));
+                assert_eq!(unit.register_map[new], branch_type);
+                for bid in [BlockId(1), BlockId(2)] {
+                    assert!(
+                        matches!(&unit.blocks[&bid].instructions[0],SIRInstruction::RuntimeEvent{args,..}if args==&vec![*new])
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn mismatched_branch_load_types_are_not_merged() {
+        let mut unit = fixture(
+            RegisterType::Bit {
+                width: 64,
+                signed: false,
+            },
+            RegisterType::Logic { width: 64 },
+        );
+        unit.register_map.insert(
+            RegisterId(3),
+            RegisterType::Bit {
+                width: 64,
+                signed: false,
+            },
+        );
+        let before = unit.clone();
+        hoist_common_branch_loads(&mut unit);
+        assert_eq!(unit, before);
+    }
+    #[test]
+    fn successor_with_another_predecessor_keeps_its_load() {
+        let mut unit = fixture(
+            RegisterType::Logic { width: 64 },
+            RegisterType::Logic { width: 64 },
+        );
+        unit.blocks.get_mut(&BlockId(2)).unwrap().terminator =
+            SIRTerminator::Jump(BlockId(1), vec![]);
+        let before = unit.clone();
+        hoist_common_branch_loads(&mut unit);
+        unit.verify();
+        assert_eq!(unit, before);
     }
 }

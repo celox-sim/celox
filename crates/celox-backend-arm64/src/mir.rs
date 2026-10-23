@@ -285,6 +285,21 @@ impl SparseCommitDescriptor {
 /// Word-level AArch64 operations before physical-register substitution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MInst {
+    /// IEEE payloads use ordinary virtual registers; emission stages operands
+    /// through caller-clobbered SIMD scratch registers for native FP execution.
+    FloatBinary {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+        op: celox_sir::FloatBinaryOp,
+        precision: celox_sir::FloatPrecision,
+    },
+    FloatUnary {
+        dst: VReg,
+        src: VReg,
+        op: celox_sir::FloatUnaryOp,
+        precision: celox_sir::FloatPrecision,
+    },
     Mov {
         dst: VReg,
         src: VReg,
@@ -686,7 +701,9 @@ pub(crate) enum MInst {
 impl MInst {
     pub(crate) fn def(&self) -> Option<VReg> {
         match self {
-            Self::Mov { dst, .. }
+            Self::FloatBinary { dst, .. }
+            | Self::FloatUnary { dst, .. }
+            | Self::Mov { dst, .. }
             | Self::Mov32 { dst, .. }
             | Self::LoadImm { dst, .. }
             | Self::BitExtract { dst, .. }
@@ -771,7 +788,9 @@ impl MInst {
     pub(crate) fn def_mut(&mut self) -> Option<&mut VReg> {
         match self {
             Self::CallExtern { dst, .. } => dst.as_mut(),
-            Self::Mov { dst, .. }
+            Self::FloatBinary { dst, .. }
+            | Self::FloatUnary { dst, .. }
+            | Self::Mov { dst, .. }
             | Self::Mov32 { dst, .. }
             | Self::LoadImm { dst, .. }
             | Self::BitExtract { dst, .. }
@@ -883,7 +902,8 @@ impl MInst {
             | Self::ReleaseStorePtrIndexed {
                 ptr, index, src, ..
             } => vec![*ptr, *index, *src],
-            Self::Add { lhs, rhs, .. }
+            Self::FloatBinary { lhs, rhs, .. }
+            | Self::Add { lhs, rhs, .. }
             | Self::Add32 { lhs, rhs, .. }
             | Self::Sub { lhs, rhs, .. }
             | Self::Sub32 { lhs, rhs, .. }
@@ -905,7 +925,8 @@ impl MInst {
             | Self::URem { lhs, rhs, .. }
             | Self::SDiv { lhs, rhs, .. }
             | Self::SRem { lhs, rhs, .. } => vec![*lhs, *rhs],
-            Self::BitExtract { src, .. }
+            Self::FloatUnary { src, .. }
+            | Self::BitExtract { src, .. }
             | Self::AndImm { src, .. }
             | Self::AndImm32 { src, .. }
             | Self::OrImm { src, .. }
@@ -1019,7 +1040,8 @@ impl MInst {
                 rewrite(index);
                 rewrite(src);
             }
-            Self::Add { lhs, rhs, .. }
+            Self::FloatBinary { lhs, rhs, .. }
+            | Self::Add { lhs, rhs, .. }
             | Self::Add32 { lhs, rhs, .. }
             | Self::Sub { lhs, rhs, .. }
             | Self::Sub32 { lhs, rhs, .. }
@@ -1044,7 +1066,8 @@ impl MInst {
                 rewrite(lhs);
                 rewrite(rhs);
             }
-            Self::BitExtract { src, .. }
+            Self::FloatUnary { src, .. }
+            | Self::BitExtract { src, .. }
             | Self::AndImm { src, .. }
             | Self::AndImm32 { src, .. }
             | Self::OrImm { src, .. }

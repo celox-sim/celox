@@ -1,8 +1,5 @@
 use super::pass_manager::ExecutionUnitPass;
-use super::shared::{
-    collect_all_used_registers, is_unused_definition, replace_reg_in_terminator,
-    resolve_transitive_aliases, sir_value_to_u64,
-};
+use super::shared::{resolve_transitive_aliases, sir_value_to_u64};
 use crate::HashMap;
 use crate::PassOptions;
 use crate::ir::*;
@@ -35,11 +32,13 @@ impl ExecutionUnitPass for StoreLoadForwardingPass {
             for instruction in &mut block.instructions {
                 apply_aliases_to_inst(instruction, &aliases);
             }
-            for (&from, &to) in &aliases {
-                replace_reg_in_terminator(&mut block.terminator, from, to);
-            }
+            block.terminator.for_each_use_mut(|register| {
+                if let Some(&alias) = aliases.get(register) {
+                    *register = alias;
+                }
+            });
         }
-        dead_code_eliminate(eu);
+        super::super::dataflow::pass_vectorize_concat::remove_dead_definitions(eu);
     }
 }
 
@@ -449,29 +448,6 @@ fn apply_aliases_to_inst(
     });
 }
 
-/// Remove instructions whose defined register is never used.
-fn dead_code_eliminate(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
-    // Iterate until no more changes (dead chains)
-    loop {
-        let used = collect_all_used_registers(eu);
-
-        let mut changed = false;
-        for block in eu.blocks.values_mut() {
-            let before = block.instructions.len();
-            block
-                .instructions
-                .retain(|inst| !is_unused_definition(inst, &used));
-            if block.instructions.len() != before {
-                changed = true;
-            }
-        }
-
-        if !changed {
-            break;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +467,64 @@ mod tests {
             width,
             signed: false,
         }
+    }
+
+    #[test]
+    fn removes_deep_dead_producer_chain_and_preserves_live_store() {
+        let mut instructions = vec![
+            SIRInstruction::Imm(RegisterId(0), SIRValue::new(3u8)),
+            SIRInstruction::Load(RegisterId(1), address(), SIROffset::Static(0), 8),
+        ];
+        for register in 2..8194 {
+            instructions.push(SIRInstruction::Binary(
+                RegisterId(register),
+                RegisterId(register - 1),
+                BinaryOp::Add,
+                RegisterId(0),
+            ));
+        }
+        instructions.push(SIRInstruction::Store(
+            address(),
+            SIROffset::Static(0),
+            8,
+            RegisterId(0),
+            Vec::new(),
+            Vec::new(),
+        ));
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: Vec::new(),
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: (0..8194)
+                .map(|register| (RegisterId(register), bit(8)))
+                .collect(),
+        };
+        StoreLoadForwardingPass.run(&mut eu, &PassOptions::default());
+        eu.verify();
+        assert_eq!(
+            eu.blocks[&BlockId(0)].instructions,
+            vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(3u8)),
+                SIRInstruction::Store(
+                    address(),
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(0),
+                    Vec::new(),
+                    Vec::new()
+                ),
+            ]
+        );
+        assert_eq!(eu.register_map.len(), 1);
     }
 
     #[test]
@@ -832,6 +866,111 @@ mod tests {
             eu.blocks[&BlockId(1)].instructions.as_slice(),
             [SIRInstruction::Store(_, _, 1, RegisterId(0), _, _)]
         ));
+    }
+
+    #[test]
+    fn resolves_cross_block_transitive_aliases_in_all_terminator_uses() {
+        for four_state in [false, true] {
+            for kind in 0..3 {
+                let (terminator, expected) = match kind {
+                    0 => (
+                        SIRTerminator::Jump(BlockId(2), vec![RegisterId(2)]),
+                        SIRTerminator::Jump(BlockId(2), vec![RegisterId(0)]),
+                    ),
+                    1 => (
+                        SIRTerminator::Branch {
+                            cond: RegisterId(2),
+                            true_block: (BlockId(2), vec![RegisterId(2)]),
+                            false_block: (BlockId(3), vec![RegisterId(1)]),
+                        },
+                        SIRTerminator::Branch {
+                            cond: RegisterId(0),
+                            true_block: (BlockId(2), vec![RegisterId(0)]),
+                            false_block: (BlockId(3), vec![RegisterId(0)]),
+                        },
+                    ),
+                    _ => (
+                        SIRTerminator::Switch {
+                            selector: RegisterId(2),
+                            cases: vec![SIRSwitchCase {
+                                value: 1u8.into(),
+                                target: BlockId(2),
+                            }],
+                            default: BlockId(3),
+                        },
+                        SIRTerminator::Switch {
+                            selector: RegisterId(0),
+                            cases: vec![SIRSwitchCase {
+                                value: 1u8.into(),
+                                target: BlockId(2),
+                            }],
+                            default: BlockId(3),
+                        },
+                    ),
+                };
+                let mut blocks = vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: Vec::new(),
+                        instructions: vec![
+                            SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
+                            SIRInstruction::Unary(RegisterId(1), UnaryOp::Ident, RegisterId(0)),
+                        ],
+                        terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        params: Vec::new(),
+                        instructions: vec![SIRInstruction::Unary(
+                            RegisterId(2),
+                            UnaryOp::Ident,
+                            RegisterId(1),
+                        )],
+                        terminator,
+                    },
+                ];
+                for target in 2..=if kind == 0 { 2 } else { 3 } {
+                    let parameter = RegisterId(target + 1);
+                    let params = if kind == 2 {
+                        Vec::new()
+                    } else {
+                        vec![parameter]
+                    };
+                    blocks.push(BasicBlock {
+                        id: BlockId(target),
+                        params,
+                        instructions: vec![SIRInstruction::Store(
+                            address(),
+                            SIROffset::Static(0),
+                            1,
+                            if kind == 2 { RegisterId(2) } else { parameter },
+                            Vec::new(),
+                            Vec::new(),
+                        )],
+                        terminator: SIRTerminator::Return,
+                    });
+                }
+                let mut eu = ExecutionUnit {
+                    entry_block_id: BlockId(0),
+                    blocks: blocks.into_iter().map(|block| (block.id, block)).collect(),
+                    register_map: (0..5)
+                        .map(|register| (RegisterId(register), bit(1)))
+                        .collect(),
+                };
+                eu.verify();
+                StoreLoadForwardingPass.run(
+                    &mut eu,
+                    &PassOptions {
+                        four_state,
+                        ..PassOptions::default()
+                    },
+                );
+                eu.verify();
+                assert_eq!(eu.blocks[&BlockId(1)].terminator, expected);
+                assert!(!eu.register_map.contains_key(&RegisterId(1)));
+                assert!(!eu.register_map.contains_key(&RegisterId(2)));
+            }
+        }
     }
 
     #[test]

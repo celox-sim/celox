@@ -111,6 +111,10 @@ const _: () = {
     );
     assert!(
         celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET + 8
+            <= celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET
+    );
+    assert!(
+        celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET + 8
             <= celox_state_layout::STATE_HEADER_SIZE
     );
 };

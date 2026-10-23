@@ -162,7 +162,10 @@ fn test_dynamic_access_with_static_precedence_is_ok() {
         }
     "#;
 
-    let result = Simulator::builder(code, "Top").build();
+    let result = Simulator::builder(code, "Top")
+        // Unselected array elements intentionally retain their previous values.
+        .allow_inferred_latches(true)
+        .build();
     assert!(
         result.is_ok(),
         "Should be OK because x[0][0] is defined before being read. but {:?}",
@@ -194,7 +197,7 @@ fn test_dynamic_access_self_loop_is_err() {
 }
 
 #[test]
-fn test_if_without_else_latch_loop() {
+fn test_if_without_else_reports_inferred_latch() {
     let code = r#"
         module Top (sel: input logic, a: input logic) {
             var x: logic;
@@ -208,14 +211,12 @@ fn test_if_without_else_latch_loop() {
         }
     "#;
 
-    let result = Simulator::builder(code, "Top").build();
-    assert_analyzer_or_sir(result, |e| {
-        let msg = format!("{e:?}");
-        assert!(
-            msg.contains("CombinationalLoop") || msg.contains("unassign"),
-            "Expected loop or unassign error, got: {e:?}"
-        );
-    });
+    let error = Simulator::builder(code, "Top").build().unwrap_err();
+    assert!(
+        matches!(error.kind(), SimulatorErrorKind::DiagnosticPolicy(_)),
+        "{error}"
+    );
+    assert!(error.to_string().contains("inferred_latch"), "{error}");
 }
 
 #[test]
@@ -247,7 +248,10 @@ fn test_dynamic_write_then_read_is_ok() {
             }
         }
     "#;
-    let result = Simulator::builder(code, "Top").build();
+    let result = Simulator::builder(code, "Top")
+        // Unselected array elements intentionally retain their previous values.
+        .allow_inferred_latches(true)
+        .build();
     assert!(
         result.is_ok(),
         "Dynamic sequence allowed due to analysis complexity"

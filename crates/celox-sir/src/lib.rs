@@ -6,13 +6,16 @@ use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use std::{fmt, fmt::Display};
 
-pub use celox_design::{BinaryOp, DomainKind, TriggerIdWithKind, UnaryOp};
+pub use celox_design::{
+    BinaryOp, DomainKind, FloatBinaryOp, FloatPrecision, FloatUnaryOp, TriggerIdWithKind, UnaryOp,
+};
 
 pub mod analysis;
 pub mod builder;
 pub mod cfg;
 pub mod effects;
 pub mod extern_abi;
+pub mod float;
 mod serde_helpers;
 pub mod transform;
 pub mod two_state;

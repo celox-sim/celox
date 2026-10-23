@@ -119,7 +119,11 @@ pub(super) fn apply_parameter_overrides(
     }
     for parameter in parameters {
         if let Some(value) = overrides.get(parameter.name()) {
-            parameter.value = Some(value.clone());
+            parameter.value = normalize_unbased_unsized_parameter_value(
+                Some(value.clone()),
+                parameter.declared_width(),
+                parameter.declared_signed(),
+            );
         }
     }
     Ok(())
@@ -145,7 +149,15 @@ pub(super) fn parameters_from_native(
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<(), AnalyzerError> {
-    let mut environment = ParameterEnvironment::new(&syntax_tree.state, parameters, base_const_env);
+    let mut environment = ParameterEnvironment::new(
+        &syntax_tree.state,
+        parameters,
+        base_const_env,
+        &authored
+            .iter()
+            .map(|parameter| instances::normalize_identifier(&parameter.name.spelling))
+            .collect::<Vec<_>>(),
+    );
     parameters_from_native_with_environment(
         authored,
         syntax_tree,
@@ -164,6 +176,9 @@ pub(super) fn parameters_from_native(
 pub(super) struct ParameterEnvironment<'a> {
     base: &'a HashMap<String, i128>,
     values: HashMap<String, i128>,
+    // Evaluation sees inherited constants except declarations of this scope.
+    // Keep it incremental, while `values` remains the local prefix projection.
+    bindings: HashMap<String, i128>,
     types: HashMap<String, ExprType>,
     constants: HashMap<String, i128>,
     // Only a nonnumeric prefix binding with an inherited numeric value makes
@@ -180,12 +195,42 @@ impl<'a> ParameterEnvironment<'a> {
         state: &AnalysisState,
         parameters: &[Parameter],
         base: &'a HashMap<String, i128>,
+        shadowed: &[String],
     ) -> Self {
+        let shadowed: HashSet<&str> = shadowed
+            .iter()
+            .map(String::as_str)
+            .chain(parameters.iter().map(Parameter::name))
+            .collect();
+        let mut bindings = base.clone();
+        for name in &shadowed {
+            for key in binding_keys(name, &bindings, 0) {
+                bindings.remove(&key);
+            }
+        }
         let mut values = HashMap::default();
-        let mut types = HashMap::default();
-        let mut literals = HashMap::default();
+        let mut types = parameter_types_from_const_env(&bindings);
+        let mut literals = scope::imported(state)
+            .parameter_values
+            .iter()
+            .filter(|(name, value)| {
+                let mut literal = *value;
+                while let Expr::Resize { expr, .. } = literal {
+                    literal = expr;
+                }
+                matches!(literal, Expr::Literal(_))
+                    && !bindings.contains_key(*name)
+                    && !shadowed.contains(name.as_str())
+            })
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
         for parameter in parameters {
-            bind_parameter(state, &mut values, &mut types, &mut literals, parameter);
+            bind_parameter(state, &mut bindings, &mut types, &mut literals, parameter);
+            for key in binding_keys(parameter.name(), &bindings, parameter.packed_ranges.len()) {
+                if let Some(value) = bindings.get(&key) {
+                    values.insert(key, *value);
+                }
+            }
         }
         let mut constants = base.clone();
         let has_inherited_literal_shadow = parameters.iter().any(|parameter| {
@@ -200,6 +245,7 @@ impl<'a> ParameterEnvironment<'a> {
         Self {
             base,
             values,
+            bindings,
             types,
             constants,
             has_inherited_literal_shadow,
@@ -210,11 +256,27 @@ impl<'a> ParameterEnvironment<'a> {
     fn append(&mut self, state: &AnalysisState, parameter: &Parameter) {
         let bound = bind_parameter(
             state,
-            &mut self.values,
+            &mut self.bindings,
             &mut self.types,
             &mut self.literals,
             parameter,
         );
+        for key in binding_keys(
+            parameter.name(),
+            &self.values,
+            parameter.packed_ranges.len(),
+        ) {
+            self.values.remove(&key);
+        }
+        for key in binding_keys(
+            parameter.name(),
+            &self.bindings,
+            parameter.packed_ranges.len(),
+        ) {
+            if let Some(value) = self.bindings.get(&key) {
+                self.values.insert(key, *value);
+            }
+        }
         for key in binding_keys(
             parameter.name(),
             &self.constants,
@@ -229,7 +291,9 @@ impl<'a> ParameterEnvironment<'a> {
             // rank for following declarations even when an imported alias's
             // value is deferred; do not publish an inherited numeric value.
             if let Some(ty) = parameter.resolved_type(&self.types) {
-                let rank = if parameter.packed_ranges.is_empty() {
+                let rank = if parameter.floating.is_some() {
+                    0
+                } else if parameter.packed_ranges.is_empty() {
                     usize::from(!parameter.has_declared_type || ty.width > 1)
                 } else {
                     parameter.packed_ranges.len()
@@ -381,12 +445,14 @@ pub(super) fn parameters_from_native_with_environment(
                 &proof_context,
             )? {
                 Some(value)
-            } else if skipped::needs_selected(
-                &syntax_tree.state,
-                ownership::default(native)
-                    .ok_or_else(|| unsupported("native parameter default is missing"))?,
-                syntax_tree.declarations(),
-            ) {
+            } else if native_prefix.floating().is_none()
+                && skipped::needs_selected(
+                    &syntax_tree.state,
+                    ownership::default(native)
+                        .ok_or_else(|| unsupported("native parameter default is missing"))?,
+                    syntax_tree.declarations(),
+                )
+            {
                 let mut dimensions = PackedDimensions::new(
                     parameter_packed_dimensions_with_imported(parameters, &imported),
                     const_env,
@@ -418,20 +484,17 @@ pub(super) fn parameters_from_native_with_environment(
                     Err(_) => None,
                 }
             } else {
-                constant_binding::expression(
+                constant_binding::bind(
                     ownership::default(native).ok_or_else(|| {
                         AnalyzerError::Parse("native parameter default is missing".into())
                     })?,
-                    syntax_tree.declarations(),
                     syntax_tree,
-                    const_env,
-                    type_aliases,
+                    &proof_context,
                 )?
             }
         } else {
             None
         };
-        value = normalize_unbased_unsized_parameter_value(value, parameter_width, parameter_signed);
         // Apply overrides as each declaration is collected so later
         // parameter initializers (including casts) are evaluated from the
         // specialized values rather than defaults that will be replaced
@@ -439,6 +502,7 @@ pub(super) fn parameters_from_native_with_environment(
         if !is_local && let Some(override_value) = parameter_overrides.get(&name) {
             value = Some(override_value.clone());
         }
+        value = normalize_unbased_unsized_parameter_value(value, parameter_width, parameter_signed);
         if value
             .as_ref()
             .is_some_and(|expression| is_unbounded(expression, const_env))
@@ -480,6 +544,17 @@ pub(super) fn parameters_from_native_with_environment(
             has_declared_type,
             is_local,
         );
+        parameter.floating = native_prefix.floating().or_else(|| {
+            if has_declared_type {
+                return None;
+            }
+            let expanded = substitute_expr_idents(
+                const_expr_to_expr(parameter.value()?.clone()),
+                &environment.literals,
+            );
+            let expr = expr_to_const(&syntax_tree.state, expanded)?;
+            typecheck::const_expr_has_real_type(&expr.into()).then_some(TypeKind::Real)
+        });
         parameter.packed_ranges = parameter_ranges.clone();
         parameter.members = parameter_members.clone();
         parameter.signed_element_depth = parameter_signed_element_depth;
@@ -695,7 +770,9 @@ pub(super) fn bind_parameter(
         if let Some(ty) = parameter.resolved_type(types) {
             types.insert(parameter.name().to_string(), ty);
             insert_parameter_type_markers(env, parameter.name(), ty);
-            let rank = if parameter.packed_ranges.is_empty() {
+            let rank = if parameter.floating.is_some() {
+                0
+            } else if parameter.packed_ranges.is_empty() {
                 usize::from(!parameter.has_declared_type || ty.width > 1)
             } else {
                 parameter.packed_ranges.len()
@@ -713,7 +790,9 @@ pub(super) fn bind_parameter(
     if let Some(ty) = parameter.resolved_type(types) {
         types.insert(parameter.name().to_string(), ty);
         insert_parameter_type_markers(env, parameter.name(), ty);
-        let rank = if parameter.packed_ranges.is_empty() {
+        let rank = if parameter.floating.is_some() {
+            0
+        } else if parameter.packed_ranges.is_empty() {
             usize::from(!parameter.has_declared_type || ty.width > 1)
         } else {
             parameter.packed_ranges.len()
@@ -1137,6 +1216,15 @@ fn parameter_value_env_filtered(
     let mut values = HashMap::default();
     let mut parameter_types = HashMap::default();
     for parameter in parameters {
+        if let Some(kind) = parameter.floating {
+            if let Some(value) = parameter
+                .value()
+                .and_then(|value| real_literal(value, kind, const_env, &values))
+            {
+                values.insert(parameter.name.clone(), value);
+            }
+            continue;
+        }
         if parameter.value().is_none() {
             continue;
         }
@@ -1736,3 +1824,29 @@ thread_local! {
 
 #[cfg(test)]
 mod tests;
+
+/// Resolve real parameter expressions without passing IEEE payloads through integer arithmetic.
+pub(super) fn real_literal(
+    expr: &ConstExpr,
+    kind: TypeKind,
+    constants: &HashMap<String, i128>,
+    literals: &HashMap<String, Expr>,
+) -> Option<Expr> {
+    let expanded = substitute_expr_idents(const_expr_to_expr(expr.clone()), literals);
+    let expr = expr_to_const(&AnalysisState::default(), expanded)?;
+    let value = typecheck::eval_real_const_expr(&expr.into(), constants)?;
+    let value = if kind == TypeKind::Shortreal {
+        f64::from(value as f32)
+    } else {
+        value
+    };
+    Some(if value.is_finite() {
+        Expr::Literal(format!("{value:?}"))
+    } else {
+        Expr::Call {
+            callee: Callee::System(SystemFunction::Bitstoreal),
+            args: vec![Some(Expr::Literal(format!("64'h{:x}", value.to_bits())))],
+            arg_order: Vec::new(),
+        }
+    })
+}

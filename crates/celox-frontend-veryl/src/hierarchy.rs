@@ -392,6 +392,7 @@ fn parse_external_hierarchy<'a>(
                 .collect()
         });
     }
+    let mut inferred_latch_diagnostics: Vec<crate::FrontendDiagnostic> = Vec::new();
     for (module_id, mut sim_module) in parsed_modules {
         let ir_module = module_ir[&module_id];
         if let Some(symbols) = &symbols
@@ -416,8 +417,16 @@ fn parse_external_hierarchy<'a>(
                 .collect();
         }
         let id_map = source_id_maps[&module_id].clone();
-        let (sim_module, id_map) =
+        let (sim_module, id_map, diagnostics) =
             project_module_with_ids(&sim_module, ir_module, config, id_map, &source_id_maps)?;
+        for diagnostic in diagnostics {
+            if !inferred_latch_diagnostics
+                .iter()
+                .any(|existing| existing.same_site(&diagnostic))
+            {
+                inferred_latch_diagnostics.push(diagnostic);
+            }
+        }
         modules.insert(module_id, sim_module);
         source_id_maps.insert(module_id, id_map);
     }
@@ -465,6 +474,7 @@ fn parse_external_hierarchy<'a>(
         },
         module_ir,
         source_id_maps,
+        inferred_latch_diagnostics,
     })
 }
 

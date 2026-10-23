@@ -64,6 +64,12 @@ impl SimHandle {
         })
     }
 
+    /// Evaluate an internal floating-point operation for generated simulation modules.
+    #[wasm_bindgen(js_name = "evaluateFloat")]
+    pub fn evaluate_float(&self, lhs: u64, rhs: u64, code: u64) -> u64 {
+        wasm_codegen::evaluate_float(lhs, rhs, code)
+    }
+
     /// Returns the WASM module bytes for eval_comb (combinational logic evaluation).
     #[wasm_bindgen(js_name = "combWasmBytes")]
     pub fn comb_wasm_bytes(&self) -> Vec<u8> {

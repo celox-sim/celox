@@ -1,7 +1,9 @@
+use num_bigint::BigUint;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::symbolic::artifact::{
-    FfPart, RelocationModule, SimModule, SplitCommit, SymbolicGlueAddr as GlueAddr, SymbolicRtl,
+    FfPart, NbaSwitch, RelocationModule, SimModule, SplitCommit, SymbolicGlueAddr as GlueAddr,
+    SymbolicRtl,
 };
 use crate::{
     FrontendLookup, FrontendTrace, FrontendTraceOptions, FusedSirOptimizationHints, HashMap,
@@ -10,14 +12,15 @@ use crate::{
 };
 use celox_design::{
     BitAccess, CombDerivedClock, CounterKind, CounterSlots, DomainKind, ElaboratedDesign,
-    EventTopology, EventWatch, ExternFunction, GateOp, HostRequestSite, InitialStateValue,
-    InstanceId, ModuleId, NbaSite, ProcessSlots, RegionedAbsoluteAddrBase, RegionedStateAddr,
-    RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, RuntimeSchema,
-    STABLE_REGION, StateAddr, StateObjectId, TriggerSet, VarAtomBase, VariableMetadata, WaitSite,
+    EventTopology, EventWatch, ExternFunction, GateOp, HostRequestSite, InitialStateData,
+    InitialStateValue, InstanceId, ModuleId, NbaSite, ProcessSlots, RegionedAbsoluteAddrBase,
+    RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite,
+    RuntimeSchema, STABLE_REGION, StateAddr, StateObjectId, TriggerSet, VarAtomBase,
+    VariableMetadata, WORKING_REGION, WaitSite,
 };
 use celox_sir::{
-    BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIRTerminator,
-    SirProgram,
+    BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIROffset,
+    SIRTerminator, SirProgram,
 };
 use celox_slt::{
     CombObserver, FfAccessSummary, LogicPath, LogicPathId, LogicPathTarget, NodeId, SLTNodeArena,
@@ -546,6 +549,7 @@ fn scheduler_source_locations(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn schedule_symbolic_rtl(
     symbolic: SymbolicRtl,
     fused_ff_factory: Option<&dyn FusedFfLoweringFactory>,
@@ -561,7 +565,45 @@ pub fn schedule_symbolic_rtl(
     four_state: bool,
     parallel: &ParallelScheduleOptions,
     trace_opts: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+) -> Result<ScheduledRtlOutput, ParserError> {
+    schedule_symbolic_rtl_reporting_loops(
+        symbolic,
+        fused_ff_factory,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_opts,
+        trace,
+        &mut Vec::new(),
+    )
+}
+
+/// A range a block of a combinational loop writes, in the module that
+/// declares it.
+pub type LoopMember = (ModuleId, VarAtomBase<SourceVarId>);
+
+/// [`schedule_symbolic_rtl`], which also reports the ranges the blocks of a
+/// combinational loop write when the scheduler rejects one.
+#[allow(clippy::too_many_arguments)]
+pub fn schedule_symbolic_rtl_reporting_loops(
+    symbolic: SymbolicRtl,
+    fused_ff_factory: Option<&dyn FusedFfLoweringFactory>,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &ParallelScheduleOptions,
+    trace_opts: &FrontendTraceOptions,
     mut trace: Option<&mut FrontendTrace>,
+    loop_members: &mut Vec<LoopMember>,
 ) -> Result<ScheduledRtlOutput, ParserError> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT_SOURCE_PROGRAM: AtomicU64 = AtomicU64::new(1);
@@ -678,7 +720,19 @@ pub fn schedule_symbolic_rtl(
             &mut trace,
         )
     )?;
-    let timing = relocate_timing(bindings, &instance_modules, &modules, &processes);
+    let mut timing = relocate_timing(bindings, &instance_modules, &modules, &processes);
+    let variables: HashMap<AbsoluteAddr, (usize, bool)> = instance_modules
+        .iter()
+        .flat_map(|(&instance, module)| {
+            modules[module].variables.iter().map(move |(&var_id, var)| {
+                (
+                    bindings.locate(instance, var_id),
+                    (var.metadata.width, var.metadata.is_4state),
+                )
+            })
+        })
+        .collect();
+    let declaration_probes;
     let counted = {
         // Flip-flop event domains and the aliases that resolve to them.
         let event_addresses: HashSet<AbsoluteAddr> = eval_apply_ffs
@@ -691,24 +745,163 @@ pub fn schedule_symbolic_rtl(
                     .map(|(alias, _)| *alias),
             )
             .collect();
-        let variables: HashMap<AbsoluteAddr, (usize, bool)> = instance_modules
-            .iter()
-            .flat_map(|(&instance, module)| {
-                modules[module].variables.iter().map(move |(&var_id, var)| {
-                    (
-                        bindings.locate(instance, var_id),
-                        (var.metadata.width, var.metadata.is_4state),
-                    )
-                })
-            })
-            .collect();
+        let counted = counted_signals(&timing, &event_addresses);
+        choose_comb_alternatives(
+            bindings,
+            &instance_modules,
+            &modules,
+            &counted,
+            &mut comb_blocks,
+        );
+        // Count sensitivity occurrences before any optimizer can coalesce
+        // consecutive writes whose final value is unchanged.
+        let mut probes = Vec::new();
+        for path in &comb_blocks {
+            if let LogicPathTarget::Process {
+                sensitivity_counters,
+                ..
+            } = &path.target
+            {
+                for &(source, counter) in sensitivity_counters {
+                    if !probes.contains(&(source, counter)) {
+                        probes.push((source, counter));
+                    }
+                }
+            }
+        }
+        // A direct wire/port connection carries occurrences as well as its
+        // settled value. Preserve them when a kernel writes the upstream
+        // object twice before the copy path is evaluated. Only equal-width,
+        // unindexed copies are transparent here; expressions remain scheduled
+        // combinational evaluations.
+        let mut next_probe = 0;
+        while next_probe < probes.len() {
+            let (source, counter) = probes[next_probe];
+            next_probe += 1;
+            for path in &comb_blocks {
+                let LogicPathTarget::Var(target) = &path.target else {
+                    continue;
+                };
+                if !path.transparent_copy
+                    || target.id != source.id
+                    || !target.access.overlaps(&source.access)
+                {
+                    continue;
+                }
+                let celox_slt::SLTNode::Input {
+                    variable,
+                    access,
+                    index,
+                    ..
+                } = global_arena.get(path.expr)
+                else {
+                    continue;
+                };
+                if !index.is_empty()
+                    || (four_state && variables[variable].1 != variables[&target.id].1)
+                    || access.msb - access.lsb != target.access.msb - target.access.lsb
+                {
+                    continue;
+                }
+                let lsb = source.access.lsb.max(target.access.lsb);
+                let msb = source.access.msb.min(target.access.msb);
+                let upstream = VarAtomBase::new(
+                    *variable,
+                    access.lsb + lsb - target.access.lsb,
+                    access.lsb + msb - target.access.lsb,
+                );
+                if !probes.contains(&(upstream, counter)) {
+                    probes.push((upstream, counter));
+                }
+            }
+        }
+        declaration_probes = probes.clone();
+        for (source, counter) in probes {
+            let width = source.access.msb - source.access.lsb + 1;
+            let four_state = four_state && variables[&source.id].1;
+            let offset = match unpacked_element_widths.get(&source.id) {
+                Some(&element_width)
+                    if width > element_width
+                        && source.access.lsb.is_multiple_of(element_width)
+                        && width.is_multiple_of(element_width) =>
+                {
+                    celox_sir::SIROffset::PackedElements {
+                        bit_offset: source.access.lsb,
+                        element_width,
+                    }
+                }
+                _ => celox_sir::SIROffset::Static(source.access.lsb),
+            };
+            let stable = |address| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address);
+            let code = |address: &RegionedAbsoluteAddr| {
+                (address.region == STABLE_REGION && address.absolute_addr() == source.id).then(
+                    || crate::watch::WatchCode {
+                        signal: stable(source.id),
+                        width,
+                        offset: offset.clone(),
+                        four_state,
+                        counters: vec![(CounterKind::Changes, stable(counter))],
+                    },
+                )
+            };
+            for process in &mut processes {
+                crate::watch::instrument_unit(&mut process.kernel, code);
+            }
+            for units in eval_apply_ffs
+                .values_mut()
+                .chain(eval_only_ffs.values_mut())
+                .chain(apply_ffs.values_mut())
+            {
+                for unit in units {
+                    crate::watch::instrument_unit(unit, code);
+                }
+            }
+            for parts in parallel_ff_units.values_mut() {
+                for (_, part) in parts {
+                    crate::watch::instrument_unit(&mut part.evaluate, code);
+                    crate::watch::instrument_unit(&mut part.apply, code);
+                }
+            }
+            for path in &mut comb_blocks {
+                if let LogicPathTarget::Process { unit, .. } = &mut path.target {
+                    crate::watch::instrument_unit(unit, |address| {
+                        (*address == source.id).then(|| crate::watch::WatchCode {
+                            signal: source.id,
+                            width,
+                            offset: offset.clone(),
+                            four_state,
+                            counters: vec![(CounterKind::Changes, counter)],
+                        })
+                    });
+                }
+            }
+        }
+        let ff_units = eval_apply_ffs
+            .values_mut()
+            .chain(eval_only_ffs.values_mut())
+            .chain(apply_ffs.values_mut())
+            .flatten()
+            .chain(
+                parallel_ff_units
+                    .values_mut()
+                    .flatten()
+                    .flat_map(|(_, part)| [&mut part.evaluate, &mut part.apply]),
+            )
+            .chain(
+                split_commits
+                    .values_mut()
+                    .flatten()
+                    .flatten()
+                    .flat_map(|split| [&mut split.active, &mut split.nba]),
+            );
         instrument_counted_signals(
             &timing,
-            &event_addresses,
+            counted,
             &variables,
             four_state,
             &mut processes,
             &mut comb_blocks,
+            ff_units,
         )
     };
     // Combinational values and the variables they are computed from.
@@ -929,8 +1122,66 @@ pub fn schedule_symbolic_rtl(
             .collect::<HashSet<_>>()
     });
     let mut persistent_comb_state = HashSet::default();
+    let mut comb_startups = BTreeMap::new();
     for path in &comb_blocks {
-        if let LogicPathTarget::Process { unit, .. } = &path.target {
+        if let LogicPathTarget::Process { unit, startup, .. } = &path.target {
+            if let Some(startup) = startup {
+                comb_startups.entry(startup.initialized).or_insert_with(|| {
+                    let mut startup = startup.clone();
+                    // Transparent ports/wires already have their upstream
+                    // declaration value before wildcard processes begin
+                    // waiting. Their unconnected net default (Z) is not a
+                    // startup event. Resolve only direct equal-type copies;
+                    // constant/expression continuous drivers still run at
+                    // time zero and can wake the process.
+                    for (source, _) in &mut startup.inputs {
+                        let mut seen = HashSet::default();
+                        while seen.insert(*source) {
+                            let upstream = comb_blocks.iter().find_map(|path| {
+                                if !path.transparent_copy {
+                                    return None;
+                                }
+                                let LogicPathTarget::Var(target) = &path.target else {
+                                    return None;
+                                };
+                                if target.id != source.id
+                                    || target.access.lsb > source.access.lsb
+                                    || target.access.msb < source.access.msb
+                                {
+                                    return None;
+                                }
+                                let celox_slt::SLTNode::Input {
+                                    variable,
+                                    access,
+                                    index,
+                                    ..
+                                } = global_arena.get(path.expr)
+                                else {
+                                    return None;
+                                };
+                                if !index.is_empty()
+                                    || access.msb - access.lsb
+                                        != target.access.msb - target.access.lsb
+                                    || (four_state
+                                        && variables[variable].1 != variables[&target.id].1)
+                                {
+                                    return None;
+                                }
+                                Some(VarAtomBase::new(
+                                    *variable,
+                                    access.lsb + source.access.lsb - target.access.lsb,
+                                    access.lsb + source.access.msb - target.access.lsb,
+                                ))
+                            });
+                            let Some(upstream) = upstream else {
+                                break;
+                            };
+                            *source = upstream;
+                        }
+                    }
+                    startup
+                });
+            }
             for block in unit.blocks.values() {
                 for inst in &block.instructions {
                     if let SIRInstruction::Store(address, ..) = inst {
@@ -968,6 +1219,15 @@ pub fn schedule_symbolic_rtl(
                 package_instances: package_instances.values().copied().collect(),
             };
             let source_locations = scheduler_source_locations(&error, &modules, &instance_modules);
+            if let SchedulerError::CombinationalLoop { blocks } = &error {
+                loop_members.extend(blocks.iter().filter_map(|block| {
+                    let var = block.target.var()?;
+                    Some((
+                        *instance_modules.get(&var.id.instance_id)?,
+                        VarAtomBase::new(var.id.var_id, var.access.lsb, var.access.msb),
+                    ))
+                }));
+            }
             let mut target_arena = SLTNodeArena::new();
             let error = error.map_addr(&global_arena, &mut target_arena, &|addr| {
                 frontend_lookup.get_path(addr)
@@ -1276,7 +1536,37 @@ pub fn schedule_symbolic_rtl(
     initial_instances.sort_unstable_by_key(|(instance, module)| {
         (!package_instances.contains_key(*module), instance.0)
     });
-    let initial_memory_values: Vec<InitialStateValue<AbsoluteAddr>> = initial_instances
+    let declaration_values: Vec<InitialStateValue<AbsoluteAddr>> = initial_instances
+        .iter()
+        .flat_map(|&(&instance_id, module_id)| {
+            modules[module_id]
+                .declaration_initial_memory_values
+                .iter()
+                .filter(move |init| {
+                    !bindings.is_bound(&AbsoluteAddr {
+                        instance_id,
+                        var_id: init.address,
+                    })
+                })
+                .map(move |init| InitialStateValue {
+                    address: bindings.locate(instance_id, init.address),
+                    data: init.data.clone(),
+                })
+        })
+        .collect();
+    let folded_initials: Vec<InitialStateValue<AbsoluteAddr>> = initial_instances
+        .iter()
+        .flat_map(|&(&instance_id, module_id)| {
+            modules[module_id]
+                .folded_initial_memory_values
+                .iter()
+                .map(move |init| InitialStateValue {
+                    address: bindings.locate(instance_id, init.address),
+                    data: init.data.clone(),
+                })
+        })
+        .collect();
+    let mut initial_memory_values: Vec<InitialStateValue<AbsoluteAddr>> = initial_instances
         .into_iter()
         .flat_map(|(&instance_id, module_id)| {
             modules[module_id]
@@ -1306,6 +1596,52 @@ pub fn schedule_symbolic_rtl(
         })
         .filter(|(address, _)| !bindings.is_bound(address))
         .collect();
+    let declaration_startup = processes
+        .iter()
+        .any(|process| process.slots.is_initializer)
+        .then(|| {
+            let targets: BTreeSet<_> = folded_initials.iter().map(|init| init.address).collect();
+            let mut reset = targets
+                .iter()
+                .map(|&address| InitialStateValue {
+                    address,
+                    data: InitialStateData::Packed {
+                        value: BigUint::default(),
+                        mask: BigUint::default(),
+                        written_mask: (BigUint::from(1u8) << state_objects[&address].width) - 1u8,
+                    },
+                })
+                .collect::<Vec<_>>();
+            reset.extend(
+                declaration_values
+                    .iter()
+                    .filter(|init| targets.contains(&init.address))
+                    .cloned(),
+            );
+            celox_design::DeclarationStartup {
+                reset,
+                ordinary: folded_initials,
+                snapshots: comb_startups
+                    .values()
+                    .flat_map(|startup| startup.inputs.iter().copied())
+                    .collect(),
+                counter_snapshots: comb_startups
+                    .values()
+                    .flat_map(|startup| startup.counters.iter().copied())
+                    .collect(),
+                probes: declaration_probes,
+            }
+        });
+    // Arm wildcard processes against declaration-time state, before continuous
+    // drivers, folded initial statements, or the first host write can change
+    // their inputs. The resulting constants use the ordinary initialization
+    // path on every backend, including native images.
+    initial_memory_values.extend(super::comb_startup::initial_values(
+        comb_startups.values(),
+        &declaration_values,
+        &state_objects,
+        four_state,
+    ));
     let runtime_comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>> = comb_observers
         .iter()
         .map(|observer| RuntimeCombObserver {
@@ -1315,10 +1651,81 @@ pub fn schedule_symbolic_rtl(
             written_inputs: observer.written_inputs.clone(),
         })
         .collect();
-    let (process_kernels, process_slots): (Vec<_>, Vec<_>) = processes
-        .into_iter()
-        .map(|process| (process.kernel, process.slots))
-        .unzip();
+    // Nonblocking sites that can stage their value instead of queueing it
+    // (`NbaSite::pending`). Staged values are published after the queue,
+    // so a staged target must be one whose update order nothing observes:
+    // no wait, counter, event domain or comb observer reads it, directly or
+    // through combinational logic.
+    if !timing.nba_switches.is_empty() {
+        let observed = {
+            let mut observed: HashSet<AbsoluteAddr> = timing
+                .wait_sites
+                .iter()
+                .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal))
+                .chain(timing.counter_slots.iter().map(|slots| slots.signal))
+                .chain(
+                    clock_domains
+                        .iter()
+                        .flat_map(|(&alias, &canonical)| [alias, canonical]),
+                )
+                .chain(topological_clocks.iter().copied())
+                .chain(
+                    runtime_comb_observers
+                        .iter()
+                        .flat_map(|observer| observer.sensitivity.iter().map(|atom| atom.id)),
+                )
+                .collect();
+            for ffs in [
+                &eval_apply_ffs,
+                &eval_comb_apply_ffs,
+                &eval_only_ffs,
+                &apply_ffs,
+            ] {
+                observed.extend(ffs.keys().copied());
+            }
+            through_comb(observed, &comb_sources)
+        };
+        // The ports of the top module, which the host drives.
+        let top_ports: HashSet<AbsoluteAddr> = expanded
+            .get(&InstancePath(Vec::new()))
+            .map(|&root| {
+                modules[&instance_modules[&root]]
+                    .variables
+                    .iter()
+                    .filter(|(_, variable)| {
+                        matches!(
+                            variable.kind,
+                            crate::VariableKind::Input
+                                | crate::VariableKind::Output
+                                | crate::VariableKind::Inout
+                        )
+                    })
+                    .map(|(&var_id, _)| bindings.locate(root, var_id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let staged = staged_nba_sites(
+            &timing,
+            eval_comb
+                .iter()
+                .chain(eval_apply_ffs.values().flatten())
+                .chain(eval_comb_apply_ffs.values().flatten())
+                .chain(eval_only_ffs.values().flatten())
+                .chain(apply_ffs.values().flatten())
+                .chain(processes.iter().map(|process| &process.kernel)),
+            &top_ports,
+            &observed,
+        );
+        select_nba_paths(&mut timing, &staged, &mut processes);
+    }
+    let mut process_kernels = Vec::with_capacity(processes.len());
+    let mut process_slots = Vec::with_capacity(processes.len());
+    let mut process_origins = Vec::with_capacity(processes.len());
+    for process in processes {
+        process_kernels.push(process.kernel);
+        process_slots.push(process.slots);
+        process_origins.push(process.origin);
+    }
     let TimingMetadata {
         wait_sites,
         nba_sites,
@@ -1566,7 +1973,7 @@ pub fn schedule_symbolic_rtl(
     let time_slots: Vec<StateAddr> = time_slots.into_iter().map(project).collect();
     // The runtime reads counters, the signals waits watch and staged
     // nonblocking values directly; no unit loads a wait's signal.
-    let timing_read_roots = watches
+    let mut timing_read_roots: HashSet<StateAddr> = watches
         .iter()
         .flat_map(|watch| {
             watch
@@ -1587,6 +1994,34 @@ pub fn schedule_symbolic_rtl(
         )
         .chain(host_request_sites.iter().flat_map(|site| site.slots()))
         .collect();
+    let declaration_startup = declaration_startup.map(|startup| startup.map(project));
+    if let Some(startup) = &declaration_startup {
+        timing_read_roots.extend(
+            startup
+                .reset
+                .iter()
+                .chain(&startup.ordinary)
+                .map(|value| value.address),
+        );
+        timing_read_roots.extend(
+            startup
+                .snapshots
+                .iter()
+                .flat_map(|(source, saved)| [source.id, *saved]),
+        );
+        timing_read_roots.extend(
+            startup
+                .counter_snapshots
+                .iter()
+                .flat_map(|&(counter, saved)| [counter, saved]),
+        );
+        timing_read_roots.extend(
+            startup
+                .probes
+                .iter()
+                .flat_map(|(source, counter)| [source.id, *counter]),
+        );
+    }
     // A package variable's state object maps back to the package's own
     // variable, not to one of its aliases.
     let state_to_source = source_to_state
@@ -1626,9 +2061,11 @@ pub fn schedule_symbolic_rtl(
             rtl_writes,
             comb_writes: Default::default(),
             persistent_comb_state,
+            declaration_startup,
             dead_store_policy: Default::default(),
             live_signals: Default::default(),
             processes: process_slots,
+            process_origins,
             watches,
             wait_sites,
             nba_sites,
@@ -1690,6 +2127,7 @@ fn module_variables(
                     var_kind: variable.kind,
                     signed: variable.signed,
                     packed_dims: variable.packed_dims.clone(),
+                    unpacked_ranges: variable.unpacked_ranges.clone(),
                     metadata: variable.metadata.clone(),
                 },
             );
@@ -1943,7 +2381,13 @@ fn relocate_executation_unit_with_errors<A, B>(
                                 SIRInstruction::ExternCall { dst, func, args } => {
                                     SIRInstruction::ExternCall {
                                         dst: *dst,
-                                        func: extern_functions[func],
+                                        // The heap helper is outside every
+                                        // module's extern function table.
+                                        func: if *func == celox_sir::extern_abi::HEAP_HELPER_ID {
+                                            *func
+                                        } else {
+                                            extern_functions[func]
+                                        },
                                         args: args.clone(),
                                     }
                                 }
@@ -2675,6 +3119,10 @@ fn relocate_units(
                         &extern_function_map,
                     ),
                     slots: process.slots.map(|var_id| bindings.locate(*id, var_id)),
+                    origin: celox_design::ProcessOrigin {
+                        scope: Some(scope.clone()),
+                        ..process.origin.clone()
+                    },
                     key: (*id, index),
                 },
             ));
@@ -2802,6 +3250,7 @@ fn relocate_units(
 struct RelocatedProcess {
     kernel: ExecutionUnit<RegionedAbsoluteAddr>,
     slots: ProcessSlots<AbsoluteAddr>,
+    origin: celox_design::ProcessOrigin,
     /// The instance and the module-local index of the process.
     key: (InstanceId, usize),
 }
@@ -2810,10 +3259,12 @@ struct RelocatedProcess {
 /// design.
 struct TimingMetadata {
     counter_slots: Vec<CounterSlots<AbsoluteAddr>>,
+    pending_slots: Vec<crate::watch::PendingSlots<AbsoluteAddr>>,
     wait_sites: Vec<WaitSite<AbsoluteAddr>>,
     nba_sites: Vec<NbaSite<AbsoluteAddr>>,
     host_request_sites: Vec<HostRequestSite<AbsoluteAddr>>,
     time_slots: Vec<AbsoluteAddr>,
+    nba_switches: Vec<NbaSwitch<AbsoluteAddr>>,
 }
 
 /// For every combinational value, the variables it is computed from.
@@ -2949,6 +3400,156 @@ fn split_observed_commits<'k>(
     split
 }
 
+/// The switches of the switched nonblocking sites that may stage their
+/// value: the site's target has no other writer (no store or commit of any
+/// unit, no other nonblocking site, not a top-level port the host drives)
+/// and is not in `observed`.
+fn staged_nba_sites<'u>(
+    timing: &TimingMetadata,
+    units: impl Iterator<Item = &'u ExecutionUnit<RegionedAbsoluteAddr>>,
+    top_ports: &HashSet<AbsoluteAddr>,
+    observed: &HashSet<AbsoluteAddr>,
+) -> HashSet<AbsoluteAddr> {
+    let mut written = HashSet::default();
+    for unit in units {
+        for block in unit.blocks.values() {
+            for instruction in &block.instructions {
+                match instruction {
+                    SIRInstruction::Store(dst, ..) | SIRInstruction::Commit(_, dst, ..) => {
+                        written.insert(dst.absolute_addr());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut sites_per_target: HashMap<AbsoluteAddr, usize> = HashMap::default();
+    for site in &timing.nba_sites {
+        *sites_per_target.entry(site.target).or_default() += 1;
+    }
+    let targets: HashMap<AbsoluteAddr, AbsoluteAddr> = timing
+        .nba_sites
+        .iter()
+        .map(|site| (site.value, site.target))
+        .collect();
+    timing
+        .nba_switches
+        .iter()
+        .filter(|switch| {
+            let target = targets[&switch.value];
+            sites_per_target[&target] == 1
+                && !written.contains(&target)
+                && !top_ports.contains(&target)
+                && !observed.contains(&target)
+        })
+        .map(|switch| switch.switch)
+        .collect()
+}
+
+/// Keep one path of every switched nonblocking site: the staged one if its
+/// switch is in `staged`, otherwise the queued one, whose value object
+/// becomes the site's and which has no `pending` flag. The kernels select
+/// the path by a jump; the other path is removed.
+fn select_nba_paths(
+    timing: &mut TimingMetadata,
+    staged: &HashSet<AbsoluteAddr>,
+    processes: &mut [RelocatedProcess],
+) {
+    let switches: HashMap<AbsoluteAddr, NbaSwitch<AbsoluteAddr>> = timing
+        .nba_switches
+        .iter()
+        .map(|switch| (switch.value, *switch))
+        .collect();
+    for site in &mut timing.nba_sites {
+        let Some(switch) = switches.get(&site.value) else {
+            continue;
+        };
+        if !staged.contains(&switch.switch) {
+            site.value = switch.queued;
+            site.pending = None;
+        }
+    }
+    let selections: HashMap<AbsoluteAddr, bool> = switches
+        .values()
+        .map(|switch| (switch.switch, staged.contains(&switch.switch)))
+        .collect();
+    let mut folded = 0;
+    for process in processes {
+        folded += fold_nba_switches(&mut process.kernel, &selections);
+    }
+    assert_eq!(
+        folded,
+        selections.len(),
+        "every nonblocking switch selects its path once"
+    );
+}
+
+/// Replace each branch on a load of a switch in `selections` by a jump to
+/// the selected path and remove the blocks no longer reachable. Returns the
+/// number of branches replaced.
+fn fold_nba_switches(
+    unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    selections: &HashMap<AbsoluteAddr, bool>,
+) -> usize {
+    let mut folded = 0;
+    for block in unit.blocks.values_mut() {
+        let SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } = &block.terminator
+        else {
+            continue;
+        };
+        let Some((position, staged)) =
+            block
+                .instructions
+                .iter()
+                .enumerate()
+                .find_map(|(position, instruction)| match instruction {
+                    SIRInstruction::Load(register, addr, SIROffset::Static(0), 1)
+                        if register == cond =>
+                    {
+                        selections
+                            .get(&addr.absolute_addr())
+                            .map(|&staged| (position, staged))
+                    }
+                    _ => None,
+                })
+        else {
+            continue;
+        };
+        let (target, args) = if staged { true_block } else { false_block };
+        block.terminator = SIRTerminator::Jump(*target, args.clone());
+        block.instructions.remove(position);
+        folded += 1;
+    }
+    if folded > 0 {
+        let mut reachable = HashSet::default();
+        let mut pending = vec![unit.entry_block_id];
+        while let Some(id) = pending.pop() {
+            if !reachable.insert(id) {
+                continue;
+            }
+            match &unit.blocks[&id].terminator {
+                SIRTerminator::Jump(next, _) => pending.push(*next),
+                SIRTerminator::Branch {
+                    true_block,
+                    false_block,
+                    ..
+                } => pending.extend([true_block.0, false_block.0]),
+                SIRTerminator::Switch { cases, default, .. } => {
+                    pending.extend(cases.iter().map(|case| case.target));
+                    pending.push(*default);
+                }
+                SIRTerminator::Return | SIRTerminator::Error(_) => {}
+            }
+        }
+        unit.blocks.retain(|id, _| reachable.contains(id));
+    }
+    folded
+}
+
 /// Place the timing metadata of every instance. Sites name the global index
 /// of their process; a kernel numbers its sites in the order they appear
 /// here, which is the module's order.
@@ -2967,10 +3568,12 @@ fn relocate_timing(
     instances.sort_unstable_by_key(|(instance, _)| **instance);
     let mut metadata = TimingMetadata {
         counter_slots: Vec::new(),
+        pending_slots: Vec::new(),
         wait_sites: Vec::new(),
         nba_sites: Vec::new(),
         host_request_sites: Vec::new(),
         time_slots: Vec::new(),
+        nba_switches: Vec::new(),
     };
     for (&instance, module) in instances {
         let module = &modules[module];
@@ -2978,6 +3581,9 @@ fn relocate_timing(
         metadata
             .counter_slots
             .extend(module.counter_slots.iter().map(|slots| slots.map(locate)));
+        metadata
+            .pending_slots
+            .extend(module.pending_slots.iter().map(|slots| slots.map(locate)));
         metadata
             .wait_sites
             .extend(module.wait_sites.iter().map(|site| WaitSite {
@@ -3002,34 +3608,96 @@ fn relocate_timing(
                     }),
             );
         metadata.time_slots.extend(module.time_slot.map(locate));
+        metadata.nba_switches.extend(
+            module
+                .nba_switches
+                .iter()
+                .map(|switch| switch.map(|&var| locate(var))),
+        );
     }
     metadata
 }
 
 /// Counted signals: those a unit may store twice between two runtime checks
 /// (a frontend declared counters for them) and that a flip-flop domain or a
-/// wait watches. Returns their counters by signal and instruments the
-/// process kernels and combinational process units that write them; no
-/// other unit changes.
-fn instrument_counted_signals(
+/// wait watches, by signal.
+fn counted_signals(
     timing: &TimingMetadata,
     event_addresses: &HashSet<AbsoluteAddr>,
-    variables: &HashMap<AbsoluteAddr, (usize, bool)>,
-    four_state: bool,
-    processes: &mut [RelocatedProcess],
-    comb_blocks: &mut [LogicPath<AbsoluteAddr>],
 ) -> BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> {
     let waited: HashSet<AbsoluteAddr> = timing
         .wait_sites
         .iter()
         .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal))
         .collect();
-    let counted: BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> = timing
+    timing
         .counter_slots
         .iter()
         .filter(|slots| event_addresses.contains(&slots.signal) || waited.contains(&slots.signal))
         .map(|slots| (slots.signal, *slots))
-        .collect();
+        .collect()
+}
+
+/// Keep, for every instance of a process in `comb_alternatives`, either
+/// its imperative unit, when a variable it may store twice is `counted`, or
+/// its symbolic definitions, and remove the paths of the other form from
+/// `comb_blocks`. Paths of other drivers of the same variables stay.
+fn choose_comb_alternatives(
+    bindings: &PackageBindings,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
+    counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    comb_blocks: &mut Vec<LogicPath<AbsoluteAddr>>,
+) {
+    let mut imperative = HashSet::default();
+    let mut symbolic = HashMap::<AbsoluteAddr, Vec<_>>::default();
+    for (&instance, module) in instance_modules {
+        for alternative in &modules[module].comb_alternatives {
+            let locate = |var_id| bindings.locate(instance, var_id);
+            if alternative
+                .candidates
+                .iter()
+                .any(|&candidate| counted.contains_key(&locate(candidate)))
+            {
+                for target in &alternative.targets {
+                    symbolic
+                        .entry(locate(target.id))
+                        .or_default()
+                        .push(target.access);
+                }
+            } else {
+                imperative.insert(locate(alternative.process));
+            }
+        }
+    }
+    if imperative.is_empty() && symbolic.is_empty() {
+        return;
+    }
+    // Flattening may have split a definition at the boundaries of its
+    // readers, so a path of the process is any piece of one of its ranges.
+    // No other driver writes those bits: the SV frontend rejects overlapping
+    // drivers (`validate_variable_driver_ranges`).
+    comb_blocks.retain(|path| match &path.target {
+        LogicPathTarget::Var(target) => !symbolic
+            .get(&target.id)
+            .is_some_and(|ranges| ranges.iter().any(|range| range.overlaps(&target.access))),
+        LogicPathTarget::Process { process, .. } => !imperative.contains(process),
+        LogicPathTarget::CombCaptureEvent { .. } => true,
+    });
+}
+
+/// Instrument the process kernels, combinational process units and
+/// flip-flop units that write a `counted` signal, and return `counted`; no
+/// other unit changes.
+fn instrument_counted_signals<'u>(
+    timing: &TimingMetadata,
+    counted: BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    variables: &HashMap<AbsoluteAddr, (usize, bool)>,
+    four_state: bool,
+    processes: &mut [RelocatedProcess],
+    comb_blocks: &mut [LogicPath<AbsoluteAddr>],
+    ff_units: impl Iterator<Item = &'u mut ExecutionUnit<RegionedAbsoluteAddr>>,
+) -> BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> {
     if counted.is_empty() {
         return counted;
     }
@@ -3048,6 +3716,7 @@ fn instrument_counted_signals(
                 |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, var);
             Some(crate::watch::WatchCode {
                 signal: stable(slots.signal),
+                offset: celox_sir::SIROffset::Static(0),
                 width,
                 four_state,
                 counters: CounterKind::ALL
@@ -3063,6 +3732,7 @@ fn instrument_counted_signals(
                 let (slots, width, four_state) = code(*address)?;
                 Some(crate::watch::WatchCode {
                     signal: slots.signal,
+                    offset: celox_sir::SIROffset::Static(0),
                     width,
                     four_state,
                     counters: CounterKind::ALL
@@ -3072,6 +3742,75 @@ fn instrument_counted_signals(
                 })
             });
         }
+    }
+    let stable = |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, var);
+    let working = |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, var);
+    let watch = |signal: AbsoluteAddr| {
+        let (slots, width, four_state) = code(signal)?;
+        Some(crate::watch::WatchCode {
+            signal: stable(slots.signal),
+            offset: celox_sir::SIROffset::Static(0),
+            width,
+            four_state,
+            counters: CounterKind::ALL
+                .into_iter()
+                .map(|kind| (kind, stable(slots.counter(kind))))
+                .collect(),
+        })
+    };
+    // A flip-flop writes its next state, and a commit publishes it. Repeated
+    // writes are held back until the commit; a single write is counted at
+    // the commit itself.
+    let pending: Vec<_> = timing
+        .pending_slots
+        .iter()
+        .filter_map(|slots| {
+            Some(crate::watch::PendingCode {
+                watch: watch(slots.signal)?,
+                write: working(slots.staged.unwrap_or(slots.signal)),
+                staged: slots.staged.is_some(),
+                value: stable(slots.value),
+                covered: stable(slots.covered),
+                first: stable(slots.first),
+                changed: stable(slots.changed),
+                written: stable(slots.written),
+                edges: vec![
+                    (CounterKind::Rises, stable(slots.rises)),
+                    (CounterKind::Falls, stable(slots.falls)),
+                ],
+            })
+        })
+        .collect();
+    let held = |staged: bool| -> HashSet<AbsoluteAddr> {
+        timing
+            .pending_slots
+            .iter()
+            .filter(|slots| slots.staged.is_some() == staged)
+            .map(|slots| slots.signal)
+            .collect()
+    };
+    let (held_next, held_staged) = (held(false), held(true));
+    for unit in ff_units {
+        crate::watch::instrument_writes(unit, |instruction| match instruction {
+            // The commit of the next state; a seed copies the other way.
+            SIRInstruction::Commit(source, destination, ..)
+                if source.region == WORKING_REGION
+                    && destination.region == STABLE_REGION
+                    && source.absolute_addr() == destination.absolute_addr()
+                    && !held_next.contains(&destination.absolute_addr()) =>
+            {
+                watch(destination.absolute_addr())
+            }
+            // The merge of staged nonblocking values.
+            SIRInstruction::Store(destination, ..)
+                if destination.region == STABLE_REGION
+                    && !held_staged.contains(&destination.absolute_addr()) =>
+            {
+                watch(destination.absolute_addr())
+            }
+            _ => None,
+        });
+        crate::watch::instrument_pending(unit, &pending);
     }
     counted
 }
@@ -3129,6 +3868,7 @@ fn build_comb_observer_capture_paths(
                 comb_blocks[idx.0].order_before.insert(path_id);
             }
             comb_blocks.push(LogicPath {
+                transparent_copy: false,
                 target: LogicPathTarget::CombCaptureEvent {
                     site_id: observer.site_id,
                     guard: None,
@@ -3161,6 +3901,7 @@ fn build_comb_observer_capture_paths(
                 }
                 comb_blocks[trigger_idx.0].order_before.insert(path_id);
                 comb_blocks.push(LogicPath {
+                    transparent_copy: false,
                     target: LogicPathTarget::CombCaptureEvent {
                         site_id: observer.site_id,
                         guard: None,
@@ -3245,6 +3986,7 @@ fn build_comb_observer_capture_paths(
             comb_blocks[idx.0].order_before.insert(path_id);
         }
         comb_blocks.push(LogicPath {
+            transparent_copy: false,
             target: LogicPathTarget::CombCaptureEvent {
                 site_id: observer.site_id,
                 guard: observer.guard,
@@ -3306,6 +4048,7 @@ fn build_comb_observer_capture_paths(
                 }
                 comb_blocks[trigger_idx.0].order_before.insert(path_id);
                 comb_blocks.push(LogicPath {
+                    transparent_copy: false,
                     target: LogicPathTarget::CombCaptureEvent {
                         site_id: member.site_id,
                         guard: member.guard,

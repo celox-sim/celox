@@ -80,3 +80,28 @@
   (for (index expected) (list (0 0xaa) (1 0xbb) (2 0xcc) (3 0xdd))
     (modify (set i index))
     (assert_eq o expected)))
+
+; An event list naming exactly the variables the statement reads is the
+; implicit event expression of that statement (IEEE 1800-2023 9.4.2.2), in
+; either order and with `or` or a comma.
+(case explicit_list_of_every_read_settles_like_a_wildcard
+  (source "level_list.sv" #"
+        module Top(
+            input logic [7:0] a,
+            input logic [7:0] b,
+            output logic [7:0] y,
+            output logic [7:0] z
+        );
+            always @(a or b) y = a + b;
+            always @(b, a) z = a - b;
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set a 3)
+    (set b 5))
+  (assert_eq y 8)
+  (assert_eq z 0xfe)
+  (modify (set a 10))
+  (assert_eq y 15)
+  (assert_eq z 5))

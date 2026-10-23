@@ -190,6 +190,7 @@ impl ArrayParameter {
         };
         Ok(InitialProcess {
             creation_order: 0,
+            site: None,
             condition: None,
             body: vec![Stmt::Assign {
                 lhs: LValue::Ident(name),

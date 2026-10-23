@@ -86,12 +86,13 @@ fn instances_from_native_declaration(
                 const_env,
                 &parameter_types_from_const_env(const_env),
             );
-            let value = expr_to_const(
+            let value = expr_to_index_const(
                 &syntax_tree.state,
                 substitute_expr_idents(
                     const_expr_to_expr(value),
                     &packed_dimensions.parameter_values,
                 ),
+                packed_dimensions,
             )
             .ok_or_else(|| {
                 AnalyzerError::Unsupported(format!(
@@ -380,6 +381,15 @@ fn parameter_override(
             return Ok(bound);
         }
         pending.extend(parameters::skipped::children(id, declarations));
+    }
+    if let Some(shape) =
+        array_compatibility::native_unpacked_shape(native, declarations, packed_dimensions)
+    {
+        let pattern =
+            bound_patterns::from_array_parameter(native, syntax_tree, packed_dimensions, &shape)?;
+        let mut bound = ParameterOverride::new(name, None);
+        bound.bound_pattern = Some(pattern);
+        return Ok(bound);
     }
     if let Some((type_name, dimensions)) = type_binding::argument_alias(native, declarations)
         && packed_dimensions.type_aliases.contains_key(&type_name)

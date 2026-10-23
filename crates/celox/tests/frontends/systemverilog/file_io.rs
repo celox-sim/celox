@@ -163,21 +163,26 @@ fn edge_host_requests_require_the_timed_api() {
         build().build_wasm().map(|_| ()),
     ];
     for result in results {
+        let error = result.unwrap_err();
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("require Simulation")
+            matches!(
+                error.kind(),
+                celox::SimulatorErrorKind::ProcessRequiresSimulation(_)
+            ),
+            "{error}"
         );
     }
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    assert!(
-        build()
-            .build_native()
-            .unwrap_err()
-            .to_string()
-            .contains("require Simulation")
-    );
+    {
+        let error = build().build_native().map(|_| ()).unwrap_err();
+        assert!(
+            matches!(
+                error.kind(),
+                celox::SimulatorErrorKind::ProcessRequiresSimulation(_)
+            ),
+            "{error}"
+        );
+    }
 }
 
 #[test]

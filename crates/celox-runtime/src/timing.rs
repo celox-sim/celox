@@ -130,6 +130,8 @@ pub struct NbaSiteRefs {
 /// Control slots and sites of one process kernel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessRefs {
+    pub is_initializer: bool,
+    pub resume: SignalRef,
     /// A converted edge procedure starts by registering its event control
     /// before scheduled time-zero inputs are applied.
     pub starts_with_event_wait: bool,
@@ -146,6 +148,8 @@ impl ProcessRefs {
     /// A process without wait or nonblocking sites.
     pub fn new(status: SignalRef, delay: SignalRef) -> Self {
         Self {
+            is_initializer: false,
+            resume: status,
             starts_with_event_wait: false,
             status,
             delay,

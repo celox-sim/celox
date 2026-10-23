@@ -97,20 +97,7 @@ fn eval_expr<B: SimBackend>(
     sim: &mut Simulator<B>,
     expr: &celox_testbench::CompiledExpr,
 ) -> TbValue {
-    let (memory, _) = sim.backend.memory_as_ptr();
-    let trace = sim.backend.layout().trace.as_ref();
-    expr.eval_with_strings(
-        memory.cast_mut(),
-        &mut sim.testbench_strings,
-        |offset, len| {
-            if let Some(trace) = trace {
-                // SAFETY: bytecode is bound to this simulator's memory layout.
-                unsafe {
-                    trace.mark_range(memory.cast_mut(), offset, len);
-                }
-            }
-        },
-    )
+    eval_backend_expr(&mut sim.backend, expr)
 }
 
 pub(crate) fn eval_backend_expr<B: SimBackend>(
@@ -118,18 +105,25 @@ pub(crate) fn eval_backend_expr<B: SimBackend>(
     expr: &celox_testbench::CompiledExpr,
 ) -> TbValue {
     // This pointer is used only during evaluation, never exposed to a host.
-    // Observe VM stores explicitly instead of disabling tracking for reads.
+    // Observe VM stores explicitly instead of disabling tracking for reads;
+    // they are marked once the heap is no longer borrowed.
     let (memory, _) = backend.memory_as_ptr();
-    let trace = backend.layout().trace.as_ref();
-    expr.eval_value_with_write_observer(memory.cast_mut(), |offset, len| {
-        if let Some(trace) = trace {
+    let mut writes = Vec::new();
+    let value = expr.eval_with_heap(
+        memory.cast_mut(),
+        Some(backend.heap_mut()),
+        |offset, len| writes.push((offset, len)),
+    );
+    if let Some(trace) = backend.layout().trace.as_ref() {
+        for (offset, len) in writes {
             // SAFETY: bound bytecode writes valid locations in this image, and
             // the simulator cannot execute concurrently with this evaluation.
             unsafe {
                 trace.mark_range(memory.cast_mut(), offset, len);
             }
         }
-    })
+    }
+    value
 }
 
 fn format_assert_arg<B: SimBackend>(
@@ -151,6 +145,7 @@ fn format_assert_arg<B: SimBackend>(
             width,
             signed: arg.signed,
             is_string: arg.is_string,
+            float_precision: arg.float_precision,
         },
         spec,
         field,
@@ -166,7 +161,18 @@ fn render_assert_message<B: SimBackend>(
         None => None,
         Some(AssertMessage::DynamicArgs(args)) => Some(
             args.iter()
-                .map(|arg| format_assert_arg(sim, arg, 'x', FieldSpec::default()))
+                .map(|arg| {
+                    format_assert_arg(
+                        sim,
+                        arg,
+                        if arg.float_precision.is_some() {
+                            'g'
+                        } else {
+                            'x'
+                        },
+                        FieldSpec::default(),
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(&b' '),
         ),
@@ -192,7 +198,7 @@ fn render_assert_message<B: SimBackend>(
                         };
                         match spec {
                             'h' | 'H' | 'x' | 'X' | 'd' | 'D' | 'i' | 'I' | 'o' | 'O' | 'b'
-                            | 'B' | 'c' | 'C' | 's' | 'S' => {
+                            | 'B' | 'c' | 'C' | 's' | 'S' | 'f' | 'F' | 'e' | 'E' | 'g' | 'G' => {
                                 if let Some(arg) = args.get(arg_idx) {
                                     rendered.extend_from_slice(&format_assert_arg(
                                         sim, arg, spec, field,
@@ -241,12 +247,19 @@ fn sim_set_target<B: SimBackend>(
     value: TbValue,
 ) {
     if let TbValue::String(bytes) = value {
+        // A selection names a string element by its bit offset.
         let index = target.selection.as_ref().map_or(0, |selection| {
-            eval_expr(sim, &selection.offset).to_u64() as usize
+            eval_expr(sim, &selection.offset).to_u64() as usize / celox_design::HANDLE_WIDTH
         });
-        if index < target.signal.width {
-            sim.testbench_strings
-                .insert((target.signal.offset, index), bytes);
+        if index < target.signal.width / celox_design::HANDLE_WIDTH {
+            let handle = sim.backend.heap_mut().intern(&bytes);
+            let element = SignalRef {
+                offset: target.signal.offset + index * celox_heap::HANDLE_BYTES,
+                width: celox_design::HANDLE_WIDTH,
+                is_4state: false,
+                array_layout: None,
+            };
+            sim.set(element, handle);
         }
         return;
     }
@@ -276,6 +289,40 @@ fn sim_set_target<B: SimBackend>(
         (root & &clear_mask) | selected_value,
         root_mask & clear_mask,
     );
+}
+
+/// Collect the heap between concurrent process polls. The saved temporaries of
+/// suspended processes are outside state memory, so their handles are roots.
+fn collect_testbench_heap<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    private_signals: &[SignalRef],
+    locals: &[Vec<(BigUint, BigUint)>],
+) {
+    if !sim.backend.heap().should_collect() {
+        return;
+    }
+    let slots = sim.handle_slots();
+    let saved_roots: Vec<celox_heap::Root> = private_signals
+        .iter()
+        .enumerate()
+        .filter_map(|(index, signal)| {
+            let slot = slots
+                .binary_search_by_key(&signal.offset, |&(offset, _)| offset)
+                .ok()?;
+            Some((index, signal, slots[slot].1))
+        })
+        .flat_map(|(index, signal, kind)| {
+            let elements = signal.width / celox_design::HANDLE_WIDTH;
+            locals.iter().flat_map(move |process| {
+                let digits = process[index].0.to_u32_digits();
+                (0..elements).map(move |element| celox_heap::Root {
+                    kind,
+                    handle: digits.get(element).copied().unwrap_or(0),
+                })
+            })
+        })
+        .collect();
+    sim.maybe_collect_heap(saved_roots);
 }
 
 fn sim_set_queue_target<B: SimBackend>(
@@ -1714,6 +1761,20 @@ fn exec_testbench<B: SimBackend>(
     if blocks.len() <= 1 {
         return exec_detailed(sim, testbench.statements(), ctx);
     }
+    // Suspended processes keep their temporaries outside state memory, so
+    // only the poll loop collects, with those temporaries as roots.
+    let blocked = std::mem::replace(&mut sim.heap_safepoints_blocked, true);
+    let result = exec_processes(sim, testbench, ctx, &blocks);
+    sim.heap_safepoints_blocked = blocked;
+    result
+}
+
+fn exec_processes<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    testbench: &CompiledTestbench<B>,
+    ctx: &mut DetailedExecContext,
+    blocks: &[&[TestbenchStatement<B>]],
+) -> ExecResult {
     initialize_process_clocks(sim, testbench.statements());
     // The compiler's function slots are shared by inline call sites. Keep
     // only these temporaries private; design variables remain shared between
@@ -1824,6 +1885,9 @@ fn exec_testbench<B: SimBackend>(
                 Poll::Pending => debug_assert!(wait.borrow().is_some()),
             }
         }
+        // No process is running, so every string handle is in state memory or
+        // in a suspended process's saved temporaries.
+        collect_testbench_heap(&mut sim.borrow_mut(), testbench.private_signals(), &locals);
         for wait in &waits {
             if let Some(wait) = wait.borrow().as_ref()
                 && wait.remaining != 0
@@ -2000,6 +2064,9 @@ fn exec_detailed<B: SimBackend>(
 ) -> ExecResult {
     for stmt in stmts {
         let r = exec_one_detailed(sim, stmt, ctx);
+        // Only a single process runs here, so between statements every string
+        // handle is in state memory.
+        sim.maybe_collect_heap([]);
         // Stop on control-flow transfers or hard errors. Assertion failures that
         // are allowed to continue return `Continue` and are recorded in `ctx`.
         if matches!(

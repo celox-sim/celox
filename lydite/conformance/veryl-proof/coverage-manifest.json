@@ -5554,6 +5554,164 @@
       ]
     },
     {
+      "case": "floating_point::arithmetic_and_rounding",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/floating_point.vtest",
+        "script_sha256": "e30a79c8d730d7a362431a30be3e86144567936310566a2a99609f986bb1c5e7"
+      },
+      "disposition": "proof_backend_unsupported",
+      "designs": [
+        {
+          "design_sha256": "33c0c0bb77d7b2a6398fb59b1a5702f1c6561cff74a7b1aa07534b5934379b7c",
+          "protocol_sha256": "29159404aa60ad8efe6a9e58e42caedad8d45b00a5c11eac081b7ed7da771a3f",
+          "reads": 0,
+          "commands": 2,
+          "operations": 0,
+          "diagnostic": {
+            "stage": "proof_backend",
+            "detail_sha256": "66c30dfb7dedd7b8288bc0218b8dad496e0558154f775a9b0327f5d9ed388c83"
+          }
+        }
+      ]
+    },
+    {
+      "case": "floating_point::f32_precision_and_conversion",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/floating_point.vtest",
+        "script_sha256": "05448be18fd9c4e06cc3eeba3fff69033d7c0ce678474e52ae771bea52431663"
+      },
+      "disposition": "proof_backend_unsupported",
+      "designs": [
+        {
+          "design_sha256": "b7b15af710c46becb2144cddbdb228ba586e1cf71fa4c32b159dc97bee1ce765",
+          "protocol_sha256": "3523cd48ae1efa3e896a37f65f4af8014e5255bed008654818b3d340b90ebadb",
+          "reads": 0,
+          "commands": 2,
+          "operations": 0,
+          "diagnostic": {
+            "stage": "proof_backend",
+            "detail_sha256": "66c30dfb7dedd7b8288bc0218b8dad496e0558154f775a9b0327f5d9ed388c83"
+          }
+        }
+      ]
+    },
+    {
+      "case": "floating_point::formatted_display_and_write",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/floating_point.vtest",
+        "script_sha256": "8d4ba813a509aee226ac4facc204b354c36c13a64dab3df830877132da9f1722"
+      },
+      "disposition": "proof_backend_unsupported",
+      "designs": [
+        {
+          "design_sha256": "0bb4d8d3537ca4d54255f182b453bd9b40e684d468e989d197f966802eb142d1",
+          "protocol_sha256": "d934e8715ecee6e02f3092359418804f18e9b6c51b23cde7b63f01dcaca3f2f9",
+          "reads": 0,
+          "commands": 2,
+          "operations": 0,
+          "diagnostic": {
+            "stage": "proof_backend",
+            "detail_sha256": "66c30dfb7dedd7b8288bc0218b8dad496e0558154f775a9b0327f5d9ed388c83"
+          }
+        }
+      ]
+    },
+    {
+      "case": "floating_point::integral_constants_from_float",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/floating_point.vtest",
+        "script_sha256": "26c75e3be7c25762abd889280379e01e5c1a2a306833b444878d3a7ccf39754b"
+      },
+      "disposition": "known_celox_failure",
+      "designs": [
+        {
+          "design_sha256": "40abae4142f25784cff500ca49af7ac1a3a49202ba286996d8fce1479eb64ace",
+          "protocol_sha256": "917a8975f6b9fd66ccc3c790e7d852053063fb43f09929e48cda87de48c44bdf",
+          "reads": 1,
+          "commands": 3,
+          "operations": 1,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "floating_point::scalar_port_and_function_conversions",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/floating_point.vtest",
+        "script_sha256": "f33544d3049fbec21f690d1d17bb1b2192d167da8ca07c66041f4cb81c793ccf"
+      },
+      "disposition": "proof_backend_unsupported",
+      "designs": [
+        {
+          "design_sha256": "4b93b99ab5205a7f4a6127a33abbf8eebc620e5667ff21e6313cbe8fab742dbd",
+          "protocol_sha256": "bf0c65eb5ed5d10ef0a85561583745409cc4fe0543d5334109016bcea6dec686",
+          "reads": 0,
+          "commands": 2,
+          "operations": 0,
+          "diagnostic": {
+            "stage": "proof_backend",
+            "detail_sha256": "66c30dfb7dedd7b8288bc0218b8dad496e0558154f775a9b0327f5d9ed388c83"
+          }
+        }
+      ]
+    },
+    {
+      "case": "floating_point::sequential_float",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/floating_point.vtest",
+        "script_sha256": "6e94cbc66114b0c6bcb49758456f96eff3d7edf2d43b616798eb68fc4ef33e63"
+      },
+      "disposition": "proof_backend_unsupported",
+      "designs": [
+        {
+          "design_sha256": "b801c96fb3788b72a88bcc18f31879a369d9209fe50c1fe5a16722e74fc1a522",
+          "protocol_sha256": "6dafbc606592f23cec81d519b252c223851b6dcfdcdd275d42261639026027ed",
+          "reads": 0,
+          "commands": 2,
+          "operations": 0,
+          "diagnostic": {
+            "stage": "proof_backend",
+            "detail_sha256": "66c30dfb7dedd7b8288bc0218b8dad496e0558154f775a9b0327f5d9ed388c83"
+          }
+        }
+      ]
+    },
+    {
+      "case": "floating_point::unknown_integer_conversion",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/floating_point.vtest",
+        "script_sha256": "0d177a5196616eb8fa67fbd2538b3ef5633db16df4752b197d566937704e290a"
+      },
+      "disposition": "proof_backend_unsupported",
+      "designs": [
+        {
+          "design_sha256": "be07903d0c33d1fad87313fcac7ad79c522b066249acad18449295dc1274a96b",
+          "protocol_sha256": "d496d72f77c6e010d50f1086fb02fa09e397be1f8367a7c88649cc32b7daf1d1",
+          "reads": 0,
+          "commands": 2,
+          "operations": 0,
+          "diagnostic": {
+            "stage": "proof_backend",
+            "detail_sha256": "66c30dfb7dedd7b8288bc0218b8dad496e0558154f775a9b0327f5d9ed388c83"
+          }
+        }
+      ]
+    },
+    {
       "case": "for_loop_unroll::test_for_loop_unroll_break_in_always_ff",
       "expectation": "Simulation",
       "category": "ControlFlow",
@@ -12419,6 +12577,46 @@
           "reads": 3,
           "commands": 35,
           "operations": 16,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "struct_constructor::test_single_bit_aggregate_members",
+      "expectation": "Simulation",
+      "category": "Types",
+      "source": {
+        "file": "src/veryl/cases/struct_constructor.vtest",
+        "script_sha256": "c848e74e8360cabf67c3383b803c30f2b3dfe71101d6e11e71762b5ea58062ff"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "b28cb6b50fb627c38d37257663238fcc7251357eba078723b0520e707ae98cc4",
+          "protocol_sha256": "ed849f25149487d55f2824aff43061a9265a4b66600b39c2550c03dbdd5d57ed",
+          "reads": 4,
+          "commands": 12,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "struct_constructor::test_single_bit_struct_ff",
+      "expectation": "Simulation",
+      "category": "Types",
+      "source": {
+        "file": "src/veryl/cases/struct_constructor.vtest",
+        "script_sha256": "7f6b0b1d725fd3b5b6fee21779da0b4163e6be39319bbcdabb959c51bd1b32fd"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "ed7aee8f18662ff1afa275f786c6186b66d0d6253382b1236053071c051d241b",
+          "protocol_sha256": "6e97d458512398e458a81dc73e618280953ac48befada3b8e37cc555967589ae",
+          "reads": 3,
+          "commands": 15,
+          "operations": 6,
           "diagnostic": null
         }
       ]

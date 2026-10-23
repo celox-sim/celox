@@ -236,17 +236,19 @@ macro_rules! scheduled_requests {
                   end
                 endmodule
                 "#;
-                let result = celox::Simulator::from_sv_sources(
+                let error = celox::Simulator::from_sv_sources(
                     vec![(source, Path::new("dead_host.sv"))],
                     "Top",
                 )
-                .$backend();
+                .$backend()
+                .err()
+                .unwrap();
                 assert!(
-                    result
-                        .err()
-                        .unwrap()
-                        .to_string()
-                        .contains("require Simulation")
+                    matches!(
+                        error.kind(),
+                        celox::SimulatorErrorKind::ProcessRequiresSimulation(_)
+                    ),
+                    "{error}"
                 );
                 let mut sim = celox::Simulation::from_sv_sources(
                     vec![(source, Path::new("dead_host.sv"))],

@@ -56,6 +56,9 @@ impl From<celox_frontend_core::LoweringPhase> for LoweringPhase {
 /// source identities are discarded by lowering.
 #[derive(Error, Debug, Clone)]
 pub enum FrontendDiagnostic {
+    #[error("latch inference inside always_comb: assignments retain their previous values")]
+    InferredLatch { source_location: SourceLocation },
+
     #[error("Array literal side-effect evaluation count is undefined: {detail}")]
     UndefinedArrayLiteralEvaluationCount {
         detail: String,
@@ -88,6 +91,41 @@ pub enum FrontendDiagnostic {
 }
 
 impl FrontendDiagnostic {
+    pub(crate) fn inferred_latch(token: &TokenRange) -> Self {
+        Self::InferredLatch {
+            source_location: SourceLocation::from_token(token),
+        }
+    }
+
+    pub(crate) fn same_site(&self, other: &Self) -> bool {
+        let a = self.source_location();
+        let b = other.source_location();
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+            && a.path() == b.path()
+            && a.span == b.span
+    }
+
+    /// Coverage warnings for this same process are represented by inferred_latch.
+    pub fn covers_uncovered_branch(&self, error: &veryl_analyzer::AnalyzerError) -> bool {
+        let Self::InferredLatch { source_location } = self else {
+            return false;
+        };
+        let veryl_analyzer::AnalyzerError::UncoveredBranch {
+            input,
+            error_locations,
+            ..
+        } = error
+        else {
+            return false;
+        };
+        source_location.path() == input.sources.first().map(|source| source.path.as_str())
+            && error_locations.iter().any(|span| {
+                source_location.span.offset() <= span.offset()
+                    && span.offset() + span.len()
+                        <= source_location.span.offset() + source_location.span.len()
+            })
+    }
+
     pub fn undefined_array_literal_evaluation_count(
         token: &TokenRange,
         detail: impl Into<String>,
@@ -132,7 +170,8 @@ impl FrontendDiagnostic {
 
     fn source_location(&self) -> &SourceLocation {
         match self {
-            Self::UndefinedArrayLiteralEvaluationCount {
+            Self::InferredLatch { source_location }
+            | Self::UndefinedArrayLiteralEvaluationCount {
                 source_location, ..
             }
             | Self::MutableForBound {
@@ -158,6 +197,7 @@ impl miette::Diagnostic for FrontendDiagnostic {
                 "undefined_array_literal_evaluation_count"
             }
             Self::UnspecifiedOutputCopyOrder { .. } => "unspecified_output_copy_order",
+            Self::InferredLatch { .. } => "inferred_latch",
             Self::MutableForBound { .. } => "mutable_for_bound",
             Self::TimeAdvancingForBound { .. } => "time_advancing_for_bound",
             Self::UnknownForBoundEffect { .. } => "unknown_for_bound_effect",
@@ -174,6 +214,9 @@ impl miette::Diagnostic for FrontendDiagnostic {
 
     fn help<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self {
+            Self::InferredLatch { .. } => {
+                "assign every output on every path, or configure diagnostics.inferred_latch as warn or allow"
+            }
             Self::UndefinedArrayLiteralEvaluationCount { .. } => {
                 "evaluate the expression into a temporary before the array literal, then use that value in default or repeat"
             }
@@ -201,6 +244,7 @@ impl miette::Diagnostic for FrontendDiagnostic {
         let label = match self {
             Self::UndefinedArrayLiteralEvaluationCount { .. } => "effectful default or repeat item",
             Self::UnspecifiedOutputCopyOrder { .. } => "overlapping output arguments in this call",
+            Self::InferredLatch { .. } => "retained assignment in this process",
             _ => "loop with an unstable continuation bound",
         };
         Some(Box::new(std::iter::once(

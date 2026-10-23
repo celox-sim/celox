@@ -311,6 +311,9 @@ pub(super) fn body(
     subroutine: &Subroutine,
     locals: &[LocalVariable],
 ) -> Option<(Expr, Vec<(String, Expr)>)> {
+    if !subroutine.persistent_locals.is_empty() {
+        return None;
+    }
     let mut types = HashMap::default();
     for local in locals {
         if !local.r#type.unpacked_ranges().is_empty() {

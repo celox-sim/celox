@@ -163,6 +163,9 @@ pub(super) fn lower_wide_binary(
     }
 
     match op {
+        BinaryOp::Float { .. } => {
+            unreachable!("float operations are lowered before integer operations")
+        }
         // Chunk-wise operations: apply to each 64-bit chunk independently
         BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => {
             let lhs_chunks = ctx.get_wide_chunks(&lhs, block);

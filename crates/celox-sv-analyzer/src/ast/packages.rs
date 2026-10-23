@@ -197,19 +197,19 @@ impl Packages {
         trees: &[(&SyntaxTree, &Path)],
         roots: Option<&[&str]>,
     ) -> Result<Self, AnalyzerError> {
-        Self::analyze_with_options(trees, roots, false)
+        Self::analyze_with_options(trees, roots, crate::AnalysisOptions::default())
     }
 
     pub(crate) fn analyze_with_options(
         trees: &[(&SyntaxTree, &Path)],
         roots: Option<&[&str]>,
-        allow_mixed_timescales: bool,
+        options: crate::AnalysisOptions,
     ) -> Result<Self, AnalyzerError> {
         let mut warnings = Vec::new();
         for (tree, _) in trees {
             super::warnings::append(&mut warnings, super::warnings::packages(tree));
         }
-        match Self::analyze_with_roots_impl(trees, roots, allow_mixed_timescales) {
+        match Self::analyze_with_roots_impl(trees, roots, options) {
             Ok(packages) => Ok(packages.with_warnings(warnings)),
             Err(error) => Err(error.with_warnings(warnings)),
         }
@@ -218,10 +218,9 @@ impl Packages {
     fn analyze_with_roots_impl(
         trees: &[(&SyntaxTree, &Path)],
         roots: Option<&[&str]>,
-        allow_mixed_timescales: bool,
+        options: crate::AnalysisOptions,
     ) -> Result<Self, AnalyzerError> {
-        let mut timescales =
-            timescales::Timescales::collect_with_options(trees, allow_mixed_timescales)?;
+        let mut timescales = timescales::Timescales::collect_with_options(trees, options)?;
         if let Some(roots) = roots {
             timescales.select_roots(roots);
         }
@@ -483,7 +482,7 @@ fn analyze_package_scope(
     // The names the package declares, from its syntax: an escaped name may
     // contain `::` itself.
     let own = imports::scope_names(tree)?;
-    let variables = package_variables(name, tree)?;
+    let mut variables = package_variables(name, tree)?;
     let mut module = Module::from_scope_with_parameter_overrides(
         tree,
         "",
@@ -494,6 +493,9 @@ fn analyze_package_scope(
         },
         Arc::new(imported),
     )?;
+    for subroutine in &module.subroutines {
+        variables.extend(subroutine.persistent_locals.iter().cloned());
+    }
     let mut symbols = module
         .symbols
         .take()

@@ -127,6 +127,14 @@ impl super::traits::SimBackend for WasmBackend {
     fn layout(&self) -> &super::MemoryLayout {
         WasmBackend::layout(self)
     }
+
+    fn heap(&self) -> &celox_heap::Heap {
+        self.store.data()
+    }
+
+    fn heap_mut(&mut self) -> &mut celox_heap::Heap {
+        self.store.data_mut()
+    }
     fn id_to_addr_slice(&self) -> &[AbsoluteAddr] {
         WasmBackend::id_to_addr_slice(self)
     }
@@ -149,7 +157,7 @@ impl super::traits::SimBackend for WasmBackend {
 
 /// The runtime WASM backend.
 pub struct WasmBackend {
-    store: Store<()>,
+    store: Store<celox_heap::Heap>,
     memory: Memory,
     raw_view_exposed: bool,
     comb_func: TypedFunc<(), i64>,
@@ -306,7 +314,7 @@ impl WasmBackend {
         }
 
         // Create store and shared memory
-        let mut store = Store::new(&engine, ());
+        let mut store = Store::new(&engine, celox_heap::Heap::new());
         let runtime_event_base = layout.merged_total_size;
         let comb_capture_enabled_base = runtime_event_base + layout.runtime_event_buffer_size;
         let comb_capture_enabled_size = layout.runtime_event_site_layouts.len().max(1);
@@ -347,7 +355,7 @@ impl WasmBackend {
         // extern functions it imports.
         fn instantiate_module(
             engine: &Engine,
-            store: &mut Store<()>,
+            store: &mut Store<celox_heap::Heap>,
             module: &Module,
             memory: &Memory,
             extern_functions: &crate::dpi::ExternFunctionTable,
@@ -369,19 +377,30 @@ impl WasmBackend {
                 };
                 let extern_functions = extern_functions.clone();
                 linker
-                    .func_new("env", import.name(), ty, move |_, params, results| {
-                        // The SIR verifier bounds the argument count.
-                        let mut args = [0; celox_sir::MAX_EXTERN_CALL_ARGUMENTS];
-                        let args = &mut args[..params.len()];
-                        for (arg, param) in args.iter_mut().zip(params) {
-                            *arg = param.unwrap_i64() as u64;
-                        }
-                        // SAFETY: the module calls each import with the
-                        // argument count of the DPI-C import it links to.
-                        let result = unsafe { extern_functions.call(func, args) };
-                        results[0] = wasmtime::Val::I64(result as i64);
-                        Ok(())
-                    })
+                    .func_new(
+                        "env",
+                        import.name(),
+                        ty,
+                        move |mut caller, params, results| {
+                            // The SIR verifier bounds the argument count.
+                            let mut args = [0; celox_sir::MAX_EXTERN_CALL_ARGUMENTS];
+                            let args = &mut args[..params.len()];
+                            for (arg, param) in args.iter_mut().zip(params) {
+                                *arg = param.unwrap_i64() as u64;
+                            }
+                            // SAFETY: the module calls each import with the
+                            // argument count of the DPI-C import it links to.
+                            let result = if func == u32::MAX {
+                                celox_sir::float::evaluate(args[0], args[1], args[2])
+                            } else if func == celox_sir::extern_abi::HEAP_HELPER_ID {
+                                caller.data_mut().call(args[0], args[1], args[2], args[3])
+                            } else {
+                                unsafe { extern_functions.call(func, args) }
+                            };
+                            results[0] = wasmtime::Val::I64(result as i64);
+                            Ok(())
+                        },
+                    )
                     .map_err(|source| wasm_codegen_error("linking", source))?;
             }
             let instance = linker

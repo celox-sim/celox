@@ -150,6 +150,8 @@ export interface WasmFrontendSimulatorHandle
 	extends FrontendSimulatorHandleMetadata {
 	initialMemoryBytes(): Uint8Array | number[];
 	combWasmBytes(): Uint8Array | number[];
+	/** Internal floating-point helper for generated simulation modules. */
+	evaluateFloat?(lhs: bigint, rhs: bigint, code: bigint): bigint;
 	eventWasmBytes(name: string): Uint8Array | number[];
 	/**
 	 * Per event name, the derived domains its ticks and edges run, as JSON.
@@ -322,6 +324,11 @@ export interface SimulatorOptions {
 	fourState?: boolean;
 	/** Ordered SystemVerilog plusargs; the leading + is optional. */
 	plusargs?: string[];
+	/**
+	 * Allow inferred latches in always_comb when no explicit inferred_latch
+	 * diagnostic level is set. Project diagnostics take precedence. Default: false.
+	 */
+	allowInferredLatches?: boolean;
 	/** Path to write VCD waveform output. */
 	vcd?: string;
 	/**

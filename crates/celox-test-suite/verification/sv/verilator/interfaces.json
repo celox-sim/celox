@@ -131,6 +131,29 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator 5.052 rejects a four-bit actual connected to a 2x2 interface instance array with scalar ports, requiring only 1 or 2 bits instead of 1 or 4. IEEE 1800-2023 23.3.3.5 distributes packed actuals across all instance dimensions, rightmost dimension first. Celox passes the unchanged shared assertions; Icarus separately rejects multidimensional instance arrays.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_interface_array_connections_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_multidimensional_interface_connections",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects a four-bit actual connected to a 2x2 interface instance array with scalar ports, requiring only 1 or 2 bits instead of 1 or 4. IEEE 1800-2023 23.3.3.5 distributes packed actuals across all instance dimensions, rightmost dimension first. Celox passes the unchanged shared assertions; Icarus separately rejects multidimensional instance arrays.",
+        "upstream": []
+      },
+      "name": "interfaces::distributes_multidimensional_connections_to_interface_arrays",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

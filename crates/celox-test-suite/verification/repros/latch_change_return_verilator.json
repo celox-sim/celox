@@ -1,0 +1,70 @@
+{
+  "schema_version": 3,
+  "suite_version": "0.11.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n",
+      "expectation": "Simulation",
+      "name": "latch::hierarchy_same_activation_change_return",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n",
+      "expectation": "Simulation",
+      "name": "latch::same_activation_change_return",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 0,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 2,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "include_ignored": true,
+  "exclude_stronger_than_sv": false,
+  "standard": "IEEE 1800-2023 9.2.2.1, 9.2.2.2.1, 9.2.2.3 and 9.4.2.2: implicit event controls govern procedural activations; written expressions are excluded from always_latch sensitivity, and @* does not wait for events while executing its body.",
+  "adapter_free": [
+    {
+      "name": "latch::same_activation_change_return",
+      "source": "verification/repros/latch_change_return.sv",
+      "verilator_command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <build-dir> -o sim latch_change_return.sv; <build-dir>/sim",
+      "verilator_exit_code": 1,
+      "verilator_output": "%Error-DIDNOTCONVERGE: Settle region did not converge after '--converge-limit' of 10000 tries\nAborting...",
+      "icarus_command": "iverilog -g2012 -s Top -o <output> latch_change_return.sv; vvp <output>",
+      "icarus_version": "Icarus Verilog version 13.0",
+      "icarus_exit_code": 0,
+      "icarus_output": "crates/celox-test-suite/verification/repros/latch_change_return.sv:18: $finish called at 3 (1s)",
+      "expected": "The process settles and all original timed assertions complete."
+    },
+    {
+      "name": "latch::hierarchy_same_activation_change_return",
+      "source": "verification/repros/latch_hierarchy_change_return.sv",
+      "verilator_command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <build-dir> -o sim latch_hierarchy_change_return.sv; <build-dir>/sim",
+      "verilator_exit_code": 1,
+      "verilator_output": "%Error-DIDNOTCONVERGE: Settle region did not converge after '--converge-limit' of 10000 tries\nAborting...",
+      "icarus_command": "iverilog -g2012 -s Top -o <output> latch_hierarchy_change_return.sv; vvp <output>",
+      "icarus_version": "Icarus Verilog version 13.0",
+      "icarus_exit_code": 0,
+      "icarus_output": "crates/celox-test-suite/verification/repros/latch_hierarchy_change_return.sv:16: $finish called at 2 (1s)",
+      "expected": "The process settles and all original timed assertions complete."
+    }
+  ]
+}

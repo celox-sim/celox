@@ -147,7 +147,7 @@ impl SLTToSIRLowerer {
         skipped_cost > introduced_cost
     }
 
-    fn mux_cfg_plan<A: Hash + Eq + Clone + std::fmt::Debug>(
+    pub(super) fn mux_cfg_plan<A: Hash + Eq + Clone + std::fmt::Debug>(
         &self,
         cond: NodeId,
         then_expr: NodeId,
@@ -214,7 +214,7 @@ impl SLTToSIRLowerer {
         Some(MuxCfgPlan { shared_nodes })
     }
 
-    fn mux_slice_cfg_plan<A: Hash + Eq + Clone + std::fmt::Debug>(
+    pub(super) fn mux_slice_cfg_plan<A: Hash + Eq + Clone + std::fmt::Debug>(
         &self,
         cond: NodeId,
         then_expr: NodeId,
@@ -288,7 +288,7 @@ impl SLTToSIRLowerer {
         Some(MuxCfgPlan { shared_nodes })
     }
 
-    fn constant_condition<A: Hash + Eq + Clone>(
+    pub(super) fn constant_condition<A: Hash + Eq + Clone>(
         cond: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> Option<bool> {
@@ -296,7 +296,9 @@ impl SLTToSIRLowerer {
         (mask == BigUint::from(0u8)).then(|| value != BigUint::from(0u8))
     }
 
-    fn hoist_shared_mux_nodes<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+    pub(super) fn hoist_shared_mux_nodes<
+        A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
+    >(
         &self,
         builder: &mut SIRBuilder<A>,
         plan: &MuxCfgPlan,
@@ -312,232 +314,5 @@ impl SLTToSIRLowerer {
         for &node in &plan.shared_nodes {
             self.lower_inner(builder, node, arena, cache, env, true);
         }
-    }
-
-    /// Cost-directed reverse if-conversion for symbolic expression DAGs.
-    ///
-    /// Cheap pure muxes remain `SIRInstruction::Mux`.  When the expected work
-    /// skipped by preserving control exceeds branch, prediction, and phi-copy
-    /// costs, the arms are lowered into separate CFG blocks.  Division and
-    /// remainder remain a correctness case: an unselected zero divisor must
-    /// never reach a native divide instruction.
-    pub(super) fn lower_mux_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
-        builder: &mut SIRBuilder<A>,
-        cond: NodeId,
-        then_expr: NodeId,
-        else_expr: NodeId,
-        arena: &SLTNodeArena<A>,
-        cache: &mut crate::HashMap<NodeId, RegisterId>,
-        env: Option<&LowerEnv<'_, A>>,
-        allow_cache: bool,
-    ) -> RegisterId {
-        self.with_mux_stats(|stats| stats.normal_seen += 1);
-        let then_width = self.get_width(then_expr, arena);
-        let else_width = self.get_width(else_expr, arena);
-        let res_width = then_width.max(else_width);
-
-        if let Some(take_then) = Self::constant_condition(cond, arena) {
-            self.with_mux_stats(|stats| stats.constant_folded += 1);
-            let selected = if take_then { then_expr } else { else_expr };
-            let value = self.lower_inner(builder, selected, arena, cache, env, allow_cache);
-            return self.cast_reg_width(builder, value, res_width);
-        }
-
-        let cond_reg = self.lower_inner(builder, cond, arena, cache, env, allow_cache);
-        if let Some(plan) = self.mux_cfg_plan(
-            cond,
-            then_expr,
-            else_expr,
-            res_width,
-            arena,
-            cache,
-            allow_cache,
-        ) {
-            self.hoist_shared_mux_nodes(builder, &plan, arena, cache, env, allow_cache);
-            return self.lower_mux_cfg(
-                builder,
-                cond_reg,
-                then_expr,
-                else_expr,
-                res_width,
-                arena,
-                cache,
-                env,
-                allow_cache,
-            );
-        }
-
-        // An SLT mux is as wide as its wider arm, while a SIR mux needs arms of
-        // its own width; widen the narrower arm as the folded and CFG paths do.
-        let then_val = self.lower_inner(builder, then_expr, arena, cache, env, allow_cache);
-        let then_val = self.cast_reg_width(builder, then_val, res_width);
-        let else_val = self.lower_inner(builder, else_expr, arena, cache, env, allow_cache);
-        let else_val = self.cast_reg_width(builder, else_val, res_width);
-
-        // Use Mux instruction: preserves Z in 4-state, branchless select in 2-state.
-        // Backends handle value and mask selection independently.
-        let result = builder.alloc_logic(res_width);
-        builder.emit(SIRInstruction::Mux(result, cond_reg, then_val, else_val));
-
-        result
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn lower_mux_cfg<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
-        builder: &mut SIRBuilder<A>,
-        cond_reg: RegisterId,
-        then_expr: NodeId,
-        else_expr: NodeId,
-        result_width: usize,
-        arena: &SLTNodeArena<A>,
-        cache: &mut crate::HashMap<NodeId, RegisterId>,
-        env: Option<&LowerEnv<'_, A>>,
-        allow_cache: bool,
-    ) -> RegisterId {
-        let result = builder.alloc_logic(result_width);
-        let then_block = builder.new_block();
-        let else_block = builder.new_block();
-        let merge_block = builder.new_block_with(vec![result]);
-
-        builder.seal_block(SIRTerminator::Branch {
-            cond: cond_reg,
-            true_block: (then_block, vec![]),
-            false_block: (else_block, vec![]),
-        });
-
-        let then_transaction = self.cache_transaction();
-        builder.switch_to_block(then_block);
-        let then_val = self.lower_inner(builder, then_expr, arena, cache, env, allow_cache);
-        let then_val = self.cast_reg_width(builder, then_val, result_width);
-        builder.seal_block(SIRTerminator::Jump(merge_block, vec![then_val]));
-        if allow_cache {
-            self.rollback_cache(cache, then_transaction);
-        }
-
-        let else_transaction = self.cache_transaction();
-        builder.switch_to_block(else_block);
-        let else_val = self.lower_inner(builder, else_expr, arena, cache, env, allow_cache);
-        let else_val = self.cast_reg_width(builder, else_val, result_width);
-        builder.seal_block(SIRTerminator::Jump(merge_block, vec![else_val]));
-        if allow_cache {
-            self.rollback_cache(cache, else_transaction);
-        }
-
-        builder.switch_to_block(merge_block);
-        result
-    }
-
-    pub(super) fn lower_region_slice_mux_inner<
-        A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
-    >(
-        &self,
-        builder: &mut SIRBuilder<A>,
-        cond: NodeId,
-        then_expr: NodeId,
-        else_expr: NodeId,
-        access: &BitAccess,
-        arena: &SLTNodeArena<A>,
-        cache: &mut crate::HashMap<NodeId, RegisterId>,
-        env: Option<&LowerEnv<'_, A>>,
-        allow_cache: bool,
-    ) -> RegisterId {
-        self.with_mux_stats(|stats| stats.slice_seen += 1);
-        let result_width = access.msb - access.lsb + 1;
-        if let Some(take_then) = Self::constant_condition(cond, arena) {
-            self.with_mux_stats(|stats| stats.constant_folded += 1);
-            return self.lower_region_slice_inner(
-                builder,
-                if take_then { then_expr } else { else_expr },
-                access,
-                arena,
-                cache,
-                env,
-                allow_cache,
-            );
-        }
-
-        let cond_reg = self.lower_inner(builder, cond, arena, cache, env, allow_cache);
-        if let Some(plan) = self.mux_slice_cfg_plan(
-            cond,
-            then_expr,
-            else_expr,
-            access,
-            arena,
-            cache,
-            allow_cache,
-        ) {
-            self.hoist_shared_mux_nodes(builder, &plan, arena, cache, env, allow_cache);
-            let result = builder.alloc_logic(result_width);
-            let then_block = builder.new_block();
-            let else_block = builder.new_block();
-            let merge_block = builder.new_block_with(vec![result]);
-
-            builder.seal_block(SIRTerminator::Branch {
-                cond: cond_reg,
-                true_block: (then_block, vec![]),
-                false_block: (else_block, vec![]),
-            });
-
-            let then_transaction = self.cache_transaction();
-            builder.switch_to_block(then_block);
-            let then_value = self.lower_region_slice_inner(
-                builder,
-                then_expr,
-                access,
-                arena,
-                cache,
-                env,
-                allow_cache,
-            );
-            builder.seal_block(SIRTerminator::Jump(merge_block, vec![then_value]));
-            if allow_cache {
-                self.rollback_cache(cache, then_transaction);
-            }
-
-            let else_transaction = self.cache_transaction();
-            builder.switch_to_block(else_block);
-            let else_value = self.lower_region_slice_inner(
-                builder,
-                else_expr,
-                access,
-                arena,
-                cache,
-                env,
-                allow_cache,
-            );
-            builder.seal_block(SIRTerminator::Jump(merge_block, vec![else_value]));
-            if allow_cache {
-                self.rollback_cache(cache, else_transaction);
-            }
-
-            builder.switch_to_block(merge_block);
-            return result;
-        }
-
-        let then_value = self.lower_region_slice_inner(
-            builder,
-            then_expr,
-            access,
-            arena,
-            cache,
-            env,
-            allow_cache,
-        );
-        let else_value = self.lower_region_slice_inner(
-            builder,
-            else_expr,
-            access,
-            arena,
-            cache,
-            env,
-            allow_cache,
-        );
-        let result = builder.alloc_logic(result_width);
-        builder.emit(SIRInstruction::Mux(
-            result, cond_reg, then_value, else_value,
-        ));
-        result
     }
 }

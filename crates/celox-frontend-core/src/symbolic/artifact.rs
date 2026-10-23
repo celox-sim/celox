@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, fmt};
 use celox_design::{
     CounterSlots, ExternFunction, InitialStateValue, ModuleId, NbaSite, ProcessSlots,
     RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, TriggerSet,
-    VariableMetadata, WaitSite,
+    VarAtomBase, VariableMetadata, WaitSite,
 };
 use celox_sir::ExecutionUnit;
 use celox_slt::{CombObserver, FfAccessSummary, GlueBlockBase, LogicPath, SLTNodeArena};
@@ -22,6 +22,8 @@ pub struct SymbolicVariable {
     pub signed: bool,
     pub metadata: VariableMetadata,
     pub packed_dims: Vec<usize>,
+    /// Declared unpacked bounds, in storage order; empty uses zero-based dimensions.
+    pub unpacked_ranges: Vec<(i128, i128)>,
     pub source: Option<SourceLocation>,
     pub module_affiliated: bool,
 }
@@ -52,6 +54,7 @@ impl<A> FfPart<A> {
 pub struct SymbolicProcess {
     pub kernel: ExecutionUnit<SymbolicRegionedAddr>,
     pub slots: ProcessSlots<SourceVarId>,
+    pub origin: celox_design::ProcessOrigin,
 }
 
 /// The commit of a trigger group's results, split by region.
@@ -61,6 +64,24 @@ pub struct SplitCommit<A> {
     pub active: ExecutionUnit<A>,
     /// Commits of the results of nonblocking assignments.
     pub nba: ExecutionUnit<A>,
+}
+
+/// A combinational process that `comb_blocks` holds both as symbolic
+/// definitions and as an imperative unit. The symbolic form computes only
+/// the final value of each written variable; the unit performs every store,
+/// so the counters of a watched variable see the intermediate values
+/// (IEEE 1800-2023 4.3, 9.4.2). Assembly keeps the unit for an instance in
+/// which a variable of `candidates` is counted, and the symbolic
+/// definitions otherwise.
+#[derive(Clone, Debug)]
+pub struct CombAlternative {
+    /// The `process` of the unit's paths.
+    pub process: SourceVarId,
+    /// The ranges the symbolic definitions write; other drivers may write
+    /// the other bits of the same variables.
+    pub targets: Vec<VarAtomBase<SourceVarId>>,
+    /// The variables the unit may store twice in one execution.
+    pub candidates: Vec<SourceVarId>,
 }
 
 #[derive(Clone)]
@@ -97,6 +118,9 @@ pub struct SimModule {
     /// Extern functions the module calls; its `ExternCall`s index this list.
     pub extern_functions: Vec<ExternFunction>,
     pub initial_memory_values: Vec<InitialStateValue<SourceVarId>>,
+    pub folded_initial_memory_values: Vec<InitialStateValue<SourceVarId>>,
+    /// Static declaration state, before initial blocks or combinational activity.
+    pub declaration_initial_memory_values: Vec<InitialStateValue<SourceVarId>>,
     pub comb_boundaries: HashMap<SourceVarId, BTreeSet<usize>>,
     pub arena: SLTNodeArena<SourceVarId>,
     pub reset_clock_map: HashMap<SourceVarId, SourceVarId>,
@@ -111,17 +135,53 @@ pub struct SimModule {
     /// `crate::watch::multi_store_candidates`). Assembly counts a signal's
     /// occurrences only if a flip-flop domain or a wait watches it.
     pub counter_slots: Vec<CounterSlots<SourceVarId>>,
+    /// Objects that hold the occurrences of a flip-flop's repeated writes
+    /// to a signal until their commit (see `crate::watch::PendingSlots`).
+    /// Assembly uses them only for the signals it counts.
+    pub pending_slots: Vec<crate::watch::PendingSlots<SourceVarId>>,
+    /// Combinational processes lowered both ways; see [`CombAlternative`].
+    pub comb_alternatives: Vec<CombAlternative>,
     /// Wait sites of the module's processes; `process` indexes
     /// [`Self::processes`].
     pub wait_sites: Vec<WaitSite<SourceVarId>>,
     /// Nonblocking sites of the module's processes; `process` indexes
     /// [`Self::processes`].
     pub nba_sites: Vec<NbaSite<SourceVarId>>,
+    /// Nonblocking sites whose kernel has both a staged and a queued path.
+    pub nba_switches: Vec<NbaSwitch<SourceVarId>>,
     /// Synchronous host operations of the module processes.
     pub host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
     /// The variable through which the module's code reads the simulation
     /// time; see `RuntimeSchema::time_slots`.
     pub time_slot: Option<SourceVarId>,
+}
+
+/// A nonblocking site whose kernel has two paths, as
+/// `ProcessKernelBuilder::nonblocking_switched` builds them. The staged path
+/// stages the value in the site's `value` and sets its `pending` flag; the
+/// queued path leaves the value in `queued` and returns to the runtime.
+/// Assembly keeps one path: the staged one only if nothing else writes the
+/// site's target and nothing can observe when the target is updated. For the
+/// queued path it makes `queued` the site's value and drops the flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NbaSwitch<A> {
+    /// The site's `value` object, which identifies the site.
+    pub value: A,
+    /// The one-bit variable whose load selects the path. It holds no state:
+    /// assembly replaces the selection by a jump.
+    pub switch: A,
+    /// The value object of the queued path.
+    pub queued: A,
+}
+
+impl<A> NbaSwitch<A> {
+    pub fn map<B>(&self, mut map: impl FnMut(&A) -> B) -> NbaSwitch<B> {
+        NbaSwitch {
+            value: map(&self.value),
+            switch: map(&self.switch),
+            queued: map(&self.queued),
+        }
+    }
 }
 
 /// The package variable a module variable denotes.

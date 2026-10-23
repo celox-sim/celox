@@ -1,6 +1,8 @@
 {
   "case_files": [
+    "icarus/aggregate_regressions.json",
     "icarus/always_comb.json",
+    "icarus/class.json",
     "icarus/generate.json",
     "icarus/hierarchy.json",
     "icarus/indexed_select.json",
@@ -11,6 +13,7 @@
     "icarus/procedural.json",
     "icarus/random_plusargs.json",
     "icarus/review_regressions.json",
+    "icarus/string.json",
     "icarus/synthesizable.json",
     "icarus/system_functions.json",
     "icarus/timing.json",

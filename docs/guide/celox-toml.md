@@ -129,6 +129,21 @@ The Vite plugin picks up `test_veryl/` automatically and generates type definiti
 - The Vite plugin regenerates types for test sources on hot reload, just like for production sources.
 - `[simulation]` settings apply to every `Simulation.fromProject` / `Simulation.create` call within the project. A per-call `{ maxSteps }` option always takes precedence over the `celox.toml` value.
 
+
+### CLI SystemVerilog timing
+
+For `celox run` and `celox vpi build`, set `timescale = "1ns/1fs"` at the
+manifest root or in `[targets.NAME]`. `--timescale 1ns/1fs` overrides the selected
+target, which overrides the root setting. The default remains `1ns/1ps`.
+
+This sets the default time unit and precision for scopes without source timing
+declarations. The configured precision also contributes to the global scheduler
+resolution, so cocotb can schedule femtosecond clock periods even when an SV
+module declares `1ns/1ps`. Explicit `timeunit`, `timeprecision`, and `` `timescale ``
+settings retain their scope units and delay rounding. The global resolution is
+the finest configured or declared precision. Values use magnitudes 1, 10, or 100
+and units `s`, `ms`, `us`, `ns`, `ps`, or `fs`; precision cannot be coarser than unit.
+
 ### `[diagnostics]`
 
 Override individual compilation diagnostics by their displayed code:
@@ -136,6 +151,7 @@ Override individual compilation diagnostics by their displayed code:
 ```toml
 [diagnostics]
 mixed_timescale = "warn"
+inferred_latch = "warn"
 exit_outside_program = "allow"
 memory_file_word_count = "error"
 ```
@@ -147,12 +163,28 @@ Use the exact code printed in the diagnostic; entries for codes not encountered
 by a compilation have no effect.
 
 Recoverable errors support relaxation only when the compiler defines a fallback.
-Currently `mixed_timescale` is the supported error: IEEE 1800-2023 §3.14.2.3 requires
+`mixed_timescale` is one supported error: IEEE 1800-2023 §3.14.2.3 requires
 consistent explicit time units and precisions. Its default is `error`. With `warn`
 or `allow`, undeclared settings use Celox's defaults (1ns unit, 1ps precision),
 explicit settings remain effective, and the global precision includes default
 scopes. Syntax errors, unsupported constructs and invalid precision declarations
 remain errors.
+
+`multiple_always_ff_drivers` defaults to `error` for shared memories written by
+an `always_ff` and another edge process (IEEE 1800-2023 §9.2.2.4). With `warn`
+or `allow`, Celox stages their nonblocking writes in sparse next-state storage
+and commits dirty chunks. Ordinary `always` procedures can share a memory
+without this diagnostic. Simultaneous
+writes to the same bits from different processes have no portable ordering.
+
+`inferred_latch` rejects retained assignments in SystemVerilog and Veryl
+`always_comb` by default. Set it to `warn` to simulate the latch with a
+source-located warning, or `allow` to simulate it silently. Ordinary `always @*`
+and explicit `always_latch` do not require this relaxation. Nonblocking latch
+assignments and unsupported combinational feedback remain errors.
+The Rust `.allow_inferred_latches(true)` and JavaScript `allowInferredLatches: true`
+options provide `allow` only when this diagnostic has no explicit setting;
+an explicit `error`, `warn` or `allow` takes precedence.
 
 Project simulator constructors load this table alongside `Veryl.toml`. Native
 compilation also supports standalone SystemVerilog projects:

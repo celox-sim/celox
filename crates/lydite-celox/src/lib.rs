@@ -1337,7 +1337,7 @@ fn unary(name: UnaryOp, x: Term, w: u32, signed: bool) -> Res<Term> {
             }
             boolword(v, w)
         }
-        PopCount | CountLeadingZeros | CountTrailingZeros => {
+        PopCount | CountLeadingZeros | CountTrailingZeros | Float { .. } => {
             return Err(format!("unsupported symbolic unary {name}"));
         }
     })

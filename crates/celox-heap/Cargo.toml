@@ -1,0 +1,16 @@
+[package]
+name                  = "celox-heap"
+version.workspace     = true
+publish               = ["crates-io"]
+authors.workspace     = true
+repository.workspace  = true
+license.workspace     = true
+description           = "Runtime heap of dynamic values referenced by handles in Celox state"
+edition.workspace     = true
+rust-version.workspace = true
+
+[dependencies]
+fxhash = { workspace = true }
+
+[lints]
+workspace = true

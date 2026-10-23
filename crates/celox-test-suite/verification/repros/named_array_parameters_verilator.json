@@ -1,0 +1,66 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "hierarchy::named_array_parameters_follow_caller_specialization at 690:3: assert_eq a: expected 0xfdfb, got 0xfbfd",
+      "expectation": "Simulation",
+      "name": "hierarchy::named_array_parameters_follow_caller_specialization",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:11:18: Expecting expression to be constant, but variable isn't const: 'Q'\n                                : ... note: In instance 'celox_suite_tb.dut.middle'\n   11 |       Child #(.Q(Q[1])) child(y);\n      |                  ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: <case>/source_0.sv:11:16: Can't convert defparam value to constant: Param 'Q' of 'child'\n                                : ... note: In instance 'celox_suite_tb.dut.middle'\n   11 |       Child #(.Q(Q[1])) child(y);\n      |                ^\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "Simulation",
+      "name": "hierarchy::named_array_parameters_forward_package_subarrays",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::named_array_parameters_forward_whole_values",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "hierarchy::named_array_parameters_keep_four_state_values",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 1,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 1,
+    "passed": 1,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 1
+  },
+  "include_ignored": true,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "note": "Focused observations before exact-case exclusions for named array parameter forwarding; shared assertions are preserved."
+}

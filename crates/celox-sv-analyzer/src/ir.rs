@@ -4,10 +4,12 @@ use crate::{ast, symbol::ModuleId, typecheck};
 
 pub use crate::ast::warnings::AnalyzerWarning;
 pub use crate::procedural::{
-    CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, SourceSpan, StmtBase, SystemTaskArg,
+    CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, ProcessSite, SourceSpan, StmtBase,
+    SystemTaskArg,
 };
 pub use crate::system_functions::{
-    ArrayQuery, Callee, MemoryFormat, Radix, Severity, SystemFunction, SystemTask, VcdTask,
+    ArrayQuery, Callee, HandleProperty, MemoryFormat, ObjectField, ObjectOp, Radix, Severity,
+    StringOp, SystemFunction, SystemTask, VcdTask,
 };
 
 /// A procedural statement of the analyzed IR.
@@ -98,6 +100,7 @@ impl Module {
             body.extend(process.body);
             self.initial_processes.push(InitialProcess {
                 creation_order: process.creation_order,
+                site: process.site,
                 scheduled_edge: true,
                 condition: None,
                 body: vec![Stmt::Loop {
@@ -115,6 +118,34 @@ impl Module {
         self.ff_processes = retained;
         self.initial_processes
             .sort_by_key(|process| (!process.initializer, process.creation_order));
+        self
+    }
+
+    /// Represent selected [`InitialProcess::level_sensitive`] processes as
+    /// `always @*`. The caller selects a process only when its list is the
+    /// implicit event expression of its statement (IEEE 1800-2023 9.4.2.2).
+    pub fn lower_level_sensitive_processes(
+        mut self,
+        mut select: impl FnMut(&InitialProcess) -> bool,
+    ) -> Self {
+        let mut retained = Vec::new();
+        for process in std::mem::take(&mut self.initial_processes) {
+            let Some(body) = process
+                .level_sensitive()
+                .filter(|_| select(&process))
+                .map(|(_, body)| body.to_vec())
+            else {
+                retained.push(process);
+                continue;
+            };
+            let at = self
+                .comb_processes
+                .partition_point(|comb| comb.creation_order <= process.creation_order);
+            let mut comb = CombProcess::new(CombProcessKind::AlwaysStar, None, Vec::new(), body);
+            comb.creation_order = process.creation_order;
+            self.comb_processes.insert(at, comb);
+        }
+        self.initial_processes = retained;
         self
     }
 
@@ -590,11 +621,17 @@ pub struct Type {
     packed_ranges: Vec<PackedRange>,
     unpacked_ranges: Vec<UnpackedRange>,
     resolved_width: Option<usize>,
+    class: Option<String>,
 }
 
 impl Type {
     pub fn kind(&self) -> TypeKind {
         self.kind
+    }
+
+    /// The class of an object handle type.
+    pub fn class(&self) -> Option<&str> {
+        self.class.as_deref()
     }
 
     pub fn is_signed(&self) -> bool {
@@ -650,6 +687,12 @@ impl Type {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeKind {
+    Real,
+    Shortreal,
+    /// IEEE 1800-2023 6.16: a dynamically sized string, held as a heap handle.
+    String,
+    /// IEEE 1800-2023 8.4: a handle of a class object.
+    Object,
     Bit,
     Logic,
     Reg,
@@ -663,6 +706,7 @@ impl Type {
     ) -> Self {
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
+        let class = r#type.class().map(str::to_owned);
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
             kind,
@@ -670,6 +714,7 @@ impl Type {
             packed_ranges,
             unpacked_ranges,
             resolved_width,
+            class,
         }
     }
 }
@@ -711,6 +756,10 @@ fn convert_type(
 impl From<ast::TypeKind> for TypeKind {
     fn from(kind: ast::TypeKind) -> Self {
         match kind {
+            ast::TypeKind::Real => TypeKind::Real,
+            ast::TypeKind::Shortreal => TypeKind::Shortreal,
+            ast::TypeKind::String => TypeKind::String,
+            ast::TypeKind::Object => TypeKind::Object,
             ast::TypeKind::Bit => TypeKind::Bit,
             ast::TypeKind::Logic => TypeKind::Logic,
             ast::TypeKind::Reg => TypeKind::Reg,
@@ -896,6 +945,7 @@ impl LValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CombProcess {
     creation_order: usize,
+    site: Option<SourceSpan>,
     kind: CombProcessKind,
     condition: Option<ConstExpr>,
     assignments: Vec<Assignment>,
@@ -904,6 +954,10 @@ pub struct CombProcess {
 }
 
 impl CombProcess {
+    pub fn site(&self) -> Option<&SourceSpan> {
+        self.site.as_ref()
+    }
+
     /// Reads removed from executable branches still affect implicit sensitivity.
     pub fn sensitivity_body(&self) -> &[Stmt] {
         &self.sensitivity_body
@@ -922,6 +976,7 @@ impl CombProcess {
     ) -> Self {
         Self {
             creation_order: 0,
+            site: None,
             sensitivity_body: Vec::new(),
             kind,
             condition,
@@ -953,25 +1008,40 @@ impl CombProcess {
 pub enum CombProcessKind {
     ContinuousAssign,
     AlwaysComb,
+    AlwaysLatch,
     AlwaysStar,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfProcess {
+    always_ff: bool,
     creation_order: usize,
+    site: Option<ProcessSite>,
     events: Vec<FfEvent>,
     body: Vec<Stmt>,
 }
 
 impl FfProcess {
+    /// Whether the source used the restricted always_ff procedure.
+    pub fn is_always_ff(&self) -> bool {
+        self.always_ff
+    }
+
     /// Position among elaborated module items, shared across process kinds.
     pub fn creation_order(&self) -> usize {
         self.creation_order
     }
 
+    /// Where the procedure is written.
+    pub fn site(&self) -> Option<&ProcessSite> {
+        self.site.as_ref()
+    }
+
     pub(crate) fn new(events: Vec<FfEvent>, body: Vec<Stmt>) -> Self {
         Self {
+            always_ff: false,
             creation_order: 0,
+            site: None,
             events,
             body,
         }
@@ -990,6 +1060,7 @@ impl FfProcess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialProcess {
     creation_order: usize,
+    site: Option<ProcessSite>,
     scheduled_edge: bool,
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
@@ -1010,9 +1081,15 @@ impl InitialProcess {
         self.creation_order
     }
 
+    /// Where the procedure is written.
+    pub fn site(&self) -> Option<&ProcessSite> {
+        self.site.as_ref()
+    }
+
     pub(crate) fn new(condition: Option<ConstExpr>, body: Vec<Stmt>, initializer: bool) -> Self {
         Self {
             creation_order: 0,
+            site: None,
             scheduled_edge: false,
             condition,
             body,
@@ -1039,6 +1116,34 @@ impl InitialProcess {
         self.repeats
     }
 
+    /// The event list and statement of `always @(list) statement`, when no
+    /// list item has an edge.
+    pub fn level_sensitive(&self) -> Option<(&[EventItem], &[Stmt])> {
+        if !self.repeats || self.scheduled_edge || self.condition.is_some() {
+            return None;
+        }
+        let [
+            Stmt::Loop {
+                kind: LoopKind::Forever,
+                init,
+                condition: None,
+                step,
+                body,
+            },
+        ] = self.body.as_slice()
+        else {
+            return None;
+        };
+        let (Stmt::WaitEvent(items), body) = body.split_first()? else {
+            return None;
+        };
+        (init.is_empty()
+            && step.is_empty()
+            && items.iter().all(|item| item.edge == EventEdge::Any)
+            && !leaves_the_process_loop(body))
+        .then_some((items.as_slice(), body))
+    }
+
     /// The condition of the enclosing conditional generate block, if any.
     pub fn condition(&self) -> Option<&ConstExpr> {
         self.condition.as_ref()
@@ -1047,6 +1152,24 @@ impl InitialProcess {
     pub fn body(&self) -> &[Stmt] {
         &self.body
     }
+}
+
+/// Whether `body` has a `break`, `continue` or `return` outside its own
+/// loops, which would leave the loop of its `always` process.
+fn leaves_the_process_loop(body: &[Stmt]) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::Break | Stmt::Continue | Stmt::Return(_) => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => leaves_the_process_loop(then_body) || leaves_the_process_loop(else_body),
+        Stmt::Case { items, default, .. } => {
+            items.iter().any(|item| leaves_the_process_loop(&item.body))
+                || default.as_deref().is_some_and(leaves_the_process_loop)
+        }
+        _ => false,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1339,6 +1462,7 @@ impl From<ast::CombProcess> for CombProcess {
                 .collect(),
         );
         result.creation_order = process.creation_order();
+        result.site = process.site().cloned();
         result.sensitivity_body = process
             .sensitivity_body()
             .iter()
@@ -1354,6 +1478,7 @@ impl From<ast::CombProcessKind> for CombProcessKind {
         match kind {
             ast::CombProcessKind::ContinuousAssign => CombProcessKind::ContinuousAssign,
             ast::CombProcessKind::AlwaysComb => CombProcessKind::AlwaysComb,
+            ast::CombProcessKind::AlwaysLatch => CombProcessKind::AlwaysLatch,
             ast::CombProcessKind::AlwaysStar => CombProcessKind::AlwaysStar,
         }
     }
@@ -1370,7 +1495,9 @@ impl From<ast::FfProcess> for FfProcess {
                 .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
                 .collect(),
         );
+        result.always_ff = process.is_always_ff();
         result.creation_order = process.creation_order();
+        result.site = process.site().cloned();
         result
     }
 }
@@ -1388,6 +1515,7 @@ impl From<ast::InitialProcess> for InitialProcess {
             process.is_initializer(),
         );
         result.creation_order = process.creation_order();
+        result.site = process.site().cloned();
         result.synthetic = process.is_synthetic();
         result.repeats = process.repeats();
         result

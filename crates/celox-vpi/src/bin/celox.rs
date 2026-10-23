@@ -156,10 +156,11 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .map(|(text, path)| (text.as_str(), path.as_path()))
         .collect();
     let builder = celox::Simulation::from_sv_sources(source_refs, &arguments.design.top)
-        .four_state(arguments.execution.four_state)
+        .four_state(arguments.design.four_state.unwrap_or(false))
         .threads(arguments.execution.threads as usize)
         .opt_level(arguments.opt_level)
         .diagnostic_policy(arguments.design.diagnostics.clone())
+        .sv_timescale(arguments.design.timescale)
         .signal_access(arguments.design.signal_access.clone());
     let builder = arguments.design.apply_parameters(builder);
     let max_steps = if arguments.execution.unlimited {
@@ -403,8 +404,9 @@ fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> 
                 .map(|(text, path)| (text.as_str(), path.as_path()))
                 .collect();
             let builder = celox::Simulator::from_sv_sources(refs, &design.top)
-                .four_state(true)
+                .four_state(design.four_state.unwrap_or(false))
                 .diagnostic_policy(design.diagnostics.clone())
+                .sv_timescale(design.timescale)
                 .signal_access(design.signal_access.clone())
                 .opt_level(design.opt_level.unwrap_or(celox::OptLevel::O1));
             let simulator = design
@@ -427,13 +429,14 @@ fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> 
     {
         return Err("pass .sv/.v sources, or one .veryl project entry file".to_string());
     }
-    let (image, warnings) = celox_vpi::driver::compile_native_image_with_parameters(
+    let (image, warnings) = celox_vpi::driver::compile_native_image_with_state(
         &design.sources[0],
         &design.top,
         design.diagnostics.clone(),
         design.opt_level.unwrap_or(celox::OptLevel::O1),
         design.signal_access.clone(),
         &design.parameters,
+        design.four_state.unwrap_or(false),
     )?;
     report_warnings(&warnings)?;
     Ok(image)
@@ -570,7 +573,19 @@ fn discover_vpi(python: &Path) -> Result<PathBuf, String> {
 
 fn check_results(python: &Path, results_file: &Path) -> Result<(), String> {
     let output = Command::new(python)
-        .args([OsStr::new("-m"), OsStr::new("cocotb_tools.check_results")])
+        .args(["-c", r#"
+import sys
+from xml.etree import ElementTree
+
+cases = list(ElementTree.parse(sys.argv[1]).getroot().iter("testcase"))
+executed = [case for case in cases if case.find("skipped") is None]
+failed = [case for case in executed if case.find("failure") is not None or case.find("error") is not None]
+if not executed:
+    sys.exit("no cocotb tests were executed (check the test filter and skip settings)")
+if failed:
+    names = ", ".join(case.get("name", "<unnamed>") for case in failed[:8])
+    sys.exit(f"{len(failed)} cocotb test(s) failed: {names}")
+"#])
         .arg(results_file)
         .output()
         .map_err(|error| format!("failed to check cocotb results: {error}"))?;
@@ -928,6 +943,7 @@ mod tests {
                 object("next", StateRole::Comb, stale, 0),
             ],
             schedule: None,
+            strings: Vec::new(),
         }
     }
 

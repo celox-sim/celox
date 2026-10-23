@@ -27,6 +27,8 @@ pub(super) struct AnalysisState {
     root_subroutines: std::cell::Cell<bool>,
     next_call_site: std::rc::Rc<std::cell::Cell<usize>>,
     timescales: timescales::State,
+    /// Classes laid out so far, by name.
+    classes: std::cell::RefCell<HashMap<String, std::rc::Rc<classes::Class>>>,
 }
 
 /// Syntax and specialization bindings for one scope within an analysis session.
@@ -90,7 +92,9 @@ impl Deref for AnalysisContext<'_> {
     }
 }
 
-pub use crate::system_functions::{ArrayQuery, Callee, SystemFunction, SystemTask};
+pub use crate::system_functions::{
+    ArrayQuery, Callee, ObjectOp, StringOp, SystemFunction, SystemTask,
+};
 use crate::{AnalyzerError, system_functions, typecheck};
 
 mod array_compatibility;
@@ -99,6 +103,7 @@ mod assignment_analysis;
 mod bound_patterns;
 mod case;
 mod casts;
+mod classes;
 mod comb_process;
 pub use bound_patterns::BoundPattern;
 mod comb_rewrite;
@@ -933,6 +938,32 @@ impl Module {
         }
         packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
         packed_dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
+        // Array parameters retain a constant value as well as their signal layout.
+        // Bind their values in declaration order before child parameter arguments.
+        for process in &imported.initial_processes {
+            for statement in &process.body {
+                if let Stmt::Assign {
+                    lhs: LValue::Ident(name),
+                    rhs,
+                    ..
+                } = statement
+                {
+                    packed_dimensions
+                        .array_parameter_values
+                        .insert(name.clone(), rhs.clone());
+                }
+            }
+        }
+        let mut array_initial_processes = Vec::new();
+        for parameter in &array_parameters {
+            let process = parameter.initial_process(syntax_tree, &packed_dimensions)?;
+            if let Stmt::Assign { rhs, .. } = &process.body[0] {
+                packed_dimensions
+                    .array_parameter_values
+                    .insert(parameter.signal.name.clone(), rhs.clone());
+            }
+            array_initial_processes.push(process);
+        }
         let mut instances =
             instances_from_scope(syntax_tree, &const_env, &packed_dimensions, interfaces)?;
         let mut instance_names = HashSet::default();
@@ -1022,6 +1053,7 @@ impl Module {
                         dimensions: function.return_dimensions,
                         signed: function.return_signed,
                         is_2state: function.return_is_2state,
+                        string: function.return_string,
                     },
                 )
             }));
@@ -1039,9 +1071,12 @@ impl Module {
                         dimensions: Some(usize::from(r#type.width() > 1)),
                         signed: r#type.is_signed(),
                         is_2state: !r#type.is_4state(),
+                        string: false,
                     },
                 ))
             }));
+        // Class methods are subroutines `class::method` (IEEE 1800-2023 8.6).
+        dimensions::all_class_signatures(syntax_tree, &mut packed_dimensions);
         packed_dimensions.functions = Arc::new(functions.clone());
         packed_dimensions.expression_signedness = expression_signedness.clone().into();
         for instance in &mut instances {
@@ -1070,6 +1105,8 @@ impl Module {
             subroutine_directions: &subroutine_directions,
             automatic: lifetimes::automatic_by_default(syntax_tree),
             statics: Vec::new(),
+            static_initializers: Vec::new(),
+            constant_evaluation: false,
         };
         let (mut subroutines, mut comb_processes, mut ff_processes, mut initial_processes) =
             if imported.declarations_only {
@@ -1108,11 +1145,7 @@ impl Module {
                 )?;
                 comb_processes.extend(imported.comb_processes.iter().cloned());
                 ff_processes.extend(imported.ff_processes.iter().cloned());
-                let mut initial_processes = Vec::new();
-                for parameter in &array_parameters {
-                    initial_processes
-                        .push(parameter.initial_process(syntax_tree, &packed_dimensions)?);
-                }
+                let mut initial_processes = array_initial_processes;
                 initial_processes.extend(imported.initial_processes.iter().cloned());
                 initial_processes.extend(procedural::initial_processes_from_scope(
                     syntax_tree,
@@ -1126,7 +1159,7 @@ impl Module {
         // Static locals of the processes that keep their value are variables
         // of the module, initialized once with the declaration initializers.
         let statics: HashMap<String, Type> = body_state.statics.drain(..).collect();
-        let (kept, static_initializers) = lifetimes::keep_static_locals(
+        let (mut kept, mut static_initializers) = lifetimes::keep_static_locals(
             &syntax_tree.state,
             &statics,
             &subroutine_directions,
@@ -1140,6 +1173,10 @@ impl Module {
                         .map(|process| &mut process.body),
                 ),
         )?;
+        for subroutine in &subroutines {
+            kept.extend(subroutine.persistent_locals.iter().cloned());
+        }
+        static_initializers.append(&mut body_state.static_initializers);
         locals.retain(|local| !kept.contains(&local.name));
         for name in kept {
             signals.push(Signal::new(name.clone(), statics[&name].clone()));
@@ -1154,6 +1191,7 @@ impl Module {
                 first_block,
                 InitialProcess {
                     creation_order: 0,
+                    site: None,
                     condition: None,
                     body: static_initializers,
                     initializer: true,
@@ -1428,13 +1466,14 @@ pub(crate) fn generated_time_declarations(
     sources: &[(&str, &std::path::Path)],
     roots: Option<&[&str]>,
 ) -> Result<String, AnalyzerError> {
-    timescales::generated_source_declarations(sources, roots, false)
+    timescales::generated_source_declarations(sources, roots, crate::AnalysisOptions::default())
 }
 
 const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
+    floating: Option<TypeKind>,
     name: String,
     value: Option<ConstExpr>,
     declared_width: Option<usize>,
@@ -1462,6 +1501,7 @@ impl Parameter {
             name,
             value,
             declared_width,
+            floating: None,
             packed_ranges: Vec::new(),
             members: Vec::new(),
             declared_signed,
@@ -1486,6 +1526,9 @@ impl Parameter {
         constants: &HashMap<String, i128>,
         parameter_types: &HashMap<String, ExprType>,
     ) -> Option<i128> {
+        if self.floating.is_some() {
+            return None;
+        }
         let mut value =
             substitute_typed_parameter_literals(self.value()?.clone(), constants, parameter_types);
         if self.declared_is_2state {
@@ -1494,13 +1537,18 @@ impl Parameter {
                 expr: Box::new(value),
             };
         }
-        let mut value = typecheck::eval_const_expr_in_env(
-            &value.into(),
-            &const_functions::Environment {
-                constants,
-                functions: &state.const_functions,
-            },
-        )?;
+        let value: crate::ir::ConstExpr = value.into();
+        let environment = const_functions::Environment {
+            constants,
+            functions: &state.const_functions,
+        };
+        let mut value = if self.has_declared_type && typecheck::const_expr_has_real_type(&value) {
+            // An explicitly integral parameter supplies an integer assignment
+            // context. Untyped real parameters retain their floating type.
+            typecheck::round_real_to_i128(typecheck::eval_real_const_expr(&value, &environment)?)
+        } else {
+            typecheck::eval_const_expr_in_env(&value, &environment)?
+        };
         if let Some(width) = self.declared_width {
             value =
                 coerce_const_parameter_value(value, width, self.declared_signed.unwrap_or(false));
@@ -1518,6 +1566,12 @@ impl Parameter {
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
     ) -> (Option<i128>, Option<Expr>) {
+        if self.floating.is_some() {
+            return (
+                None,
+                self.resolved_literal(state, constants, parameter_types, literals),
+            );
+        }
         if let Some(value) = self.resolved_value(state, constants, parameter_types) {
             return (Some(value), None);
         }
@@ -1539,6 +1593,9 @@ impl Parameter {
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
     ) -> Option<Expr> {
+        if let Some(kind) = self.floating {
+            return parameters::real_literal(self.value()?, kind, constants, literals);
+        }
         #[cfg(test)]
         parameters::LITERAL_RESOLUTIONS.with(|calls| calls.set(calls.get() + 1));
         if self
@@ -1609,6 +1666,7 @@ impl Parameter {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Port {
+    randomizable: bool,
     name: String,
     direction: PortDirection,
     r#type: Type,
@@ -1618,6 +1676,7 @@ pub struct Port {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signal {
+    is_const: bool,
     name: String,
     r#type: Type,
     is_net: bool,
@@ -1631,6 +1690,7 @@ impl Signal {
             name,
             r#type,
             is_net: false,
+            is_const: false,
             package_variable: None,
         }
     }
@@ -1640,6 +1700,7 @@ impl Signal {
             name,
             r#type,
             is_net: true,
+            is_const: false,
             package_variable: None,
         }
     }
@@ -1671,6 +1732,7 @@ impl Port {
             name,
             direction,
             r#type,
+            randomizable: !is_net,
             is_net,
             default: None,
         }
@@ -1863,6 +1925,7 @@ pub enum PortDirection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Type {
+    is_enum: bool,
     kind: TypeKind,
     is_signed: bool,
     packed_ranges: Vec<PackedRange>,
@@ -1872,29 +1935,40 @@ pub struct Type {
     /// named type, which is signed although the whole array is not (IEEE
     /// 1800-2023 7.4.1).
     signed_element_depth: Option<usize>,
+    /// The class of an object handle type.
+    class: Option<String>,
 }
 
 impl Type {
     fn implicit() -> Self {
         Self {
+            is_enum: false,
             kind: TypeKind::Implicit,
             is_signed: false,
             packed_ranges: Vec::new(),
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
             signed_element_depth: None,
+            class: None,
         }
     }
 
     fn new(kind: TypeKind) -> Self {
         Self {
             kind,
+            is_enum: false,
             is_signed: false,
             packed_ranges: Vec::new(),
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
             signed_element_depth: None,
+            class: None,
         }
+    }
+
+    /// The class of an object handle type.
+    pub fn class(&self) -> Option<&str> {
+        self.class.as_deref()
     }
 
     pub fn kind(&self) -> TypeKind {
@@ -1916,6 +1990,13 @@ impl Type {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TypeKind {
+    Real,
+    Shortreal,
+    /// IEEE 1800-2023 6.16: a dynamically sized string, held as a heap handle.
+    String,
+    /// IEEE 1800-2023 8.4: a handle of a class object, `null` or an object
+    /// in the heap.
+    Object,
     Bit,
     Logic,
     Reg,
@@ -2129,6 +2210,7 @@ impl LValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CombProcess {
     creation_order: usize,
+    site: Option<crate::procedural::SourceSpan>,
     kind: CombProcessKind,
     condition: Option<ConstExpr>,
     assignments: Vec<Assignment>,
@@ -2137,6 +2219,10 @@ pub struct CombProcess {
 }
 
 impl CombProcess {
+    pub fn site(&self) -> Option<&crate::procedural::SourceSpan> {
+        self.site.as_ref()
+    }
+
     /// Reads removed from executable branches still affect implicit sensitivity.
     pub fn sensitivity_body(&self) -> &[Stmt] {
         &self.sensitivity_body
@@ -2162,6 +2248,7 @@ impl CombProcess {
             .collect();
         Self {
             creation_order: 0,
+            site: None,
             sensitivity_body: Vec::new(),
             kind,
             condition,
@@ -2173,6 +2260,7 @@ impl CombProcess {
     fn procedural(kind: CombProcessKind, condition: Option<ConstExpr>, body: Vec<Stmt>) -> Self {
         Self {
             creation_order: 0,
+            site: None,
             sensitivity_body: Vec::new(),
             kind,
             condition,
@@ -2202,27 +2290,40 @@ impl CombProcess {
 pub enum CombProcessKind {
     ContinuousAssign,
     AlwaysComb,
+    AlwaysLatch,
     AlwaysStar,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfProcess {
+    always_ff: bool,
     suspendable: bool,
     creation_order: usize,
+    site: Option<crate::procedural::ProcessSite>,
     events: Vec<FfEvent>,
     body: Vec<Stmt>,
 }
 
 impl FfProcess {
+    pub fn is_always_ff(&self) -> bool {
+        self.always_ff
+    }
+
     /// Position among the elaborated module items, shared across process kinds.
     pub fn creation_order(&self) -> usize {
         self.creation_order
     }
 
+    pub fn site(&self) -> Option<&crate::procedural::ProcessSite> {
+        self.site.as_ref()
+    }
+
     fn new(events: Vec<FfEvent>, body: Vec<Stmt>) -> Self {
         Self {
+            always_ff: false,
             suspendable: false,
             creation_order: 0,
+            site: None,
             events,
             body,
         }
@@ -2241,6 +2342,7 @@ impl FfProcess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialProcess {
     creation_order: usize,
+    site: Option<crate::procedural::ProcessSite>,
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
     initializer: bool,
@@ -2253,6 +2355,10 @@ impl InitialProcess {
     /// Position among the elaborated module items, shared across process kinds.
     pub fn creation_order(&self) -> usize {
         self.creation_order
+    }
+
+    pub fn site(&self) -> Option<&crate::procedural::ProcessSite> {
+        self.site.as_ref()
     }
 
     pub fn condition(&self) -> Option<&ConstExpr> {
@@ -2329,6 +2435,9 @@ impl ConditionalAssignment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Function {
+    return_real: bool,
+    /// Whether the function returns a `string`.
+    return_string: bool,
     name: String,
     params: Vec<FunctionParam>,
     /// The function's value as one expression of its arguments, or `None`
@@ -2567,6 +2676,12 @@ struct UnpackedDimension {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VariableDimensions {
+    randomizable: bool,
+    real: bool,
+    /// A `string`: each element is a heap handle, not packed bits.
+    string: bool,
+    /// The class of an object handle variable.
+    class: Option<String>,
     packed: Vec<PackedDimension>,
     unpacked: Vec<UnpackedDimension>,
     signed: bool,
@@ -2594,6 +2709,8 @@ struct FunctionReturnMetadata {
     dimensions: Option<usize>,
     signed: bool,
     is_2state: bool,
+    /// The function returns a `string`.
+    string: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2604,6 +2721,8 @@ struct PackedDimensions {
     function_return_types: HashMap<String, FunctionReturnMetadata>,
     functions: Arc<HashMap<String, Function>>,
     parameter_values: SharedMap<Expr>,
+    /// Constant array initializers for binding child parameter values.
+    array_parameter_values: SharedMap<Expr>,
     expression_signedness: ScopedMap<bool>,
     constant_indexed_base: bool,
     /// The current lexical scope has already collected its visible declarations.
@@ -2615,6 +2734,8 @@ struct PackedDimensions {
     /// assignment patterns passed as arguments.
     subroutine_param_shapes: Arc<HashMap<String, Vec<VariableDimensions>>>,
     subroutine_param_names: Arc<HashMap<String, Vec<String>>>,
+    /// The class whose method is being bound.
+    class_scope: Option<String>,
 }
 
 impl PackedDimensions {
@@ -2630,12 +2751,14 @@ impl PackedDimensions {
             function_return_types: HashMap::default(),
             functions: Arc::default(),
             parameter_values: SharedMap::default(),
+            array_parameter_values: SharedMap::default(),
             expression_signedness: ScopedMap::default(),
             constant_indexed_base: false,
             scope_types_complete: false,
             type_query: false,
             subroutine_param_shapes: Arc::default(),
             subroutine_param_names: Arc::default(),
+            class_scope: None,
         }
     }
 }

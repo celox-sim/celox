@@ -1,0 +1,27 @@
+(group real_extensions (category sequential))
+
+; Real scan destinations must feed math and time expressions as numeric values.
+(case scanned_values_feed_math_and_realtime
+  (source "real_extensions.sv" #"
+module Top(output bit ok, output logic [63:0] result);
+    real parsed, value;
+    int count, exponent;
+    initial begin
+        count = $sscanf("6.25 2", "%f %d", parsed, exponent);
+        ok = count == 2 && parsed == 6.25 && exponent == 2;
+        #4;
+        value = $sqrt(parsed) + $pow($realtime, exponent);
+        result = $realtobits(value);
+        ok &= value == 18.5;
+        #2;
+        count = $sscanf("bad", "%f", parsed);
+        ok &= count == 0 && parsed == 6.25 && $realtime == 6.0;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_until 4)
+  (assert_eq ok 1)
+  (assert_eq result 0x4032800000000000)
+  (run_until 6)
+  (assert_eq ok 1))
