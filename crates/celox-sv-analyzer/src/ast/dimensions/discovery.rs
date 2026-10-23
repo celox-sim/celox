@@ -161,11 +161,9 @@ fn variables(
     let Some(base) = type_binding::bind(declaration.data_type, tree, context)? else {
         return Ok(());
     };
-    for variable in declaration
-        .variables
-        .iter()
-        .filter(|variable| type_binding::ordinary_variable(variable, tree.declarations()))
-    {
+    for variable in declaration.variables.iter().filter(|variable| {
+        type_binding::ordinary_variable(variable, declaration.data_type, tree.declarations())
+    }) {
         let ty = type_with_dimensions(base.clone(), &variable.dimensions, tree, context)?;
         shape(context, name(&variable.name), &ty, local);
         publish(&tree.state.dimensions, key, context);
@@ -368,6 +366,19 @@ fn return_metadata(
         }),
         signed: ty.is_some_and(Type::is_signed),
         is_2state: ty.is_some_and(|ty| ty.kind() == TypeKind::Bit),
+        string: ty.is_some_and(|ty| ty.kind() == TypeKind::String),
+        pattern_type: ty
+            .filter(|ty| {
+                !ty.members.is_empty()
+                    || !ty.unpacked_ranges.is_empty()
+                    || ty.packed_ranges.len() > 1
+            })
+            .and_then(|ty| {
+                ty.pattern_target(&const_functions::Environment {
+                    constants: &*context.const_env,
+                    functions: &state.const_functions,
+                })
+            }),
     }
 }
 fn signature(
@@ -376,8 +387,136 @@ fn signature(
     context: &mut PackedDimensions,
 ) -> Converted<()> {
     let subroutine = tree.declarations().subroutine(id);
-    let n = name(&subroutine.name);
     let formals = formal_types(subroutine, tree, context)?;
+    let result = return_type(subroutine, tree, context)?;
+    publish_signature(name(&subroutine.name), formals, result, tree, context);
+    Ok(())
+}
+/// The return type of a function, `None` for a task.
+fn return_type(
+    subroutine: &celox_sv_syntax::Subroutine,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+) -> Converted<Option<Option<Type>>> {
+    if subroutine.kind != SubroutineKind::Function {
+        return Ok(None);
+    }
+    let mut ty = subroutine
+        .return_type
+        .map(|id| type_binding::bind(id, tree, context))
+        .transpose()?
+        .flatten();
+    if subroutine.return_type.is_some_and(|id| {
+        matches!(
+            tree.declarations().data_type(id).kind,
+            DataTypeKind::Implicit
+        )
+    }) && let Some(ty) = &mut ty
+    {
+        ty.kind = TypeKind::Logic;
+    }
+    Ok(Some(ty))
+}
+/// The methods of `class` as subroutines `class::method`: a method that is
+/// not static takes the handle `this` before its formals, and the
+/// constructor, declared or implicit, returns `this` once it has
+/// initialized it (IEEE 1800-2023 8.6, 8.7, 8.10).
+fn class_signatures(
+    class: &celox_sv_syntax::ClassDeclaration,
+    tree: &AnalysisContext<'_>,
+    context: &mut PackedDimensions,
+) -> Converted<()> {
+    let class_name = name(&class.name);
+    let Some(handle) = classes::handle_type(tree, &class_name) else {
+        return Ok(());
+    };
+    let this = (
+        FunctionArgumentMetadata {
+            name: classes::THIS.into(),
+            direction: ParamDirection::Input,
+            has_default: false,
+        },
+        handle.clone(),
+    );
+    let mut constructor = false;
+    for method in &class.methods {
+        let subroutine = tree.declarations().subroutine(method.subroutine);
+        let mut formals = formal_types(subroutine, tree, context)?;
+        if !method.qualifiers.is_static {
+            formals.insert(0, this.clone());
+        }
+        let result = if subroutine.kind == SubroutineKind::Constructor {
+            constructor = true;
+            Some(Some(handle.clone()))
+        } else {
+            return_type(subroutine, tree, context)?
+        };
+        // A method that may be virtual also has a dispatcher (8.20).
+        if !method.qualifiers.is_static && subroutine.kind != SubroutineKind::Constructor {
+            publish_signature(
+                classes::Class::dispatcher_name(&class_name, &name(&subroutine.name)),
+                formals.clone(),
+                result.clone(),
+                tree,
+                context,
+            );
+        }
+        publish_signature(
+            classes::Class::subroutine_name(&class_name, &name(&subroutine.name)),
+            formals,
+            result,
+            tree,
+            context,
+        );
+    }
+    if !constructor && !class.interface {
+        publish_signature(
+            classes::Class::subroutine_name(&class_name, "new"),
+            vec![this],
+            Some(Some(handle.clone())),
+            tree,
+            context,
+        );
+    }
+    // `$cast` to a variable of the class (8.16).
+    let formal = |name: &str, direction| {
+        (
+            FunctionArgumentMetadata {
+                name: name.into(),
+                direction,
+                has_default: false,
+            },
+            handle.clone(),
+        )
+    };
+    publish_signature(
+        classes::Class::cast_name(&class_name),
+        vec![
+            formal(procedural::CAST_DESTINATION, ParamDirection::Inout),
+            formal(procedural::CAST_SOURCE, ParamDirection::Input),
+        ],
+        Some(Some(procedural::int_type())),
+        tree,
+        context,
+    );
+    Ok(())
+}
+/// Publish the signatures of the methods of every class in the source.
+pub(in crate::ast) fn all_class_signatures(
+    tree: &AnalysisContext<'_>,
+    context: &mut PackedDimensions,
+) {
+    for class in &tree.declarations().classes {
+        let _ = class_signatures(class, tree, context);
+    }
+}
+fn publish_signature(
+    n: String,
+    formals: Vec<(FunctionArgumentMetadata, Type)>,
+    result: Option<Option<Type>>,
+    tree: &AnalysisContext<'_>,
+    context: &mut PackedDimensions,
+) {
     let arguments = formals
         .iter()
         .map(|(argument, _)| argument.clone())
@@ -396,27 +535,12 @@ fn signature(
             .map(|(argument, _)| argument.name.clone())
             .collect(),
     );
-    if subroutine.kind == SubroutineKind::Function {
-        let mut ty = subroutine
-            .return_type
-            .map(|id| type_binding::bind(id, tree, context))
-            .transpose()?
-            .flatten();
-        if subroutine.return_type.is_some_and(|id| {
-            matches!(
-                tree.declarations().data_type(id).kind,
-                DataTypeKind::Implicit
-            )
-        }) && let Some(ty) = &mut ty
-        {
-            ty.kind = TypeKind::Logic;
-        }
+    if let Some(ty) = result {
         context.function_return_types.insert(
             n,
             return_metadata(&tree.state, ty.as_ref(), arguments, context),
         );
     }
-    Ok(())
 }
 fn local_declaration(
     item: &LocalDeclaration,
@@ -605,7 +729,9 @@ pub(in crate::ast) fn query_operand_dimensions_id(
         let before = context.clone();
         for frame in &frames {
             for id in frame {
-                if let BodyItemKind::Subroutine(id) = native.body_item(*id).kind {
+                if let BodyItemKind::Subroutine(id) = native.body_item(*id).kind
+                    && native.subroutine(id).scope.is_empty()
+                {
                     let _ = signature(id, tree, &mut context);
                     publish(&tree.state.dimensions, &key, &context);
                 } else if let BodyItemKind::Dpi(id) = native.body_item(*id).kind
@@ -621,12 +747,16 @@ pub(in crate::ast) fn query_operand_dimensions_id(
                             dimensions: Some(usize::from(ty.width() > 1)),
                             signed: ty.is_signed(),
                             is_2state: !ty.is_4state(),
+                            string: false,
+                            pattern_type: None,
                         },
                     );
                     publish(&tree.state.dimensions, &key, &context);
                 }
             }
         }
+        all_class_signatures(tree, &mut context);
+        publish(&tree.state.dimensions, &key, &context);
         if let Ok(unit) = tree.root_unit() {
             if let Some(parameters) = &unit.parameters {
                 for parameter_node in parameters {

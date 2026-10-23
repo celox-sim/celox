@@ -11,6 +11,7 @@
 
 mod file_io;
 mod fread;
+mod objects;
 mod scan;
 mod strings;
 
@@ -76,6 +77,9 @@ pub(super) struct Ff<'p, 'a> {
     /// The nonblocking sites with a staged and a queued path.
     nba_switches: Vec<NbaSwitch<SourceVarId>>,
     direct: bool,
+    /// Whether a combinational process also reruns for occurrences of its
+    /// inputs that left their value unchanged.
+    input_occurrences: bool,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -121,12 +125,21 @@ impl<'p, 'a> Ff<'p, 'a> {
             dist_seed: None,
             kernel: None,
             direct: false,
+            input_occurrences: true,
             process: 0,
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
             host_request_sites: Vec::new(),
             nba_switches: Vec::new(),
         }
+    }
+
+    /// Lower a combinational process that reruns only when an input value
+    /// changed. Its inputs then need no occurrence counters, so the units
+    /// that write them stay unchanged.
+    pub fn without_input_occurrences(mut self) -> Self {
+        self.input_occurrences = false;
+        self
     }
 
     pub fn with_sparse_memories(mut self, names: &HashSet<String>) -> Self {
@@ -203,15 +216,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.m.constants,
                 self.m.parameter_types,
             ))
-            .and_then(|(msb, lsb)| {
-                Some((
-                    packed_index_offset(variable, msb)?,
-                    packed_index_offset(variable, lsb)?,
-                ))
-            })
-            .map_or(whole, |(msb, lsb)| {
-                BitAccess::new(msb.min(lsb), msb.max(lsb))
-            }),
+            .and_then(|(msb, lsb)| constant_select_write(variable, msb, lsb)?.0)
+            .unwrap_or(whole),
         };
         self.targets.push((id, access));
     }
@@ -267,7 +273,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     }
                     continue;
                 }
-                sv::ir::Callee::String(_) => continue,
+                sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
@@ -341,13 +347,20 @@ impl<'p, 'a> Ff<'p, 'a> {
                 lsb,
                 array_slice_width,
                 array_slice_reversed,
-            } => sv::ir::LValue::Select {
-                name: name.clone(),
-                msb: substitute_overlay_const(msb, &self.overlay),
-                lsb: substitute_overlay_const(lsb, &self.overlay),
-                array_slice_width: array_slice_width.clone(),
-                array_slice_reversed: *array_slice_reversed,
-            },
+            } => keep_element_window(
+                lvalue,
+                sv::ir::LValue::Select {
+                    name: name.clone(),
+                    msb: substitute_overlay_const(msb, &self.overlay),
+                    lsb: substitute_overlay_const(lsb, &self.overlay),
+                    array_slice_width: array_slice_width.clone(),
+                    array_slice_reversed: *array_slice_reversed,
+                },
+                self.m.variables,
+                self.m.name_to_id,
+                self.m.constants,
+                self.m.parameter_types,
+            ),
         }
     }
 
@@ -875,6 +888,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ..
             } => self.string_call(*op, args)?,
             Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                args,
+                ..
+            } => self.object_call(op, args)?,
+            Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fopen),
                 args,
                 ..
@@ -1009,8 +1027,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                     sv::ir::TypeKind::Shortreal => Some(celox_sir::FloatPrecision::F32),
                     _ => None,
                 };
-                self.m.variables.get_mut(&temp).unwrap().string =
-                    r#type.kind() == sv::ir::TypeKind::String;
+                self.m.variables.get_mut(&temp).unwrap().value_kind = match r#type.kind() {
+                    sv::ir::TypeKind::String => celox_design::ValueKind::StrRef,
+                    sv::ir::TypeKind::Object => celox_design::ValueKind::ObjRef,
+                    _ => celox_design::ValueKind::Bits,
+                };
                 let Some(result) = result else {
                     return Err(unsupported(format!(
                         "void function `{name}` used as a value"
@@ -2224,15 +2245,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                     sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types),
                     sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types),
                 ) {
-                    let variable = self.m.var(id);
-                    let (Some(msb), Some(lsb)) = (
-                        packed_index_offset(variable, msb),
-                        packed_index_offset(variable, lsb),
-                    ) else {
+                    let (access, drop) = constant_select_write(self.m.var(id), msb, lsb)
+                        .ok_or_else(|| unsupported("assignment position"))?;
+                    let Some(access) = access else {
                         return Ok(());
                     };
-                    let low = msb.min(lsb);
-                    let node = permute_reversed_lvalue_rhs_slt(
+                    let mut node = permute_reversed_lvalue_rhs_slt(
                         lhs,
                         node,
                         width,
@@ -2241,9 +2259,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                         arena,
                     )
                     .ok_or_else(|| unsupported("assignment lvalue order"))?;
+                    let written = access.msb - access.lsb + 1;
+                    if written != width {
+                        node = arena
+                            .alloc(SLTNode::Slice {
+                                expr: node,
+                                access: BitAccess::new(drop, drop + written - 1),
+                            })
+                            .map_err(slt_error)?;
+                    }
                     let value = self.lower_slt(arena, node)?;
-                    let offset = sv_memory_offset(self.m.var(id), low, width);
-                    self.store(id, offset, width, value);
+                    let offset = sv_memory_offset(self.m.var(id), access.lsb, written);
+                    self.store(id, offset, written, value);
                     return Ok(());
                 }
                 if let Some((_, element_width, offset, access)) = dynamic_array_element_lvalue(
@@ -3520,9 +3547,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                         .map_err(slt_error)?;
                 }
                 inputs.push((id, self.lower_slt(&arena, node)?));
-            } else if self.kernel.is_none()
-                || !subroutine.is_task
-                || subroutine.automatic_locals.contains(&param.name)
+            } else if !subroutine.persistent_locals.contains(&param.name)
+                && (self.kernel.is_none()
+                    || !subroutine.is_task
+                    || subroutine.automatic_locals.contains(&param.name))
             {
                 let value = self.default_reg(id);
                 inputs.push((id, value));
@@ -3538,7 +3566,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .m
                 .id(return_var)
                 .ok_or_else(|| unsupported(format!("result of `{name}`")))?;
-            self.init_default(id);
+            if !subroutine.persistent_locals.contains(return_var) {
+                self.init_default(id);
+            }
         }
         let return_block = self.b.new_block();
         self.functions.push(FunctionBlocks {
@@ -3710,6 +3740,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .emit(SIRInstruction::Binary(next, changed, BinaryOp::Or, differs));
             changed = next;
             snapshots.push((saved, width, current));
+            if !self.input_occurrences {
+                continue;
+            }
             // A source can change and return to its saved value inside one
             // initial activation. Count occurrences around stores before
             // optimization, rather than relying only on the settled value.
@@ -4013,6 +4046,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             active: seal_builder(active),
             nba: seal_builder(nba),
             targets,
+            staged: staged
+                .iter()
+                .map(|stage| (stage.id, stage.value, stage.mask))
+                .collect(),
         })
     }
 }
@@ -4060,6 +4097,8 @@ pub(super) struct FfProcessUnits {
     pub active: ExecutionUnit<Addr>,
     pub nba: ExecutionUnit<Addr>,
     pub targets: Vec<VarAtomBase<SourceVarId>>,
+    /// The staged variables, as (variable, staging value, staging mask).
+    pub staged: Vec<(SourceVarId, SourceVarId, SourceVarId)>,
 }
 
 /// The staging of a variable a process writes both by blocking and by
@@ -4276,10 +4315,12 @@ impl Ff<'_, '_> {
         self.exec_block(body)?;
         let mut kernel = self.kernel.take().expect("lowering a process kernel");
         std::mem::swap(&mut self.b, kernel.builder());
+        let slots = kernel.slots();
         let mut unit = kernel.build();
         prune_unreachable_blocks(&mut unit);
         Ok(KernelUnit {
             unit,
+            slots,
             wait_sites: self.wait_sites,
             nba_sites: self.nba_sites,
             host_request_sites: self.host_request_sites,
@@ -4422,6 +4463,9 @@ impl Ff<'_, '_> {
         ticks_per_unit: u64,
         ticks_per_precision: u64,
     ) -> Result<(), sv::AnalyzerError> {
+        // Only integral constants are recorded; a real delay counts as
+        // variable.
+        let mut constant = None;
         let (mut delay, ticks_per_step) = match self.m.expr_float_precision(amount) {
             Some(precision) => (
                 self.real_delay(amount, precision, ticks_per_unit / ticks_per_precision)?,
@@ -4429,6 +4473,13 @@ impl Ff<'_, '_> {
             ),
             None => {
                 let signed = self.expr_signed(amount);
+                constant = self
+                    .eval_const(amount)?
+                    .filter(|(value, width)| {
+                        !(signed && *width > 0 && value.bit(*width as u64 - 1))
+                    })
+                    .and_then(|(value, _)| u64::try_from(&value).ok())
+                    .and_then(|value| value.checked_mul(ticks_per_unit));
                 let mut arena = SLTNodeArena::new();
                 let node = self.expr_slt(amount, None, &mut arena)?;
                 let original = self.lower_slt(&arena, node)?;
@@ -4477,7 +4528,7 @@ impl Ff<'_, '_> {
             ));
             delay = product;
         }
-        self.with_kernel(|kernel| kernel.inactive_delay(delay))
+        self.with_kernel(|kernel| kernel.inactive_delay(delay, constant))
             .map_err(kernel_error)
     }
 
@@ -4687,7 +4738,7 @@ impl Ff<'_, '_> {
                 source: None,
                 hidden: true,
                 force_control: None,
-                string: false,
+                value_kind: Default::default(),
             },
         );
         let mut renames = HashMap::default();
@@ -4837,6 +4888,7 @@ impl Ff<'_, '_> {
 /// The kernel of a process and its wait and nonblocking assignment sites.
 pub(super) struct KernelUnit {
     pub unit: ExecutionUnit<Addr>,
+    pub slots: ProcessSlots<SourceVarId>,
     pub wait_sites: Vec<WaitSite<SourceVarId>>,
     pub nba_sites: Vec<NbaSite<SourceVarId>>,
     pub host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
@@ -4916,6 +4968,8 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                 }
                 // A string operation is a value of its operands.
                 sv::ir::Callee::String(_) => continue,
+                // A property can change without the handle changing.
+                sv::ir::Callee::Object(op) => return Some(op.to_string()),
                 sv::ir::Callee::Subroutine(name) => name,
             };
             if !visited.insert(name.clone()) {

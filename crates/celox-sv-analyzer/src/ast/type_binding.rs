@@ -14,12 +14,32 @@ pub(super) use binding::{bind, expression_type};
 
 /// The historical constructed-declarator path retains ordinary siblings and
 /// does not allocate dynamic arrays or construct class objects.
+/// Whether a variable of a declaration of `data_type` is stored in state
+/// memory: not a dynamic array, and not constructed by `new` unless it is a
+/// class handle (IEEE 1800-2023 8.7), such as a covergroup instance.
 pub(super) fn ordinary_variable(
     variable: &celox_sv_syntax::VariableDeclarator,
+    data_type: celox_sv_syntax::TypeId,
     native: &celox_sv_syntax::Declarations,
 ) -> bool {
     !variable.dimensions.iter().any(|dimension|matches!(dimension.kind,celox_sv_syntax::DimensionKind::Unsized))
-        && !variable.value.is_some_and(|id|matches!(&native.expression(id).kind,celox_sv_syntax::ExprKind::Name(name) if name.spelling=="new"))
+        && (!variable.value.is_some_and(|id|matches!(&native.expression(id).kind,celox_sv_syntax::ExprKind::Name(name) if name.spelling=="new"))
+            || names_class(data_type, native))
+}
+
+/// Whether `data_type` names a class declared in the source.
+fn names_class(data_type: celox_sv_syntax::TypeId, native: &celox_sv_syntax::Declarations) -> bool {
+    let celox_sv_syntax::DataTypeKind::Named(segments) = &native.data_type(data_type).kind else {
+        return false;
+    };
+    let [segment] = segments.as_slice() else {
+        return false;
+    };
+    let name = normalize_identifier(&segment.name.spelling);
+    native
+        .classes
+        .iter()
+        .any(|class| normalize_identifier(&class.name.spelling) == name)
 }
 
 pub(super) fn port_direction(direction: celox_sv_syntax::Direction) -> PortDirection {
@@ -71,7 +91,7 @@ pub(super) fn local_signals(
     };
     let mut signals = Vec::new();
     for variable in &declaration.variables {
-        if !ordinary_variable(variable, tree.declarations()) {
+        if !ordinary_variable(variable, declaration.data_type, tree.declarations()) {
             continue;
         }
         let name = normalize_identifier(&variable.name.spelling);

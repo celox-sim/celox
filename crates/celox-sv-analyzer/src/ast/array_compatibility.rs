@@ -53,6 +53,7 @@ pub(super) fn selected_unpacked_shape(
     Some(VariableDimensions {
         real: false,
         string: false,
+        class: None,
         unpacked: unpacked.to_vec(),
         ..shape.clone()
     })

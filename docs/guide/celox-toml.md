@@ -170,6 +170,19 @@ explicit settings remain effective, and the global precision includes default
 scopes. Syntax errors, unsupported constructs and invalid precision declarations
 remain errors.
 
+`interface_array_query` defaults to `error`. Set it to `warn` or `allow` to enable
+`$size` on fixed-size interface arrays and index-selected subarrays as a compatibility
+extension. IEEE 1800-2023 §20.7 specifies queries on data arrays; interface
+instances are not data objects. The optional dimension must be a known integer constant. This
+extension does not give interface handles a packed width or enable other queries.
+
+```toml
+[diagnostics]
+interface_array_query = "warn"
+```
+
+The CLI uses the same policy: `celox run top.sv --top Top --diagnostic interface_array_query=warn`.
+
 `multiple_always_ff_drivers` defaults to `error` for shared memories written by
 an `always_ff` and another edge process (IEEE 1800-2023 §9.2.2.4). With `warn`
 or `allow`, Celox stages their nonblocking writes in sparse next-state storage

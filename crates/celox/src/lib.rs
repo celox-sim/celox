@@ -60,6 +60,8 @@ pub use celox_runtime::{
     StateDifference, StateFile, StateFileError, StateObject, StateRole, WaiterRecord,
     format_state_value,
 };
+#[doc(hidden)]
+pub use celox_runtime::{KernelSchedule, SchedulerMode, SchedulerStats};
 pub use celox_slt::scheduler::SchedulerError;
 pub use celox_state_layout::STATE_HEADER_SIZE;
 pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
@@ -119,7 +121,7 @@ mod host_api {
     pub use celox_runtime::{
         BackendExecutor, DerivedTickPlan, DerivedTickPlans, DerivedTickScratch, Edge, EdgeOutcome,
         EventEdge, EventEdges, Halt, SignalWrite, VcdSignalDesc, VcdStatistics, VcdWriter,
-        move_signal, run_edge, run_edges, set_level,
+        move_signal, run_edge, run_edges, run_tick, set_level,
     };
 
     pub struct IOContext<'a, B: SimBackend = DefaultBackend> {

@@ -27,6 +27,9 @@ pub(super) struct AnalysisState {
     root_subroutines: std::cell::Cell<bool>,
     next_call_site: std::rc::Rc<std::cell::Cell<usize>>,
     timescales: timescales::State,
+    diagnostics: RefCell<Vec<warnings::AnalyzerWarning>>,
+    /// Classes laid out so far, by name.
+    classes: std::cell::RefCell<HashMap<String, std::rc::Rc<classes::Class>>>,
 }
 
 /// Syntax and specialization bindings for one scope within an analysis session.
@@ -90,7 +93,9 @@ impl Deref for AnalysisContext<'_> {
     }
 }
 
-pub use crate::system_functions::{ArrayQuery, Callee, StringOp, SystemFunction, SystemTask};
+pub use crate::system_functions::{
+    ArrayQuery, Callee, ObjectOp, StringOp, SystemFunction, SystemTask,
+};
 use crate::{AnalyzerError, system_functions, typecheck};
 
 mod array_compatibility;
@@ -99,6 +104,7 @@ mod assignment_analysis;
 mod bound_patterns;
 mod case;
 mod casts;
+mod classes;
 mod comb_process;
 pub use bound_patterns::BoundPattern;
 mod comb_rewrite;
@@ -180,9 +186,7 @@ use dimensions::{
 use expressions::guard_zero_divisions;
 use ff_process::ff_processes_from_scope;
 use functions::{functions_from_scope, procedural_truth_condition};
-use inlining::{
-    expand_expr_calls, expr_signedness, expr_signedness_with_return_types, substitute_expr_idents,
-};
+use inlining::{expand_expr_calls, expr_signedness_with_return_types, substitute_expr_idents};
 pub(crate) use instances::normalize_identifier;
 use instances::{collect_connected_nets, expr_ident_name, instances_from_scope};
 use parameters::{
@@ -244,6 +248,7 @@ impl InterfaceLookup<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {
     modules: Vec<Module>,
+    diagnostics: Vec<warnings::AnalyzerWarning>,
 }
 
 /// Overrides supplied by one instantiation. Types have been resolved in its scope.
@@ -293,16 +298,21 @@ impl Source {
                         &packages,
                         packages.unit(Path::new("")),
                     )?;
-                    modules.push(Module::from_scope_with_parameter_overrides(
-                        syntax_tree,
-                        module_name,
-                        &parameter_overrides,
-                        &InterfaceLookup {
-                            local: &interfaces,
-                            extra: &ModuleInterfaces::default(),
-                        },
-                        Arc::new(imported),
-                    )?);
+                    modules.push(
+                        Module::from_scope_with_parameter_overrides(
+                            syntax_tree,
+                            module_name,
+                            &parameter_overrides,
+                            &InterfaceLookup {
+                                local: &interfaces,
+                                extra: &ModuleInterfaces::default(),
+                            },
+                            Arc::new(imported),
+                        )
+                        .map_err(|error| {
+                            error.with_warnings(context.state.diagnostics.borrow().clone())
+                        })?,
+                    );
                 }
                 celox_sv_syntax::PortStyle::NonAnsi => {
                     return Err(AnalyzerError::Unsupported(
@@ -313,7 +323,10 @@ impl Source {
             }
         }
 
-        Ok(Self { modules })
+        Ok(Self {
+            modules,
+            diagnostics: context.state.diagnostics.borrow().clone(),
+        })
     }
 
     pub(crate) fn from_syntax_module_with_parameter_overrides(
@@ -421,18 +434,26 @@ impl Source {
                         },
                         &interfaces,
                         imported.clone(),
-                    )? {
+                    )
+                    .map_err(|error| {
+                        error.with_warnings(context.state.diagnostics.borrow().clone())
+                    })? {
                         module.name = module_name.to_string();
                         modules.push(module);
                         continue;
                     }
-                    modules.push(Module::from_scope_with_parameter_overrides(
-                        syntax_tree,
-                        module_name,
-                        bindings.values,
-                        &interfaces,
-                        Arc::new(imported),
-                    )?);
+                    modules.push(
+                        Module::from_scope_with_parameter_overrides(
+                            syntax_tree,
+                            module_name,
+                            bindings.values,
+                            &interfaces,
+                            Arc::new(imported),
+                        )
+                        .map_err(|error| {
+                            error.with_warnings(context.state.diagnostics.borrow().clone())
+                        })?,
+                    );
                 }
                 celox_sv_syntax::PortStyle::NonAnsi if syntax_tree.root_name()? == module_name => {
                     return Err(AnalyzerError::Unsupported(
@@ -442,7 +463,10 @@ impl Source {
                 _ => {}
             }
         }
-        Ok(Self { modules })
+        Ok(Self {
+            modules,
+            diagnostics: context.state.diagnostics.borrow().clone(),
+        })
     }
 
     pub(crate) fn module_names_from_syntax(
@@ -487,7 +511,7 @@ impl Source {
     }
 
     pub(crate) fn warnings(&self) -> Vec<warnings::AnalyzerWarning> {
-        let mut warnings = Vec::new();
+        let mut warnings = self.diagnostics.clone();
         for module in &self.modules {
             warnings::append(&mut warnings, module.constant_functions.warnings());
         }
@@ -1048,6 +1072,8 @@ impl Module {
                         dimensions: function.return_dimensions,
                         signed: function.return_signed,
                         is_2state: function.return_is_2state,
+                        string: function.return_string,
+                        pattern_type: function.return_type.clone(),
                     },
                 )
             }));
@@ -1065,14 +1091,21 @@ impl Module {
                         dimensions: Some(usize::from(r#type.width() > 1)),
                         signed: r#type.is_signed(),
                         is_2state: !r#type.is_4state(),
+                        string: false,
+                        pattern_type: None,
                     },
                 ))
             }));
+        // Class methods are subroutines `class::method` (IEEE 1800-2023 8.6).
+        dimensions::all_class_signatures(syntax_tree, &mut packed_dimensions);
         packed_dimensions.functions = Arc::new(functions.clone());
         packed_dimensions.expression_signedness = expression_signedness.clone().into();
         for instance in &mut instances {
             for connection in &mut instance.port_connections {
-                connection.actual_expr = connection.actual_expr.take().map(|expr| {
+                if let Some(pattern) = &mut connection.bound_pattern {
+                    pattern.resolve_types(&packed_dimensions)?;
+                }
+                connection.map_expressions(|expr| {
                     let expr = expand_expr_calls(expr, &functions, &expression_signedness, 0, true);
                     substitute_expr_constants_with_parameter_literals(
                         &syntax_tree.state,
@@ -1096,6 +1129,8 @@ impl Module {
             subroutine_directions: &subroutine_directions,
             automatic: lifetimes::automatic_by_default(syntax_tree),
             statics: Vec::new(),
+            static_initializers: Vec::new(),
+            constant_evaluation: false,
         };
         let (mut subroutines, mut comb_processes, mut ff_processes, mut initial_processes) =
             if imported.declarations_only {
@@ -1148,7 +1183,7 @@ impl Module {
         // Static locals of the processes that keep their value are variables
         // of the module, initialized once with the declaration initializers.
         let statics: HashMap<String, Type> = body_state.statics.drain(..).collect();
-        let (kept, static_initializers) = lifetimes::keep_static_locals(
+        let (mut kept, mut static_initializers) = lifetimes::keep_static_locals(
             &syntax_tree.state,
             &statics,
             &subroutine_directions,
@@ -1162,6 +1197,10 @@ impl Module {
                         .map(|process| &mut process.body),
                 ),
         )?;
+        for subroutine in &subroutines {
+            kept.extend(subroutine.persistent_locals.iter().cloned());
+        }
+        static_initializers.append(&mut body_state.static_initializers);
         locals.retain(|local| !kept.contains(&local.name));
         for name in kept {
             signals.push(Signal::new(name.clone(), statics[&name].clone()));
@@ -1198,6 +1237,11 @@ impl Module {
         {
             if let Some(expr) = connection.actual_expr() {
                 collect_connected_nets(expr, &mut connected_nets);
+            }
+            if let Some(pattern) = connection.bound_pattern() {
+                pattern.visit_expressions(&mut |expr| {
+                    collect_connected_nets(expr, &mut connected_nets)
+                });
             }
         }
         if let Some(signal) = signals.iter().find(|signal| {
@@ -1250,8 +1294,7 @@ impl Module {
             }
             for instance in &mut instances {
                 for connection in &mut instance.port_connections {
-                    connection.actual_expr =
-                        connection.actual_expr.take().map(|expr| rename.expr(expr));
+                    connection.map_expressions(|expr| rename.expr(expr));
                 }
             }
         }
@@ -1875,6 +1918,7 @@ pub struct PortConnection {
     formal: String,
     actual: String,
     actual_expr: Option<Expr>,
+    bound_pattern: Option<BoundPattern>,
 }
 
 impl PortConnection {
@@ -1883,6 +1927,20 @@ impl PortConnection {
             formal,
             actual,
             actual_expr,
+            bound_pattern: None,
+        }
+    }
+
+    /// An untyped assignment pattern with caller-owned values. The receiving
+    /// port supplies its element types after parameter specialization.
+    pub fn bound_pattern(&self) -> Option<&BoundPattern> {
+        self.bound_pattern.as_ref()
+    }
+
+    fn map_expressions(&mut self, mut map: impl FnMut(Expr) -> Expr) {
+        self.actual_expr = self.actual_expr.take().map(&mut map);
+        if let Some(pattern) = &mut self.bound_pattern {
+            pattern.map_expressions(&mut map);
         }
     }
 
@@ -1920,6 +1978,8 @@ pub struct Type {
     /// named type, which is signed although the whole array is not (IEEE
     /// 1800-2023 7.4.1).
     signed_element_depth: Option<usize>,
+    /// The class of an object handle type.
+    class: Option<String>,
 }
 
 impl Type {
@@ -1932,6 +1992,7 @@ impl Type {
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
             signed_element_depth: None,
+            class: None,
         }
     }
 
@@ -1944,7 +2005,13 @@ impl Type {
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
             signed_element_depth: None,
+            class: None,
         }
+    }
+
+    /// The class of an object handle type.
+    pub fn class(&self) -> Option<&str> {
+        self.class.as_deref()
     }
 
     pub fn kind(&self) -> TypeKind {
@@ -1970,6 +2037,9 @@ pub enum TypeKind {
     Shortreal,
     /// IEEE 1800-2023 6.16: a dynamically sized string, held as a heap handle.
     String,
+    /// IEEE 1800-2023 8.4: a handle of a class object, `null` or an object
+    /// in the heap.
+    Object,
     Bit,
     Logic,
     Reg,
@@ -2408,6 +2478,8 @@ impl ConditionalAssignment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Function {
+    /// The aggregate return type, frozen in its declaration scope.
+    return_type: Option<Type>,
     return_real: bool,
     /// Whether the function returns a `string`.
     return_string: bool,
@@ -2653,6 +2725,8 @@ struct VariableDimensions {
     real: bool,
     /// A `string`: each element is a heap handle, not packed bits.
     string: bool,
+    /// The class of an object handle variable.
+    class: Option<String>,
     packed: Vec<PackedDimension>,
     unpacked: Vec<UnpackedDimension>,
     signed: bool,
@@ -2680,6 +2754,10 @@ struct FunctionReturnMetadata {
     dimensions: Option<usize>,
     signed: bool,
     is_2state: bool,
+    /// The function returns a `string`.
+    string: bool,
+    /// Declared aggregate type, available before function bodies are inlined.
+    pattern_type: Option<Type>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2703,6 +2781,8 @@ struct PackedDimensions {
     /// assignment patterns passed as arguments.
     subroutine_param_shapes: Arc<HashMap<String, Vec<VariableDimensions>>>,
     subroutine_param_names: Arc<HashMap<String, Vec<String>>>,
+    /// The class whose method is being bound.
+    class_scope: Option<String>,
 }
 
 impl PackedDimensions {
@@ -2725,6 +2805,7 @@ impl PackedDimensions {
             type_query: false,
             subroutine_param_shapes: Arc::default(),
             subroutine_param_names: Arc::default(),
+            class_scope: None,
         }
     }
 }

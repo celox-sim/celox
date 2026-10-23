@@ -218,7 +218,7 @@ pub(crate) fn eval_const_expr_in_env(
                 crate::ast::const_functions::eval_call(name, args, constants)
             }
             Callee::System(function) => eval_system_function(*function, args, constants),
-            Callee::String(_) => None,
+            Callee::String(_) | Callee::Object(_) => None,
         },
         ConstExpr::Unary { op, expr: operand } => {
             if let Some(result) = integral_literal_from_const_expr(expr)

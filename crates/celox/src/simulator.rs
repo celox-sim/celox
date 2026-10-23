@@ -124,7 +124,7 @@ mod host {
     pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
         pub(crate) backend: B,
         /// Byte offsets of every handle slot in state memory.
-        pub(super) handle_slots: std::sync::OnceLock<Arc<[usize]>>,
+        pub(super) handle_slots: std::sync::OnceLock<Arc<[(usize, celox_heap::HandleKind)]>>,
         /// Set while handles live outside state memory, where no collection
         /// may run: between the polls of concurrent testbench processes.
         pub(crate) heap_safepoints_blocked: bool,
@@ -323,7 +323,7 @@ mod host {
 
     /// A bounded continuation of the backend ring. Records remain unformatted
     /// until the eventual consumer supplies its scope/time context.
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct PendingRuntimeEvents {
         events: std::collections::VecDeque<RawRuntimeEvent>,
         missed: u64,
@@ -1183,6 +1183,44 @@ mod host {
             );
         }
 
+        /// The runtime events [`Self::drain_runtime_events`] would return
+        /// next, without taking them.
+        pub(crate) fn peek_runtime_events(&mut self) -> Vec<RuntimeEvent> {
+            self.stash_runtime_events();
+            let raw = self.pending_host_events.lock().unwrap().clone().drain();
+            raw.into_iter()
+                .filter_map(|raw| {
+                    render_raw_runtime_event(
+                        raw,
+                        &self.program.runtime_schema.runtime_event_sites,
+                        RuntimeFormatContext::default(),
+                    )
+                })
+                .collect()
+        }
+
+        /// Make the design state, the host state design code observes and
+        /// the undrained runtime events those of `other`, a simulator of the
+        /// same design. Host state outside the memory image, such as open
+        /// files, is not copied.
+        pub(crate) fn mirror(&mut self, other: &mut Self) {
+            other.stash_runtime_events();
+            self.stash_runtime_events();
+            let pending = other.pending_host_events.lock().unwrap().clone();
+            *self.pending_host_events.lock().unwrap() = pending;
+            let fingerprint = self.state_fingerprint();
+            crate::simulator::StateImage::capture(&other.backend, other.state_fingerprint())
+                .restore_into(&mut self.backend, fingerprint)
+                .expect("a simulator of the same design");
+            self.frozen = other.frozen;
+            self.dirty = other.dirty;
+            self.declaration_phase = other.declaration_phase;
+            self.comb_observer_snapshots
+                .clone_from(&other.comb_observer_snapshots);
+            self.comb_observer_initial_eval = other.comb_observer_initial_eval;
+            self.host_watch.set_log(other.host_watch.log().to_vec());
+        }
+
         /// Move the events in the backend's buffer to the queue that
         /// [`Self::drain_runtime_events`] reads.
         pub(crate) fn stash_runtime_events(&mut self) {
@@ -1624,28 +1662,71 @@ mod host {
                 .map_err(|e| self.decorate_runtime_error(e))
         }
 
-        /// Manually triggers a clock or event to process sequential logic.
+        /// One clock period of an event's signal: its active edge, then its
+        /// inactive edge.
         ///
-        /// A tick is one active edge of the event. Clock domains derived from
-        /// it run as in the timed [`crate::Simulation`]: a clock computed
-        /// combinationally from the event's signal, such as `clk & enable`,
-        /// is judged from the state before the edge and its domain evaluates
-        /// together with the event's own; domains clocked from state the
-        /// tick changes, such as a register bit, a divider or a gate whose
-        /// enable the commit raises, run after the commit, transitively.
+        /// A tick is defined as the SystemVerilog statements
         ///
-        /// Only the active edge is ticked, and the event's signal is left
-        /// unchanged. Domains that react to the opposite edge of the event's
-        /// signal, such as one clocked by `~clk` or by a falling `clk & en`,
-        /// do not run; drive the signal's levels with the timed
-        /// [`crate::Simulation`] for them.
+        /// ```systemverilog
+        /// s <= A; #H;
+        /// s <= I; #L;
+        /// ```
+        ///
+        /// on the event's signal `s`, where `A` is its active level (1 for a
+        /// positive-edge clock or an active-high reset, 0 otherwise) and `I`
+        /// the inactive one, with host operations taking place between
+        /// periods. Every domain sensitive to either edge runs, including
+        /// domains of the opposite edge and clocks derived from the signal,
+        /// and the signal ends at the inactive level. A signal already at the
+        /// active level takes no active edge. See the execution semantics
+        /// guide for the host API as a whole.
         pub fn tick(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-            let result = self.tick_unit(event);
-            self.heap_safepoint();
-            result
+            if self.frozen {
+                return Ok(());
+            }
+            let info = self.event_edges[event.id()];
+            let active = info.active_edge();
+            let inactive = active.opposite();
+            let plain = !matches!(self.derived_ticks.get(event.id()), Some(Some(_)));
+            if !(plain && self.host_watch.is_empty() && !info.can_fire(inactive)) {
+                self.active_edge(event)?;
+                return self.inactive_edge(event);
+            }
+            // Everything is read before the domain runs: right after its
+            // kernel, loads of host tables can wait behind the kernel's
+            // stores (4 KiB aliasing), which made a period cost almost two
+            // domain runs. The inactive edge runs nothing and only stores.
+            let observers = !self.program.runtime_schema.comb_observers.is_empty();
+            let moved = celox_runtime::move_signal(
+                &mut self.backend,
+                &info,
+                active,
+                celox_runtime::set_level,
+            );
+            if let Some(old) = moved {
+                if info.comb_read {
+                    self.dirty = true;
+                }
+                if info.fires(old, active) {
+                    self.fire(event)?;
+                }
+            }
+            self.backend.set(info.signal, inactive.level());
+            if info.comb_read || observers {
+                self.dirty = true;
+            }
+            Ok(())
         }
 
-        fn tick_unit(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+        /// Run the event's domain as its active edge does, with the signal
+        /// left as it is: the unit of the edge APIs.
+        fn fire(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            let result = self.fire_unit(event);
+            self.heap_safepoint();
+            result.and(self.take_heap_fault())
+        }
+
+        fn fire_unit(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
             if let Some(Some(_)) = self.derived_ticks.get(event.id()) {
                 return self.tick_derived(event);
             }
@@ -1712,7 +1793,7 @@ mod host {
                     // store the level without reading it first. A load of
                     // the signal right after the previous edge's kernel can
                     // wait behind the kernel's stores (4 KiB aliasing),
-                    // which made a cycle cost almost two ticks.
+                    // which made a period cost almost two domain runs.
                     self.backend.set(info.signal, edge.level());
                     if info.comb_read || !self.program.runtime_schema.comb_observers.is_empty() {
                         self.dirty = true;
@@ -1720,7 +1801,7 @@ mod host {
                     return Ok(());
                 }
                 // No derived domains: move the signal, then run the event's
-                // domain exactly as `tick` does.
+                // domain.
                 let write = watched_write(&mut self.host_watch);
                 let Some(old) = celox_runtime::move_signal(&mut self.backend, &info, edge, write)
                 else {
@@ -1730,7 +1811,7 @@ mod host {
                     self.dirty = true;
                 }
                 if info.fires(old, edge) {
-                    return self.tick(event);
+                    return self.fire(event);
                 }
                 if !self.program.runtime_schema.comb_observers.is_empty() {
                     self.dirty = true;
@@ -1800,49 +1881,6 @@ mod host {
             self.edge(event, edge)
         }
 
-        /// One clock cycle: [`Self::active_edge`], then
-        /// [`Self::inactive_edge`].
-        pub fn cycle(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-            if self.frozen {
-                return Ok(());
-            }
-            let info = self.event_edges[event.id()];
-            let active = info.active_edge();
-            let inactive = match active {
-                celox_runtime::Edge::Rising => celox_runtime::Edge::Falling,
-                celox_runtime::Edge::Falling => celox_runtime::Edge::Rising,
-            };
-            let plain = !matches!(self.derived_ticks.get(event.id()), Some(Some(_)));
-            if !(plain && self.host_watch.is_empty() && !info.can_fire(inactive)) {
-                self.active_edge(event)?;
-                return self.inactive_edge(event);
-            }
-            // Everything is read before the domain runs: right after its
-            // kernel, loads of host tables can wait behind the kernel's
-            // stores (4 KiB aliasing), which made a cycle cost almost two
-            // ticks. The inactive edge runs nothing and only stores.
-            let observers = !self.program.runtime_schema.comb_observers.is_empty();
-            let moved = celox_runtime::move_signal(
-                &mut self.backend,
-                &info,
-                active,
-                celox_runtime::set_level,
-            );
-            if let Some(old) = moved {
-                if info.comb_read {
-                    self.dirty = true;
-                }
-                if info.fires(old, active) {
-                    self.tick(event)?;
-                }
-            }
-            self.backend.set(info.signal, inactive.level());
-            if info.comb_read || observers {
-                self.dirty = true;
-            }
-            Ok(())
-        }
-
         /// Move several event signals at one instant, as coincident edges:
         /// every domain sensitive to one of them evaluates against the state
         /// before the edges, then all of them commit, then the rounds of
@@ -1880,8 +1918,8 @@ mod host {
             std::sync::Arc::clone(&self.derived_ticks)
         }
 
-        /// [`Self::tick`] of an event whose ticks can trigger derived domains,
-        /// kept out of line so that the plain tick stays small.
+        /// The domain run of an event whose edges can trigger derived
+        /// domains, kept out of line so that the plain run stays small.
         #[inline(never)]
         fn tick_derived(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
             let plans = std::sync::Arc::clone(&self.derived_ticks);
@@ -1939,23 +1977,80 @@ mod host {
             result
         }
 
-        /// Advance several events as one coincident edge.
+        /// Tick several events at once: [`Self::tick`] with the edges of all
+        /// their signals made together,
         ///
-        /// Every triggered domain samples the state settled before the edge,
-        /// then all of them update, then combinational logic settles once.
-        /// This is the behaviour of clocks that share an edge in hardware,
-        /// such as a divided clock and its source, which sequential
-        /// [`Self::tick`] calls cannot express: each of them would settle
-        /// the design between the domains. Events of the same domain are
-        /// applied once. A single event behaves like [`Self::tick`].
+        /// ```systemverilog
+        /// s1 <= A1; ... sk <= Ak; #H;
+        /// s1 <= I1; ... sk <= Ik; #L;
+        /// ```
         ///
-        /// Derived domains of the ticked events run as in [`Self::tick`]:
-        /// gated clocks with the ticked domains, state-derived ones after
-        /// all of them commit.
+        /// so every domain triggered by the coincident active edges samples
+        /// the state settled before them, then all of them update. This is
+        /// the behaviour of clocks that share an edge in hardware, such as a
+        /// divided clock and its source, which sequential [`Self::tick`]
+        /// calls cannot express: each of them would settle the design
+        /// between the domains. Events of the same domain are applied once.
+        /// A single event behaves like [`Self::tick`].
         pub fn tick_events(&mut self, events: &[B::Event]) -> Result<(), RuntimeErrorCode> {
-            let result = self.tick_events_unit(events);
+            if self.frozen {
+                return Ok(());
+            }
+            if let [event] = events {
+                return self.tick(*event);
+            }
+            let only_active_edges = self.host_watch.is_empty()
+                && events.iter().all(|event| {
+                    let info = self.event_edges[event.id()];
+                    !matches!(self.derived_ticks.get(event.id()), Some(Some(_)))
+                        && !info.can_fire(info.active_edge().opposite())
+                });
+            if !only_active_edges {
+                let moves = |edge: fn(celox_runtime::EventEdge) -> celox_runtime::Edge| {
+                    events
+                        .iter()
+                        .map(|&event| (event, edge(self.event_edges[event.id()])))
+                        .collect::<Vec<_>>()
+                };
+                let active = moves(|info| info.active_edge());
+                let inactive = moves(|info| info.active_edge().opposite());
+                self.edges(&active)?;
+                return self.edges(&inactive);
+            }
+            // The inactive edges run nothing and only store.
+            let mut fired = Vec::with_capacity(events.len());
+            for &event in events {
+                let info = self.event_edges[event.id()];
+                let active = info.active_edge();
+                if let Some(old) = celox_runtime::move_signal(
+                    &mut self.backend,
+                    &info,
+                    active,
+                    celox_runtime::set_level,
+                ) {
+                    if info.comb_read {
+                        self.dirty = true;
+                    }
+                    if info.fires(old, active) {
+                        fired.push(event);
+                    }
+                }
+            }
+            let result = self.tick_events_unit(&fired);
             self.heap_safepoint();
-            result
+            result.and(self.take_heap_fault())?;
+            for &event in events {
+                let info = self.event_edges[event.id()];
+                self.backend
+                    .set(info.signal, info.active_edge().opposite().level());
+                if info.comb_read {
+                    self.dirty = true;
+                }
+            }
+            if !self.program.runtime_schema.comb_observers.is_empty() {
+                self.dirty = true;
+            }
+            Ok(())
         }
 
         fn tick_events_unit(&mut self, events: &[B::Event]) -> Result<(), RuntimeErrorCode> {
@@ -1998,11 +2093,11 @@ mod host {
             match domains.as_slice() {
                 [] => {
                     for event in unsplit {
-                        self.tick(event)?;
+                        self.fire(event)?;
                     }
                     return Ok(());
                 }
-                [(event, _, _)] => return self.tick(*event),
+                [(event, _, _)] => return self.fire(*event),
                 _ => {}
             }
             let timing_enabled = self.diagnostics.tick_timing_every.is_some();
@@ -2047,7 +2142,7 @@ mod host {
                 || matches!(self.derived_ticks.get(event.id()), Some(Some(_)))
             {
                 // Derived domains need the settled state to see their edges.
-                return self.tick(event);
+                return self.fire(event);
             }
             if self.dirty {
                 self.eval_comb_apply_ff_at_checked(event)?;
@@ -2056,6 +2151,16 @@ mod host {
             }
             self.dirty = true;
             Ok(())
+        }
+
+        /// Whether a period of `event`'s signal, a rise and a fall, runs only
+        /// the event's own domain, once: no domain reacts to the other edge
+        /// and no clock derives from the signal.
+        pub(crate) fn period_runs_only_own_domain(&self, event: B::Event) -> bool {
+            let info = self.event_edges[event.id()];
+            !matches!(self.derived_ticks.get(event.id()), Some(Some(_)))
+                && !info.can_fire(info.active_edge().opposite())
+                && self.host_watch.is_empty()
         }
 
         /// Advance a run of identical deferred-comb ticks. Native code may keep
@@ -2711,7 +2816,7 @@ mod host {
             sim.frozen = true;
             sim.posedge(clk).unwrap();
             sim.edges(&[(clk, celox_runtime::Edge::Rising)]).unwrap();
-            sim.cycle(clk).unwrap();
+            sim.tick(clk).unwrap();
             let clk_signal = sim.signal("clk");
             assert_eq!(sim.get(clk_signal), BigUint::from(0u8));
             assert_eq!(sim.get(count), BigUint::from(1u8));
@@ -2769,7 +2874,7 @@ mod host {
                 // logic stale only when it reads `clk`.
                 sim.negedge(clk).unwrap();
                 assert_eq!(sim.dirty, comb_read, "{seen}");
-                sim.cycle(clk).unwrap();
+                sim.tick(clk).unwrap();
                 assert_eq!(sim.dirty, comb_read, "{seen}");
                 let seen_signal = sim.signal("seen");
                 let expected = if comb_read { 0u8 } else { 1 };

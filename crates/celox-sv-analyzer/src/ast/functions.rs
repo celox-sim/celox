@@ -85,6 +85,8 @@ pub(super) fn native_functions(
             subroutine_directions: &directions,
             automatic,
             statics: Vec::new(),
+            static_initializers: Vec::new(),
+            constant_evaluation: false,
         };
         let mut dims = item.dimensions(dimensions);
         dims.subroutine_param_names = names.clone();
@@ -97,6 +99,8 @@ pub(super) fn native_functions(
             &item.literals,
             &mut state,
             item,
+            None,
+            None,
         ) {
             Ok(subroutine) => {
                 let has_real = subroutine.return_type.as_ref().is_some_and(|ty| {
@@ -264,5 +268,17 @@ fn native_signature(
         }),
         return_signed: result.is_some_and(|ty| ty.signed),
         return_is_2state: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::Bit),
+        return_type: ty
+            .filter(|ty| {
+                !ty.members.is_empty()
+                    || !ty.unpacked_ranges.is_empty()
+                    || ty.packed_ranges.len() > 1
+            })
+            .and_then(|ty| {
+                ty.pattern_target(&const_functions::Environment {
+                    constants: &*context.const_env,
+                    functions: &tree.state.const_functions,
+                })
+            }),
     })
 }

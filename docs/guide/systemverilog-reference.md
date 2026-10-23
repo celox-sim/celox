@@ -30,6 +30,7 @@ synthesis and is tested at the design level.
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Strings | `string` variables, function arguments and results: assignment of strings, string literals and casts (`string'(x)`), `==`, `!=` and ordering comparisons, concatenation and replication (with a run-time count), character reads and writes (`s[i]`), and the methods `len`, `getc`, `putc`, `toupper`, `tolower`, `compare`, `icompare`, `substr`, `atoi` / `atohex` / `atooct` / `atobin` and `itoa` / `hextoa` / `octtoa` / `bintoa`; `%s` and format-less display of string values. See [strings](#strings) |
+| Classes | classes declared in a module: properties of 2-state integral types up to 64 bits, `string` and class handle types, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes and method calls through interface class handles; `$cast` of class handles, as a function and as a task; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles. See [classes](#classes) |
 | Parameters | integral parameters and overrides preserving widths beyond 128 bits and X/Z values, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 
 ### Processes and control flow
@@ -127,7 +128,7 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Classes. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
+- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, typedefs and parameters of interface classes, classes declared in packages, parameterized classes, named constructor arguments, shallow copies (`new h`), and properties that are 4-state, `real`, arrays or wider than 64 bits. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
 - Behavioral and verification constructs: `final`, intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events and `->`, `fork` / `join`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
@@ -219,11 +220,54 @@ Not yet supported: `$sformat` / `$sformatf`, `atoreal` / `realtoa`, string
 arguments of `$value$plusargs`, file I/O and DPI-C, and string values in VPI,
 VCD output and the TypeScript API.
 
+### Classes {#classes}
+
+A class variable holds a handle of an object in the simulator's heap, `null`
+until a constructor runs. Like a string, a handle costs the same as a 32-bit
+integer to copy or compare; reading or writing a property and creating an
+object call into the runtime. Objects that no variable or other object refers
+to are collected between time slots and after each `tick`. A method is called
+with the object it was called on, so it can be a function or a task, and
+calls are bound to the method of the variable's class (IEEE 1800-2023 8.6).
+A call of a virtual method runs the override of the object's class instead,
+except `super.m(...)`, which runs the base's implementation (8.15, 8.20); it
+selects the override by the class of the object, so it costs one more call
+into the runtime. Reading or writing a property or calling a method through
+`null` is a runtime error. Constructing an abstract class and a class that
+leaves a pure virtual method unimplemented are rejected (8.21). A class that
+implements an interface class implements each of its methods with the same
+return type, or, if it is abstract, re-declares it pure (8.26). A method called
+through a handle of an interface class runs the implementation of the object's
+class.
+
+A handle may be assigned to a variable of its class, of a base class or of an
+interface class it implements; any other assignment of a handle is an error
+(IEEE 1800-2023 8.16, 8.26.5). `$cast(dest, source)` assigns a handle whose
+object's class derives from or implements the class of `dest`, or `null`, and
+returns 1; otherwise it leaves `dest` unchanged and returns 0, or, called as a
+task, reports an error. A `$cast` between classes neither of which derives from
+the other, unless the source is an interface class, always fails (8.16).
+
+A constructor calls the constructor of the base class first, with the
+arguments of `super.new(...)` or of the `extends` clause, then runs the
+initializers of the properties its class declares, then its body (IEEE
+1800-2023 8.17). A static property is a variable of the module that declares
+the class, so each instance of the module has its own.
+
+Checkpoints keep objects. State files record strings but not objects, so
+saving a state file fails while any variable holds an object.
+
 ### Out-of-range selects
 
 A run-time select that reaches past either end of a
 vector reads `X` for the missing bits (zero in two-state simulation) and
-writes only the bits that exist.
+writes only the bits that exist. A write to a constant part-select partly
+outside the vector, by any procedural or continuous assignment, also writes
+only the bits inside: `q[9:6] = v` on `logic [7:0] q` writes `v[1:0]` to
+`q[7:6]`. A write wholly outside the vector has no effect. Reading such a
+constant part-select, and writing one of an array element or of an inner
+packed dimension that leaves its declared range, are rejected
+([#88](https://github.com/celox-sim/celox/issues/88)).
 
 ### Wildcard comparisons
 
@@ -354,30 +398,52 @@ unsupported, including when the inference option is enabled.
   `a = 1; a = 0;` wakes `@(a)` but not `@(a ^ b)`; write `#0` between the
   writes to make the pulse visible. IEEE 1800-2023 4.7 permits this order;
   Icarus evaluates the expression at each write.
-- A waiter does not yet see a value that one evaluation of `always_comb`, an
-  edge-triggered `always` or `always_ff` writes and then overwrites, as in
-  `y = 0; if (a) y = 1;` ([#1706](https://github.com/celox-sim/celox/issues/1706)). `always @*` already
-  reports that write.
+- A waiter sees every value that one evaluation of `always_comb`,
+  `always @*`, an edge-triggered `always` or `always_ff` writes, including
+  one that a later write overwrites: with `a` at 1, `y = 0; if (a) y = 1;`
+  wakes `@(y)` (IEEE 1800-2023 4.3, 9.4.2). Nonblocking updates apply in the
+  NBA region in issue order, each its own update (10.4.2). A child's output
+  port is a continuous assignment to the parent's net (23.3.3), so a waiter
+  in the parent sees only the settled value, as in the previous item.
+  Verilator 5.052 sees only the final value of an evaluation; Icarus 13.0
+  also sees the pulse through the port.
+- A blocking write of an edge-triggered `always` is an update of the active
+  region: the processes it wakes run before the same edge's nonblocking
+  updates. With `y = ~y; q <= q + 1;`, a waiter on `@(y)` reads `q` from
+  before the edge and waits again before the nonblocking updates
+  (IEEE 1800-2023 4.5). Icarus 13.0 gives the same values; Verilator 5.052
+  resumes the waiter after the nonblocking updates.
 
 ### Variable lifetimes
 
-Variable lifetimes follow IEEE 1800-2023 6.21. A variable declared in a
-procedural block, function or task is static unless it, its subroutine or
-its module (`module automatic`) is declared `automatic`. A static local of a
-block keeps its value from one execution of the block to the next, and its
+Variable lifetimes follow IEEE 1800-2023 6.21. Outside classes, a variable
+declared in a procedural block, function or task is static unless it, its
+subroutine or its module (`module automatic`) is declared `automatic`.
+Class methods have automatic lifetime (8.6). A static local of a block
+keeps its value from one execution of the block to the next, and its
 initializer runs once at time zero: in `always_ff`, `int count; count++;`
 counts. An automatic local is initialized on every entry. A static local
 whose value on entry is never read, because every path writes it before
 reading it, behaves the same either way. Because a static local keeps its
 value, a local of `always_comb` that only some paths write is a latch, and
-requires relaxing `inferred_latch` like other inferred latches. A static local of a function or task
-that keeps its value between calls is not supported, nor is a static local
-whose initializer is not constant; declare them `automatic`. The result of
-a static function is static too, so one with a path that does not assign
-it (other than a `case` whose items cover every value of a two-state
-argument) is
-rejected as well. An interface
-whose default lifetime (`interface automatic`) differs from that of the
+requires relaxing `inferred_latch` like other inferred latches.
+
+Static function locals and result variables keep their values between calls
+(13.4.2), including scalar `real` values and packed/unpacked integral storage.
+An explicit `static` local of an automatic function is shared too; automatic
+locals are initialized on each call. Static output arguments retain their
+previous values on paths that leave them unassigned. Observable static storage
+is shared by call sites and timed processes, and module-local storage is separate
+for each module instance. Declaration initializers run once at time zero,
+including when the function has not been called. Initializers that call a
+stateful function require `Simulation` or a native testbench to execute the
+initialization process. Constant function calls use
+fresh values and do not affect runtime storage (13.4.3).
+
+Task locals that keep their values and nonconstant static initializers remain
+unsupported; declare those locals `automatic`. Package function state follows
+the existing package-variable restrictions on multiple procedural drivers.
+An interface whose default lifetime (`interface automatic`) differs from that of the
 module it is used in is rejected.
 
 ### Run-time loops

@@ -232,6 +232,15 @@ enum Finish {
     Inside(Vec<bool>),
     /// A string operation on the bound children, see [`strings`].
     StringCall(StringOp),
+    /// A read of property `property` of the object handle child.
+    ObjectLoad(crate::ast::classes::Property),
+    /// A call of method subroutine `name` with `formals` formals; the first
+    /// child is the object handle when `receiver` is one.
+    MethodCall {
+        name: String,
+        formals: usize,
+        receiver: objects::Receiver,
+    },
 }
 
 enum Job {
@@ -310,6 +319,11 @@ pub(in crate::ast) fn bind_value(
                         jobs.push(Job::Enter(*inner, target, scope.clone()));
                         continue;
                     }
+                    ExprKind::Literal(text) if text == "null" => {
+                        // A handle of no object (IEEE 1800-2023 8.4).
+                        values.push(Expr::Literal("32'h0".into()));
+                        continue;
+                    }
                     ExprKind::Literal(text) => {
                         if let Some(packed) = packed_string_literal(text) {
                             values.push(Expr::Literal(packed));
@@ -326,8 +340,19 @@ pub(in crate::ast) fn bind_value(
                     }
                     ExprKind::Name(name) if !name.spelling.starts_with('$') => {
                         let name = instances::normalize_identifier(&name.spelling);
-                        if matches!(name.as_str(), "null" | "this" | "super") {
+                        if name == "null" {
+                            values.push(Expr::Literal("32'h0".into()));
+                            continue;
+                        }
+                        if matches!(name.as_str(), "this" | "super")
+                            && dimensions.get(&name).is_none()
+                        {
                             return Err(unsupported(format!("`{name}`")));
+                        }
+                        if let Some(value) = objects::unqualified_property(tree, dimensions, &name)?
+                        {
+                            values.push(value);
+                            continue;
                         }
                         values.push(expressions::identifier_expression(
                             &tree.state,
@@ -384,8 +409,39 @@ pub(in crate::ast) fn bind_value(
                     ExprKind::Call {
                         expression,
                         arguments: args,
-                    } if strings::method(*expression, native, dimensions).is_some() => {
-                        let (op, base) = strings::method(*expression, native, dimensions)
+                    } if objects::method(tree, *expression, native, dimensions)?.is_some() => {
+                        let (name, formals, receiver) =
+                            objects::method(tree, *expression, native, dimensions)?
+                                .expect("checked by the guard");
+                        if args.len() > formals || args.iter().any(|arg| arg.name.is_some()) {
+                            return Err(unsupported(format!("arguments of method `{name}`")));
+                        }
+                        let mut children = Vec::new();
+                        if let objects::Receiver::Handle(handle) = receiver {
+                            children.push((handle, None));
+                        }
+                        for arg in args {
+                            let Some(value) = arg.value else {
+                                return Err(unsupported(format!(
+                                    "omitted argument of method `{name}`"
+                                )));
+                            };
+                            children.push((value, None));
+                        }
+                        (
+                            Finish::MethodCall {
+                                name,
+                                formals,
+                                receiver,
+                            },
+                            children,
+                        )
+                    }
+                    ExprKind::Call {
+                        expression,
+                        arguments: args,
+                    } if strings::method(tree, *expression, native, dimensions).is_some() => {
+                        let (op, base) = strings::method(tree, *expression, native, dimensions)
                             .expect("checked by the guard");
                         if op.updates_receiver() {
                             return Err(unsupported(format!(
@@ -471,7 +527,30 @@ pub(in crate::ast) fn bind_value(
                         }
                         let name = bound_callable_name(tree, *expression, native, dimensions)?
                             .ok_or_else(|| unsupported("method or randomize call"))?;
-                        if name.starts_with('$') && !name.contains("::") {
+                        let cast = match name.as_str() {
+                            "$cast" => objects::cast(tree, args, native, dimensions)?,
+                            _ => None,
+                        };
+                        if let Some(cast) = cast {
+                            let objects::Cast::Call {
+                                name,
+                                destination,
+                                source,
+                            } = cast
+                            else {
+                                values.push(Expr::Literal("0".into()));
+                                continue;
+                            };
+                            (
+                                Finish::Call {
+                                    name,
+                                    args: vec![Some(destination), Some(source)],
+                                    order: Vec::new(),
+                                    system: None,
+                                },
+                                vec![(destination, None), (source, None)],
+                            )
+                        } else if name.starts_with('$') && !name.contains("::") {
                             let presence = args
                                 .iter()
                                 .map(|arg| {
@@ -646,7 +725,7 @@ pub(in crate::ast) fn bind_value(
                     ExprKind::Select {
                         expression,
                         dimension,
-                    } if strings::native_string(*expression, native, dimensions) => {
+                    } if strings::native_string(tree, *expression, native, dimensions) => {
                         let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind else {
                             return Err(unsupported("part-select of a string"));
                         };
@@ -654,6 +733,21 @@ pub(in crate::ast) fn bind_value(
                             Finish::StringCall(StringOp::Getc),
                             vec![(*expression, None), (index, None)],
                         )
+                    }
+                    ExprKind::Member { .. }
+                        if objects::property(tree, id, native, dimensions)?.is_some() =>
+                    {
+                        let (property, receiver) = objects::property(tree, id, native, dimensions)?
+                            .expect("checked by the guard");
+                        match receiver {
+                            Some(receiver) => {
+                                (Finish::ObjectLoad(property), vec![(receiver, None)])
+                            }
+                            None => {
+                                values.push(objects::load(&property, objects::this()));
+                                continue;
+                            }
+                        }
                     }
                     ExprKind::Member { .. } | ExprKind::Select { .. } => {
                         values.push(selected_value(id, native, tree, dimensions)?);
@@ -818,6 +912,29 @@ pub(in crate::ast) fn bind_value(
                     Finish::Concat => Expr::Concat(operands),
                     Finish::StringCall(op) => {
                         strings::call(op, strings::operands(op, operands, dimensions))
+                    }
+                    Finish::ObjectLoad(property) => {
+                        let handle = operands.pop().ok_or_else(disagreement)?;
+                        objects::load(&property, handle)
+                    }
+                    Finish::MethodCall {
+                        name,
+                        formals,
+                        receiver,
+                    } => {
+                        let mut args: Vec<Option<Expr>> = Vec::with_capacity(formals + 1);
+                        if receiver == objects::Receiver::This {
+                            args.push(Some(objects::this()));
+                        }
+                        let handles = usize::from(receiver != objects::Receiver::Static);
+                        args.extend(operands.into_iter().map(Some));
+                        // Omitted trailing arguments take their defaults.
+                        args.resize(formals + handles, None);
+                        Expr::Call {
+                            callee: Callee::Subroutine(name),
+                            args,
+                            arg_order: Vec::new(),
+                        }
                     }
                     Finish::Cast(target) => {
                         let operand = remove_real_division_guards(
@@ -1117,6 +1234,10 @@ fn path(
     tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<(Vec<String>, Option<String>)> {
+    // A static class property is a variable of the module.
+    if let Some(variable) = objects::static_property(tree, root, native, dimensions)? {
+        return Ok((vec![variable], None));
+    }
     let mut parts = Vec::new();
     let mut qualified = None;
     loop {

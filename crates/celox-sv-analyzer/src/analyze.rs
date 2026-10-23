@@ -121,7 +121,13 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     ),
                     port.is_net(),
                 )
-                .with_default(port.default().cloned().map(Into::into)),
+                .with_default(port.default().cloned().map(Into::into))
+                .with_pattern_target(port.r#type().pattern_target(
+                    &ast::const_functions::Environment {
+                        constants: &constants,
+                        functions: &state.const_functions,
+                    },
+                )),
             );
         }
         let signals = module
@@ -172,6 +178,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                                 connection.formal().to_string(),
                                 connection.actual().to_string(),
                                 connection.actual_expr().cloned().map(Into::into),
+                                connection.bound_pattern().cloned(),
                             )
                         })
                         .collect(),

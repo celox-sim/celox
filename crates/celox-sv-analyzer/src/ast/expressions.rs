@@ -3,6 +3,14 @@
 use super::*;
 
 pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
+    // Binding an enclosing expression can visit an already guarded operand.
+    // Its children were guarded when it was constructed. Wrapping it again
+    // loses the operation's type when the internal unknown arm is lowered.
+    if matches!(&expr, Expr::Mux { then_expr, .. }
+        if matches!(&**then_expr, Expr::Literal(text) if text == crate::DIV_ZERO_UNKNOWN_LITERAL))
+    {
+        return expr;
+    }
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => expr,
         Expr::Select {

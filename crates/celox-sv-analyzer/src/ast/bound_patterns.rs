@@ -3,7 +3,9 @@
 //! the receiving declaration's assignment context (IEEE 1800-2023 10.9).
 use super::*;
 mod binding;
+mod ports;
 pub(super) use binding::{Kind as NativeKind, prepare_native};
+pub(in crate::ast) use ports::{ValueType, from_port, native_value_type};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BoundPattern {
@@ -26,12 +28,17 @@ enum Items {
 pub(super) enum Key {
     Index(i128),
     Member(String),
+    Name { name: String, index: Option<i128> },
     Default,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum Value {
-    Expression(Expr),
+    Expression {
+        expr: Expr,
+        signed: Option<bool>,
+        value_type: ports::ValueType,
+    },
     Pattern(BoundPattern),
 }
 
@@ -42,8 +49,8 @@ pub(super) fn from_param(
 ) -> Converted<BoundPattern> {
     match binding::value(root, tree, dims)? {
         Value::Pattern(pattern) => Ok(pattern),
-        Value::Expression(value) => Ok(BoundPattern {
-            items: Items::Value(value),
+        Value::Expression { expr, .. } => Ok(BoundPattern {
+            items: Items::Value(expr),
         }),
     }
 }
@@ -118,6 +125,7 @@ fn frozen(state: &AnalysisState, expr: Expr, dims: &PackedDimensions) -> Convert
             Expr::Literal(typecheck::format_integral_literal_binary(&literal))
         }
         value => {
+            let value = substitute_expr_idents(value, &dims.array_parameter_values);
             let values = dims
                 .parameter_values
                 .iter()
@@ -154,38 +162,19 @@ impl Value {
         if let Self::Pattern(pattern) = self {
             return pattern.lower(state, shape, dims);
         }
-        let Self::Expression(value) = self else {
-            unreachable!()
+        let (value, signed, value_type) = match self {
+            Self::Expression {
+                expr,
+                signed,
+                value_type,
+            } => (
+                expr,
+                signed.ok_or_else(|| unsupported("assignment pattern operand signedness"))?,
+                value_type.known(),
+            ),
+            Self::Pattern(_) => unreachable!(),
         };
-        if default && let Some((dimension, rest)) = shape.unpacked.split_first() {
-            let count = eval_ast_const_expr(state, &dimension.width, &dims.const_env)
-                .and_then(|n| usize::try_from(n).ok())
-                .ok_or_else(|| unsupported("pattern target array size"))?;
-            let shape = VariableDimensions {
-                real: false,
-                string: false,
-                unpacked: rest.to_vec(),
-                ..shape.clone()
-            };
-            return Ok(Expr::Concat(vec![
-                self.lower(state, &shape, dims, true)?;
-                count
-            ]));
-        }
-        if !shape.unpacked.is_empty() {
-            return Err(unsupported(
-                "scalar assignment pattern item for unpacked array",
-            ));
-        }
-        let width = patterns::shape_width(state, shape, dims)
-            .ok_or_else(|| unsupported("assignment pattern element width"))?;
-        let signed =
-            expr_signedness(value, &dims.expression_signedness, &dims.functions).unwrap_or(false);
-        Ok(Expr::Resize {
-            expr: Box::new(value.clone()),
-            width,
-            signed,
-        })
+        patterns::assignment_value(state, value, signed, value_type, shape, dims, default)
     }
 }
 
@@ -227,6 +216,7 @@ impl BoundPattern {
                 VariableDimensions {
                     real: false,
                     string: false,
+                    class: None,
                     unpacked: rest.to_vec(),
                     ..shape.clone()
                 };
@@ -241,21 +231,6 @@ impl BoundPattern {
                     })
                 })
                 .collect::<Vec<_>>();
-        } else if !shape.members.is_empty() {
-            if shape.members.len() > 1 && shape.members.iter().all(|m| m.offset() == 0) {
-                return Err(unsupported("assignment pattern for a packed union"));
-            }
-            keys = shape
-                .members
-                .iter()
-                .map(|m| Key::Member(m.name().into()))
-                .collect();
-            shapes.extend(
-                shape
-                    .members
-                    .iter()
-                    .map(|m| procedural::dimensions_from_type(m.r#type())),
-            );
         } else if let Some((dim, rest)) = shape.packed.split_first()
             && !rest.is_empty()
         {
@@ -267,6 +242,7 @@ impl BoundPattern {
                 VariableDimensions {
                     real: false,
                     string: false,
+                    class: None,
                     packed: rest.to_vec(),
                     signed: shape.signed_element_depth == Some(1),
                     signed_element_depth: shape
@@ -286,6 +262,21 @@ impl BoundPattern {
                     })
                 })
                 .collect();
+        } else if !shape.members.is_empty() {
+            if shape.members.len() > 1 && shape.members.iter().all(|m| m.offset() == 0) {
+                return Err(unsupported("assignment pattern for a packed union"));
+            }
+            keys = shape
+                .members
+                .iter()
+                .map(|m| Key::Member(m.name().into()))
+                .collect();
+            shapes.extend(
+                shape
+                    .members
+                    .iter()
+                    .map(|m| procedural::dimensions_from_type(m.r#type())),
+            );
         } else {
             let width = patterns::shape_width(state, shape, dims)
                 .ok_or_else(|| unsupported("pattern target width"))?;
@@ -293,6 +284,7 @@ impl BoundPattern {
                 VariableDimensions {
                     real: false,
                     string: false,
+                    class: None,
                     packed: Vec::new(),
                     signed: false,
                     signed_element_depth: None,
@@ -325,7 +317,27 @@ impl BoundPattern {
                 values.iter().map(|v| (v, false)).collect::<Vec<_>>()
             }
             Items::Keyed(items) => {
-                for (key, _) in items {
+                let structure = shape.unpacked.is_empty()
+                    && shape.packed.len() <= 1
+                    && !shape.members.is_empty();
+                let items = items
+                    .iter()
+                    .map(|(key, value)| {
+                        let key = match key {
+                            Key::Name { name, .. } if structure => Key::Member(name.clone()),
+                            Key::Name { index, .. } => Key::Index(index.ok_or_else(|| {
+                                unsupported("nonconstant assignment pattern index")
+                            })?),
+                            key => key.clone(),
+                        };
+                        Ok((key, value))
+                    })
+                    .collect::<Converted<Vec<_>>>()?;
+                let mut seen = HashSet::default();
+                for (key, _) in &items {
+                    if !seen.insert(key) {
+                        return Err(unsupported("duplicate assignment pattern key"));
+                    }
                     if *key != Key::Default && !keys.contains(key) {
                         return Err(unsupported("assignment pattern key outside target"));
                     }
@@ -336,13 +348,13 @@ impl BoundPattern {
                             .iter()
                             .rev()
                             .find(|(k, _)| k == key)
-                            .map(|(_, v)| (v, false))
+                            .map(|(_, v)| (*v, false))
                             .or_else(|| {
                                 items
                                     .iter()
                                     .rev()
                                     .find(|(k, _)| *k == Key::Default)
-                                    .map(|(_, v)| (v, true))
+                                    .map(|(_, v)| (*v, true))
                             })
                             .ok_or_else(|| unsupported("assignment pattern missing element"))
                     })

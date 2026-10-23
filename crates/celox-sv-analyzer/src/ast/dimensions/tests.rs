@@ -124,6 +124,8 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
                     dimensions: f.return_dimensions,
                     signed: f.return_signed,
                     is_2state: f.return_is_2state,
+                    string: f.return_string,
+                    pattern_type: f.return_type.clone(),
                 },
             )
         }));

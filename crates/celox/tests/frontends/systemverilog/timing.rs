@@ -148,6 +148,18 @@ timed_cases! {
     fn event_expressions_read_automatic_task_locals = "timing::event_expressions_read_automatic_task_locals";
     fn event_controls_sample_the_expression_when_they_begin = "timing::event_controls_sample_the_expression_when_they_begin";
     fn implicit_event_controls_in_processes_wait_on_their_reads = "timing::implicit_event_controls_in_processes_wait_on_their_reads";
+    fn intermediate_combinational_writes_wake_waiters = "timing::intermediate_combinational_writes_wake_waiters";
+    fn intermediate_edge_process_writes_wake_waiters = "timing::intermediate_edge_process_writes_wake_waiters";
+    fn staged_nonblocking_writes_wake_waiters = "timing::staged_nonblocking_writes_wake_waiters";
+    fn child_port_pulses_reach_waiters_settled = "timing::child_port_pulses_reach_waiters_settled";
+    fn intermediate_combinational_writes_keep_other_drivers = "timing::intermediate_combinational_writes_keep_other_drivers";
+    fn parallel_flip_flop_parts_keep_pulses = "timing::parallel_flip_flop_parts_keep_pulses";
+    fn staged_nonblocking_writes_follow_later_blocking_writes = "timing::staged_nonblocking_writes_follow_later_blocking_writes";
+    fn intermediate_combinational_writes_replace_split_definitions = "timing::intermediate_combinational_writes_replace_split_definitions";
+    fn intermediate_combinational_writes_reach_concatenated_ports = "timing::intermediate_combinational_writes_reach_concatenated_ports";
+    fn blocking_write_waiters_run_before_nonblocking_updates = "timing::blocking_write_waiters_run_before_nonblocking_updates";
+    fn blocking_write_waiters_rearm_before_nonblocking_updates = "timing::blocking_write_waiters_rearm_before_nonblocking_updates";
+    fn blocking_write_edges_read_values_before_nonblocking_updates = "timing::blocking_write_edges_read_values_before_nonblocking_updates";
 }
 
 #[test]
@@ -655,5 +667,84 @@ fn narrow_nonblocking_updates_cover_staged_and_queued_sites() {
     }
     for name in ["q", "v", "y"] {
         assert!(!staged(name), "{name} queues its updates");
+    }
+}
+
+sv_backends! {
+    fn static_function_storage_is_shared_between_processes(sim) {
+        @case "timing::static_function_storage_is_shared_between_processes";
+    }
+}
+
+sv_backends! {
+    fn static_function_readonly_initializer_calls_execute_once(sim) {
+        @case "timing::static_function_readonly_initializer_calls_execute_once";
+    }
+}
+
+/// An edge whose evaluation a `$fatal` ends before its commit leaves no
+/// held write of a watched variable behind: when the host continues, the
+/// later edges rewrite `y[0]` to its own value and wake no waiter.
+#[test]
+fn runtime_error_before_a_commit_leaves_no_held_writes() {
+    let source = r#"
+        module Top(output bit [1:0] y, output int n, r, f);
+            timeunit 1ns / 1ns;
+            bit clk, bad = 1;
+            initial y = 2'b01;
+            always_ff @(posedge clk) begin
+                if (bad) begin y[0] <= 0; $fatal(1, "bad edge"); end
+                else begin y[0] <= 1; y[0] <= 1; end
+            end
+            initial #2 forever begin @(y); n++; end
+            initial #2 forever begin @(posedge y); r++; end
+            initial #2 forever begin @(negedge y); f++; end
+            initial begin
+                #1 clk = 1;
+                #1 clk = 0; bad = 0;
+                #1 clk = 1;
+                #1 clk = 0;
+                #1 clk = 1;
+            end
+        endmodule
+    "#;
+    let mut backends = vec!["cranelift", "cranelift-parallel"];
+    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+        backends.extend(["native", "native-parallel"]);
+    }
+    for backend in backends {
+        let builder = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("held_after_error.sv"))],
+            "Top",
+        );
+        let builder = if backend.ends_with("-parallel") {
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+        } else {
+            builder
+        };
+        // The backends build different simulation types.
+        macro_rules! check {
+            ($sim:expr) => {{
+                let mut sim = $sim.unwrap();
+                let [y, n, r, f] = ["y", "n", "r", "f"].map(|name| sim.signal(name));
+                assert!(
+                    sim.run_until(1).is_err(),
+                    "{backend}: the first edge reports $fatal"
+                );
+                sim.run_until(10).unwrap();
+                assert_eq!(sim.get(y), 1u8.into(), "{backend}");
+                for (signal, label) in [(n, "n"), (r, "r"), (f, "f")] {
+                    assert_eq!(sim.get(signal), 0u32.into(), "{backend}: {label}");
+                }
+            }};
+        }
+        if backend.starts_with("native") {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check!(builder.build_native());
+        } else {
+            check!(builder.build_cranelift());
+        }
     }
 }

@@ -674,6 +674,8 @@ pub(crate) fn project_module_with_ids(
             processes: Vec::new(),
             package_bindings: HashMap::default(),
             counter_slots: Vec::new(),
+            pending_slots: Vec::new(),
+            comb_alternatives: Vec::new(),
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
             nba_switches: Vec::new(),

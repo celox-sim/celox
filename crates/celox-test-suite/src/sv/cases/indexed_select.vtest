@@ -1860,3 +1860,101 @@
   (assert_eq q 0x43)
   (modify (set addr 3))
   (assert_eq q 0x44))
+
+; IEEE 1800-2023 11.5.1: a write to a constant part-select partly outside the
+; vector writes the bits inside, and one wholly outside writes nothing.
+(case constant_part_selects_partly_outside_write_the_bits_inside
+  (source "partly_outside.sv" #"
+                module Top(input logic clk, input logic [3:0] v,
+                           output logic [7:0] comb_hi, comb_out, ff_nb, ff_b);
+                    always_comb begin
+                        comb_hi = 8'h00;
+                        comb_hi[9:6] = v;
+                        comb_out = 8'h5a;
+                        comb_out[11:8] = v;
+                    end
+                    always_ff @(posedge clk) begin
+                        ff_nb <= 8'h00;
+                        ff_nb[9:6] <= v;
+                    end
+                    always_ff @(posedge clk) begin
+                        ff_b = 8'h00;
+                        ff_b[9:6] = v;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set clk 0) (set v 0xf))
+  (assert_eq comb_hi 0xc0 "bits 7:6 take the low bits of the value")
+  (assert_eq comb_out 0x5a "a select wholly outside writes nothing")
+  (tick clk)
+  (assert_eq ff_nb 0xc0)
+  (assert_eq ff_b 0xc0)
+  (modify (set v 0x6))
+  (assert_eq comb_hi 0x80)
+  (tick clk)
+  (assert_eq ff_nb 0x80)
+  (assert_eq ff_b 0x80))
+
+; On an ascending vector the bits past the declared right end are the low
+; bits of the select, so the bits inside take the high bits of the value.
+(case ascending_part_selects_partly_outside_write_the_bits_inside
+  (source "ascending_partly_outside.sv" #"
+                module Top(input logic clk, input logic [3:0] v,
+                           output logic [0:7] comb_up, ff_up);
+                    always_comb begin
+                        comb_up = 8'h00;
+                        comb_up[6:9] = v;
+                    end
+                    always_ff @(posedge clk) begin
+                        ff_up <= 8'h00;
+                        ff_up[6:9] <= v;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set clk 0) (set v 0x9))
+  (assert_eq comb_up 0x02 "comb_up[6:7] take v[3:2]")
+  (tick clk)
+  (assert_eq ff_up 0x02))
+
+; A run-time select within one array element stays within it even when the
+; position is known while the design is compiled (IEEE 1800-2023 7.4.6,
+; 11.5.1).
+(case known_run_time_selects_stay_within_their_element
+  (source "known_element_selects.sv" #"
+                module Top(output logic [7:0] a0, a1, a2, l0, l1, l2, s0, s1, s2);
+                    int k = 6, n = -2;
+                    logic [7:0] a [0:2];
+                    logic [7:0] l [0:2];
+                    logic [7:0] s [0:2];
+                    initial begin
+                        for (int i = 0; i < 3; i++) begin
+                            a[i] = 8'd0;
+                            l[i] = 8'd0;
+                            s[i] = 8'd0;
+                        end
+                        a[1][k +: 4] = 4'b0101;
+                        a[1][n +: 4] = 4'b1010;
+                        for (int j = 6; j < 7; j++) l[1][j +: 4] = 4'b0101;
+                        #1;
+                        s[1][k +: 4] = 4'b0101;
+                        s[1][n +: 4] = 4'b1010;
+                    end
+                    assign a0 = a[0];
+                    assign a1 = a[1];
+                    assign a2 = a[2];
+                    assign l0 = l[0];
+                    assign l1 = l[1];
+                    assign l2 = l[2];
+                    assign s0 = s[0];
+                    assign s1 = s[1];
+                    assign s2 = s[2];
+                endmodule
+            "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq a0 0) (assert_eq a1 0x42) (assert_eq a2 0)
+  (assert_eq l0 0) (assert_eq l1 0x40) (assert_eq l2 0)
+  (run_until 1)
+  (assert_eq s0 0) (assert_eq s1 0x42) (assert_eq s2 0))

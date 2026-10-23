@@ -70,6 +70,8 @@ pub enum ValueKind {
     Bits,
     /// A handle of a string in the simulator's heap.
     StrRef,
+    /// A handle of a class object in the simulator's heap, `0` for `null`.
+    ObjRef,
 }
 
 impl ValueKind {
@@ -460,6 +462,9 @@ pub struct ProcessSlots<A> {
     pub is_initializer: bool,
     /// This kernel originated from an edge procedure and must execute in Simulation.
     pub requires_timed_simulation: bool,
+    /// Every delay the kernel suspends for is a constant of at least one
+    /// time unit.
+    pub const_delays: bool,
     pub resume: A,
     pub status: A,
     pub delay: A,
@@ -470,6 +475,7 @@ impl<A> ProcessSlots<A> {
         ProcessSlots {
             is_initializer: self.is_initializer,
             requires_timed_simulation: self.requires_timed_simulation,
+            const_delays: self.const_delays,
             resume: map(self.resume),
             status: map(self.status),
             delay: map(self.delay),

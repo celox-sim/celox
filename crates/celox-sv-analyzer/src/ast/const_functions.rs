@@ -175,6 +175,8 @@ impl ConstantFunctions {
             ) => std::cmp::Ordering::Equal,
             (super::warnings::AnalyzerWarning::MixedTimescale, _) => std::cmp::Ordering::Less,
             (_, super::warnings::AnalyzerWarning::MixedTimescale) => std::cmp::Ordering::Greater,
+            // This collector emits only ExitOutsideProgram warnings.
+            _ => std::cmp::Ordering::Equal,
         });
         warnings
     }
@@ -309,6 +311,7 @@ impl ConstantFunctions {
                 sensitivity_body: Vec::new(),
                 is_task: false,
                 automatic_locals: Vec::new(),
+                persistent_locals: Vec::new(),
                 return_type: function.return_var.as_ref().map(|(_, ty)| ty.clone()),
                 return_var: function.return_var.as_ref().map(|(name, _)| name.clone()),
                 params: function
@@ -481,6 +484,8 @@ fn collect_module_constant_functions(
         subroutine_directions: &subroutine_directions,
         automatic: lifetimes::automatic_by_default(tree),
         statics: Vec::new(),
+        static_initializers: Vec::new(),
+        constant_evaluation: true,
     };
     let mut rejected = HashMap::default();
     let subroutines = match procedural::subroutines_with_symbolic_parameters(
@@ -610,7 +615,7 @@ fn simulation_state_readers(functions: &[Subroutine]) -> HashMap<String, Analyze
                 Callee::System(system) if system.reads_simulation_state() => {
                     reads.get_or_insert(*system);
                 }
-                Callee::System(_) | Callee::String(_) => {}
+                Callee::System(_) | Callee::String(_) | Callee::Object(_) => {}
                 Callee::Subroutine(callee) => calls.push(callee.as_str()),
             }
         }

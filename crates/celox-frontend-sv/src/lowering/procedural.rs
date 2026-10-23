@@ -18,6 +18,26 @@ pub(super) fn unsupported(construct: impl Into<String>) -> sv::AnalyzerError {
     sv::AnalyzerError::Unsupported(construct.into())
 }
 
+/// What [`ProcModule::rollback`] restores.
+pub(super) struct Checkpoint {
+    next_id: SourceVarId,
+    created: usize,
+    temp_counter: usize,
+    capture_counter: u64,
+    runtime_event_sites: usize,
+    runtime_errors: usize,
+    extern_functions: usize,
+    extern_calls: usize,
+    warnings: usize,
+}
+
+impl Checkpoint {
+    /// The number of runtime event sites at the checkpoint.
+    pub fn runtime_event_sites(&self) -> usize {
+        self.runtime_event_sites
+    }
+}
+
 /// The variables and subroutines of the module being lowered.
 pub(super) struct ProcModule<'a> {
     pub variables: &'a mut HashMap<SourceVarId, SvVariable>,
@@ -70,11 +90,16 @@ impl<'a> ProcModule<'a> {
                 .name_to_id
                 .get(name)
                 .and_then(|id| self.variables.get(id))
-                .is_some_and(|variable| variable.string),
+                .is_some_and(|variable| variable.value_kind == celox_design::ValueKind::StrRef),
             sv::ir::Expr::Call {
                 callee: sv::ir::Callee::String(op),
                 ..
             } => op.returns_string(),
+            sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                ..
+            } => matches!(**op, sv::ir::ObjectOp::Load(field)
+                if field.handle == Some(sv::ir::HandleProperty::String)),
             sv::ir::Expr::Call {
                 callee: sv::ir::Callee::Subroutine(name),
                 ..
@@ -248,10 +273,13 @@ impl<'a> ProcModule<'a> {
                     continue;
                 }
                 // String operations use the simulator's heap.
-                sv::ir::Callee::String(_) => return true,
+                sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => return true,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             if let Some(subroutine) = self.subroutine(&name) {
+                if !subroutine.persistent_locals.is_empty() {
+                    return true;
+                }
                 default_calls(subroutine, &args, &mut calls);
                 if visited.insert(name) {
                     for stmt in &subroutine.body {
@@ -667,6 +695,48 @@ impl<'a> ProcModule<'a> {
         Ok((left, right, width))
     }
 
+    /// The lowering state, for [`Self::rollback`].
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            next_id: self.next_id,
+            created: self.created.len(),
+            temp_counter: self.temp_counter,
+            capture_counter: self.capture_counter,
+            runtime_event_sites: self.runtime_event_sites.len(),
+            runtime_errors: self.runtime_errors.len(),
+            extern_functions: self.extern_functions.len(),
+            extern_calls: self.extern_calls,
+            warnings: self.warnings.len(),
+        }
+    }
+
+    /// Forget everything lowered since `checkpoint`, so that the module
+    /// lowers as if it had never been.
+    pub fn rollback(&mut self, checkpoint: Checkpoint) {
+        for id in checkpoint.next_id.0..self.next_id.0 {
+            let Some(variable) = self.variables.remove(&SourceVarId(id)) else {
+                continue;
+            };
+            if let Some(name) = variable.path.first()
+                && self.name_to_id.get(name) == Some(&SourceVarId(id))
+            {
+                self.name_to_id.remove(name);
+            }
+        }
+        self.next_id = checkpoint.next_id;
+        self.created.truncate(checkpoint.created);
+        self.temp_counter = checkpoint.temp_counter;
+        self.capture_counter = checkpoint.capture_counter;
+        self.runtime_event_sites
+            .truncate(checkpoint.runtime_event_sites);
+        // Codes are numbered from one in registration order.
+        self.runtime_errors
+            .retain(|&code, _| code <= checkpoint.runtime_errors as i64);
+        self.extern_functions.truncate(checkpoint.extern_functions);
+        self.extern_calls = checkpoint.extern_calls;
+        self.warnings.truncate(checkpoint.warnings);
+    }
+
     /// Register a runtime event site and return its local number.
     pub fn event_site(&mut self, site: RuntimeEventSite) -> u32 {
         self.runtime_event_sites.push(site);
@@ -741,7 +811,7 @@ impl<'a> ProcModule<'a> {
             SvVariable {
                 float: None,
 
-                string: false,
+                value_kind: celox_design::ValueKind::Bits,
                 path: vec![name.clone()],
                 width: width.max(1),
                 signed,
@@ -811,7 +881,7 @@ impl<'a> ProcModule<'a> {
         let variable = SvVariable {
             float: None,
 
-            string: false,
+            value_kind: celox_design::ValueKind::Bits,
             path,
             width: 1,
             signed: false,
@@ -882,7 +952,7 @@ impl<'a> ProcModule<'a> {
     pub fn is_callee(&self, callee: &sv::ir::Callee) -> bool {
         match callee {
             sv::ir::Callee::System(function) => function.reads_simulation_state(),
-            sv::ir::Callee::String(_) => true,
+            sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => true,
             sv::ir::Callee::Subroutine(name) => {
                 self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
             }
@@ -1274,7 +1344,7 @@ pub(super) fn register_locals(
             SvVariable {
                 float: type_info.float,
 
-                string: type_info.string,
+                value_kind: type_info.value_kind,
                 path: vec![local.source_name.clone()],
                 width: type_info.width,
                 signed: type_info.signed,

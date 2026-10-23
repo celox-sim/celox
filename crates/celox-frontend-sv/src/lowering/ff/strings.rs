@@ -109,7 +109,9 @@ impl Ff<'_, '_> {
         let value = self.b.alloc_bit(width, false);
         self.b.emit(SIRInstruction::Slice(value, result, 0, width));
         let (temp, name) = self.m.temp("string", width, signed, false);
-        self.m.variables.get_mut(&temp).unwrap().string = op.returns_string();
+        if op.returns_string() {
+            self.m.variables.get_mut(&temp).unwrap().value_kind = celox_design::ValueKind::StrRef;
+        }
         self.store(temp, SIROffset::Static(0), width, value);
         Ok(sv::ir::Expr::Ident(name))
     }
@@ -121,7 +123,9 @@ impl Ff<'_, '_> {
         target: SourceVarId,
         value: sv::ir::Expr,
     ) -> sv::ir::Expr {
-        if self.m.var(target).string && !self.m.expr_is_string(&value) {
+        if self.m.var(target).value_kind == celox_design::ValueKind::StrRef
+            && !self.m.expr_is_string(&value)
+        {
             sv::ir::Expr::Call {
                 callee: sv::ir::Callee::String(StringOp::FromBits),
                 args: vec![Some(value)],
@@ -134,7 +138,7 @@ impl Ff<'_, '_> {
 
     /// Call the heap helper with `code` and up to three operands; the result
     /// is a 64-bit register.
-    fn heap_call(&mut self, code: u64, operands: &[RegisterId]) -> RegisterId {
+    pub(super) fn heap_call(&mut self, code: u64, operands: &[RegisterId]) -> RegisterId {
         let mut args = vec![self.constant64(code)];
         args.extend_from_slice(operands);
         while args.len() < celox_sir::extern_abi::HEAP_HELPER_ARGUMENTS {
@@ -149,7 +153,7 @@ impl Ff<'_, '_> {
         dst
     }
 
-    fn constant64(&mut self, value: u64) -> RegisterId {
+    pub(super) fn constant64(&mut self, value: u64) -> RegisterId {
         let register = self.b.alloc_bit(64, false);
         self.b.emit(SIRInstruction::Imm(
             register,
@@ -159,7 +163,7 @@ impl Ff<'_, '_> {
     }
 
     /// The handle of string `expr`, as a 64-bit operand.
-    fn handle(&mut self, expr: &sv::ir::Expr) -> Result<RegisterId, sv::AnalyzerError> {
+    pub(super) fn handle(&mut self, expr: &sv::ir::Expr) -> Result<RegisterId, sv::AnalyzerError> {
         self.integer_of_width(expr, celox_design::HANDLE_WIDTH, false)
     }
 
@@ -174,7 +178,7 @@ impl Ff<'_, '_> {
 
     /// `expr` converted to `width` bits, then extended to a 64-bit operand.
     /// Unknown bits read as zero.
-    fn integer_of_width(
+    pub(super) fn integer_of_width(
         &mut self,
         expr: &sv::ir::Expr,
         width: usize,

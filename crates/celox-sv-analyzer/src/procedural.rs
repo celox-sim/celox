@@ -511,6 +511,8 @@ pub struct SubroutineBase<E, L, T> {
     pub is_task: bool,
     /// Automatic storage that needs a private activation when a task suspends.
     pub automatic_locals: Vec<String>,
+    /// Observable static storage shared by every call of this function.
+    pub persistent_locals: Vec<String>,
     /// `None` for a task or a `void` function.
     pub return_type: Option<T>,
     pub params: Vec<SubroutineParamBase<E, T>>,
@@ -543,6 +545,7 @@ impl<E, L, T> SubroutineBase<E, L, T> {
             name: self.name,
             is_task: self.is_task,
             automatic_locals: self.automatic_locals,
+            persistent_locals: self.persistent_locals,
             return_type: self.return_type.map(&mut *ft),
             params: self
                 .params

@@ -103,6 +103,13 @@ cases retain their verdicts. The pinned `real_bit_select_idx` input is rejected
 earlier for its undriven net, so a separate analyzer regression uses a driven
 input to check that real-valued indices themselves are rejected.
 
+Static function storage support updates the two rows for
+`13.4.2--function-static` from fail to pass in both state modes. The official
+runner selects elaboration for this probe: its local accumulator now has
+persistent storage rather than being rejected. Runtime retention is exercised
+by the shared static-function simulation cases. The full pinned run matches
+the reviewed expectations in both state modes.
+
 Blocking latch support changes ten expectation rows: `12.4--if`,
 `12.4.1--if_else_if`, and the three `12.4.2` priority/unique conditional probes
 now pass elaboration in both state modes. These sources use ordinary
@@ -140,6 +147,56 @@ passes elaboration and the nine `20.8` probes for `atan2`, `ceil`, `exp`, `floor
 The full pinned run reviewed all 2,054 rows, with 496 passing cases in 2state
 and 498 in 4state; no passing case regresses. The existing scanf probes retain
 their verdicts because their other unsupported constructs remain unchanged.
+
+Classes update fourteen reviewed expectation rows: both state modes for
+`8.4--instantiation`, `8.5--properties`, `8.6--methods`, `8.12--assignment`,
+`8.24--out_of_block_methods`, `8.26.5--implemented_class_handle` and
+`6.20.6--const` change from fail to pass. The simulated cases were run and their
+values checked, including the shared object behind two handles in
+`8.12--assignment`. Full official runs at the pinned revision report 524 passing
+cases in 2state and 526 in 4state. No passing case regresses: classes that are
+declared but never constructed, interface classes and pure virtual methods are
+not lowered. `8.7--constructor` keeps failing because it initializes an
+implicitly static procedural variable without the `static` keyword, which IEEE
+1800-2023 6.21 requires; `8.7--constructor_param` fails for the same reason.
+
+Base constructors, `super`, static members and `C::` scope resolution update
+eighteen more rows: both state modes for `8.7--constructor_super`,
+`8.8--typed_constructor`, `8.9--static_properties`, `8.10--static_methods`,
+`8.13--inheritance`, `8.14--override_member`, `8.15--super`,
+`8.17--constructor_const_arg` and `8.23--scope_resolution` change from fail to
+pass. Each was simulated and its displayed values checked, including the base
+method that a base-class handle calls in `8.14--override_member`. Full official
+runs at the pinned revision report 534 passing cases in 2state and 536 in
+4state, with no passing case regressing. Virtual dispatch, abstract and
+interface classes, classes in packages, parameterized classes and shallow copies
+stay unsupported.
+
+Virtual methods, abstract classes and classes implementing interface classes
+update eighteen more rows: both state modes for `8.15--super-default-new`,
+`8.20--virtual_method`, `8.21--abstract_class`, `8.22--dynamic_method_lookup`,
+`8.26.2--implements`, `8.26.2--implements_extends`,
+`8.26.2--implements_multiple`, `8.26.6.1--name_conflict_resolved` and
+`8.26.7--partial_implementation` change from fail to pass. Each was simulated
+and its displayed values checked: the override of the object's class runs
+through base-class handles and an array of them, and the shadowed property of
+`8.20--virtual_method` reads the derived class's value. Full official runs at
+the pinned revision report 543 passing cases in 2state and 545 in 4state, with
+no passing case regressing. `8.26.6.1--name_conflict_unresolved` stays a
+passing negative case: its return types conflict, which is rejected. Calls
+through interface class handles, `$cast`, parameterized classes and shallow
+copies stay unsupported.
+
+Interface class handles and `$cast` of class handles update two more rows: both
+state modes for `8.26.5--cast_between_interface_classes` change from fail to
+pass. The case was simulated with calls added after the cast, which reached the
+object through both interface class handles. Full official runs at the pinned
+revision report 544 passing cases in 2state and 546 in 4state, with no passing
+case regressing: an interface class whose methods use its own typedefs or type
+parameters, as in `8.26.3--type_access_extends` and
+`8.26.6.2--parameter_type_conflict`, is still elaborated without being lowered.
+`6.24.2--cast_fn`, `6.24.2--cast_task` and `8.16--cast_func` keep failing
+because they cast to integral and enum variables.
 
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains

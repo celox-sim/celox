@@ -557,13 +557,20 @@ impl<'p, 'a> Comb<'p, 'a> {
                 let sv::ir::Expr::Select { msb, lsb, .. } = self.propagate(store, &probe) else {
                     unreachable!()
                 };
-                sv::ir::LValue::Select {
-                    name: name.clone(),
-                    msb,
-                    lsb,
-                    array_slice_width: array_slice_width.clone(),
-                    array_slice_reversed: *array_slice_reversed,
-                }
+                keep_element_window(
+                    lvalue,
+                    sv::ir::LValue::Select {
+                        name: name.clone(),
+                        msb,
+                        lsb,
+                        array_slice_width: array_slice_width.clone(),
+                        array_slice_reversed: *array_slice_reversed,
+                    },
+                    self.m.variables,
+                    self.m.name_to_id,
+                    self.m.constants,
+                    self.m.parameter_types,
+                )
             }
         }
     }
@@ -1529,8 +1536,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         lvalue: &sv::ir::LValue,
     ) -> Result<usize, sv::AnalyzerError> {
         Ok(match self.lvalue_target(store, lvalue)? {
-            Target::Static { access, .. } => access.msb - access.lsb + 1,
-            Target::Dynamic { width, .. } => width,
+            Target::Static { width, .. } | Target::Dynamic { width, .. } => width,
         })
     }
 
@@ -1551,6 +1557,8 @@ impl<'p, 'a> Comb<'p, 'a> {
             sv::ir::LValue::Ident(_) => Ok(Target::Static {
                 id,
                 access: full(var_width),
+                width: var_width,
+                drop: 0,
                 lvalue,
             }),
             sv::ir::LValue::Select { msb, lsb, .. } => {
@@ -1559,21 +1567,22 @@ impl<'p, 'a> Comb<'p, 'a> {
                 let lsb_value =
                     sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types);
                 if let (Some(msb), Some(lsb)) = (msb_value, lsb_value) {
-                    let variable = self.m.var(id);
-                    let (Some(msb), Some(lsb)) = (
-                        packed_index_offset(variable, msb),
-                        packed_index_offset(variable, lsb),
-                    ) else {
+                    let width = usize::try_from(msb.abs_diff(lsb)).unwrap_or(0) + 1;
+                    let (access, drop) = constant_select_write(self.m.var(id), msb, lsb)
+                        .ok_or_else(|| unsupported("assignment position"))?;
+                    let Some(access) = access else {
                         // A constant select entirely outside the vector writes nothing.
                         return Ok(Target::Dynamic {
                             id,
                             offset: Offset::Nothing,
-                            width: usize::try_from(msb.abs_diff(lsb)).unwrap_or(0) + 1,
+                            width,
                         });
                     };
                     return Ok(Target::Static {
                         id,
-                        access: BitAccess::new(lsb.min(msb), lsb.max(msb)),
+                        access,
+                        width,
+                        drop,
                         lvalue: lvalue.clone(),
                     });
                 }
@@ -1638,11 +1647,14 @@ impl<'p, 'a> Comb<'p, 'a> {
         let lhs = &self.hoist_lvalue(store, frames, lhs)?;
         let target = self.lvalue_target(store, lhs)?;
         let width = match &target {
-            Target::Static { access, .. } => access.msb - access.lsb + 1,
-            Target::Dynamic { width, .. } => *width,
+            Target::Static { width, .. } | Target::Dynamic { width, .. } => *width,
         };
         if self.continuous
-            && matches!(&target, Target::Dynamic { id, .. } if !self.m.is_hidden(*id))
+            && matches!(
+                &target,
+                Target::Dynamic { id, offset, .. }
+                    if !self.m.is_hidden(*id) && !matches!(offset, Offset::Nothing)
+            )
         {
             return Err(unsupported(format!(
                 "combinational assignment target `{}` at a run-time position",
@@ -1703,8 +1715,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
         let (id, width) = match &target {
-            Target::Static { id, access, .. } => (*id, access.msb - access.lsb + 1),
-            Target::Dynamic { id, width, .. } => (*id, *width),
+            Target::Static { id, width, .. } | Target::Dynamic { id, width, .. } => (*id, *width),
         };
         let (mut node, mut sources) = value;
         node = coerce_node_width(self.arena, node, Some(width), signed).map_err(slt_error)?;
@@ -1713,8 +1724,14 @@ impl<'p, 'a> Comb<'p, 'a> {
             node = self.alloc(SLTNode::Unary(UnaryOp::ToTwoState, node))?;
         }
         match target {
-            Target::Static { id, access, lvalue } => {
-                let node = permute_reversed_lvalue_rhs_slt(
+            Target::Static {
+                id,
+                access,
+                drop,
+                lvalue,
+                ..
+            } => {
+                let mut node = permute_reversed_lvalue_rhs_slt(
                     &lvalue,
                     node,
                     width,
@@ -1723,6 +1740,13 @@ impl<'p, 'a> Comb<'p, 'a> {
                     self.arena,
                 )
                 .ok_or_else(|| unsupported("assignment lvalue order"))?;
+                let written = access.msb - access.lsb + 1;
+                if written != width {
+                    node = self.alloc(SLTNode::Slice {
+                        expr: node,
+                        access: BitAccess::new(drop, drop + written - 1),
+                    })?;
+                }
                 self.write(store, id, access, (node, sources))
             }
             Target::Dynamic { id, offset, width } => {
@@ -3167,6 +3191,11 @@ impl<'p, 'a> Comb<'p, 'a> {
             .subroutine(name)
             .cloned()
             .ok_or_else(|| unsupported(format!("call of `{name}`")))?;
+        // Symbolic execution cannot represent state shared by invocations.
+        // Fall back to Ff, including for runtime declaration initializers.
+        if !subroutine.persistent_locals.is_empty() {
+            return Err(unsupported("stateful function call"));
+        }
         if self.active_calls.iter().any(|active| active == name) {
             return Err(unsupported(format!("recursive call of `{name}`")));
         }
@@ -3896,14 +3925,12 @@ impl Comb<'_, '_> {
                             this.m.constants,
                             this.m.parameter_types,
                         ))
-                        .and_then(|(msb, lsb)| {
-                            Some((
-                                packed_index_offset(variable, msb)?,
-                                packed_index_offset(variable, lsb)?,
-                            ))
-                        });
+                        .and_then(|(msb, lsb)| constant_select_write(variable, msb, lsb));
                         match bounds {
-                            Some((msb, lsb)) => BitAccess::new(msb.min(lsb), msb.max(lsb)),
+                            Some((Some(access), _)) => access,
+                            // A constant select entirely outside the vector
+                            // writes nothing.
+                            Some((None, _)) => return,
                             // A run-time select may write any bit; the written
                             // value keeps the others, so it defines the whole
                             // vector, or the one element its constant part names.
@@ -3977,9 +4004,14 @@ enum Label {
 }
 
 enum Target {
+    /// A constant select: the select's `width` bits of the value from
+    /// `drop` up go to the bits `access` of the variable, the part of the
+    /// select inside it.
     Static {
         id: SourceVarId,
         access: BitAccess,
+        width: usize,
+        drop: usize,
         lvalue: sv::ir::LValue,
     },
     Dynamic {

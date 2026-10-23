@@ -8,8 +8,8 @@ pub use crate::procedural::{
     SystemTaskArg,
 };
 pub use crate::system_functions::{
-    ArrayQuery, Callee, MemoryFormat, Radix, Severity, StringOp, SystemFunction, SystemTask,
-    VcdTask,
+    ArrayQuery, Callee, HandleProperty, MemoryFormat, ObjectField, ObjectOp, Radix, Severity,
+    StringOp, SystemFunction, SystemTask, VcdTask,
 };
 
 /// A procedural statement of the analyzed IR.
@@ -360,6 +360,7 @@ pub struct Port {
     r#type: Type,
     is_net: bool,
     default: Option<ConstExpr>,
+    pattern_target: Option<crate::ast::Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,7 +418,24 @@ impl Port {
             r#type,
             is_net,
             default: None,
+            pattern_target: None,
         }
+    }
+
+    pub(crate) fn with_pattern_target(mut self, target: Option<crate::ast::Type>) -> Self {
+        self.pattern_target = target;
+        self
+    }
+
+    /// Bind caller-owned pattern values in this specialized port's type.
+    pub fn bind_pattern(
+        &self,
+        pattern: &crate::ast::BoundPattern,
+    ) -> Result<Expr, crate::AnalyzerError> {
+        let target = self.pattern_target.as_ref().ok_or_else(|| {
+            crate::AnalyzerError::Unsupported("assignment pattern port type".into())
+        })?;
+        pattern.bind_port(target)
     }
 
     pub fn name(&self) -> &str {
@@ -569,15 +587,28 @@ pub struct PortConnection {
     formal: String,
     actual: String,
     actual_expr: Option<Expr>,
+    bound_pattern: Option<crate::ast::BoundPattern>,
 }
 
 impl PortConnection {
-    pub(crate) fn new(formal: String, actual: String, actual_expr: Option<Expr>) -> Self {
+    pub(crate) fn new(
+        formal: String,
+        actual: String,
+        actual_expr: Option<Expr>,
+        bound_pattern: Option<crate::ast::BoundPattern>,
+    ) -> Self {
         Self {
             formal,
             actual,
             actual_expr,
+            bound_pattern,
         }
+    }
+
+    /// An untyped assignment pattern with caller-owned values. The receiving
+    /// port supplies its element types after parameter specialization.
+    pub fn bound_pattern(&self) -> Option<&crate::ast::BoundPattern> {
+        self.bound_pattern.as_ref()
     }
 
     pub fn formal(&self) -> &str {
@@ -621,11 +652,17 @@ pub struct Type {
     packed_ranges: Vec<PackedRange>,
     unpacked_ranges: Vec<UnpackedRange>,
     resolved_width: Option<usize>,
+    class: Option<String>,
 }
 
 impl Type {
     pub fn kind(&self) -> TypeKind {
         self.kind
+    }
+
+    /// The class of an object handle type.
+    pub fn class(&self) -> Option<&str> {
+        self.class.as_deref()
     }
 
     pub fn is_signed(&self) -> bool {
@@ -685,6 +722,8 @@ pub enum TypeKind {
     Shortreal,
     /// IEEE 1800-2023 6.16: a dynamically sized string, held as a heap handle.
     String,
+    /// IEEE 1800-2023 8.4: a handle of a class object.
+    Object,
     Bit,
     Logic,
     Reg,
@@ -698,6 +737,7 @@ impl Type {
     ) -> Self {
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
+        let class = r#type.class().map(str::to_owned);
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
             kind,
@@ -705,6 +745,7 @@ impl Type {
             packed_ranges,
             unpacked_ranges,
             resolved_width,
+            class,
         }
     }
 }
@@ -749,6 +790,7 @@ impl From<ast::TypeKind> for TypeKind {
             ast::TypeKind::Real => TypeKind::Real,
             ast::TypeKind::Shortreal => TypeKind::Shortreal,
             ast::TypeKind::String => TypeKind::String,
+            ast::TypeKind::Object => TypeKind::Object,
             ast::TypeKind::Bit => TypeKind::Bit,
             ast::TypeKind::Logic => TypeKind::Logic,
             ast::TypeKind::Reg => TypeKind::Reg,

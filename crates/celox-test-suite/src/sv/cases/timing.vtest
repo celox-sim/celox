@@ -1704,3 +1704,381 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (top Top)
   (run_to_finish)
   (assert_eq count 3))
+
+(case static_function_storage_is_shared_between_processes
+  (source "static_processes.sv" #"
+    module Top(output int first, second, third);
+      function int next_value();
+        static int saved = 11;
+        saved++;
+        return saved;
+      endfunction
+      initial begin
+        #1 first = next_value();
+        #2 third = next_value();
+      end
+      initial begin
+        #2 second = next_value();
+        #2 $finish;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq first 12) (assert_eq second 13) (assert_eq third 14))
+
+(case static_function_readonly_initializer_calls_execute_once
+  (source "static_initializer.sv" #"
+    module Top(output int cached, next, cached_again, next_again);
+      function int count();
+        static bit [31:0] value;
+        value++;
+        return value;
+      endfunction
+      function int remember();
+        static int value = count();
+        return value;
+      endfunction
+      initial begin
+        #1 cached = remember();
+        next = count();
+        #1 cached_again = remember();
+        next_again = count();
+        #1 $finish;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq cached 1) (assert_eq next 2)
+  (assert_eq cached_again 1) (assert_eq next_again 3))
+
+; A process waiting on a variable sees every store to it, including one a
+; later store of the same evaluation overwrites (IEEE 1800-2023 4.3, 9.4.2).
+(case intermediate_combinational_writes_wake_waiters
+  (source "comb.sv" #"
+                module Top;
+                    bit a, b, c, d, y1, y2;
+                    int n1, n2;
+                    always_comb begin y1 = 0; if (a) y1 = 1; c = b; end
+                    always @* begin y2 = 0; if (a) y2 = 1; d = b; end
+                    initial forever begin @(y1); n1++; end
+                    initial forever begin @(y2); n2++; end
+                    initial begin
+                        #1 a = 1;
+                        // While a is 1, each change of b rewrites y 1 -> 0 -> 1.
+                        #1 b = 1;
+                        #1 b = 0;
+                        #1 $display("comb=%0d star=%0d", n1, n2);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "comb=3 star=3\n"))
+
+; The processes share one clock, so a parallel build evaluates them as
+; separate parts. Nonblocking updates apply in the NBA region in issue
+; order, each its own update (IEEE 1800-2023 4.5, 10.4.2); edges are judged
+; on each update.
+(case intermediate_edge_process_writes_wake_waiters
+  (source "ff.sv" #"
+                module Top;
+                    bit a, clk, y3, y4, y5;
+                    int n3, n4, n5, p4, f5;
+                    always @(posedge clk) begin y3 = 0; if (a) y3 = 1; end
+                    always_ff @(posedge clk) begin y4 <= 0; if (a) y4 <= 1; end
+                    always @(posedge clk) begin y5 = 0; y5 = 1; end
+                    initial forever begin @(y3); n3++; end
+                    initial forever begin @(y4); n4++; end
+                    initial forever begin @(y5); n5++; end
+                    initial forever begin @(posedge y4); p4++; end
+                    initial forever begin @(negedge y5); f5++; end
+                    initial begin
+                        #1 a = 1;
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("blk=%0d nba=%0d const=%0d rise=%0d fall=%0d", n3, n4, n5, p4, f5);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "blk=3 nba=3 const=3 rise=3 fall=2\n"))
+
+; A variable written by blocking and nonblocking assignments of one process:
+; each nonblocking update, whole or partial, is its own update in the NBA
+; region. The blocking value equals the old one, so no waiter runs between
+; the regions.
+(case staged_nonblocking_writes_wake_waiters
+  (source "staged.sv" #"
+                module Top;
+                    bit clk, y = 1;
+                    bit [1:0] z = 2'b11;
+                    int n, m;
+                    always @(posedge clk) begin y = 1; y <= 0; y <= 1; end
+                    always @(posedge clk) begin
+                        z = 2'b11;
+                        z[0] <= 0;
+                        z[1] <= 0;
+                        z[0] <= 1;
+                        z[1] <= 1;
+                    end
+                    initial forever begin @(y); n++; end
+                    initial forever begin @(z); m++; end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("y=%0d z=%0d", n, m);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=3 z=3\n"))
+
+; The output port of a child is a continuous assignment to the parent's
+; net (IEEE 1800-2023 23.3.3), evaluated after the child's process yields,
+; so the parent may miss a pulse the child writes inside one evaluation
+; (4.7). Celox, like Verilator, sees only the settled value.
+(case child_port_pulses_reach_waiters_settled
+  (source "child.sv" #"
+                module Child(input bit a, b, output bit y, c);
+                    always_comb begin y = 0; if (a) y = 1; c = b; end
+                endmodule
+                module Top;
+                    bit a, b, y, c;
+                    int n;
+                    Child u(.a(a), .b(b), .y(y), .c(c));
+                    initial forever begin @(y); n++; end
+                    initial begin
+                        #1 a = 1;
+                        #1 b = 1;
+                        #1 b = 0;
+                        #1 $display("child=%0d", n);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "child=1\n"))
+
+; A process whose intermediate writes are counted drives only some bits of
+; its variable; the other bits keep their own drivers.
+(case intermediate_combinational_writes_keep_other_drivers
+  (source "drivers.sv" #"
+                module Top;
+                    logic a = 0, b = 0, e = 0, c, d;
+                    logic [7:0] y, z;
+                    int n, m;
+                    assign y[7:4] = 4'hA;
+                    always_comb begin y[3:0] = 0; if (a) y[3:0] = 1; c = b; end
+                    always_comb begin z[3:0] = 0; if (a) z[3:0] = 1; d = b; end
+                    always_comb z[7:4] = {4{e}};
+                    initial #1 forever begin @(y); n++; end
+                    initial #1 forever begin @(z); m++; end
+                    initial begin
+                        #2 a = 1;
+                        // While a is 1, each change of b rewrites y and z
+                        // 1 -> 0 -> 1 in their low bits.
+                        #1 b = 1;
+                        #1 e = 1;
+                        #1 $display("y=%h z=%h n=%0d m=%0d", y, z, n, m);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=a1 z=f1 n=2 m=3\n"))
+
+; One process pulses y[0] back to its value, and processes of the same clock
+; write the other bits of y unchanged. A parallel build evaluates every
+; process before any commits; the pulse still counts.
+(case parallel_flip_flop_parts_keep_pulses
+  (source "parts.sv" #"
+                module Top;
+                    bit clk;
+                    bit [2:0] y = 3'b001;
+                    bit [63:0] p, q, r, s;
+                    int n, f;
+                    always_ff @(posedge clk) y[2] <= y[2];
+                    always_ff @(posedge clk) begin y[0] <= 0; y[0] <= 1; end
+                    always_ff @(posedge clk) y[1] <= y[1];
+                    // Independent work, so that a parallel build splits the
+                    // processes into parts.
+                    always_ff @(posedge clk) p <= p * 64'd7 + (p >> 3) + 64'd1;
+                    always_ff @(posedge clk) q <= q * 64'd11 + (q >> 5) + 64'd3;
+                    always_ff @(posedge clk) r <= r * 64'd13 + (r >> 7) + 64'd5;
+                    always_ff @(posedge clk) s <= s * 64'd17 + (s >> 9) + 64'd9;
+                    initial forever begin @(y); n++; end
+                    initial forever begin @(negedge y); f++; end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("y=%b n=%0d f=%0d", y, n, f);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=001 n=2 f=2\n"))
+
+; The nonblocking updates apply after the blocking value was published:
+; y[0] <= 1 rises from the final blocking value 0, not from the 1 it held
+; when the update was issued. The blocking writes only fall, so the waiter
+; sees the rise in the NBA region.
+(case staged_nonblocking_writes_follow_later_blocking_writes
+  (source "staged_order.sv" #"
+                module Top;
+                    bit clk;
+                    bit [1:0] y = 2'b01;
+                    int r;
+                    always @(posedge clk) begin y[1] <= 0; y[0] <= 1; y = 2'b00; end
+                    initial forever begin @(posedge y); r++; end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("y=%b r=%0d", y, r);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=01 r=2\n"))
+
+; A reader of some bits of the counted variable splits its symbolic
+; definition at those bits; the imperative unit replaces every piece.
+(case intermediate_combinational_writes_replace_split_definitions
+  (source "split.sv" #"
+                module Top;
+                    logic [3:0] y, a = 4'b0101, b;
+                    logic [1:0] w;
+                    logic c = 0;
+                    int n;
+                    always_comb begin y = 4'b0; if (c) y = a; b = a; end
+                    assign w = y[1:0];
+                    initial #1 forever begin @(y); n++; end
+                    initial begin
+                        #2 c = 1;
+                        // While c is 1, each change of a rewrites y through 0.
+                        #1 a = 4'b0110;
+                        #1 a = 4'b0111;
+                        #1 $display("y=%b w=%b n=%0d", y, w, n);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=0111 w=11 n=3\n"))
+
+; The counted variable is an output port that the parent connects to a
+; concatenation.
+(case intermediate_combinational_writes_reach_concatenated_ports
+  (source "ports.sv" #"
+                module Child(input logic c, input logic [3:0] a, output logic [3:0] y);
+                    int n;
+                    always_comb begin y = 4'b0; if (c) y = a; end
+                    initial #1 forever begin @(y); n++; end
+                    initial #5 $display("y=%b n=%0d", y, n);
+                endmodule
+                module Top;
+                    logic [3:0] a = 4'b0101;
+                    logic [1:0] p, q;
+                    logic c = 0;
+                    Child u(.c(c), .a(a), .y({p, q}));
+                    initial begin
+                        #2 c = 1;
+                        #1 a = 4'b0110;
+                        #1 a = 4'b1001;
+                        #2 $display("p=%b q=%b", p, q);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=1001 n=3\np=10 q=01\n"))
+
+; A blocking write of an edge process is an update of the active region:
+; the process waiting on it runs there, before the NBA region applies the
+; same edge's nonblocking update (IEEE 1800-2023 4.5, 9.4.2).
+(case blocking_write_waiters_run_before_nonblocking_updates
+  (source "active.sv" #"
+                module Top;
+                    bit clk, y;
+                    int q;
+                    always @(posedge clk) begin y = ~y; q <= q + 1; end
+                    initial forever begin @(y); $display("y=%0d q=%0d", y, q); end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=1 q=0\ny=0 q=1\n"))
+
+; The waiter the blocking write wakes waits again before the nonblocking
+; updates, so they wake it once more.
+(case blocking_write_waiters_rearm_before_nonblocking_updates
+  (source "rearm.sv" #"
+                module Top;
+                    bit clk, y;
+                    int n, r;
+                    always @(posedge clk) begin y = 1; y <= 0; y <= 1; end
+                    initial forever begin @(y); n++; end
+                    initial forever begin @(posedge y); r++; end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("n=%0d r=%0d", n, r);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "n=3 r=3\n"))
+
+; Processes and edge processes woken by the blocking write read the
+; variables the same edge updates nonblocking before the update.
+(case blocking_write_edges_read_values_before_nonblocking_updates
+  (source "derived.sv" #"
+                module Top;
+                    bit clk, g;
+                    int q, r, s;
+                    always @(posedge clk) begin g = ~g; q <= q + 1; end
+                    always @(g) r <= q;
+                    initial forever begin @(g); s = q; end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("q=%0d r=%0d s=%0d", q, r, s);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "q=2 r=1 s=1\n"))

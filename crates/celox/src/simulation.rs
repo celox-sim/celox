@@ -11,6 +11,7 @@ use celox_runtime::{
     UnitExecutor, host_watch,
 };
 
+mod differential;
 mod vcd_tasks;
 
 /// Saved state of a [`Simulation`], created by [`Simulation::checkpoint`]:
@@ -64,6 +65,13 @@ impl<B: SimBackend> std::fmt::Debug for SimulationCheckpoint<B> {
 pub struct Simulation<B: SimBackend = crate::DefaultBackend> {
     pub(crate) simulator: Simulator<B>,
     pub(crate) state: SimulationState<B>,
+    /// The reference simulation every step is checked against in
+    /// [`crate::SchedulerMode::Differential`].
+    shadow: Option<Box<Simulation<B>>>,
+    /// Steps checked against the shadow.
+    checked_steps: u64,
+    /// Why [`crate::SchedulerMode::Differential`] has no shadow.
+    unchecked: Option<&'static str>,
 }
 
 impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
@@ -218,6 +226,7 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
     fn try_finish_timed_step(&mut self, timestamp: u64) -> Result<(), Halt> {
         // The time slot is over: no kernel runs, and its updates are in
         // state memory.
+        self.take_heap_fault().map_err(Halt::Error)?;
         self.heap_safepoint();
         self.start_sv_vcd(timestamp).map_err(|error| {
             Halt::Error(RuntimeErrorCode::Runtime {
@@ -315,7 +324,13 @@ impl<B: SimBackend> Simulation<B> {
         simulator.finish_sites = simulator.schedule.finish_sites;
         simulator.skip_runtime_finish();
         state.initialize_declarations(&mut simulator)?;
-        Ok(Self { simulator, state })
+        Ok(Self {
+            simulator,
+            state,
+            shadow: None,
+            checked_steps: 0,
+            unchecked: None,
+        })
     }
 
     /// Returns warnings emitted during compilation.
@@ -527,13 +542,22 @@ impl<B: SimBackend> Simulation<B> {
     /// Returns the new simulation time, the current time when only host
     /// writes were settled, or None if nothing was to do.
     pub fn step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
-        self.state.step(&mut self.simulator)
+        self.step_until(u64::MAX)
     }
 
     /// [`Self::step`] that, after settling host writes at the current time,
     /// does not advance past `end_time`.
     fn step_until(&mut self, end_time: u64) -> Result<Option<u64>, RuntimeErrorCode> {
-        self.state.step_until(&mut self.simulator, end_time)
+        let Some(mut shadow) = self.shadow.take() else {
+            return self.state.step_until(&mut self.simulator, end_time);
+        };
+        let mut check = differential::ShadowCheck::new(&mut shadow);
+        let result = self
+            .state
+            .step_until_observed(&mut self.simulator, end_time, &mut check);
+        self.checked_steps += check.checked;
+        self.shadow = Some(shadow);
+        result
     }
 
     /// Advance time and run until `end_time` (inclusive).
@@ -542,26 +566,21 @@ impl<B: SimBackend> Simulation<B> {
     /// slot of the stop, with [`Self::is_stopped`] set; calling this again
     /// continues.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
-        if end_time < self.state.time() {
-            // Time only moves forward. Moving the timestamp back while the
-            // design keeps the state it reached would leave the two describing
-            // different moments, so an earlier target is a no-op.
+        let reached = match self.shadow.take() {
+            None => self.state.run_until(&mut self.simulator, end_time)?,
+            Some(mut shadow) => {
+                let mut check = differential::ShadowCheck::new(&mut shadow);
+                let result =
+                    self.state
+                        .run_until_observed(&mut self.simulator, end_time, &mut check);
+                self.checked_steps += check.checked;
+                self.shadow = Some(shadow);
+                result?
+            }
+        };
+        if !reached {
             return Ok(());
         }
-        while let Some(next_time) = self.state.next_event_time() {
-            if next_time > end_time {
-                break;
-            }
-            self.step_until(end_time)?;
-            if self.state.is_stopped() {
-                return Ok(());
-            }
-        }
-        if self.state.is_finished() {
-            return Ok(());
-        }
-        self.state
-            .advance_time(&mut self.simulator.backend, end_time);
         if let Err(error) = self.simulator.try_dump_unless_rewound(end_time) {
             if matches!(&error, crate::simulator::DumpError::Runtime(_)) {
                 self.flush_error_output();
@@ -1103,10 +1122,10 @@ mod process_tests {
     /// enable from before the edge (here a register of `clk`'s own domain)
     /// and its domain reads the state from before `clk`'s domain commits; an
     /// edge raising `en` raises the gate after the commit, a further edge
-    /// that reads the committed state. `~clk` rises when `clk` falls, which
-    /// the timed steps drive and a tick, the active edge only, does not. Timed steps and
-    /// event-based ticks agree on every backend, in both state modes; the
-    /// four-state ticks judge the gate by settling the design.
+    /// that reads the committed state. `~clk` rises when `clk` falls. Timed
+    /// steps and event-based ticks, one clock period each, agree on every
+    /// backend, in both state modes; the four-state ticks judge the gate by
+    /// settling the design.
     #[test]
     fn gated_clocks_share_their_source_edge_on_every_backend() {
         const CODE: &str = "module Top (clk: input '_ clock, rst: input '_ reset_async_low,
@@ -1190,22 +1209,12 @@ mod process_tests {
                 .iter()
                 .map(|&enable| {
                     sim.modify(|io| io.set(en_in, enable)).unwrap();
-                    let clk_before = sim.get_four_state(sim.signal("clk"));
                     sim.tick(clk).unwrap();
-                    let mut observed = observe(&mut sim);
-                    assert_eq!(
-                        sim.get_four_state(sim.signal("clk")),
-                        clk_before,
-                        "a tick leaves clk as it was"
-                    );
-                    // A tick is not a falling edge of `clk`: `~clk` stays put.
-                    observed[3] = 0;
-                    observed
+                    observe(&mut sim)
                 })
                 .collect()
         }
         let want = expected();
-        let want_ticked: Vec<_> = want.iter().map(|&[a, b, c, _]| [a, b, c, 0]).collect();
         for four_state in [false, true] {
             let build = || {
                 crate::Simulator::builder(CODE, "Top")
@@ -1221,7 +1230,7 @@ mod process_tests {
             );
             assert_eq!(
                 ticked(build().build_interpreter().unwrap()),
-                want_ticked,
+                want,
                 "{}",
                 context("interp tick")
             );
@@ -1233,7 +1242,7 @@ mod process_tests {
             );
             assert_eq!(
                 ticked(build().build_cranelift().unwrap()),
-                want_ticked,
+                want,
                 "{}",
                 context("cranelift tick")
             );
@@ -1245,7 +1254,7 @@ mod process_tests {
             );
             assert_eq!(
                 ticked(build().build_wasm().unwrap()),
-                want_ticked,
+                want,
                 "{}",
                 context("wasm tick")
             );
@@ -1257,7 +1266,7 @@ mod process_tests {
             );
             assert_eq!(
                 ticked(build().build_tiered().unwrap()),
-                want_ticked,
+                want,
                 "{}",
                 context("tiered tick")
             );
@@ -1274,7 +1283,7 @@ mod process_tests {
                 );
                 assert_eq!(
                     ticked(build().build_native().unwrap()),
-                    want_ticked,
+                    want,
                     "{}",
                     context("native tick")
                 );
