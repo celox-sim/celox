@@ -173,6 +173,8 @@ declaration order. A time slot follows the regions of IEEE 1800-2023 4.5:
 processes, including those an edge wakes, run in the active region before the
 registers of that edge publish their nonblocking assignments, so a process
 woken by `@(posedge clk)` reads the register outputs from before the edge.
+A process woken by a register domain's blocking write also runs in the
+active region, before that domain's nonblocking assignments publish.
 Zero-delay `InactiveDelay` processes run after the active region, and
 nonblocking assignments publish only when both are empty. A process that
 drives a register's input at the same edge races with the register, as in
