@@ -101,6 +101,13 @@ pub trait HostBoundary: UnitExecutor {
         Ok(())
     }
 
+    /// How many time slots a compiled scheduler may run between calls of
+    /// [`Self::try_finish_timed_step`]. The default keeps every slot in the
+    /// runtime's loop.
+    fn compiled_slots(&self) -> CompiledSlots {
+        CompiledSlots::None
+    }
+
     /// Called after the state for a simulation timestamp has stabilized.
     fn finish_timed_step(&mut self, _timestamp: u64) {}
 
@@ -110,6 +117,19 @@ pub trait HostBoundary: UnitExecutor {
         self.finish_timed_step(timestamp);
         Ok(())
     }
+}
+
+/// How many time slots a compiled scheduler may run at once (see
+/// [`HostBoundary::compiled_slots`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompiledSlots {
+    /// None: the runtime's loop runs every slot.
+    None,
+    /// One per run: the host acts at every slot boundary.
+    One,
+    /// Any number: the host's boundary call after the last slot of a run
+    /// stands for the calls after the others.
+    Any,
 }
 
 /// Backend execution hooks needed by the timed simulation engine: its

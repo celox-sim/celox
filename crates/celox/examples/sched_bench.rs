@@ -1,6 +1,6 @@
 //! Timed-scheduler overhead benchmark for instruction-count comparisons.
 //!
-//! Usage: `sched_bench <a|ac|b1|b5> <cycles>`
+//! Usage: `sched_bench <a|ac|b1|b5|d> <cycles> [default|reference|compiled] [native|interp]`
 //!
 //! Every variant clocks the same 64 registers `rK <= rK + (seed ^ K)`:
 //!
@@ -9,6 +9,12 @@
 //! - `b1`: the clock comes from `always #5 clk = ~clk` and the registers read
 //!   `stim`, which `initial forever @(posedge clk) stim = stim + 3` drives.
 //! - `b5`: like `b1` with `stim <= stim + 3`.
+//! - `d`: the clock comes from `always #5 clk = ~clk` and the registers read
+//!   a constant seed, so only delay-only kernels run.
+//!
+//! The optional third argument selects the timed scheduler (hidden builder
+//! option), by default the library's; the fourth the backend, by default the
+//! host's native one.
 //!
 //! The scheduler's cost per cycle is the difference of the whole-program
 //! instruction counts of two runs, which cancels compilation:
@@ -43,7 +49,15 @@ fn source(variant: &str) -> String {
                 "stim",
             )
         }
-        _ => panic!("unknown variant {variant}: expected a, ac, b1 or b5"),
+        "d" => (
+            "module Top(output logic [31:0] out);\n\
+             logic clk = 0;\n\
+             logic [31:0] seed = 7;\n\
+             always #5 clk = ~clk;\n"
+                .to_string(),
+            "seed",
+        ),
+        _ => panic!("unknown variant {variant}: expected a, ac, b1, b5 or d"),
     };
     // One time unit per tick, so that `#5` and `add_clock(10, 5)` agree.
     let mut body = String::from("`timescale 1fs/1fs\n");
@@ -68,7 +82,18 @@ fn main() {
         .unwrap_or(20_000);
     let source = source(variant);
     let sources = vec![(source.as_str(), std::path::Path::new("sched_bench.sv"))];
-    let out = if variant == "a" {
+    let interpreter = match args.get(4).map(String::as_str) {
+        None | Some("native") => false,
+        Some("interp") => true,
+        Some(other) => panic!("unknown backend {other}: expected native or interp"),
+    };
+    let out = if variant == "a" && interpreter {
+        let sim = celox::Simulator::from_sv_sources(sources, "Top")
+            .build_interpreter()
+            .unwrap();
+        tick(sim, cycles)
+    } else if variant == "a" {
+        // The loop of the native case stays in `main`, as the baseline has it.
         let mut sim = celox::Simulator::from_sv_sources(sources, "Top")
             .build()
             .unwrap();
@@ -81,17 +106,51 @@ fn main() {
         let out = sim.signal("out");
         sim.get(out)
     } else {
-        let mut sim = celox::Simulation::from_sv_sources(sources, "Top")
-            .build()
-            .unwrap();
-        if variant == "ac" {
-            let seed = sim.signal("seed");
-            sim.modify(|io| io.set(seed, 7u32)).unwrap();
-            sim.add_clock("clk", 10, 5);
+        let mode = match args.get(3).map(String::as_str) {
+            None | Some("default") => celox::SchedulerMode::default(),
+            Some("reference") => celox::SchedulerMode::Reference,
+            Some("compiled") => celox::SchedulerMode::Compiled,
+            Some(other) => panic!("unknown scheduler {other}: expected reference or compiled"),
+        };
+        let builder = celox::Simulation::from_sv_sources(sources, "Top").scheduler_mode(mode);
+        if interpreter {
+            run(builder.build_interpreter().unwrap(), variant, cycles)
+        } else {
+            run(builder.build().unwrap(), variant, cycles)
         }
-        sim.run_until(cycles * 10).unwrap();
-        let out = sim.signal("out");
-        sim.get(out)
     };
     println!("{variant} {cycles} out={out:?}");
+}
+
+/// Variant `a` on another backend: one tick per cycle.
+fn tick<B: celox::SimBackend>(mut sim: celox::Simulator<B>, cycles: u64) -> celox::BigUint {
+    let seed = sim.signal("seed");
+    sim.modify(|io| io.set(seed, 7u32)).unwrap();
+    let clk = sim.event("clk");
+    for _ in 0..cycles {
+        sim.tick(clk).unwrap();
+    }
+    let out = sim.signal("out");
+    sim.get(out)
+}
+
+/// The timed variants: run `cycles` clock periods.
+fn run<B: celox::SimBackend>(
+    mut sim: celox::Simulation<B>,
+    variant: &str,
+    cycles: u64,
+) -> celox::BigUint {
+    if variant == "ac" {
+        let seed = sim.signal("seed");
+        sim.modify(|io| io.set(seed, 7u32)).unwrap();
+        sim.add_clock("clk", 10, 5);
+    }
+    sim.run_until(cycles * 10).unwrap();
+    let stats = sim.scheduler_stats();
+    println!(
+        "compiled slots {}, kernels {:?}",
+        stats.compiled_slots, stats.kernels
+    );
+    let out = sim.signal("out");
+    sim.get(out)
 }

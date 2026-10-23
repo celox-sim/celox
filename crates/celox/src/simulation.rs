@@ -218,6 +218,24 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         Ok(())
     }
 
+    fn compiled_slots(&self) -> celox_runtime::CompiledSlots {
+        use celox_runtime::CompiledSlots;
+        if self.frozen || !self.components.is_empty() || !self.backend.runs_compiled_scheduler() {
+            return CompiledSlots::None;
+        }
+        // Waveforms record, and the heap collects, at every slot boundary.
+        let vcd = &self.sv_vcd;
+        if self.vcd_writer.is_some()
+            || vcd.path.is_some()
+            || vcd.started.is_some()
+            || vcd.pending
+            || !self.handle_slots().is_empty()
+        {
+            return CompiledSlots::One;
+        }
+        CompiledSlots::Any
+    }
+
     fn finish_timed_step(&mut self, timestamp: u64) {
         self.dirty = false;
         self.dump_unless_rewound(timestamp);
@@ -551,7 +569,7 @@ impl<B: SimBackend> Simulation<B> {
         let Some(mut shadow) = self.shadow.take() else {
             return self.state.step_until(&mut self.simulator, end_time);
         };
-        let mut check = differential::ShadowCheck::new(&mut shadow);
+        let mut check = differential::ShadowCheck::new(&mut shadow, self.mode());
         let result = self
             .state
             .step_until_observed(&mut self.simulator, end_time, &mut check);
@@ -569,7 +587,7 @@ impl<B: SimBackend> Simulation<B> {
         let reached = match self.shadow.take() {
             None => self.state.run_until(&mut self.simulator, end_time)?,
             Some(mut shadow) => {
-                let mut check = differential::ShadowCheck::new(&mut shadow);
+                let mut check = differential::ShadowCheck::new(&mut shadow, self.mode());
                 let result =
                     self.state
                         .run_until_observed(&mut self.simulator, end_time, &mut check);
