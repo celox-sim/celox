@@ -185,7 +185,7 @@ fn difference<B: SimBackend>(
         .heap()
         .same_contents(shadow.simulator.backend.heap())
     {
-        return Some("the string heap".to_string());
+        return Some("the runtime heap (strings or objects)".to_string());
     }
     let (events, reference) = (
         primary.peek_runtime_events(),
@@ -501,6 +501,42 @@ mod tests {
             sim.run_until(u64::MAX).unwrap();
             assert_eq!(sim.get(x), 2u8.into(), "{mode:?}");
         }
+    }
+
+    #[test]
+    fn differential_mode_detects_object_rng_divergence_before_randomize() {
+        use crate::backend::SimBackend as _;
+        let source = r#"
+            module Top(output bit done);
+                timeunit 1ps / 1ps;
+                class C; rand int value; endclass
+                C c;
+                initial begin
+                    c = new;
+                    #5 done = 1;
+                    #5 void'(c.randomize());
+                end
+            endmodule
+        "#;
+        let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("rng.sv"))], "Top")
+            .scheduler_mode(SchedulerMode::Differential)
+            .build()
+            .unwrap();
+        sim.run_until(0).unwrap();
+        let object = sim.get(sim.signal("c")).to_u32_digits()[0];
+        use celox_runtime::StepObserver as _;
+        let mut check =
+            super::ShadowCheck::new(sim.shadow.as_mut().unwrap(), SchedulerMode::Differential);
+        check.before_step(&sim.state, &mut sim.simulator);
+        let result = sim.state.step_until(&mut sim.simulator, 5);
+        // Inject an extra draw after the primary step: before_step mirrors the
+        // heap, so a mutation between run_until calls would be overwritten.
+        sim.simulator.backend.heap_mut().random_object(object);
+        let error = check
+            .after_step(&sim.state, &mut sim.simulator, 5, &result)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("runtime heap"), "{error}");
     }
 
     #[test]

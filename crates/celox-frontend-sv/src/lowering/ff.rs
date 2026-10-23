@@ -273,6 +273,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                     }
                     continue;
                 }
+                sv::ir::Callee::Object(op) if matches!(*op, sv::ir::ObjectOp::New { .. }) => {
+                    // Constructor seeding consumes the process RNG. Register it
+                    // before lower_process freezes the persistent target ranges.
+                    self.urandom_state();
+                    continue;
+                }
                 sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };

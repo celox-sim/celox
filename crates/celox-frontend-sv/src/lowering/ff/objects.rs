@@ -32,6 +32,11 @@ impl Ff<'_, '_> {
                 let size = self.constant64(u64::from(*size));
                 let object =
                     self.heap_call(ops::encode(ops::OBJECT_NEW, u64::from(*class)), &[size]);
+                // Object seeding consumes the creating process's RNG once,
+                // before the constructor body (IEEE 1800-2023 18.14.3).
+                let seed = self.urandom(None)?;
+                let seed = self.integer_of_width(&seed, 32, false)?;
+                self.heap_call(ops::OBJECT_SEED, &[object, seed]);
                 for &(offset, kind) in handles {
                     let offset = self.constant64(u64::from(offset));
                     let kind = self.constant64(match kind {
@@ -55,6 +60,21 @@ impl Ff<'_, '_> {
                 let value = self.integer_of_width(&args[1], field.width as usize, field.signed)?;
                 self.heap_call(ops::OBJECT_STORE, &[object, place, value])
             }
+            ObjectOp::Random | ObjectOp::Check(_) => {
+                let object = self.handle(&args[0])?;
+                self.heap_call(
+                    match op {
+                        ObjectOp::Check(class) => ops::encode(ops::OBJECT_CHECK, u64::from(*class)),
+                        _ => ops::OBJECT_RANDOM,
+                    },
+                    &[object],
+                )
+            }
+            ObjectOp::Seed => {
+                let object = self.handle(&args[0])?;
+                let seed = self.integer_of_width(&args[1], 32, false)?;
+                self.heap_call(ops::OBJECT_SEED, &[object, seed])
+            }
             ObjectOp::ClassOf => {
                 let object = self.handle(&args[0])?;
                 self.heap_call(ops::OBJECT_CLASS, &[object])
@@ -70,7 +90,11 @@ impl Ff<'_, '_> {
                 HandleProperty::String => celox_design::ValueKind::StrRef,
                 HandleProperty::Object => celox_design::ValueKind::ObjRef,
             }),
-            ObjectOp::Store(_) | ObjectOp::ClassOf => None,
+            ObjectOp::Store(_)
+            | ObjectOp::ClassOf
+            | ObjectOp::Random
+            | ObjectOp::Seed
+            | ObjectOp::Check(_) => None,
         };
         if let Some(kind) = kind {
             self.m.variables.get_mut(&temp).unwrap().value_kind = kind;

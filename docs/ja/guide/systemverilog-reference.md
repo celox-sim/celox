@@ -92,8 +92,23 @@ package／`$unit` の static 引数を持つ時間待ち task と、static task 
 プロセスごとの永続的な乱数列を使い、文の実行順序と短絡評価に従います
 （IEEE 1800-2023 18.12）。
 
-`with` 制約、class メソッド、enum 変数、unpacked 配列、net、定数、
+`with` 制約、enum 変数、unpacked 配列、net、定数、
 select・連結式の引数は未対応として拒否します。
+
+### クラスの乱数化
+
+`object.randomize()` は `rand` プロパティを乱数化し、成功値の1（signed `int`）を返します。
+最初の対応範囲は継承・制約のないクラスと、64ビット以下の2値・非enum整数型の `rand` プロパティです。
+それ以外のプロパティは保持します。引数なし・非static・非virtualの
+`pre_randomize()` と `post_randomize()` を更新の前後に呼びます。
+`rand` プロパティがない場合もフックを呼びます（IEEE 1800-2023 18.6）。
+クラス内では `randomize()` や `this.randomize()` と書けます。
+
+オブジェクトごとに独立した乱数列を持ち、生成元のプロセスから初期シードを取得します。
+`object.srandom(seed)` で32ビットのシードを設定でき、チェックポイントは乱数状態も保持します
+（18.13.3、18.14.3）。具体的な乱数列は処理系に依存します。
+`randc`、制約、`with`、`randomize` の引数指定、`rand_mode`、staticな乱数プロパティ、enum・配列・オブジェクト・文字列の
+乱数化、継承を使った乱数化は未対応です。`null` を通した呼び出しは実行時エラーです。
 
 ### 時間リテラルによる遅延 {#time-literal-delays}
 

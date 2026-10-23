@@ -957,6 +957,8 @@ pub struct ClassDeclaration {
     /// The interface classes of `implements`, or those an interface class
     /// extends (8.26).
     pub interfaces: Vec<TypeId>,
+    /// Whether the class declares constraints, including prototypes.
+    pub has_constraints: bool,
     pub properties: Vec<ClassProperty>,
     pub methods: Vec<ClassMethod>,
     pub tokens: TokenRange,
@@ -980,6 +982,7 @@ pub struct ClassQualifiers {
     pub local: bool,
     pub protected: bool,
     pub rand: bool,
+    pub randc: bool,
 }
 
 /// A property declaration of a class.
