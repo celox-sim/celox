@@ -3469,7 +3469,8 @@ impl<'p, 'a> Comb<'p, 'a> {
         } else {
             None
         };
-        let (template, values) = system_task_template(self.m, &kind, args);
+        let (template, mut values) = system_task_template(self.m, &kind, args);
+        prepare_time_operands(self.m, template.as_deref(), &mut values)?;
         let mut captured = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
         let mut arg_signed = Vec::with_capacity(values.len());
