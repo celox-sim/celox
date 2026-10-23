@@ -59,9 +59,18 @@ pub(crate) struct SchedulerRefs {
     pub(crate) count: SignalRef,
     pub(crate) current: SignalRef,
     pub(crate) levels: SignalRef,
-    /// The wake and waiting slots of each kernel the scheduler runs, by
-    /// process index.
+    pub(crate) ready: SignalRef,
+    /// The wake and waiting slots of each kernel the scheduler runs that
+    /// only delays, by process index.
     pub(crate) wake: Vec<Option<(SignalRef, SignalRef)>>,
+    /// The waiting and baseline slots of each kernel the scheduler runs that
+    /// waits for an edge, by process index.
+    pub(crate) waits: Vec<Option<(SignalRef, SignalRef)>>,
+    /// The number of such kernels.
+    pub(crate) wait_kernels: usize,
+    /// The bit of each kernel the scheduler runs in its ready mask: its
+    /// place among them in kernel order.
+    pub(crate) ordinals: Vec<Option<u32>>,
     /// The event ids of the bits of `levels`.
     pub(crate) events: Vec<usize>,
 }
@@ -283,17 +292,45 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                     count: resolve(&slots.count),
                     current: resolve(&slots.current),
                     levels: resolve(&slots.levels),
-                    wake: slots
-                        .wake
-                        .iter()
-                        .zip(&slots.waiting)
-                        .zip(&scheduler.fallback)
-                        .map(|((wake, waiting), fallback)| {
-                            fallback
-                                .is_none()
-                                .then(|| (resolve(wake), resolve(waiting)))
+                    ready: resolve(&slots.ready),
+                    wake: (0..scheduler.fallback.len())
+                        .map(|index| {
+                            (scheduler.fallback[index].is_none()
+                                && model.processes[index].waits.is_empty())
+                            .then(|| (resolve(&slots.wake[index]), resolve(&slots.waiting[index])))
                         })
                         .collect(),
+                    waits: (0..scheduler.fallback.len())
+                        .map(|index| {
+                            (scheduler.fallback[index].is_none()
+                                && !model.processes[index].waits.is_empty())
+                            .then(|| {
+                                (
+                                    resolve(&slots.waiting[index]),
+                                    resolve(&slots.baseline[index]),
+                                )
+                            })
+                        })
+                        .collect(),
+                    ordinals: {
+                        let mut next = 0;
+                        scheduler
+                            .fallback
+                            .iter()
+                            .map(|fallback| {
+                                fallback.is_none().then(|| {
+                                    next += 1;
+                                    next - 1
+                                })
+                            })
+                            .collect()
+                    },
+                    wait_kernels: (0..scheduler.fallback.len())
+                        .filter(|&index| {
+                            scheduler.fallback[index].is_none()
+                                && !model.processes[index].waits.is_empty()
+                        })
+                        .count(),
                     events: scheduler
                         .events
                         .iter()

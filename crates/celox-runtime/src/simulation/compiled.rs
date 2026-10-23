@@ -5,8 +5,12 @@ use std::cmp::Reverse;
 
 use celox_design::SchedulerExit;
 
-use super::{CompiledSlots, SchedulerMode, SimulationExecutor, SimulationState};
-use crate::{SimulatorErrorCode, backend::SimBackend, timing::Halt};
+use super::{Baseline, CompiledSlots, SchedulerMode, SimulationExecutor, SimulationState};
+use crate::{
+    SimulatorErrorCode,
+    backend::SimBackend,
+    timing::{Halt, copy_planes},
+};
 
 impl<B: SimBackend> SimulationState<B> {
     /// Whether a compiled scheduler may run slots of this simulation.
@@ -37,7 +41,10 @@ impl<B: SimBackend> SimulationState<B> {
             || !pending.ready.is_empty()
             || !pending.inactive.is_empty()
             || !pending.nba_queue.is_empty()
-            || !pending.waiters.is_empty()
+            || pending
+                .waiters
+                .iter()
+                .any(|(process, _)| scheduler.waits.get(process).is_none_or(Option::is_none))
         {
             return None;
         }
@@ -111,6 +118,28 @@ impl<B: SimBackend> SimulationState<B> {
         for &(_, waiting) in scheduler.wake.iter().flatten() {
             backend.set(waiting, 0u8);
         }
+        backend.set(scheduler.ready, 0u64);
+        // The scheduler's waiting kernels wait in its slots during the run,
+        // with the level each wait last saw.
+        for (process, slots) in scheduler.waits.iter().enumerate() {
+            let Some((waiting, baseline)) = *slots else {
+                continue;
+            };
+            let level = match self.process_state.waiters.get(process) {
+                Some(waiter) => match waiter.baselines.first() {
+                    Some(Baseline::Raw(raw)) => raw.first().is_some_and(|byte| byte & 1 != 0),
+                    Some(Baseline::Value((value, _))) => value.bit(0),
+                    _ => return Err(SimulatorErrorCode::InternalError.into()),
+                },
+                None => {
+                    backend.set(waiting, 0u8);
+                    continue;
+                }
+            };
+            backend.set(waiting, 1u8);
+            backend.set(baseline, u8::from(level));
+            self.process_state.waiters.remove(process);
+        }
         // The scheduler's kernels wait in its wake slots during the run.
         let mut kept = Vec::with_capacity(self.process_wakeups.len());
         for wakeup @ Reverse((time, process)) in self.process_wakeups.drain() {
@@ -136,26 +165,69 @@ impl<B: SimBackend> SimulationState<B> {
         let now: u64 = backend.get_as(scheduler.now);
         let exit = SchedulerExit::from_code(backend.get_as(scheduler.exit));
         let current: u64 = backend.get_as(scheduler.current);
+        let ready: u64 = backend.get_as(scheduler.ready);
         let complete = result.is_ok() && exit == Some(SchedulerExit::Limit);
+        // A run that returned in the middle of slot `now` leaves the kernel
+        // that ended it filed nowhere, as the reference loop leaves it, and
+        // the kernels still ready in the slot ready.
+        let ordinals = &scheduler.ordinals;
+        let is_ready = |process: usize| {
+            ordinals
+                .get(process)
+                .copied()
+                .flatten()
+                .is_some_and(|ordinal| ready >> ordinal & 1 != 0)
+        };
+        let pending =
+            |process: usize| !complete && (process as u64 == current || is_ready(process));
         for (process, wake) in scheduler.wake.iter().enumerate() {
             let Some((wake, waiting)) = *wake else {
                 continue;
             };
-            if backend.get_as::<u8>(waiting) == 0 {
+            if pending(process) || backend.get_as::<u8>(waiting) == 0 {
                 continue;
             }
             let time: u64 = backend.get_as(wake);
-            if !complete && time == now {
-                // The run returned in the middle of slot `now`: the kernel
-                // that ended it is filed nowhere, as the reference loop
-                // leaves it, and kernels due then that did not run yet are
-                // still ready.
-                if process as u64 != current {
-                    self.process_state.ready.insert(process);
-                }
+            self.process_wakeups.push(Reverse((time, process)));
+        }
+        for (process, slots) in scheduler.waits.iter().enumerate() {
+            let Some((waiting, baseline)) = *slots else {
+                continue;
+            };
+            if pending(process) || backend.get_as::<u8>(waiting) == 0 {
                 continue;
             }
-            self.process_wakeups.push(Reverse((time, process)));
+            let site = backend.get_as::<u64>(self.model.processes[process].delay) as usize;
+            let terms = self.model.processes[process]
+                .wait_sites
+                .get(site)
+                .ok_or_else(|| Self::site_error(process, site))?;
+            let level = [backend.get_as::<u8>(baseline)];
+            // The slot keeps its storage, as `register_waiter` reuses it.
+            self.process_state.waiters.register(
+                process,
+                terms.iter().any(|term| term.driven),
+                |waiter| {
+                    waiter.site = site;
+                    waiter.baselines.truncate(1);
+                    match waiter.baselines.first_mut() {
+                        Some(Baseline::Raw(raw)) => copy_planes(raw, &level, 1),
+                        _ => {
+                            let mut raw = Vec::with_capacity(1);
+                            copy_planes(&mut raw, &level, 1);
+                            waiter.baselines.clear();
+                            waiter.baselines.push(Baseline::Raw(raw));
+                        }
+                    }
+                },
+            );
+        }
+        if !complete {
+            for process in 0..ordinals.len() {
+                if is_ready(process) && process as u64 != current {
+                    self.process_state.ready.insert(process);
+                }
+            }
         }
         self.stats.compiled_slots += count;
         if count > 0 {
