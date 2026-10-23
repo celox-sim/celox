@@ -2219,16 +2219,14 @@ pub fn schedule_symbolic_rtl_reporting_loops(
 }
 
 /// Declare the hidden objects a compiled scheduler exchanges with the
-/// runtime (`RuntimeSchema::scheduler`) as variables of the top module,
-/// when the design has `process_count` process kernels.
+/// runtime (`RuntimeSchema::scheduler`) as variables of the top module, for
+/// a design with `process_count` process kernels. A design without kernels
+/// has them too: host clocks may run in a compiled scheduler.
 fn declare_scheduler_slots(
     modules: &mut HashMap<ModuleId, SimModule>,
     root: ModuleId,
     process_count: usize,
 ) -> Option<celox_design::SchedulerSlots<SourceVarId>> {
-    if process_count == 0 {
-        return None;
-    }
     let variables = &mut modules.get_mut(&root)?.variables;
     let mut next = variables.keys().map(|id| id.0 + 1).max().unwrap_or(0);
     let mut declare = |name: String, width: usize| {

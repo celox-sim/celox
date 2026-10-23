@@ -11,6 +11,11 @@
 //! each kernel in [`SchedulerSlots::wake`]. It inlines the units the
 //! reference loop calls, so their code is unchanged.
 //!
+//! Periodic host clocks (`add_clock`) on clock events no design code writes
+//! run in the same loop: their edges apply at the start of a slot, before
+//! any kernel, and re-arm at its end. A design without kernels gets the
+//! unit for its host clocks alone.
+//!
 //! The runtime runs the unit only for slots that touch nothing else (see
 //! `celox_runtime::SimulationState::run_until_observed`): every other slot,
 //! and every design or kernel this module does not qualify, runs in the
@@ -70,10 +75,8 @@ pub(crate) fn attach(program: &mut LaidOutProgram) {
         Err(reason) => (vec![Some(reason); kernels], None, Vec::new(), Vec::new()),
         Ok(plan) => {
             let fallback = plan.fallback.clone();
-            let unit = plan
-                .kernels
-                .iter()
-                .any(Option::is_some)
+            // Without kernels, slots of host clocks alone.
+            let unit = (plan.kernels.iter().any(Option::is_some) || !plan.clocks.is_empty())
                 .then(|| plan.generate(program, &schema.slots));
             let events = plan
                 .edged()
@@ -113,8 +116,11 @@ struct Event {
     /// A clock edge rather than an asynchronous reset.
     clock: bool,
     eval_apply: Vec<Unit>,
-    eval_only: Vec<Unit>,
-    apply: Vec<Unit>,
+    /// The units of the path of several triggered domains, which a design
+    /// without kernels lacks; required when more than one event can have an
+    /// edge in a slot.
+    eval_only: Option<Vec<Unit>>,
+    apply: Option<Vec<Unit>>,
 }
 
 /// A kernel the scheduler runs.
@@ -218,15 +224,16 @@ impl Plan {
                 Some(DomainKind::ResetAsyncLow) => (0, false),
                 _ => return Err("an event is not a clock or reset edge".into()),
             };
-            let units = |map: &HashMap<AbsoluteAddr, Vec<Unit>>| -> Result<Vec<Unit>, String> {
-                let aliased = map
-                    .keys()
-                    .any(|key| *key != signal && topology.canonical(*key) == signal);
-                match map.get(&signal) {
-                    Some(units) if !aliased => Ok(units.clone()),
-                    _ => Err("an event domain has no separate units".into()),
-                }
-            };
+            let units =
+                |map: &HashMap<AbsoluteAddr, Vec<Unit>>| -> Result<Option<Vec<Unit>>, String> {
+                    let aliased = map
+                        .keys()
+                        .any(|key| *key != signal && topology.canonical(*key) == signal);
+                    if aliased {
+                        return Err("an event domain has no separate units".into());
+                    }
+                    Ok(map.get(&signal).cloned())
+                };
             let event = Event {
                 signal,
                 width: *program
@@ -236,7 +243,8 @@ impl Plan {
                     .ok_or("an event signal has no storage")?,
                 active,
                 clock,
-                eval_apply: units(&sir.eval_apply_ffs)?,
+                eval_apply: units(&sir.eval_apply_ffs)?
+                    .ok_or("an event domain has no separate units")?,
                 eval_only: units(&sir.eval_only_ffs)?,
                 apply: units(&sir.apply_ffs)?,
             };
@@ -539,14 +547,23 @@ impl Plan {
                 })
                 .collect()
         });
-        Ok(Self {
+        let plan = Self {
             events,
             kernels,
             clocks,
             fallback,
             finish_sites,
             settle_reads,
-        })
+        };
+        let edged = plan.edged();
+        if edged.len() > 1
+            && edged.iter().any(|&event| {
+                plan.events[event].eval_only.is_none() || plan.events[event].apply.is_none()
+            })
+        {
+            return Err("an event domain has no separate units".into());
+        }
+        Ok(plan)
     }
 
     /// The events the scheduler's kernels write, in event order: the only
@@ -1114,9 +1131,10 @@ impl Plan {
                         });
                         g.b.switch_to_block(unit);
                         let units = match phase {
-                            Phase::Evaluate => &event.eval_only,
-                            Phase::Apply => &event.apply,
-                        };
+                            Phase::Evaluate => event.eval_only.as_ref(),
+                            Phase::Apply => event.apply.as_ref(),
+                        }
+                        .expect("several edged events have their units (`Plan::new`)");
                         for unit in units {
                             g.inline_writer(unit, finish_exit);
                         }
@@ -1460,7 +1478,31 @@ impl Generator<'_> {
     /// The unit, once every block is sealed.
     fn finish(mut self) -> Unit {
         self.emit_exits();
-        let (blocks, register_map, _) = self.b.drain();
+        let (mut blocks, register_map, _) = self.b.drain();
+        // Exits a unit never takes are left out: the `$finish` exit of one
+        // without kernels whose domains and combinational logic record no
+        // `$finish`, and the exits of the paths it does not generate.
+        let mut reached = HashSet::default();
+        let mut pending = vec![celox_sir::BlockId(0)];
+        while let Some(block) = pending.pop() {
+            if !reached.insert(block) {
+                continue;
+            }
+            match &blocks[&block].terminator {
+                SIRTerminator::Jump(target, _) => pending.push(*target),
+                SIRTerminator::Branch {
+                    true_block,
+                    false_block,
+                    ..
+                } => pending.extend([true_block.0, false_block.0]),
+                SIRTerminator::Switch { cases, default, .. } => {
+                    pending.extend(cases.iter().map(|case| case.target));
+                    pending.push(*default);
+                }
+                SIRTerminator::Return | SIRTerminator::Error(_) => {}
+            }
+        }
+        blocks.retain(|block, _| reached.contains(block));
         Unit {
             entry_block_id: celox_sir::BlockId(0),
             blocks,
