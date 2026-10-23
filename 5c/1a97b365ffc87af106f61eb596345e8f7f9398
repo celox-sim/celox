@@ -1,0 +1,1 @@
+Fix sv-tests regression: defer unsupported unused class layouts during randomization signature discovery. Preserve the existing conformance baseline; validate all 2054 mode runs locally.
