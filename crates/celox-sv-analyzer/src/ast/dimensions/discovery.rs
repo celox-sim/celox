@@ -469,6 +469,33 @@ fn class_signatures(
             context,
         );
     }
+    for method in ["randomize", "srandom"] {
+        let mut formals = vec![(
+            FunctionArgumentMetadata {
+                name: classes::THIS.into(),
+                direction: ParamDirection::Input,
+                has_default: false,
+            },
+            handle.clone(),
+        )];
+        if method == "srandom" {
+            formals.push((
+                FunctionArgumentMetadata {
+                    name: "seed".into(),
+                    direction: ParamDirection::Input,
+                    has_default: false,
+                },
+                procedural::int_type(),
+            ));
+        }
+        publish_signature(
+            classes::Class::subroutine_name(&class_name, method),
+            formals,
+            Some((method == "randomize").then(procedural::int_type)),
+            tree,
+            context,
+        );
+    }
     if !constructor && !class.interface {
         publish_signature(
             classes::Class::subroutine_name(&class_name, "new"),

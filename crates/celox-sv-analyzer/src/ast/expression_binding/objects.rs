@@ -280,6 +280,23 @@ pub(in crate::ast) fn method(
             )),
         };
     }
+    if matches!(method_name.as_str(), "randomize" | "srandom") {
+        if receiver == Receiver::Static
+            || (receiver == Receiver::This && dimensions.get(THIS).is_none())
+        {
+            return Err(unsupported(
+                "class randomization requires an object receiver",
+            ));
+        }
+        if method_name == "randomize" {
+            class.check_randomize(tree)?;
+        }
+        return Ok(Some((
+            Class::subroutine_name(&class_name, &method_name),
+            usize::from(method_name == "srandom"),
+            receiver,
+        )));
+    }
     let Some(method) = class.method(&method_name) else {
         return Ok(None);
     };

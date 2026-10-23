@@ -101,8 +101,25 @@ variable or advancing the random stream. Calls follow procedural statement order
 and short-circuit evaluation, and use the calling process's persistent random
 stream (IEEE 1800-2023 18.12).
 
-Constraints (`with`), class methods, enum variables, unpacked arrays, nets,
+Constraints (`with`), enum variables, unpacked arrays, nets,
 constants, selects and concatenation arguments are unsupported and rejected.
+
+### Class randomization
+
+`object.randomize()` randomizes the object's `rand` properties and returns
+signed `int` value `1`. This first subset supports classes without inheritance
+or constraints, with 2-state non-enum integral `rand` properties up to 64 bits.
+Other properties keep their values. Zero-argument, non-static, non-virtual
+`pre_randomize()` and `post_randomize()` functions run before and after the
+updates, including when there are no `rand` properties (IEEE 1800-2023 18.6).
+Calls inside a class may use `randomize()` or `this.randomize()`.
+
+Each object has an independent random stream, seeded from its creating process.
+`object.srandom(seed)` resets it using a 32-bit seed; checkpoints preserve it
+(18.13.3, 18.14.3). Random sequences are implementation-specific.
+`randc`, constraints, `with`, argument lists to `randomize`, `rand_mode`,
+static random properties, random enum/array/object/string properties and randomization through inheritance
+remain unsupported. A call through `null` is a runtime error.
 
 ### Time literal delays {#time-literal-delays}
 

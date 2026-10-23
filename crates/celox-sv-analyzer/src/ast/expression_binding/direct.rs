@@ -413,7 +413,10 @@ pub(in crate::ast) fn bind_value(
                         let (name, formals, receiver) =
                             objects::method(tree, *expression, native, dimensions)?
                                 .expect("checked by the guard");
-                        if args.len() > formals || args.iter().any(|arg| arg.name.is_some()) {
+                        if args.len() > formals
+                            || (name.ends_with("::srandom") && args.len() != 1)
+                            || args.iter().any(|arg| arg.name.is_some())
+                        {
                             return Err(unsupported(format!("arguments of method `{name}`")));
                         }
                         let mut children = Vec::new();

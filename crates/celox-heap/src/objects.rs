@@ -11,9 +11,10 @@ use crate::{Handle, HandleKind, Heap};
 /// The handle of `null`, the value of zero-initialized memory.
 pub const NULL: Handle = 0;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Object {
     class: u32,
+    random_state: u64,
     bytes: Box<[u8]>,
     /// Byte offsets of the handle properties, with what they refer to.
     pub(crate) handles: Vec<(u32, HandleKind)>,
@@ -32,12 +33,17 @@ pub enum Fault {
     /// A property access or method call through `null` or a handle of no
     /// live object (IEEE 1800-2023 8.4).
     NullDereference,
+    /// The first randomization subset does not implement virtual dispatch.
+    RandomizationClassMismatch,
 }
 
 impl std::fmt::Display for Fault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NullDereference => f.write_str("null object handle dereferenced"),
+            Self::RandomizationClassMismatch => {
+                f.write_str("class randomization through a base handle is unsupported")
+            }
         }
     }
 }
@@ -53,12 +59,44 @@ impl Heap {
             handle,
             Object {
                 class,
+                random_state: 0,
                 bytes: vec![0; size].into(),
                 handles: Vec::new(),
             },
         );
         self.created += 1;
         handle
+    }
+
+    /// Seed an object's independent random stream (IEEE 1800-2023 18.13.3).
+    pub fn seed_object(&mut self, handle: Handle, seed: u32) {
+        if let Some(object) = self.object_mut(handle) {
+            object.random_state = u64::from(seed);
+        }
+    }
+
+    /// SplitMix64: a full-period state transition with a bijective output
+    /// permutation, including seed zero. The language does not fix the RNG.
+    pub fn random_object(&mut self, handle: Handle) -> u64 {
+        let Some(object) = self.object_mut(handle) else {
+            return 0;
+        };
+        object.random_state = object.random_state.wrapping_add(0x9e3779b97f4a7c15);
+        let mut word = object.random_state;
+        word = (word ^ (word >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        word = (word ^ (word >> 27)).wrapping_mul(0x94d049bb133111eb);
+        word ^ (word >> 31)
+    }
+
+    pub(crate) fn check_object(&mut self, handle: Handle, class: u32) -> bool {
+        let Some(object) = self.object_mut(handle) else {
+            return false;
+        };
+        if class != 0 && object.class != class {
+            self.fault.get_or_insert(Fault::RandomizationClassMismatch);
+            return false;
+        }
+        true
     }
 
     /// Declare that the property of `object` at byte `offset` holds a handle
@@ -181,5 +219,33 @@ mod tests {
         heap.collect([]);
         assert!(!heap.contains_object(outer));
         assert!(!heap.contains(text));
+    }
+}
+
+#[cfg(test)]
+mod random_tests {
+    use super::*;
+
+    #[test]
+    fn random_streams_are_independent_and_checkpointed() {
+        let mut heap = Heap::new();
+        let a = heap.new_object(1, 1);
+        let b = heap.new_object(1, 1);
+        heap.seed_object(a, 0);
+        heap.seed_object(b, 0);
+        let first = heap.random_object(a);
+        for _ in 0..10 {
+            heap.random_object(a);
+        }
+        assert_eq!(first, heap.random_object(b));
+        heap.seed_object(a, 0);
+        assert_eq!(first, heap.random_object(a));
+        let mut snapshot = heap.clone();
+        for _ in 0..20 {
+            assert_eq!(heap.random_object(a), snapshot.random_object(a));
+        }
+        assert_eq!(heap.take_fault(), None);
+        heap.random_object(NULL);
+        assert_eq!(heap.take_fault(), Some(Fault::NullDereference));
     }
 }

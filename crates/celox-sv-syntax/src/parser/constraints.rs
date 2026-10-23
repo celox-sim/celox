@@ -28,6 +28,9 @@ impl Parser<'_> {
     }
 
     pub(super) fn class_constraint(&mut self) -> Result<()> {
+        if let Some(class) = self.class_stack.last_mut() {
+            class.has_constraints = true;
+        }
         let prototype = self.eat("extern") || self.eat("pure");
         self.eat("static");
         self.expect("constraint")?;
