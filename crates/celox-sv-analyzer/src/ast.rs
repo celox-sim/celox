@@ -27,6 +27,7 @@ pub(super) struct AnalysisState {
     root_subroutines: std::cell::Cell<bool>,
     next_call_site: std::rc::Rc<std::cell::Cell<usize>>,
     timescales: timescales::State,
+    diagnostics: RefCell<Vec<warnings::AnalyzerWarning>>,
     /// Classes laid out so far, by name.
     classes: std::cell::RefCell<HashMap<String, std::rc::Rc<classes::Class>>>,
 }
@@ -247,6 +248,7 @@ impl InterfaceLookup<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {
     modules: Vec<Module>,
+    diagnostics: Vec<warnings::AnalyzerWarning>,
 }
 
 /// Overrides supplied by one instantiation. Types have been resolved in its scope.
@@ -296,16 +298,21 @@ impl Source {
                         &packages,
                         packages.unit(Path::new("")),
                     )?;
-                    modules.push(Module::from_scope_with_parameter_overrides(
-                        syntax_tree,
-                        module_name,
-                        &parameter_overrides,
-                        &InterfaceLookup {
-                            local: &interfaces,
-                            extra: &ModuleInterfaces::default(),
-                        },
-                        Arc::new(imported),
-                    )?);
+                    modules.push(
+                        Module::from_scope_with_parameter_overrides(
+                            syntax_tree,
+                            module_name,
+                            &parameter_overrides,
+                            &InterfaceLookup {
+                                local: &interfaces,
+                                extra: &ModuleInterfaces::default(),
+                            },
+                            Arc::new(imported),
+                        )
+                        .map_err(|error| {
+                            error.with_warnings(context.state.diagnostics.borrow().clone())
+                        })?,
+                    );
                 }
                 celox_sv_syntax::PortStyle::NonAnsi => {
                     return Err(AnalyzerError::Unsupported(
@@ -316,7 +323,10 @@ impl Source {
             }
         }
 
-        Ok(Self { modules })
+        Ok(Self {
+            modules,
+            diagnostics: context.state.diagnostics.borrow().clone(),
+        })
     }
 
     pub(crate) fn from_syntax_module_with_parameter_overrides(
@@ -424,18 +434,26 @@ impl Source {
                         },
                         &interfaces,
                         imported.clone(),
-                    )? {
+                    )
+                    .map_err(|error| {
+                        error.with_warnings(context.state.diagnostics.borrow().clone())
+                    })? {
                         module.name = module_name.to_string();
                         modules.push(module);
                         continue;
                     }
-                    modules.push(Module::from_scope_with_parameter_overrides(
-                        syntax_tree,
-                        module_name,
-                        bindings.values,
-                        &interfaces,
-                        Arc::new(imported),
-                    )?);
+                    modules.push(
+                        Module::from_scope_with_parameter_overrides(
+                            syntax_tree,
+                            module_name,
+                            bindings.values,
+                            &interfaces,
+                            Arc::new(imported),
+                        )
+                        .map_err(|error| {
+                            error.with_warnings(context.state.diagnostics.borrow().clone())
+                        })?,
+                    );
                 }
                 celox_sv_syntax::PortStyle::NonAnsi if syntax_tree.root_name()? == module_name => {
                     return Err(AnalyzerError::Unsupported(
@@ -445,7 +463,10 @@ impl Source {
                 _ => {}
             }
         }
-        Ok(Self { modules })
+        Ok(Self {
+            modules,
+            diagnostics: context.state.diagnostics.borrow().clone(),
+        })
     }
 
     pub(crate) fn module_names_from_syntax(
@@ -490,7 +511,7 @@ impl Source {
     }
 
     pub(crate) fn warnings(&self) -> Vec<warnings::AnalyzerWarning> {
-        let mut warnings = Vec::new();
+        let mut warnings = self.diagnostics.clone();
         for module in &self.modules {
             warnings::append(&mut warnings, module.constant_functions.warnings());
         }

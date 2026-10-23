@@ -8,6 +8,8 @@ use crate::procedural::SourceSpan;
 pub enum AnalyzerWarning {
     /// Explicit and implementation-default time scales occur in one design.
     MixedTimescale,
+    /// `$size` on an interface array is a compatibility extension to 20.7.
+    InterfaceArrayQuery { site: Option<SourceSpan> },
     /// An ignored `$exit` in a function outside a program (IEEE 1800-2023 24.7).
     ExitOutsideProgram { site: Option<SourceSpan> },
 }

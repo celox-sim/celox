@@ -540,3 +540,64 @@ fn source_file_is_relative_to_celox_manifest_from_another_directory() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn interface_array_query_policy_flows_through_manifest_and_cli_overrides() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join("top.sv"),
+        r#"
+        interface Lane; logic v; endinterface
+        module Top;
+            Lane lanes[3:2]();
+            localparam N=$size(lanes);
+            initial begin
+                assert(N==2) else $fatal(1,"size");
+                $display("size=%0d",N);
+                $finish;
+            end
+        endmodule
+    "#,
+    )
+    .unwrap();
+    let manifest = project.path().join("celox.toml");
+    for (configured, overridden, success, warning) in [
+        (None, None, false, false),
+        (Some("warn"), None, true, true),
+        (Some("allow"), None, true, false),
+        (Some("warn"), Some("error"), false, false),
+        (Some("error"), Some("allow"), true, false),
+    ] {
+        let mut config = "sources=['top.sv']\ntop='Top'\n".to_string();
+        if let Some(level) = configured {
+            config.push_str(&format!("[diagnostics]\ninterface_array_query='{level}'\n"));
+        }
+        std::fs::write(&manifest, config).unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_celox"));
+        cmd.args(["run", "--project"])
+            .arg(&manifest)
+            .args(["--backend", "interpreter"])
+            .env("RUST_LOG", "warn");
+        if let Some(level) = overridden {
+            cmd.args(["--diagnostic", &format!("interface_array_query={level}")]);
+        }
+        let output = cmd.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{configured:?}/{overridden:?}: {output:?}"
+        );
+        if success {
+            assert_eq!(output.stdout, b"size=2\n", "{output:?}");
+            assert_eq!(
+                stderr.contains("interface_array_query"),
+                warning,
+                "{stderr}"
+            );
+        } else {
+            assert!(stderr.contains("interface_array_query"), "{stderr}");
+        }
+    }
+}
