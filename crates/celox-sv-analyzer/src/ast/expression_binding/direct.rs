@@ -527,7 +527,30 @@ pub(in crate::ast) fn bind_value(
                         }
                         let name = bound_callable_name(tree, *expression, native, dimensions)?
                             .ok_or_else(|| unsupported("method or randomize call"))?;
-                        if name.starts_with('$') && !name.contains("::") {
+                        let cast = match name.as_str() {
+                            "$cast" => objects::cast(tree, args, native, dimensions)?,
+                            _ => None,
+                        };
+                        if let Some(cast) = cast {
+                            let objects::Cast::Call {
+                                name,
+                                destination,
+                                source,
+                            } = cast
+                            else {
+                                values.push(Expr::Literal("0".into()));
+                                continue;
+                            };
+                            (
+                                Finish::Call {
+                                    name,
+                                    args: vec![Some(destination), Some(source)],
+                                    order: Vec::new(),
+                                    system: None,
+                                },
+                                vec![(destination, None), (source, None)],
+                            )
+                        } else if name.starts_with('$') && !name.contains("::") {
                             let presence = args
                                 .iter()
                                 .map(|arg| {
