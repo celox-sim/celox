@@ -7237,6 +7237,19 @@ fn packed_index_offset(variable: &SvVariable, index: i128) -> Option<usize> {
         .filter(|offset| *offset < variable.width)
 }
 
+/// The bit position of declared index `index` of `variable`, which may lie
+/// outside it; see [`packed_index_offset`].
+fn packed_index_position(variable: &SvVariable, index: i128) -> Option<i128> {
+    if !variable.array_dims.is_empty() {
+        return Some(index);
+    }
+    match variable.packed_ranges.as_slice() {
+        [(left, right)] if left >= right => index.checked_sub(*right),
+        [(_, right)] => right.checked_sub(index),
+        _ => Some(index),
+    }
+}
+
 fn unpacked_element_width(variable: &SvVariable) -> Option<usize> {
     if variable.array_dims.is_empty() {
         return None;
@@ -7392,6 +7405,83 @@ fn sv_memory_offset(variable: &SvVariable, bit_offset: usize, width: usize) -> S
             }
         }
         _ => SIROffset::Static(bit_offset),
+    }
+}
+
+/// The bits of `variable` that a constant select from declared index `msb`
+/// to `lsb` writes, and the number of low bits of the assigned value that
+/// fall below the variable. A select partly outside the variable writes only
+/// the bits inside, one wholly outside writes none (IEEE 1800-2023 11.5.1).
+fn constant_select_write(
+    variable: &SvVariable,
+    msb: i128,
+    lsb: i128,
+) -> Option<(Option<BitAccess>, usize)> {
+    let (msb, lsb) = (
+        packed_index_position(variable, msb)?,
+        packed_index_position(variable, lsb)?,
+    );
+    let (low, high) = (msb.min(lsb), msb.max(lsb));
+    let top = i128::try_from(variable.width).ok()? - 1;
+    let (start, end) = (low.max(0), high.min(top));
+    if start > end {
+        return Some((None, 0));
+    }
+    Some((
+        Some(BitAccess::new(
+            usize::try_from(start).ok()?,
+            usize::try_from(end).ok()?,
+        )),
+        usize::try_from(start - low).ok()?,
+    ))
+}
+
+/// `folded`, the select `original` with the values its position reads
+/// substituted, unless that turned a run-time select within one array
+/// element into a constant one reaching past the element: the run-time form
+/// keeps its write within the element (see `dynamic_packed_write`), while
+/// the constant position counts from bit 0 of the whole array.
+fn keep_element_window(
+    original: &sv::ir::LValue,
+    folded: sv::ir::LValue,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> sv::ir::LValue {
+    let constant =
+        |expr| sv::typecheck::eval_const_expr_with_types(expr, constants, parameter_types);
+    let (
+        sv::ir::LValue::Select {
+            msb: original_msb,
+            lsb: original_lsb,
+            ..
+        },
+        sv::ir::LValue::Select { msb, lsb, .. },
+    ) = (original, &folded)
+    else {
+        return folded;
+    };
+    if constant(original_msb).is_some() && constant(original_lsb).is_some() {
+        return folded;
+    }
+    let (Some(msb), Some(lsb)) = (constant(msb), constant(lsb)) else {
+        return folded;
+    };
+    let Some(window) =
+        dynamic_packed_write(original, variables, name_to_id, constants, parameter_types)
+            .and_then(|write| write.window)
+    else {
+        return folded;
+    };
+    let inside = |position: i128| {
+        usize::try_from(position)
+            .is_ok_and(|position| (window.lsb..=window.msb).contains(&position))
+    };
+    if inside(msb) && inside(lsb) {
+        folded
+    } else {
+        original.clone()
     }
 }
 

@@ -7,7 +7,7 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 0,
-    "mismatch": 21,
+    "mismatch": 24,
     "emission_error": 0,
     "compile_error": 18,
     "runtime_error": 2,
@@ -426,6 +426,30 @@
       "name": "class::inherited_methods_of_extended_interface_classes",
       "phase": "compile",
       "status": "compile_error"
+    },
+    {
+      "category": "Arrays",
+      "detail": "indexed_select::ascending_part_selects_partly_outside_write_the_bits_inside at 1917:3: assert_eq comb_up: expected 0x2, got 0x40 (comb_up[6:7] take v[3:2])",
+      "expectation": "Simulation",
+      "name": "indexed_select::ascending_part_selects_partly_outside_write_the_bits_inside",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Arrays",
+      "detail": "indexed_select::constant_part_selects_partly_outside_write_the_bits_inside at 1889:3: assert_eq comb_out: expected 0x5a, got 0x5f (a select wholly outside writes nothing)",
+      "expectation": "Simulation",
+      "name": "indexed_select::constant_part_selects_partly_outside_write_the_bits_inside",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Arrays",
+      "detail": "indexed_select::known_run_time_selects_stay_within_their_element at 1957:20: assert_eq a1: expected 0x42, got 0x80",
+      "expectation": "Simulation",
+      "name": "indexed_select::known_run_time_selects_stay_within_their_element",
+      "phase": "execute",
+      "status": "mismatch"
     }
   ]
 }
