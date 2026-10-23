@@ -223,6 +223,13 @@ stays a passing negative case because `par_cls::b` outside the class is
 rejected. `8.5--properties_enum` keeps failing because enumeration constants
 declared in a class are not supported.
 
+Shallow copies update two more rows: both state modes for `8.12--shallow_copy`
+change from fail to pass. The case was simulated and its displayed values
+checked: the property of the copy keeps the value it was copied with after the
+method call changes the original. Full official runs at the pinned revision
+report 554 passing cases in 2state and 556 in 4state, with no passing case
+regressing.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.

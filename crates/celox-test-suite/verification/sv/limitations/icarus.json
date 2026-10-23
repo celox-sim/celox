@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 17,
     "emission_error": 0,
-    "compile_error": 132,
+    "compile_error": 133,
     "runtime_error": 8,
     "unsupported": 0,
     "ignored": 0
@@ -1453,6 +1453,14 @@
       "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid module instantiation\n<case>/source_0.sv:16: syntax error\n<case>/testbench.sv:3: error: Invalid module item.\n<case>/testbench.sv:4: error: Repeat timeunit found and the initial timeunit for this scope is missing.\n<case>/testbench.sv:5: error: Repeat timeprecision found and the initial timeprecision for this scope is missing.\n",
       "expectation": "Simulation",
       "name": "class::parameter_defaults_bind_where_the_class_is_declared",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:34: syntax error\n<case>/source_0.sv:34: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::shallow_copies",
       "phase": "compile",
       "status": "compile_error"
     }
