@@ -85,6 +85,7 @@ impl DiagnosticPolicy {
             if matches!(
                 code,
                 "mixed_timescale"
+                    | "interface_array_query"
                     | "unpacked_port_default"
                     | "multiple_always_ff_drivers"
                     | "inferred_latch"
