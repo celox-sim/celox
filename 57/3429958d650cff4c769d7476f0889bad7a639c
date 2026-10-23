@@ -1,0 +1,6 @@
+Revision history for #1758:
+
+rev 2 (content) 2026-10-22 21:10 UTC — Rebased onto master after #1737; the $cast helper initializes the new persistent_locals field and the sv-tests totals rise by one for its two accepted rows.
+rev 1 (initial) 2026-10-22 21:10 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1758,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"7fa07c6db69e986590c5b915dde5ddfe86ff0903","timestamp_iso":"2026-10-22T21:10:52Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"7fa07c6db69e986590c5b915dde5ddfe86ff0903","new_sha":"462d189a32789bbf644148548c37aa153a2b0c04","timestamp_iso":"2026-10-22T21:10:52Z","reason":"Rebased onto master after #1737; the $cast helper initializes the new persistent_locals field and the sv-tests totals rise by one for its two accepted rows.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/7fa07c6db69e986590c5b915dde5ddfe86ff0903...462d189a32789bbf644148548c37aa153a2b0c04"}]} -->
