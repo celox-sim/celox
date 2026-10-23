@@ -682,6 +682,321 @@ mod tests {
         }
     }
 
+    /// What the host does before a run.
+    #[derive(Clone, Copy)]
+    enum Host {
+        Clock(&'static str, u64, u64),
+        Set(&'static str, u8),
+        Schedule(&'static str, u64, u64),
+    }
+
+    fn drive<B: crate::SimBackend>(sim: &mut Simulation<B>, actions: &[Host]) {
+        for &action in actions {
+            match action {
+                Host::Clock(port, period, delay) => sim.add_clock(port, period, delay),
+                Host::Set(port, value) => {
+                    let signal = sim.signal(port);
+                    sim.modify(|io| io.set(signal, value)).unwrap();
+                }
+                Host::Schedule(port, time, value) => sim.schedule(port, time, value).unwrap(),
+            }
+        }
+    }
+
+    /// Run `source`, whose kernels all compile, in every mode on the native
+    /// and Cranelift backends: before each run until `end`, the host does
+    /// `actions`, and afterwards the state file is the reference's. At least
+    /// one slot must run compiled.
+    fn host_driven_agrees(source: &str, runs: &[(u64, &[Host])]) {
+        let kernels = build_in(source, SchedulerMode::Compiled)
+            .scheduler_stats()
+            .kernels;
+        assert!(
+            kernels
+                .iter()
+                .all(|kernel| *kernel == crate::KernelSchedule::Compiled),
+            "{kernels:?}"
+        );
+        let mut reference = build_in(source, SchedulerMode::Reference);
+        let mut expected = Vec::new();
+        for &(end, actions) in runs {
+            drive(&mut reference, actions);
+            reference.run_until(end).unwrap();
+            expected.push(reference.save_state().unwrap());
+        }
+        fn check<B: crate::SimBackend>(
+            mut sim: Simulation<B>,
+            runs: &[(u64, &[Host])],
+            expected: &[crate::StateFile],
+            label: &str,
+        ) {
+            for (run, &(end, actions)) in runs.iter().enumerate() {
+                drive(&mut sim, actions);
+                sim.run_until(end).unwrap();
+                assert_eq!(
+                    sim.save_state().unwrap(),
+                    expected[run],
+                    "{label} run {run}"
+                );
+            }
+            let stats = sim.scheduler_stats();
+            assert!(stats.compiled_slots > 0, "{label}: {stats:?}");
+        }
+        for mode in MODES {
+            check(
+                build_in(source, mode),
+                runs,
+                &expected,
+                &format!("{mode:?}"),
+            );
+            let cranelift = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+                .scheduler_mode(mode)
+                .build_cranelift()
+                .unwrap();
+            check(cranelift, runs, &expected, &format!("cranelift {mode:?}"));
+        }
+    }
+
+    /// Kernels waiting for a host clock run in compiled slots with the
+    /// domain of their edge, blocking and nonblocking.
+    #[test]
+    fn host_clocks_run_in_compiled_slots() {
+        for assign in ["=", "<="] {
+            let source = format!(
+                "`timescale 1ns/1ns
+                module Top(input logic clk, output logic [7:0] sum);
+                    logic [7:0] stim = 8'd0;
+                    logic [7:0] r = 8'd0;
+                    initial forever @(posedge clk) stim {assign} stim + 8'd3;
+                    always_ff @(posedge clk) r <= r + stim;
+                    assign sum = r;
+                endmodule"
+            );
+            host_driven_agrees(&source, &[(1000, &[Host::Clock("clk", 10, 5)])]);
+        }
+    }
+
+    /// Host clocks with coinciding edges, odd and short periods, a kernel
+    /// clock in the same slots, and waits for falling and any edges.
+    #[test]
+    fn coincident_host_clocks_run_in_compiled_slots() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(input logic a, input logic b, input logic c, output logic [7:0] seen);
+                logic g = 1'b0;
+                logic [7:0] log = 8'd0;
+                logic [7:0] acc = 8'd0;
+                logic [7:0] ra = 8'd0;
+                logic [7:0] rb = 8'd0;
+                logic [7:0] rg = 8'd0;
+                logic [7:0] rc = 8'd0;
+                initial forever @(posedge a) log = log * 8'd3 + 8'd1;
+                always #3 g = ~g;
+                initial forever @(negedge b) log = log * 8'd5 + 8'd2;
+                initial forever @(c) acc <= acc + log;
+                always_ff @(posedge a) ra <= ra + log;
+                always_ff @(negedge b) rb <= rb + acc;
+                always_ff @(posedge g) rg <= rg + ra + rb;
+                always_ff @(posedge c) rc <= rc + log;
+                assign seen = log + acc + rg + rc;
+            endmodule
+        "#;
+        for (a, b, c) in [(10, 6, 15), (7, 3, 1), (2, 5, 9)] {
+            host_driven_agrees(
+                source,
+                &[(
+                    300,
+                    &[
+                        Host::Clock("a", a, 1),
+                        Host::Clock("b", b, 3),
+                        Host::Clock("c", c, 2),
+                    ],
+                )],
+            );
+        }
+    }
+
+    /// Host writes, of a clocked signal too, a clock added later, a one-shot
+    /// event on a clocked signal and a clock added twice to one event
+    /// between runs.
+    #[test]
+    fn host_clocks_agree_across_host_changes() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(input logic clk, input logic clk2, input logic go, input logic [7:0] k,
+                       output logic [7:0] q);
+                logic [7:0] n = 8'd0;
+                logic [7:0] m = 8'd0;
+                logic [7:0] r = 8'd0;
+                logic [7:0] r2 = 8'd0;
+                logic [7:0] boost = 8'd0;
+                initial forever @(posedge clk) n = n + k + boost;
+                initial @(posedge go) boost = 8'd5;
+                initial forever @(posedge clk2) m <= m + n;
+                always_ff @(posedge clk) r <= r + n + m;
+                always_ff @(posedge clk2) r2 <= r2 ^ m;
+                assign q = r + r2;
+            endmodule
+        "#;
+        host_driven_agrees(
+            source,
+            &[
+                (100, &[Host::Set("k", 1), Host::Clock("clk", 10, 5)]),
+                (
+                    200,
+                    &[
+                        Host::Set("k", 3),
+                        Host::Set("go", 1),
+                        Host::Clock("clk2", 7, 2),
+                    ],
+                ),
+                (300, &[Host::Schedule("clk", 253, 1)]),
+                (400, &[Host::Clock("clk2", 4, 1)]),
+                (500, &[Host::Set("clk", 1)]),
+                (600, &[Host::Set("clk", 0), Host::Set("clk2", 1)]),
+            ],
+        );
+    }
+
+    /// A kernel's `$finish` in a slot with a host clock edge, and a state
+    /// file and a checkpoint taken between runs and restored.
+    #[test]
+    fn host_clocks_finish_and_restore_as_the_reference() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(input logic clk, input logic clk2, output logic [7:0] n);
+                logic [7:0] r = 8'd0;
+                initial begin
+                    n = 8'd0;
+                    forever @(posedge clk) begin
+                        n = n + 8'd1;
+                        if (n == 8'd40) $finish;
+                    end
+                end
+                logic [7:0] q = 8'd0;
+                always_ff @(posedge clk2) r <= r + n;
+                always_ff @(posedge clk) q <= q ^ r;
+            endmodule
+        "#;
+        let clocks = [Host::Clock("clk", 10, 5), Host::Clock("clk2", 3, 1)];
+        host_driven_agrees(source, &[(100, &clocks), (1000, &[])]);
+        // A state file and a checkpoint taken in the middle continue as the
+        // reference does.
+        let mut reference = build_in(source, SchedulerMode::Reference);
+        drive(&mut reference, &clocks);
+        reference.run_until(1000).unwrap();
+        assert!(reference.is_finished());
+        let expected = reference.save_state().unwrap();
+        for mode in MODES {
+            let mut sim = build_in(source, mode);
+            drive(&mut sim, &clocks);
+            sim.run_until(133).unwrap();
+            let state = sim.save_state().unwrap();
+            let checkpoint = sim.checkpoint().unwrap();
+            sim.run_until(1000).unwrap();
+            assert_eq!(sim.save_state().unwrap(), expected, "{mode:?}");
+            sim.restore(&checkpoint).unwrap();
+            sim.run_until(1000).unwrap();
+            assert_eq!(sim.save_state().unwrap(), expected, "{mode:?} checkpoint");
+            let mut loaded = build_in(source, mode);
+            loaded.load_state(&state).unwrap();
+            loaded.run_until(1000).unwrap();
+            assert_eq!(
+                loaded.save_state().unwrap(),
+                expected,
+                "{mode:?} state file"
+            );
+        }
+    }
+
+    /// The next edge of a host clock that overflows the simulation time
+    /// fails the run as the reference's, after the clocks before it in the
+    /// slot re-armed.
+    #[test]
+    fn host_clock_overflow_fails_as_the_reference() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(input logic a, input logic b, output logic [7:0] n);
+                logic [7:0] ra = 8'd0;
+                logic [7:0] rb = 8'd0;
+                initial begin n = 8'd0; forever @(posedge b) n = n + 8'd1; end
+                always_ff @(posedge a) ra <= ra + n;
+                always_ff @(posedge b) rb <= rb + ra;
+            endmodule
+        "#;
+        let run = |mode: SchedulerMode| {
+            let mut sim = build_in(source, mode);
+            sim.add_clock("a", 4, u64::MAX - 3);
+            sim.add_clock("b", 10, u64::MAX - 3);
+            let error = sim.run_until(u64::MAX).unwrap_err();
+            (error.to_string(), sim.save_state().unwrap(), sim)
+        };
+        let (expected_error, expected, _) = run(SchedulerMode::Reference);
+        assert!(
+            expected_error.contains("overflows simulation time"),
+            "{expected_error}"
+        );
+        for mode in MODES {
+            let (error, state, sim) = run(mode);
+            assert_eq!(error, expected_error, "{mode:?}");
+            assert_eq!(state, expected, "{mode:?}");
+            assert!(sim.scheduler_stats().compiled_slots > 0, "{mode:?}");
+        }
+    }
+
+    /// Events only the host writes and no clock drives, a reset and a clock
+    /// input: runs skip the clock code, host writes of them between runs
+    /// reach their domains in the reference loop, and a `$finish` in the
+    /// middle of a slot leaves their baselines as the reference's.
+    #[test]
+    fn unclocked_host_events_agree() {
+        for finish in ["", "initial #47 $finish;"] {
+            let source = format!(
+                "`timescale 1ns/1ns
+                module Top(input logic rst_n, input logic clk2, output logic [7:0] q);
+                    logic clk = 1'b0;
+                    logic [7:0] q2 = 8'd0;
+                    always #5 clk = ~clk;
+                    {finish}
+                    always_ff @(posedge clk or negedge rst_n)
+                        if (!rst_n) q <= 8'd0; else q <= q + 8'd1;
+                    always_ff @(posedge clk2) q2 <= q2 + q;
+                endmodule"
+            );
+            host_driven_agrees(
+                &source,
+                &[
+                    (100, &[Host::Set("rst_n", 1), Host::Set("clk2", 1)]),
+                    (200, &[Host::Set("rst_n", 0), Host::Set("clk2", 0)]),
+                    (300, &[Host::Set("rst_n", 1), Host::Set("clk2", 1)]),
+                ],
+            );
+        }
+    }
+
+    /// A clock on an event a kernel drives, or added twice to one event,
+    /// stays with the reference loop and bounds the compiled runs.
+    #[test]
+    fn other_host_clocks_bound_compiled_runs() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(input logic h, output logic [7:0] n);
+                logic clk = 1'b0;
+                logic [7:0] r = 8'd0;
+                logic [7:0] r2 = 8'd0;
+                always #5 clk = ~clk;
+                initial begin n = 8'd0; forever @(posedge clk) n = n + 8'd1; end
+                always_ff @(posedge clk) r <= r + n;
+                always_ff @(posedge h) r2 <= r2 ^ n;
+            endmodule
+        "#;
+        host_driven_agrees(source, &[(300, &[Host::Clock("clk", 6, 2)])]);
+        host_driven_agrees(
+            source,
+            &[(300, &[Host::Clock("h", 20, 2), Host::Clock("h", 20, 7)])],
+        );
+    }
+
     #[test]
     fn differential_mode_reports_a_diverging_step() {
         let mut sim = build(SchedulerMode::Differential);

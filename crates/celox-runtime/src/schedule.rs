@@ -50,6 +50,7 @@ pub(crate) struct SchedulerRefs {
     pub(crate) limit: SignalRef,
     pub(crate) now: SignalRef,
     pub(crate) exit: SignalRef,
+    pub(crate) exit_arg: SignalRef,
     pub(crate) finish: SignalRef,
     pub(crate) count: SignalRef,
     pub(crate) current: SignalRef,
@@ -68,6 +69,33 @@ pub(crate) struct SchedulerRefs {
     pub(crate) ordinals: Vec<Option<u32>>,
     /// The event ids of the bits of `levels`.
     pub(crate) events: Vec<usize>,
+    /// The event id and signal of each host clock the scheduler may run,
+    /// in the order of its clock slots.
+    pub(crate) clocks: Vec<(usize, SignalRef)>,
+    pub(crate) clock_next: SignalRef,
+    pub(crate) clock_period: SignalRef,
+    pub(crate) clock_value: SignalRef,
+    pub(crate) clock_armed: SignalRef,
+}
+
+impl SchedulerRefs {
+    /// Element `bit` of the per-clock slot `slots`.
+    pub(crate) fn clock_element(slots: SignalRef, bit: usize) -> SignalRef {
+        let width = celox_design::SCHEDULER_TIME_WIDTH;
+        SignalRef {
+            offset: slots.offset + bit * width / 8,
+            width,
+            is_4state: false,
+            array_layout: None,
+        }
+    }
+
+    /// The clock slot that runs a scheduled `event` of `signal`, if any.
+    pub(crate) fn clock_of(&self, event: usize, signal: SignalRef) -> Option<usize> {
+        self.clocks
+            .iter()
+            .position(|&(id, clock)| id == event && clock == signal)
+    }
 }
 
 impl<B: SimBackend> ResolvedSchedule<B> {
@@ -251,6 +279,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                     limit: resolve(&slots.limit),
                     now: resolve(&slots.now),
                     exit: resolve(&slots.exit),
+                    exit_arg: resolve(&slots.exit_arg),
                     finish: resolve(&slots.finish),
                     count: resolve(&slots.count),
                     current: resolve(&slots.current),
@@ -299,6 +328,18 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                         .iter()
                         .map(|event| backend.resolve_event_opt(event).map(|event| event.id()))
                         .collect::<Option<_>>()?,
+                    clocks: scheduler
+                        .clocks
+                        .iter()
+                        .map(|clock| {
+                            let event = backend.resolve_event_opt(clock)?;
+                            Some((event.id(), resolve(clock)))
+                        })
+                        .collect::<Option<_>>()?,
+                    clock_next: resolve(&slots.clock_next),
+                    clock_period: resolve(&slots.clock_period),
+                    clock_value: resolve(&slots.clock_value),
+                    clock_armed: resolve(&slots.clock_armed),
                 })
             }),
             kernel_fallback: model
