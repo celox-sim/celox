@@ -1061,6 +1061,78 @@ mod tests {
         );
     }
 
+    /// A design without process kernels runs its host clocks in compiled
+    /// slots: one domain, which has no units for several domains, coinciding
+    /// domains and a domain-less edge, with host writes between runs and a
+    /// one-shot event.
+    #[test]
+    fn kernel_less_designs_run_host_clocks_compiled() {
+        let single = r#"
+            module Top(input logic clk, input logic [7:0] k, output logic [7:0] y);
+                logic [7:0] r = 8'd0;
+                always_ff @(posedge clk) r <= r + k;
+                assign y = r ^ k;
+            endmodule
+        "#;
+        host_driven_agrees(
+            single,
+            &[
+                (100, &[Host::Set("k", 3), Host::Clock("clk", 10, 5)]),
+                (200, &[Host::Set("k", 5)]),
+                (300, &[Host::Schedule("clk", 253, 1)]),
+            ],
+        );
+        let source = r#"
+            module Top(input logic a, input logic b, input logic [7:0] k, output logic [7:0] y);
+                logic [7:0] ra = 8'd0;
+                logic [7:0] rb = 8'd0;
+                logic [7:0] w;
+                always_ff @(posedge a) ra <= ra + w;
+                always_ff @(negedge b) rb <= rb ^ ra;
+                assign w = ra + rb + k;
+                assign y = w ^ {7'd0, a};
+            endmodule
+        "#;
+        host_driven_agrees(
+            source,
+            &[
+                (100, &[Host::Set("k", 3), Host::Clock("a", 10, 5)]),
+                (200, &[Host::Clock("b", 6, 1)]),
+                (300, &[Host::Set("k", 7), Host::Schedule("a", 251, 1)]),
+                (400, &[]),
+            ],
+        );
+    }
+
+    /// A design without kernels takes the `$finish` exit through a domain:
+    /// the run ends in the middle of the slot as the reference's does.
+    #[test]
+    fn kernel_less_designs_finish_in_a_domain() {
+        let source = r#"
+            module Top(input logic clk, output logic [7:0] n);
+                logic [7:0] r = 8'd0;
+                always_ff @(posedge clk) begin
+                    r <= r + 8'd1;
+                    if (r == 8'd6) $finish;
+                end
+                assign n = r;
+            endmodule
+        "#;
+        let mut reference = build_in(source, SchedulerMode::Reference);
+        reference.add_clock("clk", 10, 5);
+        reference.run_until(1000).unwrap();
+        assert!(reference.is_finished());
+        let expected = reference.save_state().unwrap();
+        for mode in MODES {
+            let mut sim = build_in(source, mode);
+            sim.add_clock("clk", 10, 5);
+            sim.run_until(1000).unwrap();
+            assert!(sim.is_finished(), "{mode:?}");
+            assert_eq!(sim.save_state().unwrap(), expected, "{mode:?}");
+            assert!(sim.scheduler_stats().compiled_slots > 0, "{mode:?}");
+        }
+    }
+
     /// A clock on an event a kernel drives, or added twice to one event,
     /// stays with the reference loop and bounds the compiled runs.
     #[test]
