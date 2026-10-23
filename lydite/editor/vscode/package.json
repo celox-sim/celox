@@ -33,6 +33,13 @@
         "configuration": "./language-configuration.json"
       }
     ],
+    "grammars": [
+      {
+        "language": "lydite",
+        "scopeName": "source.lydite",
+        "path": "./syntaxes/lydite.tmLanguage.json"
+      }
+    ],
     "commands": [
       {
         "command": "lydite.check",
@@ -75,11 +82,13 @@
     "vscode-languageclient": "10.1.2"
   },
   "devDependencies": {
-    "@vscode/test-electron": "3.1.0"
+    "@vscode/test-electron": "3.1.0",
+    "vscode-oniguruma": "2.0.1",
+    "vscode-textmate": "9.3.2"
   },
   "scripts": {
     "test": "node test/run-extension-host.js",
-    "test:unit": "node test-extension.js && node test/hover-contract.test.js",
+    "test:unit": "node test-extension.js && node test/hover-contract.test.js && node test/grammar.test.js",
     "test:rpc": "node test/rpc-integration.js"
   }
 }
