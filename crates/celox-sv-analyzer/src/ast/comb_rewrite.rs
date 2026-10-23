@@ -84,6 +84,14 @@ pub(super) fn expr_static_width(
             }
         }
         Expr::Inside { .. } => Some(1),
+        // The synthetic unknown arm has the guarded operation's width.
+        Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } if matches!(&**then_expr, Expr::Literal(text) if text == crate::DIV_ZERO_UNKNOWN_LITERAL) => {
+            expr_static_width(state, else_expr, packed_dimensions)
+        }
         Expr::Mux {
             then_expr,
             else_expr,
@@ -99,6 +107,14 @@ pub(super) fn expr_static_width(
             callee: Callee::System(function),
             ..
         } => function.result_type().map(|(width, _)| width),
+        Expr::Call {
+            callee: Callee::String(op),
+            ..
+        } => Some(op.result_type().0),
+        Expr::Call {
+            callee: Callee::Object(op),
+            ..
+        } => Some(op.result_type().0),
         Expr::Call {
             callee: Callee::Subroutine(name),
             ..

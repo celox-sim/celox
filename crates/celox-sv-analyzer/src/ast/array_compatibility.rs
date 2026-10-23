@@ -12,7 +12,7 @@ use typecheck::UnpackedArrayType;
 
 /// The type of an unpacked array of `shape`, or `None` when `shape` is not an
 /// unpacked array or its type cannot be resolved.
-fn unpacked_array_type(
+pub(super) fn unpacked_array_type(
     state: &AnalysisState,
     shape: &VariableDimensions,
     dims: &PackedDimensions,
@@ -51,6 +51,9 @@ pub(super) fn selected_unpacked_shape(
         .get(indices..)
         .filter(|rest| !rest.is_empty())?;
     Some(VariableDimensions {
+        real: false,
+        string: false,
+        class: None,
         unpacked: unpacked.to_vec(),
         ..shape.clone()
     })

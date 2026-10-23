@@ -15,8 +15,8 @@ use num_traits::Zero;
 use celox_design::{BinaryOp, BitAccess, UnaryOp};
 
 use crate::{
-    HashMap, HashSet, LogicPath, NodeId, SLTForFoldGroupState, SLTNode, SLTNodeArena,
-    SLTNodeFactsError, get_width,
+    HashMap, HashSet, LogicPath, LogicPathTarget, NodeId, SLTForFoldGroupState, SLTNode,
+    SLTNodeArena, SLTNodeFactsError, get_width,
 };
 
 /// Check if an SLT expression tree is purely constant (no Input references).
@@ -81,6 +81,14 @@ fn eval_const_expr<A: Clone + Eq + Hash + Debug>(
                 return (BigUint::from(0u32), width_mask.clone(), width); // unknown
             }
             let result = match op {
+                BinaryOp::Float { op, precision } => {
+                    BigUint::from(celox_design::eval_float_binary(
+                        *op,
+                        *precision,
+                        lv.iter_u64_digits().next().unwrap_or(0),
+                        rv.iter_u64_digits().next().unwrap_or(0),
+                    ))
+                }
                 BinaryOp::And => &lv & &rv,
                 BinaryOp::Or => &lv | &rv,
                 BinaryOp::Xor => &lv ^ &rv,
@@ -110,6 +118,28 @@ fn eval_const_expr<A: Clone + Eq + Hash + Debug>(
         }
         SLTNode::Unary(op, inner) => {
             let (v, m, inner_width) = eval_const_expr(*inner, arena);
+            if let UnaryOp::Float {
+                op: float_op,
+                precision,
+            } = op
+            {
+                if matches!(
+                    float_op,
+                    celox_design::FloatUnaryOp::FromSigned { .. }
+                        | celox_design::FloatUnaryOp::FromUnsigned { .. }
+                ) {
+                    let known = &v & (((BigUint::from(1u8) << inner_width) - 1u8) ^ &m);
+                    return (
+                        BigUint::from(celox_design::eval_float_unary(
+                            *float_op,
+                            *precision,
+                            known.iter_u64_digits().next().unwrap_or(0),
+                        )),
+                        BigUint::from(0u8),
+                        width,
+                    );
+                }
+            }
             if matches!(op, UnaryOp::ToTwoState) {
                 return (
                     v & (&width_mask ^ (&m & &width_mask)),
@@ -154,6 +184,11 @@ fn eval_const_expr<A: Clone + Eq + Hash + Debug>(
                 return (BigUint::from(0u32), width_mask.clone(), width);
             }
             let result = match op {
+                UnaryOp::Float { op, precision } => BigUint::from(celox_design::eval_float_unary(
+                    *op,
+                    *precision,
+                    v.iter_u64_digits().next().unwrap_or(0),
+                )),
                 UnaryOp::BitNot => (&width_mask) ^ &v,
                 UnaryOp::PopCount => BigUint::from(
                     v.iter_u64_digits()
@@ -283,6 +318,12 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     //    with shared nodes, so in-place mutation would corrupt unrelated paths).
     let mut rewrite_cache: HashMap<NodeId, NodeId> = HashMap::default();
     for path in paths.iter_mut() {
+        // Imperative units load their inputs directly from memory. Rewriting
+        // the output projection does not replace those loads, so their
+        // producer dependencies must survive constant inlining.
+        if matches!(path.target, LogicPathTarget::Process { .. }) {
+            continue;
+        }
         if path.sources.iter().any(|s| const_vars.contains_key(&s.id)) {
             // Legacy folds have scoped bindings and are not rewritten below.
             // Keep their source edges until their input references are actually
@@ -519,6 +560,72 @@ mod tests {
     use super::eval_const_expr;
 
     #[test]
+    fn floating_operations_fold_ieee_payloads_and_result_widths() {
+        use celox_design::{BinaryOp, FloatBinaryOp, FloatPrecision, FloatUnaryOp};
+        let mut arena = SLTNodeArena::<u32>::new();
+        let left = arena
+            .alloc(SLTNode::Constant(
+                1.5f32.to_bits().into(),
+                0u8.into(),
+                32,
+                false,
+            ))
+            .unwrap();
+        let right = arena
+            .alloc(SLTNode::Constant(
+                2.0f32.to_bits().into(),
+                0u8.into(),
+                32,
+                false,
+            ))
+            .unwrap();
+        let sum = arena
+            .alloc(SLTNode::Binary(
+                left,
+                BinaryOp::Float {
+                    op: FloatBinaryOp::Add,
+                    precision: FloatPrecision::F32,
+                },
+                right,
+            ))
+            .unwrap();
+        assert_eq!(
+            eval_const_expr(sum, &arena),
+            (BigUint::from(3.5f32.to_bits()), 0u8.into(), 32)
+        );
+        let comparison = arena
+            .alloc(SLTNode::Binary(
+                left,
+                BinaryOp::Float {
+                    op: FloatBinaryOp::Lt,
+                    precision: FloatPrecision::F32,
+                },
+                right,
+            ))
+            .unwrap();
+        assert_eq!(
+            eval_const_expr(comparison, &arena),
+            (1u8.into(), 0u8.into(), 1)
+        );
+        let integer = arena
+            .alloc(SLTNode::Unary(
+                UnaryOp::Float {
+                    op: FloatUnaryOp::ToSigned {
+                        width: 8,
+                        round: true,
+                    },
+                    precision: FloatPrecision::F32,
+                },
+                sum,
+            ))
+            .unwrap();
+        assert_eq!(
+            eval_const_expr(integer, &arena),
+            (4u8.into(), 0u8.into(), 8)
+        );
+    }
+
+    #[test]
     fn evaluates_constant_concat_payload_and_mask_at_declared_widths() {
         let mut arena = SLTNodeArena::<u32>::new();
         let high = arena
@@ -607,6 +714,7 @@ mod tests {
             })
             .unwrap();
         let make_path = |variable, expr, sources| LogicPath {
+            transparent_copy: false,
             target: LogicPathTarget::Var(VarAtomBase::new(variable, 0, 31)),
             sources,
             previous_sources: Default::default(),

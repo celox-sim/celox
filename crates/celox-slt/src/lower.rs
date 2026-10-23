@@ -10,9 +10,11 @@ mod cost;
 mod count_idioms;
 mod inputs;
 mod loops;
+mod mask_constants;
 mod mux;
 mod or_scan;
 mod slices;
+mod worklist;
 
 use constants::try_const_eval;
 pub use count_idioms::matches_slt_count_idiom;
@@ -190,6 +192,8 @@ enum SLTCountPost {
 
 #[derive(Default)]
 struct LoweringCostCache {
+    /// Outer None is unvisited; inner None is not an exact constant.
+    mask_constants: Vec<Option<Option<(BigUint, BigUint)>>>,
     tree_costs: Vec<Option<u128>>,
     contains_div_rem: Vec<Option<bool>>,
     fanout: Vec<usize>,
@@ -208,6 +212,7 @@ struct LoweringCostCache {
 
 impl LoweringCostCache {
     fn resize(&mut self, node_count: usize) {
+        self.mask_constants.resize(node_count, None);
         self.tree_costs.resize(node_count, None);
         self.contains_div_rem.resize(node_count, None);
         self.fanout.resize(node_count, 0);
@@ -232,6 +237,7 @@ impl LoweringCostCache {
         // facts for nodes written by any analysis, including nodes beyond a
         // materialization boundary, without scanning every arena-sized table.
         for node in self.touched.drain(..) {
+            self.mask_constants[node.0] = None;
             self.tree_costs[node.0] = None;
             self.contains_div_rem[node.0] = None;
             self.fanout[node.0] = 0;
@@ -465,7 +471,7 @@ impl SLTToSIRLowerer {
         }
     }
 
-    /// Recursively expand SLT nodes into SIR instructions
+    /// Expand SLT nodes into SIR instructions.
     pub fn lower<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
@@ -511,7 +517,106 @@ impl SLTToSIRLowerer {
         }
     }
 
-    fn lower_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+    fn emit_binary<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        node: NodeId,
+        lhs: &NodeId,
+        op: &BinaryOp,
+        rhs: &NodeId,
+        mut l: RegisterId,
+        mut r: RegisterId,
+        arena: &SLTNodeArena<A>,
+    ) -> RegisterId {
+        let width = self.get_width(node, arena);
+        if matches!(
+            op,
+            BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::EqCase
+                | BinaryOp::NeCase
+                | BinaryOp::LtU
+                | BinaryOp::LtS
+                | BinaryOp::LeU
+                | BinaryOp::LeS
+                | BinaryOp::GtU
+                | BinaryOp::GtS
+                | BinaryOp::GeU
+                | BinaryOp::GeS
+                | BinaryOp::EqWildcard
+                | BinaryOp::NeWildcard
+        ) {
+            let operand_width = builder
+                .register(&l)
+                .width()
+                .max(builder.register(&r).width());
+            let signed = matches!(
+                op,
+                BinaryOp::LtS | BinaryOp::LeS | BinaryOp::GtS | BinaryOp::GeS
+            ) || matches!(
+                op,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::EqCase
+                    | BinaryOp::NeCase
+                    | BinaryOp::EqWildcard
+                    | BinaryOp::NeWildcard
+            ) && self.get_bound_signed(*lhs, arena)
+                && self.get_bound_signed(*rhs, arena);
+            l = self.cast_reg_width_ext(builder, l, operand_width, signed);
+            r = self.cast_reg_width_ext(builder, r, operand_width, signed);
+        } else if matches!(
+            op,
+            BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS
+        ) {
+            let signed = matches!(op, BinaryOp::DivS | BinaryOp::RemS);
+            l = self.cast_reg_width_ext(builder, l, width, signed);
+            r = self.cast_reg_width_ext(builder, r, width, signed);
+        }
+        let dest = if matches!(op, BinaryOp::Float { .. }) {
+            builder.alloc_bit(width, false)
+        } else {
+            builder.alloc_logic(width)
+        };
+        builder.emit(SIRInstruction::Binary(dest, l, *op, r));
+        dest
+    }
+
+    fn emit_wildcard_binary<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        node: NodeId,
+        op: &BinaryOp,
+        rhs: &NodeId,
+        l: RegisterId,
+        arena: &SLTNodeArena<A>,
+    ) -> RegisterId {
+        let (value, mask, pattern_width) = wildcard_pattern(*rhs, arena).expect("guarded above");
+        let operand_width = builder.register(&l).width().max(pattern_width);
+        let l = self.cast_reg_width_ext(builder, l, operand_width, false);
+        let wildcard = builder.alloc_bit(operand_width, false);
+        builder.emit(SIRInstruction::Imm(
+            wildcard,
+            SIRValue::new_four_state(mask.clone(), BigUint::zero()),
+        ));
+        let pattern = builder.alloc_bit(operand_width, false);
+        builder.emit(SIRInstruction::Imm(
+            pattern,
+            SIRValue::new_four_state(&value | &mask, BigUint::zero()),
+        ));
+        let forced = builder.alloc_logic(operand_width);
+        builder.emit(SIRInstruction::Binary(forced, l, BinaryOp::Or, wildcard));
+        let dest = builder.alloc_logic(self.get_width(node, arena));
+        let compare = if matches!(op, BinaryOp::EqWildcard) {
+            BinaryOp::Eq
+        } else {
+            BinaryOp::Ne
+        };
+        builder.emit(SIRInstruction::Binary(dest, forced, compare, pattern));
+        dest
+    }
+
+    fn lower_leaf<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
         node: NodeId,
@@ -520,24 +625,7 @@ impl SLTToSIRLowerer {
         env: Option<&LowerEnv<'_, A>>,
         allow_cache: bool,
     ) -> RegisterId {
-        if allow_cache {
-            if let Some(reg) = cache.get(&node) {
-                return *reg;
-            }
-        }
-
-        if env.is_none()
-            && let Some(reg) = self.try_lower_count_idiom(builder, node, arena, cache, allow_cache)
-        {
-            if allow_cache {
-                let previous = cache.insert(node, reg);
-                debug_assert!(previous.is_none());
-                self.cache_insert_log.borrow_mut().push(node);
-            }
-            return reg;
-        }
-
-        let reg = match arena.get(node) {
+        match arena.get(node) {
             SLTNode::Input {
                 variable: id,
                 index,
@@ -565,126 +653,14 @@ impl SLTToSIRLowerer {
                 ));
                 reg
             }
-            SLTNode::Binary(lhs, op, rhs)
-                if !self.four_state
-                    && matches!(op, BinaryOp::EqWildcard | BinaryOp::NeWildcard)
-                    && wildcard_pattern(*rhs, arena).is_some() =>
-            {
-                // Without unknown-bit state the wildcard positions of a constant
-                // pattern are still known: force them to one on both sides and
-                // compare the rest. This matches `==?` for any left operand.
-                let (value, mask, pattern_width) =
-                    wildcard_pattern(*rhs, arena).expect("guarded above");
-                let l = self.lower_inner(builder, *lhs, arena, cache, env, allow_cache);
-                let operand_width = builder.register(&l).width().max(pattern_width);
-                let l = self.cast_reg_width_ext(builder, l, operand_width, false);
-                let wildcard = builder.alloc_bit(operand_width, false);
-                builder.emit(SIRInstruction::Imm(
-                    wildcard,
-                    SIRValue::new_four_state(mask.clone(), BigUint::zero()),
-                ));
-                let pattern = builder.alloc_bit(operand_width, false);
-                builder.emit(SIRInstruction::Imm(
-                    pattern,
-                    SIRValue::new_four_state(&value | &mask, BigUint::zero()),
-                ));
-                let forced = builder.alloc_logic(operand_width);
-                builder.emit(SIRInstruction::Binary(forced, l, BinaryOp::Or, wildcard));
-                let dest = builder.alloc_logic(self.get_width(node, arena));
-                let compare = if matches!(op, BinaryOp::EqWildcard) {
-                    BinaryOp::Eq
-                } else {
-                    BinaryOp::Ne
-                };
-                builder.emit(SIRInstruction::Binary(dest, forced, compare, pattern));
-                dest
-            }
-            SLTNode::Binary(lhs, op, rhs) => {
-                let mut l = self.lower_inner(builder, *lhs, arena, cache, env, allow_cache);
-                let mut r = self.lower_inner(builder, *rhs, arena, cache, env, allow_cache);
-                let width = self.get_width(node, arena);
-                if matches!(
-                    op,
-                    BinaryOp::Eq
-                        | BinaryOp::Ne
-                        | BinaryOp::EqCase
-                        | BinaryOp::NeCase
-                        | BinaryOp::LtU
-                        | BinaryOp::LtS
-                        | BinaryOp::LeU
-                        | BinaryOp::LeS
-                        | BinaryOp::GtU
-                        | BinaryOp::GtS
-                        | BinaryOp::GeU
-                        | BinaryOp::GeS
-                        | BinaryOp::EqWildcard
-                        | BinaryOp::NeWildcard
-                ) {
-                    let operand_width = builder
-                        .register(&l)
-                        .width()
-                        .max(builder.register(&r).width());
-                    let signed = matches!(
-                        op,
-                        BinaryOp::LtS | BinaryOp::LeS | BinaryOp::GtS | BinaryOp::GeS
-                    ) || matches!(
-                        op,
-                        BinaryOp::Eq
-                            | BinaryOp::Ne
-                            | BinaryOp::EqCase
-                            | BinaryOp::NeCase
-                            | BinaryOp::EqWildcard
-                            | BinaryOp::NeWildcard
-                    ) && self.get_bound_signed(*lhs, arena)
-                        && self.get_bound_signed(*rhs, arena);
-                    l = self.cast_reg_width_ext(builder, l, operand_width, signed);
-                    r = self.cast_reg_width_ext(builder, r, operand_width, signed);
-                } else if matches!(
-                    op,
-                    BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS
-                ) {
-                    let signed = matches!(op, BinaryOp::DivS | BinaryOp::RemS);
-                    l = self.cast_reg_width_ext(builder, l, width, signed);
-                    r = self.cast_reg_width_ext(builder, r, width, signed);
-                }
-                let dest = builder.alloc_logic(width);
-                builder.emit(SIRInstruction::Binary(dest, l, *op, r));
-                dest
-            }
-            SLTNode::Unary(op, inner) => {
-                let i = self.lower_inner(builder, *inner, arena, cache, env, allow_cache);
-                let width = self.get_width(node, arena);
-                let dest = if matches!(op, UnaryOp::ToTwoState) {
-                    builder.alloc_bit(width, self.get_bound_signed(node, arena))
-                } else {
-                    builder.alloc_logic(width)
-                };
-                builder.emit(SIRInstruction::Unary(dest, *op, i));
-                dest
-            }
-            SLTNode::Capture { expr, .. } => {
-                self.lower_inner(builder, *expr, arena, cache, env, allow_cache)
-            }
-            SLTNode::Slice { expr, access } => {
-                self.lower_slice_inner(builder, *expr, access, arena, cache, env, allow_cache)
-            }
+            SLTNode::Binary(..)
+            | SLTNode::Unary(..)
+            | SLTNode::Capture { .. }
+            | SLTNode::Mux { .. }
+            | SLTNode::Slice { .. } => unreachable!("common nodes use the lowering worklist"),
             SLTNode::Concat(parts) => {
                 self.lower_concat_inner(builder, node, parts, arena, cache, env, allow_cache)
             }
-            SLTNode::Mux {
-                cond,
-                then_expr,
-                else_expr,
-            } => self.lower_mux_inner(
-                builder,
-                *cond,
-                *then_expr,
-                *else_expr,
-                arena,
-                cache,
-                env,
-                allow_cache,
-            ),
             SLTNode::ForFold {
                 loop_var,
                 loop_width,
@@ -732,14 +708,7 @@ impl SLTToSIRLowerer {
                     allow_cache,
                 )[0]
             }
-        };
-
-        if allow_cache {
-            let previous = cache.insert(node, reg);
-            debug_assert!(previous.is_none());
-            self.cache_insert_log.borrow_mut().push(node);
         }
-        reg
     }
 
     /// Get the width recorded by frontend construction.
@@ -756,77 +725,61 @@ impl SLTToSIRLowerer {
         node: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> bool {
-        match arena.get(node) {
-            SLTNode::Input { signed, .. } => *signed,
-            SLTNode::Constant(_, _, _, signed) => *signed,
-            SLTNode::Binary(lhs, op, rhs) => match op {
-                BinaryOp::Eq
-                | BinaryOp::Ne
-                | BinaryOp::EqCase
-                | BinaryOp::NeCase
-                | BinaryOp::LtU
-                | BinaryOp::LtS
-                | BinaryOp::LeU
-                | BinaryOp::LeS
-                | BinaryOp::GtU
-                | BinaryOp::GtS
-                | BinaryOp::GeU
-                | BinaryOp::GeS
-                | BinaryOp::LogicAnd
-                | BinaryOp::LogicOr
-                | BinaryOp::EqWildcard
-                | BinaryOp::NeWildcard
-                | BinaryOp::DivU
-                | BinaryOp::RemU => false,
-                BinaryOp::DivS | BinaryOp::RemS => true,
-                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => self.get_bound_signed(*lhs, arena),
-                BinaryOp::Add
-                | BinaryOp::Sub
-                | BinaryOp::Mul
-                | BinaryOp::And
-                | BinaryOp::Or
-                | BinaryOp::Xor => {
-                    self.get_bound_signed(*lhs, arena) && self.get_bound_signed(*rhs, arena)
-                }
-            },
-            SLTNode::Unary(
-                UnaryOp::LogicNot
-                | UnaryOp::And
-                | UnaryOp::Or
-                | UnaryOp::Xor
-                | UnaryOp::PopCount
-                | UnaryOp::CountLeadingZeros
-                | UnaryOp::CountTrailingZeros,
-                _,
-            ) => false,
-            SLTNode::Unary(
-                UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
-                inner,
-            ) => self.get_bound_signed(*inner, arena),
-            SLTNode::Capture { expr, .. } => self.get_bound_signed(*expr, arena),
-            SLTNode::Mux {
-                then_expr,
-                else_expr,
-                ..
-            } => {
-                self.get_bound_signed(*then_expr, arena) && self.get_bound_signed(*else_expr, arena)
+        let mut pending = vec![node];
+        let mut seen = crate::HashSet::default();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
             }
-            SLTNode::ForFold {
-                loop_signed,
-                result,
-                ..
-            } => match result {
-                crate::SLTForFoldResult::State(_) => *loop_signed,
-                crate::SLTForFoldResult::Transient { .. } => false,
-            },
-            // The grouped result has concat layout and is therefore unsigned,
-            // independently of the loop counter's signedness.
-            SLTNode::ForFoldGroup { .. } => false,
-            // Verilog/Veryl bit- and part-select expressions are unsigned even when
-            // the source signal is signed.
-            SLTNode::Slice { .. } => false,
-            SLTNode::Concat(_) => false,
+            match arena.get(node) {
+                SLTNode::Input { signed, .. } | SLTNode::Constant(_, _, _, signed) => {
+                    if !signed {
+                        return false;
+                    }
+                }
+                SLTNode::Binary(lhs, op, rhs) => match op {
+                    BinaryOp::DivS | BinaryOp::RemS => {}
+                    BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => pending.push(*lhs),
+                    BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::And
+                    | BinaryOp::Or
+                    | BinaryOp::Xor => {
+                        pending.push(*rhs);
+                        pending.push(*lhs);
+                    }
+                    _ => return false,
+                },
+                SLTNode::Unary(
+                    UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
+                    inner,
+                ) => pending.push(*inner),
+                SLTNode::Unary(
+                    UnaryOp::Float {
+                        op: celox_design::FloatUnaryOp::ToSigned { .. },
+                        ..
+                    },
+                    _,
+                ) => {}
+                SLTNode::Capture { expr, .. } => pending.push(*expr),
+                SLTNode::Mux {
+                    then_expr,
+                    else_expr,
+                    ..
+                } => {
+                    pending.push(*else_expr);
+                    pending.push(*then_expr);
+                }
+                SLTNode::ForFold {
+                    loop_signed: true,
+                    result: crate::SLTForFoldResult::State(_),
+                    ..
+                } => {}
+                _ => return false,
+            }
         }
+        true
     }
 }
 

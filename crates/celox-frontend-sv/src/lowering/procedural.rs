@@ -18,6 +18,26 @@ pub(super) fn unsupported(construct: impl Into<String>) -> sv::AnalyzerError {
     sv::AnalyzerError::Unsupported(construct.into())
 }
 
+/// What [`ProcModule::rollback`] restores.
+pub(super) struct Checkpoint {
+    next_id: SourceVarId,
+    created: usize,
+    temp_counter: usize,
+    capture_counter: u64,
+    runtime_event_sites: usize,
+    runtime_errors: usize,
+    extern_functions: usize,
+    extern_calls: usize,
+    warnings: usize,
+}
+
+impl Checkpoint {
+    /// The number of runtime event sites at the checkpoint.
+    pub fn runtime_event_sites(&self) -> usize {
+        self.runtime_event_sites
+    }
+}
+
 /// The variables and subroutines of the module being lowered.
 pub(super) struct ProcModule<'a> {
     pub variables: &'a mut HashMap<SourceVarId, SvVariable>,
@@ -43,6 +63,9 @@ pub(super) struct ProcModule<'a> {
     pub runtime_event_sites: Vec<RuntimeEventSite>,
     /// Runtime errors (fatal assertions) of the module, by local code.
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
+    /// The continuous assignments `$event[k] = expr` of the event
+    /// expressions the module's processes wait on, by target.
+    pub event_assignments: Vec<(SourceVarId, Vec<sv::ir::Stmt>)>,
     /// The declared bounds of each unpacked dimension, by variable.
     unpacked_bounds: HashMap<SourceVarId, Vec<(i128, i128)>>,
     /// Where the warnings found while lowering go. A process lowered more
@@ -59,6 +82,88 @@ pub(super) struct MemoryWord {
 }
 
 impl<'a> ProcModule<'a> {
+    /// Whether `expr` has type `string`: a string variable, or an operation
+    /// or function that returns one.
+    pub fn expr_is_string(&self, expr: &sv::ir::Expr) -> bool {
+        match expr {
+            sv::ir::Expr::Ident(name) => self
+                .name_to_id
+                .get(name)
+                .and_then(|id| self.variables.get(id))
+                .is_some_and(|variable| variable.value_kind == celox_design::ValueKind::StrRef),
+            sv::ir::Expr::Call {
+                callee: sv::ir::Callee::String(op),
+                ..
+            } => op.returns_string(),
+            sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                ..
+            } => matches!(**op, sv::ir::ObjectOp::Load(field)
+                if field.handle == Some(sv::ir::HandleProperty::String)),
+            sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Subroutine(name),
+                ..
+            } => self.subroutines.get(name).is_some_and(|subroutine| {
+                subroutine
+                    .return_type
+                    .as_ref()
+                    .is_some_and(|ty| ty.kind() == sv::ir::TypeKind::String)
+            }),
+            sv::ir::Expr::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => self.expr_is_string(then_expr) || self.expr_is_string(else_expr),
+            _ => false,
+        }
+    }
+
+    pub fn expr_float_precision(&self, expr: &sv::ir::Expr) -> Option<celox_sir::FloatPrecision> {
+        use celox_sir::FloatPrecision as P;
+        use sv::ir::{BinaryOp, Expr};
+        let combine = |left, right| match (left, right) {
+            (Some(P::F64), _) | (_, Some(P::F64)) => Some(P::F64),
+            (Some(P::F32), _) | (_, Some(P::F32)) => Some(P::F32),
+            _ => None,
+        };
+        match expr {
+            Expr::Call {
+                callee: sv::ir::Callee::Subroutine(name),
+                ..
+            } => self
+                .subroutines
+                .get(name)?
+                .return_type
+                .as_ref()
+                .and_then(|ty| match ty.kind() {
+                    sv::ir::TypeKind::Real => Some(P::F64),
+                    sv::ir::TypeKind::Shortreal => Some(P::F32),
+                    _ => None,
+                }),
+            Expr::Binary {
+                left,
+                op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Pow,
+                right,
+            } => combine(
+                self.expr_float_precision(left),
+                self.expr_float_precision(right),
+            ),
+            Expr::Unary {
+                op: sv::ir::UnaryOp::Plus | sv::ir::UnaryOp::Minus | sv::ir::UnaryOp::ToTwoState,
+                expr,
+            } => self.expr_float_precision(expr),
+            Expr::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => combine(
+                self.expr_float_precision(then_expr),
+                self.expr_float_precision(else_expr),
+            ),
+            _ => floating::precision(expr, self.variables, self.name_to_id),
+        }
+    }
+
     pub fn new(
         module: &sv::ir::Module,
         variables: &'a mut HashMap<SourceVarId, SvVariable>,
@@ -144,6 +249,7 @@ impl<'a> ProcModule<'a> {
             capture_counter: 0,
             runtime_event_sites: Vec::new(),
             runtime_errors: HashMap::default(),
+            event_assignments: Vec::new(),
             unpacked_bounds,
             warnings,
         }
@@ -166,9 +272,14 @@ impl<'a> ProcModule<'a> {
                     }
                     continue;
                 }
+                // String operations use the simulator's heap.
+                sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => return true,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             if let Some(subroutine) = self.subroutine(&name) {
+                if !subroutine.persistent_locals.is_empty() {
+                    return true;
+                }
                 default_calls(subroutine, &args, &mut calls);
                 if visited.insert(name) {
                     for stmt in &subroutine.body {
@@ -180,8 +291,98 @@ impl<'a> ProcModule<'a> {
         false
     }
 
+    /// Task bodies do not contribute to an implicit always_comb/latch
+    /// sensitivity list. Preserve their procedural activation instead of
+    /// turning their body reads into symbolic combinational dependencies.
+    pub fn calls_task(&self, body: &[sv::ir::Stmt]) -> bool {
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+        }
+        let mut visited = HashSet::default();
+        while let Some((callee, args)) = calls.pop() {
+            let sv::ir::Callee::Subroutine(name) = callee else {
+                continue;
+            };
+            if let Some(subroutine) = self.subroutine(&name) {
+                if subroutine.is_task {
+                    return true;
+                }
+                default_calls(subroutine, &args, &mut calls);
+                if visited.insert(name) {
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Whether `always @(items) body` is `always @* body`: no item has an edge
+    /// or a select, the items name exactly the variables the implicit event
+    /// expression of `body` has (IEEE 1800-2023 9.4.2.2), and the body neither
+    /// suspends nor makes a nonblocking assignment, directly or in a call.
+    pub fn is_implicit_event_list(
+        &self,
+        items: &[sv::ir::EventItem],
+        body: &[sv::ir::Stmt],
+    ) -> bool {
+        let mut listed = HashSet::default();
+        for item in items {
+            let sv::ir::Expr::Ident(name) = &item.expr else {
+                return false;
+            };
+            let Some(id) = self.id(name).filter(|id| !self.is_hidden(*id)) else {
+                return false;
+            };
+            listed.insert(VarAtomBase::new(id, 0, self.var(id).width - 1));
+        }
+        !self.suspends_or_defers(body) && listed == self.implicit_reads(body, false)
+    }
+
+    fn suspends_or_defers(&self, body: &[sv::ir::Stmt]) -> bool {
+        let mut found = false;
+        let mut calls = Vec::new();
+        let mut visit = |stmt: &sv::ir::Stmt, calls: &mut Vec<_>| {
+            found |= matches!(
+                stmt,
+                sv::ir::Stmt::Delay { .. }
+                    | sv::ir::Stmt::WaitEvent(_)
+                    | sv::ir::Stmt::Wait(_)
+                    | sv::ir::Stmt::Assign {
+                        nonblocking: true,
+                        ..
+                    }
+                    | sv::ir::Stmt::AssignConcat {
+                        nonblocking: true,
+                        ..
+                    }
+            );
+            stmt_calls(stmt, calls);
+        };
+        for stmt in body {
+            stmt.walk(&mut |stmt| visit(stmt, &mut calls));
+        }
+        let mut visited = HashSet::default();
+        while let Some((callee, args)) = calls.pop() {
+            let sv::ir::Callee::Subroutine(name) = callee else {
+                continue;
+            };
+            if let Some(subroutine) = self.subroutine(&name) {
+                default_calls(subroutine, &args, &mut calls);
+                if visited.insert(name) {
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| visit(stmt, &mut calls));
+                    }
+                }
+            }
+        }
+        found
+    }
+
     /// Syntactic implicit sensitivity, including branches that constant folding
-    /// will remove. `always @*` sees arguments; `always_comb` also sees bodies.
+    /// will remove. `always @*` sees arguments; `always_comb` also sees function bodies.
     pub fn implicit_reads(
         &self,
         body: &[sv::ir::Stmt],
@@ -207,7 +408,10 @@ impl<'a> ProcModule<'a> {
                                 exprs.extend(param.default.clone());
                             }
                         }
-                        if include_functions && visited.insert(name.clone()) {
+                        // IEEE 1800-2023 9.2.2.2.1 includes function bodies,
+                        // but only the argument expressions of task calls.
+                        if include_functions && !subroutine.is_task && visited.insert(name.clone())
+                        {
                             statements(m, &subroutine.body, true, visited, reads);
                             statements(m, &subroutine.sensitivity_body, true, visited, reads);
                         }
@@ -232,12 +436,16 @@ impl<'a> ProcModule<'a> {
                     .and_then(|(msb, lsb)| {
                         packed_expr_select_offsets(base, msb, lsb, m.variables, m.name_to_id)
                     });
-                    if let (Expr::Ident(name), Some((msb, lsb))) = (&**base, selected)
+                    // @* adds variable identifiers (9.4.2.2), whereas
+                    // always_comb/latch uses longest static prefixes
+                    // (9.2.2.2.1), including constant selected ranges.
+                    if include_functions
+                        && let (Expr::Ident(name), Some((msb, lsb))) = (&**base, selected)
                         && let Some(id) = m.id(name).filter(|id| !m.is_hidden(*id))
                     {
                         reads.insert(VarAtomBase::new(id, lsb.min(msb), lsb.max(msb)));
                     } else {
-                        // A dynamic select's longest static prefix is its base.
+                        // Dynamic selects and wildcard controls include the base.
                         exprs.push((**base).clone());
                     }
                     exprs.extend(expr_from_const_expr(msb));
@@ -487,6 +695,48 @@ impl<'a> ProcModule<'a> {
         Ok((left, right, width))
     }
 
+    /// The lowering state, for [`Self::rollback`].
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            next_id: self.next_id,
+            created: self.created.len(),
+            temp_counter: self.temp_counter,
+            capture_counter: self.capture_counter,
+            runtime_event_sites: self.runtime_event_sites.len(),
+            runtime_errors: self.runtime_errors.len(),
+            extern_functions: self.extern_functions.len(),
+            extern_calls: self.extern_calls,
+            warnings: self.warnings.len(),
+        }
+    }
+
+    /// Forget everything lowered since `checkpoint`, so that the module
+    /// lowers as if it had never been.
+    pub fn rollback(&mut self, checkpoint: Checkpoint) {
+        for id in checkpoint.next_id.0..self.next_id.0 {
+            let Some(variable) = self.variables.remove(&SourceVarId(id)) else {
+                continue;
+            };
+            if let Some(name) = variable.path.first()
+                && self.name_to_id.get(name) == Some(&SourceVarId(id))
+            {
+                self.name_to_id.remove(name);
+            }
+        }
+        self.next_id = checkpoint.next_id;
+        self.created.truncate(checkpoint.created);
+        self.temp_counter = checkpoint.temp_counter;
+        self.capture_counter = checkpoint.capture_counter;
+        self.runtime_event_sites
+            .truncate(checkpoint.runtime_event_sites);
+        // Codes are numbered from one in registration order.
+        self.runtime_errors
+            .retain(|&code, _| code <= checkpoint.runtime_errors as i64);
+        self.extern_functions.truncate(checkpoint.extern_functions);
+        self.extern_calls = checkpoint.extern_calls;
+        self.warnings.truncate(checkpoint.warnings);
+    }
+
     /// Register a runtime event site and return its local number.
     pub fn event_site(&mut self, site: RuntimeEventSite) -> u32 {
         self.runtime_event_sites.push(site);
@@ -559,12 +809,16 @@ impl<'a> ProcModule<'a> {
         self.variables.insert(
             id,
             SvVariable {
+                float: None,
+
+                value_kind: celox_design::ValueKind::Bits,
                 path: vec![name.clone()],
                 width: width.max(1),
                 signed,
                 is_4state,
                 packed_ranges: vec![(i128::try_from(width.max(1)).unwrap_or(1) - 1, 0)],
                 array_dims: Vec::new(),
+                unpacked_ranges: Vec::new(),
                 domain_kind: DomainKind::Other,
                 kind: VariableKind::Variable,
                 type_kind: if is_4state {
@@ -625,12 +879,16 @@ impl<'a> ProcModule<'a> {
             last.push_str(suffix);
         }
         let variable = SvVariable {
+            float: None,
+
+            value_kind: celox_design::ValueKind::Bits,
             path,
             width: 1,
             signed: false,
             is_4state: source.is_4state,
             packed_ranges: vec![(0, 0)],
             array_dims: Vec::new(),
+            unpacked_ranges: Vec::new(),
             domain_kind: kind,
             kind: VariableKind::Variable,
             type_kind: source.type_kind,
@@ -643,6 +901,47 @@ impl<'a> ProcModule<'a> {
         id
     }
 
+    /// A module-scope variable of event expression `index` with the shape
+    /// of `variable`: `$event[index]` itself for `slot == None`, otherwise
+    /// its copy `$event[index].slot`. Like a process slot it is no signal of
+    /// the design, but state that persists while processes wait.
+    pub fn event_variable(
+        &mut self,
+        index: usize,
+        slot: Option<String>,
+        variable: SvVariable,
+    ) -> (SourceVarId, String) {
+        let path: Vec<_> = std::iter::once(format!("{EVENT_PREFIX}{index}]"))
+            .chain(slot)
+            .collect();
+        let name = path.join(".");
+        let id = next_var_id(&mut self.next_id);
+        self.variables.insert(
+            id,
+            SvVariable {
+                path,
+                domain_kind: DomainKind::Other,
+                kind: VariableKind::Variable,
+                source: None,
+                hidden: true,
+                force_control: None,
+                ..variable
+            },
+        );
+        self.name_to_id.insert(name.clone(), id);
+        (id, name)
+    }
+
+    /// The index of the next event expression of the module.
+    pub fn next_event_index(&self) -> usize {
+        (0..)
+            .take_while(|index| {
+                self.name_to_id
+                    .contains_key(&format!("{EVENT_PREFIX}{index}]"))
+            })
+            .count()
+    }
+
     pub fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine> {
         self.subroutines.get(name)
     }
@@ -653,6 +952,7 @@ impl<'a> ProcModule<'a> {
     pub fn is_callee(&self, callee: &sv::ir::Callee) -> bool {
         match callee {
             sv::ir::Callee::System(function) => function.reads_simulation_state(),
+            sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => true,
             sv::ir::Callee::Subroutine(name) => {
                 self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
             }
@@ -755,7 +1055,7 @@ impl<'a> ProcModule<'a> {
 
     /// `expr` with each user function call replaced by a literal of its
     /// return type.
-    fn typed_calls(&self, expr: &sv::ir::Expr) -> sv::ir::Expr {
+    pub fn typed_calls(&self, expr: &sv::ir::Expr) -> sv::ir::Expr {
         use sv::ir::Expr;
         let go = |expr: &Expr| self.typed_calls(expr);
         match expr {
@@ -915,6 +1215,7 @@ pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKin
         SystemTask::Readmem(_)
         | SystemTask::Writemem(_)
         | SystemTask::Fclose
+        | SystemTask::Fflush
         | SystemTask::Fdisplay(_)
         | SystemTask::Fwrite(_)
         | SystemTask::Printtimescale
@@ -932,10 +1233,16 @@ fn template_arguments(template: &str) -> usize {
         if ch != '%' {
             continue;
         }
-        chars.next_if_eq(&'-');
+        while chars
+            .next_if(|ch| matches!(ch, '-' | '+' | ' ' | '#' | '0'))
+            .is_some()
+        {}
         while chars.next_if(char::is_ascii_digit).is_some() {}
+        if chars.next_if_eq(&'.').is_some() {
+            while chars.next_if(char::is_ascii_digit).is_some() {}
+        }
         if let Some(spec) = chars.next()
-            && "bBoOhHxXdDiIcCsStT".contains(spec)
+            && "bBoOhHxXdDiIcCsStTeEfFgG".contains(spec)
         {
             count += 1;
         }
@@ -949,6 +1256,7 @@ fn template_arguments(template: &str) -> usize {
 /// displayed in the task's radix, directly after the previous one (IEEE
 /// 1800-2023 21.2.1.1).
 pub(super) fn system_task_template(
+    module: &ProcModule<'_>,
     kind: &SystemTaskKind,
     args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
 ) -> (Option<String>, Vec<sv::ir::SystemTaskArg<sv::ir::Expr>>) {
@@ -976,11 +1284,18 @@ pub(super) fn system_task_template(
             let mut text = template.unwrap_or_default();
             for value in &values[converted..] {
                 text.push('%');
-                text.push(if matches!(value, sv::ir::SystemTaskArg::Str(_)) {
-                    's'
+                if let sv::ir::SystemTaskArg::Expr(expr) = value
+                    && module.expr_float_precision(expr).is_some()
+                {
+                    text.push_str("#g");
                 } else {
-                    *radix
-                });
+                    let string = match value {
+                        sv::ir::SystemTaskArg::Str(_) => true,
+                        sv::ir::SystemTaskArg::Expr(expr) => module.expr_is_string(expr),
+                        sv::ir::SystemTaskArg::Empty => false,
+                    };
+                    text.push(if string { 's' } else { *radix });
+                }
             }
             template = Some(text);
         }
@@ -1027,12 +1342,16 @@ pub(super) fn register_locals(
         variables.insert(
             id,
             SvVariable {
+                float: type_info.float,
+
+                value_kind: type_info.value_kind,
                 path: vec![local.source_name.clone()],
                 width: type_info.width,
                 signed: type_info.signed,
                 is_4state: type_info.is_4state,
                 packed_ranges: type_info.packed_ranges,
                 array_dims: type_info.array_dims,
+                unpacked_ranges: type_info.unpacked_ranges,
                 domain_kind: DomainKind::Other,
                 kind: VariableKind::Variable,
                 type_kind: type_info.type_kind,
@@ -1155,6 +1474,7 @@ fn slt_const4_node<A: std::hash::Hash + Eq + Clone>(
             let (value, mask, inner_width) = child(*inner)?;
             let inner_all = mask_of(inner_width);
             match op {
+                UnaryOp::Float { .. } => return None,
                 UnaryOp::Ident => (value, mask, width),
                 UnaryOp::ToTwoState => (
                     (&value & (&inner_all ^ &mask)) & &all,

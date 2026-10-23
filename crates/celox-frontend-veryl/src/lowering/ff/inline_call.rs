@@ -406,8 +406,9 @@ impl<'a> FfParser<'a> {
             .collect();
         let element_count: usize = formal_shape.iter().product();
         if formal_shape.is_empty() || element_count == 0 || !width.is_multiple_of(element_count) {
+            let actual = crate::float::converted(actual, &self.module.variables[&formal_id].r#type);
             self.parse_expression(
-                actual,
+                &actual,
                 targets,
                 domain,
                 convert,

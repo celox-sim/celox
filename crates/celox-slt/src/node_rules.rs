@@ -91,6 +91,21 @@ pub(super) fn binary_width(
 /// full verifier.
 pub(super) fn binary_result_width(op: BinaryOp, lhs_width: usize, rhs_width: usize) -> usize {
     match op {
+        BinaryOp::Float { op, precision } => {
+            if matches!(
+                op,
+                celox_design::FloatBinaryOp::Eq
+                    | celox_design::FloatBinaryOp::Ne
+                    | celox_design::FloatBinaryOp::Lt
+                    | celox_design::FloatBinaryOp::Le
+                    | celox_design::FloatBinaryOp::Gt
+                    | celox_design::FloatBinaryOp::Ge
+            ) {
+                1
+            } else {
+                precision.width()
+            }
+        }
         BinaryOp::EqWildcard
         | BinaryOp::NeWildcard
         | BinaryOp::Eq

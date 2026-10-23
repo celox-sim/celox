@@ -44,7 +44,8 @@ pub fn component_names(
 
 pub use lowering::{
     FrontendError, prepare_external_hierarchy, prepare_external_hierarchy_with_foreign,
-    schedule_sources,
+    prepare_external_hierarchy_with_foreign_resolver_and_latch_policy, schedule_sources,
+    schedule_sources_with_latch_policy,
 };
 pub use lowering::{InterfaceSignature, interface_signatures, interface_signatures_for};
 
@@ -55,5 +56,8 @@ pub use lowering::{
 };
 
 pub use lowering::{
-    schedule_sources_with_force_signals, schedule_sources_with_parameter_expressions,
+    prepare_external_hierarchy_with_foreign_resolver_with_options_and_latch_policy,
+    schedule_sources_with_force_signals, schedule_sources_with_force_signals_and_latch_policy,
+    schedule_sources_with_parameter_expressions,
+    schedule_sources_with_parameter_expressions_and_latch_policy,
 };

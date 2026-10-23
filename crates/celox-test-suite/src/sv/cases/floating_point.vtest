@@ -1,0 +1,265 @@
+(group floating_point (category operators))
+
+(case real_arithmetic_and_rounding
+  (source "float.sv" #"
+module Top(input logic signed [31:0] a, b,
+           output logic signed [31:0] sum, difference, product, quotient, negative,
+           output logic lt, eq);
+    real x, y;
+    assign x = a;
+    assign y = b;
+    assign sum = x + y;
+    assign difference = x - y;
+    assign product = x * y;
+    assign quotient = x / y;
+    assign negative = -x;
+    assign lt = x < y;
+    assign eq = x == y;
+endmodule
+"#)
+  (top Top)
+  (modify (set a 7) (set b 2))
+  (assert_eq sum 9) (assert_eq difference 5) (assert_eq product 14)
+  (assert_eq quotient 4) (assert_eq negative 0xfffffff9)
+  (assert_eq lt 0) (assert_eq eq 0)
+  (modify (set a 0xfffffff9) (set b 2))
+  (assert_eq sum 0xfffffffb) (assert_eq difference 0xfffffff7)
+  (assert_eq product 0xfffffff2) (assert_eq quotient 0xfffffffc)
+  (assert_eq negative 7) (assert_eq lt 1)
+  (modify (set a 2) (set b 2)) (assert_eq eq 1))
+
+(case real_bits_and_comparisons
+  (source "float.sv" #"
+module Top(input logic [63:0] a, b, output logic [63:0] sum, negated,
+           output logic eq, ne, lt, le, gt, ge);
+    real x, y;
+    assign x = $bitstoreal(a);
+    assign y = $bitstoreal(b);
+    assign sum = $realtobits(x + y);
+    assign negated = $realtobits(-x);
+    assign eq = x == y;
+    assign ne = x != y;
+    assign lt = x < y;
+    assign le = x <= y;
+    assign gt = x > y;
+    assign ge = x >= y;
+endmodule
+"#)
+  (top Top)
+  ; 1.5 + 2.25 = 3.75
+  (modify (set a 0x3ff8000000000000) (set b 0x4002000000000000))
+  (assert_eq sum 0x400e000000000000) (assert_eq negated 0xbff8000000000000)
+  (assert_eq eq 0) (assert_eq ne 1) (assert_eq lt 1) (assert_eq le 1)
+  (assert_eq gt 0) (assert_eq ge 0)
+  ; Both signs of zero compare equal.
+  (modify (set a 0x8000000000000000) (set b 0))
+  (assert_eq negated 0) (assert_eq eq 1) (assert_eq ne 0)
+  (assert_eq lt 0) (assert_eq le 1) (assert_eq gt 0) (assert_eq ge 1)
+  ; Unordered comparisons with a quiet NaN.
+  (modify (set a 0x7ff8000000000001) (set b 0x3ff0000000000000))
+  (assert_eq eq 0) (assert_eq ne 1) (assert_eq lt 0)
+  (assert_eq le 0) (assert_eq gt 0) (assert_eq ge 0))
+
+(case shortreal_storage_precision
+  (source "float.sv" #"
+module Top(input logic [31:0] a, output logic [31:0] narrow, wide);
+    shortreal x;
+    real y;
+    assign x = a;
+    assign y = a;
+    shortreal rounded;
+    assign rounded = x + 1.0;
+    assign narrow = rounded;
+    assign wide = y + 1.0;
+endmodule
+"#)
+  (top Top)
+  (modify (set a 16777216))
+  (assert_eq narrow 16777216) (assert_eq wide 16777217)
+  (modify (set a 7)) (assert_eq narrow 8) (assert_eq wide 8))
+
+(case sequential_real
+  (source "float.sv" #"
+module Top(input logic clk, input logic signed [31:0] a,
+           output logic signed [31:0] result, output logic less);
+    realtime q;
+    always @(posedge clk) begin
+        q <= real'(a) / 2.0;
+        less <= real'(a) < 0.5;
+    end
+    assign result = q;
+endmodule
+"#)
+  (top Top)
+  (modify (set a 3)) (tick clk)
+  (assert_eq result 2) (assert_eq less 0)
+  (modify (set a 0xfffffffd)) (tick clk)
+  (assert_eq result 0xfffffffe) (assert_eq less 1))
+
+(case real_truth_and_unknown_integer_conversion
+  (source "float.sv" #"
+module Top(input logic [63:0] bits, output logic truth, logical_not, logical_and,
+           output logic signed [31:0] converted);
+    real x, from_unknown;
+    assign x = $bitstoreal(bits);
+    assign from_unknown = 4'b1xz1;
+    assign converted = from_unknown;
+    assign logical_not = !x;
+    assign logical_and = x && 1;
+    always_comb begin
+        if (x) truth = 1; else truth = 0;
+    end
+endmodule
+"#)
+  (top Top)
+  (modify (set bits 0x8000000000000000))
+  (assert_eq truth 0) (assert_eq logical_not 1) (assert_eq logical_and 0)
+  (assert_eq converted 9)
+  (modify (set bits 0x3ff0000000000000))
+  (assert_eq truth 1) (assert_eq logical_not 0) (assert_eq logical_and 1))
+
+(case real_parameter_and_default_storage
+  (source "float.sv" #"
+module Top(output logic [63:0] parameter_bits, default_bits);
+    localparam real A = 1.5;
+    localparam real B = A * 2.0;
+    real initial_zero;
+    assign parameter_bits = $realtobits(B);
+    assign default_bits = $realtobits(initial_zero);
+endmodule
+"#)
+  (top Top)
+  (assert_eq parameter_bits 0x4008000000000000)
+  (assert_eq default_bits 0))
+
+(case real_narrow_integer_conversion
+  (source "float.sv" #"
+module Top(input logic [63:0] bits, output logic [2:0] tiny,
+           output logic [7:0] byte_value, output logic [31:0] unsigned_value);
+    real x;
+    assign x = $bitstoreal(bits);
+    assign tiny = x;
+    assign byte_value = x;
+    assign unsigned_value = x;
+endmodule
+"#)
+  (top Top)
+  ; -1.5 rounds away from zero to -2, then destination width keeps low bits.
+  (modify (set bits 0xbff8000000000000))
+  (assert_eq tiny 6) (assert_eq byte_value 254) (assert_eq unsigned_value 0xfffffffe)
+  ; Positive values also round before their low bits are selected.
+  (modify (set bits 0x407015999999999a))
+  (assert_eq tiny 1) (assert_eq byte_value 1) (assert_eq unsigned_value 257))
+
+(case real_ports_and_subroutines
+  (source "float.sv" #"
+module Child(input real a, output real b);
+    function automatic real half(input real value);
+        return value / 2.0;
+    endfunction
+    assign b = half(a);
+endmodule
+module Top(input logic signed [31:0] a, output logic signed [31:0] result,
+           output logic signed [31:0] task_result);
+    Child child(.a(a), .b(result));
+    real task_value;
+    task automatic calculate(input real x, output real y);
+        y = x / 2.0;
+    endtask
+    always_comb calculate(a, task_value);
+    assign task_result = task_value;
+endmodule
+"#)
+  (top Top)
+  (modify (set a 7)) (assert_eq result 4) (assert_eq task_result 4)
+  (modify (set a 0xfffffff9)) (assert_eq result 0xfffffffc) (assert_eq task_result 0xfffffffc))
+
+(case real_conversion_functions
+  (source "float.sv" #"
+module Top(input logic [63:0] bits, input logic [31:0] integer_bits, short_bits,
+           output logic signed [31:0] truncated, rounded,
+           output logic [63:0] integer_real_bits,
+           output logic [31:0] short_roundtrip);
+    real x;
+    shortreal sx;
+    assign x = $bitstoreal(bits);
+    assign sx = $bitstoshortreal(short_bits);
+    assign truncated = $rtoi(x);
+    assign rounded = int'(x);
+    assign integer_real_bits = $realtobits($itor(integer_bits));
+    assign short_roundtrip = $shortrealtobits(sx);
+endmodule
+"#)
+  (top Top)
+  (modify (set bits 0x3ff8000000000000) (set integer_bits 0xffffffff) (set short_bits 0x3fc00000))
+  (assert_eq truncated 1) (assert_eq rounded 2)
+  (assert_eq integer_real_bits 0xbff0000000000000) (assert_eq short_roundtrip 0x3fc00000)
+  (modify (set bits 0xbff8000000000000) (set integer_bits 0x80000000) (set short_bits 0x80000000))
+  (assert_eq truncated 0xffffffff) (assert_eq rounded 0xfffffffe)
+  (assert_eq integer_real_bits 0xc1e0000000000000) (assert_eq short_roundtrip 0x80000000))
+
+(case real_zero_divisor
+  (source "float.sv" #"
+module Top(input logic [63:0] a, b, output logic [63:0] quotient_bits,
+           output logic unordered);
+    real x, y, quotient;
+    assign x = $bitstoreal(a);
+    assign y = $bitstoreal(b);
+    assign quotient = x / y;
+    assign quotient_bits = $realtobits(quotient);
+    assign unordered = quotient != quotient;
+endmodule
+"#)
+  (top Top)
+  (modify (set a 0x3ff0000000000000) (set b 0))
+  (assert_eq quotient_bits 0x7ff0000000000000) (assert_eq unordered 0)
+  (modify (set a 0xbff0000000000000))
+  (assert_eq quotient_bits 0xfff0000000000000) (assert_eq unordered 0)
+  (modify (set a 0)) (assert_eq unordered 1))
+
+(case real_display_formats
+  (source "float_display.sv" #"
+module Top(input logic clk, input logic [63:0] bits);
+    real x;
+    shortreal sx;
+    function automatic real twice(input real a); return a * 2.0; endfunction
+    assign x = $bitstoreal(bits);
+    assign sx = shortreal'(x);
+    always @(posedge clk) begin
+        $display("f=[%8.2f] e=[%.3e] g=[%.3g] short=[%.1f] expr=[%.1f] signed=[%.1f] unsigned=[%.1f]", x, x, x, sx, twice(x), -32'sd2, 32'hffffffff);
+        $write("flags=[%+.1f][%010.2f] ", x, x);
+        $display(x);
+    end
+endmodule
+"#)
+  (top Top)
+  (modify (set bits 0x3ff8000000000000))
+  (tick clk)
+  (expect_output "f=[    1.50] e=[1.500e+00] g=[1.5] short=[1.5] expr=[3.0] signed=[-2.0] unsigned=[4294967295.0]\nflags=[+1.5][0000001.50] 1.50000\n"))
+
+(case real_display_negative_zero
+  (source "float_display.sv" #"
+module Top(input logic clk, input logic [63:0] bits);
+    realtime x;
+    assign x = $bitstoreal(bits);
+    always @(posedge clk) $display("zero=[%.2f] scientific=[%.1E]", x, x);
+endmodule
+"#)
+  (top Top)
+  (modify (set bits 0x8000000000000000)) (tick clk)
+  (expect_output "zero=[-0.00] scientific=[-0.0E+00]\n"))
+
+(case real_file_display_formats
+  (source "float_file_display.sv" #"
+module Top(output bit done);
+    real x;
+    initial begin
+        x = 1.5;
+        $fdisplay(1, "file=[%8.2f] expr=[%.1f]", x, x * 2.0);
+        $fwrite(32'h80000001, "write=[%.1e]\n", x);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "file=[    1.50] expr=[3.0]\nwrite=[1.5e+00]\n"))

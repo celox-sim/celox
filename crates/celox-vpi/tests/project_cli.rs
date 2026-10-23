@@ -491,6 +491,13 @@ fn top_parameters_merge_common_target_and_cli_without_editing_sv() {
     );
     success(&output);
     assert_eq!(output.stdout, b"v=9 w=16\n");
+    assert_eq!(
+        fs::read_to_string(root.path().join("top.sv")).unwrap(),
+        source
+    );
+    // A VPI image runs no process.
+    let untimed = "module Top #(parameter W=8, parameter V=1, parameter NEXT=V+1) (output logic [W-1:0] y); assign y=NEXT; endmodule";
+    fs::write(root.path().join("top.sv"), untimed).unwrap();
     success(&invoke(
         root.path(),
         &[
@@ -516,8 +523,9 @@ fn top_parameters_merge_common_target_and_cli_without_editing_sv() {
     assert_eq!(celox::SimBackend::get_as::<u16>(sim.backend(), signal), 0);
     assert_eq!(
         fs::read_to_string(root.path().join("top.sv")).unwrap(),
-        source
+        untimed
     );
+    fs::write(root.path().join("top.sv"), source).unwrap();
     let output = invoke(root.path(), &["run", "--target", "wide", "-GMISSING=1"]);
     assert!(!output.status.success());
     assert!(
@@ -583,18 +591,319 @@ fn top_parameters_reach_veryl_run_and_native_build() {
 fn invalid_parameter_assignments_are_rejected() {
     let root = tempfile::tempdir().unwrap();
     for value in [
-        "V",
-        "=1",
-        "x.y=1",
-        "V=",
-        "V=-1",
-        "V=1+2",
-        "V=18446744073709551616",
-        "V=0x",
-        "V=0b2",
-        "V=_1",
+        "V", "=1", "x.y=1", "V=", "V=--1", "V=1+2", "V=8'hG", "V=0x", "V=0b2", "V=_1",
     ] {
         let output = invoke(root.path(), &["run", "dut.sv", "--top", "Top", "-G", value]);
         rejected(&output, "parameter");
     }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn sv_parameter_literals_preserve_types_across_project_target_and_cli() {
+    let root = tempfile::tempdir().unwrap();
+    let source = r#"
+        module Top #(parameter VENDOR="GENERIC", parameter NEG=3,
+            parameter logic [64:0] WIDE=0, parameter logic [57:0] FILL=0,
+            parameter logic [3:0] UNKNOWN=0)(output logic matched);
+            assign matched=(VENDOR == "XILINX") && (NEG == -8) && (NEG < 0)
+                && ($bits(NEG) == 32) && ($bits(VENDOR) == 48)
+                && (WIDE == 65'h10000000000000001) && (FILL == 58'h3ffffffffffffff)
+                && (UNKNOWN === 4'b10xz);
+            initial begin #1; assert(matched) else $fatal(1,"literal parameter types");
+                $display("ok"); $finish; end
+        endmodule
+    "#;
+    fs::write(root.path().join("top.sv"), source).unwrap();
+    fs::write(
+        root.path().join("celox.toml"),
+        r#"
+        sources=["top.sv"]
+        top="Top"
+        [parameters]
+        VENDOR="GENERIC"
+        NEG=3
+        FILL=0
+        [targets.literals.parameters]
+        VENDOR="XILINX"
+        NEG=-8
+        WIDE="65'h10000000000000001"
+        FILL="'1"
+        UNKNOWN="4'b10xz"
+    "#,
+    )
+    .unwrap();
+    let output = invoke(root.path(), &["run", "--target", "literals"]);
+    success(&output);
+    assert_eq!(output.stdout, b"ok\n");
+    let args = [
+        "--target",
+        "literals",
+        "-GVENDOR=0",
+        "-GVENDOR=\"XILINX\"",
+        "-GNEG=8",
+        "-GNEG=-8",
+        "-GFILL=0",
+        "-GFILL='1",
+    ];
+    let output = invoke(root.path(), &[&["run"][..], &args].concat());
+    success(&output);
+    assert_eq!(output.stdout, b"ok\n");
+    assert_eq!(
+        fs::read_to_string(root.path().join("top.sv")).unwrap(),
+        source
+    );
+    // A VPI image runs no process.
+    let (design, _) = source.split_once("initial").unwrap();
+    let source = format!("{design}endmodule\n");
+    fs::write(root.path().join("top.sv"), &source).unwrap();
+    success(&invoke(
+        root.path(),
+        &[&["vpi", "build"][..], &args, &["-o", "sim"]].concat(),
+    ));
+    let bytes = fs::read(root.path().join("sim")).unwrap();
+    let image = celox::NativeProgramImage::discover_appended(&bytes)
+        .unwrap()
+        .unwrap()
+        .image;
+    // Safety: the CLI compiled this test's source into the image above.
+    let instance = unsafe { celox::NativeProgramInstance::from_image(image) }.unwrap();
+    let matched = instance.signal_ref("Top.matched").unwrap();
+    assert_eq!(
+        celox::SimBackend::get_as::<u8>(instance.backend(), matched),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("top.sv")).unwrap(),
+        source
+    );
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn state_mode_merges_project_target_and_cli_for_run_and_native_build() {
+    let root = tempfile::tempdir().unwrap();
+    let timed = r#"
+        module Top(output logic[3:0] y);
+            logic[3:0] uninitialized;
+            assign y=uninitialized;
+            initial begin #1; $display("value=%b",y); $finish; end
+        endmodule
+    "#;
+    // A VPI image runs no process.
+    let untimed = r#"
+        module Top(output logic[3:0] y);
+            logic[3:0] uninitialized;
+            assign y=uninitialized;
+        endmodule
+    "#;
+    fs::write(
+        root.path().join("celox.toml"),
+        "sources=['top.sv']\ntop='Top'\nfour_state=true\n[targets.two]\nfour_state=false\n",
+    )
+    .unwrap();
+    for (args, expected, is_four) in [
+        (vec![], "value=xxxx\n", true),
+        (vec!["--two-state"], "value=0000\n", false),
+        (vec!["--target", "two"], "value=0000\n", false),
+        (
+            vec!["--target", "two", "--four-state"],
+            "value=xxxx\n",
+            true,
+        ),
+    ] {
+        fs::write(root.path().join("top.sv"), timed).unwrap();
+        let run = invoke(root.path(), &[&["run"][..], &args].concat());
+        success(&run);
+        assert_eq!(String::from_utf8(run.stdout).unwrap(), expected);
+        fs::write(root.path().join("top.sv"), untimed).unwrap();
+        success(&invoke(
+            root.path(),
+            &[&["vpi", "build"][..], &args, &["-o", "sim"]].concat(),
+        ));
+        let bytes = fs::read(root.path().join("sim")).unwrap();
+        let image = celox::NativeProgramImage::discover_appended(&bytes)
+            .unwrap()
+            .unwrap()
+            .image;
+        // Safety: the CLI compiled this test's source into this image.
+        let instance = unsafe { celox::NativeProgramInstance::from_image(image) }.unwrap();
+        assert_eq!(instance.four_state(), is_four);
+        let (value, mask) = celox::SimBackend::get_four_state(
+            instance.backend(),
+            instance.signal_ref("Top.y").unwrap(),
+        );
+        assert_eq!(
+            mask.to_u64_digits(),
+            if is_four { vec![15] } else { vec![] }
+        );
+        if !is_four {
+            assert_eq!(value.to_u64_digits(), Vec::<u64>::new());
+        }
+    }
+}
+
+#[test]
+fn sv_literal_parameters_are_rejected_for_veryl_in_both_commands() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("top.veryl"),
+        "module Top #(param W:u32=8) (y:output logic<W>) { assign y=0; }",
+    )
+    .unwrap();
+    for prefix in [&["run"][..], &["vpi", "build"][..]] {
+        let output = invoke(
+            root.path(),
+            &[prefix, &["top.veryl", "--top", "Top", "-GW=-8"]].concat(),
+        );
+        rejected(&output, "SV parameter literals require");
+    }
+}
+
+#[test]
+fn veryl_native_images_preserve_the_selected_state_mode() {
+    for with_metadata in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("top.veryl"),
+            "module Top (y:output logic<4>) { assign y=3; }",
+        )
+        .unwrap();
+        if with_metadata {
+            fs::write(
+                root.path().join("Veryl.toml"),
+                "[project]\nname='state_mode'\nversion='0.1.0'\n",
+            )
+            .unwrap();
+        }
+        for (flag, four_state) in [("--two-state", false), ("--four-state", true)] {
+            let output = invoke(
+                root.path(),
+                &[
+                    "vpi",
+                    "build",
+                    "top.veryl",
+                    "--top",
+                    "Top",
+                    flag,
+                    "-o",
+                    "sim",
+                ],
+            );
+            success(&output);
+            let bytes = fs::read(root.path().join("sim")).unwrap();
+            let image = celox::NativeProgramImage::discover_appended(&bytes)
+                .unwrap()
+                .unwrap()
+                .image;
+            // Safety: the CLI compiled this test's source into this image.
+            let instance = unsafe { celox::NativeProgramInstance::from_image(image) }.unwrap();
+            assert_eq!(instance.four_state(), four_state);
+        }
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn sv_cli_defaults_to_two_state_for_run_and_native_images() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("top.sv"),
+        r#"module Top(output logic[3:0] y);
+      logic[3:0] uninitialized;
+      assign y=uninitialized;
+      initial begin #1; $display("value=%b", y); $finish; end
+    endmodule"#,
+    )
+    .unwrap();
+    let run = invoke(root.path(), &["run", "top.sv", "--top", "Top"]);
+    success(&run);
+    assert_eq!(run.stdout, b"value=0000\n");
+    // A VPI image runs no process.
+    fs::write(
+        root.path().join("top.sv"),
+        "module Top(output logic[3:0] y); logic[3:0] uninitialized; assign y=uninitialized; endmodule",
+    )
+    .unwrap();
+    success(&invoke(
+        root.path(),
+        &["vpi", "build", "top.sv", "--top", "Top", "-o", "sim"],
+    ));
+    let bytes = fs::read(root.path().join("sim")).unwrap();
+    let image = celox::NativeProgramImage::discover_appended(&bytes)
+        .unwrap()
+        .unwrap()
+        .image;
+    // Safety: this test compiled the source into the image above.
+    let instance = unsafe { celox::NativeProgramInstance::from_image(image) }.unwrap();
+    assert!(!instance.four_state());
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn timescale_reaches_run_and_native_images_with_target_and_cli_precedence() {
+    let root = tempfile::tempdir().unwrap();
+    let timed = r#"
+`timescale 1ns/1ps
+module Top(input bit clk, output bit q);
+    always_ff @(posedge clk) q <= !q;
+    initial begin
+        $display("SCALE %0d %0d", $timeprecision(), $timeprecision($root));
+        #1ns $finish;
+    end
+endmodule
+"#;
+    // A VPI image runs no process.
+    let untimed = r#"
+`timescale 1ns/1ps
+module Top(input bit clk, output bit q);
+    always_ff @(posedge clk) q <= !q;
+endmodule
+"#;
+    fs::write(
+        root.path().join("celox.toml"),
+        r#"
+sources = ["top.sv"]
+top = "Top"
+timescale = "1ns/10fs"
+[targets.fine]
+timescale = "1ns/1fs"
+"#,
+    )
+    .unwrap();
+    for (options, precision) in [
+        (vec![], -14),
+        (vec!["--target", "fine"], -15),
+        (vec!["--target", "fine", "--timescale", "10ns/100fs"], -13),
+        (vec!["--timescale", "1ns/10ps"], -12),
+    ] {
+        fs::write(root.path().join("top.sv"), timed).unwrap();
+        let output = invoke(root.path(), &[vec!["run"], options.clone()].concat());
+        success(&output);
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(&format!("SCALE -12 {precision}")),
+            "{output:?}"
+        );
+        fs::write(root.path().join("top.sv"), untimed).unwrap();
+        success(&invoke(
+            root.path(),
+            &[vec!["vpi", "build", "-o", "sim"], options].concat(),
+        ));
+        let bytes = fs::read(root.path().join("sim")).unwrap();
+        // Safety: the test compiled this trusted runtime itself.
+        let instance =
+            unsafe { celox::NativeProgramInstance::from_attached_bytes(&bytes) }.unwrap();
+        assert_eq!(instance.time_precision().exponent(), precision);
+    }
+    fs::write(root.path().join("top.sv"), timed).unwrap();
+    rejected(
+        &invoke(root.path(), &["run", "--timescale", "1ps/1ns"]),
+        "invalid timescale",
+    );
+    fs::write(
+        root.path().join("celox.toml"),
+        "sources=['top.sv']\ntop='Top'\ntimescale='1ns/2fs'",
+    )
+    .unwrap();
+    rejected(&invoke(root.path(), &["run"]), "invalid timescale");
 }

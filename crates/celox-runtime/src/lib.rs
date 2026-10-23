@@ -2,6 +2,7 @@
 
 pub mod backend;
 mod derived_tick;
+pub mod distribution;
 mod edge;
 mod error;
 mod event_buffer;
@@ -9,6 +10,7 @@ pub mod file_io;
 pub mod parallel;
 pub mod plusargs;
 mod reflection;
+pub mod scan;
 mod schedule;
 pub mod scheduler;
 mod simulation;
@@ -33,8 +35,9 @@ pub use reflection::{
 };
 pub use schedule::{ResolvedSchedule, host_watch};
 pub use simulation::{
-    EventInfo, HostBoundary, ScheduleParts, SimulationExecutor, SimulationSnapshot,
-    SimulationState, UnitExecutor,
+    EventInfo, HostBoundary, KernelSchedule, ScheduleKey, ScheduleParts, SchedulerMode,
+    SchedulerStats, SimulationExecutor, SimulationSnapshot, SimulationState, StepObserver,
+    UnitExecutor,
 };
 pub use state_file::{
     BaselineRecord, NbaRecord, ProcessRecord, ScheduleRecord, ScheduledEvent, StateDifference,

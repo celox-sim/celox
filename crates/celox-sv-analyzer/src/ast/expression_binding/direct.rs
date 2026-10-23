@@ -135,6 +135,19 @@ pub(in crate::ast) fn cast_target_native(
     dimensions: &PackedDimensions,
 ) -> Converted<casts::RuntimeCastTarget> {
     let target = ungroup(target, native);
+    if let ExprKind::Type(id) = native.expression(target).kind
+        && matches!(&native.data_type(id).kind, celox_sv_syntax::DataTypeKind::Builtin(name) if name == "string")
+    {
+        return Ok(casts::RuntimeCastTarget::String);
+    }
+    if let ExprKind::Type(id) = native.expression(target).kind
+        && let Some(ty) = type_binding::binding::bind_in(id, native, tree, dimensions)?
+        && matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal)
+    {
+        return Ok(casts::RuntimeCastTarget::Real {
+            short: ty.kind() == TypeKind::Shortreal,
+        });
+    }
     if let ExprKind::Name(name) = &native.expression(target).kind
         && matches!(name.spelling.as_str(), "signed" | "unsigned")
     {
@@ -217,6 +230,17 @@ enum Finish {
     Cast(casts::RuntimeCastTarget),
     Repeat,
     Inside(Vec<bool>),
+    /// A string operation on the bound children, see [`strings`].
+    StringCall(StringOp),
+    /// A read of property `property` of the object handle child.
+    ObjectLoad(crate::ast::classes::Property),
+    /// A call of method subroutine `name` with `formals` formals; the first
+    /// child is the object handle when `receiver` is one.
+    MethodCall {
+        name: String,
+        formals: usize,
+        receiver: objects::Receiver,
+    },
 }
 
 enum Job {
@@ -251,7 +275,7 @@ pub(in crate::ast) fn bind_value(
                 }
                 let time_call = match &native.expression(id).kind {
                     ExprKind::Name(name)
-                        if matches!(name.spelling.as_str(), "$time" | "$stime") =>
+                        if matches!(name.spelling.as_str(), "$time" | "$stime" | "$realtime") =>
                     {
                         Some((name.spelling.clone(), &[][..]))
                     }
@@ -259,7 +283,7 @@ pub(in crate::ast) fn bind_value(
                         expression,
                         arguments,
                     } => call_name(&tree.state, *expression, native)
-                        .filter(|name| matches!(name.as_str(), "$time" | "$stime"))
+                        .filter(|name| matches!(name.as_str(), "$time" | "$stime" | "$realtime"))
                         .map(|name| (name, arguments.as_slice())),
                     _ => None,
                 };
@@ -295,11 +319,19 @@ pub(in crate::ast) fn bind_value(
                         jobs.push(Job::Enter(*inner, target, scope.clone()));
                         continue;
                     }
+                    ExprKind::Literal(text) if text == "null" => {
+                        // A handle of no object (IEEE 1800-2023 8.4).
+                        values.push(Expr::Literal("32'h0".into()));
+                        continue;
+                    }
                     ExprKind::Literal(text) => {
                         if let Some(packed) = packed_string_literal(text) {
                             values.push(Expr::Literal(packed));
                         } else {
-                            if typecheck::integral_literal_type_metadata(text).is_none() {
+                            if typecheck::integral_literal_type_metadata(text).is_none()
+                                && !(text.contains(['.', 'e', 'E'])
+                                    && text.replace('_', "").parse::<f64>().is_ok())
+                            {
                                 return Err(unsupported("primary literal"));
                             }
                             values.push(Expr::Literal(text.clone()));
@@ -308,8 +340,19 @@ pub(in crate::ast) fn bind_value(
                     }
                     ExprKind::Name(name) if !name.spelling.starts_with('$') => {
                         let name = instances::normalize_identifier(&name.spelling);
-                        if matches!(name.as_str(), "null" | "this" | "super") {
+                        if name == "null" {
+                            values.push(Expr::Literal("32'h0".into()));
+                            continue;
+                        }
+                        if matches!(name.as_str(), "this" | "super")
+                            && dimensions.get(&name).is_none()
+                        {
                             return Err(unsupported(format!("`{name}`")));
+                        }
+                        if let Some(value) = objects::unqualified_property(tree, dimensions, &name)?
+                        {
+                            values.push(value);
+                            continue;
                         }
                         values.push(expressions::identifier_expression(
                             &tree.state,
@@ -366,7 +409,122 @@ pub(in crate::ast) fn bind_value(
                     ExprKind::Call {
                         expression,
                         arguments: args,
+                    } if objects::method(tree, *expression, native, dimensions)?.is_some() => {
+                        let (name, formals, receiver) =
+                            objects::method(tree, *expression, native, dimensions)?
+                                .expect("checked by the guard");
+                        if args.len() > formals || args.iter().any(|arg| arg.name.is_some()) {
+                            return Err(unsupported(format!("arguments of method `{name}`")));
+                        }
+                        let mut children = Vec::new();
+                        if let objects::Receiver::Handle(handle) = receiver {
+                            children.push((handle, None));
+                        }
+                        for arg in args {
+                            let Some(value) = arg.value else {
+                                return Err(unsupported(format!(
+                                    "omitted argument of method `{name}`"
+                                )));
+                            };
+                            children.push((value, None));
+                        }
+                        (
+                            Finish::MethodCall {
+                                name,
+                                formals,
+                                receiver,
+                            },
+                            children,
+                        )
+                    }
+                    ExprKind::Call {
+                        expression,
+                        arguments: args,
+                    } if strings::method(tree, *expression, native, dimensions).is_some() => {
+                        let (op, base) = strings::method(tree, *expression, native, dimensions)
+                            .expect("checked by the guard");
+                        if op.updates_receiver() {
+                            return Err(unsupported(format!(
+                                "string method `{op}` used as a value"
+                            )));
+                        }
+                        let (_, count) = StringOp::method(&op.to_string()).expect("a method name");
+                        let values = args
+                            .iter()
+                            .map(|arg| arg.value.filter(|_| arg.name.is_none()))
+                            .collect::<Option<Vec<_>>>()
+                            .filter(|values| values.len() == count)
+                            .ok_or_else(|| {
+                                unsupported(format!("arguments of string method `{op}`"))
+                            })?;
+                        (
+                            Finish::StringCall(op),
+                            std::iter::once(base)
+                                .chain(values)
+                                .map(|id| (id, None))
+                                .collect(),
+                        )
+                    }
+                    ExprKind::Call {
+                        expression,
+                        arguments: args,
                     } => {
+                        if matches!(
+                            call_name(&tree.state, *expression, native).as_deref(),
+                            Some("randomize" | "std::randomize")
+                        ) {
+                            if args
+                                .iter()
+                                .any(|arg| arg.name.is_some() || arg.value.is_none())
+                            {
+                                return Err(unsupported(
+                                    "scope randomize requires positional variable identifiers",
+                                ));
+                            }
+                            let actuals =
+                                args.iter().filter_map(|arg| arg.value).collect::<Vec<_>>();
+                            for &actual in &actuals {
+                                let ExprKind::Name(name) = &native.expression(actual).kind else {
+                                    return Err(unsupported(
+                                        "scope randomize requires whole packed variable identifiers",
+                                    ));
+                                };
+                                let name = instances::normalize_identifier(&name.spelling);
+                                let shape = dimensions
+                                    .get(&name)
+                                    .ok_or_else(|| unsupported("scope randomize variable"))?;
+                                if !shape.unpacked.is_empty() || !shape.randomizable {
+                                    return Err(unsupported(
+                                        "scope randomize requires a packed non-enum variable",
+                                    ));
+                                }
+                                if !expressions::query_actual_is_writable(
+                                    &Expr::Ident(name),
+                                    dimensions,
+                                ) {
+                                    return Err(unsupported(
+                                        "scope randomize argument is not writable",
+                                    ));
+                                }
+                            }
+                            jobs.push(Job::Finish(
+                                Finish::Call {
+                                    name: "std::randomize".into(),
+                                    args: actuals.iter().copied().map(Some).collect(),
+                                    order: Vec::new(),
+                                    system: Some(SystemFunction::ScopeRandomize),
+                                },
+                                actuals.len(),
+                                scope.clone(),
+                            ));
+                            jobs.extend(
+                                actuals
+                                    .into_iter()
+                                    .rev()
+                                    .map(|id| Job::Enter(id, None, scope.clone())),
+                            );
+                            continue;
+                        }
                         let name = bound_callable_name(tree, *expression, native, dimensions)?
                             .ok_or_else(|| unsupported("method or randomize call"))?;
                         if name.starts_with('$') && !name.contains("::") {
@@ -541,6 +699,33 @@ pub(in crate::ast) fn bind_value(
                             Vec::new(),
                         )
                     }
+                    ExprKind::Select {
+                        expression,
+                        dimension,
+                    } if strings::native_string(tree, *expression, native, dimensions) => {
+                        let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind else {
+                            return Err(unsupported("part-select of a string"));
+                        };
+                        (
+                            Finish::StringCall(StringOp::Getc),
+                            vec![(*expression, None), (index, None)],
+                        )
+                    }
+                    ExprKind::Member { .. }
+                        if objects::property(tree, id, native, dimensions)?.is_some() =>
+                    {
+                        let (property, receiver) = objects::property(tree, id, native, dimensions)?
+                            .expect("checked by the guard");
+                        match receiver {
+                            Some(receiver) => {
+                                (Finish::ObjectLoad(property), vec![(receiver, None)])
+                            }
+                            None => {
+                                values.push(objects::load(&property, objects::this()));
+                                continue;
+                            }
+                        }
+                    }
                     ExprKind::Member { .. } | ExprKind::Select { .. } => {
                         values.push(selected_value(id, native, tree, dimensions)?);
                         continue;
@@ -609,14 +794,49 @@ pub(in crate::ast) fn bind_value(
                 let start = values.len().checked_sub(count).ok_or_else(disagreement)?;
                 let mut operands = values.split_off(start);
                 let value = match finish {
-                    Finish::Unary(op) => constants::unary_expr_from_text(
-                        &op,
-                        operands.pop().ok_or_else(disagreement)?,
-                    )
-                    .ok_or_else(|| unsupported(format!("unary operator `{op}`")))?,
+                    Finish::Unary(op) => {
+                        let operand = operands.pop().ok_or_else(disagreement)?;
+                        if strings::string_value(&operand, dimensions) {
+                            return Err(unsupported(format!(
+                                "operator `{op}` on a string operand"
+                            )));
+                        }
+                        if real_value(&operand, dimensions)
+                            && !matches!(op.as_str(), "+" | "-" | "!")
+                        {
+                            return Err(unsupported("operator on a real operand"));
+                        }
+                        constants::unary_expr_from_text(&op, operand)
+                            .ok_or_else(|| unsupported(format!("unary operator `{op}`")))?
+                    }
                     Finish::Binary(op) => {
                         let right = operands.pop().ok_or_else(disagreement)?;
                         let left = operands.pop().ok_or_else(disagreement)?;
+                        if strings::string_value(&left, dimensions)
+                            || strings::string_value(&right, dimensions)
+                        {
+                            values.push(strings::binary(&op, left, right, dimensions)?);
+                            continue;
+                        }
+                        if (real_value(&left, dimensions) || real_value(&right, dimensions))
+                            && !matches!(
+                                op.as_str(),
+                                "+" | "-"
+                                    | "*"
+                                    | "/"
+                                    | "**"
+                                    | "=="
+                                    | "!="
+                                    | "<"
+                                    | "<="
+                                    | ">"
+                                    | ">="
+                                    | "&&"
+                                    | "||"
+                            )
+                        {
+                            return Err(unsupported("operator on a real operand"));
+                        }
                         let xnor = matches!(op.as_str(), "~^" | "^~");
                         let value = Expr::Binary {
                             left: Box::new(left),
@@ -644,20 +864,62 @@ pub(in crate::ast) fn bind_value(
                         Expr::Literal(ty.width.to_string())
                     }
                     Finish::Mux => {
-                        let else_expr = operands.pop().ok_or_else(disagreement)?;
-                        let then_expr = operands.pop().ok_or_else(disagreement)?;
+                        let mut else_expr = operands.pop().ok_or_else(disagreement)?;
+                        let mut then_expr = operands.pop().ok_or_else(disagreement)?;
                         let condition = operands.pop().ok_or_else(disagreement)?;
+                        if strings::string_value(&then_expr, dimensions)
+                            || strings::string_value(&else_expr, dimensions)
+                        {
+                            then_expr = strings::to_string(then_expr, dimensions);
+                            else_expr = strings::to_string(else_expr, dimensions);
+                        }
                         Expr::Mux {
                             condition: Box::new(condition),
                             then_expr: Box::new(then_expr),
                             else_expr: Box::new(else_expr),
                         }
                     }
+                    Finish::Concat
+                        if operands
+                            .iter()
+                            .any(|operand| strings::string_value(operand, dimensions)) =>
+                    {
+                        strings::call(StringOp::Concat, operands)
+                    }
                     Finish::Concat => Expr::Concat(operands),
+                    Finish::StringCall(op) => {
+                        strings::call(op, strings::operands(op, operands, dimensions))
+                    }
+                    Finish::ObjectLoad(property) => {
+                        let handle = operands.pop().ok_or_else(disagreement)?;
+                        objects::load(&property, handle)
+                    }
+                    Finish::MethodCall {
+                        name,
+                        formals,
+                        receiver,
+                    } => {
+                        let mut args: Vec<Option<Expr>> = Vec::with_capacity(formals + 1);
+                        if receiver == objects::Receiver::This {
+                            args.push(Some(objects::this()));
+                        }
+                        let handles = usize::from(receiver != objects::Receiver::Static);
+                        args.extend(operands.into_iter().map(Some));
+                        // Omitted trailing arguments take their defaults.
+                        args.resize(formals + handles, None);
+                        Expr::Call {
+                            callee: Callee::Subroutine(name),
+                            args,
+                            arg_order: Vec::new(),
+                        }
+                    }
                     Finish::Cast(target) => {
-                        let operand = guard_zero_divisions(
-                            &tree.state,
-                            operands.pop().ok_or_else(disagreement)?,
+                        let operand = remove_real_division_guards(
+                            guard_zero_divisions(
+                                &tree.state,
+                                operands.pop().ok_or_else(disagreement)?,
+                            ),
+                            dimensions,
                         );
                         if dimensions.constant_indexed_base {
                             let operand =
@@ -680,6 +942,21 @@ pub(in crate::ast) fn bind_value(
                                 dimensions,
                             )?
                         }
+                    }
+                    Finish::Repeat
+                        if operands[1..]
+                            .iter()
+                            .any(|operand| strings::string_value(operand, dimensions)) =>
+                    {
+                        // A string replication count need not be constant
+                        // (11.4.12.2).
+                        let count = operands.remove(0);
+                        let string = if operands.len() == 1 {
+                            strings::to_string(operands.remove(0), dimensions)
+                        } else {
+                            strings::call(StringOp::Concat, operands)
+                        };
+                        strings::call(StringOp::Replicate, vec![string, count])
                     }
                     Finish::Repeat => {
                         let count = operands.remove(0);
@@ -718,18 +995,76 @@ pub(in crate::ast) fn bind_value(
                         system,
                     } => {
                         if let Some(function) = system {
-                            if matches!(
+                            if function == SystemFunction::Fread {
+                                let mut operands = operands.into_iter();
+                                let mut values = Vec::new();
+                                for (position, id) in args.into_iter().enumerate() {
+                                    let value = if id.is_some() {
+                                        Some(operands.next().ok_or_else(disagreement)?)
+                                    } else {
+                                        None
+                                    };
+                                    if position < 2 && value.is_none() {
+                                        return Err(unsupported(
+                                            "omitted $fread destination or descriptor",
+                                        ));
+                                    }
+                                    if let Some(value) = &value {
+                                        if position == 0 {
+                                            if !expressions::query_actual_is_writable(
+                                                value, dimensions,
+                                            ) {
+                                                return Err(unsupported(
+                                                    "writable $fread destination",
+                                                ));
+                                            }
+                                        } else if expr_static_width(&tree.state, value, dimensions)
+                                            .is_none()
+                                        {
+                                            return Err(unsupported("integral $fread argument"));
+                                        }
+                                    }
+                                    values.push(value);
+                                }
+                                Expr::Call {
+                                    callee: Callee::System(function),
+                                    args: values,
+                                    arg_order: Vec::new(),
+                                }
+                            } else if matches!(
                                 function,
                                 SystemFunction::Urandom
                                     | SystemFunction::Random
                                     | SystemFunction::DistUniform
+                                    | SystemFunction::DistNormal
+                                    | SystemFunction::DistExponential
+                                    | SystemFunction::DistPoisson
+                                    | SystemFunction::DistChiSquare
+                                    | SystemFunction::DistT
+                                    | SystemFunction::DistErlang
                                     | SystemFunction::TestPlusargs
                                     | SystemFunction::ValuePlusargs
                                     | SystemFunction::Fopen
+                                    | SystemFunction::Ftell
+                                    | SystemFunction::Fseek
+                                    | SystemFunction::Rewind
+                                    | SystemFunction::Fgetc
+                                    | SystemFunction::Ungetc
+                                    | SystemFunction::Feof
+                                    | SystemFunction::Sscanf
+                                    | SystemFunction::Fscanf
                                     | SystemFunction::UrandomRange
+                                    | SystemFunction::ScopeRandomize
                             ) {
                                 for (position, arg) in operands.iter().enumerate() {
-                                    if expr_static_width(&tree.state, arg, dimensions).is_none()
+                                    let real_output = matches!(
+                                        function,
+                                        SystemFunction::Sscanf | SystemFunction::Fscanf
+                                    ) && position >= 2
+                                        && real_value(arg, dimensions);
+                                    if (!real_output
+                                        && expr_static_width(&tree.state, arg, dimensions)
+                                            .is_none())
                                         || args
                                             .get(position)
                                             .copied()
@@ -750,9 +1085,15 @@ pub(in crate::ast) fn bind_value(
                                     {
                                         return Err(AnalyzerError::InvalidSystemTfCall {
                                             name: name.clone(),
-                                            detail:
+                                            detail: if matches!(
+                                                function,
+                                                SystemFunction::Sscanf | SystemFunction::Fscanf
+                                            ) {
+                                                "output argument must be a writable integral, real or shortreal variable".into()
+                                            } else {
                                                 "output/inout argument must be an integral variable"
-                                                    .into(),
+                                                    .into()
+                                            },
                                         });
                                     }
                                 }
@@ -800,7 +1141,10 @@ pub(in crate::ast) fn bind_value(
     if values.len() != 1 {
         return Err(disagreement());
     }
-    Ok(guard_zero_divisions(&tree.state, values.pop().unwrap()))
+    Ok(remove_real_division_guards(
+        guard_zero_divisions(&tree.state, values.pop().unwrap()),
+        dimensions,
+    ))
 }
 
 fn index_value(
@@ -810,6 +1154,9 @@ fn index_value(
     dimensions: &PackedDimensions,
 ) -> Converted<ConstExpr> {
     let value = bind_value(id, native, tree, dimensions, None)?;
+    if real_value(&value, dimensions) {
+        return Err(unsupported("real-valued select index"));
+    }
     let value = expand_expr_calls(
         value,
         &dimensions.functions,
@@ -821,6 +1168,10 @@ fn index_value(
         && (matches!(folded, ConstExpr::Literal(_))
             || eval_ast_const_expr(&tree.state, &folded, &dimensions.const_env).is_some())
     {
+        if matches!(&folded, ConstExpr::Literal(text) if real_value(&Expr::Literal(text.clone()), dimensions))
+        {
+            return Err(unsupported("real-valued select index"));
+        }
         return Ok(folded);
     }
     (if dimensions.constant_indexed_base {
@@ -860,6 +1211,10 @@ fn path(
     tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<(Vec<String>, Option<String>)> {
+    // A static class property is a variable of the module.
+    if let Some(variable) = objects::static_property(tree, root, native, dimensions)? {
+        return Ok((vec![variable], None));
+    }
     let mut parts = Vec::new();
     let mut qualified = None;
     loop {
@@ -928,6 +1283,13 @@ fn selected_value(
         base = *expression;
     }
     suffix.reverse();
+    if let ExprKind::Name(name) = &native.expression(base).kind
+        && dimensions
+            .get(&instances::normalize_identifier(&name.spelling))
+            .is_some_and(|ty| ty.real && suffix.len() > ty.unpacked.len())
+    {
+        return Err(unsupported("bit-select or part-select of a real variable"));
+    }
     if let ExprKind::Concatenation(_) | ExprKind::Replication { .. } = native.expression(base).kind
     {
         let expr = bind_value(base, native, tree, dimensions, None)?;
@@ -1038,6 +1400,12 @@ pub(in crate::ast) fn selected_lvalue(
         return packed_structs::whole_member(&tree.state, parts, qualified, dimensions);
     }
     let finish = |name: String, context: &PackedDimensions, strict: bool| -> Converted<LValue> {
+        if context
+            .get(&name)
+            .is_some_and(|ty| ty.real && suffix.len() > ty.unpacked.len())
+        {
+            return Err(unsupported("bit-select or part-select of a real variable"));
+        }
         let mut indices = Vec::new();
         let mut range = None;
         let mut ranged = false;
@@ -1192,6 +1560,128 @@ fn packed_string_literal(text: &str) -> Option<String> {
         width,
         num_bigint::BigUint::from_bytes_be(&bytes).to_str_radix(16)
     ))
+}
+
+pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> bool {
+    match expr {
+        Expr::Ident(name) => {
+            dimensions.get(name).is_some_and(|ty| ty.real)
+                || dimensions.parameter_values.get(name).is_some_and(|value| {
+                    matches!(value, Expr::Literal(text) if text.contains(['.', 'e', 'E']) && text.replace('_', "").parse::<f64>().is_ok())
+                        || matches!(value, Expr::Call { callee: Callee::System(function), .. }
+                            if function.is_real_math() || matches!(function, SystemFunction::Bitstoreal | SystemFunction::Bitstoshortreal | SystemFunction::Itor))
+                })
+        }
+        Expr::Literal(text) => {
+            text.contains(['.', 'e', 'E']) && text.replace('_', "").parse::<f64>().is_ok()
+        }
+        Expr::Call {
+            callee:
+                Callee::System(
+                    SystemFunction::Ln
+                    | SystemFunction::Log10
+                    | SystemFunction::Exp
+                    | SystemFunction::Sqrt
+                    | SystemFunction::Floor
+                    | SystemFunction::Ceil
+                    | SystemFunction::Sin
+                    | SystemFunction::Cos
+                    | SystemFunction::Tan
+                    | SystemFunction::Asin
+                    | SystemFunction::Acos
+                    | SystemFunction::Atan
+                    | SystemFunction::Sinh
+                    | SystemFunction::Cosh
+                    | SystemFunction::Tanh
+                    | SystemFunction::Asinh
+                    | SystemFunction::Acosh
+                    | SystemFunction::Atanh
+                    | SystemFunction::Pow
+                    | SystemFunction::Atan2
+                    | SystemFunction::Hypot
+                    | SystemFunction::Bitstoreal
+                    | SystemFunction::Bitstoshortreal
+                    | SystemFunction::Itor
+                    | SystemFunction::Realtime,
+                ),
+            ..
+        } => true,
+        Expr::Call {
+            callee: Callee::Subroutine(name),
+            ..
+        } => dimensions
+            .functions
+            .get(name)
+            .is_some_and(|function| function.return_real),
+        Expr::Unary {
+            op: UnaryOp::Plus | UnaryOp::Minus | UnaryOp::ToTwoState,
+            expr,
+        } => real_value(expr, dimensions),
+        Expr::Binary {
+            left,
+            op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Pow,
+            right,
+        } => real_value(left, dimensions) || real_value(right, dimensions),
+        Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => real_value(then_expr, dimensions) || real_value(else_expr, dimensions),
+        _ => false,
+    }
+}
+
+// Integer zero-divisor guards must not change real arithmetic or its type.
+pub(in crate::ast) fn remove_real_division_guards(expr: Expr, dims: &PackedDimensions) -> Expr {
+    match expr {
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            if matches!(&*then_expr, Expr::Literal(text) if text == crate::DIV_ZERO_UNKNOWN_LITERAL)
+                && matches!(&*else_expr, Expr::Binary { left, op: BinaryOp::Div, right } if real_value(left, dims) || real_value(right, dims))
+            {
+                return remove_real_division_guards(*else_expr, dims);
+            }
+            Expr::Mux {
+                condition: Box::new(remove_real_division_guards(*condition, dims)),
+                then_expr: Box::new(remove_real_division_guards(*then_expr, dims)),
+                else_expr: Box::new(remove_real_division_guards(*else_expr, dims)),
+            }
+        }
+        Expr::Unary { op, expr } => Expr::Unary {
+            op,
+            expr: Box::new(remove_real_division_guards(*expr, dims)),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: Box::new(remove_real_division_guards(*left, dims)),
+            op,
+            right: Box::new(remove_real_division_guards(*right, dims)),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(remove_real_division_guards(*expr, dims)),
+            width,
+            signed,
+        },
+        Expr::Call {
+            callee,
+            args,
+            arg_order,
+        } => Expr::Call {
+            callee,
+            args: args
+                .into_iter()
+                .map(|arg| arg.map(|arg| remove_real_division_guards(arg, dims)))
+                .collect(),
+            arg_order,
+        },
+        expr => expr,
+    }
 }
 
 #[cfg(test)]

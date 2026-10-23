@@ -107,7 +107,7 @@ pub(super) struct Timescales {
     instantiated: HashSet<String>,
     roots: Option<HashSet<String>>,
     specified: [u8; 2],
-    allow_mixed_timescales: bool,
+    options: crate::AnalysisOptions,
 }
 
 /// Time-query state owned by one analysis, shared explicitly by nested scopes.
@@ -361,7 +361,7 @@ fn time_declarations(unit: Option<i32>, precision: Option<i32>) -> String {
 pub(crate) fn generated_source_declarations(
     sources: &[(&str, &Path)],
     roots: Option<&[&str]>,
-    allow_mixed_timescales: bool,
+    options: crate::AnalysisOptions,
 ) -> Converted<String> {
     let trees = sources
         .iter()
@@ -372,7 +372,7 @@ pub(crate) fn generated_source_declarations(
             .iter()
             .map(|(tree, path)| (tree, *path))
             .collect::<Vec<_>>(),
-        allow_mixed_timescales,
+        options,
     )?;
     if let Some(roots) = roots {
         scales.select_roots(roots);
@@ -516,13 +516,12 @@ impl Timescales {
         self.precision.unwrap_or(DEFAULT.precision)
     }
     fn including_tree(&self, tree: &SyntaxTree) -> Converted<Self> {
-        let local =
-            Self::collect_with_options(&[(tree, Path::new(""))], self.allow_mixed_timescales)?;
+        let local = Self::collect_with_options(&[(tree, Path::new(""))], self.options)?;
         let specified = [
             self.specified[0] | local.specified[0],
             self.specified[1] | local.specified[1],
         ];
-        if specified.contains(&3) && !self.allow_mixed_timescales {
+        if specified.contains(&3) && !self.options.allow_mixed_timescales {
             return Err(unsupported(
                 "mixed explicit and default time units or precisions across design elements",
             ));
@@ -577,17 +576,29 @@ impl Timescales {
 
     #[cfg(test)]
     pub(super) fn collect(trees: &[(&SyntaxTree, &Path)]) -> Converted<Self> {
-        Self::collect_with_options(trees, false)
+        Self::collect_with_options(trees, crate::AnalysisOptions::default())
     }
 
     pub(super) fn collect_with_options(
         trees: &[(&SyntaxTree, &Path)],
-        allow_mixed_timescales: bool,
+        options: crate::AnalysisOptions,
     ) -> Converted<Self> {
         #[cfg(test)]
         COLLECTIONS.with(|count| count.set(count.get() + 1));
+        let default = match options.default_timescale {
+            Some((unit, precision))
+                if (-15..=2).contains(&unit)
+                    && (-15..=2).contains(&precision)
+                    && precision <= unit =>
+            {
+                Scale { unit, precision }
+            }
+            Some(_) => return Err(unsupported("invalid default time unit or precision")),
+            None => DEFAULT,
+        };
         let mut design = Self {
-            allow_mixed_timescales,
+            precision: options.default_timescale.map(|(_, precision)| precision),
+            options,
             ..Self::default()
         };
         // Each bit records whether a design element uses a default (1) or an
@@ -686,8 +697,8 @@ impl Timescales {
             }
             directives.sort_by_key(|(at, _)| *at);
             let unit = Scale {
-                unit: unit_decl.0.unwrap_or(DEFAULT.unit),
-                precision: unit_decl.1.unwrap_or(DEFAULT.precision),
+                unit: unit_decl.0.unwrap_or(default.unit),
+                precision: unit_decl.1.unwrap_or(default.precision),
             };
             if unit.precision > unit.unit {
                 return Err(unsupported("timeprecision coarser than timeunit"));
@@ -740,7 +751,7 @@ impl Timescales {
                 }),
             );
         }
-        if specified.contains(&3) && !allow_mixed_timescales {
+        if specified.contains(&3) && !options.allow_mixed_timescales {
             return Err(unsupported(
                 "mixed explicit and default time units or precisions across design elements",
             ));
@@ -783,12 +794,24 @@ impl Timescales {
     /// The time units of the simulation, which counts the global time
     /// precision (3.14.3), in one time unit of the scope of `node`.
     fn time_divisor_in_unit(&self, at: usize, unit: &Unit) -> u64 {
+        self.ticks_in(at, unit, |scale| scale.unit)
+    }
+
+    /// The time units of the simulation in one time precision step of the
+    /// scope of `node` (3.14.1).
+    fn precision_divisor_in_unit(&self, at: usize, unit: &Unit) -> u64 {
+        self.ticks_in(at, unit, |scale| scale.precision)
+    }
+
+    /// The time units of the simulation in `10^exponent(scale)` seconds,
+    /// where `scale` is the time scale of the scope at `at`.
+    fn ticks_in(&self, at: usize, unit: &Unit, exponent: impl Fn(&Scale) -> i32) -> u64 {
         let scale =
             scope_at(&unit.scopes, &unit.parents, at).map_or(unit.scale, |i| unit.scopes[i].scale);
         let precision = self.precision.unwrap_or(DEFAULT.precision);
         // A scope's precision is not coarser than its unit, and no unit is
         // longer than 100 s or precision finer than 1 fs.
-        10u64.pow((scale.unit - precision.min(scale.precision)) as u32)
+        10u64.pow((exponent(&scale) - precision.min(scale.precision)) as u32)
     }
 
     fn resolve(
@@ -998,27 +1021,37 @@ pub(super) fn time_divisor(
     node: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
 ) -> Converted<u64> {
+    divisor(node, tree, Timescales::time_divisor_in_unit)
+}
+
+/// The simulation's time units in one time precision step of the scope of
+/// `node`, at which a real delay is rounded (3.14.1).
+pub(super) fn precision_divisor(
+    node: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+) -> Converted<u64> {
+    divisor(node, tree, Timescales::precision_divisor_in_unit)
+}
+
+fn divisor(
+    node: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    in_unit: fn(&Timescales, usize, &Unit) -> u64,
+) -> Converted<u64> {
+    let context = tree.state.timescales.design.borrow();
+    let at = tree.declarations().expression(node).tokens.start;
+    if let Some(prepared) = &context.prepared
+        && prepared.address == tree.syntax_tree as *const SyntaxTree as usize
     {
-        let context = tree.state.timescales.design.borrow();
-        if let Some(prepared) = &context.prepared
-            && prepared.address == tree.syntax_tree as *const SyntaxTree as usize
-        {
-            return Ok(context.design.time_divisor_in_unit(
-                tree.declarations().expression(node).tokens.start,
-                &prepared.unit,
-            ));
-        }
-        let design = &context.design;
-        let source = key(tree);
-        let extended = (!design.units.contains_key(&source))
-            .then(|| design.including_tree(tree))
-            .transpose()?;
-        let design = extended.as_ref().unwrap_or(design);
-        Ok(design.time_divisor_in_unit(
-            tree.declarations().expression(node).tokens.start,
-            &design.units[&source],
-        ))
+        return Ok(in_unit(&context.design, at, &prepared.unit));
     }
+    let design = &context.design;
+    let source = key(tree);
+    let extended = (!design.units.contains_key(&source))
+        .then(|| design.including_tree(tree))
+        .transpose()?;
+    let design = extended.as_ref().unwrap_or(design);
+    Ok(in_unit(design, at, &design.units[&source]))
 }
 
 /// A standalone time literal used as a delay: round at the declaring

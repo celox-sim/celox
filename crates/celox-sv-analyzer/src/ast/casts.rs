@@ -26,6 +26,11 @@ pub(super) fn expr_type_from_type(
 
 #[derive(Clone, Copy)]
 pub(super) enum RuntimeCastTarget {
+    Real {
+        short: bool,
+    },
+    /// `string'(x)` (IEEE 1800-2023 6.24.1).
+    String,
     Zero(ExprType),
     Signing(bool),
     Integral {
@@ -50,6 +55,27 @@ pub(super) fn runtime_cast_target_expr(
 ) -> Converted<Expr> {
     let const_env = &packed_dimensions.const_env;
     let (target, numeric_size, two_state) = match target {
+        RuntimeCastTarget::String => {
+            return Ok(expression_binding::string_operand(expr, packed_dimensions));
+        }
+        RuntimeCastTarget::Real { short } => {
+            let call = |function, value| Expr::Call {
+                callee: Callee::System(function),
+                args: vec![Some(value)],
+                arg_order: Vec::new(),
+            };
+            return Ok(if short {
+                call(
+                    SystemFunction::Bitstoshortreal,
+                    call(SystemFunction::Shortrealtobits, expr),
+                )
+            } else {
+                call(
+                    SystemFunction::Bitstoreal,
+                    call(SystemFunction::Realtobits, expr),
+                )
+            });
+        }
         RuntimeCastTarget::Zero(target) => {
             return Ok(Expr::Resize {
                 expr: Box::new(expr),
@@ -61,8 +87,17 @@ pub(super) fn runtime_cast_target_expr(
             let width = expr_static_width(state, &expr, packed_dimensions).ok_or_else(|| {
                 unsupported("signedness cast of an operand without a static width")
             })?;
+            let operand_signed =
+                dimensions::expression_signedness(&expr, packed_dimensions, const_env)
+                    .ok_or_else(|| unsupported("cast of an operand whose signedness is unknown"))?;
             return Ok(Expr::Resize {
-                expr: Box::new(expr),
+                // Signing changes the result type after evaluating the operand
+                // in its own type; it must not change a division's operator.
+                expr: Box::new(Expr::Resize {
+                    expr: Box::new(expr),
+                    width,
+                    signed: operand_signed,
+                }),
                 width,
                 signed,
             });
@@ -107,6 +142,63 @@ pub(super) fn cast_constant_target(
     target: RuntimeCastTarget,
     const_env: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
+    if let RuntimeCastTarget::Real { short } = target {
+        let kind = if short {
+            TypeKind::Shortreal
+        } else {
+            TypeKind::Real
+        };
+        return expr_to_const(
+            state,
+            parameters::real_literal(&operand, kind, const_env, &HashMap::default())?,
+        );
+    }
+    fn contains_real(expr: &ConstExpr) -> bool {
+        if typecheck::const_expr_has_real_type(&expr.clone().into()) {
+            return true;
+        }
+        match expr {
+            ConstExpr::Literal(text) => {
+                text.contains(['.', 'e', 'E']) && text.replace('_', "").parse::<f64>().is_ok()
+            }
+            ConstExpr::Unary { expr, .. } | ConstExpr::Resize { expr, .. } => contains_real(expr),
+            ConstExpr::Binary { left, right, .. } => contains_real(left) || contains_real(right),
+            _ => false,
+        }
+    }
+    if contains_real(&operand) {
+        let value = typecheck::eval_real_const_expr(&operand.clone().into(), const_env)?.round();
+        let (width, signed) = match target {
+            RuntimeCastTarget::Integral {
+                target,
+                numeric_size,
+                ..
+            } => (target.width, numeric_size || target.signed),
+            RuntimeCastTarget::Zero(target) => (target.width, target.signed),
+            RuntimeCastTarget::Signing(_)
+            | RuntimeCastTarget::Real { .. }
+            | RuntimeCastTarget::String => return None,
+        };
+        if width == 0 || width > 128 {
+            return None;
+        }
+        let magnitude = (value.abs() % 2.0f64.powi(width as i32)) as u128;
+        let bits = if value.is_sign_negative() {
+            0u128.wrapping_sub(magnitude)
+        } else {
+            magnitude
+        };
+        let bits = if width == 128 {
+            bits
+        } else {
+            bits & ((1u128 << width) - 1)
+        };
+        return Some(ConstExpr::Literal(format_typed_parameter_literal(
+            bits as i128,
+            width,
+            signed,
+        )));
+    }
     let parameter_types = parameter_types_from_const_env(const_env);
     let operand_type = infer_const_expr_type(&operand, &parameter_types)?;
     let literal = if let ConstExpr::Literal(literal) = &operand {
@@ -133,6 +225,7 @@ pub(super) fn cast_constant_target(
         })?
     };
     let (target_type, numeric_size, two_state) = match target {
+        RuntimeCastTarget::Real { .. } | RuntimeCastTarget::String => return None,
         RuntimeCastTarget::Signing(signed) => (
             ExprType {
                 width: literal.width,

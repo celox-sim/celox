@@ -2,13 +2,24 @@ use super::*;
 use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue};
 
 impl Ff<'_, '_> {
-    fn file_io_arg(
+    pub(super) fn file_io_arg(
         &mut self,
         arg: &sv::ir::SystemTaskArg<sv::ir::Expr>,
     ) -> Result<HostRequestValue<SourceVarId>, sv::AnalyzerError> {
-        let (reg, signed, is_string) = match arg {
+        let (reg, signed, is_string, float_precision) = match arg {
             sv::ir::SystemTaskArg::Expr(expr) => {
-                (self.eval(expr, None)?, self.expr_signed(expr), false)
+                let expr = if self.m.calls(expr) {
+                    self.hoist(expr)?
+                } else {
+                    expr.clone()
+                };
+                let precision = floating::precision(&expr, self.m.variables, self.m.name_to_id);
+                (
+                    self.eval(&expr, None)?,
+                    self.expr_signed(&expr),
+                    false,
+                    precision,
+                )
             }
             sv::ir::SystemTaskArg::Str(text) => {
                 let bytes = unescape(text).into_bytes();
@@ -17,7 +28,7 @@ impl Ff<'_, '_> {
                     reg,
                     SIRValue::new(BigUint::from_bytes_be(&bytes)),
                 ));
-                (reg, false, true)
+                (reg, false, true, None)
             }
             _ => return Err(unsupported("empty file I/O argument")),
         };
@@ -30,10 +41,24 @@ impl Ff<'_, '_> {
             width,
             signed,
             is_string,
+            float_precision,
         })
     }
 
-    fn file_io_request(
+    fn file_descriptor_arg(
+        &mut self,
+        arg: &sv::ir::SystemTaskArg<sv::ir::Expr>,
+    ) -> Result<HostRequestValue<SourceVarId>, sv::AnalyzerError> {
+        match arg {
+            sv::ir::SystemTaskArg::Expr(expr) => {
+                let expr = self.int_formal(expr.clone());
+                self.file_io_arg(&sv::ir::SystemTaskArg::Expr(expr))
+            }
+            _ => self.file_io_arg(arg),
+        }
+    }
+
+    pub(super) fn file_io_request(
         &mut self,
         operation: u32,
         args: Vec<HostRequestValue<SourceVarId>>,
@@ -50,7 +75,6 @@ impl Ff<'_, '_> {
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
             process: 0,
-            requires_timed_simulation: false,
             kind: HostRequestKind::FileIo,
             operation,
             args,
@@ -81,6 +105,57 @@ impl Ff<'_, '_> {
                 width: 32,
                 signed: false,
                 is_string: false,
+                float_precision: None,
+            }],
+            Vec::new(),
+        )?;
+        Ok(sv::ir::Expr::Ident(name))
+    }
+
+    pub(super) fn file_function(
+        &mut self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::SystemFunction;
+        if self.kernel.is_none() {
+            return Err(unsupported(format!(
+                "system function `{function}` requires a scheduled process"
+            )));
+        }
+        let operation = match function {
+            SystemFunction::Ftell => 7,
+            SystemFunction::Fseek => 8,
+            SystemFunction::Rewind => 9,
+            SystemFunction::Fgetc => 10,
+            SystemFunction::Ungetc => 11,
+            SystemFunction::Feof => 12,
+            _ => unreachable!(),
+        };
+        let mut values = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            let expr = arg
+                .as_ref()
+                .ok_or_else(|| unsupported(format!("omitted argument of `{function}`")))?;
+            let signed = function == SystemFunction::Fseek && index > 0
+                || function == SystemFunction::Ungetc && index == 0;
+            // Extend using the actual's signedness before interpreting the
+            // resulting 32 bits as the formal int/int-unsigned argument.
+            let expr = self.int_formal(expr.clone());
+            let mut value = self.file_io_arg(&sv::ir::SystemTaskArg::Expr(expr))?;
+            value.signed = signed;
+            values.push(value);
+        }
+        let (id, name) = self.m.temp("file_result", 32, true, false);
+        self.file_io_request(
+            operation,
+            values,
+            vec![HostRequestValue {
+                float_precision: None,
+                id,
+                width: 32,
+                signed: true,
+                is_string: false,
             }],
             Vec::new(),
         )?;
@@ -97,6 +172,13 @@ impl Ff<'_, '_> {
             return Err(unsupported(format!("`{task}` outside a scheduled process")));
         }
         match task {
+            SystemTask::Fflush => {
+                let mut values = Vec::new();
+                for arg in args {
+                    values.push(self.file_descriptor_arg(arg)?);
+                }
+                self.file_io_request(6, values, Vec::new(), Vec::new())?;
+            }
             SystemTask::Fclose => {
                 let descriptor = self.file_io_arg(&args[0])?;
                 self.file_io_request(1, vec![descriptor], Vec::new(), Vec::new())?;
@@ -104,7 +186,7 @@ impl Ff<'_, '_> {
             SystemTask::Fdisplay(radix) | SystemTask::Fwrite(radix) => {
                 let descriptor = self.file_io_arg(&args[0])?;
                 let kind = SystemTaskKind::Print(RuntimeEventKind::Write, radix.letter());
-                let (template, args) = system_task_template(&kind, &args[1..]);
+                let (template, args) = system_task_template(self.m, &kind, &args[1..]);
                 let mut values = vec![descriptor];
                 for arg in &args {
                     values.push(self.file_io_arg(arg)?);

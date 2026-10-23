@@ -117,6 +117,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
         }
         return CombProcess {
             creation_order: process.creation_order,
+            site: process.site,
             sensitivity_body,
             ..CombProcess::procedural(process.kind, condition, body)
         };
@@ -138,6 +139,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
             .collect(),
     );
     result.creation_order = process.creation_order;
+    result.site = process.site;
     result.sensitivity_body = sensitivity_body;
     result
 }
@@ -739,9 +741,24 @@ pub(super) fn expr_to_index_const(
             };
             assemble_index_bits(bits)
         }
-        Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } | Expr::Inside { .. } => {
-            None
+        expr @ (Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
+            // Bit extraction retains self-determined operand widths and X/Z.
+            // Never duplicate a call whose effects have not been expanded.
+            if inlining::calls_subroutine(&expr) {
+                return None;
+            }
+            let source = IndexBitSource::from_expr(state, expr, dimensions)?;
+            let width = source.width();
+            if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+                return None;
+            }
+            assemble_index_bits(
+                (0..width)
+                    .map(|bit| source.bit(bit as i128))
+                    .collect::<Option<_>>()?,
+            )
         }
+        Expr::Select { .. } | Expr::Inside { .. } => None,
     }
 }
 

@@ -64,6 +64,9 @@ fn pattern_value(
     if let Some((dimension, rest)) = shape.unpacked.split_first() {
         let (_, _, count) = dimension_bounds(state, &dimension.left, &dimension.right, dims)?;
         let element = VariableDimensions {
+            real: false,
+            string: false,
+            class: None,
             unpacked: rest.to_vec(),
             ..shape.clone()
         };

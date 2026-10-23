@@ -4,9 +4,14 @@ use crate::ParserError;
 
 /// Resolve the total storage size of a variable.
 pub fn resolve_total_width(module: &Module, variable: &Variable) -> Result<usize, ParserError> {
-    let width = variable.total_width().ok_or_else(|| {
-        ParserError::unresolved_width(module, variable, variable.r#type.to_string())
-    })?;
+    // A string element is a handle into the simulator's heap.
+    let width = if variable.r#type.is_string() {
+        celox_design::HANDLE_WIDTH
+    } else {
+        variable.total_width().ok_or_else(|| {
+            ParserError::unresolved_width(module, variable, variable.r#type.to_string())
+        })?
+    };
     let array = variable.r#type.total_array().ok_or_else(|| {
         ParserError::unresolved_width(module, variable, variable.r#type.to_string())
     })?;

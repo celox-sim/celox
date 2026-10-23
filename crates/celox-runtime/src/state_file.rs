@@ -34,10 +34,15 @@
 //!     counted count u32, then per signal: signal str | 3 × counter u32
 //!     write count u32, then per host write: signal str | value bytes | mask bytes
 //!     host pending u8 | finished u8
+//! strings (only with FLAG_STRINGS): count u32, then per string: bytes
 //! scheduled event: time u64 | event str | signal str | value u8
 //! str: byte length u32 | UTF-8
 //! bytes: byte length u32 | little-endian bytes
 //! ```
+//!
+//! The value of a string object is one little-endian u32 per element: 0 for
+//! `""`, otherwise one more than the index of its contents in the strings
+//! section. Files without strings keep the earlier encoding.
 //!
 //! Version 1 files, which have no process section, still load. A file whose
 //! processes have nothing to record is written as version 1, which older
@@ -52,6 +57,8 @@ const FLAG_SCHEDULE: u16 = 1 << 1;
 /// The schedule lists events whose signal was x or z. Set only when there are
 /// any, so other files keep their earlier encoding.
 const FLAG_UNKNOWN_EVENTS: u16 = 1 << 2;
+/// String objects refer to a strings section after the schedule.
+const FLAG_STRINGS: u16 = 1 << 3;
 
 /// How a state object gets its value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +182,8 @@ pub struct StateFile {
     pub four_state: bool,
     pub objects: Vec<StateObject>,
     pub schedule: Option<ScheduleRecord>,
+    /// Contents of the strings that string objects refer to.
+    pub strings: Vec<Vec<u8>>,
 }
 
 /// A state file that could not be read.
@@ -225,6 +234,9 @@ impl StateFile {
                 flags |= FLAG_UNKNOWN_EVENTS;
             }
         }
+        if !self.strings.is_empty() {
+            flags |= FLAG_STRINGS;
+        }
         put_u16(w, flags)?;
         put_len(w, self.objects.len())?;
         for object in &self.objects {
@@ -274,6 +286,12 @@ impl StateFile {
             }
             if let Some(processes) = processes {
                 put_processes(w, processes)?;
+            }
+        }
+        if !self.strings.is_empty() {
+            put_len(w, self.strings.len())?;
+            for string in &self.strings {
+                put_bytes(w, string)?;
             }
         }
         Ok(())
@@ -364,6 +382,13 @@ impl StateFile {
         } else {
             None
         };
+        let strings = if flags & FLAG_STRINGS != 0 {
+            (0..get_u32(r)?)
+                .map(|_| get_len_bytes(r))
+                .collect::<Result<_, _>>()?
+        } else {
+            Vec::new()
+        };
         let mut rest = [0; 1];
         if r.read(&mut rest)? != 0 {
             return Err(StateFileError::Malformed(
@@ -374,6 +399,7 @@ impl StateFile {
             four_state,
             objects,
             schedule,
+            strings,
         })
     }
 
@@ -741,7 +767,21 @@ mod tests {
                     finished: false,
                 },
             }),
+            strings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn strings_round_trip_after_the_schedule() {
+        let mut file = sample();
+        file.strings = vec![b"abc".to_vec(), Vec::new(), b"\xff".to_vec()];
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+        file.schedule = None;
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
     }
 
     #[test]

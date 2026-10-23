@@ -4198,7 +4198,7 @@ module Top (
         out = mem[2];
     }
 }
-"#, "Top");
+"#, "Top").allow_inferred_latches(true);
 
     let b = sim.signal("b");
     let out = sim.signal("out");
@@ -4526,7 +4526,7 @@ module Top (
     assign first_out = first;
     assign slots_out = slots;
 }
-"#, "Top");
+"#, "Top").allow_inferred_latches(true);
 
     let value = sim.signal("value");
     let first_out = sim.signal("first_out");
@@ -4579,7 +4579,7 @@ module Top (
     assign first_out = first;
     assign slots_out = slots;
 }
-"#, "Top");
+"#, "Top").allow_inferred_latches(true);
 
     let value = sim.signal("value");
     let first_out = sim.signal("first_out");
@@ -4939,6 +4939,7 @@ module Top (
 "#,
         "Top",
     )
+    .allow_inferred_latches(true)
     .build()
     .unwrap();
 
@@ -5033,6 +5034,7 @@ module Top (
 "#,
         "Top",
     )
+    .allow_inferred_latches(true)
     .build()
     .unwrap();
 
@@ -5119,6 +5121,7 @@ module Top (
 "#,
         "Top",
     )
+    .allow_inferred_latches(true)
     .build()
     .unwrap();
 

@@ -1,0 +1,42 @@
+{
+  "schema_version": 3,
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0",
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "class::virtual_methods_dispatch_on_object_class at 393:3: expect_output: expected [48, 32, 97, 114, 101, 97, 61, 57, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 49, 48, 48, 57, 32, 115, 99, 97, 108, 101, 100, 61, 57, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 49, 32, 97, 114, 101, 97, 61, 50, 52, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 50, 48, 50, 52, 32, 115, 99, 97, 108, 101, 100, 61, 50, 52, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 50, 32, 97, 114, 101, 97, 61, 48, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 57, 48, 48, 48, 32, 115, 99, 97, 108, 101, 100, 61, 49, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 51, 32, 97, 114, 101, 97, 61, 48, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 52, 48, 48, 48, 32, 115, 99, 97, 108, 101, 100, 61, 49, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 115, 113, 117, 97, 114, 101, 32, 97, 114, 101, 97, 61, 50, 52, 32, 112, 108, 97, 105, 110, 61, 50, 10], got [48, 32, 97, 114, 101, 97, 61, 48, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 49, 48, 48, 48, 32, 115, 99, 97, 108, 101, 100, 61, 49, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 49, 32, 97, 114, 101, 97, 61, 48, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 50, 48, 48, 48, 32, 115, 99, 97, 108, 101, 100, 61, 49, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 50, 32, 97, 114, 101, 97, 61, 48, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 57, 48, 48, 48, 32, 115, 99, 97, 108, 101, 100, 61, 49, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 51, 32, 97, 114, 101, 97, 61, 48, 32, 100, 101, 115, 99, 114, 105, 98, 101, 61, 52, 48, 48, 48, 32, 115, 99, 97, 108, 101, 100, 61, 49, 48, 32, 112, 108, 97, 105, 110, 61, 49, 10, 115, 113, 117, 97, 114, 101, 32, 97, 114, 101, 97, 61, 52, 32, 112, 108, 97, 105, 110, 61, 50, 10]",
+      "expectation": "Simulation",
+      "name": "class::virtual_methods_dispatch_on_object_class",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "passed": 0,
+    "mismatch": 1,
+    "compile_error": 0,
+    "emission_error": 0,
+    "ignored": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "include_ignored": true,
+  "exclude_stronger_than_sv": false,
+  "standard": "IEEE 1800-2023 8.20: a virtual method called through a base-class handle runs the override of the object's class; an override is virtual whether or not it repeats the keyword.",
+  "adapter_free": {
+    "source": "verification/repros/virtual_dispatch.sv",
+    "icarus_command": "iverilog -g2012 -s Top -o <output> virtual_dispatch.sv; vvp <output>",
+    "icarus_version": "Icarus Verilog version 13.0",
+    "icarus_output": "1 1 1 3",
+    "verilator_command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <build-dir> virtual_dispatch.sv",
+    "verilator_output": "2 3 4 4",
+    "expected_output": "2 3 4 4"
+  }
+}

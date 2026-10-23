@@ -345,6 +345,26 @@ records the native-runner result; the case stays enabled on all Celox backends.
 
 ## SystemVerilog suite
 
+Named unpacked array parameter forwarding is checked against IEEE 1800-2023
+6.20.2 and 7.6. Verilator 5.052 passes the whole-array forwarding case, but
+reverses elements across opposite declaration directions and rejects a constant
+subarray argument. Slang 12.0 accepts all four cases and confirms their parameter
+values. Icarus 13.0 explicitly reports unpacked array parameters as unsupported.
+Only these exact tool/case combinations are excluded; Celox runs every assertion.
+The focused [Verilator](verification/repros/named_array_parameters_verilator.json),
+[Icarus](verification/repros/named_array_parameters_icarus.json), and
+[Slang](verification/repros/named_array_parameters_slang.json) observations retain
+the failures and independent elaborated values.
+
+Static function lifetime cases expose resets of the implicit result in Verilator
+5.052 and Icarus 13.0, and of an output-only formal in Verilator. The expected
+retention follows IEEE 1800-2023 6.21, 13.4.1, 13.4.2 and 13.5. The
+[adapter-free source](verification/repros/sv_static_function_lifetimes.sv) and
+[focused observations](verification/repros/sv_static_function_lifetimes.json)
+record these differences. Icarus also rejects explicit static locals in automatic
+functions and output function arguments. Only the affected tool/case pairs are
+excluded; their original assertions remain available through `--include-ignored`.
+
 The new `$dist_uniform` seed-width case is excluded for Verilator 5.052 and
 Icarus 13.0. Verilator generates an invalid C++ reference binding for converted
 seed arguments; Icarus rejects the `shortint` seed at startup. IEEE 1800-2023
@@ -352,7 +372,72 @@ seed arguments; Icarus rejects the `shortint` seed at startup. IEEE 1800-2023
 backends; the source and observed failures are retained in
 [`sv_dist_uniform_seed_width.json`](verification/repros/sv_dist_uniform_seed_width.json).
 
+Verilator 5.052 executes `always @*` once at time zero in
+`latch::classic_star_declaration_startup`, before any sensitivity input changes.
+Static declarations initialize before procedures start (IEEE 1800-2023 6.8),
+while `always @*` waits for an input change (9.2.2.2.2).
+The [adapter-free reproduction](verification/repros/wildcard_declaration_startup.sv)
+fails the same assertion in Verilator and passes in Icarus 13.0.
+The [retained observation](verification/repros/wildcard_declaration_startup_verilator.json)
+records this failure; `--include-ignored` retains its assertions.
+The same startup disagreement affects the complete body in
+`latch::star_complete_declaration_startup`; its [exact source](verification/repros/star_complete_declaration_startup.sv)
+and [standalone comparison](verification/repros/wildcard_task_sensitivity_verilator.json)
+show Verilator failing the startup assertion and Icarus completing it.
+
+Verilator 5.052 also executes an `always` with an edgeless variable event list
+at time zero, in `timing::explicit_list_of_every_read_waits_for_a_change` and
+`timing::list_with_an_extra_signal_wakes_on_it`. Its event control waits for a
+value change (IEEE 1800-2023 9.4.2), and declaration initializers precede it
+(6.8). The [adapter-free reproduction](verification/repros/event_list_declaration_startup.sv)
+fails its startup assertion in Verilator and passes in Icarus 13.0, which also
+passes the unchanged shared assertions. The [retained observation](verification/repros/event_list_declaration_startup_verilator.json)
+records both failures; `--include-ignored` retains their assertions.
+
+Verilator 5.052 repeats activation of the self-reading latch in
+`latch::guarded_activation`, producing 3 where one `seed`/`en` change should
+produce 1. The [adapter-free reproduction](verification/repros/latch_activation.sv)
+produces 2 in Verilator and 1 in Icarus 13.0; Icarus also passes the unchanged
+shared assertions. IEEE 1800-2023 9.2.2.2.1 excludes written expressions from
+implicit sensitivity. The [retained observation](verification/repros/latch_activation_verilator.json)
+records both executions. This exact Verilator case is excluded, with its
+original assertions available through `--include-ignored`.
+
+The two pulse regressions `latch::same_activation_change_return` and
+`latch::hierarchy_same_activation_change_return` also fail to settle in
+Verilator 5.052, before reaching their timed assertions. Their unchanged
+[standalone sources](verification/repros/latch_change_return.sv) and
+[hierarchical variant](verification/repros/latch_hierarchy_change_return.sv)
+complete in Icarus 13.0. An `always_latch` excludes its written expressions
+from sensitivity (IEEE 1800-2023 9.2.2.3, 9.2.2.2.1); an `@*` procedure does
+not wait on events while executing its body (9.2.2.1, 9.4.2.2). Their own
+blocking writes therefore cannot cause endless reactivation. The
+[focused retained failures](verification/repros/latch_change_return_verilator.json)
+record both adapter and standalone nonconvergence. Only these two additional
+Verilator cases are excluded; their original assertions remain available with
+`--include-ignored`.
+
+Verilator 5.052 also wakes the task-calling `always_comb`/`always_latch`
+procedures in `latch::task_call_sensitivity` when only task-body globals change.
+IEEE 1800-2023 9.2.2.2.1 adds task argument expressions, but excludes task
+contents, from implicit sensitivity; 9.2.2.3 applies the same rule to
+`always_latch`. Icarus 13.0 passes the [unchanged shared source](verification/repros/task_call_sensitivity.sv),
+including its positive check that changing the argument does wake the procedures.
+The [standalone comparison](verification/repros/wildcard_task_sensitivity_verilator.json)
+records both executions. Only this Verilator case is excluded for this reason.
+
 The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations.json`](verification/sv/limitations.json), with the failures observed before them in [`verification/sv/limitations/`](verification/sv/limitations). A case is excluded for a tool only when the expected value follows IEEE 1800 and the tool either cannot run the design or disagrees with the standard; where the two tools disagree with each other, the entry says so.
+
+The interface-array connection cases cover packed distribution, unpacked
+connections and array ports, and multidimensional instance arrays (IEEE
+1800-2023 23.3.3.5). Verilator 5.052 passes the three one-dimensional cases,
+but counts only the inner instance dimension when validating the packed
+connection width of a 2x2 array. Icarus 13.0 passes the packed case; it rejects
+unpacked actuals, aborts on interface array ports, and explicitly rejects
+multidimensional instance arrays. The exact case exclusions retain the
+[Verilator diagnostics](verification/repros/sv_interface_array_connections_verilator.json)
+and [Icarus diagnostics](verification/repros/sv_interface_array_connections_icarus.json).
+Celox runs all four unchanged cases on every backend.
 
 The `indexed_select::constant_part_select_indices_of_concatenations` case also
 uses these standard concatenation and replication selections as array indices
@@ -370,6 +455,8 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | Group | Stage | Tool | Cases | Reason |
 | --- | --- | --- | ---: | --- |
 | `sv_icarus_automatic_task_arrays` | execute | icarus | 1 | Icarus 13.0 shares an automatic task's unpacked local array across overlapping calls. IEEE 1800-2023 13.3.1–13.3.2 require separate storage for each activation. The [pre-exclusion result](verification/repros/sv_timed_task_arrays_icarus.json) retains the first call returning 31 instead of 11. The scalar activation case remains enabled for Icarus. |
+| `sv_icarus_expression_event_sample` | execute | icarus | 1 | Icarus 13.0 wakes a process that writes an operand of an event expression and then waits on it (`a = 1; @(a ^ b);`). IEEE 1800-2023 9.4.2 synchronizes the statement with a value change of the expression, and the write came before the event control. Verilator 5.052 agrees with the expected value. The [pre-exclusion result](verification/repros/sv_expression_event_sample_icarus.json) is retained. |
+| `sv_verilator_implicit_event_in_process` | compile | verilator | 1 | Verilator 5.052 rejects `@*` in an `initial forever` ("Unsupported: Event control with implicit sensitivity (@*) in this context"); IEEE 1800-2023 9.4.2.2 permits it in any procedural timing control. Icarus 13.0 passes the case. The [pre-exclusion diagnostic](verification/repros/sv_implicit_event_in_process_verilator.json) is retained. |
 | `sv_icarus_genvar_dimensions` | execute | icarus | 1 | Icarus 13.0 returns 0 for `$dimensions` of a generated loop index's implicit integer localparam; IEEE 1800-2023 27.4 and 20.7 require one packed dimension. Celox and Verilator pass the unchanged assertions. The [standalone reproducer and pre-exclusion result](verification/repros/sv_genvar_dimensions.json) retain the observed disagreement. |
 | `sv_icarus_constant_array_queries` | compile | icarus | 1 | Icarus 13.0 rejects array queries of variables in constant expressions and typedef operands; IEEE 1800-2023 20.7 permits them. Verilator passes. |
 | `sv_icarus_runtime_array_queries` | execute | icarus | 1 | Icarus 13.0 aborts on a runtime dimension argument. A standalone reproducer also rejects an integer variable as the dimension. IEEE 1800-2023 20.7 permits querying fixed-size dimensions with runtime expressions. |
@@ -397,9 +484,18 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_mixed_state_struct_members` | execute | icarus | 1 | Icarus 13.0 does not convert a 2-state member of a packed struct with 4-state members from four state when reading it, so a compound assignment to the member keeps X; IEEE 1800-2023 7.2.1 converts it. Verilator cannot check four-state values. |
 | `sv_icarus_unary_plus_unknown` | execute | icarus | 1 | Icarus 13.0 returns the operand of a unary plus unchanged when it has X or Z bits; IEEE 1800-2023 11.4.3 makes the result of an arithmetic operator all X. Verilator cannot check four-state values. |
 | `sv_icarus_runtime_packed_subselect` | compile | icarus | 3 | Icarus 13.0 rejects a further select after a runtime index into a multidimensional packed array, or after runtime indices into an unpacked array of them (t[k][j], t[k][2:1], u[j][k][i]: "Array index expressions must be constant here"). Verilator passes the two-state case; the four-state one is outside what it checks. |
-| `sv_icarus_interfaces` | compile | icarus | 14 | Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports ("sorry: modport task/function ports are not yet supported") and multidimensional interface instance arrays ("sorry: Multi-dimensional arrays of instances are not yet supported"). Verilator passes these cases. The implicit named interface cases have [focused pre-exclusion evidence](verification/sv/limitations/implicit-interface-ports-icarus.json). |
+| `sv_verilator_multidimensional_interface_connections` | compile | verilator | 1 | Verilator 5.052 validates a 2x2 scalar interface array against a two-bit connection instead of four bits. See the focused interface-array evidence above. |
+| `sv_icarus_interface_array_connections` | compile | icarus | 3 | Icarus 13.0 rejects distributed unpacked actuals and multidimensional instances, and aborts on interface array ports. See the focused interface-array evidence above. |
+| `sv_icarus_interfaces` | compile | icarus | 15 | Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports ("sorry: modport task/function ports are not yet supported") and multidimensional interface instance arrays ("sorry: Multi-dimensional arrays of instances are not yet supported"). Verilator passes these cases. The implicit named interface cases have [focused pre-exclusion evidence](verification/sv/limitations/implicit-interface-ports-icarus.json). The mixed module-contract/local-interface case retains its [port-declaration diagnostics](verification/repros/sv_mixed_interface_connections_icarus.json). |
 | `sv_icarus_packed_inner_index_range` | execute | icarus | 1 | Icarus 13.0 flattens an out-of-range inner index of a multidimensional packed array into the neighbouring element: a read gives a known value instead of X, and a write lands in that element; IEEE 1800-2023 7.4.6 and 11.5.1 make the select out of range. Verilator cannot check four-state values, and it truncates out-of-range packed indices. |
+| `sv_icarus_string_methods` | compile | icarus | 3 | Icarus 13.0 does not implement the string methods getc, putc, compare, icompare, toupper, tolower, substr, atoi/atohex/atooct/atobin and itoa/hextoa/octtoa/bintoa ("Method getc is not a string method"), and requires a constant replication count for a string ("A reference to a net or variable is not allowed in a constant expression"). IEEE 1800-2023 6.16 defines the methods and 11.4.12.2 permits a non-constant count for a string replication. Verilator passes the cases. |
 | `sv_icarus_unpacked_subroutine_ports` | compile | icarus | 2 | Icarus 13.0 reports that subroutine ports with unpacked dimensions are not yet supported. Verilator passes the valid case. |
+| `sv_icarus_classes` | compile | icarus | 5 | Icarus 13.0 does not support extern methods ("sorry: External methods are not yet supported") or string methods called on a class property ("Can't find task itoa in class Named") or comparisons of class handles ("SORRY: Compare class handles not implemented"), aborts on a failed assertion in dup_expr.cc while compiling objects_referring_to_objects, and crashes with a segmentation fault while compiling implicit_constructors_and_this. IEEE 1800-2023 8.4, 8.7, 8.8 and 8.24 define these constructs. Verilator passes all but the string-method case, see sv_verilator_class_property_string_methods. |
+| `sv_icarus_nested_class_members` | execute | icarus | 1 | Icarus 13.0 reads an empty string through a nested property path (kept.inner.text) after reporting "sorry: Nested member path not yet supported for class properties" for its assignment. IEEE 1800-2023 8.5 permits accessing a property of an object referred to by a property. Verilator passes the case. |
+| `sv_icarus_class_scope_resolution` | compile | icarus | 1 | Icarus 13.0 rejects class scope resolution with a syntax error: reading a static property (Counter::created), calling a static method (Counter::next()) and assigning a static property (Counter::last = "set"). IEEE 1800-2023 8.9, 8.10 and 8.23 define these accesses. Verilator passes the case. |
+| `sv_icarus_virtual_dispatch` | execute | icarus | 1 | Icarus 13.0 binds a virtual function called through a base-class handle to the handle's class instead of the object's: the shared case prints area=0 for every shape, and the adapter-free source prints 1 1 1 3 where IEEE 1800-2023 8.20 requires 2 3 4 4. Verilator and Celox print 2 3 4 4 and pass the case. |
+| `sv_icarus_abstract_and_interface_classes` | compile | icarus | 3 | Icarus 13.0 rejects pure virtual method declarations and interface classes with syntax errors ("Invalid class item", "Invalid module item") and fails code generation without a diagnostic ("Code generation had 2 error(s)") for a method called on an element of an array of class handles. IEEE 1800-2023 8.21 and 8.26 define pure virtual methods and interface classes, and 7.4 and 8.4 permit arrays of class handles. Verilator passes all three cases. |
+| `sv_verilator_class_property_string_methods` | compile | verilator | 1 | Verilator 5.052 stops with an internal error ("AstNode is not of expected type, but instead has type 'MEMBERSEL'") on a string method called on a class property, n.name.itoa(42), which IEEE 1800-2023 6.16 and 8.5 permit. Icarus rejects the case too, see sv_icarus_classes. |
 | `sv_icarus_unpacked_array_patterns` | compile | icarus | 1 | Icarus 13.0 reports that an assignment pattern with unpacked array items assigned to a multidimensional unpacked array is not yet supported ("Procedural assignment of array or array slice"), so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 7.6, 10.8). |
 | `sv_icarus_display_field_width` | execute | icarus | 1 | Icarus 13.0 zero-pads a value wider than an explicit field width of %h or %o to the argument's full width (%3h of 32'h1234 prints 00001234); IEEE 1800-2023 21.2.1.2 expands the field to the value without leading zeros (1234). Verilator agrees with the expected value. |
 | `sv_verilator_constant_unknown_bits` | execute | verilator | 1 | Verilator 5.052 is two-state: unknown bits in constant system function arguments ($onehot(2'bx1)) are not kept unknown, so a generate condition differs from IEEE 1800-2023 20.9. Icarus agrees with the expected values. |
@@ -446,6 +542,8 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_urandom_narrow_seed` | execute | icarus | 1 | Icarus 13.0 terminates for an 8-bit $urandom seed variable with 'seed variable is less than 32 bits (8)'. IEEE 1800-2023 18.13.1 accepts any integral expression, converted to the int seed formal. A standalone signed/unsigned 8-bit seed probe compiles, then vvp exits with this width error; Verilator passes the same nonzero-seed extension checks. |
 | `sv_verilator_random_algorithm` | execute | verilator | 2 | Verilator 5.052 does not compute $random with the Annex N algorithm: seeding with 0 returns 1631467331 instead of 303379748, and an unseeded $random draws from its own RNG. IEEE 1800-2023 20.14.1 and Annex N define $random as rtl_dist_uniform(seed, LONG_MIN, LONG_MAX) so that implementations repeat the same values. A standalone probe prints the Annex N sequence in Icarus 13.0 and different values in Verilator. |
 | `sv_verilator_time_in_combinational_logic` | execute | verilator | 1 | Verilator 5.052 evaluates an always_comb that reads $time again when the clocking event of the suite testbench fires, although no variable it reads has changed: at 3 ns y is 3 instead of 0. IEEE 1800-2023 9.2.2.2.1 makes always_comb sensitive to the variables it reads, and $time (20.3.1) is none. A standalone probe prints y=0 in Icarus 13.0 and Verilator without a clocking block, and y=3 in Verilator with one. |
+| `sv_verilator_intermediate_writes` | execute | verilator | 6 | Verilator 5.052 wakes a process waiting on a variable only for the value an evaluation leaves: an always_comb or edge-triggered body that rewrites a variable 1 -> 0 -> 1, and nonblocking updates `y <= 0; y <= 1;` from 1, wake no waiter, nor does a pulse that one always_ff writes to some bits of a variable while other processes write its other bits, or a nonblocking update that rises from the final blocking value. IEEE 1800-2023 4.3 and 9.4.2 make every store an update event that triggers the waiter, and 10.4.2 applies nonblocking updates in issue order, each its own update. [Standalone probes](verification/repros/sv_intermediate_writes_verilator.json) print the spec counts in Icarus 13.0 and 1 or 0 in Verilator. |
+| `sv_icarus_port_pulses` | execute | icarus | 1 | Icarus 13.0 collapses a child's output port with the parent's net, so a waiter in the parent sees each value the child's always_comb writes inside one evaluation and counts 3 instead of 1. Both are conforming: the port is a continuous assignment (IEEE 1800-2023 23.3.3), evaluated after the child's process yields, and 4.7 leaves that order open. The case asserts the settled count, which Verilator 5.052 and Celox give. The [standalone probe](verification/repros/sv_port_pulses_icarus.json) retains both outputs. |
 
 The [system-function edge-case evidence](verification/repros/system_function_edge_cases.json)
 retains the failed Icarus runs and minimal sources. Cover comparisons enable
@@ -461,6 +559,75 @@ Icarus 13.0 reports `Module instantiations are not allowed in interfaces` for
 interface. Verilator 5.052 executes the same emitted Veryl design successfully.
 The [retained diagnostic](verification/repros/interface_nested_icarus.json)
 records this compile limitation.
+
+## Veryl analyzer floating-point constant expressions
+
+Veryl analyzer 0.22 can fold negative `f32` casts and dependent floating-point
+constants or parameters incorrectly before Celox lowering. The Veryl consumers
+of `floating_point::integral_constants_from_float` are ignored with their
+assertions preserved; the emitted SystemVerilog consumer, Icarus, and Verilator
+pass. Celox's display tests retain additional ignored reproductions for inline
+negative constants, named constants, and hierarchical parameter overrides.
+Runtime floating-point display and assertion tests remain enabled.
+
+These upstream errors are deferred under
+[#1657](https://github.com/celox-sim/celox/issues/1657). The analyzer's default
+constant folding remains enabled: globally disabling it also breaks integer
+constant selects used in generate conditions, including existing linear SEC
+and LFSR regressions.
+
+## Veryl reference simulator floating-point values
+
+The Celox backend harness excludes Veryl 0.22.0's in-process reference simulator
+for six `floating_point` cases while preserving their assertions. A focused
+run on 2026-10-21 observed these mismatches:
+
+| Case | Expected | Veryl reference result |
+| --- | --- | --- |
+| `arithmetic_and_rounding` | integer conversion of 7.0 / 2.0 = 4 | 3 |
+| `f32_precision_and_conversion` | numeric integer result | IEEE f32 payload `0x40800000` |
+| `scalar_port_and_function_conversions` | implicit port conversion of 3.5 = 4 | 3 |
+| `sequential_float` | clocked integer conversion of 1.5 = 2 | 0 |
+| `unknown_integer_conversion` | unknown integer bits become zero, giving `0xa0` | unknown bits retained (`0xax`) |
+| `formatted_display_and_write` | numeric `%0.2f` output bytes | literal `%0.2f` text; in-process adapter has no output capture API |
+
+These exclusions concern the in-process Veryl simulator only. The Verilator and
+Icarus adapters have their own case-specific verification and tool limitations.
+
+### External floating-point observations
+
+Focused runs on 2026-10-21 with Verilator 5.052 and Icarus 13.0 observed:
+
+- Both tools return `16777217` where FP32 storage must round to `16777216`
+  in Veryl `floating_point::f32_precision_and_conversion` and SV
+  `floating_point::shortreal_storage_precision`. The FP64 comparisons pass.
+- Verilator rejects the real-output-to-integer-port connection in Veryl
+  `floating_point::scalar_port_and_function_conversions` and SV
+  `floating_point::real_ports_and_subroutines`. Icarus passes these cases.
+- Verilator reports the Veryl `unknown_integer_conversion` case unsupported
+  because its adapter does not execute four-state expectations; Icarus passes.
+
+The assertions remain enabled and the external runners continue reporting these
+failures/unsupported cases; no retained JSON baseline or exclusion manifest was
+changed. Other FP64 arithmetic, rounding, bit conversion, comparison and
+sequential cases passed both external tools in these focused runs.
+
+The additional SV conversion-function and zero-divisor cases pass Icarus.
+Verilator 5.052 instead interprets unsigned `32'hffffffff` passed to `$itor`
+as positive `4294967295.0` rather than the signed 32-bit integer `-1.0`, and
+returns false for the self-inequality check on `0.0 / 0.0`. Its positive and
+negative infinity checks pass. These differences remain visible in the
+external results for `real_conversion_functions` and `real_zero_divisor`.
+
+The SV `real_display_formats`, `real_display_negative_zero`, and
+`real_file_display_formats` cases pass Icarus 13.0, including real/shortreal
+arguments, numeric integer conversion, expressions, field width, precision,
+scientific/general output, negative zero, and file display/write formatting.
+Verilator 5.052 rejects the `+` formatting flag in `real_display_formats` as
+an unknown display format code. It prints a lowercase `e` for the uppercase
+`%E` conversion in `real_display_negative_zero`; the negative-zero value is
+otherwise correct. Its `real_file_display_formats` case passes. The shared
+assertions remain enabled, and these external differences are not exclusions.
 
 ## veryl-native-queue-components
 

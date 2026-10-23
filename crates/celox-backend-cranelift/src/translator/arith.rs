@@ -298,6 +298,17 @@ impl SIRTranslator {
         op: &BinaryOp,
         rhs: &RegisterId,
     ) {
+        if let BinaryOp::Float { op, precision } = op {
+            self.translate_float(
+                state,
+                *dst,
+                *lhs,
+                Some(*rhs),
+                super::core::FloatOperation::Binary(*op),
+                *precision,
+            );
+            return;
+        }
         let l_width = state.register_map[lhs].width();
         let r_width = state.register_map[rhs].width();
         let d_width = state.register_map[dst].width();
@@ -396,6 +407,7 @@ impl SIRTranslator {
             };
 
             let mut res_v = match op {
+                BinaryOp::Float { .. } => unreachable!("lowered separately"),
                 BinaryOp::Add => state.builder.ins().iadd(l, r),
                 BinaryOp::Sub => state.builder.ins().isub(l, r),
                 BinaryOp::Mul => state.builder.ins().imul(l, r),
@@ -1390,6 +1402,17 @@ impl SIRTranslator {
         op: &UnaryOp,
         rhs: &RegisterId,
     ) {
+        if let UnaryOp::Float { op, precision } = op {
+            self.translate_float(
+                state,
+                *dst,
+                *rhs,
+                None,
+                super::core::FloatOperation::Unary(*op),
+                *precision,
+            );
+            return;
+        }
         if matches!(
             op,
             UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros
@@ -1414,6 +1437,7 @@ impl SIRTranslator {
             let r = promote_to_physical(state, r_val, r_width, r_is_signed, common_ty);
 
             let res_v = match op {
+                UnaryOp::Float { .. } => unreachable!("lowered separately"),
                 UnaryOp::Minus => state.builder.ins().ineg(r),
                 UnaryOp::Ident | UnaryOp::ToTwoState => r,
                 UnaryOp::BitNot => {
@@ -1475,6 +1499,7 @@ impl SIRTranslator {
                 let r_m = promote_to_physical(state, r_m_val, r_width, r_is_signed, common_ty);
 
                 let res_m = match op {
+                    UnaryOp::Float { .. } => unreachable!("lowered separately"),
                     UnaryOp::Ident | UnaryOp::BitNot => r_m,
                     UnaryOp::ToTwoState => state.builder.ins().iconst(common_ty, 0),
                     UnaryOp::LogicNot | UnaryOp::Or => {

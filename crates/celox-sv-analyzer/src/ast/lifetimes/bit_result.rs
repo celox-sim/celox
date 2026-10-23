@@ -134,7 +134,7 @@ impl Proof<'_> {
     }
 
     /// `true` means no entry bit can subsequently be observed. Unknown control
-    /// flow or calls give no proof; the ordinary lifetime check still rejects.
+    /// flow or calls give no proof; the ordinary lifetime check requires persistent storage.
     fn block(&mut self, statements: &[Stmt]) -> Option<bool> {
         for statement in statements {
             self.remaining = self.remaining.checked_sub(1)?;
@@ -276,7 +276,7 @@ fn pure(expression: &Expr) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn incomplete_or_entry_dependent_scratch_arrays_stay_rejected() {
+    fn incomplete_or_entry_dependent_scratch_arrays_retain_storage() {
         for body in [
             "for(integer i=0;i<1;i=i+1) words[i]=a;",
             "for(integer i=0;i<2;i=i+1) words[0]=a;",
@@ -290,15 +290,12 @@ mod tests {
                 logic[7:0] words[1:0]; logic[7:0] other; {body} \
                 f=words[0]+words[1]; endfunction assign y=f(a); endmodule"
             );
-            let error = crate::analyze_source(&source, std::path::Path::new("partial-scratch.sv"))
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("static variable `words`"), "{body}: {error}");
+            assert_retained(&source, "words");
         }
     }
 
     #[test]
-    fn incomplete_or_entry_dependent_results_stay_rejected() {
+    fn incomplete_or_entry_dependent_results_retain_storage() {
         for body in [
             "for(integer i=0;i<3;i=i+1) f[i]=a[i];",
             "for(integer i=0;i<4;i=i+1) f[0]=a[i];",
@@ -313,13 +310,7 @@ mod tests {
                 function [3:0] f(input logic[3:0] a); {body} endfunction \
                 assign y=f(a); endmodule"
             );
-            let error = crate::analyze_source(&source, std::path::Path::new("partial-result.sv"))
-                .unwrap_err()
-                .to_string();
-            assert!(
-                error.contains("whose result keeps its value"),
-                "{body}: {error}"
-            );
+            assert_retained(&source, "f");
         }
     }
 
@@ -336,9 +327,25 @@ mod tests {
                 assign y=f(a);
             endmodule
         "#;
-        let error = crate::analyze_source(source, std::path::Path::new("index-call.sv"))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("whose result keeps its value"), "{error}");
+        assert_retained(source, "f");
+    }
+
+    fn assert_retained(source: &str, variable: &str) {
+        let ir =
+            crate::analyze_source(source, std::path::Path::new("retained-storage.sv")).unwrap();
+        let module = &ir.modules()[0];
+        let function = module
+            .subroutines()
+            .iter()
+            .find(|function| function.name == "f")
+            .unwrap();
+        let prefix = format!("{variable}@");
+        let name = function
+            .persistent_locals
+            .iter()
+            .find(|name| name.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("missing persistent {variable}: {source}"));
+        assert!(module.signals().iter().any(|signal| signal.name() == name));
+        assert!(!module.locals().iter().any(|local| &local.name == name));
     }
 }

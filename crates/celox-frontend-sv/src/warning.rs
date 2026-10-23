@@ -35,9 +35,14 @@ impl Eq for FrontendWarning {}
 /// What a [`FrontendWarning`] reports.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, thiserror::Error)]
 pub enum FrontendWarningKind {
+    #[error("latch inference inside always_comb: assignments retain their previous values")]
+    InferredLatch,
     /// IEEE 1800-2023 3.14.2.3 requires consistent explicit timing declarations.
     #[error("mixed explicit and default time units or precisions across design elements")]
     MixedTimescale,
+    /// IEEE 1800-2023 9.2.2.4 restricts writes by other processes.
+    #[error("multiple variable drivers for `{signal}` in `{module}` include an always_ff process")]
+    MultipleAlwaysFfDrivers { module: String, signal: String },
     /// Aggregate defaults are a compatibility extension to IEEE 1800-2023 23.2.2.4.
     #[error("default value on unpacked input port `{module}.{port}` is a language extension")]
     UnpackedPortDefault { module: String, port: String },
@@ -144,7 +149,9 @@ impl miette::Diagnostic for FrontendWarning {
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self.kind {
             FrontendWarningKind::MixedTimescale => "mixed_timescale",
+            FrontendWarningKind::MultipleAlwaysFfDrivers { .. } => "multiple_always_ff_drivers",
             FrontendWarningKind::UnpackedPortDefault { .. } => "unpacked_port_default",
+            FrontendWarningKind::InferredLatch => "inferred_latch",
             FrontendWarningKind::MemoryFileWordCount { .. } => "memory_file_word_count",
             FrontendWarningKind::ExitOutsideProgram => "exit_outside_program",
         }))
@@ -156,8 +163,14 @@ impl miette::Diagnostic for FrontendWarning {
 
     fn help<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self.kind {
+            FrontendWarningKind::InferredLatch => {
+                "assign every output on every path, or configure diagnostics.inferred_latch as warn or allow"
+            }
             FrontendWarningKind::MixedTimescale => {
                 "declare timeunit/timeprecision consistently; undeclared scopes use 1ns/1ps when this check is relaxed"
+            }
+            FrontendWarningKind::MultipleAlwaysFfDrivers { .. } => {
+                "IEEE 1800-2023 9.2.2.4 prohibits overlapping writers; use ordinary always procedures, or multiple_always_ff_drivers=warn or allow for compatibility"
             }
             FrontendWarningKind::UnpackedPortDefault { .. } => {
                 "IEEE 1800-2023 23.2.2.4 permits defaults on singular input ports; use unpacked_port_default=warn or allow to enable aggregate defaults"

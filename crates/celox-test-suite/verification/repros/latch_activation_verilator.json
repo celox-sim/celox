@@ -1,0 +1,42 @@
+{
+  "schema_version": 3,
+  "suite_version": "0.11.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "latch::guarded_activation at 40:3: assert_eq q: expected 0x1, got 0x3",
+      "expectation": "Simulation",
+      "name": "latch::guarded_activation",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "passed": 0,
+    "mismatch": 1,
+    "compile_error": 0,
+    "emission_error": 0,
+    "ignored": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "include_ignored": true,
+  "exclude_stronger_than_sv": false,
+  "standard": "IEEE 1800-2023 9.2.2.2.1: expressions written by always_comb are excluded from its implicit sensitivity; a change to seed/en executes the process once, and its q write does not wake it again.",
+  "adapter_free": {
+    "source": "verification/repros/latch_activation.sv",
+    "verilator_command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <build-dir> latch_activation.sv",
+    "verilator_output": "after enabling: q=2; Assertion failed: one activation expected",
+    "icarus_command": "iverilog -g2012 -s Top -o <output> latch_activation.sv; vvp <output>",
+    "icarus_version": "Icarus Verilog version 13.0",
+    "icarus_output": "after enabling: q=1; $finish called at 4",
+    "expected_q_after_enable": 1
+  }
+}

@@ -151,20 +151,13 @@ fn static_locals_written_before_they_are_read_are_temporaries() {
 }
 
 #[test]
-fn static_subroutine_locals_that_keep_their_value_are_unsupported() {
-    for source in [
-        "module Top(input logic clk, output logic [7:0] y);
-           function int f(); int c; c = c + 1; return c; endfunction
-           always_ff @(posedge clk) y <= f();
-         endmodule",
-        "module Top(output logic [7:0] y);
-           function automatic int f(); static int c = 3; c++; return c; endfunction
-           assign y = f();
-         endmodule",
-    ] {
-        let detail = error(source);
-        assert!(detail.contains("static variable `c`"), "{detail}");
-    }
+fn static_task_locals_that_keep_their_value_remain_unsupported() {
+    let detail = error(
+        "module Top(input logic clk, output int y);
+        task count(output int result); static int saved=0; saved++; result=saved; endtask
+        always @(posedge clk) count(y); endmodule",
+    );
+    assert!(detail.contains("static variable `saved`"), "{detail}");
 }
 
 #[test]
@@ -189,7 +182,7 @@ fn static_comb_locals_written_on_some_paths_are_latches() {
            always_comb begin int t; if (a) t = 5; y = a ? t : 0; end
          endmodule",
     );
-    assert!(detail.contains("latch"), "{detail}");
+    assert!(detail.contains("InferredLatch"), "{detail}");
     assert_eq!(
         output(
             "module Top(input logic a, output logic [7:0] y);
@@ -281,13 +274,6 @@ fn interfaces_keep_their_default_lifetime() {
 /// selectors of concatenated targets.
 #[test]
 fn static_function_results_keep_their_value() {
-    let detail = error(
-        "module Top(input logic set, output logic [7:0] y);
-           function logic [7:0] f(input logic s); if (s) f = 8'd7; endfunction
-           assign y = f(set);
-         endmodule",
-    );
-    assert!(detail.contains("whose result keeps its value"), "{detail}");
     assert_eq!(
         output(
             "module Top(output logic [7:0] y);
@@ -346,15 +332,6 @@ fn concatenated_targets_select_with_the_entry_value() {
 /// and writes through arguments of functions called in expressions.
 #[test]
 fn four_state_selectors_repeats_and_inout_arguments() {
-    // An X selector matches no item, so the static result would keep its
-    // previous value.
-    let detail = error(
-        "module Top(input logic a, output logic y);
-           function logic f(input logic s); case (s) 1'b0: f = 0; 1'b1: f = 1; endcase endfunction
-           assign y = f(a);
-         endmodule",
-    );
-    assert!(detail.contains("whose result keeps its value"), "{detail}");
     assert_eq!(
         output(
             "module Top(output logic [7:0] y);

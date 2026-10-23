@@ -1,0 +1,55 @@
+{
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "include_ignored": false,
+  "note": "Focused pre-exclusion compile failures for interface array connections (IEEE 1800-2023 23.3.3.5). Shared sources and assertions remain in src/sv/cases/interfaces.vtest; no failure was converted to a pass.",
+  "counts": {
+    "passed": 0,
+    "rejected": 0,
+    "unexpected_accept": 0,
+    "mismatch": 0,
+    "emission_error": 0,
+    "compile_error": 3,
+    "runtime_error": 0,
+    "unsupported": 0,
+    "ignored": 0
+  },
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:13: assert: elaborate.cc:1574: failed assertion prts.size()==1\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "interfaces::distributes_array_port_connections_to_interface_arrays",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: sorry: Multi-dimensional arrays of instances are not yet supported.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::distributes_multidimensional_connections_to_interface_arrays",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:10: error: Array inputs needs an array index here.\n<case>/source_0.sv:10: error: Failed to elaborate input port 'value' expression (inputs) in instance dut.pairs of module: Pair.\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::distributes_unpacked_connections_to_interface_arrays",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

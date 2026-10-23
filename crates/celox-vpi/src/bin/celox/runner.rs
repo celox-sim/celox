@@ -33,8 +33,6 @@ pub(super) struct ExecutionArgs {
     #[arg(long, value_enum, default_value = "native")]
     pub backend: Backend,
     #[arg(long)]
-    pub four_state: bool,
-    #[arg(long)]
     compile_only: bool,
     /// Write a pointer-free native image during compile-only mode.
     #[arg(long, value_name = "PATH")]
@@ -197,7 +195,7 @@ pub(super) fn run(
         test: design.top.clone(),
         opt_level: design.opt_level.unwrap_or(OptLevel::O2),
         backend: cli.backend,
-        four_state: cli.four_state,
+        four_state: design.four_state.unwrap_or(false),
         compile_only: cli.compile_only,
         native_image_output: cli.native_image_output,
         native_image_input: cli.native_image_input,

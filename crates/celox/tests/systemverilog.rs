@@ -100,8 +100,14 @@ macro_rules! sv_backends {
 
 #[path = "frontends/systemverilog/always_comb.rs"]
 mod always_comb;
+#[path = "frontends/systemverilog/binary_file_io.rs"]
+mod binary_file_io;
+#[path = "frontends/systemverilog/class.rs"]
+mod class;
 #[path = "frontends/systemverilog/edges.rs"]
 mod edges;
+#[path = "frontends/systemverilog/file_core.rs"]
+mod file_core;
 #[path = "frontends/systemverilog/file_io.rs"]
 mod file_io;
 #[path = "frontends/systemverilog/generate.rs"]
@@ -112,6 +118,8 @@ mod hierarchy;
 mod indexed_select;
 #[path = "frontends/systemverilog/interfaces.rs"]
 mod interfaces;
+#[path = "frontends/systemverilog/latch.rs"]
+mod latch;
 #[path = "frontends/systemverilog/literals.rs"]
 mod literals;
 #[path = "frontends/systemverilog/mixed.rs"]
@@ -122,8 +130,14 @@ mod operators;
 mod packed_structs;
 #[path = "frontends/systemverilog/procedural.rs"]
 mod procedural;
+#[path = "frontends/systemverilog/realtime.rs"]
+mod realtime;
 #[path = "frontends/systemverilog/review_regressions.rs"]
 mod review_regressions;
+#[path = "frontends/systemverilog/scan.rs"]
+mod scan;
+#[path = "frontends/systemverilog/string.rs"]
+mod string;
 #[path = "frontends/systemverilog/suite.rs"]
 mod suite;
 #[path = "frontends/systemverilog/synthesizable.rs"]
@@ -217,3 +231,9 @@ fn simulates_systemverilog_always_ff() {
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 1u8.into());
 }
+
+#[path = "frontends/systemverilog/floating_point.rs"]
+mod floating_point;
+
+#[path = "frontends/systemverilog/real_extensions.rs"]
+mod real_extensions;

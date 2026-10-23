@@ -139,6 +139,10 @@ pub trait SimBackend {
     fn set_comb_capture_event_enabled(&mut self, _active_sites: &[bool]) {}
     fn stable_region_size(&self) -> usize;
     fn layout(&self) -> &MemoryLayout;
+    /// The heap that handle slots in this backend's state refer to.
+    fn heap(&self) -> &celox_heap::Heap;
+    /// The heap, for changes made while no compiled code runs.
+    fn heap_mut(&mut self) -> &mut celox_heap::Heap;
 
     // ── event enumeration ───────────────────────────────────────
     fn id_to_addr_slice(&self) -> &[AbsoluteAddr];
@@ -179,7 +183,7 @@ pub trait SimBackend {
         if let Some(trace) = self.layout().trace.as_ref() {
             let len = signal.array_layout.map_or_else(
                 || celox_state_layout::get_byte_size(signal.width),
-                |array| array.plane_size,
+                |array| array.element_count * array.element_stride,
             );
             let (ptr, _) = self.memory_as_ptr();
             // SAFETY: layout homes and metadata fit in the writable state image.

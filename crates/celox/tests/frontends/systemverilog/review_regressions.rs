@@ -239,7 +239,7 @@ fn rejects_inline_enum_ports_instead_of_scalarizing_them() {
 fn rejects_non_integral_ports_instead_of_scalarizing_them() {
     let error = cranelift_build_error(
         r#"
-        module Top(input real value, output logic y);
+        module Top(input chandle value, output logic y);
             assign y = 1'b0;
         endmodule
         "#,
@@ -5426,9 +5426,9 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "always_latch process",
+            "nonblocking assignment inside always_latch",
             r#"
-            module Top(input logic a, output logic y); always_latch y = a; endmodule
+            module Top(input logic a, output logic y); always_latch y <= a; endmodule
         "#,
         ),
         (
@@ -5722,7 +5722,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "unsupported function formal data type",
+            "operator on a real operand",
             r#"
             module Top(input logic [1:0] a, output logic [1:0] y);
                 function automatic logic [1:0] shift(input real value);
@@ -5736,8 +5736,8 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "void function `f` used as a value",
             r#"
             module Top(output logic y);
-                function automatic real f();
-                    return 1'b1;
+                function automatic void f();
+                    return;
                 endfunction
                 assign y = f();
             endmodule
@@ -5758,7 +5758,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         (
             "unsupported parameter data type",
             r#"
-            module Top #(parameter real P = 1) (output logic y);
+            module Top #(parameter chandle P = null) (output logic y);
                 assign y = P;
             endmodule
         "#,
@@ -5793,19 +5793,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                     return a;
                 endfunction
                 assign y = f(a);
-            endmodule
-        "#,
-        ),
-        (
-            "static variable `saved` of subroutine `saved_value` that keeps its value between calls",
-            r#"
-            module Top(input logic set, value, output logic y);
-                function logic saved_value(input logic do_set, input logic new_value);
-                    logic saved;
-                    if (do_set) saved = new_value;
-                    return saved;
-                endfunction
-                assign y = saved_value(set, value);
             endmodule
         "#,
         ),
@@ -6416,7 +6403,7 @@ fn rejects_unsupported_internal_data_types() {
     let error = cranelift_build_error(
         r#"
         module Top(output logic y);
-            real value;
+            chandle value;
             assign y = 1'b0;
         endmodule
         "#,
@@ -8615,7 +8602,7 @@ fn timed_task_edge_processes_allow_initialization_and_disjoint_drivers() {
             always @(negedge clk) begin pause(); q[1] = a; end
         endmodule
     "#;
-    Simulator::from_sv_sources(
+    celox::Simulation::from_sv_sources(
         vec![(source, Path::new("disjoint_timed_drivers.sv"))],
         "Top",
     )
@@ -8652,7 +8639,7 @@ fn waits_on_automatic_task_arguments_still_compile() {
             initial t(0);
         endmodule
     "#;
-    Simulator::from_sv_sources(vec![(source, Path::new("automatic_wait.sv"))], "Top")
+    celox::Simulation::from_sv_sources(vec![(source, Path::new("automatic_wait.sv"))], "Top")
         .build_cranelift()
         .expect("automatic arguments are private; visible go supplies the wakeup");
 }
@@ -8693,4 +8680,142 @@ fn timed_task_edge_drivers_of_package_variables_are_checked_across_instances() {
         error.contains("multiple drivers of package variable `p::q`"),
         "{error}"
     );
+}
+
+mod aggregate_regressions {
+    sv_backends! {
+        fn continuous_function_dynamic_scratch_write(sim) { @case "aggregate_regressions::continuous_function_dynamic_scratch_write"; }
+        fn masked_feed_forward_dependencies(sim) { @case "aggregate_regressions::masked_feed_forward_dependencies"; }
+        fn shared_memory_reads_pre_edge_values(sim) { @case "aggregate_regressions::shared_memory_reads_pre_edge_values"; }
+        fn coincident_disjoint_byte_writers(sim) { @case "aggregate_regressions::coincident_disjoint_byte_writers"; }
+        fn independent_clock_byte_writers(sim) { @case "aggregate_regressions::independent_clock_byte_writers"; }
+
+        fn continuous_nested_concatenated_targets(sim) { @case "aggregate_regressions::continuous_nested_concatenated_targets"; }
+        fn concatenated_runtime_index(sim) { @case "aggregate_regressions::concatenated_runtime_index"; }
+        fn concatenated_static_loop_initializer(sim) { @case "aggregate_regressions::concatenated_static_loop_initializer"; }
+        fn parameter_element_forwarding(sim) { @case "aggregate_regressions::parameter_element_forwarding"; }
+        fn parameter_runtime_element_bit(sim) { @case "aggregate_regressions::parameter_runtime_element_bit"; }
+        fn independent_clock_memory_writers(sim) { @case "aggregate_regressions::independent_clock_memory_writers"; }
+    }
+}
+
+#[test]
+fn shared_ff_memories_keep_native_sparse_next_state() {
+    use celox_design::{SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION};
+    use celox_sir::SIRInstruction;
+
+    let source = r#"module Top(input bit a, b, en,
+        input bit [11:0] addr, input bit [7:0] data, output wire [7:0] q);
+        logic [7:0] mem[4096];
+        always @(posedge a) if (en) begin mem[0] <= data; mem[2] <= data; end
+        always @(posedge b) if (en) mem[addr] <= data;
+        assign q = mem[addr];
+    endmodule"#;
+    for level in [
+        celox::OptLevel::O0,
+        celox::OptLevel::O1,
+        celox::OptLevel::O2,
+    ] {
+        let result = Simulator::from_sv_sources(vec![(source, Path::new("sparse_ram.sv"))], "Top")
+            .opt_level(level)
+            .trace_pre_optimized_sir()
+            .build_with_trace();
+        let mut sim = result.res.unwrap();
+        let memory = sim.program().get_addr(&[], &["mem"]).unwrap();
+        let program = result.trace.pre_optimized_sir.unwrap();
+        let mut sparse_writes = 0;
+        let mut sparse_commits = 0;
+        for instruction in program
+            .sir
+            .eval_apply_ffs
+            .values()
+            .flatten()
+            .flat_map(|unit| unit.blocks.values())
+            .flat_map(|block| &block.instructions)
+        {
+            match instruction {
+                SIRInstruction::Store(address, ..) if address.absolute_addr() == memory => {
+                    assert_eq!(address.region, SPARSE_WORKING_REGION);
+                    sparse_writes += 1;
+                }
+                SIRInstruction::Commit(source, destination, offset, width, _)
+                    if destination.absolute_addr() == memory =>
+                {
+                    assert_ne!(source.region, WORKING_REGION);
+                    assert_ne!(destination.region, WORKING_REGION);
+                    assert_eq!(destination.region, STABLE_REGION);
+                    assert_eq!(source.region, SPARSE_WORKING_REGION);
+                    assert_eq!(*offset, celox_sir::SIROffset::Static(0));
+                    assert_eq!(*width, 4096 * 8);
+                    sparse_commits += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(sparse_writes >= 3);
+        assert_eq!(sparse_commits, 2, "one memory commit per clock domain");
+        let a = sim.event("a");
+        let b = sim.event("b");
+        let en = sim.signal("en");
+        let addr = sim.signal("addr");
+        let data = sim.signal("data");
+        let q = sim.signal("q");
+        for (event, index, value) in [(a, 0u32, 0x12u32), (b, 4095, 0x34), (a, 2, 0x56)] {
+            sim.modify(|io| {
+                io.set(en, 1u8);
+                io.set(addr, index);
+                io.set(data, value);
+            })
+            .unwrap();
+            sim.tick(event).unwrap();
+            assert_eq!(sim.get(q), value.into());
+        }
+        sim.modify(|io| io.set(addr, 4095u32)).unwrap();
+        assert_eq!(sim.get(q), 0x34u32.into());
+    }
+}
+
+#[test]
+fn rejects_overlapping_continuous_concatenation_drivers() {
+    for declaration in ["wire [7:0] q", "logic [7:0] q"] {
+        let source = format!(
+            "module Top(output {declaration}); assign {{q[7:0],q[3:0]}}=12'habc; endmodule"
+        );
+        let error = cranelift_build_error(&source);
+        assert!(
+            error.contains("multiple net drivers") || error.contains("multiple variable drivers"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn masked_reads_preserve_observer_sensitivity_and_real_self_dependencies() {
+    for mask in ["1'b1", "1'bx", "1'bz"] {
+        let source = format!("module Top(output logic q); always_comb q=q & {mask}; endmodule");
+        let error = four_state_cranelift_build_error(&source);
+        assert!(
+            error.contains("latch inference inside always_comb"),
+            "{error}"
+        );
+    }
+    let source = r#"module Top(input logic a, output logic y);
+        always_comb begin y=a & 1'b0; $display("tick"); end
+    endmodule"#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("masked_observer.sv"))], "Top")
+            .four_state(true)
+            .build_cranelift()
+            .unwrap();
+    let a = sim.signal("a");
+    sim.drain_runtime_events();
+    for value in [1u8, 0] {
+        sim.modify(|io| io.set(a, value)).unwrap();
+        assert_eq!(
+            sim.drain_runtime_events(),
+            vec![celox::RuntimeEvent::Display {
+                message: b"tick".to_vec()
+            }]
+        );
+    }
 }

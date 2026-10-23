@@ -1,0 +1,29 @@
+{
+  "standard": "IEEE 1800-2023 4.7 and 23.3.3",
+  "expected": "The output port connects the child's variable to the parent's net as a continuous assignment, which is evaluated after the child's process yields. A pulse the child's always_comb writes inside one evaluation may therefore reach the parent's waiter or not; both 1 and 3 are conforming counts.",
+  "probes": [
+    {
+      "name": "output_port",
+      "note": "The suite case child_port_pulses_reach_waiters_settled. Icarus collapses the port and sees each intermediate value; Verilator and Celox see the settled value.",
+      "source": "module child(input bit a, b, output bit y, c);\n  always_comb begin y = 0; if (a) y = 1; c = b; end\nendmodule\nmodule Top;\n  bit a, b, y6, c6;\n  int n6;\n  child u(.a(a), .b(b), .y(y6), .c(c6));\n  initial forever begin @(y6); n6++; end\n  initial begin #1 a = 1; #1 b = 1; #1 b = 0; #1 $display(\"child=%0d\", n6); $finish; end\nendmodule\n",
+      "verilator_compile": {
+        "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "verilator_run": {
+        "command": "<repro>/obj/VTop",
+        "exit_code": 0,
+        "output": "child=1\n- <repro>/probe.sv:9: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n"
+      },
+      "icarus_compile": {
+        "command": "iverilog -g2012 -s Top -o <repro>/probe.vvp <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "icarus_run": {
+        "command": "vvp <repro>/probe.vvp",
+        "exit_code": 0,
+        "output": "child=3\n<repro>/probe.sv:9: $finish called at 4 (1s)\n"
+      }
+    }
+  ]
+}

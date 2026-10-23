@@ -176,3 +176,441 @@ mod sv {
         );
     }
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn overlapping_always_ff_memories_require_explicit_relaxation() {
+    const SOURCE: &str = r#"module Top(input bit a, b, input bit[1:0] x, y,
+      output wire[7:0] q);
+      logic[7:0] mem[4];
+      always_ff @(posedge a) mem[x] <= 8'h12;
+      always_ff @(posedge b) mem[y] <= 8'h34;
+      assign q=mem[0];
+    endmodule"#;
+    let build = |level| {
+        celox::Simulation::from_sv_sources(
+            vec![(SOURCE, std::path::Path::new("shared_ff_memory.sv"))],
+            "Top",
+        )
+        .diagnostic_policy(policy("multiple_always_ff_drivers", level))
+        .build_cranelift()
+    };
+    let error = build(DiagnosticLevel::Error).err().unwrap().to_string();
+    assert!(error.contains("multiple variable drivers"), "{error}");
+    for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
+        let sim = build(level).unwrap();
+        assert_eq!(
+            sim.warnings().len(),
+            usize::from(level == DiagnosticLevel::Warn)
+        );
+    }
+    let error = celox::Simulation::from_sv_sources(
+        vec![(SOURCE, std::path::Path::new("shared_ff_memory.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(error.contains("multiple variable drivers"), "{error}");
+}
+
+mod inferred_latch {
+    use super::*;
+    use miette::Diagnostic;
+    use std::path::Path;
+
+    const VERYL: &str = "module Top(en: input logic, d: input logic<8>, q: output logic<8>, t: output logic<8>) { always_comb { t = d; if en { q = d; } } }";
+    #[cfg(feature = "systemverilog")]
+    const SV: &str = "module Top(input logic en, input logic [7:0] d, output logic [7:0] q, t); always_comb begin t=d; if(en) q=d; end endmodule";
+
+    fn veryl() -> celox::SimulatorBuilder<'static> {
+        Simulator::builder(VERYL, "Top")
+    }
+
+    fn assert_behavior<B: celox::SimBackend>(mut sim: Simulator<B>, level: DiagnosticLevel) {
+        assert_eq!(
+            sim.warnings().len(),
+            usize::from(level == DiagnosticLevel::Warn),
+            "{:?}",
+            sim.warnings()
+        );
+        if let Some(warning) = sim.warnings().first() {
+            assert_eq!(warning.code().unwrap().to_string(), "inferred_latch");
+            let rendered = celox::render_diagnostic(warning);
+            assert!(rendered.contains("if"), "{rendered}");
+        }
+        let en = sim.signal("en");
+        let d = sim.signal("d");
+        let q = sim.signal("q");
+        sim.modify(|io| {
+            io.set(en, 1u8);
+            io.set(d, 7u8);
+        })
+        .unwrap();
+        assert_eq!(sim.get(q), 7u8.into());
+        sim.modify(|io| io.set(d, 13u8)).unwrap();
+        assert_eq!(sim.get(q), 13u8.into());
+        sim.modify(|io| {
+            io.set(en, 0u8);
+            io.set(d, 99u8);
+        })
+        .unwrap();
+        sim.eval_comb().unwrap();
+        assert_eq!(sim.get(q), 13u8.into());
+    }
+
+    macro_rules! backend {
+        ($name:ident, $method:ident) => {
+            #[test]
+            fn $name() {
+                for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
+                    assert_behavior(
+                        veryl()
+                            .diagnostic_policy(policy("inferred_latch", level))
+                            .$method()
+                            .unwrap(),
+                        level,
+                    );
+                    #[cfg(feature = "systemverilog")]
+                    assert_behavior(
+                        Simulator::from_sv_sources(vec![(SV, Path::new("latch.sv"))], "Top")
+                            .diagnostic_policy(policy("inferred_latch", level))
+                            .$method()
+                            .unwrap(),
+                        level,
+                    );
+                }
+            }
+        };
+    }
+    backend!(interpreter, build_interpreter);
+    backend!(native, build_native);
+    backend!(cranelift, build_cranelift);
+    backend!(wasm, build_wasm);
+    backend!(tiered, build_tiered);
+
+    #[test]
+    fn default_and_explicit_error_report_the_diagnostic_code() {
+        for level in [None, Some(DiagnosticLevel::Error)] {
+            let mut builder = veryl();
+            if let Some(level) = level {
+                builder = builder.diagnostic_policy(policy("inferred_latch", level));
+            }
+            let error = builder.build_interpreter().unwrap_err();
+            assert!(
+                matches!(error.kind(), SimulatorErrorKind::DiagnosticPolicy(_)),
+                "{error}"
+            );
+            assert!(error.to_string().contains("inferred_latch"), "{error}");
+            #[cfg(feature = "systemverilog")]
+            {
+                let error = Simulator::from_sv_sources(vec![(SV, Path::new("latch.sv"))], "Top")
+                    .diagnostic_policy(policy("inferred_latch", DiagnosticLevel::Error))
+                    .build_interpreter()
+                    .unwrap_err();
+                assert!(error.to_string().contains("inferred_latch"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_policy_wins_over_shorthand_in_both_setter_orders() {
+        for level in [
+            DiagnosticLevel::Error,
+            DiagnosticLevel::Warn,
+            DiagnosticLevel::Allow,
+        ] {
+            for flag in [false, true] {
+                for policy_first in [false, true] {
+                    let builder = if policy_first {
+                        veryl()
+                            .diagnostic_policy(policy("inferred_latch", level))
+                            .allow_inferred_latches(flag)
+                    } else {
+                        veryl()
+                            .allow_inferred_latches(flag)
+                            .diagnostic_policy(policy("inferred_latch", level))
+                    };
+                    let result = builder.build_interpreter();
+                    if level == DiagnosticLevel::Error {
+                        assert!(result.unwrap_err().to_string().contains("inferred_latch"));
+                    } else {
+                        assert_behavior(result.unwrap(), level);
+                    }
+                }
+            }
+        }
+        assert_behavior(
+            veryl()
+                .allow_inferred_latches(true)
+                .build_interpreter()
+                .unwrap(),
+            DiagnosticLevel::Allow,
+        );
+    }
+
+    #[test]
+    fn complete_combinational_assignments_do_not_warn() {
+        let source = "module Top(en: input logic, d: input logic<8>, q: output logic<8>) { always_comb { if en { q = d; } else { q = 0; } } }";
+        let sim = Simulator::builder(source, "Top")
+            .diagnostic_policy(policy("inferred_latch", DiagnosticLevel::Warn))
+            .build_interpreter()
+            .unwrap();
+        assert!(sim.warnings().is_empty(), "{:?}", sim.warnings());
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn explicit_and_wildcard_latches_do_not_emit_inferred_diagnostics() {
+        for keyword in ["always_latch", "always @*"] {
+            let source = format!(
+                "module Top(input logic en,d, output logic q); {keyword} if(en) q=d; endmodule"
+            );
+            let sim =
+                Simulator::from_sv_sources(vec![(source.as_str(), Path::new("latch.sv"))], "Top")
+                    .build_interpreter()
+                    .unwrap();
+            assert!(sim.warnings().is_empty());
+        }
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn relaxation_does_not_hide_nba_or_continuous_feedback_errors() {
+        for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
+            for source in [
+                "module Top(input logic en,d, output logic q); always_latch if(en) q<=d; endmodule",
+                "module Top(input logic en, output logic q); assign q=q^en; endmodule",
+            ] {
+                assert!(
+                    Simulator::from_sv_sources(vec![(source, Path::new("bad.sv"))], "Top")
+                        .diagnostic_policy(policy("inferred_latch", level))
+                        .build_interpreter()
+                        .is_err()
+                );
+            }
+        }
+    }
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn state_reading_processes_use_the_same_latch_diagnostic() {
+        let source = "module Top(input logic en, output logic [7:0] q); always_comb if(en) q=$time; endmodule";
+        let builder =
+            || Simulator::from_sv_sources(vec![(source, Path::new("state_latch.sv"))], "Top");
+        assert!(
+            builder()
+                .build_interpreter()
+                .unwrap_err()
+                .to_string()
+                .contains("inferred_latch")
+        );
+        for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
+            let sim = builder()
+                .diagnostic_policy(policy("inferred_latch", level))
+                .build_interpreter()
+                .unwrap();
+            assert_eq!(
+                sim.warnings().len(),
+                usize::from(level == DiagnosticLevel::Warn)
+            );
+        }
+        for body in [
+            "q=$time;",
+            "if(en) q=$time; else q=0;",
+            "if(1) q=$time;",
+            "q[3:0]=$time; q[7:4]=$time;",
+        ] {
+            let source = format!(
+                "module Top(input logic en, output logic [7:0] q); always_comb begin {body} end endmodule"
+            );
+            let sim = Simulator::from_sv_sources(
+                vec![(source.as_str(), Path::new("complete_state.sv"))],
+                "Top",
+            )
+            .diagnostic_policy(policy("inferred_latch", DiagnosticLevel::Warn))
+            .build_interpreter()
+            .unwrap();
+            assert!(sim.warnings().is_empty(), "{body}: {:?}", sim.warnings());
+        }
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn static_block_locals_participate_in_latch_diagnostics() {
+        for body in [
+            "int t; if(a) t=5; y=a ? t : 0;",
+            // State-reading processes bypass symbolic comb lowering entirely.
+            "int t; if(a) t=5; y=$time+t;",
+        ] {
+            let source = format!(
+                "module Top(input logic a, output logic [7:0] y); always_comb begin {body} end endmodule"
+            );
+            let builder = || {
+                Simulator::from_sv_sources(
+                    vec![(source.as_str(), Path::new("static_latch.sv"))],
+                    "Top",
+                )
+            };
+            assert!(
+                builder()
+                    .build_interpreter()
+                    .expect_err(body)
+                    .to_string()
+                    .contains("inferred_latch"),
+                "{body}"
+            );
+            for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
+                let sim = builder()
+                    .diagnostic_policy(policy("inferred_latch", level))
+                    .build_interpreter()
+                    .unwrap();
+                assert_eq!(
+                    sim.warnings().len(),
+                    usize::from(level == DiagnosticLevel::Warn),
+                    "{body}: {:?}",
+                    sim.warnings()
+                );
+            }
+        }
+        for body in [
+            // A static local whose entry value is never observed is safely
+            // represented as an initialized activation-local temporary.
+            "int t; if(a) t=5; y=$time;",
+            "automatic int t; if(a) t=5; y=a ? t : 0;",
+            "automatic int t; if(a) t=5; y=$time;",
+            "int t; if(a) t=5; else t=0; y=$time+t;",
+        ] {
+            let source = format!(
+                "module Top(input logic a, output logic [7:0] y); always_comb begin {body} end endmodule"
+            );
+            let sim = Simulator::from_sv_sources(
+                vec![(source.as_str(), Path::new("complete_local.sv"))],
+                "Top",
+            )
+            .diagnostic_policy(policy("inferred_latch", DiagnosticLevel::Warn))
+            .build_interpreter()
+            .unwrap();
+            assert!(sim.warnings().is_empty(), "{body}: {:?}", sim.warnings());
+        }
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn complete_nonzero_lsb_state_reading_slice_does_not_warn() {
+        let source = "module Top(input logic en, output logic [7:0] q); always_comb if(en) q[7:4]=$time; else q[7:4]=0; endmodule";
+        for level in [DiagnosticLevel::Error, DiagnosticLevel::Warn] {
+            let sim =
+                Simulator::from_sv_sources(vec![(source, Path::new("complete_slice.sv"))], "Top")
+                    .diagnostic_policy(policy("inferred_latch", level))
+                    .build_interpreter()
+                    .unwrap();
+            assert!(sim.warnings().is_empty(), "{:?}", sim.warnings());
+        }
+    }
+
+    // IEEE 1800-2023 9.2.2.2.1 excludes written expressions from implicit
+    // sensitivity. A procedural read of previous q is state, not an endlessly
+    // retriggering continuous-assignment feedback loop.
+    #[cfg(feature = "systemverilog")]
+    fn assert_complete_read_before_write_activation<B: celox::SimBackend>(
+        mut sim: Simulator<B>,
+        level: DiagnosticLevel,
+    ) {
+        assert_eq!(
+            sim.warnings().len(),
+            usize::from(level == DiagnosticLevel::Warn)
+        );
+        let en = sim.signal("en");
+        let q = sim.signal("q");
+        for (input, expected) in [(0u8, 0u8), (1, 1), (0, 1), (1, 0)] {
+            sim.modify(|io| io.set(en, input)).unwrap();
+            assert_eq!(sim.get(q), expected.into());
+            sim.eval_comb().unwrap();
+            sim.eval_comb().unwrap();
+            assert_eq!(sim.get(q), expected.into());
+        }
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn complete_procedural_read_before_write_is_recoverable_state() {
+        let source = "module Top(input logic en, output logic q); always_comb q=q^en; endmodule";
+        let builder =
+            || Simulator::from_sv_sources(vec![(source, Path::new("procedural_state.sv"))], "Top");
+        let error = builder().build_interpreter().unwrap_err().to_string();
+        assert!(error.contains("inferred_latch"), "{error}");
+        for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
+            assert_complete_read_before_write_activation(
+                builder()
+                    .diagnostic_policy(policy("inferred_latch", level))
+                    .build_interpreter()
+                    .unwrap(),
+                level,
+            );
+            assert_complete_read_before_write_activation(
+                builder()
+                    .diagnostic_policy(policy("inferred_latch", level))
+                    .build_native()
+                    .unwrap(),
+                level,
+            );
+            assert_complete_read_before_write_activation(
+                builder()
+                    .diagnostic_policy(policy("inferred_latch", level))
+                    .build_cranelift()
+                    .unwrap(),
+                level,
+            );
+            assert_complete_read_before_write_activation(
+                builder()
+                    .diagnostic_policy(policy("inferred_latch", level))
+                    .build_wasm()
+                    .unwrap(),
+                level,
+            );
+        }
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn complete_state_reading_array_assignments_do_not_warn() {
+        let source = "module Top(output logic [7:0] q); logic [7:0] a[2]; always_comb begin a[0]=$time; a[1]=$time; end assign q=a[0]; endmodule";
+        let sim = Simulator::from_sv_sources(vec![(source, Path::new("state_array.sv"))], "Top")
+            .diagnostic_policy(policy("inferred_latch", DiagnosticLevel::Warn))
+            .build_interpreter()
+            .unwrap();
+        assert!(sim.warnings().is_empty(), "{:?}", sim.warnings());
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn an_authored_process_warns_once_across_instances() {
+        let source = "module Latch(input logic en,d, output logic q); always_comb if(en) q=d; endmodule module Top(input logic en,d, output logic a,b); Latch u(en,d,a); Latch v(en,d,b); endmodule";
+        let sim = Simulator::from_sv_sources(vec![(source, Path::new("instances.sv"))], "Top")
+            .diagnostic_policy(policy("inferred_latch", DiagnosticLevel::Warn))
+            .build_interpreter()
+            .unwrap();
+        assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
+        let source = "module Latch(en: input logic, d: input logic, q: output logic) { always_comb { if en { q = d; } } } module Top(en: input logic, d: input logic, a: output logic, b: output logic) { inst u: Latch(en,d,q:a); inst v: Latch(en,d,q:b); }";
+        let sim = Simulator::builder(source, "Top")
+            .diagnostic_policy(policy("inferred_latch", DiagnosticLevel::Warn))
+            .build_interpreter()
+            .unwrap();
+        assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn out_of_bounds_state_writes_do_not_expand_diagnostic_masks() {
+        let source = "module Top(output logic [7:0] q); logic [7:0] a[2]; always_comb begin q=$time; a[-1]=$time; a[2147483647]=$time; end endmodule";
+        let error = Simulator::from_sv_sources(vec![(source, Path::new("oob_state.sv"))], "Top")
+            .diagnostic_policy(policy("inferred_latch", DiagnosticLevel::Warn))
+            .build_interpreter()
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("outside its declared range"),
+            "{error}"
+        );
+    }
+}

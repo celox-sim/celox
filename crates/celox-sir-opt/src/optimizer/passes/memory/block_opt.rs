@@ -136,7 +136,10 @@ fn schedule_block_interleaved<A: Clone + PartialEq + Eq + std::hash::Hash>(
     let mut indeg = vec![0usize; n];
 
     let add_edge = |from: usize, to: usize, succs: &mut Vec<Vec<usize>>, indeg: &mut Vec<usize>| {
-        if !succs[from].contains(&to) {
+        // Every call below targets the current j of the ascending instruction
+        // scan. Successor lists therefore grow in order; a duplicate data or
+        // memory edge can only equal the most recently appended destination.
+        if succs[from].last() != Some(&to) {
             succs[from].push(to);
             indeg[to] += 1;
         }
@@ -1380,6 +1383,60 @@ mod tests {
             })
             .collect();
         subsume_static_loads_with_types(instructions, &register_map)
+    }
+
+    #[test]
+    fn high_fanout_schedule_preserves_repeated_data_and_memory_dependencies() {
+        let mut instructions = vec![SIRInstruction::Load(
+            RegisterId(0),
+            7u32,
+            SIROffset::Static(0),
+            8,
+        )];
+        for register in 1..4097 {
+            instructions.push(SIRInstruction::Binary(
+                RegisterId(register),
+                RegisterId(0),
+                crate::ir::BinaryOp::Add,
+                RegisterId(0),
+            ));
+        }
+        // This edge is discovered both as a data dependency and as WAR.
+        instructions.push(SIRInstruction::Store(
+            7,
+            SIROffset::Static(0),
+            8,
+            RegisterId(0),
+            Vec::new(),
+            Vec::new(),
+        ));
+        instructions.push(SIRInstruction::Load(
+            RegisterId(4097),
+            7,
+            SIROffset::Static(0),
+            8,
+        ));
+        let original_len = instructions.len();
+        schedule_instructions(&mut instructions, 8);
+        assert_eq!(instructions.len(), original_len);
+        let load_before = instructions
+            .iter()
+            .position(|inst| matches!(inst, SIRInstruction::Load(RegisterId(0), ..)))
+            .unwrap();
+        let store = instructions
+            .iter()
+            .position(|inst| matches!(inst, SIRInstruction::Store(..)))
+            .unwrap();
+        let load_after = instructions
+            .iter()
+            .position(|inst| matches!(inst, SIRInstruction::Load(RegisterId(4097), ..)))
+            .unwrap();
+        assert!(load_before < store && store < load_after);
+        for (index, instruction) in instructions.iter().enumerate() {
+            if matches!(instruction, SIRInstruction::Binary(..)) {
+                assert!(load_before < index);
+            }
+        }
     }
 
     #[test]

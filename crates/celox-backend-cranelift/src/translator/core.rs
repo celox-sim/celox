@@ -12,6 +12,13 @@ use crate::{
 };
 
 use super::MemoryLayout;
+use celox_sir::{FloatBinaryOp as FB, FloatPrecision, FloatUnaryOp as FU};
+
+#[derive(Clone, Copy)]
+pub(super) enum FloatOperation {
+    Binary(FB),
+    Unary(FU),
+}
 
 /// Pre-load trigger signal values at function entry for register-based
 /// edge detection. Only needed when `emit_triggers` is enabled (Simulation mode).
@@ -482,23 +489,35 @@ impl SIRTranslator {
             state.mem_ptr,
             celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET as i32,
         );
+        // The heap helper sits two slots before the user table and takes the
+        // state pointer before its arguments.
+        let heap = func == celox_sir::extern_abi::HEAP_HELPER_ID;
         let function = state.builder.ins().load(
             types::I64,
             MemFlags::trusted(),
             table,
-            i32::try_from(func as u64 * 8).expect("extern function index fits the table"),
+            if heap {
+                -16
+            } else {
+                i32::try_from(func as u64 * 8).expect("extern function index fits the table")
+            },
         );
 
         let mut signature = Signature::new(self.target_config.default_call_conv);
         signature
             .params
-            .extend(args.iter().map(|_| AbiParam::new(types::I64)));
+            .extend((0..args.len() + usize::from(heap)).map(|_| AbiParam::new(types::I64)));
         signature.returns.push(AbiParam::new(types::I64));
         let signature = state.builder.import_signature(signature);
 
-        let arguments = args
-            .iter()
-            .map(|arg| self.extern_call_argument(state, *arg))
+        let arguments = heap
+            .then_some(state.mem_ptr)
+            .into_iter()
+            .chain(
+                args.iter()
+                    .map(|arg| self.extern_call_argument(state, *arg))
+                    .collect::<Vec<_>>(),
+            )
             .collect::<Vec<_>>();
         let call = state
             .builder
@@ -510,6 +529,181 @@ impl SIRTranslator {
             let value = self.extern_call_result(state, dst, result);
             state.regs.insert(dst, value);
         }
+    }
+
+    pub(super) fn translate_float(
+        &self,
+        state: &mut TranslationState,
+        dst: RegisterId,
+        lhs: RegisterId,
+        rhs: Option<RegisterId>,
+        op: FloatOperation,
+        precision: FloatPrecision,
+    ) {
+        let a = state.regs[&lhs].first_value(state.builder);
+        let a = if matches!(
+            op,
+            FloatOperation::Unary(FU::FromSigned { .. } | FU::FromUnsigned { .. })
+        ) {
+            if let Some(mask) = state.regs[&lhs].first_mask(state.builder) {
+                let known = state.builder.ins().bnot(mask);
+                state.builder.ins().band(a, known)
+            } else {
+                a
+            }
+        } else {
+            a
+        };
+
+        let a = if state.builder.func.dfg.value_type(a) == types::I64 {
+            a
+        } else {
+            state.builder.ins().uextend(types::I64, a)
+        };
+        let b = if let Some(rhs) = rhs {
+            let b = state.regs[&rhs].first_value(state.builder);
+            if state.builder.func.dfg.value_type(b) == types::I64 {
+                b
+            } else {
+                state.builder.ins().uextend(types::I64, b)
+            }
+        } else {
+            state.builder.ins().iconst(types::I64, 0)
+        };
+        if matches!(
+            op,
+            FloatOperation::Binary(
+                FB::Add
+                    | FB::Sub
+                    | FB::Mul
+                    | FB::Div
+                    | FB::Eq
+                    | FB::Ne
+                    | FB::Lt
+                    | FB::Le
+                    | FB::Gt
+                    | FB::Ge
+            ) | FloatOperation::Unary(
+                FU::Neg
+                    | FU::ToBool
+                    | FU::FromSigned { .. }
+                    | FU::FromUnsigned { .. }
+                    | FU::Convert { .. }
+            )
+        ) {
+            let ty = if precision == FloatPrecision::F64 {
+                types::F64
+            } else {
+                types::F32
+            };
+            let result = if let FloatOperation::Unary(
+                FU::FromSigned { width } | FU::FromUnsigned { width },
+            ) = op
+            {
+                let mut integer = a;
+                if width < 64 {
+                    integer = state.builder.ins().ishl_imm_u(integer, (64 - width) as i64);
+                    integer = if matches!(op, FloatOperation::Unary(FU::FromSigned { .. })) {
+                        state.builder.ins().sshr_imm_u(integer, (64 - width) as i64)
+                    } else {
+                        state.builder.ins().ushr_imm_u(integer, (64 - width) as i64)
+                    };
+                }
+                if matches!(op, FloatOperation::Unary(FU::FromSigned { .. })) {
+                    state.builder.ins().fcvt_from_sint(ty, integer)
+                } else {
+                    state.builder.ins().fcvt_from_uint(ty, integer)
+                }
+            } else {
+                let float_bits = |builder: &mut FunctionBuilder, bits| {
+                    let bits = if ty == types::F32 {
+                        builder.ins().ireduce(types::I32, bits)
+                    } else {
+                        bits
+                    };
+                    builder.ins().bitcast(ty, MemFlags::new(), bits)
+                };
+                let a = float_bits(state.builder, a);
+                let b = float_bits(state.builder, b);
+                match op {
+                    FloatOperation::Binary(FB::Add) => state.builder.ins().fadd(a, b),
+                    FloatOperation::Binary(FB::Sub) => state.builder.ins().fsub(a, b),
+                    FloatOperation::Binary(FB::Mul) => state.builder.ins().fmul(a, b),
+                    FloatOperation::Binary(FB::Div) => state.builder.ins().fdiv(a, b),
+                    FloatOperation::Binary(
+                        comparison @ (FB::Eq | FB::Ne | FB::Lt | FB::Le | FB::Gt | FB::Ge),
+                    ) => {
+                        let condition = match comparison {
+                            FB::Eq => FloatCC::Equal,
+                            FB::Ne => FloatCC::NotEqual,
+                            FB::Lt => FloatCC::LessThan,
+                            FB::Le => FloatCC::LessThanOrEqual,
+                            FB::Gt => FloatCC::GreaterThan,
+                            FB::Ge => FloatCC::GreaterThanOrEqual,
+                            _ => unreachable!(),
+                        };
+                        state.builder.ins().fcmp(condition, a, b)
+                    }
+                    FloatOperation::Unary(FU::Neg) => state.builder.ins().fneg(a),
+                    FloatOperation::Unary(FU::ToBool) => {
+                        let zero = if ty == types::F32 {
+                            state.builder.ins().f32const(0.0)
+                        } else {
+                            state.builder.ins().f64const(0.0)
+                        };
+                        state.builder.ins().fcmp(FloatCC::NotEqual, a, zero)
+                    }
+                    FloatOperation::Unary(FU::Convert {
+                        to: FloatPrecision::F32,
+                    }) if ty == types::F64 => state.builder.ins().fdemote(types::F32, a),
+                    FloatOperation::Unary(FU::Convert {
+                        to: FloatPrecision::F64,
+                    }) if ty == types::F32 => state.builder.ins().fpromote(types::F64, a),
+                    FloatOperation::Unary(FU::Convert { .. }) => a,
+                    _ => unreachable!("known floating operation"),
+                }
+            };
+            let result_ty = state.builder.func.dfg.value_type(result);
+            let result = if result_ty == types::F32 {
+                let raw = state
+                    .builder
+                    .ins()
+                    .bitcast(types::I32, MemFlags::new(), result);
+                state.builder.ins().uextend(types::I64, raw)
+            } else if result_ty == types::F64 {
+                state
+                    .builder
+                    .ins()
+                    .bitcast(types::I64, MemFlags::new(), result)
+            } else {
+                state.builder.ins().uextend(types::I64, result)
+            };
+            let value = self.extern_call_result(state, dst, result);
+            state.regs.insert(dst, value);
+            return;
+        }
+        let code = match op {
+            FloatOperation::Binary(op) => celox_sir::float::binary_code(op, precision),
+            FloatOperation::Unary(op) => celox_sir::float::unary_code(op, precision),
+        };
+        let c = state.builder.ins().iconst(types::I64, code as i64);
+        let address = state.builder.ins().iconst(
+            types::I64,
+            celox_sir::float::evaluate as *const () as usize as i64,
+        );
+        let mut signature = Signature::new(self.target_config.default_call_conv);
+        signature
+            .params
+            .extend((0..3).map(|_| AbiParam::new(types::I64)));
+        signature.returns.push(AbiParam::new(types::I64));
+        let signature = state.builder.import_signature(signature);
+        let call = state
+            .builder
+            .ins()
+            .call_indirect(signature, address, &[a, b, c]);
+        let result = state.builder.inst_results(call)[0];
+        let value = self.extern_call_result(state, dst, result);
+        state.regs.insert(dst, value);
     }
 
     /// The 64-bit C integer passed for an extern call argument.
@@ -555,12 +749,15 @@ impl SIRTranslator {
                 builder.ins().ireduce(cl_type, raw)
             }
         };
-        let ty = ExternValue::of_verified(&state.register_map[&dst]);
+        let ty = ExternValue::of(&state.register_map[&dst]).unwrap_or(ExternValue::Integer {
+            width: state.register_map[&dst].width(),
+            signed: false,
+        });
         // Narrowing truncates a result to the register's type, which is wider
         // than a one-bit register.
         let value = match ty.result_value_mask() {
-            1 => state.builder.ins().band_imm_u(result, 1),
-            _ => result,
+            u64::MAX => result,
+            mask => state.builder.ins().band_imm_u(result, mask as i64),
         };
         let value = narrow(state.builder, value);
         let mask = match ty {
@@ -1485,7 +1682,11 @@ impl SIRTranslator {
                 &cross_chunk_targets,
                 cross_chunk_edges,
                 chunk_func_refs,
-                &chunk.outgoing_spills,
+                chunk
+                    .outgoing_spills_at
+                    .get(id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
                 scratch_base_offset,
             );
         }

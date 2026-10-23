@@ -870,6 +870,7 @@ fn blocks_vector_live_range(inst: &MInst, shift_encoding: VariableShiftEncoding)
 
 pub(crate) fn clobbers_xmm(inst: &MInst, register: X86PhysVec) -> bool {
     match inst {
+        MInst::FloatBinary { .. } | MInst::FloatUnary { .. } => register.0 <= 1,
         MInst::PackedLaneCompare { .. } => register.0 <= 5,
         MInst::PackedByteAffineCompare { .. } => register.0 <= 4,
         MInst::MemCopy { .. } => register.0 == 0,
@@ -884,6 +885,50 @@ pub(crate) fn clobbers_xmm(inst: &MInst, register: X86PhysVec) -> bool {
 mod tests {
     use super::*;
     use crate::native::mir::{BlockId, MBlock, PhiNode, SpillDesc, VRegAllocator};
+
+    #[test]
+    fn float_temporaries_do_not_clobber_live_simd_values() {
+        let mut scalar = VRegAllocator::new();
+        let input = scalar.alloc();
+        let output = scalar.alloc();
+        let mut func = MFunction::new(scalar, vec![SpillDesc::transient(); 2]);
+        let vectors = (0..9).map(|_| func.alloc_x86_vec()).collect::<Vec<_>>();
+        let mut block = MBlock::new(BlockId(0));
+        for &dst in &vectors {
+            block.push(MInst::X86Simd(X86SimdInst::Zero128 { dst }));
+        }
+        block.push(MInst::LoadImm {
+            dst: input,
+            value: 1.5f64.to_bits(),
+        });
+        block.push(MInst::FloatBinary {
+            dst: output,
+            lhs: input,
+            rhs: input,
+            op: celox_sir::FloatBinaryOp::Add,
+            precision: celox_sir::FloatPrecision::F64,
+        });
+        for (index, &src) in vectors.iter().enumerate() {
+            block.push(MInst::X86Simd(X86SimdInst::Store128 {
+                base: BaseReg::SimState,
+                offset: (index * 16) as i32,
+                src,
+            }));
+        }
+        block.push(MInst::Return);
+        func.blocks.push(block);
+        for tick_loop in [false, true] {
+            let allocation = allocate(&func, 0, tick_loop);
+            for (_, location) in allocation.assignments {
+                if let X86VectorLocation::Register(register) = location {
+                    assert!(register.0 > 1, "FP clobbers must exclude XMM0/1");
+                }
+            }
+            if !tick_loop {
+                assert!(allocation.spilled_values >= 2);
+            }
+        }
+    }
 
     #[test]
     fn shared_adjacent_load_pair_becomes_one_vector_value() {

@@ -11,6 +11,7 @@ use celox_runtime::{
     UnitExecutor, host_watch,
 };
 
+mod differential;
 mod vcd_tasks;
 
 /// Saved state of a [`Simulation`], created by [`Simulation::checkpoint`]:
@@ -64,6 +65,13 @@ impl<B: SimBackend> std::fmt::Debug for SimulationCheckpoint<B> {
 pub struct Simulation<B: SimBackend = crate::DefaultBackend> {
     pub(crate) simulator: Simulator<B>,
     pub(crate) state: SimulationState<B>,
+    /// The reference simulation every step is checked against in
+    /// [`crate::SchedulerMode::Differential`].
+    shadow: Option<Box<Simulation<B>>>,
+    /// Steps checked against the shadow.
+    checked_steps: u64,
+    /// Why [`crate::SchedulerMode::Differential`] has no shadow.
+    unchecked: Option<&'static str>,
 }
 
 impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
@@ -116,6 +124,19 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         self.runtime_finish()
     }
 
+    fn reset_declaration_startup(&mut self) -> Result<(), Halt> {
+        self.reset_declaration_state();
+        Ok(())
+    }
+    fn prime_declaration_startup(&mut self) -> Result<(), Halt> {
+        self.prime_declaration_state();
+        Ok(())
+    }
+    fn apply_declaration_startup(&mut self) -> Result<(), Halt> {
+        self.apply_ordinary_initial_state();
+        Ok(())
+    }
+
     fn host_request(
         &mut self,
         request: &celox_design::HostRequestSite<SignalRef>,
@@ -125,8 +146,12 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
             celox_design::HostRequestKind::Plusargs => {
                 self.run_plusargs_request(request, timestamp)
             }
+            celox_design::HostRequestKind::Distribution => {
+                self.run_distribution_request(request, timestamp)
+            }
             celox_design::HostRequestKind::FileIo => self.run_file_io_request(request, timestamp),
             celox_design::HostRequestKind::Vcd => self.run_vcd_request(request, timestamp),
+            celox_design::HostRequestKind::Scan => self.run_scan_request(request, timestamp),
         }
     }
 }
@@ -199,6 +224,10 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
     }
 
     fn try_finish_timed_step(&mut self, timestamp: u64) -> Result<(), Halt> {
+        // The time slot is over: no kernel runs, and its updates are in
+        // state memory.
+        self.take_heap_fault().map_err(Halt::Error)?;
+        self.heap_safepoint();
         self.start_sv_vcd(timestamp).map_err(|error| {
             Halt::Error(RuntimeErrorCode::Runtime {
                 message: format!("VCD setup failed: {error}"),
@@ -282,19 +311,36 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
 }
 
 impl<B: SimBackend> Simulation<B> {
-    pub(crate) fn new(mut simulator: Simulator<B>) -> Self {
-        let state = simulation_state(&simulator);
+    #[cfg(test)]
+    pub(crate) fn new(simulator: Simulator<B>) -> Self {
+        Self::try_new(simulator).expect("runtime static declaration initialization failed")
+    }
+
+    pub(crate) fn try_new(mut simulator: Simulator<B>) -> Result<Self, RuntimeErrorCode> {
+        let mut state = simulation_state(&simulator);
         simulator.host_watch = host_watch(&simulator.backend, &simulator.schedule);
         // Only a timed simulation ends at an RTL `$finish`; a bare
         // `Simulator`, ticks included, leaves that to the host.
         simulator.finish_sites = simulator.schedule.finish_sites;
         simulator.skip_runtime_finish();
-        Self { simulator, state }
+        state.initialize_declarations(&mut simulator)?;
+        Ok(Self {
+            simulator,
+            state,
+            shadow: None,
+            checked_steps: 0,
+            unchecked: None,
+        })
     }
 
     /// Returns warnings emitted during compilation.
     pub fn warnings(&self) -> &[crate::CompilationWarning] {
         self.simulator.warnings()
+    }
+
+    /// Returns a reference to the compiled SIR program.
+    pub fn program(&self) -> &crate::ir::RuntimeProgram {
+        self.simulator.program()
     }
 
     /// Save the design state, simulation time, clocks and pending events.
@@ -342,6 +388,9 @@ impl<B: SimBackend> Simulation<B> {
         self.state.advance_time(&mut self.simulator.backend, time);
         self.simulator.host_watch.set_log(host_writes);
         self.simulator.frozen = self.state.is_finished();
+        // Capturing a state during a stopped initializer is forbidden. A
+        // successfully loaded file therefore replaces that transient phase.
+        self.simulator.declaration_phase = false;
         Ok(())
     }
 
@@ -364,6 +413,7 @@ impl<B: SimBackend> Simulation<B> {
             })
             .map_err(|_| CheckpointError::DesignMismatch)?;
         self.simulator.restore(&checkpoint.simulator)?;
+        self.simulator.declaration_phase = false;
         self.simulator
             .host_watch
             .set_log(checkpoint.host_writes.clone());
@@ -492,13 +542,22 @@ impl<B: SimBackend> Simulation<B> {
     /// Returns the new simulation time, the current time when only host
     /// writes were settled, or None if nothing was to do.
     pub fn step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
-        self.state.step(&mut self.simulator)
+        self.step_until(u64::MAX)
     }
 
     /// [`Self::step`] that, after settling host writes at the current time,
     /// does not advance past `end_time`.
     fn step_until(&mut self, end_time: u64) -> Result<Option<u64>, RuntimeErrorCode> {
-        self.state.step_until(&mut self.simulator, end_time)
+        let Some(mut shadow) = self.shadow.take() else {
+            return self.state.step_until(&mut self.simulator, end_time);
+        };
+        let mut check = differential::ShadowCheck::new(&mut shadow);
+        let result = self
+            .state
+            .step_until_observed(&mut self.simulator, end_time, &mut check);
+        self.checked_steps += check.checked;
+        self.shadow = Some(shadow);
+        result
     }
 
     /// Advance time and run until `end_time` (inclusive).
@@ -507,26 +566,21 @@ impl<B: SimBackend> Simulation<B> {
     /// slot of the stop, with [`Self::is_stopped`] set; calling this again
     /// continues.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
-        if end_time < self.state.time() {
-            // Time only moves forward. Moving the timestamp back while the
-            // design keeps the state it reached would leave the two describing
-            // different moments, so an earlier target is a no-op.
+        let reached = match self.shadow.take() {
+            None => self.state.run_until(&mut self.simulator, end_time)?,
+            Some(mut shadow) => {
+                let mut check = differential::ShadowCheck::new(&mut shadow);
+                let result =
+                    self.state
+                        .run_until_observed(&mut self.simulator, end_time, &mut check);
+                self.checked_steps += check.checked;
+                self.shadow = Some(shadow);
+                result?
+            }
+        };
+        if !reached {
             return Ok(());
         }
-        while let Some(next_time) = self.state.next_event_time() {
-            if next_time > end_time {
-                break;
-            }
-            self.step_until(end_time)?;
-            if self.state.is_stopped() {
-                return Ok(());
-            }
-        }
-        if self.state.is_finished() {
-            return Ok(());
-        }
-        self.state
-            .advance_time(&mut self.simulator.backend, end_time);
         if let Err(error) = self.simulator.try_dump_unless_rewound(end_time) {
             if matches!(&error, crate::simulator::DumpError::Runtime(_)) {
                 self.flush_error_output();
@@ -867,23 +921,16 @@ mod process_tests {
                     .unwrap(),
                 steps as u64,
             );
-            let image = builder(four_state, steps)
+            // A native image starts an untimed Simulator, which runs no
+            // process.
+            let error = builder(four_state, steps)
                 .compile_native()
-                .unwrap()
-                .into_program_image();
-            let image = crate::NativeProgramImage::from_container_bytes(
-                &image.to_container_bytes().unwrap(),
-            )
-            .unwrap();
-            check(
-                Simulation::new(
-                    Simulator::from_sources(Vec::new(), "Processes")
-                        .emit_triggers()
-                        .build_native_from_image(image)
-                        .unwrap(),
-                ),
-                steps as u64,
-            );
+                .map(|_| ())
+                .unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                crate::SimulatorErrorKind::ProcessRequiresSimulation(_)
+            ));
         }
     }
 
@@ -1407,7 +1454,7 @@ mod four_state_edge_tests {
     use num_bigint::BigUint;
 
     use super::Simulation;
-    use crate::{SimBackend, Simulator};
+    use crate::SimBackend;
 
     /// The levels of a clock walking all twelve changes between 0, 1, x and
     /// z (an Euler circuit from 0), as (value, mask), with the posedges and
@@ -1431,15 +1478,15 @@ mod four_state_edge_tests {
     macro_rules! on_every_backend {
         ($builder:expr, $check:ident) => {{
             let builder = || $builder.four_state(true).emit_triggers();
-            $check(Simulation::new(builder().build_interpreter().unwrap()));
-            $check(Simulation::new(builder().build_cranelift().unwrap()));
-            $check(Simulation::new(builder().build_wasm().unwrap()));
-            $check(Simulation::new(builder().build_tiered().unwrap()));
+            $check(builder().build_interpreter().unwrap());
+            $check(builder().build_cranelift().unwrap());
+            $check(builder().build_wasm().unwrap());
+            $check(builder().build_tiered().unwrap());
             #[cfg(any(
                 all(target_arch = "x86_64", not(feature = "arm64-codegen")),
                 all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
             ))]
-            $check(Simulation::new(builder().build_native().unwrap()));
+            $check(builder().build_native().unwrap());
         }};
     }
 
@@ -1601,7 +1648,7 @@ mod four_state_edge_tests {
                 );
             }
         }
-        on_every_backend!(Simulator::from_frontend(wait_design()), check);
+        on_every_backend!(Simulation::from_frontend(wait_design()), check);
     }
 
     #[test]
@@ -1613,7 +1660,7 @@ mod four_state_edge_tests {
                 assert_eq!(get(&mut sim, "neg"), neg.into(), "negedges at {time}");
             }
         }
-        on_every_backend!(Simulator::from_frontend(process_design()), check);
+        on_every_backend!(Simulation::from_frontend(process_design()), check);
     }
 
     const REGISTER_CLOCK: &str = r#"
@@ -1673,7 +1720,7 @@ module Top (
                 assert_eq!(get(&mut sim, "neg"), (neg + 1).into(), "negedges at {time}");
             }
         }
-        on_every_backend!(Simulator::builder(REGISTER_CLOCK, "Top"), check);
+        on_every_backend!(Simulation::builder(REGISTER_CLOCK, "Top"), check);
     }
 
     /// A clock computed combinationally from a register, `e ? a & b : 'z`,
@@ -1746,7 +1793,7 @@ module Top (
                 assert_eq!(get(&mut sim, "neg"), (neg + 1).into(), "negedges at {time}");
             }
         }
-        on_every_backend!(Simulator::builder(SOURCE, "Top"), check);
+        on_every_backend!(Simulation::builder(SOURCE, "Top"), check);
     }
 
     /// Asynchronous resets that are registers. An edge to x or z runs the
@@ -1833,7 +1880,7 @@ module Top (
                 assert_eq!(get(&mut sim, "hits_l"), hits.into(), "rl at {time}");
             }
         }
-        on_every_backend!(Simulator::builder(SOURCE, "Top"), check);
+        on_every_backend!(Simulation::builder(SOURCE, "Top"), check);
     }
 
     /// The edge baseline of a clock left at x survives a checkpoint: the
@@ -1862,6 +1909,6 @@ module Top (
             sim.run_until(15).unwrap();
             assert_eq!(get(&mut sim, "pos"), 1u8.into(), "after a state load");
         }
-        on_every_backend!(Simulator::builder(REGISTER_CLOCK, "Top"), check);
+        on_every_backend!(Simulation::builder(REGISTER_CLOCK, "Top"), check);
     }
 }

@@ -943,6 +943,59 @@ pub struct VariableDeclaration {
     pub tokens: TokenRange,
 }
 
+/// A class declaration (IEEE 1800-2023 8.3). Its body also remains an
+/// unconverted body item covering the same tokens.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClassDeclaration {
+    pub name: Name,
+    /// `virtual class`: abstract (8.21).
+    pub virtual_class: bool,
+    /// `interface class` (8.26).
+    pub interface: bool,
+    /// `extends` of a class, not of an interface class.
+    pub base: Option<ClassBase>,
+    /// The interface classes of `implements`, or those an interface class
+    /// extends (8.26).
+    pub interfaces: Vec<TypeId>,
+    pub properties: Vec<ClassProperty>,
+    pub methods: Vec<ClassMethod>,
+    pub tokens: TokenRange,
+}
+
+/// The class a class extends, with the arguments of its constructor when
+/// they are given in the `extends` clause (8.17).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClassBase {
+    pub data_type: TypeId,
+    pub arguments: Option<Vec<Argument>>,
+}
+
+/// Qualifiers of a class item (8.3, 8.18, 8.20).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ClassQualifiers {
+    pub is_static: bool,
+    pub is_virtual: bool,
+    pub is_pure: bool,
+    pub is_extern: bool,
+    pub local: bool,
+    pub protected: bool,
+    pub rand: bool,
+}
+
+/// A property declaration of a class.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClassProperty {
+    pub qualifiers: ClassQualifiers,
+    pub declaration: VariableDeclaration,
+}
+
+/// A method of a class: a function, a task or the constructor `new`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClassMethod {
+    pub qualifiers: ClassQualifiers,
+    pub subroutine: SubroutineId,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct SubroutineId(pub(crate) usize);
 

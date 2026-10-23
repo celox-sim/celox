@@ -1,0 +1,33 @@
+{
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "include_ignored": false,
+  "counts": {
+    "compile_error": 1,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: Errors in port declarations.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::mixes_module_contracts_with_local_interface_connections",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "note": "Focused pre-exclusion failure: Icarus rejects the typed and generic module interface port declarations in the mixed local-interface connection regression. Celox and Verilator pass the unchanged source and assertions."
+}

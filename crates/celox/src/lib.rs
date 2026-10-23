@@ -41,7 +41,7 @@ pub use backend::SimulatorErrorCode as RuntimeErrorCode;
 pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,
 };
-pub use celox_design::{DomainKind, ElaboratedDesign, EventTopology, RuntimeSchema};
+pub use celox_design::{DomainKind, ElaboratedDesign, EventTopology, ProcessOrigin, RuntimeSchema};
 pub use celox_frontend_core::FrontendArtifactError;
 pub use celox_frontend_sdk as frontend_sdk;
 pub use celox_frontend_sdk::FrontendArtifact;
@@ -58,6 +58,8 @@ pub use celox_runtime::{
     StateDifference, StateFile, StateFileError, StateObject, StateRole, WaiterRecord,
     format_state_value,
 };
+#[doc(hidden)]
+pub use celox_runtime::{KernelSchedule, SchedulerMode, SchedulerStats};
 pub use celox_slt::scheduler::SchedulerError;
 pub use celox_state_layout::STATE_HEADER_SIZE;
 pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
@@ -217,7 +219,8 @@ pub use backend::wasm_codegen;
 
 // Public compilation API (available on all targets)
 pub use simulator::{
-    compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_file_dependencies,
+    compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_diagnostic_policy,
+    compile_to_sir_with_file_dependencies, compile_to_sir_with_latch_policy,
 };
 #[cfg(feature = "systemverilog")]
 pub use simulator::{
@@ -232,3 +235,6 @@ pub use diagnostic_policy::{DiagnosticLevel, DiagnosticPolicy};
 
 mod signal_access;
 pub use signal_access::SignalAccessOptions;
+
+mod timescale;
+pub use timescale::SvTimescale;

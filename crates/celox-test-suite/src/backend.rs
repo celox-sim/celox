@@ -16,6 +16,8 @@ pub struct Design {
     pub sources: Vec<Source>,
     pub top: String,
     pub four_state: bool,
+    /// Permit retained assignments in implicit combinational processes.
+    pub allow_inferred_latches: bool,
     /// Values of the top module's parameters, overriding their defaults.
     pub parameters: Vec<(String, u64)>,
     /// Whether the case advances simulation time (`run_until`,
@@ -33,6 +35,7 @@ impl Design {
             }],
             top: top.into(),
             four_state: false,
+            allow_inferred_latches: false,
             parameters: Vec::new(),
             timed: false,
         }

@@ -1,6 +1,21 @@
 use super::*;
 
 sv_backends! {
+    fn named_array_parameters_forward_whole_values(sim) {
+        @case "hierarchy::named_array_parameters_forward_whole_values";
+    }
+
+    fn named_array_parameters_forward_package_subarrays(sim) {
+        @case "hierarchy::named_array_parameters_forward_package_subarrays";
+    }
+
+    fn named_array_parameters_follow_caller_specialization(sim) {
+        @case "hierarchy::named_array_parameters_follow_caller_specialization";
+    }
+    fn named_array_parameters_keep_four_state_values(sim) {
+        @case "hierarchy::named_array_parameters_keep_four_state_values";
+    }
+
     fn sized_parameter_actuals_follow_parent_specialization(sim) {
         @case "hierarchy::sized_parameter_actuals_follow_parent_specialization";
     }
@@ -361,4 +376,70 @@ fn rejects_feedback_through_the_same_bit_of_child_input() {
         endmodule
     "#,
     );
+}
+
+sv_backends! {
+    fn literal_parameter_api_preserves_width_sign_and_unknowns(sim) {
+        @setup {
+            let source = r#"
+                module Top #(parameter TEXT="default", parameter NEG=0,
+                    parameter logic [57:0] FILL=0, parameter logic [3:0] UNKNOWN=0,
+                    parameter logic [64:0] WIDE=0, parameter FINAL=0,
+                    parameter logic [57:0] X=0, parameter logic [57:0] Z=0,
+                    parameter logic [57:0] COPY=FILL)(output logic matched);
+                    assign matched=(TEXT=="XILINX") && ($bits(TEXT)==48)
+                        && (NEG==-8) && (NEG<0) && ($bits(NEG)==32)
+                        && (FILL==58'h3ffffffffffffff) && (UNKNOWN===4'b10xz)
+                        && (WIDE==65'h10000000000000001) && (FINAL==7)
+                        && (COPY==58'h3ffffffffffffff)
+                        && (X===58'bx) && (Z===58'bz);
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("parameter_api.sv"))], "Top")
+            .param_literal("TEXT", "\"XILINX\"")
+            .param("NEG", 3).param_literal("NEG", "-8")
+            .param_literal("FILL", "'1").param_literal("UNKNOWN", "4'b10xz")
+            .param_literal("WIDE", "65'h10000000000000001")
+            .param_literal("FINAL", "-1").param("FINAL", 7)
+            .param_literal("X", "'x").param_literal("Z", "'z")
+            .four_state(true).opt_level(celox::OptLevel::O2);
+        assert_eq!(sim.get(sim.signal("matched")), BigUint::from(1u8));
+    }
+}
+
+#[test]
+fn rejects_incompatible_named_array_parameter_overrides() {
+    for declaration in [
+        "logic [7:0] TABLE[3] = '{1, 2, 3}",
+        "logic [3:0] TABLE[2] = '{1, 2}",
+        "logic signed [7:0] TABLE[2] = '{1, 2}",
+        "bit [7:0] TABLE[2] = '{1, 2}",
+        "logic [7:0] TABLE[1][2] = '{'{1, 2}}",
+    ] {
+        let source = format!(
+            r#"
+            module Child #(parameter logic [7:0] Q[2] = '{{0, 0}})(output logic [7:0] y);
+                assign y = Q[0];
+            endmodule
+            module Top(output logic [7:0] y);
+                localparam {declaration};
+                Child #(.Q(TABLE)) child(y);
+            endmodule
+        "#
+        );
+        let error = match Simulator::from_sv_sources(
+            vec![(&source, Path::new("array_override.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        {
+            Err(error) => error,
+            Ok(_) => panic!("incompatible array parameter must be rejected"),
+        };
+        assert!(
+            error.to_string().contains("is not assignment compatible"),
+            "{declaration}: {error}"
+        );
+    }
 }

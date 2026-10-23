@@ -72,10 +72,19 @@ impl ProcessKernelBuilder {
         let start = builder.current_block();
         Self {
             builder,
-            slots,
+            slots: ProcessSlots {
+                const_delays: true,
+                ..slots
+            },
             resume_blocks: vec![start],
             wait_site: None,
         }
+    }
+
+    /// The kernel's control slots, with [`ProcessSlots::const_delays`] set
+    /// for the delays lowered so far.
+    pub fn slots(&self) -> ProcessSlots<SourceVarId> {
+        self.slots
     }
 
     /// The SIR builder positioned where the process continues. After
@@ -135,8 +144,15 @@ impl ProcessKernelBuilder {
     /// Suspend for the number of time units in `amount`, an unsigned
     /// two-state register of [`PROCESS_DELAY_WIDTH`] bits, and continue at
     /// a new resume point. A zero delay resumes after the nonblocking
-    /// assignments of the time are published.
-    pub fn delay(&mut self, amount: RegisterId) -> Result<(), ProcessKernelError> {
+    /// assignments of the time are published. `constant` is the amount's
+    /// value when the frontend knows it, which it records in
+    /// [`ProcessSlots::const_delays`].
+    pub fn delay(
+        &mut self,
+        amount: RegisterId,
+        constant: Option<u64>,
+    ) -> Result<(), ProcessKernelError> {
+        self.note_delay(constant);
         self.store(self.slots.delay, PROCESS_DELAY_WIDTH, amount);
         self.suspend(ProcessStatus::Delay)
     }
@@ -144,9 +160,18 @@ impl ProcessKernelBuilder {
     /// A delay with the scheduling of IEEE 1800-2023: a zero delay resumes
     /// in the inactive region of the same time (4.4.2.3), before
     /// nonblocking assignments are published.
-    pub fn inactive_delay(&mut self, amount: RegisterId) -> Result<(), ProcessKernelError> {
+    pub fn inactive_delay(
+        &mut self,
+        amount: RegisterId,
+        constant: Option<u64>,
+    ) -> Result<(), ProcessKernelError> {
+        self.note_delay(constant);
         self.store(self.slots.delay, PROCESS_DELAY_WIDTH, amount);
         self.suspend(ProcessStatus::InactiveDelay)
+    }
+
+    fn note_delay(&mut self, constant: Option<u64>) {
+        self.slots.const_delays &= constant.is_some_and(|amount| amount > 0);
     }
 
     /// Return to the runtime, which charges its time-slot budget and
@@ -284,6 +309,55 @@ impl ProcessKernelBuilder {
         }
         self.store_delay_constant(u64::from(index));
         self.suspend(ProcessStatus::Nba)?;
+        Ok(())
+    }
+
+    /// A nonblocking update of `site` with two paths that a load of the
+    /// one-bit variable `switch` selects. With the switch set, the value
+    /// `lower` computes is staged as [`Self::nonblocking`] does for a site
+    /// with a `pending` flag. Otherwise the kernel returns
+    /// [`ProcessStatus::Nba`] at once, for a site whose value object already
+    /// holds the value. A frontend emits both before the whole design shows
+    /// which one may be used; assembly keeps one
+    /// (`crate::symbolic::artifact::NbaSwitch`).
+    pub fn nonblocking_switched<E: From<ProcessKernelError>>(
+        &mut self,
+        index: u32,
+        site: &NbaSite<SourceVarId>,
+        switch: SourceVarId,
+        lower: impl FnOnce(
+            &mut SIRBuilder<RegionedSourceAddr>,
+        ) -> Result<(RegisterId, Option<RegisterId>), E>,
+    ) -> Result<(), E> {
+        assert!(
+            site.pending.is_some(),
+            "a switched nonblocking site has a pending flag"
+        );
+        let on = self.builder.alloc_bit(1, false);
+        self.builder.emit(SIRInstruction::Load(
+            on,
+            stable(switch),
+            SIROffset::Static(0),
+            1,
+        ));
+        let staged = self.builder.new_block();
+        let queued = self.builder.new_block();
+        let join = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: on,
+            true_block: (staged, Vec::new()),
+            false_block: (queued, Vec::new()),
+        });
+        self.builder.switch_to_block(staged);
+        self.nonblocking(index, site, lower)?;
+        self.builder
+            .seal_block(SIRTerminator::Jump(join, Vec::new()));
+        self.builder.switch_to_block(queued);
+        self.store_delay_constant(u64::from(index));
+        self.suspend(ProcessStatus::Nba)?;
+        self.builder
+            .seal_block(SIRTerminator::Jump(join, Vec::new()));
+        self.builder.switch_to_block(join);
         Ok(())
     }
 

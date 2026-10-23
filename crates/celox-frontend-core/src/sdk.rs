@@ -481,6 +481,23 @@ fn coerce_sir_register(
     Ok(current)
 }
 
+/// The value of expression `id` as a delay amount, if it is a two-state
+/// constant whose coercion to [`PROCESS_DELAY_WIDTH`] bits keeps its value.
+fn constant_delay(artifact: &FrontendArtifact, id: ExprId) -> Option<u64> {
+    let expression = artifact.expression(id)?;
+    let ExprNode::Constant(value) = expression.node() else {
+        return None;
+    };
+    let value_type = expression.value_type();
+    let negative = value_type.is_signed()
+        && value_type.width() > 0
+        && value.payload().bit(value_type.width() as u64 - 1);
+    if value.mask().bits() != 0 || negative {
+        return None;
+    }
+    u64::try_from(value.payload()).ok()
+}
+
 fn coerce_sir_expression(
     artifact: &FrontendArtifact,
     id: ExprId,
@@ -1058,7 +1075,9 @@ impl HiddenObjects<'_> {
                         PortTypeKind::Bit
                     },
                     array_dims: Vec::new(),
+                    value_kind: Default::default(),
                 },
+                unpacked_ranges: Vec::new(),
                 packed_dims: vec![width],
                 source: None,
                 module_affiliated: false,
@@ -1317,6 +1336,7 @@ fn lower_statements(
                 return Ok(false);
             }
             Statement::Delay { amount } | Statement::InactiveDelay { amount } => {
+                let constant = constant_delay(artifact, *amount);
                 let amount = coerce_sir_expression(
                     artifact,
                     *amount,
@@ -1325,9 +1345,9 @@ fn lower_statements(
                     &mut cache,
                 )?;
                 if matches!(statement, Statement::Delay { .. }) {
-                    kernel.delay(amount)?;
+                    kernel.delay(amount, constant)?;
                 } else {
-                    kernel.inactive_delay(amount)?;
+                    kernel.inactive_delay(amount, constant)?;
                 }
             }
             Statement::WaitEvent { terms } => {
@@ -1638,9 +1658,12 @@ fn lower_comb_processes(
                 access: target.access,
             })?;
             paths.push(LogicPath {
+                transparent_copy: false,
                 target: LogicPathTarget::Process {
                     process: ran,
                     after_initials: true,
+                    sensitivity_counters: Vec::new(),
+                    startup: None,
                     target,
                     unit: Box::new(unit.clone()),
                 },
@@ -1706,7 +1729,9 @@ fn lower_processes(
     for (index, process) in artifact.processes().iter().enumerate() {
         let name = |slot: &str| vec![format!("$process[{index}]"), slot.to_string()];
         let slots = ProcessSlots {
+            is_initializer: false,
             requires_timed_simulation: false,
+            const_delays: false,
             resume: lowering
                 .hidden
                 .declare(name("resume"), PROCESS_RESUME_WIDTH, false),
@@ -1722,11 +1747,20 @@ fn lower_processes(
         lowering.process_nba_sites = 0;
         let mut kernel = ProcessKernelBuilder::new(slots);
         lower_statements(&mut lowering, &mut kernel, process.body())?;
+        let slots = kernel.slots();
         let kernel = kernel.build();
         candidates.extend(crate::watch::multi_store_candidates(&kernel, |address| {
             stable_signal(address, artifact.signals().len())
         }));
-        processes.push(SymbolicProcess { kernel, slots });
+        processes.push(SymbolicProcess {
+            kernel,
+            slots,
+            origin: celox_design::ProcessOrigin {
+                construct: "process".to_string(),
+                location: None,
+                scope: None,
+            },
+        });
     }
     Ok(LoweredProcesses {
         processes,
@@ -1816,7 +1850,9 @@ pub fn lower_frontend_artifact(
                         kind,
                         type_kind,
                         array_dims: Vec::new(),
+                        value_kind: Default::default(),
                     },
+                    unpacked_ranges: Vec::new(),
                     packed_dims: vec![signal.value_type().width()],
                     source: None,
                     module_affiliated: true,
@@ -1848,6 +1884,7 @@ pub fn lower_frontend_artifact(
         let mut visited = HashSet::default();
         expression_sources(artifact, assignment.value(), &mut sources, &mut visited)?;
         comb_blocks.push(LogicPath {
+            transparent_copy: false,
             target: LogicPathTarget::Var(signal_atom(assignment.target())),
             sources,
             previous_sources: HashSet::default(),
@@ -1880,7 +1917,7 @@ pub fn lower_frontend_artifact(
         &mut reset_clock_map,
     )?;
 
-    let initial_memory_values = artifact
+    let initial_memory_values: Vec<_> = artifact
         .signals()
         .iter()
         .filter_map(|signal| {
@@ -1916,6 +1953,8 @@ pub fn lower_frontend_artifact(
         runtime_errors: HashMap::default(),
         runtime_event_sites: Vec::new(),
         extern_functions: Vec::new(),
+        folded_initial_memory_values: Vec::new(),
+        declaration_initial_memory_values: initial_memory_values.clone(),
         initial_memory_values,
         comb_boundaries: HashMap::default(),
         arena,
@@ -1923,8 +1962,11 @@ pub fn lower_frontend_artifact(
         processes,
         package_bindings: HashMap::default(),
         counter_slots,
+        pending_slots: Vec::new(),
+        comb_alternatives: Vec::new(),
         wait_sites,
         nba_sites,
+        nba_switches: Vec::new(),
         host_request_sites: Vec::new(),
         time_slot: None,
     };

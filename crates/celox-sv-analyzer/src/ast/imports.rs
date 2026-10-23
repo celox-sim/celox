@@ -116,6 +116,19 @@ impl ScopeImports {
                 && let celox_sv_syntax::ExprKind::Name(package) = &native.expression(*base).kind
             {
                 let package = normalize_identifier(&package.spelling);
+                // std::randomize is a built-in scope function, not a
+                // user-declared package dependency (IEEE 1800-2023 18.12).
+                if package == "std" && normalize_identifier(&name.spelling) == "randomize" {
+                    continue;
+                }
+                // `C::name` names a member of class `C` (IEEE 1800-2023 8.23).
+                if native
+                    .classes
+                    .iter()
+                    .any(|class| normalize_identifier(&class.name.spelling) == package)
+                {
+                    continue;
+                }
                 if !nested.iter().any(|(start, end, names)| {
                     (*start..*end).contains(&expression.tokens.start) && names.contains(&package)
                 }) {

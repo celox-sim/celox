@@ -2,6 +2,8 @@ mod builder;
 #[cfg(feature = "host-runtime")]
 mod checkpoint;
 mod error;
+#[cfg(feature = "host-runtime")]
+mod heap;
 #[cfg(feature = "systemverilog")]
 pub(crate) mod mixed;
 #[cfg(feature = "host-runtime")]
@@ -18,7 +20,10 @@ mod state_file;
 pub use builder::NativeCompilation;
 #[cfg(feature = "host-runtime")]
 pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions, TierPromotion};
-pub use builder::{compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_file_dependencies};
+pub use builder::{
+    compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_diagnostic_policy,
+    compile_to_sir_with_file_dependencies, compile_to_sir_with_latch_policy,
+};
 #[cfg(feature = "systemverilog")]
 pub use builder::{
     compile_mixed_to_sir, compile_mixed_to_sir_with_file_dependencies, compile_sv_to_sir,
@@ -32,7 +37,11 @@ pub use state_file::{StateError, StateMismatch, StateSchema};
 
 #[cfg(feature = "host-runtime")]
 mod host {
+    mod declaration;
+    mod distribution;
     mod file_io;
+    mod fread;
+    mod scan;
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -114,8 +123,11 @@ mod host {
     /// cross-codegen builds or unsupported hosts.
     pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
         pub(crate) backend: B,
-        /// Dynamic testbench strings, keyed by the bound variable location.
-        pub(crate) testbench_strings: celox_testbench::TestbenchStrings,
+        /// Byte offsets of every handle slot in state memory.
+        pub(super) handle_slots: std::sync::OnceLock<Arc<[(usize, celox_heap::HandleKind)]>>,
+        /// Set while handles live outside state memory, where no collection
+        /// may run: between the polls of concurrent testbench processes.
+        pub(crate) heap_safepoints_blocked: bool,
         file_io: celox_runtime::file_io::FileIo,
         pending_host_events: Arc<std::sync::Mutex<PendingRuntimeEvents>>,
         pub(crate) program: RuntimeProgram,
@@ -124,6 +136,9 @@ mod host {
         pub(crate) vcd_writer: Option<crate::VcdWriter>,
         pub(crate) sv_vcd: SvVcdControl,
         pub(crate) dirty: bool,
+        /// Static declaration kernels may stop before wildcard baselines are
+        /// armed. Host reads and event drains must not settle comb meanwhile.
+        pub(crate) declaration_phase: bool,
         pub(crate) warnings: Vec<CompilationWarning>,
         pub(crate) components: crate::component::ComponentRuntime,
         pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
@@ -255,6 +270,37 @@ mod host {
         width: usize,
         signed: bool,
         is_string: bool,
+        float_precision: Option<celox_design::FloatPrecision>,
+        /// A string handle not yet replaced by its contents.
+        handle: bool,
+    }
+
+    impl RuntimeEventArgValue {
+        /// Replace a string handle by the bytes of its string, which the
+        /// formatter prints as text.
+        fn resolve_handle(&mut self, heap: &celox_heap::Heap) {
+            if !std::mem::take(&mut self.handle) {
+                return;
+            }
+            let handle = self.values.first().copied().unwrap_or(0) as celox_heap::Handle;
+            let bytes = heap.string(handle);
+            self.values = BigUint::from_bytes_be(bytes).to_u64_digits();
+            self.masks = vec![0; self.values.len()];
+            self.width = bytes.len() * 8;
+            self.signed = false;
+            self.is_string = true;
+        }
+    }
+
+    impl RawRuntimeEvent {
+        fn resolve_handles(&mut self, heap: &celox_heap::Heap) {
+            let (Self::Host { args, .. } | Self::Event { args, .. }) = self else {
+                return;
+            };
+            for arg in args {
+                arg.resolve_handle(heap);
+            }
+        }
     }
 
     #[derive(Clone)]
@@ -274,7 +320,7 @@ mod host {
 
     /// A bounded continuation of the backend ring. Records remain unformatted
     /// until the eventual consumer supplies its scope/time context.
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct PendingRuntimeEvents {
         events: std::collections::VecDeque<RawRuntimeEvent>,
         missed: u64,
@@ -422,6 +468,7 @@ mod host {
             width: arg.width,
             signed: arg.signed,
             is_string: arg.is_string,
+            float_precision: arg.float_precision,
         };
         match sizing {
             DisplaySizing::Veryl => format_veryl_display_arg(&arg, spec, field),
@@ -459,7 +506,16 @@ mod host {
             return args
                 .iter()
                 .map(|arg| {
-                    runtime_event_format_arg(arg, default_spec, site.sizing, FieldSpec::default())
+                    runtime_event_format_arg(
+                        arg,
+                        if arg.float_precision.is_some() {
+                            'g'
+                        } else {
+                            default_spec
+                        },
+                        site.sizing,
+                        FieldSpec::default(),
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join(&b' ');
@@ -488,7 +544,7 @@ mod host {
                     out.extend_from_slice(&runtime_event_format_arg(arg, spec, site.sizing, field));
                     arg_idx += 1;
                 }
-                'd' | 'D' | 'i' | 'I' => {
+                'd' | 'D' | 'i' | 'I' | 'f' | 'F' | 'e' | 'E' | 'g' | 'G' => {
                     let Some(arg) = args.get(arg_idx) else {
                         arg_idx += 1;
                         continue;
@@ -633,6 +689,9 @@ mod host {
                         ));
                     }
                     args.push(RuntimeEventArgValue {
+                        float_precision: site
+                            .and_then(|site| site.arg_float_precision.get(idx).copied())
+                            .flatten(),
                         values,
                         masks,
                         width: site
@@ -643,6 +702,9 @@ mod host {
                             .unwrap_or(false),
                         is_string: site
                             .and_then(|site| site.arg_is_string.get(idx).copied())
+                            .unwrap_or(false),
+                        handle: site
+                            .and_then(|site| site.arg_is_handle.get(idx).copied())
                             .unwrap_or(false),
                     });
                 }
@@ -728,7 +790,10 @@ mod host {
             collect_runtime_events(layout, sites, read_seq, size, read_u64, read_u64)
         };
         raw.into_iter()
-            .filter_map(|event| render_raw_runtime_event(event, sites, context))
+            .filter_map(|mut event| {
+                event.resolve_handles(backend.heap());
+                render_raw_runtime_event(event, sites, context)
+            })
             .collect()
     }
 
@@ -804,8 +869,10 @@ mod host {
                 vcd_writer: None,
                 sv_vcd: SvVcdControl::default(),
                 dirty: false,
+                declaration_phase: false,
                 warnings,
-                testbench_strings: Default::default(),
+                handle_slots: Default::default(),
+                heap_safepoints_blocked: false,
                 file_io: Default::default(),
                 pending_host_events: Default::default(),
                 components: Default::default(),
@@ -1122,7 +1189,65 @@ mod host {
             );
         }
 
+        /// The runtime events [`Self::drain_runtime_events`] would return
+        /// next, without taking them.
+        pub(crate) fn peek_runtime_events(&mut self) -> Vec<RuntimeEvent> {
+            self.stash_runtime_events();
+            let raw = self.pending_host_events.lock().unwrap().clone().drain();
+            raw.into_iter()
+                .filter_map(|raw| {
+                    render_raw_runtime_event(
+                        raw,
+                        &self.program.runtime_schema.runtime_event_sites,
+                        RuntimeFormatContext::default(),
+                    )
+                })
+                .collect()
+        }
+
+        /// Make the design state, the host state design code observes and
+        /// the undrained runtime events those of `other`, a simulator of the
+        /// same design. Host state outside the memory image, such as open
+        /// files, is not copied.
+        pub(crate) fn mirror(&mut self, other: &mut Self) {
+            other.stash_runtime_events();
+            self.stash_runtime_events();
+            let pending = other.pending_host_events.lock().unwrap().clone();
+            *self.pending_host_events.lock().unwrap() = pending;
+            let fingerprint = self.state_fingerprint();
+            crate::simulator::StateImage::capture(&other.backend, other.state_fingerprint())
+                .restore_into(&mut self.backend, fingerprint)
+                .expect("a simulator of the same design");
+            self.frozen = other.frozen;
+            self.dirty = other.dirty;
+            self.declaration_phase = other.declaration_phase;
+            self.comb_observer_snapshots
+                .clone_from(&other.comb_observer_snapshots);
+            self.comb_observer_initial_eval = other.comb_observer_initial_eval;
+            self.host_watch.set_log(other.host_watch.log().to_vec());
+        }
+
+        /// Move the events in the backend's buffer to the queue that
+        /// [`Self::drain_runtime_events`] reads.
+        pub(crate) fn stash_runtime_events(&mut self) {
+            let events = self.collect_backend_runtime_events();
+            let capacity = self.backend.layout().runtime_event_capacity;
+            self.pending_host_events
+                .lock()
+                .unwrap()
+                .extend(events, capacity);
+        }
+
         fn collect_backend_runtime_events(&mut self) -> Vec<RawRuntimeEvent> {
+            // String arguments are read now, while the heap still holds them.
+            let mut events = self.collect_backend_raw_runtime_events();
+            for event in &mut events {
+                event.resolve_handles(self.backend.heap());
+            }
+            events
+        }
+
+        fn collect_backend_raw_runtime_events(&mut self) -> Vec<RawRuntimeEvent> {
             let layout = self.backend.layout();
             let mut read_seq = self.runtime_event_read_seq.load(Ordering::Acquire);
             if let Some(buffer) = self.backend.runtime_event_buffer() {
@@ -1407,7 +1532,7 @@ mod host {
         }
 
         pub(crate) fn eval_comb_checked(&mut self) -> Result<(), RuntimeErrorCode> {
-            if self.frozen {
+            if self.frozen || self.declaration_phase {
                 return Ok(());
             }
             let (result, events) = self.eval_comb_capturing_events();
@@ -1433,6 +1558,11 @@ mod host {
         fn eval_comb_capturing_events(
             &mut self,
         ) -> (Result<(), RuntimeErrorCode>, Vec<RawRuntimeEvent>) {
+            // Event-drain writes use this entry directly instead of the
+            // checked facade. Leave observers and runtime events untouched.
+            if self.declaration_phase {
+                return (Ok(()), Vec::new());
+            }
             if self.program.runtime_schema.runtime_event_sites.is_empty() {
                 return (self.backend.eval_comb(), Vec::new());
             }
@@ -1585,6 +1715,12 @@ mod host {
         /// do not run; drive the signal's levels with the timed
         /// [`crate::Simulation`] for them.
         pub fn tick(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            let result = self.tick_unit(event);
+            self.heap_safepoint();
+            result.and(self.take_heap_fault())
+        }
+
+        fn tick_unit(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
             if let Some(Some(_)) = self.derived_ticks.get(event.id()) {
                 return self.tick_derived(event);
             }
@@ -1892,6 +2028,12 @@ mod host {
         /// gated clocks with the ticked domains, state-derived ones after
         /// all of them commit.
         pub fn tick_events(&mut self, events: &[B::Event]) -> Result<(), RuntimeErrorCode> {
+            let result = self.tick_events_unit(events);
+            self.heap_safepoint();
+            result.and(self.take_heap_fault())
+        }
+
+        fn tick_events_unit(&mut self, events: &[B::Event]) -> Result<(), RuntimeErrorCode> {
             use celox_runtime::backend::EventHandle;
             // Deduplicate domains before requiring split kernels: a design
             // with a single domain has no split kernels, and aliases of one
@@ -2140,6 +2282,16 @@ mod host {
                     .iter()
                     .filter_map(|address| self.program.design.variable(address))
                     .filter(|variable| instance.resolves_path_to(&variable.path, variable.address))
+                    // A handle slot holds a heap reference, not a value to
+                    // show; strings have no VCD representation yet.
+                    .filter(|variable| {
+                        !self
+                            .program
+                            .design
+                            .state_objects
+                            .get(&variable.address)
+                            .is_some_and(|metadata| metadata.value_kind.is_handle())
+                    })
                     .collect();
                 sorted_vars.sort_by(|a, b| a.path.cmp(&b.path));
 

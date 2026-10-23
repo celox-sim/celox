@@ -10,10 +10,20 @@ This page describes how Veryl types are mapped to TypeScript types when `celox-t
 | `reset` | `bigint` | yes | |
 | `logic<N>` | `bigint` | yes | |
 | `bit<N>` | `bigint` | no | 2-state only |
-| `f32` / `f64` | `bigint` | no | The IEEE 754 bit pattern. Values can be copied through ports, variables and flip-flops; arithmetic, comparisons, conversions and formatting of non-constant values are not supported yet ([#1401](https://github.com/celox-sim/celox/issues/1401)) |
+| `f32` / `f64` | `bigint` | no | The IEEE 754 bit pattern. Scalar arithmetic, comparisons, f32/f64 precision conversions and integer conversions up to 64 bits are supported. Numeric display supports `%f`, `%e` and `%g`, including field widths and precision. Aggregate numeric conversions and integer conversions wider than 64 bits remain unsupported ([#1653](https://github.com/celox-sim/celox/issues/1653)) |
 | `string` | — | no | Non-constant strings are supported only in testbench code. RTL can use string literals, constants and parameters ([#1400](https://github.com/celox-sim/celox/issues/1400)) |
 
 All signal port values use `bigint` regardless of width. This ensures a consistent type across all signals and avoids type changes when signal widths are modified.
+
+Floating-point to integer casts round to the nearest integer, with halfway
+values rounded away from zero. `$rtoi` in SystemVerilog truncates instead.
+Celox converts NaN and infinity to integer zero; finite results outside the
+target integer range retain their low bits. These out-of-range choices should
+not be used as portable behavior across simulators.
+
+Veryl analyzer 0.22 can mis-evaluate some floating-point constant expressions,
+including negative `f32` casts and dependent constants or parameters. These
+upstream limitations are tracked in [#1657](https://github.com/celox-sim/celox/issues/1657).
 
 ## Direction and Mutability
 

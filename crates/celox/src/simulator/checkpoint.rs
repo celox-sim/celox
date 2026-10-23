@@ -5,8 +5,8 @@
 //! stable region, and the sparse, triggered-bit and scratch regions are
 //! cleared before control returns to the host. A checkpoint therefore copies
 //! only the stable region, which is laid out identically in every tier of a
-//! tiered simulation. The state header in front of it holds host pointers and
-//! is never copied.
+//! tiered simulation, together with the heap its handle slots refer to. The
+//! state header in front of it holds host pointers and is never copied.
 
 use celox_state_layout::STATE_HEADER_SIZE;
 use num_bigint::BigUint;
@@ -15,7 +15,8 @@ use super::host::Simulator;
 use crate::backend::SimBackend;
 
 /// The design state of a memory image: the stable region after the state
-/// header, tagged with the layout fingerprint it belongs to.
+/// header and the heap it refers to, tagged with the layout fingerprint it
+/// belongs to.
 ///
 /// This is the backend-level building block of [`Checkpoint`]. Hosts that
 /// drive a bare backend use it directly.
@@ -23,6 +24,8 @@ use crate::backend::SimBackend;
 pub struct StateImage {
     fingerprint: u64,
     bytes: Box<[u8]>,
+    /// Strings are immutable and shared, so this copies only the tables.
+    heap: celox_heap::Heap,
 }
 
 impl StateImage {
@@ -37,6 +40,7 @@ impl StateImage {
         Self {
             fingerprint,
             bytes: memory[range].into(),
+            heap: backend.heap().clone(),
         }
     }
 
@@ -60,12 +64,14 @@ impl StateImage {
         let range = state_range(backend);
         assert_eq!(range.len(), self.bytes.len());
         backend.write_memory(range.start, &self.bytes);
+        backend.heap_mut().clone_from(&self.heap);
         Ok(())
     }
 
-    /// Size of the saved design state in bytes.
+    /// Size of the saved design state in bytes, including string contents
+    /// and excluding allocator overhead.
     pub fn len(&self) -> usize {
-        self.bytes.len()
+        self.bytes.len() + self.heap.content_size()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -92,7 +98,6 @@ fn state_range<B: SimBackend>(backend: &B) -> std::ops::Range<usize> {
 #[derive(Clone)]
 pub struct Checkpoint {
     image: StateImage,
-    testbench_strings: celox_testbench::TestbenchStrings,
     comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
     comb_observer_initial_eval: bool,
     /// Whether the design had finished a timed simulation.
@@ -102,7 +107,7 @@ pub struct Checkpoint {
 impl Checkpoint {
     /// Bytes in the saved memory image and string contents, excluding allocator overhead.
     pub fn state_size(&self) -> usize {
-        self.image.len() + self.testbench_strings.values().map(Vec::len).sum::<usize>()
+        self.image.len()
     }
 }
 
@@ -159,7 +164,6 @@ impl<B: SimBackend> Simulator<B> {
         }
         Ok(Checkpoint {
             image: StateImage::capture(&self.backend, self.state_fingerprint()),
-            testbench_strings: self.testbench_strings.clone(),
             comb_observer_snapshots: self.comb_observer_snapshots.clone(),
             comb_observer_initial_eval: self.comb_observer_initial_eval,
             frozen: self.frozen,
@@ -179,8 +183,6 @@ impl<B: SimBackend> Simulator<B> {
         checkpoint
             .image
             .restore_into(&mut self.backend, fingerprint)?;
-        self.testbench_strings
-            .clone_from(&checkpoint.testbench_strings);
         self.comb_observer_snapshots
             .clone_from(&checkpoint.comb_observer_snapshots);
         self.comb_observer_initial_eval = checkpoint.comb_observer_initial_eval;
@@ -214,7 +216,7 @@ impl<B: SimBackend> Simulator<B> {
                 matches!(
                     site.kind,
                     celox_design::HostRequestKind::FileIo | celox_design::HostRequestKind::Vcd
-                )
+                ) || (site.kind == celox_design::HostRequestKind::Scan && site.operation == 1)
             })
         {
             return Err(CheckpointError::ExternalSystemTasks);

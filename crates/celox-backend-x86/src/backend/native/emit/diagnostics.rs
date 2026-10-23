@@ -36,7 +36,9 @@ pub(super) fn log_mir_stats(label: &str, stage: &str, func: &crate::native::mir:
         phi += block.phis.len();
         for inst in &block.insts {
             match inst {
-                MInst::X86Simd(X86SimdInst::Zero128 { .. })
+                MInst::FloatBinary { .. }
+                | MInst::FloatUnary { .. }
+                | MInst::X86Simd(X86SimdInst::Zero128 { .. })
                 | MInst::X86Simd(X86SimdInst::Pack128 { .. })
                 | MInst::X86Simd(X86SimdInst::Binary128 { .. }) => alu += 1,
                 MInst::X86Simd(X86SimdInst::Scratch128 { .. }) => {}

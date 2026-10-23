@@ -158,6 +158,10 @@ pub enum SimulatorErrorKind {
     Codegen(CodegenError),
     /// The C functions of DPI-C imports could not be linked.
     Dpi(crate::DpiError),
+    /// The design has a process kernel, such as an `initial` block with
+    /// timing controls or an `always` process, which `Simulator` does not
+    /// run. `Simulation` runs it.
+    ProcessRequiresSimulation(crate::ProcessOrigin),
 }
 
 /// Structured failure while preparing executable simulator code.
@@ -332,6 +336,10 @@ impl fmt::Display for SimulatorError {
             SimulatorErrorKind::Runtime(e) => write!(f, "Runtime error: {e}")?,
             SimulatorErrorKind::Codegen(error) => write!(f, "JIT Code generation error: {error}")?,
             SimulatorErrorKind::Dpi(error) => write!(f, "{error}")?,
+            SimulatorErrorKind::ProcessRequiresSimulation(origin) => write!(
+                f,
+                "{origin} is a process, which Simulator does not run; build a Simulation instead"
+            )?,
         }
         if !self.warnings.is_empty() {
             f.write_str("\n\n--- warnings ---\n\n")?;

@@ -85,6 +85,8 @@ pub(super) fn native_functions(
             subroutine_directions: &directions,
             automatic,
             statics: Vec::new(),
+            static_initializers: Vec::new(),
+            constant_evaluation: false,
         };
         let mut dims = item.dimensions(dimensions);
         dims.subroutine_param_names = names.clone();
@@ -97,9 +99,26 @@ pub(super) fn native_functions(
             &item.literals,
             &mut state,
             item,
+            None,
+            None,
         ) {
             Ok(subroutine) => {
-                let body = symbolic::body(&subroutine, &locals);
+                let has_real = subroutine.return_type.as_ref().is_some_and(|ty| {
+                    matches!(
+                        ty.kind(),
+                        crate::ir::TypeKind::Real | crate::ir::TypeKind::Shortreal
+                    )
+                }) || subroutine.params.iter().any(|param| {
+                    matches!(
+                        param.r#type.kind(),
+                        crate::ir::TypeKind::Real | crate::ir::TypeKind::Shortreal
+                    )
+                });
+                let body = if has_real {
+                    None
+                } else {
+                    symbolic::body(&subroutine, &locals)
+                };
                 if let Some((value, outputs)) = body {
                     function.body = Some(value);
                     function.outputs = outputs;
@@ -229,15 +248,24 @@ fn native_signature(
         None => result.map(|ty| ty.width),
     };
     Ok(Function {
+        return_real: ty
+            .as_ref()
+            .is_some_and(|ty| matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal)),
+        return_string: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::String),
         name: instances::normalize_identifier(&native.name.spelling),
         params,
         body: None,
         outputs: Vec::new(),
         return_width: result.map(|ty| ty.width),
         return_first_packed_dimension_width: first,
-        return_dimensions: ty
-            .as_ref()
-            .map(|ty| ty.packed_ranges().len() + ty.unpacked_ranges().len()),
+        return_dimensions: ty.as_ref().map(|ty| {
+            ty.unpacked_ranges().len()
+                + if matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal) {
+                    0
+                } else {
+                    ty.packed_ranges().len()
+                }
+        }),
         return_signed: result.is_some_and(|ty| ty.signed),
         return_is_2state: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::Bit),
     })

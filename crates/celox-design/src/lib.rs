@@ -1,5 +1,8 @@
 //! Source-language-independent design identities and semantic vocabulary.
 
+mod float;
+pub use float::{eval_float_binary, eval_float_unary};
+
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
@@ -51,6 +54,30 @@ pub struct VariableMetadata {
     /// Per-dimension sizes for array ports (for example, `[4]` for `logic<32>[4]`).
     /// Empty means scalar.
     pub array_dims: Vec<usize>,
+    /// What each element holds. Handle elements are 32-bit two-state slots.
+    #[serde(default)]
+    pub value_kind: ValueKind,
+}
+
+/// Bit width of a handle element in state memory.
+pub const HANDLE_WIDTH: usize = 32;
+
+/// What a state element holds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ValueKind {
+    /// Packed bits.
+    #[default]
+    Bits,
+    /// A handle of a string in the simulator's heap.
+    StrRef,
+    /// A handle of a class object in the simulator's heap, `0` for `null`.
+    ObjRef,
+}
+
+impl ValueKind {
+    pub fn is_handle(self) -> bool {
+        self != Self::Bits
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -94,6 +121,12 @@ pub struct RuntimeEventSite {
     pub arg_widths: Vec<usize>,
     pub arg_signed: Vec<bool>,
     pub arg_is_string: Vec<bool>,
+    #[serde(default)]
+    pub arg_float_precision: Vec<Option<FloatPrecision>>,
+    /// Arguments that are heap handles of strings, formatted as their
+    /// contents. Missing entries are not handles.
+    #[serde(default)]
+    pub arg_is_handle: Vec<bool>,
 }
 
 /// A function in the host's C ABI that the design calls, such as a
@@ -297,6 +330,8 @@ pub enum HostRequestKind {
     Plusargs,
     FileIo,
     Vcd,
+    Scan,
+    Distribution,
 }
 
 impl HostRequestKind {
@@ -306,6 +341,8 @@ impl HostRequestKind {
             Self::Plusargs => 1u64,
             Self::FileIo => 2,
             Self::Vcd => 3,
+            Self::Scan => 4,
+            Self::Distribution => 5,
         };
         (family << 32) | site as u64
     }
@@ -316,6 +353,8 @@ impl HostRequestKind {
             1 => Self::Plusargs,
             2 => Self::FileIo,
             3 => Self::Vcd,
+            4 => Self::Scan,
+            5 => Self::Distribution,
             _ => return None,
         };
         Some((family, request as u32))
@@ -329,6 +368,8 @@ pub struct HostRequestValue<A> {
     pub width: usize,
     pub signed: bool,
     pub is_string: bool,
+    #[serde(default)]
+    pub float_precision: Option<FloatPrecision>,
 }
 
 impl<A: Copy> HostRequestValue<A> {
@@ -338,6 +379,7 @@ impl<A: Copy> HostRequestValue<A> {
             width: self.width,
             signed: self.signed,
             is_string: self.is_string,
+            float_precision: self.float_precision,
         }
     }
 }
@@ -350,8 +392,6 @@ impl<A: Copy> HostRequestValue<A> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostRequestSite<A> {
     pub process: usize,
-    /// This request belongs to an edge procedure lowered to a scheduled kernel.
-    pub requires_timed_simulation: bool,
     pub kind: HostRequestKind,
     pub operation: u32,
     pub args: Vec<HostRequestValue<A>>,
@@ -363,7 +403,6 @@ impl<A: Copy> HostRequestSite<A> {
     pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> HostRequestSite<B> {
         HostRequestSite {
             process: self.process,
-            requires_timed_simulation: self.requires_timed_simulation,
             kind: self.kind,
             operation: self.operation,
             args: self.args.iter().map(|value| value.map(&mut map)).collect(),
@@ -381,6 +420,30 @@ impl<A: Copy> HostRequestSite<A> {
     }
 }
 
+/// The source procedure a process kernel was lowered from, for diagnostics.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProcessOrigin {
+    /// The construct, such as `initial` or `always`.
+    pub construct: String,
+    /// `path:line:column` of the construct, when known.
+    pub location: Option<String>,
+    /// Fully elaborated module-instance scope that owns the process.
+    pub scope: Option<String>,
+}
+
+impl std::fmt::Display for ProcessOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "`{}`", self.construct)?;
+        if let Some(location) = &self.location {
+            write!(f, " at {location}")?;
+        }
+        if let Some(scope) = &self.scope {
+            write!(f, " in `{scope}`")?;
+        }
+        Ok(())
+    }
+}
+
 /// State through which one process kernel exchanges control with the runtime.
 ///
 /// A process kernel is a resumable function. On entry it reads `resume` to
@@ -390,8 +453,13 @@ impl<A: Copy> HostRequestSite<A> {
 /// checkpoints capture a suspended process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcessSlots<A> {
+    /// A static declaration initializer, executed before all HDL procedures.
+    pub is_initializer: bool,
     /// This kernel originated from an edge procedure and must execute in Simulation.
     pub requires_timed_simulation: bool,
+    /// Every delay the kernel suspends for is a constant of at least one
+    /// time unit.
+    pub const_delays: bool,
     pub resume: A,
     pub status: A,
     pub delay: A,
@@ -400,7 +468,9 @@ pub struct ProcessSlots<A> {
 impl<A> ProcessSlots<A> {
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessSlots<B> {
         ProcessSlots {
+            is_initializer: self.is_initializer,
             requires_timed_simulation: self.requires_timed_simulation,
+            const_delays: self.const_delays,
             resume: map(self.resume),
             status: map(self.status),
             delay: map(self.delay),
@@ -574,12 +644,13 @@ pub struct NbaSite<A> {
     /// Two-state staging object holding a bit offset added to `lsb`, for an
     /// assignment whose position is computed at run time.
     pub offset: Option<A>,
-    /// One-bit flag of a site whose destination receives no other
-    /// nonblocking assignment: a variable of the module with no other
-    /// nonblocking site in the module and no writer outside it (not a port,
-    /// not bound to a package variable, not the target of a hierarchical
-    /// reference). A frontend that cannot tell leaves it `None`, so the
-    /// assignment goes through the ordered queue.
+    /// One-bit flag of a site whose destination has no other writer in the
+    /// design (no other nonblocking site, no store of any unit, not a
+    /// top-level port) and whose update order nothing observes (no wait,
+    /// counter, event domain or combinational observer reads it, directly
+    /// or through combinational logic): publication places flagged updates
+    /// after the queued ones. Without the flag the assignment goes through
+    /// the ordered queue.
     ///
     /// The kernel stages the value and sets the flag without returning;
     /// publication commits flagged sites and clears the flags. A kernel
@@ -664,6 +735,63 @@ impl From<TimePrecision> for i32 {
     }
 }
 
+/// Timed-only preparation for runtime static declarations. Ordinary folded
+/// initial writes remain in the plain simulator's image; a timed simulation
+/// resets their targets, executes declarations, then replays these writes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeclarationStartup<A> {
+    pub reset: Vec<InitialStateValue<A>>,
+    pub ordinary: Vec<InitialStateValue<A>>,
+    pub snapshots: Vec<(VarAtomBase<A>, A)>,
+    pub counter_snapshots: Vec<(A, A)>,
+    pub probes: Vec<(VarAtomBase<A>, A)>,
+}
+
+impl<A: Copy> DeclarationStartup<A> {
+    pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> DeclarationStartup<B> {
+        let mut values = |values: &[InitialStateValue<A>]| {
+            values
+                .iter()
+                .map(|value| InitialStateValue {
+                    address: map(value.address),
+                    data: value.data.clone(),
+                })
+                .collect()
+        };
+        let reset = values(&self.reset);
+        let ordinary = values(&self.ordinary);
+        DeclarationStartup {
+            reset,
+            ordinary,
+            snapshots: self
+                .snapshots
+                .iter()
+                .map(|(source, saved)| {
+                    (
+                        VarAtomBase::new(map(source.id), source.access.lsb, source.access.msb),
+                        map(*saved),
+                    )
+                })
+                .collect(),
+            counter_snapshots: self
+                .counter_snapshots
+                .iter()
+                .map(|(counter, saved)| (map(*counter), map(*saved)))
+                .collect(),
+            probes: self
+                .probes
+                .iter()
+                .map(|(source, counter)| {
+                    (
+                        VarAtomBase::new(map(source.id), source.access.lsb, source.access.msb),
+                        map(*counter),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Source-independent runtime diagnostics and observable event descriptions.
 #[derive(Clone, Debug)]
 pub struct RuntimeSchema<A> {
@@ -685,6 +813,7 @@ pub struct RuntimeSchema<A> {
     /// Stateful combinational process writes, excluded from derived-value
     /// classification when the optimizer builds `comb_writes`.
     pub persistent_comb_state: HashSet<A>,
+    pub declaration_startup: Option<DeclarationStartup<A>>,
     /// Dead store elimination policy the program was compiled with. Together
     /// with `live_signals` and the design it decides which combinationally
     /// written state the host may observe.
@@ -693,6 +822,8 @@ pub struct RuntimeSchema<A> {
     pub live_signals: HashSet<A>,
     /// Control slots of the process kernels, in kernel order.
     pub processes: Vec<ProcessSlots<A>>,
+    /// Source procedures of the process kernels, in kernel order.
+    pub process_origins: Vec<ProcessOrigin>,
     /// Counted signals and their occurrence counters.
     pub watches: Vec<EventWatch<A>>,
     /// Wait sites of the process kernels. A process's sites appear in the
@@ -727,9 +858,11 @@ impl<A> Default for RuntimeSchema<A> {
             rtl_writes: HashSet::default(),
             comb_writes: HashSet::default(),
             persistent_comb_state: HashSet::default(),
+            declaration_startup: None,
             dead_store_policy: DeadStorePolicy::Off,
             live_signals: HashSet::default(),
             processes: Vec::new(),
+            process_origins: Vec::new(),
             watches: Vec::new(),
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
@@ -995,6 +1128,65 @@ impl<A: Copy + Eq + std::hash::Hash> ElaboratedDesign<A> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FloatPrecision {
+    F32,
+    F64,
+}
+impl FloatPrecision {
+    pub fn width(self) -> usize {
+        match self {
+            Self::F32 => 32,
+            Self::F64 => 64,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FloatBinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Pow,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Atan2,
+    Hypot,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FloatUnaryOp {
+    Neg,
+    ToBool,
+    FromSigned { width: usize },
+    FromUnsigned { width: usize },
+    ToSigned { width: usize, round: bool },
+    ToUnsigned { width: usize, round: bool },
+    Convert { to: FloatPrecision },
+    Ln,
+    Log10,
+    Exp,
+    Sqrt,
+    Floor,
+    Ceil,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Sinh,
+    Cosh,
+    Tanh,
+    Asinh,
+    Acosh,
+    Atanh,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -1025,6 +1217,10 @@ pub enum BinaryOp {
     LogicOr,
     EqWildcard,
     NeWildcard,
+    Float {
+        op: FloatBinaryOp,
+        precision: FloatPrecision,
+    },
 }
 
 impl BinaryOp {
@@ -1050,6 +1246,7 @@ impl BinaryOp {
 impl fmt::Display for BinaryOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let op_str = match self {
+            BinaryOp::Float { op, precision } => return write!(f, "Float{precision:?}{op:?}"),
             BinaryOp::Add => "Add",
             BinaryOp::Sub => "Sub",
             BinaryOp::Mul => "Mul",
@@ -1099,6 +1296,10 @@ pub enum UnaryOp {
     PopCount,
     CountLeadingZeros,
     CountTrailingZeros,
+    Float {
+        op: FloatUnaryOp,
+        precision: FloatPrecision,
+    },
 }
 
 impl UnaryOp {
@@ -1110,6 +1311,14 @@ impl UnaryOp {
     /// `usize::MAX`.
     pub fn result_width(self, operand_width: usize) -> usize {
         match self {
+            UnaryOp::Float { op, precision } => match op {
+                FloatUnaryOp::ToBool => 1,
+                FloatUnaryOp::ToSigned { width, .. } | FloatUnaryOp::ToUnsigned { width, .. } => {
+                    width
+                }
+                FloatUnaryOp::Convert { to } => to.width(),
+                _ => precision.width(),
+            },
             UnaryOp::LogicNot | UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => 1,
             UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot => {
                 operand_width
@@ -1124,6 +1333,7 @@ impl UnaryOp {
 impl fmt::Display for UnaryOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let op_str = match self {
+            UnaryOp::Float { op, precision } => return write!(f, "Float{precision:?}{op:?}"),
             UnaryOp::Ident => "Ident",
             UnaryOp::ToTwoState => "ToTwoState",
             UnaryOp::Minus => "Minus",
@@ -1325,6 +1535,8 @@ mod tests {
             HostRequestKind::Plusargs,
             HostRequestKind::FileIo,
             HostRequestKind::Vcd,
+            HostRequestKind::Scan,
+            HostRequestKind::Distribution,
         ] {
             for site in [0, 1, u32::MAX] {
                 assert_eq!(
@@ -1333,7 +1545,7 @@ mod tests {
                 );
             }
         }
-        for invalid in [0, u32::MAX as u64, 4u64 << 32, 1u64 << 63] {
+        for invalid in [0, u32::MAX as u64, 6u64 << 32, 1u64 << 63] {
             assert_eq!(HostRequestKind::decode(invalid), None);
         }
         assert_eq!(
@@ -1349,11 +1561,11 @@ mod tests {
             width: 17,
             signed: true,
             is_string: false,
+            float_precision: None,
         };
         let site = HostRequestSite {
             process: 2,
             kind: HostRequestKind::Plusargs,
-            requires_timed_simulation: false,
             operation: 1,
             args: vec![value(3u32)],
             results: vec![value(5)],
@@ -1439,6 +1651,8 @@ mod tests {
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),
+            arg_float_precision: Vec::new(),
+            arg_is_handle: Vec::new(),
         });
         runtime.comb_observers.push(RuntimeCombObserver {
             site_id: 0,
@@ -1467,6 +1681,7 @@ mod tests {
             kind: DomainKind::Other,
             type_kind: PortTypeKind::Logic,
             array_dims: vec![4],
+            value_kind: Default::default(),
         };
 
         assert_eq!(metadata.width, 32);
@@ -1484,6 +1699,7 @@ mod tests {
                 kind: DomainKind::ClockPosedge,
                 type_kind: PortTypeKind::Clock,
                 array_dims: Vec::new(),
+                value_kind: Default::default(),
             },
         );
         design.events.aliases.insert(11, 10);
@@ -1512,6 +1728,7 @@ mod tests {
                             kind,
                             type_kind: PortTypeKind::Logic,
                             array_dims: Vec::new(),
+                            value_kind: Default::default(),
                         },
                     );
                 }
@@ -1544,6 +1761,7 @@ mod tests {
                     kind,
                     type_kind: PortTypeKind::Logic,
                     array_dims: Vec::new(),
+                    value_kind: Default::default(),
                 },
             );
         }

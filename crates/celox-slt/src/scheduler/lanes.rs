@@ -1102,6 +1102,7 @@ mod tests {
                 .unwrap(),
         };
         LogicPath {
+            transparent_copy: false,
             target: LogicPathTarget::Var(VarAtomBase::new(target, access.0, access.1)),
             sources: source
                 .map(|source| {
@@ -1308,6 +1309,7 @@ mod tests {
 
     fn word_path(target: u32, sources: &[u32], expr: NodeId) -> LogicPath<u32> {
         LogicPath {
+            transparent_copy: false,
             target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 31)),
             sources: sources
                 .iter()

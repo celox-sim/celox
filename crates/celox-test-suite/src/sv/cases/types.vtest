@@ -354,3 +354,57 @@
   (assert_eq large_count 6)
   (assert_eq small_left 0)
   (assert_eq large_right 5))
+
+(case inherited_parameter_aliases_materialize_replication_masks
+  (source "inherited_replication.sv" #"
+    package Config;
+        parameter W = 58;
+    endpackage
+    module Top(input logic [63:0] data, output logic [63:0] y, generated, procedural);
+        import Config::*;
+        localparam WIDTH = W;
+        localparam MASK = {WIDTH{1'b1}} << 3;
+        always_comb y = data & MASK;
+        always_comb begin
+            localparam COPY_W = WIDTH, LOCAL_MASK = {COPY_W{1'b1}};
+            procedural = data & LOCAL_MASK;
+        end
+        if (1) begin : g
+            localparam COPY_W = WIDTH;
+            localparam G_MASK = {COPY_W{1'b1}};
+            assign generated = data & G_MASK;
+        end
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 0xffffffffffffffff 0x0123456789abcdef)
+    (modify (set data value))
+    (assert_eq y (& value 0x3fffffffffffff8))
+    (assert_eq generated (& value 0x3ffffffffffffff))
+    (assert_eq procedural (& value 0x3ffffffffffffff))))
+
+(case inherited_parameter_aliases_preserve_types_and_unknowns
+  (four_state)
+  (source "inherited_parameter_types.sv" #"
+    package Config;
+        parameter logic signed [7:0] NEG = -1;
+        parameter logic [7:0] UNSIGNED = 8'h80;
+        parameter logic [3:0] UNKNOWN = 4'bx;
+        parameter logic [3:0] HIGH_Z = 4'bz;
+    endpackage
+    module Top(output logic matched);
+        import Config::*;
+        localparam SIGNED_ALIAS = NEG;
+        localparam UNSIGNED_ALIAS = UNSIGNED;
+        localparam X_ALIAS = UNKNOWN;
+        localparam Z_ALIAS = HIGH_Z;
+        localparam XX = {2{X_ALIAS}};
+        localparam ZZ = {2{Z_ALIAS}};
+        assign matched = (SIGNED_ALIAS < 0) && ($bits(SIGNED_ALIAS) == 8)
+            && ((SIGNED_ALIAS >>> 1) == -1) && ((UNSIGNED_ALIAS >>> 1) == 8'h40)
+            && (XX === 8'bx) && (ZZ === 8'bz);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq matched 1))

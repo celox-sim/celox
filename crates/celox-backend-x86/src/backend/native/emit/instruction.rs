@@ -14,6 +14,23 @@ pub(super) fn emit_inst(
     let context = asm.context;
     let mut bound_continuation = false;
     match inst {
+        MInst::FloatBinary {
+            dst,
+            lhs,
+            rhs,
+            op,
+            precision,
+        } => {
+            floating::emit_binary(asm, assignment, *dst, *lhs, *rhs, *op, *precision)?;
+        }
+        MInst::FloatUnary {
+            dst,
+            src,
+            op,
+            precision,
+        } => {
+            floating::emit_unary(asm, assignment, *dst, *src, *op, *precision)?;
+        }
         MInst::ExternArg { index, src } => {
             extern_call::emit_extern_arg(asm, *index, preg_to_reg64(resolve(assignment, *src)))?;
         }

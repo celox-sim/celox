@@ -124,6 +124,8 @@ pub struct JitBackend {
     memory: MemoryImage,
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
     comb_capture_enabled: Vec<u8>,
+    /// Boxed so the address in the state header survives moves.
+    heap: Box<celox_heap::Heap>,
     /// Cached from `shared.comb_func` to avoid Arc dereference on the hot path.
     comb_func: SimFunc,
     /// Worker threads for lane-partitioned kernels, started on first use.
@@ -151,14 +153,14 @@ impl CraneliftEvalCombPlan {
         let timing = options.diagnostics.optimizer_timing;
         if timing {
             use celox_backend_cranelift::cost_model::{
-                CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD, estimate_eu_cost,
+                CLIF_INST_THRESHOLD, FUNCTION_VALUE_THRESHOLD, estimate_eu_cost,
                 estimate_eu_value_count,
             };
             for (i, eu) in sir.sir.eval_comb.iter().enumerate() {
                 let inst_cost = estimate_eu_cost(eu, options.four_state);
                 let value_count = estimate_eu_value_count(eu, options.four_state);
                 tracing::debug!(
-                    "[split-check] eval_comb eu[{i}]: blocks={} insts={} clif_cost={inst_cost}/{CLIF_INST_THRESHOLD} values={value_count}/{VREG_VALUE_THRESHOLD}",
+                    "[split-check] eval_comb eu[{i}]: blocks={} insts={} clif_cost={inst_cost}/{CLIF_INST_THRESHOLD} values={value_count}/{FUNCTION_VALUE_THRESHOLD}",
                     eu.blocks.len(),
                     eu.blocks
                         .values()
@@ -170,18 +172,9 @@ impl CraneliftEvalCombPlan {
 
         let split_start = timing.then(crate::timing::now);
         use celox_backend_cranelift::tail_call_split;
-        if let Some(chunks) =
-            tail_call_split::split_if_needed(&sir.sir.eval_comb, options.four_state)
-        {
-            if let Some(start) = split_start {
-                tracing::debug!(
-                    "[split] TailCallChunks: {} chunks, took {:?}",
-                    chunks.len(),
-                    start.elapsed()
-                );
-            }
-            Self::TailCallChunks(chunks)
-        } else if let Some(plan) =
+        // Multi-block units need memory-spilled chunks. Select them first so
+        // an oversized EU is not hidden inside an EU-boundary tail-call plan.
+        if let Some(plan) =
             tail_call_split::split_if_needed_spilled(&sir.sir.eval_comb, options.four_state)
         {
             if let Some(start) = split_start {
@@ -193,6 +186,17 @@ impl CraneliftEvalCombPlan {
                 );
             }
             Self::MemorySpilled(plan)
+        } else if let Some(chunks) =
+            tail_call_split::split_if_needed(&sir.sir.eval_comb, options.four_state)
+        {
+            if let Some(start) = split_start {
+                tracing::debug!(
+                    "[split] TailCallChunks: {} chunks, took {:?}",
+                    chunks.len(),
+                    start.elapsed()
+                );
+            }
+            Self::TailCallChunks(chunks)
         } else {
             Self::Unsplit
         }
@@ -736,6 +740,7 @@ impl JitBackend {
             memory,
             runtime_event_buffer,
             comb_capture_enabled,
+            heap: Default::default(),
             comb_func,
             lane_pool: None,
             lane_selectors: Default::default(),
@@ -756,6 +761,7 @@ impl JitBackend {
         memory: MemoryImage,
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
         comb_capture_enabled: Vec<u8>,
+        heap: Box<celox_heap::Heap>,
     ) -> Self {
         // A MemorySpilled compile plan extends the compiled layout with
         // backend scratch beyond the semantic state the interpreter owned.
@@ -772,6 +778,7 @@ impl JitBackend {
             memory,
             runtime_event_buffer,
             comb_capture_enabled,
+            heap,
             comb_func,
             lane_pool: None,
             lane_selectors: Default::default(),
@@ -779,6 +786,7 @@ impl JitBackend {
         // The state names the previous tier's extern function table; point it
         // at the one this code owns.
         backend.install_extern_functions();
+        backend.install_heap();
         backend
     }
 
@@ -796,6 +804,14 @@ impl JitBackend {
             self.comb_capture_enabled.as_ptr() as u64,
         );
         self.install_extern_functions();
+        self.install_heap();
+    }
+
+    fn install_heap(&mut self) {
+        self.memory.write_header_word(
+            celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET,
+            std::ptr::from_mut(&mut *self.heap) as u64,
+        );
     }
 
     fn install_extern_functions(&mut self) {
@@ -1412,6 +1428,14 @@ impl super::SimBackend for JitBackend {
 
     fn layout(&self) -> &super::MemoryLayout {
         self.layout()
+    }
+
+    fn heap(&self) -> &celox_heap::Heap {
+        &self.heap
+    }
+
+    fn heap_mut(&mut self) -> &mut celox_heap::Heap {
+        &mut self.heap
     }
 
     fn id_to_addr_slice(&self) -> &[AbsoluteAddr] {

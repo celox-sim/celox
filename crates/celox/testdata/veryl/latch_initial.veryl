@@ -1,0 +1,30 @@
+module Latch(en: input logic, d: input logic<8>, q: output logic<8>) {
+    always_comb { if en { q = d; } }
+}
+#[test(Top)] module Top {
+    inst clk: $tb::clock_gen;
+    var en: logic;
+    var d: logic<8>;
+    var q: logic<8>;
+    inst dut: Latch(en, d, q);
+    initial {
+        en = 0; d = 0;
+        clk.next(1);
+        en = 1; d = 7;
+        clk.next(1);
+        $assert(q == 8'd7);
+        d = 13;
+        clk.next(1);
+        $assert(q == 8'd13);
+        en = 0; d = 99;
+        clk.next(1);
+        $assert(q == 8'd13);
+        d = 55;
+        clk.next(2);
+        $assert(q == 8'd13);
+        en = 1;
+        clk.next(1);
+        $assert(q == 8'd55);
+        $finish();
+    }
+}

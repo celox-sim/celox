@@ -1,0 +1,154 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "Verilator executes always @* at time zero with declaration-initialized inputs for both retained and completely assigned outputs, changing q before a sensitivity event. IEEE 1800-2023 6.8 initializes static declarations before initial/always processes start, and 9.2.2.2.2 requires always @* to wait for a sensitivity change. Icarus passes the unchanged shared assertions; the adapter-free sources reproduce the Verilator failures.",
+      "expectation": "Simulation",
+      "name": "latch::classic_star_declaration_startup",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_wildcard_timezero",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "reason": "Verilator executes always @* at time zero with declaration-initialized inputs for both retained and completely assigned outputs, changing q before a sensitivity event. IEEE 1800-2023 6.8 initializes static declarations before initial/always processes start, and 9.2.2.2.2 requires always @* to wait for a sensitivity change. Icarus passes the unchanged shared assertions; the adapter-free sources reproduce the Verilator failures.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/wildcard_declaration_startup_verilator.json",
+          "verification/repros/wildcard_declaration_startup.sv",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/wildcard_task_sensitivity_verilator.json",
+          "verification/repros/star_complete_declaration_startup.sv"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator executes the self-reading always_comb latch more than once after seed/en change: the shared case expects q=1 and observes q=3. An adapter-free reproduction expects q=1 and observes q=2 in Verilator, while Icarus observes q=1 and passes unchanged-input and overwritten-read sensitivity checks. IEEE 1800-2023 9.2.2.2.1 excludes the written q expression from implicit sensitivity; its own write must not retrigger this process. Celox and Icarus pass the original shared assertions.",
+      "expectation": "Simulation",
+      "name": "latch::guarded_activation",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_latch_self_activation",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "reason": "Verilator executes the self-reading always_comb latch more than once after seed/en change: the shared case expects q=1 and observes q=3. An adapter-free reproduction expects q=1 and observes q=2 in Verilator, while Icarus observes q=1 and passes unchanged-input and overwritten-read sensitivity checks. IEEE 1800-2023 9.2.2.2.1 excludes the written q expression from implicit sensitivity; its own write must not retrigger this process. Celox and Icarus pass the original shared assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/latch_activation_verilator.json",
+          "verification/repros/latch_activation.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 reports DIDNOTCONVERGE in the settle region for these self-reading @* / always_latch processes, before the timed pulse assertions. The unchanged adapter-free sources also fail to settle, while Icarus 13.0 completes both. IEEE 1800-2023 9.2.2.3 applies the always_comb written-expression sensitivity exclusion (9.2.2.2.1) to always_latch; an @* procedure waits at its event control and does not wait on its own blocking body writes (9.2.2.1, 9.4.2.2). A self-write must not produce an endless activation loop. This exclusion concerns the observed nonconvergence, not arbitrary ordering between independent active-region processes.",
+      "expectation": "Simulation",
+      "name": "latch::hierarchy_same_activation_change_return",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_latch_pulse_self_activation",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "reason": "Verilator 5.052 reports DIDNOTCONVERGE in the settle region for these self-reading @* / always_latch processes, before the timed pulse assertions. The unchanged adapter-free sources also fail to settle, while Icarus 13.0 completes both. IEEE 1800-2023 9.2.2.3 applies the always_comb written-expression sensitivity exclusion (9.2.2.2.1) to always_latch; an @* procedure waits at its event control and does not wait on its own blocking body writes (9.2.2.1, 9.4.2.2). A self-write must not produce an endless activation loop. This exclusion concerns the observed nonconvergence, not arbitrary ordering between independent active-region processes.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/latch_change_return_verilator.json",
+          "verification/repros/latch_change_return.sv",
+          "verification/repros/latch_hierarchy_change_return.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 reports DIDNOTCONVERGE in the settle region for these self-reading @* / always_latch processes, before the timed pulse assertions. The unchanged adapter-free sources also fail to settle, while Icarus 13.0 completes both. IEEE 1800-2023 9.2.2.3 applies the always_comb written-expression sensitivity exclusion (9.2.2.2.1) to always_latch; an @* procedure waits at its event control and does not wait on its own blocking body writes (9.2.2.1, 9.4.2.2). A self-write must not produce an endless activation loop. This exclusion concerns the observed nonconvergence, not arbitrary ordering between independent active-region processes.",
+      "expectation": "Simulation",
+      "name": "latch::same_activation_change_return",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_latch_pulse_self_activation",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "reason": "Verilator 5.052 reports DIDNOTCONVERGE in the settle region for these self-reading @* / always_latch processes, before the timed pulse assertions. The unchanged adapter-free sources also fail to settle, while Icarus 13.0 completes both. IEEE 1800-2023 9.2.2.3 applies the always_comb written-expression sensitivity exclusion (9.2.2.2.1) to always_latch; an @* procedure waits at its event control and does not wait on its own blocking body writes (9.2.2.1, 9.4.2.2). A self-write must not produce an endless activation loop. This exclusion concerns the observed nonconvergence, not arbitrary ordering between independent active-region processes.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/latch_change_return_verilator.json",
+          "verification/repros/latch_change_return.sv",
+          "verification/repros/latch_hierarchy_change_return.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator executes always @* at time zero with declaration-initialized inputs for both retained and completely assigned outputs, changing q before a sensitivity event. IEEE 1800-2023 6.8 initializes static declarations before initial/always processes start, and 9.2.2.2.2 requires always @* to wait for a sensitivity change. Icarus passes the unchanged shared assertions; the adapter-free sources reproduce the Verilator failures.",
+      "expectation": "Simulation",
+      "name": "latch::star_complete_declaration_startup",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_wildcard_timezero",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "reason": "Verilator executes always @* at time zero with declaration-initialized inputs for both retained and completely assigned outputs, changing q before a sensitivity event. IEEE 1800-2023 6.8 initializes static declarations before initial/always processes start, and 9.2.2.2.2 requires always @* to wait for a sensitivity change. Icarus passes the unchanged shared assertions; the adapter-free sources reproduce the Verilator failures.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/wildcard_declaration_startup_verilator.json",
+          "verification/repros/wildcard_declaration_startup.sv",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/wildcard_task_sensitivity_verilator.json",
+          "verification/repros/star_complete_declaration_startup.sv"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator wakes always_comb/always_latch when globals read only inside called task bodies change, failing the assertion that both outputs remain zero without an argument change. IEEE 1800-2023 9.2.2.2.1 adds task arguments but excludes task contents from implicit sensitivity; 9.2.2.3 applies the same rules to always_latch. Icarus passes both the unchanged-global-sensitivity assertion and the later argument-change assertion in the exact adapter-free shared source.",
+      "expectation": "Simulation",
+      "name": "latch::task_call_sensitivity",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_task_body_sensitivity",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "reason": "Verilator wakes always_comb/always_latch when globals read only inside called task bodies change, failing the assertion that both outputs remain zero without an argument change. IEEE 1800-2023 9.2.2.2.1 adds task arguments but excludes task contents from implicit sensitivity; 9.2.2.3 applies the same rules to always_latch. Icarus passes both the unchanged-global-sensitivity assertion and the later argument-change assertion in the exact adapter-free shared source.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/wildcard_task_sensitivity_verilator.json",
+          "verification/repros/task_call_sensitivity.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    }
+  ]
+}

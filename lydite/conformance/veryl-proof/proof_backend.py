@@ -9,6 +9,33 @@ from wide_words import Encoder, join, balanced
 ROOT=pathlib.Path(__file__).resolve().parent
 class Unsupported(ValueError):pass
 
+def is_float_operation(value,kind):
+    if not isinstance(value,dict) or set(value)!={'Float'}:return False
+    body=value['Float']
+    if not isinstance(body,dict) or set(body)!={'op','precision'} or body['precision'] not in ('F32','F64'):return False
+    op=body['op']
+    if kind=='Binary':return isinstance(op,str) and op in ('Add','Sub','Mul','Div','Rem','Pow','Eq','Ne','Lt','Le','Gt','Ge')
+    if isinstance(op,str):return op in ('Neg','ToBool')
+    if not isinstance(op,dict) or len(op)!=1:return False
+    name,fields=next(iter(op.items()))
+    if not isinstance(fields,dict):return False
+    if name=='Convert':return set(fields)=={'to'} and fields['to'] in ('F32','F64')
+    expected={'width'} if name in ('FromSigned','FromUnsigned') else {'width','round'}
+    return name in ('FromSigned','FromUnsigned','ToSigned','ToUnsigned') and set(fields)==expected and type(fields['width']) is int and 1<=fields['width']<=64 and ('round' not in fields or type(fields['round']) is bool)
+
+def has_float_operations(value):
+    """Recognize only serialized SIR operations; malformed IR still fails normally."""
+    if isinstance(value,dict):
+        for kind,args in value.items():
+            if kind in ('Unary','Binary') and isinstance(args,list):
+                index=1 if kind=='Unary' else 2
+                if len(args)==(3 if kind=='Unary' else 4) and is_float_operation(args[index],kind):
+                    return True
+            if has_float_operations(args):return True
+    elif isinstance(value,list):
+        return any(has_float_operations(item) for item in value)
+    return False
+
 def conjunction(xs):
     if not xs:return True
     if len(xs)==1:return xs[0]
