@@ -2071,6 +2071,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         unit: None,
         fallback: Vec::new(),
         events: Vec::new(),
+        clocks: Vec::new(),
     });
     // The runtime reads counters, the signals waits watch and staged
     // nonblocking values directly; no unit loads a wait's signal.
@@ -2255,7 +2256,9 @@ fn declare_scheduler_slots(
         );
         id
     };
-    use celox_design::{SCHEDULER_FLAG_WIDTH as FLAG, SCHEDULER_TIME_WIDTH as TIME};
+    use celox_design::{
+        SCHEDULER_CLOCKS as CLOCKS, SCHEDULER_FLAG_WIDTH as FLAG, SCHEDULER_TIME_WIDTH as TIME,
+    };
     Some(celox_design::SchedulerSlots {
         limit: declare("limit".into(), TIME),
         now: declare("now".into(), TIME),
@@ -2276,6 +2279,10 @@ fn declare_scheduler_slots(
         baseline: (0..process_count)
             .map(|index| declare(format!("baseline[{index}]"), FLAG))
             .collect(),
+        clock_next: declare("clock_next".into(), TIME * CLOCKS),
+        clock_period: declare("clock_period".into(), TIME * CLOCKS),
+        clock_value: declare("clock_value".into(), TIME),
+        clock_armed: declare("clock_armed".into(), TIME),
     })
 }
 
