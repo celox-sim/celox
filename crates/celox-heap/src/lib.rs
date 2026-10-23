@@ -294,6 +294,32 @@ mod tests {
     }
 
     #[test]
+    fn random_modes_restore_nested_scopes_and_participate_in_comparisons() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 16);
+        assert!(heap.random_mode(object, 0, true));
+        assert!(!heap.random_mode(object, 8, false));
+        let original = heap.clone();
+        heap.set_random_mode(object, 0, false);
+        assert!(!heap.same_contents(&original));
+        let disabled = heap.clone();
+        heap.push_random_modes(object);
+        heap.select_random_mode(object, 0, true, true);
+        heap.select_random_mode(object, 8, false, true);
+        assert!(heap.selected_random_mode(object, 8));
+        assert!(heap.random_mode(object, 8, false));
+        let outer = heap.clone();
+        heap.push_random_modes(object);
+        heap.select_random_mode(object, 8, false, false);
+        assert!(!heap.selected_random_mode(object, 8));
+        assert!(!heap.random_mode(object, 8, false));
+        heap.pop_random_modes(object);
+        assert!(heap.same_contents(&outer));
+        heap.pop_random_modes(object);
+        assert!(heap.same_contents(&disabled));
+    }
+
+    #[test]
     fn interning_gives_equal_contents_equal_handles() {
         let mut heap = Heap::new();
         let a = heap.intern(b"abc");

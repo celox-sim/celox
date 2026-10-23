@@ -6596,7 +6596,19 @@ fn class_randomize_rejects_unsupported_semantics() {
             "c.randomize() with { x == 1; }",
             "unsupported",
         ),
-        ("rand int x;", "c.randomize(x)", "arguments"),
+        ("rand int x;", "c.randomize(x + 1)", "arguments"),
+        ("rand int x;", "c.randomize(c.x)", "arguments"),
+        ("rand int x;", "c.randomize(null, x)", "arguments"),
+        (
+            "rand int x;",
+            "c.randomize(missing)",
+            "not an instance property",
+        ),
+        ("const int x = 1;", "c.randomize(x)", "const"),
+        ("local int x;", "c.randomize(x)", "non-public"),
+        ("protected int x;", "c.randomize(x)", "non-public"),
+        ("rand int x;", "c.rand_mode()", "getter requires"),
+        ("int x;", "c.x.rand_mode()", "rand or randc"),
         (
             "rand int x; function void pre_randomize(int arg); endfunction",
             "c.randomize()",
@@ -6615,5 +6627,34 @@ fn class_randomize_rejects_unsupported_semantics() {
             .unwrap_err()
             .to_string();
         assert!(error.to_lowercase().contains(expected), "{source}: {error}");
+    }
+}
+
+#[test]
+fn rand_mode_setter_cannot_be_used_as_a_value() {
+    let source = "module Top; class C; rand int x; endclass C c; int result; initial begin c = new; result = c.x.rand_mode(1); end endmodule";
+    let error = analyze_source(source, Path::new("mode_value.sv"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("setter is void"), "{error}");
+}
+
+#[test]
+fn rand_mode_name_outside_a_class_is_an_ordinary_function() {
+    let source = "module Top(output int value); function int rand_mode(); return 42; endfunction initial value = rand_mode(); endmodule";
+    analyze_source(source, Path::new("ordinary_rand_mode.sv")).unwrap();
+}
+
+#[test]
+fn randomization_signatures_do_not_force_unused_interface_class_layouts() {
+    for declaration in [
+        "interface class I; typedef int T; pure virtual function void f(T x); endclass
+         interface class J extends I; pure virtual function void g(T x); endclass",
+        "interface class I #(type T = logic); pure virtual function void f(T x); endclass
+         interface class J #(type T = logic); pure virtual function void g(T x); endclass
+         interface class K #(type U = logic) extends I#(U), J#(U); typedef U T; endclass",
+    ] {
+        let source = format!("module Top; {declaration} endmodule");
+        analyze_source(&source, Path::new("unused_interface_class.sv")).unwrap();
     }
 }

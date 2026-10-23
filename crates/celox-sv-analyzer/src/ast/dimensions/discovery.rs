@@ -469,7 +469,7 @@ fn class_signatures(
             context,
         );
     }
-    for method in ["randomize", "srandom"] {
+    for method in ["randomize", "srandom", "rand_mode"] {
         let mut formals = vec![(
             FunctionArgumentMetadata {
                 name: classes::THIS.into(),
@@ -478,16 +478,29 @@ fn class_signatures(
             },
             handle.clone(),
         )];
-        if method == "srandom" {
-            formals.push((
-                FunctionArgumentMetadata {
-                    name: "seed".into(),
-                    direction: ParamDirection::Input,
-                    has_default: false,
-                },
-                procedural::int_type(),
-            ));
-        }
+        let (argument, ty) = match method {
+            "randomize" => (
+                "$selection",
+                // Signature discovery must not require an otherwise unused class
+                // to have a supported layout. A call validates the layout before
+                // using this selection formal; lowering reports layout errors.
+                classes::class(tree, &class_name, &context.const_env, &context.type_aliases)
+                    .map_or_else(
+                        |_| classes::unsigned_type(1),
+                        |layout| layout.selection_type(),
+                    ),
+            ),
+            "srandom" => ("seed", procedural::int_type()),
+            _ => ("on_off", classes::unsigned_type(1)),
+        };
+        formals.push((
+            FunctionArgumentMetadata {
+                name: argument.into(),
+                direction: ParamDirection::Input,
+                has_default: false,
+            },
+            ty,
+        ));
         publish_signature(
             classes::Class::subroutine_name(&class_name, method),
             formals,

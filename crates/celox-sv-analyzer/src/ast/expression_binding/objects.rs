@@ -293,7 +293,7 @@ pub(in crate::ast) fn method(
         }
         return Ok(Some((
             Class::subroutine_name(&class_name, &method_name),
-            usize::from(method_name == "srandom"),
+            1,
             receiver,
         )));
     }
@@ -515,4 +515,184 @@ pub(in crate::ast) fn constructor(
         args,
         arg_order: Vec::new(),
     }))
+}
+
+/// Inline randomization names are resolved in the receiver's class, not in
+/// the caller's scope (18.11). Bit zero distinguishes an explicit empty set.
+pub(super) fn random_selection(
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    name: &str,
+    arguments: &[celox_sv_syntax::Argument],
+    native: &Declarations,
+) -> Converted<Expr> {
+    let owner = name.strip_suffix("::randomize").expect("randomize method");
+    let class = class(tree, dimensions, owner)?;
+    let mut bits = vec!['0'; class.properties.len() + 1];
+    if !arguments.is_empty() {
+        bits[0] = '1';
+    }
+    for argument in arguments {
+        let id = argument
+            .value
+            .filter(|_| argument.name.is_none())
+            .ok_or_else(|| unsupported("randomize arguments must be member names"))?;
+        match &native.expression(ungroup(id, native)).kind {
+            ExprKind::Literal(value) if value == "null" && arguments.len() == 1 => {}
+            ExprKind::Name(name) => {
+                let name = instances::normalize_identifier(&name.spelling);
+                let index = class
+                    .properties
+                    .iter()
+                    .rposition(|p| p.name == name)
+                    .ok_or_else(|| {
+                        unsupported(format!(
+                            "randomize argument `{name}` is not an instance property"
+                        ))
+                    })?;
+                let property = &class.properties[index];
+                check_random_access(tree, dimensions, property)?;
+                if property.constant {
+                    return Err(unsupported("randomize argument is a const property"));
+                }
+                if property.field.handle.is_some() || property.r#type.is_enum || property.randc {
+                    return Err(unsupported(
+                        "randomize arguments require integral non-enum, non-randc properties",
+                    ));
+                }
+                bits[index + 1] = '1';
+            }
+            _ => {
+                return Err(unsupported(
+                    "randomize arguments must be member names or a single null",
+                ));
+            }
+        }
+    }
+    Ok(Expr::Literal(format!(
+        "{}'b{}",
+        bits.len(),
+        bits.into_iter().rev().collect::<String>()
+    )))
+}
+
+/// Bind rand_mode's void setter and integer getter separately (18.8).
+/// A getter requires one random property; only the setter accepts an object.
+pub(in crate::ast) fn rand_mode_call(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+    allow_set: bool,
+) -> Converted<Option<Expr>> {
+    let (callee, args) = match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Call {
+            expression,
+            arguments,
+        } => (*expression, arguments.as_slice()),
+        _ => (id, &[][..]),
+    };
+    let (property, owner, handle) = match &native.expression(ungroup(callee, native)).kind {
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "." && name.spelling == "rand_mode" => {
+            let property_target = property(tree, *expression, native, dimensions)?;
+            if let Some((property, object)) = property_target.filter(|(property, _)| {
+                property.rand || property.randc || property.r#type.class().is_none()
+            }) {
+                check_random_access(tree, dimensions, &property)?;
+                if !property.rand && !property.randc {
+                    return Err(unsupported("rand_mode requires a rand or randc property"));
+                }
+                (
+                    Some(property),
+                    None,
+                    receiver(tree, object, native, dimensions)?,
+                )
+            } else if let Some(owner) = native_class(tree, *expression, native, dimensions) {
+                (
+                    None,
+                    Some(owner),
+                    bind_value(*expression, native, tree, dimensions, None)?,
+                )
+            } else {
+                return Err(unsupported(
+                    "rand_mode requires an object or random class property",
+                ));
+            }
+        }
+        ExprKind::Name(name)
+            if name.spelling == "rand_mode" && dimensions.get("rand_mode").is_none() =>
+        {
+            let Some(owner) = scope_class(dimensions) else {
+                return Ok(None);
+            };
+            if dimensions.get(THIS).is_none() {
+                return Err(unsupported("rand_mode requires an object receiver"));
+            }
+            (None, Some(owner), this())
+        }
+        _ => return Ok(None),
+    };
+    if args.is_empty() {
+        let property =
+            property.ok_or_else(|| unsupported("rand_mode getter requires one random property"))?;
+        return Ok(Some(classes::object_call(
+            ObjectOp::ModeGet(property.field.offset, true),
+            vec![handle],
+        )));
+    }
+    if !allow_set {
+        return Err(unsupported(
+            "rand_mode setter is void and cannot be used as a value",
+        ));
+    }
+    if args.len() != 1 || args[0].name.is_some() || args[0].value.is_none() {
+        return Err(unsupported("rand_mode setter requires one on_off argument"));
+    }
+    let enabled = bind_value(args[0].value.unwrap(), native, tree, dimensions, None)?;
+    Ok(Some(match property {
+        Some(property) => classes::object_call(
+            ObjectOp::ModeSet(property.field.offset),
+            vec![handle, enabled],
+        ),
+        None => Expr::Call {
+            callee: Callee::Subroutine(Class::subroutine_name(&owner.unwrap(), "rand_mode")),
+            args: vec![Some(handle), Some(enabled)],
+            arg_order: Vec::new(),
+        },
+    }))
+}
+
+fn check_random_access(
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    property: &classes::Property,
+) -> Converted<()> {
+    let scope = scope_class(dimensions);
+    let accessible = if property.local {
+        scope.as_deref() == Some(&property.owner)
+    } else if property.protected {
+        scope
+            .and_then(|name| class(tree, dimensions, &name).ok())
+            .is_some_and(|class| {
+                class.derives_from(
+                    tree,
+                    &property.owner,
+                    &dimensions.const_env,
+                    &dimensions.type_aliases,
+                )
+            })
+    } else {
+        true
+    };
+    if !accessible {
+        return Err(unsupported(format!(
+            "randomization access to non-public property `{}`",
+            property.name
+        )));
+    }
+    Ok(())
 }
