@@ -216,6 +216,11 @@ pub struct RuntimeCombObserver<A> {
     pub site_id: u32,
     pub activation_group: u32,
     pub sensitivity: Vec<VarAtomBase<A>>,
+    /// Occurrence counters of the sensitivity: a counter that moved since
+    /// the last check activates the observer even when the settled value
+    /// equals the last one.
+    #[serde(default = "Vec::new")]
+    pub occurrence_counters: Vec<A>,
     pub written_inputs: Vec<A>,
 }
 
@@ -826,6 +831,11 @@ pub struct RuntimeSchema<A> {
     pub process_origins: Vec<ProcessOrigin>,
     /// Counted signals and their occurrence counters.
     pub watches: Vec<EventWatch<A>>,
+    /// Bit ranges whose changes bump an occurrence counter: the sensitivity
+    /// of change-gated combinational processes and comb observers. Design
+    /// code counts its own writes; the runtime counts the writes it makes,
+    /// such as the nonblocking updates it publishes.
+    pub occurrence_probes: Vec<(VarAtomBase<A>, A)>,
     /// Wait sites of the process kernels. A process's sites appear in the
     /// order of its local site indices.
     pub wait_sites: Vec<WaitSite<A>>,
@@ -999,6 +1009,7 @@ impl<A> Default for RuntimeSchema<A> {
             processes: Vec::new(),
             process_origins: Vec::new(),
             watches: Vec::new(),
+            occurrence_probes: Vec::new(),
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
             host_request_sites: Vec::new(),
@@ -1804,6 +1815,7 @@ mod tests {
                 id: initial.address,
                 access: BitAccess { lsb: 3, msb: 7 },
             }],
+            occurrence_counters: Vec::new(),
             written_inputs: vec![initial.address],
         });
         runtime.testbench_read_roots.insert(initial.address);

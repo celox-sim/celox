@@ -3733,6 +3733,14 @@ pub(crate) fn attach_instance_glue(
             ));
         }
     }
+    // A flip-flop evaluation stores each update in the working state; two
+    // of one execution are two update events (IEEE 1800-2023 4.3, 10.4.2).
+    for unit in module.eval_only_ff_blocks.values() {
+        candidates.extend(celox_frontend_core::watch::multi_store_only_candidates(
+            unit,
+            |address| (address.region == WORKING_REGION).then_some(address.var_id),
+        ));
+    }
     module.arena = arena;
     // Combinational event sites follow the flip-flop ones, including the
     // events run-time loops emit.
@@ -4430,10 +4438,35 @@ fn lower_comb_processes(
                     .collect();
             }
         }
-        // The sites of one process activate together.
+        // The sites of one process activate together. Every change of a
+        // source schedules the process (IEEE 1800-2023 4.3), also one that a
+        // later write of the same time slot undoes, so each sensitivity atom
+        // counts its occurrences.
         let base = sites.len() as u32;
+        let mut counters: Vec<(VarAtomBase<SourceVarId>, SourceVarId)> = Vec::new();
         for mut observer in std::mem::take(&mut comb.observers) {
             observer.activation_group = base;
+            for atom in &observer.sensitivity {
+                if !counters.iter().any(|(counted, _)| counted == atom) {
+                    let (counter, _) = comb.m.temp(
+                        "comb_occurrences",
+                        celox_design::EVENT_COUNTER_WIDTH,
+                        false,
+                        false,
+                    );
+                    counters.push((*atom, counter));
+                }
+            }
+            observer.sensitivity_counters = observer
+                .sensitivity
+                .iter()
+                .map(|atom| {
+                    *counters
+                        .iter()
+                        .find(|(counted, _)| counted == atom)
+                        .expect("a counter for every sensitivity atom")
+                })
+                .collect();
             observers.push(observer);
         }
         sites.append(&mut comb.sites);
