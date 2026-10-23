@@ -6,7 +6,7 @@ use celox_testbench::{
     AssertMessage as GenericAssertMessage, ClockCount as GenericClockCount, ExprBytecode,
     ExprOpcode as TbOpcode, LoopBound as GenericLoopBound, SemanticArgument,
     SemanticComponentBinding, SemanticSignal, SemanticStatement, SourceLocation, StateLocation,
-    TestbenchOperator as Op, TestbenchProgram, TestbenchSelection,
+    TestbenchClock, TestbenchOperator as Op, TestbenchProgram, TestbenchSelection,
     TestbenchStatement as GenericTestbenchStatement, TestbenchTarget,
 };
 use fxhash::{FxHashMap as HashMap, FxHashSet};
@@ -2568,6 +2568,17 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         }
     }
 
+    /// The `$tb::clock_gen` instances of this source's module.
+    fn clock_generators(&self) -> impl Iterator<Item = TestbenchClock<StateAddr>> + '_ {
+        self.testbench_source
+            .clock_periods
+            .iter()
+            .filter_map(|(&name, &period)| {
+                let (event, _) = self.named_variable(name)?;
+                Some(TestbenchClock { event, period })
+            })
+    }
+
     fn named_variable(&self, name: StrId) -> Option<(StateAddr, &VariableInfo)> {
         let instance = self.testbench_source.base_instance(self.lookup);
         let module = self.lookup.instance_module.get(&instance)?;
@@ -3852,6 +3863,7 @@ pub fn compile_semantic_testbench(
         .sum();
     let mut site_end = runtime_event_site_count.saturating_sub(total_sites);
     let mut processes = Vec::new();
+    let mut clocks = Vec::new();
     for source in sources {
         let initial_stmts = source.initial_statements.as_ref().unwrap();
         validate_testbench_statements(initial_stmts, lookup, source, &mut FxHashSet::default())?;
@@ -3859,12 +3871,16 @@ pub fn compile_semantic_testbench(
         let mut builder = SemanticTestbenchBuilder::new(lookup, source, site_end);
         builder.prepared_readmem = super::readmem::prepare_testbench_memories(lookup, source)?;
         builder.build_event_map(initial_stmts);
+        clocks.extend(builder.clock_generators());
         processes.extend(builder.convert(initial_stmts));
     }
+    clocks.sort_unstable_by_key(|clock: &TestbenchClock<StateAddr>| clock.event);
+    clocks.dedup_by_key(|clock| clock.event);
     let builder = SemanticTestbenchBuilder::new(lookup, source, runtime_event_site_count);
     let component_bindings = builder.convert_component_bindings()?;
     Ok(Some(
         TestbenchProgram::from_processes(processes)
+            .with_clocks(clocks)
             .with_private_variables(private_variables)
             .with_random_seed_option(random_seed)
             .with_components(source.components.clone())

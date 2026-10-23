@@ -263,7 +263,7 @@ export function createWasmSimulatorBridge(
 	);
 	const handle: NativeSimulatorHandle = {
 		tick(eventId: number): void {
-			if (edges?.hasDerived(eventId)) {
+			if (edges) {
 				edges.tick(eventId);
 				return;
 			}
@@ -345,7 +345,7 @@ export async function createWasmSimulatorBridgeAsync(
 	);
 	const handle: NativeSimulatorHandle = {
 		tick(eventId: number): void {
-			if (edges?.hasDerived(eventId)) {
+			if (edges) {
 				edges.tick(eventId);
 				return;
 			}

@@ -389,8 +389,8 @@ module Top (
 }
 
 /// `~clk` rises when `clk` falls: the timed simulation, which drives both
-/// levels of `clk`, runs its domain once per cycle, while a tick is the
-/// active edge of `clk` only and does not run it.
+/// levels of `clk`, runs its domain once per cycle, and so does a tick, one
+/// period of `clk`.
 #[test]
 fn an_inverted_clock_runs_on_the_falling_edge_only() {
     let code = r#"
@@ -425,9 +425,9 @@ module Top (
     let mut sim = Simulator::builder(code, "Top").build().unwrap();
     let (clk, rst, cnt2) = (sim.event("clk"), sim.signal("rst"), sim.signal("cnt2"));
     sim.modify(|io| io.set(rst, 1u8)).unwrap();
-    for _ in 0..4 {
+    for cycle in 0..4u64 {
         sim.tick(clk).unwrap();
-        assert_eq!(sim.get(cnt2), 0u8.into(), "a tick is not a falling edge");
+        assert_eq!(sim.get(cnt2), (cycle + 1).into(), "tick {cycle}");
     }
 }
 

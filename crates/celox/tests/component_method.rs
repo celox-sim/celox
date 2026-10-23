@@ -3016,7 +3016,9 @@ fn child_initial_resolves_its_component_method_instance() {
             var d: logic<8>;
             var q: logic<8>;
             inst component: $comp::celox_clocked #(STEP: 0) (clk, d, q);
-            initial { component.drive(8'h5a); $assert(q == 8'h5a); }
+            // `clk` runs whether or not a process waits on it, and its edges
+            // load `d` into `q`.
+            initial { component.drive(8'h5a); $assert(q == 8'h5a); d = 8'h5a; }
         }
         #[test(t)] module t {
             inst clk: $tb::clock_gen;

@@ -2290,15 +2290,17 @@ fn test_dual_clock() {
                 clk_a, rst_a, clk_b, rst_b, cnt_a, cnt_b,
             );
 
+            // Both clocks run throughout. `cnt_a` counts the 3 periods of
+            // `rst_b`'s assertion, then both count every period.
             initial {
                 rst_a.assert();
                 rst_b.assert();
                 clk_a.next  (10);
-                $assert     (cnt_a == 32'd10);
-                $assert     (cnt_b == 32'd0);
+                $assert     (cnt_a == 32'd13);
+                $assert     (cnt_b == 32'd10);
                 clk_b.next  (5);
-                $assert     (cnt_a == 32'd10);
-                $assert     (cnt_b == 32'd5);
+                $assert     (cnt_a == 32'd18);
+                $assert     (cnt_b == 32'd15);
                 $finish     ();
             }
         }

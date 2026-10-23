@@ -1,12 +1,11 @@
 //! Explicit edges: `posedge`, `negedge`, `active_edge`, `inactive_edge`,
-//! `cycle` and coincident `edges`, on every backend.
+//! `tick` and coincident `edges`, on every backend.
 
 use celox::{ClockType, Edge, SimBackend, Simulation, Simulator, SimulatorBuilder};
 
 /// A simulator under test, independent of its backend.
 trait Probe {
     fn edge(&mut self, event: &str, edge: Edge);
-    fn cycle(&mut self, event: &str);
     fn active_edge(&mut self, event: &str);
     fn inactive_edge(&mut self, event: &str);
     fn tick(&mut self, event: &str);
@@ -19,10 +18,6 @@ impl<B: SimBackend> Probe for Simulator<B> {
     fn edge(&mut self, event: &str, edge: Edge) {
         let event = self.event(event);
         Simulator::edge(self, event, edge).unwrap();
-    }
-    fn cycle(&mut self, event: &str) {
-        let event = self.event(event);
-        Simulator::cycle(self, event).unwrap();
     }
     fn active_edge(&mut self, event: &str) {
         let event = self.event(event);
@@ -134,12 +129,12 @@ fn edges_run_the_domains_of_their_direction() {
         sim.edge("clk", Edge::Falling);
         assert_eq!(counters(sim), [1, 1, 1], "{backend}: negedge");
         sim.set("en", 0);
-        sim.cycle("clk");
-        assert_eq!(counters(sim), [2, 2, 1], "{backend}: closed gate");
-        // A tick is the active edge only and leaves the clock low.
         sim.tick("clk");
-        assert_eq!(counters(sim), [3, 2, 1], "{backend}: tick");
-        assert_eq!(sim.get("clk"), 0, "{backend}: tick leaves clk");
+        assert_eq!(counters(sim), [2, 2, 1], "{backend}: closed gate");
+        sim.set("en", 1);
+        sim.tick("clk");
+        assert_eq!(counters(sim), [3, 3, 2], "{backend}: tick");
+        assert_eq!(sim.get("clk"), 0, "{backend}: tick leaves clk low");
     }
 }
 
@@ -169,20 +164,20 @@ module Top (clk: input clock, rst: input reset_async_low, q: output logic<8>) {
             assert_eq!(sim.get("q"), 1, "{backend}: {clock_type:?} inactive");
             sim.edge("clk", active);
             assert_eq!(sim.get("q"), 2, "{backend}: {clock_type:?} explicit");
-            sim.cycle("clk");
+            // A clock at its active level takes no active edge.
+            sim.tick("clk");
             assert_eq!(sim.get("q"), 2, "{backend}: {clock_type:?} stays active");
-            sim.edge("clk", inactive);
-            sim.cycle("clk");
-            assert_eq!(sim.get("q"), 3, "{backend}: {clock_type:?} cycle");
+            sim.tick("clk");
+            assert_eq!(sim.get("q"), 3, "{backend}: {clock_type:?} tick");
         }
     }
 }
 
-/// `cycle` runs a clock cycle exactly as the timed simulation's two steps
+/// `tick` runs a clock period exactly as the timed simulation's two steps
 /// do: gated clocks with pre-edge sampling, a gate the commit raises, `~clk`
 /// and a register divider of a divider.
 #[test]
-fn a_cycle_matches_the_timed_simulation() {
+fn a_tick_matches_the_timed_simulation() {
     const CODE: &str = r#"
 module Top (
     clk: input '_ clock,
@@ -238,7 +233,7 @@ module Top (
             .iter()
             .map(|&enable| {
                 sim.set("en_in", enable);
-                sim.cycle("clk");
+                sim.tick("clk");
                 sim.get("observed")
             })
             .collect();
