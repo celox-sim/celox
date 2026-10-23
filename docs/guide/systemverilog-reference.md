@@ -106,20 +106,37 @@ constants, selects and concatenation arguments are unsupported and rejected.
 
 ### Class randomization
 
-`object.randomize()` randomizes the object's `rand` properties and returns
-signed `int` value `1`. This first subset supports classes without inheritance
-or constraints, with 2-state non-enum integral `rand` properties up to 64 bits.
-Other properties keep their values. Zero-argument, non-static, non-virtual
-`pre_randomize()` and `post_randomize()` functions run before and after the
-updates, including when there are no `rand` properties (IEEE 1800-2023 18.6).
-Calls inside a class may use `randomize()` or `this.randomize()`.
+`object.randomize()` randomizes enabled `rand` properties and returns signed
+`int` value `1`. Supported properties are 2-state, non-enum integral values up
+to 64 bits in classes without constraints. Inherited properties are included,
+and a call through a base handle uses the dynamic object's class and its
+`pre_randomize()` / `post_randomize()` hooks. A derived hook replaces the base
+hook; call `super.pre_randomize()` or `super.post_randomize()` explicitly to
+include the base hook's work (IEEE 1800-2023 18.6.2). Hooks must be functions
+without arguments, non-static and non-virtual. Calls inside a class may use
+`randomize()` or `this.randomize()`.
+
+`object.member.rand_mode(0)` disables a random property; `rand_mode(1)` enables
+it, and `object.member.rand_mode()` returns its current mode as signed `int`.
+The setter's argument is a `bit`. `object.rand_mode(bit)` sets all random
+properties, including inherited ones. All start enabled, and aliases share the
+same modes (18.8).
+
+`object.randomize(x, y)` temporarily selects exactly those instance properties,
+including supported properties not declared `rand`. Names are resolved in the
+receiver's class, not the caller's scope; expressions and inaccessible members
+are rejected. The temporary modes are installed before the pre-hook and restored
+after the post-hook; hooks can inspect and change them. `randomize(null)` runs
+the hooks without drawing or assigning random values (18.11). Constraints are
+not supported even for this checker form.
 
 Each object has an independent random stream, seeded from its creating process.
-`object.srandom(seed)` resets it using a 32-bit seed; checkpoints preserve it
-(18.13.3, 18.14.3). Random sequences are implementation-specific.
-`randc`, constraints, `with`, argument lists to `randomize`, `rand_mode`,
-static random properties, random enum/array/object/string properties and randomization through inheritance
-remain unsupported. A call through `null` is a runtime error.
+`object.srandom(seed)` resets it using a 32-bit seed; checkpoints preserve both
+RNG and mode state (18.13.3, 18.14.3). Random sequences are implementation-specific.
+`randc` randomization, constraints, `with`, static random properties, and random
+enum/array/object/string properties remain unsupported. A constrained dynamic
+subclass is rejected rather than silently randomizing only its base properties.
+A call through `null` is a runtime error.
 
 ### Time literal delays {#time-literal-delays}
 

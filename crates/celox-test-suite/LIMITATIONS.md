@@ -651,3 +651,21 @@ an unknown display format code. It prints a lowercase `e` for the uppercase
 `%E` conversion in `real_display_negative_zero`; the negative-zero value is
 otherwise correct. Its `real_file_display_formats` case passes. The shared
 assertions remain enabled, and these external differences are not exclusions.
+
+Randomization control (`sv_icarus_randomization_control`) excludes four new
+`class::randomization_*` cases from Icarus 13.0: it rejects `randomize`, `srandom`
+and property/object `rand_mode` calls. [Retained diagnostics](verification/repros/sv_randomization_control_icarus.json)
+record the failures; they are not passing simulation results.
+
+Verilator 5.052 has two narrower exclusions, recorded in the
+[randomization control evidence](verification/repros/sv_randomization_control_verilator.json):
+
+- `sv_verilator_inherited_srandom`: `class::randomization_inheritance` fails
+  compilation with duplicate `srandom` declarations when the same derived
+  object is seeded through derived and base handles (IEEE 1800-2023 18.6.2,
+  18.13.3). Assertions for hidden inherited members and hook dispatch remain.
+- `sv_verilator_rand_mode_bit_argument`: `class::randomization_mode_bit_argument`
+  reports two errors because both forms of `rand_mode(2)` enable the variable.
+  The setter's formal is `bit` (18.8), so the required conversion truncates 2 to
+  0. Generated C++ confirms that Verilator uses 1. The normal 0/1 mode control,
+  inline member selection and pre-hook control cases pass Verilator.

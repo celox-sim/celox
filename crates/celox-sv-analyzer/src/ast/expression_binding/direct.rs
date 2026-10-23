@@ -240,6 +240,7 @@ enum Finish {
         name: String,
         formals: usize,
         receiver: objects::Receiver,
+        selection: Option<Expr>,
     },
 }
 
@@ -265,6 +266,10 @@ pub(in crate::ast) fn bind_value(
         match job {
             Job::Enter(id, target, scope) => {
                 let dimensions = scope.as_deref().unwrap_or(dimensions);
+                if let Some(call) = objects::rand_mode_call(tree, id, native, dimensions, false)? {
+                    values.push(call);
+                    continue;
+                }
                 if timescales::is_query(id, native) {
                     values.push(Expr::Literal(parameters::format_typed_parameter_literal(
                         i128::from(timescales::query(id, tree)?),
@@ -413,9 +418,16 @@ pub(in crate::ast) fn bind_value(
                         let (name, formals, receiver) =
                             objects::method(tree, *expression, native, dimensions)?
                                 .expect("checked by the guard");
-                        if args.len() > formals
-                            || (name.ends_with("::srandom") && args.len() != 1)
-                            || args.iter().any(|arg| arg.name.is_some())
+                        let selection = name
+                            .ends_with("::randomize")
+                            .then(|| {
+                                objects::random_selection(tree, dimensions, &name, args, native)
+                            })
+                            .transpose()?;
+                        if selection.is_none()
+                            && (args.len() > formals
+                                || (name.ends_with("::srandom") && args.len() != 1)
+                                || args.iter().any(|arg| arg.name.is_some()))
                         {
                             return Err(unsupported(format!("arguments of method `{name}`")));
                         }
@@ -423,7 +435,7 @@ pub(in crate::ast) fn bind_value(
                         if let objects::Receiver::Handle(handle) = receiver {
                             children.push((handle, None));
                         }
-                        for arg in args {
+                        for arg in args.iter().filter(|_| selection.is_none()) {
                             let Some(value) = arg.value else {
                                 return Err(unsupported(format!(
                                     "omitted argument of method `{name}`"
@@ -436,6 +448,7 @@ pub(in crate::ast) fn bind_value(
                                 name,
                                 formals,
                                 receiver,
+                                selection,
                             },
                             children,
                         )
@@ -924,6 +937,7 @@ pub(in crate::ast) fn bind_value(
                         name,
                         formals,
                         receiver,
+                        selection,
                     } => {
                         let mut args: Vec<Option<Expr>> = Vec::with_capacity(formals + 1);
                         if receiver == objects::Receiver::This {
@@ -931,6 +945,7 @@ pub(in crate::ast) fn bind_value(
                         }
                         let handles = usize::from(receiver != objects::Receiver::Static);
                         args.extend(operands.into_iter().map(Some));
+                        args.extend(selection.map(Some));
                         // Omitted trailing arguments take their defaults.
                         args.resize(formals + handles, None);
                         Expr::Call {
