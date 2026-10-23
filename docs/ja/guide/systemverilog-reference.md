@@ -520,6 +520,11 @@ interface型から解決します。generic interfaceポートとgenerate内の�
 変換時に精度を失う場合があります。checkpoint の復元後は復元した時刻を参照します。
 
 
+`%t` は時刻を設計全体で最も細かい時間精度の単位で、20 桁の欄に表示します（IEEE 1800-2023 20.4.3）。
+`` `timescale 1ns/1ps`` のもとで `#1.5` の後に `$display("%0t", $realtime)` を実行すると `1500` を表示します。
+時間スケールのない設計は既定の 1 ns / 1 ps を使うため、`%t` はやはりピコ秒で表示します。
+報告する時刻を持たない `string` の値に対する `%t` は拒否します。`$timeformat` には対応していません。
+
 `$printtimescale` は IEEE1800-2023 20.4.2 の形式で時刻スコープを表示します。
 例: `Time scale of (Top.child) is 100ns / 10ps`。
 引数なしの現在スコープ、design element、`$unit`、`$root` を指定でき、
