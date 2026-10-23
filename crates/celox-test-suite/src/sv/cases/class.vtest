@@ -712,6 +712,338 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "1 8\n1 1\n0 8\n"))
 
+(case specializations_of_parameterized_classes
+  (source "class.sv" #"
+module Top #(parameter int W = 6)(output bit done);
+    class Box #(int N = 4, type T = bit [7:0]);
+        T value;
+        static int made;
+        localparam int Twice = N * 2;
+        function new(T v);
+            value = v;
+            made++;
+        endfunction
+        function T get();
+            T copy = value;
+            return copy + T'(N);
+        endfunction
+        function int twice();
+            return Twice;
+        endfunction
+    endclass
+    class Wide #(int M = 1) extends Box #(M + 1, int);
+        function new();
+            super.new(100);
+        endfunction
+        function int kind();
+            return M * 10 + N;
+        endfunction
+    endclass
+    Box b4;
+    Box #(W) bw;
+    Box #(.T(int), .N(2)) bi;
+    Box #(3, bit [3:0]) bn;
+    Wide #(5) w;
+    Box #(6, int) base;
+    initial begin
+        b4 = new(8'd10);
+        bw = new(8'd1);
+        bi = new(-5);
+        bn = new(4'd14);
+        w = new;
+        $display("%0d %0d %0d %0d", b4.get(), bw.get(), bi.get(), bn.get());
+        $display("%0d %0d %0d %0d", b4.N, bw.twice(), Box#(.T(int), .N(2))::made, Box#()::made);
+        base = w;
+        $display("%0d %0d %0d %0d", base.get(), w.N, w.kind(), Box#(6, int)::made);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "14 7 -3 1\n4 12 1 1\n106 6 56 1\n"))
+
+(case specializations_are_named_by_parameter_values
+  (source "class.sv" #"
+module Top(output bit done);
+    class Box #(int N = 4, type T = bit [7:0]);
+        static int made;
+        function new();
+            made++;
+        endfunction
+    endclass
+    Box #(.T(int), .N(2)) named;
+    initial begin
+        named = new;
+        $display("%0d %0d %0d", Box#(2, int)::made, Box#(.N(2), .T(int))::made, Box#(1 + 1, int)::made);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 1 1\n"))
+
+(case specializations_with_their_own_handles
+  (source "class.sv" #"
+module Top(output bit done);
+    class Box #(int N = 4);
+        virtual function int n();
+            return N;
+        endfunction
+    endclass
+    class Sub #(int N = 4) extends Box #(N);
+        virtual function int n();
+            return N * 10;
+        endfunction
+    endclass
+    Box #(2) two;
+    Box #(3) three;
+    Sub #(2) sub;
+    int ok;
+    initial begin
+        sub = new;
+        two = sub;
+        ok = $cast(three, two);
+        $display("%0d %0d %0d", two.n(), ok, three == null);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "20 0 1\n"))
+
+(case class_scoped_parameters_and_types
+  (source "class.sv" #"
+module Top(output bit done);
+    class C #(int p = 1, type T = int);
+        parameter int q = 5;
+        typedef bit [p:0] word_t;
+        extern static function T f();
+        static function int g();
+            int p = 100;
+            return p + C::p;
+        endfunction
+        static function word_t w();
+            return '1;
+        endfunction
+    endclass
+    function C::T C::f();
+        return p + C::p;
+    endfunction
+    C#(3)::word_t x;
+    C#(.T(bit [2:0]))::T y;
+    initial begin
+        x = C#(3)::w();
+        y = 13;
+        $display("%0d %0d %0d", C#()::f(), C#(5)::f(), C#(3)::g());
+        $display("%0d %0d %0d %0d", x, y, C#()::q, C#(7)::p);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "2 10 103\n15 5 5 7\n"))
+
+(case specializations_of_interface_classes
+  (source "class.sv" #"
+module Top(output bit done);
+    interface class Getter #(type T = int);
+        pure virtual function T get();
+    endclass
+    class IntBox implements Getter#(int);
+        virtual function int get();
+            return -7;
+        endfunction
+    endclass
+    class NibbleBox #(int V = 3) implements Getter#(bit [3:0]);
+        extern virtual function bit [3:0] get();
+    endclass
+    function bit [3:0] NibbleBox::get();
+        return V + 20;
+    endfunction
+    Getter #(int) gi;
+    Getter #(bit [3:0]) gn;
+    Getter gd;
+    IntBox ib;
+    NibbleBox #(5) nb;
+    initial begin
+        ib = new;
+        nb = new;
+        gi = ib;
+        gn = nb;
+        gd = ib;
+        $display("%0d %0d %0d", gi.get(), gn.get(), gd.get());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "-7 9 -7\n"))
+
+(case named_constructor_arguments
+  (source "class.sv" #"
+module Top(output bit done);
+    class Base;
+        int s;
+        function new(int def = 3);
+            s = def;
+        endfunction
+    endclass
+    class Point #(int t = 12) extends Base;
+        int x;
+        int y;
+        function new(int x = 1, int y = 2);
+            super.new(.def(x + y));
+            this.x = x;
+            this.y = y - t;
+        endfunction
+    endclass
+    Base base;
+    Point p;
+    initial begin
+        p = new(.y(30));
+        $display("%0d %0d %0d", p.x, p.y, p.s);
+        base = Point#(.t(23))::new(.y(40), .x(4));
+        $display("%0d", base.s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 18 31\n44\n"))
+
+(case typedefs_of_interface_classes
+  (source "class.sv" #"
+module Top(output bit done);
+    interface class Hello;
+        typedef int count_t;
+        pure virtual function void hello(count_t value);
+    endclass
+    interface class Greeting extends Hello;
+        pure virtual function count_t greet(count_t value);
+    endclass
+    class Greeter implements Greeting;
+        virtual function void hello(Hello::count_t value);
+            $display("%0d", value);
+        endfunction
+        virtual function Greeting::count_t greet(Greeting::count_t value);
+            return value + 1;
+        endfunction
+    endclass
+    Greeter greeter;
+    initial begin
+        greeter = new;
+        greeter.hello(12);
+        $display("%0d", greeter.greet(12));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "12\n13\n"))
+
+(case specializations_in_generate_blocks
+  (source "class.sv" #"
+module Top(output bit done);
+    class Box #(int N = 4);
+        static int made;
+        function new();
+            made++;
+        endfunction
+        function int n();
+            return N;
+        endfunction
+    endclass
+    for (genvar i = 1; i < 3; i++) begin : g
+        Box #(i * 10) kept;
+        initial begin
+            automatic Box #(i) local_box = new;
+            kept = new;
+            $display("%0d %0d %0d", i, local_box.n(), kept.n() + Box#(i * 10)::made);
+            done = 1;
+        end
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 1 11\n2 2 21\n"))
+
+(case specializations_keep_their_parameter_scopes
+  (source "class.sv" #"
+module Top(output bit done);
+    class Box #(int N = 4);
+        function int n();
+            return N;
+        endfunction
+    endclass
+    class Base #(type T = int);
+    endclass
+    class Derived extends Base #(bit [3:0]);
+        typedef T nibble_t;
+    endclass
+    class Inner #(int N = 1);
+        function int v();
+            return N * 100;
+        endfunction
+    endclass
+    class Outer #(int N = 1);
+        extern function int f();
+    endclass
+    function int Outer::f();
+        Inner #(N) inner;
+        inner = new;
+        return inner.v();
+    endfunction
+    class Counted #(type T = logic [3:0]);
+        static int made;
+        function new();
+            made++;
+        endfunction
+    endclass
+    Derived::nibble_t nibble;
+    Outer #(7) outer;
+    Counted #(logic [3:0]) logic_counted;
+    Counted #(reg [3:0]) reg_counted;
+    for (genvar N = 5; N < 6; N++) begin : g
+        Box #(N) box;
+        initial begin
+            box = new;
+            $display("%0d", box.n());
+        end
+    end
+    initial begin
+        nibble = 20;
+        outer = new;
+        logic_counted = new;
+        reg_counted = new;
+        $display("%0d %0d %0d", nibble, outer.f(), Counted#(logic [3:0])::made);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "5\n4 700 2\n"))
+
+(case untyped_class_parameters_take_the_type_of_their_value
+  (source "class.sv" #"
+module Top(output bit done);
+    class Sized #(parameter V = 1);
+        function int bits();
+            return $bits(V);
+        endfunction
+    endclass
+    Sized #(8'h1) narrow;
+    Sized #(32'h1) wide;
+    initial begin
+        narrow = new;
+        wide = new;
+        $display("%0d %0d", narrow.bits(), wide.bits());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "8 32\n"))
+
 (case unconstrained_randomize
   (source "randomize.sv" #"
 module Top(output bit done, output int errors);
@@ -1067,3 +1399,82 @@ module Top(output bit done, output int errors);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case class_declarations_bind_in_their_scopes
+  (source "class.sv" #"
+module Top(output bit done);
+    class Ordered;
+        typedef bit [7:0] byte_t;
+        parameter byte_t P = 8'hff;
+        typedef int table_t [2];
+    endclass
+    class Init #(int N = 1);
+        static int value = N * 10;
+    endclass
+    class Named #(string S = "a");
+        function string s();
+            return S;
+        endfunction
+    endclass
+    class Self #(int N = 1);
+        typedef Self self_t;
+        function int n();
+            return N;
+        endfunction
+    endclass
+    class Base #(type T = bit [3:0]);
+    endclass
+    class Derived #(type T = int) extends Base;
+        typedef T own_t;
+    endclass
+    class Wide #(logic [57:0] V = 0);
+        function bit [63:0] v();
+            return V;
+        endfunction
+    endclass
+    class Plain;
+        typedef int T;
+    endclass
+    typedef Plain::T plain_t;
+    Ordered::table_t entries;
+    plain_t plain;
+    Self#(2)::self_t self_handle;
+    Named#("bc") named;
+    Wide#('1) wide;
+    Derived#()::own_t own;
+    initial begin
+        entries[1] = 5;
+        plain = -3;
+        self_handle = new;
+        named = new;
+        wide = new;
+        $display("%0d %0d %0d %0d", Ordered::P, entries[1], plain, $bits(own));
+        $display("%0d %0d %0d %s %h", Init#(2)::value, Init#(3)::value, self_handle.n(), named.s(), wide.v());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "255 5 -3 32\n20 30 1 bc 03ffffffffffffff\n"))
+
+(case parameter_defaults_bind_where_the_class_is_declared
+  (source "class.sv" #"
+module Top #(parameter int X = 1)(output bit done);
+    class Defaulted #(int N = X);
+        function int n();
+            return N;
+        endfunction
+    endclass
+    if (1) begin : g
+        localparam int X = 2;
+        Defaulted#() inner;
+        initial begin
+            inner = new;
+            $display("%0d", inner.n());
+            done = 1;
+        end
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1\n"))

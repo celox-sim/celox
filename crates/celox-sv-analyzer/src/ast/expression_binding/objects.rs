@@ -76,18 +76,88 @@ fn is_super(id: ExprId, native: &Declarations) -> bool {
         ExprKind::Name(name) if name.spelling == "super")
 }
 
-/// The class that native expression `id` names, as the scope of `C::name`.
+/// The class that native expression `id` names, as the scope of `C::name`:
+/// a class, or the specialization that a parameter value assignment or the
+/// defaults of a parameterized class make (IEEE 1800-2023 8.25.1).
 fn named_class(
     tree: &AnalysisContext<'_>,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
-) -> Option<String> {
-    let ExprKind::Name(name) = &native.expression(ungroup(id, native)).kind else {
-        return None;
+) -> Converted<Option<String>> {
+    let (name, arguments) = match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Name(name) => (name, None),
+        ExprKind::Parameterized {
+            expression,
+            arguments,
+        } => match &native.expression(*expression).kind {
+            ExprKind::Name(name) => (name, Some(&arguments[..])),
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
     };
     let name = instances::normalize_identifier(&name.spelling);
-    (dimensions.get(&name).is_none() && classes::handle_type(tree, &name).is_some()).then_some(name)
+    if dimensions.get(&name).is_some() {
+        return Ok(None);
+    }
+    // Inside a parameterized class and its out-of-block methods, its name
+    // alone refers to the specialization.
+    if arguments.is_none()
+        && let Some(class) = dimensions
+            .type_aliases
+            .get(&classes::specializations::scope_key(&name))
+            .or_else(|| dimensions.type_aliases.get(&name))
+            .and_then(|ty| ty.class.clone())
+    {
+        return Ok(Some(class));
+    }
+    if !classes::is_visible(tree, &name) {
+        return Ok(None);
+    }
+    if !classes::is_parameterized(tree, &name) {
+        if arguments.is_some_and(|arguments| !arguments.is_empty()) {
+            return Err(unsupported(format!(
+                "parameter value assignment of class `{name}`, which has no parameters"
+            )));
+        }
+        return Ok(Some(name));
+    }
+    // Elsewhere a parameterized class needs a specialization, `C#()` for
+    // the default one.
+    let Some(arguments) = arguments else {
+        return Err(AnalyzerError::UnspecializedClassScope { class: name });
+    };
+    classes::specializations::specialize(tree, &name, arguments, dimensions).map(Some)
+}
+
+/// The value of the class parameter that native expression `id` names,
+/// `h.p` or `C::p` (IEEE 1800-2023 8.25), as a literal.
+pub(in crate::ast) fn class_parameter(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<Expr>> {
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(ungroup(id, native)).kind
+    else {
+        return Ok(None);
+    };
+    let class = match separator.as_str() {
+        "." => native_class(tree, *expression, native, dimensions),
+        "::" => named_class(tree, *expression, native, dimensions)?,
+        _ => None,
+    };
+    Ok(class.and_then(|class| {
+        classes::specializations::parameter(
+            tree,
+            &class,
+            &instances::normalize_identifier(&name.spelling),
+        )
+    }))
 }
 
 /// The variable of the static property that native expression `id` names:
@@ -109,7 +179,7 @@ pub(in crate::ast) fn static_property(
     };
     let class_name = match separator.as_str() {
         "." => native_class(tree, *expression, native, dimensions),
-        "::" => named_class(tree, *expression, native, dimensions),
+        "::" => named_class(tree, *expression, native, dimensions)?,
         _ => None,
     };
     let Some(class_name) = class_name else {
@@ -253,7 +323,7 @@ pub(in crate::ast) fn method(
             expression,
             separator,
             name,
-        } if separator == "::" => match named_class(tree, *expression, native, dimensions) {
+        } if separator == "::" => match named_class(tree, *expression, native, dimensions)? {
             Some(class) => (class, name, Receiver::Static),
             None => return Ok(None),
         },
@@ -468,7 +538,7 @@ pub(in crate::ast) fn constructor(
             separator,
             name,
         } if separator == "::" && name.spelling == "new" => {
-            match named_class(tree, *expression, native, dimensions) {
+            match named_class(tree, *expression, native, dimensions)? {
                 Some(class) => {
                     if !derives_from(tree, dimensions, &class, class_name)? {
                         return Err(AnalyzerError::IncompatibleClassHandle {
@@ -490,30 +560,23 @@ pub(in crate::ast) fn constructor(
             "object of abstract class `{class_name}`"
         )));
     }
-    let formals = class.constructor_formals(native);
     let mut args = vec![Some(class.allocation())];
-    for argument in arguments {
-        if argument.name.is_some() {
-            return Err(unsupported("named constructor argument"));
-        }
+    let (actuals, order) = class.constructor_arguments(native, arguments)?;
+    for actual in actuals {
         args.push(
-            argument
-                .value
+            actual
                 .map(|value| bind_value(value, native, tree, dimensions, None))
                 .transpose()?,
         );
     }
-    if args.len() > formals + 1 {
-        return Err(unsupported(format!(
-            "constructor of class `{class_name}` with {} arguments",
-            args.len() - 1
-        )));
-    }
-    args.resize(formals + 1, None);
     Ok(Some(Expr::Call {
         callee: Callee::Subroutine(Class::subroutine_name(&class_name, "new")),
         args,
-        arg_order: Vec::new(),
+        // The allocation is passed first; the actuals are evaluated in the
+        // order they are written (13.5.4).
+        arg_order: std::iter::once(0)
+            .chain(order.into_iter().map(|index| index + 1))
+            .collect(),
     }))
 }
 

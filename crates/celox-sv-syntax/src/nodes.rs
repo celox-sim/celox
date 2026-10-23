@@ -960,6 +960,13 @@ pub struct ClassDeclaration {
     pub interfaces: Vec<TypeId>,
     /// Whether the class declares constraints, including prototypes.
     pub has_constraints: bool,
+    /// The parameter port list `#(...)`, after which the parameters the
+    /// body declares are local (8.25).
+    pub parameter_ports: Option<ParameterDeclarationId>,
+    /// The `parameter` and `localparam` declarations of the body.
+    pub parameters: Vec<ParameterDeclarationId>,
+    /// The `typedef` declarations of the body.
+    pub type_aliases: Vec<TypeAliasId>,
     pub properties: Vec<ClassProperty>,
     pub methods: Vec<ClassMethod>,
     pub tokens: TokenRange,
