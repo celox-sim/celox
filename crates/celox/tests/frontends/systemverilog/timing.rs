@@ -157,6 +157,9 @@ timed_cases! {
     fn staged_nonblocking_writes_follow_later_blocking_writes = "timing::staged_nonblocking_writes_follow_later_blocking_writes";
     fn intermediate_combinational_writes_replace_split_definitions = "timing::intermediate_combinational_writes_replace_split_definitions";
     fn intermediate_combinational_writes_reach_concatenated_ports = "timing::intermediate_combinational_writes_reach_concatenated_ports";
+    fn blocking_write_waiters_run_before_nonblocking_updates = "timing::blocking_write_waiters_run_before_nonblocking_updates";
+    fn blocking_write_waiters_rearm_before_nonblocking_updates = "timing::blocking_write_waiters_rearm_before_nonblocking_updates";
+    fn blocking_write_edges_read_values_before_nonblocking_updates = "timing::blocking_write_edges_read_values_before_nonblocking_updates";
 }
 
 #[test]
