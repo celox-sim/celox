@@ -769,6 +769,49 @@ mod tests {
         }
     }
 
+    /// A delay-only kernel pulses the signal another kernel waits on within
+    /// one activation, with two stores or in a loop: the frontend counts the
+    /// signal's occurrences, the waiting kernel wakes on every pulse, and a
+    /// design that counts occurrences keeps the reference loop in every
+    /// mode.
+    #[test]
+    fn pulses_within_one_activation_wake_as_the_reference() {
+        for pulse in [
+            "a = 1'b1; a = 1'b0;",
+            "for (int i = 0; i < 2; i++) a = ~a;",
+            "for (int i = 0; i < k; i++) a = ~a;",
+        ] {
+            let source = format!(
+                "`timescale 1ns/1ns
+                module Top(output logic [7:0] n);
+                    logic a = 1'b0;
+                    int k = 2;
+                    always #5 begin {pulse} end
+                    initial begin n = 8'd0; forever @(posedge a) n = n + 8'd1; end
+                endmodule"
+            );
+            let counted =
+                crate::KernelSchedule::Reference("the design counts event occurrences".into());
+            let kernels = build_in(&source, SchedulerMode::Compiled)
+                .scheduler_stats()
+                .kernels;
+            assert!(
+                kernels.iter().all(|kernel| *kernel == counted),
+                "{pulse}: {kernels:?}"
+            );
+            let mut reference = build_in(&source, SchedulerMode::Reference);
+            reference.run_until(100).unwrap();
+            let n = reference.signal("n");
+            assert_eq!(reference.get(n), 20u8.into(), "{pulse}");
+            let expected = reference.save_state().unwrap();
+            for mode in MODES {
+                let mut sim = build_in(&source, mode);
+                sim.run_until(100).unwrap();
+                assert_eq!(sim.save_state().unwrap(), expected, "{pulse} {mode:?}");
+            }
+        }
+    }
+
     #[test]
     fn differential_mode_reports_a_diverging_step() {
         let mut sim = build(SchedulerMode::Differential);
