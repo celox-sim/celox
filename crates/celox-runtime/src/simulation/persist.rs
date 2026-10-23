@@ -100,6 +100,9 @@ impl<B: SimBackend> SimulationState<B> {
     /// Express the scheduling state with `backend`'s event handles.
     pub fn export_schedule(&self, backend: &B) -> ScheduleParts<B> {
         let events = backend.id_to_event_slice();
+        // In the order they fire, whatever order the queue holds them in.
+        let mut queue: Vec<&SimEvent<B>> = self.scheduler.event_queue.iter().collect();
+        queue.sort_by(|a, b| b.cmp(a).then(a.periodic.cmp(&b.periodic)));
         ScheduleParts {
             time: self.scheduler.time,
             clocks: self
@@ -109,12 +112,12 @@ impl<B: SimBackend> SimulationState<B> {
                 .enumerate()
                 .filter_map(|(id, clock)| Some((events[id], clock.as_ref()?.period)))
                 .collect(),
-            events: self.scheduler.event_queue.iter().cloned().collect(),
+            events: queue.iter().map(|&event| event.clone()).collect(),
             periodic: {
                 // Identical periodic events once, with their number, in the
                 // order of `events`.
                 let mut periodic: Vec<(SimEvent<B>, u64)> = Vec::new();
-                for event in self.scheduler.event_queue.iter().filter(|e| e.periodic) {
+                for &event in queue.iter().filter(|e| e.periodic) {
                     match periodic.iter_mut().find(|(known, _)| known == event) {
                         Some((_, count)) => *count += 1,
                         None => periodic.push((event.clone(), 1)),
