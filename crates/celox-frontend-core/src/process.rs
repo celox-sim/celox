@@ -21,7 +21,7 @@
 //! [`WaitSite`]: celox_design::WaitSite
 
 use celox_design::{
-    HostRequestKind, NbaSite, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, ProcessSlots,
+    HostRequestKind, NbaPosition, NbaSite, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, ProcessSlots,
     ProcessStatus, RegionedVarAddrBase, STABLE_REGION,
 };
 use celox_sir::{
@@ -50,9 +50,9 @@ pub enum ProcessKernelError {
     TooManySuspensions,
 }
 
-/// Width of the bit offset staged by a nonblocking assignment whose position
-/// is computed at run time ([`NbaSite::offset`]).
-pub const NBA_OFFSET_WIDTH: usize = 64;
+/// Width of the bit offset and of the bit count staged by a nonblocking
+/// assignment whose position is computed at run time ([`NbaPosition`]).
+pub const NBA_POSITION_WIDTH: usize = 64;
 
 /// Builder of one process kernel.
 pub struct ProcessKernelBuilder {
@@ -259,9 +259,9 @@ impl ProcessKernelBuilder {
     /// process, described by `site`: schedule a value for the NBA region of
     /// the current time (IEEE 1800-2023 10.4.2). `lower` lowers the
     /// right-hand side at the open block and returns the value, a register
-    /// of `site.width` bits, and for a site with a run-time position the
-    /// bit offset, an unsigned two-state register of [`NBA_OFFSET_WIDTH`]
-    /// bits.
+    /// of `site.width` bits, and for a site with a run-time position the bit
+    /// offset and the number of bits written, unsigned two-state registers
+    /// of [`NBA_POSITION_WIDTH`] bits.
     ///
     /// A site with a `pending` flag stages the value without returning. If
     /// the flag is still set from an earlier execution in the same time
@@ -274,7 +274,7 @@ impl ProcessKernelBuilder {
         site: &NbaSite<SourceVarId>,
         lower: impl FnOnce(
             &mut SIRBuilder<RegionedSourceAddr>,
-        ) -> Result<(RegisterId, Option<RegisterId>), E>,
+        ) -> Result<(RegisterId, Option<NbaPosition<RegisterId>>), E>,
     ) -> Result<(), E> {
         if let Some(pending) = site.pending {
             let flag = self.builder.alloc_bit(1, false);
@@ -298,10 +298,11 @@ impl ProcessKernelBuilder {
                 .seal_block(SIRTerminator::Jump(stage, Vec::new()));
             self.builder.switch_to_block(stage);
         }
-        let (value, offset) = lower(&mut self.builder)?;
+        let (value, position) = lower(&mut self.builder)?;
         self.store(site.value, site.width, value);
-        if let (Some(slot), Some(offset)) = (site.offset, offset) {
-            self.store(slot, NBA_OFFSET_WIDTH, offset);
+        if let (Some(slots), Some(position)) = (site.position, position) {
+            self.store(slots.offset, NBA_POSITION_WIDTH, position.offset);
+            self.store(slots.width, NBA_POSITION_WIDTH, position.width);
         }
         if let Some(pending) = site.pending {
             self.store_constant(pending, 1, 1);
@@ -327,7 +328,7 @@ impl ProcessKernelBuilder {
         switch: SourceVarId,
         lower: impl FnOnce(
             &mut SIRBuilder<RegionedSourceAddr>,
-        ) -> Result<(RegisterId, Option<RegisterId>), E>,
+        ) -> Result<(RegisterId, Option<NbaPosition<RegisterId>>), E>,
     ) -> Result<(), E> {
         assert!(
             site.pending.is_some(),
