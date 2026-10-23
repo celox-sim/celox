@@ -887,7 +887,23 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             StatementKind::ProceduralAssign(_) | StatementKind::ProceduralRelease(_) => {
                 Err(unsupported("procedural continuous assignment"))
             }
-            StatementKind::Disable(_) => Err(unsupported("disable statement")),
+            StatementKind::Disable(tokens) => {
+                let disables_fork = self
+                    .tree
+                    .declarations()
+                    .tokens
+                    .get(tokens.start..tokens.end)
+                    .into_iter()
+                    .flatten()
+                    .filter(|token| !token.is_trivia())
+                    .find(|token| token.text != "disable")
+                    .is_some_and(|token| token.text == "fork");
+                Err(unsupported(if disables_fork {
+                    "disable fork statement"
+                } else {
+                    "disable statement"
+                }))
+            }
             StatementKind::Parallel { .. } => Err(unsupported("fork-join block")),
             _ => Err(unsupported("procedural statement")),
         }
@@ -904,9 +920,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 context: "an always_comb or always_ff body",
             }),
             system_functions::Body::Subroutine if self.task_timing => Ok(()),
-            system_functions::Body::Subroutine => {
-                Err(unsupported(format!("{construct} in a subroutine")))
-            }
+            // IEEE 1800-2023 13.4: a function shall not contain a timing
+            // control.
+            system_functions::Body::Subroutine => Err(AnalyzerError::TimingControlOutsideProcess {
+                construct,
+                context: "a function",
+            }),
         }
     }
 
