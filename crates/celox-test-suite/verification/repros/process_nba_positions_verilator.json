@@ -1,0 +1,40 @@
+{
+ "schema_version": 3,
+ "suite_version": "0.11.0",
+ "tool": "verilator",
+ "version": "Verilator 5.052 2026-09-05 rev v5.052",
+ "cases": [
+  {
+   "category": "Sequential",
+   "detail": "timing::process_nonblocking_assignments_at_run_time_positions at 1816:3: assert_eq packed_bits: expected 0x14e4, got 0x1400 (bits past the top are not written)",
+   "expectation": "Simulation",
+   "name": "timing::process_nonblocking_assignments_at_run_time_positions",
+   "phase": "execute",
+   "status": "mismatch",
+   "stronger_than_sv": false,
+   "tag_reasons": {},
+   "tags": []
+  },
+  {
+   "category": "Sequential",
+   "detail": "timing::process_nonblocking_assignments_outside_their_target at 1854:3: assert_eq q: expected 0xc0, got 0xc1",
+   "expectation": "Simulation",
+   "name": "timing::process_nonblocking_assignments_outside_their_target",
+   "phase": "execute",
+   "status": "mismatch",
+   "stronger_than_sv": false,
+   "tag_reasons": {},
+   "tags": []
+  }
+ ],
+ "standard": "IEEE 1800-2023 10.4.2 schedules each nonblocking assignment as its own update event in the NBA region, in the order the assignments execute, so every update of a part-select at a run-time position lands. 11.5.1 and 7.4.6 make a write outside the target, wholly or in part, have no effect on the bits outside: q[8] of logic [7:0] q writes nothing.",
+ "adapter_free": {
+  "source": "verification/repros/process_nba_positions.sv",
+  "verilator_command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <build-dir> process_nba_positions.sv",
+  "verilator_output": "p=1400\np=2400\n[2] %Fatal: process_nba_positions.sv:10: Assertion failed in Top: nonblocking updates in issue order give 24e4, not 2400",
+  "verilator_output_without_the_p_check": "p=1400\np=2400\nq=01\n[3] %Fatal: process_nba_positions.sv:13: Assertion failed in Top: an update outside the target changed q to 01",
+  "icarus_command": "iverilog -g2012 -s Top -o <output> process_nba_positions.sv; vvp <output>",
+  "icarus_version": "Icarus Verilog version 13.0",
+  "icarus_output": "p=14e4\np=24e4\nq=00\nprocess_nba_positions.sv:14: $finish called at 3 (1s)"
+ }
+}

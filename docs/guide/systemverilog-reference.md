@@ -53,7 +53,7 @@ In a timed `Simulation`, `initial` and plain `always` processes can suspend:
 | `#delay` | integral and real delays, `#(min:typ:max)` (the typical value) and [time literals](#time-literal-delays); an X or Z delay counts as zero |
 | `@(...)` | variables, `posedge` / `negedge` / `edge`, items joined by `or` or `,`, bit, part and run-time index selects, any expression including calls of pure functions, and `@*` / `@(*)`, which waits on the variables its statement reads |
 | `wait (condition)` | any condition; an X or Z condition counts as false |
-| Assignments | blocking and nonblocking; nonblocking updates take effect in the NBA region of the time slot |
+| Assignments | blocking and nonblocking, to any target a blocking assignment takes, including unpacked array elements and run-time positions; nonblocking updates take effect in the NBA region of the time slot, at the position evaluated when the assignment executes, and bits outside the target or at a position with an X or Z bit are not written |
 
 An `always` whose sensitivity list names exactly the variables its statement
 reads, as `@*` would (IEEE 1800-2023 9.4.2.2), simulates like `always @*` in
@@ -141,10 +141,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Timing controls in processes: `iff` qualifiers ([#1444](https://github.com/celox-sim/celox/issues/1444)),
   package-scoped delay values
   ([#1710](https://github.com/celox-sim/celox/issues/1710)), impure function calls in event expressions, and
-  `wait` or event expressions reading a static task argument. Nonblocking
-  assignments in a process cannot yet target an unpacked array element, a
-  run-time position or a constant position outside the target
-  ([#1709](https://github.com/celox-sim/celox/issues/1709)).
+  `wait` or event expressions reading a static task argument.
 - Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset.
 - Inferred latches inside `always_comb` are rejected by default. Set `inferred_latch = "warn"` or `"allow"` in `celox.toml` under `[diagnostics]` to permit retained blocking assignments. Ordinary `always @*` and explicit `always_latch` do not require this option.
 - Ports and instances: non-ANSI port declarations ([#426](https://github.com/celox-sim/celox/issues/426)), `ref` ports
