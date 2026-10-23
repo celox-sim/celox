@@ -839,3 +839,110 @@
     (assert_eq generic_value value)
     (assert_eq array_value value)
     (assert_eq single_value (% value 2))))
+
+(case connects_interface_array_slices_in_declaration_order
+  (source "interface_array_slices.sv" #"
+    interface Lane;
+      logic [7:0] value;
+      modport reader(input value);
+    endinterface
+    module Reader(Lane.reader lanes[9:8], output wire [15:0] y);
+      assign y={lanes[9].value,lanes[8].value};
+    endmodule
+    module Scalar(Lane.reader lane, output wire [7:0] y);
+      assign y=lane.value;
+    endmodule
+    module Relay(Lane.reader lanes[8:5], output wire [15:0] y);
+      Reader r(.lanes(lanes[7 -: 2]),.y(y));
+    endmodule
+    module Top(input wire [7:0] x, output wire [15:0] up, down, fixed_range,
+               ascending_up, ascending_down, relayed, output wire [7:0] scalar);
+      Lane descending[7:2]();
+      Lane ascending[-3:2]();
+      for(genvar i=2;i<=7;i++) begin: descending_values
+        assign descending[i].value=x+8'(i);
+      end
+      for(genvar i=-3;i<=2;i++) begin: ascending_values
+        assign ascending[i].value=x+8'(i+3);
+      end
+      Reader u(.lanes(descending[3 +: 2]),.y(up));
+      Reader d(.lanes(descending[5 -: 2]),.y(down));
+      Reader f(.lanes((descending[6:5])),.y(fixed_range));
+      Reader a(.lanes(ascending[-2 +: 2]),.y(ascending_up));
+      Reader b(.lanes(ascending[-1 -: 2]),.y(ascending_down));
+      Relay r(.lanes(descending[5:2]),.y(relayed));
+      Scalar s(.lane(descending[5]),.y(scalar));
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 37 253)
+    (modify (set x value))
+    (assert_eq up (| (<< (trunc 8 (+ value 4)) 8) (trunc 8 (+ value 3))))
+    (assert_eq down (| (<< (trunc 8 (+ value 5)) 8) (trunc 8 (+ value 4))))
+    (assert_eq fixed_range (| (<< (trunc 8 (+ value 6)) 8) (trunc 8 (+ value 5))))
+    (assert_eq ascending_up (| (<< (trunc 8 (+ value 1)) 8) (trunc 8 (+ value 2))))
+    (assert_eq ascending_down (| (<< (trunc 8 (+ value 1)) 8) (trunc 8 (+ value 2))))
+    (assert_eq relayed (| (<< (trunc 8 (+ value 4)) 8) (trunc 8 (+ value 3))))
+    (assert_eq scalar (trunc 8 (+ value 5)))))
+
+(case drives_interface_array_slices_through_generated_relays
+  (source "interface_slice_writers.sv" #"
+    interface Lane;
+      logic [7:0] value;
+      modport writer(output value);
+    endinterface
+    module Writer(Lane.writer lanes[4:5], input wire [7:0] x);
+      assign lanes[4].value=x;
+      assign lanes[5].value=x+8'd1;
+    endmodule
+    module Relay(Lane.writer lanes[10:13], input wire [7:0] x);
+      for(genvar n=0;n<2;n++) begin: g
+        Writer w(.lanes(lanes[10+n*2 +: 2]),.x(x+8'(n*2)));
+      end
+    endmodule
+    module Top(input wire [7:0] x, output wire [31:0] y);
+      if(1) begin: bank
+        Lane lanes[5:2]();
+        Relay r(.lanes(lanes[5 -: 4]),.x(x));
+        assign y={lanes[5].value,lanes[4].value,lanes[3].value,lanes[2].value};
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 37 253)
+    (modify (set x value))
+    (assert_eq y (| (<< value 24) (<< (trunc 8 (+ value 1)) 16)
+                    (<< (trunc 8 (+ value 2)) 8) (trunc 8 (+ value 3))))))
+
+(case connects_multidimensional_interface_array_slices
+  (source "interface_matrix_slices.sv" #"
+    interface Lane;
+      logic [7:0] value;
+      modport reader(input value);
+    endinterface
+    module Row(Lane.reader lanes[8:6], output wire [23:0] y);
+      assign y={lanes[8].value,lanes[7].value,lanes[6].value};
+    endmodule
+    module Pair(Lane.reader lanes[-2:-1], output wire [15:0] y);
+      assign y={lanes[-2].value,lanes[-1].value};
+    endmodule
+    module Top(input wire [7:0] x, output wire [23:0] row,
+               output wire [15:0] first, second);
+      Lane grid[-1:0][4:2]();
+      for(genvar i=-1;i<=0;i++) begin: rows
+        for(genvar j=2;j<=4;j++) begin: columns
+          assign grid[i][j].value=x+8'((i+1)*3+4-j);
+        end
+      end
+      Row r(.lanes(grid[0]),.y(row));
+      Pair a(.lanes(grid[-1][3:2]),.y(first));
+      Pair b(.lanes(grid[0][4 -: 2]),.y(second));
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 37 253)
+    (modify (set x value))
+    (assert_eq row (| (<< (trunc 8 (+ value 3)) 16)
+                     (<< (trunc 8 (+ value 4)) 8) (trunc 8 (+ value 5))))
+    (assert_eq first (| (<< (trunc 8 (+ value 1)) 8) (trunc 8 (+ value 2))))
+    (assert_eq second (| (<< (trunc 8 (+ value 3)) 8) (trunc 8 (+ value 4))))))
