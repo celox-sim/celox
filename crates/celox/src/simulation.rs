@@ -72,6 +72,19 @@ pub struct Simulation<B: SimBackend = crate::DefaultBackend> {
     checked_steps: u64,
     /// Why [`crate::SchedulerMode::Differential`] has no shadow.
     unchecked: Option<&'static str>,
+    /// Boxed: only runs with `fail_on` use it.
+    reports: Box<ReportWatch>,
+}
+
+/// Reports a simulation stops at, set by [`Simulation::set_fail_on`].
+#[derive(Debug, Default)]
+struct ReportWatch {
+    fail_on: Option<crate::Severity>,
+    /// Events taken after each step while `fail_on` is set, with the time of
+    /// that step, for the next [`Simulation::drain_runtime_events`].
+    events: Vec<crate::RuntimeEvent>,
+    /// The first report of the last run at or above `fail_on`.
+    failure: Option<crate::Report>,
 }
 
 impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
@@ -348,6 +361,7 @@ impl<B: SimBackend> Simulation<B> {
             shadow: None,
             checked_steps: 0,
             unchecked: None,
+            reports: Box::default(),
         })
     }
 
@@ -560,7 +574,32 @@ impl<B: SimBackend> Simulation<B> {
     /// Returns the new simulation time, the current time when only host
     /// writes were settled, or None if nothing was to do.
     pub fn step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
+        self.reports.failure = None;
+        if self.reports.fail_on.is_some() {
+            return self.watched_step();
+        }
         self.step_until(u64::MAX)
+    }
+
+    /// [`Self::step`] while [`Self::set_fail_on`] is set: a slot that only
+    /// settles host writes is watched before the step goes on to the next
+    /// time.
+    #[cold]
+    #[inline(never)]
+    fn watched_step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
+        let mut settled = None;
+        while let Some(next_time) = self.state.next_event_time() {
+            let host_only =
+                self.state.host_pending() && self.state.next_work_time() != Some(next_time);
+            let time = self.step_until(next_time)?;
+            self.watch_reports();
+            if !host_only || self.state.is_stopped() || self.reports.failure.is_some() {
+                return Ok(time);
+            }
+            settled = time;
+        }
+        self.watch_settle()?;
+        Ok(settled)
     }
 
     /// [`Self::step`] that, after settling host writes at the current time,
@@ -578,12 +617,105 @@ impl<B: SimBackend> Simulation<B> {
         result
     }
 
+    /// The steps of a run while [`Self::set_fail_on`] is set, apart from
+    /// the run loop that has no reports to watch. Returns `false` when a
+    /// step stopped at `$stop` or at a failure, or `max_steps` ran out.
+    #[cold]
+    #[inline(never)]
+    fn watched_steps(&mut self, end_time: u64, max_steps: u64) -> Result<bool, RuntimeErrorCode> {
+        let mut steps = 0;
+        while let Some(next_time) = self.state.next_event_time() {
+            if next_time > end_time {
+                break;
+            }
+            if steps >= max_steps {
+                return Ok(false);
+            }
+            // One slot per step, so that a slot that only settles host
+            // writes is watched before the next runs.
+            self.step_until(next_time)?;
+            self.watch_reports();
+            steps += 1;
+            if self.state.is_stopped() || self.reports.failure.is_some() {
+                return Ok(false);
+            }
+        }
+        self.watch_settle()?;
+        Ok(self.reports.failure.is_none())
+    }
+
+    /// Settle combinational logic that no step settled, as after host writes
+    /// that wake no process, at the current time, and watch its reports.
+    fn watch_settle(&mut self) -> Result<(), RuntimeErrorCode> {
+        if !self.simulator.dirty {
+            return Ok(());
+        }
+        if let Err(error) = self.simulator.eval_comb_checked() {
+            self.flush_error_output();
+            return Err(error);
+        }
+        self.simulator.dirty = false;
+        self.watch_reports();
+        Ok(())
+    }
+
+    /// Stop [`Self::run_until`] and [`Self::run_until_bounded`] after the
+    /// time step of the first report of at least `severity`, which
+    /// [`Self::failure`] then returns. While it is set, the events of each
+    /// step are taken from the design's event buffer after the step and keep
+    /// the time of that step, so none are missed and their reports have an
+    /// exact time. They wait for [`Self::drain_runtime_events`]. `None`
+    /// stops only at `$fatal`, as before.
+    pub fn set_fail_on(&mut self, severity: Option<crate::Severity>) {
+        self.reports.fail_on = severity;
+    }
+
+    /// The report the last run stopped at (see [`Self::set_fail_on`]).
+    /// The next run clears it.
+    pub fn failure(&self) -> Option<&crate::Report> {
+        self.reports.failure.as_ref()
+    }
+
+    fn watch_reports(&mut self) {
+        let Some(fail_on) = self.reports.fail_on else {
+            return;
+        };
+        // A step leaves combinational logic settled.
+        let events =
+            self.simulator
+                .drain_settled_runtime_events_with_context(crate::RuntimeFormatContext {
+                    tb_time: Some(self.state.time()),
+                    scope: None,
+                });
+        if self.reports.failure.is_none() {
+            self.reports.failure = events.iter().find_map(|event| match event {
+                crate::RuntimeEvent::Report(report) if report.severity >= fail_on => {
+                    Some(report.clone())
+                }
+                // A lost event may have been a failure.
+                crate::RuntimeEvent::Missed { count } => Some(crate::Report::new(
+                    fail_on,
+                    format!("missed {count} runtime events").into_bytes(),
+                )),
+                _ => None,
+            });
+        }
+        self.reports.events.extend(events);
+    }
+
     /// Advance time and run until `end_time` (inclusive).
     /// Targets earlier than the current time leave time and state unchanged.
     /// A process that executes `$stop` returns control early, after the time
     /// slot of the stop, with [`Self::is_stopped`] set; calling this again
-    /// continues.
+    /// continues. A report of the severity of [`Self::set_fail_on`] returns
+    /// early in the same way, with [`Self::failure`] set.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
+        self.reports.failure = None;
+        // With reports to watch, step one slot at a time; the run below
+        // then only advances the time.
+        if self.reports.fail_on.is_some() && !self.watched_steps(end_time, u64::MAX)? {
+            return Ok(());
+        }
         let reached = match self.shadow.take() {
             None => self.state.run_until(&mut self.simulator, end_time)?,
             Some(mut shadow) => {
@@ -611,7 +743,7 @@ impl<B: SimBackend> Simulation<B> {
     /// Like [`Self::run_until`], but takes at most `max_steps` steps.
     /// Returns `false`, with the simulation at the time of its last step,
     /// when another step would be needed to reach `end_time`, including when
-    /// a step stopped at `$stop`.
+    /// a step stopped at `$stop` or at a [`Self::failure`].
     pub fn run_until_bounded(
         &mut self,
         end_time: u64,
@@ -619,6 +751,14 @@ impl<B: SimBackend> Simulation<B> {
     ) -> Result<bool, RuntimeErrorCode> {
         if end_time < self.state.time() {
             return Ok(true);
+        }
+        self.reports.failure = None;
+        if self.reports.fail_on.is_some() {
+            if !self.watched_steps(end_time, max_steps)? {
+                return Ok(false);
+            }
+            self.run_until(end_time)?;
+            return Ok(!self.state.is_stopped());
         }
         let mut steps = 0;
         while let Some(next_time) = self.state.next_event_time() {
@@ -668,7 +808,9 @@ impl<B: SimBackend> Simulation<B> {
     /// Takes the runtime events (`$display`, messages, `$finish`, ...) the
     /// design emitted since the last call, in emission order.
     pub fn drain_runtime_events(&mut self) -> Vec<crate::RuntimeEvent> {
-        self.simulator.drain_runtime_events()
+        let mut events = std::mem::take(&mut self.reports.events);
+        events.extend(self.simulator.drain_runtime_events());
+        events
     }
 
     /// Returns the time of the next scheduled event, if any.

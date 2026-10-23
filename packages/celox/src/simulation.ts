@@ -22,6 +22,8 @@ import type {
 	FourStateValue,
 	ModuleDefinition,
 	NativeSimulationHandle,
+	RuntimeEvent,
+	Severity,
 	SignalLayout,
 	SimulatorOptions,
 	SourceFile,
@@ -493,6 +495,35 @@ export class Simulation<P = Record<string, unknown>> {
 		const t = this._handle.step();
 		this._state.dirty = false;
 		return t;
+	}
+
+	/**
+	 * Take the runtime events the design emitted since the last call, in
+	 * emission order: `$display` and `$write` output, reports of severity
+	 * tasks, `$finish` and `$stop`.
+	 */
+	drainRuntimeEvents(): RuntimeEvent[] {
+		this.ensureAlive();
+		if (!this._handle.drainRuntimeEvents) {
+			throw new Error(
+				"This simulation does not support draining runtime events",
+			);
+		}
+		return this._handle.drainRuntimeEvents();
+	}
+
+	/**
+	 * Make `runUntil()`, `step()` and the waits throw after the time step of
+	 * the first report of at least `severity`, such as `"error"` for
+	 * `$error` and failed assertions. While it is set, each report keeps the
+	 * exact time it was issued at. `null` throws only at `$fatal`.
+	 */
+	setFailOn(severity: Severity | null): void {
+		this.ensureAlive();
+		if (!this._handle.setFailOn) {
+			throw new Error("This simulation does not support failOn");
+		}
+		this._handle.setFailOn(severity);
 	}
 
 	/** Current simulation time. */

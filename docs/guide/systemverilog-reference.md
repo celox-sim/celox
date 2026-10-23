@@ -564,7 +564,8 @@ action block of an immediate assertion also names that assertion: its
 statement label, `assert`, `assume` or `cover`, and whether the pass or the
 fail action issued it. Severity tasks in subroutines the action block calls
 are not attributed. `time` is the time the drain's context gives, as the VPI
-host does at each callback. `Report::render` formats a report as the VPI host
+host does at each callback, or the time step of the report while
+`Simulation::set_fail_on` is set. `Report::render` formats a report as the VPI host
 and the `celox` command print it. Only `$error` and `$fatal` fail a `celox`
 run; `$fatal` also ends the simulation with an error.
 

@@ -59,9 +59,11 @@ export {
 	runTestFromProject,
 	runTestWithFrontendArtifact,
 } from "./testbench.js";
+// Runtime events
 // Core types
 /** @internal */
 export type {
+	AssertionSite,
 	ClockEdge,
 	CreateResult,
 	EventHandle,
@@ -79,6 +81,9 @@ export type {
 	OptimizeOptions,
 	ParamOverride,
 	PortInfo,
+	Report,
+	RuntimeEvent,
+	Severity,
 	SignalLayout,
 	SimulatorOptions,
 	SourceFile,

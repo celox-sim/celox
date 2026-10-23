@@ -148,6 +148,140 @@ macro_rules! reports {
                 );
             }
 
+            /// With `failOn`, a run stops after the time step of the first
+            /// report of at least that severity, the next run continues,
+            /// and every report keeps the time it was issued at.
+            #[test]
+            fn fail_on_stops_runs_at_the_time_of_a_report() {
+                let source = "`timescale 1ns/1ns\nmodule Top;\n  initial begin\n    \
+                              #1 $warning(\"w\");\n    \
+                              #1 $error(\"e\");\n    \
+                              #1 $display(\"after\");\n  \
+                              end\nendmodule";
+                let mut sim = celox::Simulation::from_sv_sources(
+                    vec![(source, Path::new("reports.sv"))],
+                    "Top",
+                )
+                .$backend()
+                .unwrap();
+                sim.set_fail_on(Some(Severity::Error));
+                sim.run_until(10).unwrap();
+                assert_eq!(sim.time(), 2);
+                let failure = sim.failure().unwrap();
+                assert_eq!(failure.message, b"e");
+                assert_eq!(failure.time, Some(2));
+                let times: Vec<_> = sim
+                    .drain_runtime_events()
+                    .into_iter()
+                    .map(|event| match event {
+                        celox::RuntimeEvent::Report(report) => (report.severity, report.time),
+                        event => panic!("unexpected event {event:?}"),
+                    })
+                    .collect();
+                assert_eq!(
+                    times,
+                    vec![(Severity::Warning, Some(1)), (Severity::Error, Some(2))]
+                );
+                sim.run_until(10).unwrap();
+                assert!(sim.failure().is_none());
+                assert_eq!(sim.time(), 10);
+                assert!(matches!(
+                    sim.drain_runtime_events().as_slice(),
+                    [celox::RuntimeEvent::Display { message }] if message == b"after"
+                ));
+            }
+
+            /// A report caused by a host write stops the run in the slot
+            /// that settles the write, before later slots run.
+            #[test]
+            fn fail_on_stops_at_reports_of_host_writes() {
+                let source = "`timescale 1ns/1ns\nmodule Top(input logic a);\n  \
+                              always @(posedge a) $error(\"e\");\n  \
+                              initial #5 $display(\"later\");\nendmodule";
+                for step in [false, true] {
+                    let mut sim = celox::Simulation::from_sv_sources(
+                        vec![(source, Path::new("reports.sv"))],
+                        "Top",
+                    )
+                    .$backend()
+                    .unwrap();
+                    sim.set_fail_on(Some(Severity::Error));
+                    sim.run_until(2).unwrap();
+                    let a = sim.signal("a");
+                    sim.modify(|io| io.set(a, 1u8)).unwrap();
+                    if step {
+                        assert_eq!(sim.step().unwrap(), Some(2));
+                    } else {
+                        sim.run_until(10).unwrap();
+                    }
+                    assert_eq!(sim.time(), 2);
+                    assert_eq!(sim.failure().unwrap().time, Some(2));
+                    let events = sim.drain_runtime_events();
+                    assert!(
+                        matches!(
+                            events.as_slice(),
+                            [celox::RuntimeEvent::Report(report)] if report.message == b"e"
+                        ),
+                        "{events:?}"
+                    );
+                }
+            }
+
+            /// A report of combinational logic that a host write leaves to
+            /// settle, with no step to run, stops the run at the current
+            /// time, by `run_until` or by `step`.
+            #[test]
+            fn fail_on_stops_at_reports_of_settles_without_steps() {
+                let source = "`timescale 1ns/1ns\nmodule Top(input logic a);\n  \
+                              always_comb if (a) $error(\"e\");\nendmodule";
+                for step in [false, true] {
+                    let mut sim = celox::Simulation::from_sv_sources(
+                        vec![(source, Path::new("reports.sv"))],
+                        "Top",
+                    )
+                    .$backend()
+                    .unwrap();
+                    sim.set_fail_on(Some(Severity::Error));
+                    sim.run_until(2).unwrap();
+                    let a = sim.signal("a");
+                    sim.modify(|io| io.set(a, 1u8)).unwrap();
+                    if step {
+                        sim.step().unwrap();
+                    } else {
+                        sim.run_until(10).unwrap();
+                    }
+                    assert_eq!(sim.time(), 2, "step: {step}");
+                    let failure = sim.failure().expect("a failure");
+                    assert_eq!(failure.message, b"e");
+                    assert_eq!(failure.time, Some(2));
+                    sim.run_until(10).unwrap();
+                    assert!(sim.failure().is_none());
+                    assert_eq!(sim.time(), 10);
+                }
+            }
+
+            /// Events lost to a full event buffer may have been failures.
+            #[test]
+            fn fail_on_stops_at_missed_events() {
+                let source = "`timescale 1ns/1ns\nmodule Top;\n  initial begin\n    \
+                              #1;\n    \
+                              for (int i = 0; i < 2000; i++) $display(\"x\");\n    \
+                              #1 $display(\"after\");\n  \
+                              end\nendmodule";
+                let mut sim = celox::Simulation::from_sv_sources(
+                    vec![(source, Path::new("reports.sv"))],
+                    "Top",
+                )
+                .$backend()
+                .unwrap();
+                sim.set_fail_on(Some(Severity::Error));
+                sim.run_until(10).unwrap();
+                assert_eq!(sim.time(), 1);
+                let failure = sim.failure().unwrap();
+                assert_eq!(failure.severity, Severity::Error);
+                assert!(failure.message.starts_with(b"missed "), "{failure:?}");
+            }
+
             #[test]
             fn line_directives_set_the_reported_location() {
                 let reports = reports("`line 40 \"other.sv\" 0\n  initial $info(\"moved\");");
