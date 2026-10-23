@@ -29,6 +29,8 @@ pub(super) struct ScopeBinding {
 pub(super) struct ArrayBinding {
     pub elements: Vec<String>,
     pub shape: Vec<usize>,
+    /// Authored bounds, retained for selecting actual interface array elements.
+    pub ranges: Vec<(i128, i128)>,
 }
 
 pub(super) fn analyze_module(
@@ -419,6 +421,7 @@ pub(super) fn analyze_module(
                         })
                         .collect(),
                     shape: elements.shape.clone(),
+                    ranges: elements.ranges.clone(),
                 };
                 imported.interface_arrays.insert(qualified, absolute);
                 if let Some(item) = &generated_item {
@@ -636,26 +639,7 @@ pub(super) fn analyze_module(
                     let actual =
                         connection_expression(authored, &port.name, interfaces.get(&original))?;
                     let env = &item.env;
-                    let handle = match actual {
-                        Some(actual) => {
-                            actual_handle_key(actual, tree, env, &active_scope.type_aliases)?
-                        }
-                        None => port.name.clone(),
-                    };
-                    let actuals = if port.array_rank == 0 {
-                        ArrayBinding {
-                            elements: vec![handle.clone()],
-                            shape: Vec::new(),
-                        }
-                    } else {
-                        active_scope
-                            .interface_arrays
-                            .get(&handle)
-                            .cloned()
-                            .ok_or_else(|| {
-                                unsupported(format!("interface array actual `{handle}`"))
-                            })?
-                    };
+                    let actuals = connection_array(actual, &port.name, tree, env, &active_scope)?;
                     if actuals.shape.len() != port.array_rank {
                         return Err(unsupported(format!(
                             "interface array rank mismatch at `{original}.{}`",
@@ -1239,6 +1223,7 @@ fn instance_elements(
     let ranges = constant_binding::bind_unpacked_ranges(dimensions, tree, &context)?;
     validate_unpacked_dimension_sizes(&tree.state, &ranges, env)?;
     let mut shape = Vec::new();
+    let mut bounds = Vec::new();
     let mut elements = vec![handle.to_string()];
     for range in ranges {
         let left = eval_ast_const_expr(&tree.state, &range.left, env)
@@ -1256,6 +1241,7 @@ fn instance_elements(
             })
             .ok_or_else(|| unsupported("interface array elaboration limit exceeded"))?;
         shape.push(count);
+        bounds.push((left, right));
         elements = elements
             .into_iter()
             .flat_map(|prefix| {
@@ -1270,7 +1256,165 @@ fn instance_elements(
             })
             .collect();
     }
-    Ok(ArrayBinding { elements, shape })
+    Ok(ArrayBinding {
+        elements,
+        shape,
+        ranges: bounds,
+    })
+}
+
+/// Bind an interface actual as a selection of elaborated instances. Selections
+/// consume authored dimensions; a slice retains its dimension while an index
+/// removes it. Elements stay in declaration order for left-to-left port mapping.
+fn connection_array(
+    actual: Option<celox_sv_syntax::ExprId>,
+    implicit: &str,
+    tree: &AnalysisContext<'_>,
+    env: &HashMap<String, i128>,
+    scope: &scope::ScopeSymbols,
+) -> Converted<ArrayBinding> {
+    use celox_sv_syntax::ExprKind;
+    let native = tree.declarations();
+    let mut selections = Vec::new();
+    let mut root = actual;
+    while let Some(id) = root {
+        let id = expression_binding::ungroup(id, native);
+        if let ExprKind::Select {
+            expression,
+            dimension,
+        } = &native.expression(id).kind
+        {
+            selections.push(&dimension.kind);
+            root = Some(*expression);
+        } else {
+            root = Some(id);
+            break;
+        }
+    }
+    let handle = match root {
+        Some(root) => actual_handle_key(root, tree, env, &scope.type_aliases)?,
+        None => implicit.to_string(),
+    };
+    let Some(array) = scope.interface_arrays.get(&handle) else {
+        // A selection in a hierarchical prefix may name a generated scope;
+        // retain the existing scalar-handle resolution for that case.
+        return Ok(ArrayBinding {
+            elements: vec![match actual {
+                Some(actual) => actual_handle_key(actual, tree, env, &scope.type_aliases)?,
+                None => handle,
+            }],
+            shape: Vec::new(),
+            ranges: Vec::new(),
+        });
+    };
+    if selections.is_empty() {
+        return Ok(array.clone());
+    }
+    if selections.len() > array.shape.len() {
+        return Err(unsupported("too many interface array selections"));
+    }
+    if selections
+        .iter()
+        .filter(|selection| {
+            matches!(
+                selection,
+                celox_sv_syntax::DimensionKind::Range { .. }
+                    | celox_sv_syntax::DimensionKind::Indexed { .. }
+            )
+        })
+        .count()
+        > 1
+    {
+        return Err(unsupported("interface array slices in multiple dimensions"));
+    }
+    let context = PackedDimensions::new(HashMap::default(), env, &scope.type_aliases);
+    let evaluate = |root| -> Converted<i128> {
+        constant_binding::bind(root, tree, &context)?
+            .and_then(|value| eval_ast_const_expr(&tree.state, &value, env))
+            .ok_or_else(|| unsupported("nonconstant interface array selection"))
+    };
+    let selections = selections.into_iter().rev().collect::<Vec<_>>();
+    let mut offsets = vec![0];
+    let mut shape = Vec::new();
+    let mut ranges = Vec::new();
+    for (dimension, (&size, &(left, right))) in array.shape.iter().zip(&array.ranges).enumerate() {
+        let (selected_left, selected_right, retain) = match selections.get(dimension) {
+            None => (left, right, true),
+            Some(celox_sv_syntax::DimensionKind::Index(index)) => {
+                let index = evaluate(*index)?;
+                (index, index, false)
+            }
+            Some(selection) => {
+                let (start, end) = selection_range(selection, left <= right, &evaluate)?;
+                (start, end, true)
+            }
+        };
+        if selected_left < left.min(right)
+            || selected_left > left.max(right)
+            || selected_right < left.min(right)
+            || selected_right > left.max(right)
+        {
+            return Err(unsupported(
+                "interface array selection outside its declared range",
+            ));
+        }
+        if selected_left != selected_right && (selected_left < selected_right) != (left < right) {
+            return Err(unsupported("reversed interface array selection"));
+        }
+        // Bounds were checked against an elaborated dimension (at most 4096
+        // elements), so these differences and products fit in usize.
+        let start = left.abs_diff(selected_left) as usize;
+        let end = left.abs_diff(selected_right) as usize;
+        offsets = offsets
+            .into_iter()
+            .flat_map(|prefix| (start..=end).map(move |index| prefix * size + index))
+            .collect();
+        if retain {
+            shape.push(end - start + 1);
+            ranges.push((selected_left, selected_right));
+        }
+    }
+    Ok(ArrayBinding {
+        elements: offsets
+            .into_iter()
+            .map(|offset| array.elements[offset].clone())
+            .collect(),
+        shape,
+        ranges,
+    })
+}
+
+fn selection_range(
+    selection: &celox_sv_syntax::DimensionKind,
+    ascending: bool,
+    evaluate: &impl Fn(celox_sv_syntax::ExprId) -> Converted<i128>,
+) -> Converted<(i128, i128)> {
+    use celox_sv_syntax::DimensionKind;
+    match selection {
+        DimensionKind::Range { left, right } => Ok((evaluate(*left)?, evaluate(*right)?)),
+        DimensionKind::Indexed {
+            base,
+            operator,
+            width,
+        } => {
+            let base = evaluate(*base)?;
+            let width = evaluate(*width)?;
+            let extent = width
+                .checked_sub(1)
+                .filter(|_| width > 0)
+                .ok_or_else(|| unsupported("nonpositive interface array selection width"))?;
+            let (low, high) = if operator == "+:" {
+                (Some(base), base.checked_add(extent))
+            } else {
+                (base.checked_sub(extent), Some(base))
+            };
+            let (low, high) = low
+                .zip(high)
+                .ok_or_else(|| unsupported("interface array selection bound overflow"))?;
+            Ok(if ascending { (low, high) } else { (high, low) })
+        }
+        _ => Err(unsupported("interface array selection")),
+    }
 }
 
 pub(super) fn actual_handle_key(
@@ -1288,6 +1432,7 @@ pub(super) fn actual_handle_key(
     let mut root = root;
     let mut suffixes = Vec::new();
     let mut handle = loop {
+        root = expression_binding::ungroup(root, native);
         match &native.expression(root).kind {
             ExprKind::Name(name) => break instances::normalize_identifier(&name.spelling),
             ExprKind::Member {

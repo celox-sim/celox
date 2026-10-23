@@ -1,6 +1,16 @@
 use super::*;
 
 sv_backends! {
+    fn connects_interface_array_slices_in_declaration_order(sim) {
+        @case "interfaces::connects_interface_array_slices_in_declaration_order";
+    }
+    fn drives_interface_array_slices_through_generated_relays(sim) {
+        @case "interfaces::drives_interface_array_slices_through_generated_relays";
+    }
+    fn connects_multidimensional_interface_array_slices(sim) {
+        @case "interfaces::connects_multidimensional_interface_array_slices";
+    }
+
     fn distributes_multidimensional_connections_to_interface_arrays(sim) {
         @case "interfaces::distributes_multidimensional_connections_to_interface_arrays";
     }
@@ -196,4 +206,74 @@ sv_backends! {
         }
         assert!(!sim.warnings().is_empty());
     }
+}
+
+#[test]
+fn rejects_invalid_interface_array_selections() {
+    for (selection, expected) in [
+        ("lanes[4:3]", "outside its declared range"),
+        ("lanes[0:1]", "reversed interface array selection"),
+        (
+            "lanes[1 +: 0]",
+            "nonpositive interface array selection width",
+        ),
+        ("lanes[index +: 2]", "nonconstant interface array selection"),
+        ("lanes[0][0]", "too many interface array selections"),
+        ("lanes[3:1]", "interface array dimension mismatch"),
+        (
+            "lanes[128'h7fffffffffffffffffffffffffffffff +: 2]",
+            "selection bound overflow",
+        ),
+    ] {
+        let source = format!(
+            r#"
+            interface Lane;
+                logic value;
+                modport reader(input value);
+            endinterface
+            module Reader(Lane.reader ports[2], output wire y);
+                assign y=ports[0].value ^ ports[1].value;
+            endmodule
+            module Top(input int index, output wire y);
+                Lane lanes[3:0]();
+                for(genvar n=0;n<4;n++) begin: g
+                    assign lanes[n].value=1'b0;
+                end
+                Reader r(.ports({selection}),.y(y));
+            endmodule
+        "#
+        );
+        let error = Simulator::from_sv_sources(
+            vec![(source.as_str(), Path::new("invalid_interface_slice.sv"))],
+            "Top",
+        )
+        .build_interpreter()
+        .expect_err(selection)
+        .to_string();
+        assert!(error.contains(expected), "{selection}: {error}");
+    }
+}
+
+#[test]
+fn rejects_interface_array_slices_in_multiple_dimensions() {
+    let source = r#"
+        interface Lane; logic value; endinterface
+        module Reader(Lane lanes[1][1], output wire y);
+            assign y=lanes[0][0].value;
+        endmodule
+        module Top(output wire y);
+            Lane lanes[2][2]();
+            Reader r(.lanes(lanes[0:0][0:0]),.y(y));
+        endmodule
+    "#;
+    let error =
+        Simulator::from_sv_sources(vec![(source, Path::new("invalid_matrix_slice.sv"))], "Top")
+            .build_interpreter()
+            .err()
+            .unwrap()
+            .to_string();
+    assert!(
+        error.contains("interface array slices in multiple dimensions"),
+        "{error}"
+    );
 }
