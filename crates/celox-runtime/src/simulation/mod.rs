@@ -295,13 +295,19 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(false);
         }
         let compiles = self.compiles_slots();
+        let waiting_kernels = self
+            .model
+            .scheduler
+            .as_ref()
+            .map_or(0, |scheduler| scheduler.wait_kernels);
         while let Some(next_time) = self.next_event_time() {
             if next_time > end {
                 break;
             }
-            // A waiting process keeps the slot in the reference loop; test
-            // that first, as fallback designs fail it at every step.
-            let compiled = if compiles && self.process_state.waiters.is_empty() {
+            // A process the scheduler does not run waits: the slot stays in
+            // the reference loop. Test that first, as designs with such
+            // processes fail it at every step.
+            let compiled = if compiles && self.process_state.waiters.len() <= waiting_kernels {
                 self.compiled_limit(executor, end, observer.one_slot())
             } else {
                 None

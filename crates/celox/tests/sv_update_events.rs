@@ -5,6 +5,20 @@
 //! performed one by one, in the order they were scheduled (10.4.2).
 use std::path::Path;
 
+/// The scheduler mode: `CELOX_SCHEDULER` set to `reference`, `compiled`,
+/// `differential` or `differential-runs`, by default the library's.
+#[allow(clippy::disallowed_methods)] // Opt-in test configuration is environment-driven.
+fn scheduler_mode() -> celox::SchedulerMode {
+    match std::env::var("CELOX_SCHEDULER").as_deref() {
+        Ok("reference") => celox::SchedulerMode::Reference,
+        Ok("compiled") => celox::SchedulerMode::Compiled,
+        Ok("differential") => celox::SchedulerMode::Differential,
+        Ok("differential-runs") => celox::SchedulerMode::DifferentialRuns,
+        Ok(other) => panic!("unknown CELOX_SCHEDULER mode `{other}`"),
+        Err(_) => celox::SchedulerMode::default(),
+    }
+}
+
 macro_rules! update_events {
     ($module:ident, $backend:ident) => {
         mod $module {
@@ -18,6 +32,7 @@ macro_rules! update_events {
                     vec![(source.as_str(), Path::new("update_events.sv"))],
                     "Top",
                 )
+                .scheduler_mode(scheduler_mode())
                 .$backend()
                 .unwrap()
             }
@@ -146,6 +161,7 @@ macro_rules! update_events {
                     vec![(source, Path::new("pulse.sv"))],
                     "Top",
                 )
+                .scheduler_mode(scheduler_mode())
                 .$backend()
                 .unwrap();
                 sim.schedule("c", 1, 1).unwrap();
