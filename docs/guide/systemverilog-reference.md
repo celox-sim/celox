@@ -261,7 +261,13 @@ saving a state file fails while any variable holds an object.
 
 A run-time select that reaches past either end of a
 vector reads `X` for the missing bits (zero in two-state simulation) and
-writes only the bits that exist.
+writes only the bits that exist. A write to a constant part-select partly
+outside the vector, by any procedural or continuous assignment, also writes
+only the bits inside: `q[9:6] = v` on `logic [7:0] q` writes `v[1:0]` to
+`q[7:6]`. A write wholly outside the vector has no effect. Reading such a
+constant part-select, and writing one of an array element or of an inner
+packed dimension that leaves its declared range, are rejected
+([#88](https://github.com/celox-sim/celox/issues/88)).
 
 ### Wildcard comparisons
 
