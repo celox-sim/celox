@@ -99,9 +99,5 @@ endtask
   further rule: they are concurrent SystemVerilog processes. A clock nobody
   waits on keeps running and clocking its domains.
 
-A testbench statement that reads the design, such as `$assert` or an `if`
-condition, sees combinational logic settled after the process's own writes.
-SystemVerilog leaves such a read racy within one time step; Celox resolves it
-this way.
-
-`rst.assert` of `$tb::reset_gen` is not defined by this page yet.
+This page defines only `$tb::clock_gen` and `clk.next` among the testbench
+components.
