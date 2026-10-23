@@ -358,6 +358,14 @@ pub(super) fn analyze_module(
             &current.type_aliases,
         );
         dimensions.extend(parameter_packed_dimensions(&current.parameters));
+        dimensions.functions = Arc::new(current.functions.clone());
+        dimensions
+            .function_return_types
+            .extend(current.function_return_types.clone());
+        if let Some(item) = &generated_item {
+            let mut views = generate::ScopeViews::new(&dimensions);
+            dimensions = views.dimensions(item).clone();
+        }
         let native = instances::declaration_from_item(id, tree)?;
         let interface_name = instances::normalize_identifier(&native.name.spelling);
         let (definition_tree, definition_path) = &definitions[&interface_name];
@@ -472,10 +480,39 @@ pub(super) fn analyze_module(
                     else {
                         continue;
                     };
-                    let Some(actual) = connection.actual_expr.clone() else {
+                    let actual = if let Some(pattern) = &connection.bound_pattern {
+                        if port.direction != PortDirection::Input {
+                            return Err(unsupported(
+                                "output/inout/ref interface port assignment pattern",
+                            ));
+                        }
+                        let mut pattern = pattern.clone();
+                        pattern.resolve_types(&dimensions)?;
+                        pattern.map_expressions(&mut |expr| {
+                            let mut expr = substitute_expr_constants_with_parameter_literals(
+                                &tree.state,
+                                expr,
+                                &dimensions.const_env,
+                                &current.parameter_values,
+                            );
+                            if let Some(item) = &generated_item {
+                                item.expr(&mut expr);
+                            }
+                            expr
+                        });
+                        let shape = port_dimensions.get(&port.name).ok_or_else(|| {
+                            unsupported("interface assignment pattern port shape")
+                        })?;
+                        pattern.lower(&port_state, shape, &port_dimensions)?
+                    } else if let Some(actual) = connection.actual_expr.clone() {
+                        actual
+                    } else {
                         continue;
                     };
-                    let actual = if elements.shape.is_empty() {
+                    // An untyped pattern takes the single formal's context,
+                    // so every element of an interface array receives it.
+                    let actual = if elements.shape.is_empty() || connection.bound_pattern.is_some()
+                    {
                         actual
                     } else {
                         let port_shape = port_dimensions.get(&port.name).unwrap();

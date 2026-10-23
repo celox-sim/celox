@@ -52,9 +52,14 @@ pub(in crate::ast) fn prepare_native(
         let id = item.key.ok_or_else(mismatch)?;
         keys.push(match &native.expression(id).kind {
             ExprKind::Literal(text) if text == "default" => Key::Default,
+            ExprKind::Name(name) if shape.is_none() => Key::Name {
+                name: instances::normalize_identifier(&name.spelling),
+                index: integer(id).ok(),
+            },
             ExprKind::Name(name)
                 if shape.is_some_and(|shape| {
                     shape.unpacked.is_empty()
+                        && shape.packed.len() <= 1
                         && shape.members.iter().any(|member| {
                             member.name() == instances::normalize_identifier(&name.spelling)
                         })
@@ -78,6 +83,15 @@ pub(super) fn value(
     tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<Value> {
+    value_mode(root, tree, dims, true)
+}
+
+pub(super) fn value_mode(
+    root: ExprId,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+    constant: bool,
+) -> Converted<Value> {
     enum Job {
         Enter(ExprId),
         Finish(Kind, usize),
@@ -98,14 +112,42 @@ pub(super) fn value(
                         jobs.push(Job::Finish(plan.kind, plan.bindings.len()));
                         jobs.extend(plan.bindings.into_iter().rev().map(Job::Enter));
                     }
-                    ExprKind::Pattern { .. } => {
+                    ExprKind::Pattern { .. } if constant => {
                         values.push(patterns::constant_native(id, tree, dims)?)
                     }
-                    _ => values.push(Value::Expression(frozen(
-                        &tree.state,
-                        expression_binding::bind(id, tree, dims)?,
-                        dims,
-                    )?)),
+                    _ => {
+                        let expr = expression_binding::bind(id, tree, dims)?;
+                        let (expr, signed, value_type) = if constant {
+                            // Capture the self-determined type before folding the
+                            // value into bits, just as for runtime port values.
+                            let types = dimensions::query_context_for_operand(id, tree, dims)?;
+                            let value_type = super::ports::ValueType::Known(
+                                super::ports::native_value_type(id, tree, &types)?,
+                            );
+                            let signed =
+                                dimensions::expression_signedness(&expr, &types, &types.const_env);
+                            let expr = frozen(&tree.state, expr, dims)?;
+                            let signed = Some(signed.unwrap_or_else(|| {
+                                dimensions::expression_signedness(&expr, &types, &types.const_env)
+                                    .unwrap_or(false)
+                            }));
+
+                            (expr, signed, value_type)
+                        } else {
+                            let signed =
+                                dimensions::expression_signedness(&expr, dims, &dims.const_env);
+                            (
+                                expr,
+                                signed,
+                                super::ports::native_value_type_plan(id, tree, dims)?,
+                            )
+                        };
+                        values.push(Value::Expression {
+                            expr,
+                            signed,
+                            value_type,
+                        });
+                    }
                 }
             }
             Job::Finish(kind, count) => {
@@ -183,7 +225,10 @@ mod tests {
             depth += 1;
             match &items[0] {
                 Value::Pattern(pattern) => at = pattern,
-                Value::Expression(Expr::Literal(value)) => {
+                Value::Expression {
+                    expr: Expr::Literal(value),
+                    ..
+                } => {
                     assert_eq!(value, "1");
                     break;
                 }

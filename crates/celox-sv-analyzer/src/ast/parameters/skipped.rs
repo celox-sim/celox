@@ -406,7 +406,7 @@ fn pattern_items(
     use bound_patterns::{Key, NativeKind};
     let plan = bound_patterns::prepare_native(root, tree, dims, Some(shape))?;
     let wrong = || unsupported("assignment pattern items do not match the target shape");
-    if shape.unpacked.is_empty() && !shape.members.is_empty() {
+    if shape.unpacked.is_empty() && shape.packed.len() <= 1 && !shape.members.is_empty() {
         if shape.members.len() > 1 && shape.members.iter().all(|member| member.offset() == 0) {
             return Err(unsupported("assignment pattern for a packed union"));
         }
@@ -432,7 +432,7 @@ fn pattern_items(
                             named.insert(name, value);
                         }
                         Key::Default => default = Some(value),
-                        Key::Index(_) => {
+                        Key::Index(_) | Key::Name { .. } => {
                             return Err(unsupported("structure assignment pattern form"));
                         }
                     }
@@ -537,7 +537,7 @@ fn pattern_items(
                         indices.insert(index);
                     }
                     Key::Default => default = true,
-                    Key::Member(_) => {
+                    Key::Member(_) | Key::Name { .. } => {
                         return Err(unsupported(
                             "member or type key in an array assignment pattern",
                         ));

@@ -21,6 +21,10 @@ fn leaves(source: &Source) -> Vec<(usize, i128)> {
     let mut leaves = Vec::new();
     while let Some(value) = pending.pop() {
         match value {
+            Expr::Unary {
+                op: crate::ast::UnaryOp::ToTwoState,
+                expr,
+            } => pending.push(expr),
             Expr::Concat(parts) => pending.extend(parts.iter().rev()),
             Expr::Resize { expr, width, .. } => {
                 let Expr::Binary {
