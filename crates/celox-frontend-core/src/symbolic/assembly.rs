@@ -2266,11 +2266,15 @@ fn declare_scheduler_slots(
         count: declare("count".into(), TIME),
         current: declare("current".into(), TIME),
         levels: declare("levels".into(), TIME),
+        ready: declare("ready".into(), TIME),
         wake: (0..process_count)
             .map(|index| declare(format!("wake[{index}]"), TIME))
             .collect(),
         waiting: (0..process_count)
             .map(|index| declare(format!("waiting[{index}]"), FLAG))
+            .collect(),
+        baseline: (0..process_count)
+            .map(|index| declare(format!("baseline[{index}]"), FLAG))
             .collect(),
     })
 }
