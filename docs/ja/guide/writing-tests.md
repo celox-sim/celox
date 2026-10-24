@@ -261,7 +261,7 @@ const sim = Simulator.fromSource(SOURCE, "Adder", {
 
 ### HDL出力のバイト列
 
-Rustの`RuntimeEvent::{Display, Write, AssertContinue, AssertFatal}`と詳細テスト結果の
+Rustの`RuntimeEvent::{Display, Write}`と`RuntimeEvent::Report`の`message`、詳細テスト結果の
 assertionメッセージは`Vec<u8>`を返します。JavaScriptの`runTest`、
 `runTestFromProject`、`runTestWithFrontendArtifact`では`Uint8Array`です。
 `%s`と`%c`には非UTF-8やNULが含まれるため、暗黙のデコードは行いません。

@@ -2990,9 +2990,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.eval(expr, None)?;
                 Ok(true)
             }
-            sv::ir::Stmt::SystemTask { task, args, site } => {
-                self.system_task(*task, args, site.as_ref())
-            }
+            sv::ir::Stmt::SystemTask {
+                task,
+                args,
+                site,
+                assertion,
+            } => self.system_task(*task, args, site.as_ref(), assertion.as_ref()),
         }
     }
 
@@ -3003,6 +3006,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         task: sv::ir::SystemTask,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
         site: Option<&sv::ir::SourceSpan>,
+        assertion_site: Option<&celox_design::AssertionSite>,
     ) -> Result<bool, sv::AnalyzerError> {
         if let sv::ir::SystemTask::Vcd(operation) = task {
             self.vcd_task(operation, args)?;
@@ -3161,18 +3165,14 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             _ => None,
         };
-        let event_kind = match &kind {
-            SystemTaskKind::Print(kind, _) => *kind,
-            SystemTaskKind::Control(kind) => *kind,
-            SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
-            SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,
-            SystemTaskKind::Assertion(kind) => *kind,
-        };
+        let event_kind = kind.event_kind();
         let site_id = self.m.event_site(RuntimeEventSite {
             kind: event_kind,
             template: template.clone(),
             sizing: DisplaySizing::Ieee,
             scope: None,
+            location: report_location(site),
+            assertion: assertion_site.cloned(),
             arg_widths,
             arg_signed,
             arg_is_string,

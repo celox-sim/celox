@@ -1,4 +1,4 @@
-use celox::{RuntimeEvent, Simulator};
+use celox::{Report, RuntimeEvent, Severity, Simulator};
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -20,10 +20,10 @@ all_backends! {
                 }
             }
         "#, "Top");
-        sim.drain_runtime_events();
+        bare(sim.drain_runtime_events());
         let a = sim.signal("a");
         sim.modify(|io| io.set(a, 3u32)).unwrap();
-        assert_eq!(sim.drain_runtime_events(), vec![
+        assert_eq!(bare(sim.drain_runtime_events()), vec![
             RuntimeEvent::Display { message: b"wide=1.500000 narrow=3.00 neg=-1.50".to_vec() },
             RuntimeEvent::Write { message: b"fraction=1.50".to_vec() },
         ]);
@@ -39,10 +39,10 @@ all_backends! {
                 always_comb { $display((a as f64) / 2.0, a as f32); }
             }
         "#, "Top");
-        sim.drain_runtime_events();
+        bare(sim.drain_runtime_events());
         let a = sim.signal("a");
         sim.modify(|io| io.set(a, 3u32)).unwrap();
-        assert_eq!(sim.drain_runtime_events(), vec![RuntimeEvent::Display { message: b"1.5 3".to_vec() }]);
+        assert_eq!(bare(sim.drain_runtime_events()), vec![RuntimeEvent::Display { message: b"1.5 3".to_vec() }]);
     }
 
     fn rtl_negative_float_constants(sim) {
@@ -58,10 +58,10 @@ all_backends! {
             }
         "#, "Top");
         let clk = sim.event("clk");
-        sim.drain_runtime_events();
+        bare(sim.drain_runtime_events());
         sim.tick(clk).unwrap();
         assert_eq!(sim.get(sim.signal("q")), 0xfffffffeu32.into());
-        assert_eq!(sim.drain_runtime_events(), vec![RuntimeEvent::Display { message: b"constant=-2.25 wide=-1.50".to_vec() }]);
+        assert_eq!(bare(sim.drain_runtime_events()), vec![RuntimeEvent::Display { message: b"constant=-2.25 wide=-1.50".to_vec() }]);
     }
 
     fn rtl_ff_float_messages(sim) {
@@ -77,11 +77,11 @@ all_backends! {
         let a = sim.signal("a");
         let clk = sim.event("clk");
         sim.modify(|io| io.set(a, 3u32)).unwrap();
-        sim.drain_runtime_events();
+        bare(sim.drain_runtime_events());
         sim.tick(clk).unwrap();
-        assert_eq!(sim.drain_runtime_events(), vec![
+        assert_eq!(bare(sim.drain_runtime_events()), vec![
             RuntimeEvent::Display { message: b"ff=1.50 f32=3.00".to_vec() },
-            RuntimeEvent::AssertContinue { message: b"value=1.50".to_vec() },
+            RuntimeEvent::Report(Report::new(Severity::Error, b"value=1.50".to_vec())),
         ]);
     }
 }
@@ -244,7 +244,7 @@ fn named_float_constants_and_parameters_display_numeric_values() {
         let clk = sim.event("clk");
         sim.tick(clk).unwrap();
         assert_eq!(
-            sim.drain_runtime_events(),
+            bare(sim.drain_runtime_events()),
             vec![RuntimeEvent::Display {
                 message: expected.as_bytes().to_vec()
             }]
@@ -276,7 +276,7 @@ fn hierarchical_float_parameter_overrides_keep_their_own_scope() {
     let clk = sim.event("clk");
     sim.tick(clk).unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![RuntimeEvent::Display {
             message: b"P=1.25 C=1.75".to_vec()
         }]
@@ -319,7 +319,7 @@ fn package_float_constants_do_not_alias_same_named_parameter_overrides() {
     let clk = sim.event("clk");
     sim.tick(clk).unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![RuntimeEvent::Display {
             message: b"local=1.25 package=-2.25".to_vec()
         }]
@@ -342,9 +342,23 @@ fn integral_parameter_override_is_used_by_float_constant() {
     let clk = sim.event("clk");
     sim.tick(clk).unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![RuntimeEvent::Display {
             message: b"F=3.00 transitive=4.00 direct=4.00".to_vec()
         }]
     );
+}
+
+/// The drained events without the time, scope, location and assertion of
+/// their reports, which these tests do not check.
+fn bare(events: Vec<celox::RuntimeEvent>) -> Vec<celox::RuntimeEvent> {
+    events
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Report(report) => {
+                celox::RuntimeEvent::Report(celox::Report::new(report.severity, report.message))
+            }
+            event => event,
+        })
+        .collect()
 }
