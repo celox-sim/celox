@@ -1,0 +1,1 @@
+Fix P2: normalize enum unbased fill initializers to the base width and signedness before collecting randomization values. Add a shared regression for 4-bit, 64-bit, signed '1 and '0; reproduce five failures before the fix.
