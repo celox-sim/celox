@@ -59,7 +59,17 @@ impl NativeProgramInstance {
     ///
     /// The image's machine code must come from a trusted source. Image
     /// validation is structural and does not authenticate executable code.
+    ///
+    /// An image with process kernels, which only a timed
+    /// [`crate::Simulation`] runs, fails to attach.
     pub unsafe fn from_image(image: NativeProgramImage) -> Result<Self, NativeProgramLoadError> {
+        let schema = image.runtime_schema();
+        if !schema.processes.is_empty() {
+            let origin = schema.process_origins.first().cloned().unwrap_or_default();
+            return Err(NativeProgramLoadError::Attach(SimulatorError::new(
+                crate::SimulatorErrorKind::ProcessRequiresSimulation(origin),
+            )));
+        }
         // Safety: upheld by this constructor's caller.
         let shared = Arc::new(
             unsafe { SharedNativeCode::from_image(image) }
