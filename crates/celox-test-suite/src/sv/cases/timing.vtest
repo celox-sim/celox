@@ -2565,3 +2565,73 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (top Top)
   (run_until 6)
   (assert_eq t 0x22))
+
+; A clock computed from a clock that one of several nonblocking updates
+; changes has its edge in that NBA region (IEEE 1800-2023 4.5, 10.4.2):
+; `rclk = clk & ren` rises with `clk` while `ren` is 1.
+(case derived_clocks_follow_several_nonblocking_updates
+  (source "derived_nba.sv" #"
+                module Top;
+                  bit clk, clk2; bit ren = 0; bit rclk; bit [7:0] e = 0;
+                  assign rclk = clk & ren;
+                  always_ff @(posedge clk) ren <= ~ren;
+                  always_ff @(posedge rclk) e <= e + 8'd1;
+                  initial begin
+                    #9 clk <= 1; #1; clk <= 0;
+                    #3 clk <= 1; clk2 <= 1; #1; clk <= 0; clk2 <= 0;
+                    #3 clk <= 1; #1; clk <= 0;
+                  end
+                  initial begin #12 $display("t12 e=%0d", e); #4 $display("t16 e=%0d", e); #4 $display("t20 e=%0d", e); $finish; end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "t12 e=1\nt16 e=2\nt20 e=3\n"))
+
+; A clock computed from a blocking result that a domain commits in the
+; active region (#1783) has its edges there.
+(case derived_clocks_follow_active_region_commits
+  (source "derived_active.sv" #"
+                module Top;
+                  bit clk, clk2, c2, en = 1;
+                  wire g = c2 & en;
+                  int cnt, w;
+                  always @(posedge clk) c2 = ~c2;
+                  initial forever begin @(c2); w++; end
+                  always_ff @(posedge g) cnt <= cnt + 1;
+                  initial begin
+                    repeat (4) begin #1 clk <= 1; clk2 <= 1; #1 clk <= 0; clk2 <= 0; end
+                    #1 $display("cnt=%0d w=%0d", cnt, w);
+                    $finish;
+                  end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "cnt=2 w=4\n"))
+
+; A domain evaluated twice before one NBA region publishes both
+; evaluations; the continuous assignment of the clock computed from its
+; output sees the final value (IEEE 1800-2023 4.7).
+(case derived_clocks_follow_superseded_publications
+  (source "derived_superseded.sv" #"
+                module Top;
+                  bit clk, c, q, en = 1;
+                  wire gq = q & en;
+                  int cnt, n;
+                  always_ff @(posedge clk) q <= c;
+                  always_ff @(posedge gq) cnt <= cnt + 1;
+                  initial forever begin @(q); n++; end
+                  initial begin
+                    #1 c = 1; clk = 1;
+                    #0 clk = 0; c = 0;
+                    #0 clk = 1;
+                    #1 clk = 0;
+                    #1 $display("cnt=%0d n=%0d q=%0d", cnt, n, q);
+                    $finish;
+                  end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "cnt=0 n=1 q=0\n"))

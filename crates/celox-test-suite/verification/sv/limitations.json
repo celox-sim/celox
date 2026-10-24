@@ -2011,7 +2011,8 @@
         "timing::staged_nonblocking_writes_wake_waiters",
         "timing::intermediate_combinational_writes_keep_other_drivers",
         "timing::parallel_flip_flop_parts_keep_pulses",
-        "timing::staged_nonblocking_writes_follow_later_blocking_writes"
+        "timing::staged_nonblocking_writes_follow_later_blocking_writes",
+        "timing::derived_clocks_follow_superseded_publications"
       ]
     }
   },

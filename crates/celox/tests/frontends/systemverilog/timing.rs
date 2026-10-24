@@ -172,6 +172,9 @@ timed_cases! {
     fn plain_always_expression_edges_run_as_processes = "timing::plain_always_expression_edges_run_as_processes";
     fn plain_always_multi_bit_edges_follow_the_lsb = "timing::plain_always_multi_bit_edges_follow_the_lsb";
     fn plain_always_edges_without_a_reset_run_as_processes = "timing::plain_always_edges_without_a_reset_run_as_processes";
+    fn derived_clocks_follow_several_nonblocking_updates = "timing::derived_clocks_follow_several_nonblocking_updates";
+    fn derived_clocks_follow_active_region_commits = "timing::derived_clocks_follow_active_region_commits";
+    fn derived_clocks_follow_superseded_publications = "timing::derived_clocks_follow_superseded_publications";
 }
 
 #[test]
