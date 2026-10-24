@@ -16,6 +16,7 @@
     "verilator/string.json",
     "verilator/synthesizable.json",
     "verilator/system_functions.json",
+    "verilator/tagged_unions.json",
     "verilator/timing.json",
     "verilator/types.json"
   ],

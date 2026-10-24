@@ -276,12 +276,29 @@ test("all four retained baselines accept only their existing failures", () => {
           result.accepted_failures,
           tool === "icarus"
             ? [
+                "tagged_unions::casts_ports_and_registers",
+                "tagged_unions::conditional_struct_payload",
+                "tagged_unions::constructors_and_checked_members",
+                "tagged_unions::default_arguments",
+                "tagged_unions::factory_and_union_arguments",
+                "tagged_unions::nested_and_void_constructors",
+                "tagged_unions::wide_four_state_payload",
+                "tagged_unions::writable_system_arguments",
+                "tagged_unions::writable_task_arguments",
                 "unions::packed_mixed_state",
                 "unions::soft_overlay",
                 "unions::soft_signed_ports",
                 "unions::soft_wide_four_state",
               ]
-            : [],
+            : [
+                "tagged_unions::conditional_struct_payload",
+                "tagged_unions::constructors_and_checked_members",
+                "tagged_unions::default_arguments",
+                "tagged_unions::factory_and_union_arguments",
+                "tagged_unions::nested_and_void_constructors",
+                "tagged_unions::writable_system_arguments",
+                "tagged_unions::writable_task_arguments",
+              ],
         );
       } else {
         assert.equal(result.accepted_failures.length, tool === "icarus" ? 11 : 2);

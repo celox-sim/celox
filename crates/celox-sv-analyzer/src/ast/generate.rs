@@ -310,6 +310,10 @@ impl Item {
                 local.subroutine_param_shapes =
                     Arc::new(self.function_aliases((*dimensions.subroutine_param_shapes).clone()));
             }
+            if !dimensions.subroutine_directions.is_empty() {
+                local.subroutine_directions =
+                    Arc::new(self.function_aliases((*dimensions.subroutine_directions).clone()));
+            }
             if !dimensions.function_return_types.is_empty() {
                 local.function_return_types =
                     self.function_aliases(dimensions.function_return_types.clone());

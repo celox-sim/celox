@@ -1227,7 +1227,9 @@ fn kernel_written_names(
                 );
                 continue;
             }
-            sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => continue,
+            sv::ir::Callee::String(_)
+            | sv::ir::Callee::Object(_)
+            | sv::ir::Callee::Checked { .. } => continue,
             sv::ir::Callee::Subroutine(name) => name,
         };
         let Some(subroutine) = subroutines
@@ -1372,7 +1374,9 @@ impl DriverScan<'_> {
                     }
                     continue;
                 }
-                sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => continue,
+                sv::ir::Callee::String(_)
+                | sv::ir::Callee::Object(_)
+                | sv::ir::Callee::Checked { .. } => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             let Some(subroutine) = self
@@ -3708,6 +3712,87 @@ fn array_element_connections(
         .collect()
 }
 
+/// Tagged unions cannot acquire an arbitrary tag through an integral port connection.
+fn check_tagged_port_connections(
+    parent: &sv::ir::Module,
+    child: &sv::ir::Module,
+    connections: &[LoweredSvPortConnection],
+) -> Result<(), ParserError> {
+    let type_of = |name: &str| {
+        parent
+            .ports()
+            .iter()
+            .find(|port| port.name() == name)
+            .map(|port| port.r#type())
+            .or_else(|| {
+                parent
+                    .signals()
+                    .iter()
+                    .find(|signal| signal.name() == name)
+                    .map(|signal| signal.r#type())
+            })
+    };
+    for connection in connections {
+        let Some(port) = child
+            .ports()
+            .iter()
+            .find(|port| port.name() == connection.formal)
+        else {
+            continue;
+        };
+        let Some(expr) = &connection.actual_expr else {
+            continue;
+        };
+        let actual = if let sv::ir::Expr::Ident(name) = expr {
+            type_of(name)
+        } else {
+            None
+        };
+        let writes_actual = matches!(
+            port.direction(),
+            sv::ir::PortDirection::Output
+                | sv::ir::PortDirection::Inout
+                | sv::ir::PortDirection::Ref
+        );
+        let mut writes_tagged = false;
+        if writes_actual {
+            let mut pending = vec![expr];
+            while let Some(part) = pending.pop() {
+                match part {
+                    sv::ir::Expr::Ident(name) => {
+                        writes_tagged |=
+                            type_of(name).is_some_and(|ty| ty.tagged_identity().is_some());
+                    }
+                    sv::ir::Expr::Concat(parts) => pending.extend(parts),
+                    sv::ir::Expr::Select { expr, .. } | sv::ir::Expr::Resize { expr, .. } => {
+                        pending.push(expr)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let target = port.r#type();
+        if target.tagged_identity().is_none() && !writes_tagged {
+            continue;
+        }
+        if !actual.is_some_and(|ty| {
+            ty.tagged_identity() == target.tagged_identity()
+                && ty.resolved_width() == target.resolved_width()
+                && ty.unpacked_ranges() == target.unpacked_ranges()
+        }) {
+            return Err(ParserError::illegal_context(
+                "systemverilog tagged union port",
+                format!(
+                    "port `{}` requires a signal of the same tagged union type",
+                    connection.formal
+                ),
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn bind_port_patterns(
     connections: &mut [LoweredSvPortConnection],
     child: &LoweredSvModule,
@@ -3802,6 +3887,7 @@ pub(crate) fn attach_instance_glue(
             }
             None => authored_connections,
         };
+        check_tagged_port_connections(&lowered.source, &child.source, &connections)?;
         ensure_parent_output_signals(
             module,
             &mut parent_variables,

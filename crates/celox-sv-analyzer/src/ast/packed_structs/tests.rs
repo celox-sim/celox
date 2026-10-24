@@ -49,7 +49,6 @@ fn rejects_invalid_or_unsupported_struct_shapes() {
     for body in [
         "struct { logic a; } value;",
         "union packed { logic a; logic [1:0] b; } value;",
-        "union tagged packed { logic a; logic b; } value;",
         "union soft { real a; bit [63:0] b; } value;",
         "union soft { logic a[2]; logic b; } value;",
         "union soft { logic a; logic a; } value;",
@@ -172,4 +171,41 @@ fn rejects_member_access_on_packed_struct_array_aliases() {
             "{access}"
         );
     }
+}
+
+#[test]
+fn tagged_union_layout_includes_minimal_tag_and_maximum_payload() {
+    let ir = analyze_source(
+        r#"
+        module Top;
+            union tagged packed { void Empty; logic [7:0] ByteValue; logic [3:0] Nibble; } three;
+            union tagged packed { void Empty; bit [129:0] Full; } wide;
+            union tagged packed { void A; void B; } flags;
+            union tagged packed { logic [7:0] Only; } one;
+        endmodule
+    "#,
+        Path::new("tagged_layout.sv"),
+    )
+    .unwrap();
+    for (name, width) in [("three", 10), ("wide", 131), ("flags", 1), ("one", 8)] {
+        let ty = ir.modules()[0]
+            .signals()
+            .iter()
+            .find(|s| s.name() == name)
+            .unwrap()
+            .r#type();
+        assert_eq!(ty.resolved_width(), Some(width));
+        assert_eq!(ty.kind(), ir::TypeKind::Logic);
+    }
+}
+
+#[test]
+fn rejects_empty_tagged_union_without_panicking() {
+    assert!(
+        analyze_source(
+            "module Top; union tagged packed {} item; endmodule",
+            Path::new("empty_tagged.sv")
+        )
+        .is_err()
+    );
 }

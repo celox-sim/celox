@@ -187,18 +187,40 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                     }
                 }
                 "compile_error" | "mismatch" => {
-                    assert_eq!(tool, "icarus", "{name}");
-                    let (expected_status, phase, diagnostic) = match name {
-                        "unions::packed_mixed_state" => (
+                    let (expected_status, phase, diagnostic) = match (tool, name) {
+                        (
+                            "verilator",
+                            "tagged_unions::conditional_struct_payload"
+                            | "tagged_unions::constructors_and_checked_members"
+                            | "tagged_unions::writable_system_arguments"
+                            | "tagged_unions::writable_task_arguments"
+                            | "tagged_unions::default_arguments"
+                            | "tagged_unions::factory_and_union_arguments"
+                            | "tagged_unions::nested_and_void_constructors",
+                        ) => ("compile_error", "compile", "Unsupported: tagged union"),
+                        (
+                            "icarus",
+                            "tagged_unions::casts_ports_and_registers"
+                            | "tagged_unions::conditional_struct_payload"
+                            | "tagged_unions::constructors_and_checked_members"
+                            | "tagged_unions::writable_system_arguments"
+                            | "tagged_unions::writable_task_arguments"
+                            | "tagged_unions::default_arguments"
+                            | "tagged_unions::factory_and_union_arguments"
+                            | "tagged_unions::nested_and_void_constructors"
+                            | "tagged_unions::wide_four_state_payload",
+                        ) => ("compile_error", "compile", "syntax error"),
+                        ("icarus", "unions::packed_mixed_state") => (
                             "mismatch",
                             "execute",
                             "assert_eq two: expected 0xa0, got 0xaX",
                         ),
-                        "unions::soft_overlay"
-                        | "unions::soft_signed_ports"
-                        | "unions::soft_wide_four_state" => {
-                            ("compile_error", "compile", "syntax error")
-                        }
+                        (
+                            "icarus",
+                            "unions::soft_overlay"
+                            | "unions::soft_signed_ports"
+                            | "unions::soft_wide_four_state",
+                        ) => ("compile_error", "compile", "syntax error"),
                         _ => panic!("unreviewed failure: {tool} {name}: {status}"),
                     };
                     assert_eq!(status, expected_status, "{name}");

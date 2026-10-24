@@ -956,6 +956,7 @@ impl Module {
             );
         }
         packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
+        packed_dimensions.subroutine_directions = Arc::new(subroutine_directions.clone());
         packed_dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
         // Array parameters retain a constant value as well as their signal layout.
         // Bind their values in declaration order before child parameter arguments.
@@ -2790,6 +2791,7 @@ struct PackedDimensions {
     /// The declared shape of each argument of each subroutine, for
     /// assignment patterns passed as arguments.
     subroutine_param_shapes: Arc<HashMap<String, Vec<VariableDimensions>>>,
+    subroutine_directions: Arc<lifetimes::Directions>,
     subroutine_param_names: Arc<HashMap<String, Vec<String>>>,
     /// The class whose method is being bound.
     class_scope: Option<String>,
@@ -2814,6 +2816,7 @@ impl PackedDimensions {
             scope_types_complete: false,
             type_query: false,
             subroutine_param_shapes: Arc::default(),
+            subroutine_directions: Arc::default(),
             subroutine_param_names: Arc::default(),
             class_scope: None,
         }
