@@ -1,0 +1,1 @@
+Fix three P2 findings: validate nominal copy-out compatibility, retain checked arguments during expression inlining, and bind tagged returns in their declared result type.
