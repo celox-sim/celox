@@ -1,0 +1,1 @@
+Fix CI retained_reports failure: explicitly validate the four executed Icarus union discrepancies instead of assuming every SV failure is excluded; validate the entire external-enabled test-suite crate.
