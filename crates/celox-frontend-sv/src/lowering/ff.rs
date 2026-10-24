@@ -259,6 +259,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     use sv::ir::SystemFunction;
                     match function {
                         SystemFunction::ScopeRandomize
+                        | SystemFunction::ScopeRandomizeEnum
                         | SystemFunction::Urandom
                         | SystemFunction::UrandomRange => {
                             self.urandom_state();
@@ -904,6 +905,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ..
             } => self.fopen(args)?,
             Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::ScopeRandomizeEnum),
+                args,
+                ..
+            } => self.randomize_enum(args)?,
+            Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::ScopeRandomize),
                 args,
                 ..
@@ -1410,6 +1416,67 @@ impl<'p, 'a> Ff<'p, 'a> {
         let state = self.eval(&state, Some((33, false)))?;
         self.store(id, SIROffset::Static(0), 33, state);
         Ok(result)
+    }
+
+    /// Randomize one scalar enum from the process stream. Arguments after the
+    /// writable destination are its declared values, supplied by the analyzer.
+    fn randomize_enum(
+        &mut self,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        let Some(Some(Expr::Ident(name))) = args.first() else {
+            return Err(unsupported("scope enum randomize variable"));
+        };
+        let values = args[1..]
+            .iter()
+            .map(Option::as_ref)
+            .collect::<Option<Vec<_>>>()
+            .filter(|values| !values.is_empty())
+            .ok_or_else(|| unsupported("scope enum randomize domain"))?;
+        let count = u32::try_from(values.len())
+            .map_err(|_| unsupported("scope enum randomize domain size"))?;
+        let threshold = count.wrapping_neg() % count;
+        let draw_block = self.b.new_block();
+        let accepted = self.b.new_block();
+        self.jump(draw_block);
+        self.b.switch_to_block(draw_block);
+        let draw = self.randomize_word()?;
+        let rejected = Expr::Binary {
+            left: Box::new(draw.clone()),
+            op: BinaryOp::Lt,
+            right: Box::new(Expr::Literal(format!("32'd{threshold}"))),
+        };
+        let cond = self.eval_truth(&rejected)?.0;
+        self.b.seal_block(SIRTerminator::Branch {
+            cond,
+            true_block: (draw_block, Vec::new()),
+            false_block: (accepted, Vec::new()),
+        });
+        self.b.switch_to_block(accepted);
+        let index = self.hidden(
+            "enum_index",
+            &Expr::Binary {
+                left: Box::new(draw),
+                op: BinaryOp::Mod,
+                right: Box::new(Expr::Literal(format!("32'd{count}"))),
+            },
+            false,
+        )?;
+        let mut value = (*values.last().unwrap()).clone();
+        for (position, member) in values.iter().enumerate().rev().skip(1) {
+            value = Expr::Mux {
+                condition: Box::new(Expr::Binary {
+                    left: Box::new(index.clone()),
+                    op: BinaryOp::Eq,
+                    right: Box::new(Expr::Literal(format!("32'd{position}"))),
+                }),
+                then_expr: Box::new((*member).clone()),
+                else_expr: Box::new(value),
+            };
+        }
+        self.assign(&sv::ir::LValue::Ident(name.clone()), &value)?;
+        Ok(Expr::Literal("32'sd1".into()))
     }
 
     /// A bijective 32-bit output permutation of the process RNG. Mixing

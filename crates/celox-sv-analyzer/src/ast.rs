@@ -2731,6 +2731,7 @@ struct UnpackedDimension {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VariableDimensions {
     randomizable: bool,
+    enum_values: Option<Vec<i128>>,
     real: bool,
     /// A `string`: each element is a heap handle, not packed bits.
     string: bool,

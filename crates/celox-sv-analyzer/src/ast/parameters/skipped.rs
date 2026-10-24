@@ -502,6 +502,7 @@ fn pattern_items(
             count as i128 - 1,
             VariableDimensions {
                 randomizable: true,
+                enum_values: None,
                 real: false,
                 string: false,
                 class: None,
