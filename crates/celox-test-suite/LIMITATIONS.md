@@ -696,6 +696,19 @@ Verilator 5.052 has two narrower exclusions, recorded in the
   0. Generated C++ confirms that Verilator uses 1. The normal 0/1 mode control,
   inline member selection and pre-hook control cases pass Verilator.
 
+Enum class randomization (`sv_icarus_enum_randomization`) excludes the four
+`class::randomization_enum_*` cases from Icarus 13.0 because it cannot elaborate
+class randomization methods. [Original diagnostics](verification/repros/sv_enum_randomization_icarus.json)
+retain the failures without changing the shared assertions.
+
+Verilator 5.052 passes the direct enum and inherited enum cases, but treats a
+typedef alias of an enum as the underlying integer during randomization
+(`sv_verilator_enum_alias_randomization`). The generated randomizer assigns raw
+8-bit random values rather than selecting declared enum values, contrary to
+IEEE 1800-2023 18.3. Only `class::randomization_enum_alias` is excluded;
+[the mismatch evidence](verification/repros/sv_enum_randomization_verilator.json)
+retains its unchanged domain assertion.
+
 ## SystemVerilog packed unions
 
 The `unions` shared group covers hard and soft packed untagged unions. With

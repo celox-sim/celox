@@ -1,0 +1,22 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "class::randomization_enum_alias at 1038:46: assert_eq errors: expected 0x0, got 0x7e",
+      "expectation": "Simulation",
+      "name": "class::randomization_enum_alias",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052"
+}
