@@ -15,12 +15,12 @@ export function resetReports(directory, source = currentReport(process.cwd())) {
   clearCurrentReport(source);
   if (!existsSync(directory)) return;
   for (const name of readdirSync(directory)) {
-    if (/^nextest-(?:full|\d+)\.xml$/.test(name)) rmSync(resolve(directory, name));
+    if (/^nextest-(?:full|cocotb-\d+|\d+)\.xml$/.test(name)) rmSync(resolve(directory, name));
   }
 }
 
 export function saveCurrentReport(directory, name, source = currentReport(process.cwd())) {
-  if (!/^(?:full|\d+)$/.test(name)) throw new Error("Invalid Rust report name");
+  if (!/^(?:full|cocotb-\d+|\d+)$/.test(name)) throw new Error("Invalid Rust report name");
   // A build failure or an empty selection may produce no report. Keep the
   // Cargo exit status and any earlier reports; never reuse a previous result.
   if (!existsSync(source)) return;
