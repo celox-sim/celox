@@ -66,6 +66,15 @@ workspace runs and scoped runs that include Celox. Scopes without Celox skip tha
 build. The default-branch cache warmer builds both executor and test dependencies
 under the same cache key; vtest preparation failures fail the test job.
 
+The CI nextest profile also emits JUnit results. The Rust Tests job preserves
+each scoped invocation separately under `work/ci-reports/rust/`, retains the XML
+as the `rust-test-results` artifact for 14 days, and uploads it to Mergify CI
+Insights when the repository's `MERGIFY_TOKEN` secret is available. The secret
+must be a Mergify application key with `ci` scope, and CI Insights must be enabled
+for the repository. Tests keep their normal failure status; reporting does not
+enable retries or quarantine. Forks without the secret still run tests and retain
+the artifact. `cargo test`/doctest invocations are not part of this nextest report.
+
 For debugging a single case after building, the executor also accepts
 `<veryl|sv> <group::case> <backend>` directly, for example:
 

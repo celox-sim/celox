@@ -248,11 +248,11 @@ test("queue CI retains the whole workspace and ordinary PRs use scoped tests", (
   // Anything but an explicit scope, including a failed detection, runs all.
   assert.match(
     rust,
-    /name: Run workspace tests with CI features\n        if: needs\.changes\.outputs\.rust_full != 'false'\n/,
+    /name: Run workspace tests with CI features\n        id: workspace-tests\n        if: needs\.changes\.outputs\.rust_full != 'false'\n/,
   );
   assert.match(
     rust,
-    /name: Run the tests this pull request can affect\n        if: needs\.changes\.outputs\.rust_full == 'false' && /,
+    /name: Run the tests this pull request can affect\n        id: scoped-tests\n        if: needs\.changes\.outputs\.rust_full == 'false' && /,
   );
   assert.match(
     job("changes"),
@@ -459,6 +459,28 @@ test("CI prepares one executor for full runs and scopes containing Celox", () =>
     CELOX_VTEST_RUNNER: "",
   }), ["nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass",
     "-p", "celox-heap", "-E", "package(celox-heap)"]);
+});
+
+test("CI reports each Rust run to Mergify without weakening test failures", () => {
+  const rust = job("rust-tests");
+  assert.match(rust, /CELOX_CI_REPORT_DIR: work\/ci-reports\/rust/);
+  assert.match(rust, /HAS_MERGIFY_TOKEN: \$\{\{ secrets.MERGIFY_TOKEN != '' \}\}/);
+  assert.match(rust, /run: node scripts\/ci-rust-reports.mjs reset/);
+  assert.match(rust, /name: Collect Rust test reports\n        if: success\(\) \|\| failure\(\)/);
+  assert.match(rust, /run: node scripts\/ci-rust-reports.mjs collect/);
+  assert.match(rust, /name: Run workspace tests with CI features\n        id: workspace-tests/);
+  assert.match(rust, /name: Run the tests this pull request can affect\n        id: scoped-tests/);
+  assert.doesNotMatch(rust, /continue-on-error/);
+  const upload = rust.split("      - name: Upload Rust test results to Mergify\n")[1]
+    .split("\n      #")[0];
+  assert.match(upload, /if: \(success\(\) \|\| failure\(\)\) && env.HAS_MERGIFY_TOKEN == 'true' && hashFiles\('work\/ci-reports\/rust\/\*.xml'\) != ''/);
+  assert.match(upload, /uses: mergifyio\/gha-mergify-ci@[0-9a-f]{40} # v27/);
+  assert.match(upload, /report_path: work\/ci-reports\/rust\/\*.xml/);
+  assert.match(upload, /job_name: rust-tests/);
+  assert.match(upload, /test_step_outcome: .*steps.workspace-tests.outcome.*steps.scoped-tests.outcome/);
+  assert.match(rust, /name: rust-test-results\n          path: work\/ci-reports\/rust\/\*.xml\n          retention-days: 14/);
+  const nextest = readFileSync(new URL("../.config/nextest.toml", import.meta.url), "utf8");
+  assert.match(nextest, /\[profile.ci.junit\]\npath = "junit.xml"/);
 });
 
 test("scoped checks preserve full-run fallbacks and use their own package scopes", () => {

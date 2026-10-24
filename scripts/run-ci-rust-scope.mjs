@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { runtimeCasesFeature } from "./run-vtest.mjs";
+import { clearCurrentReport, saveCurrentReport } from "./ci-rust-reports.mjs";
 
 // Keep target flags local to their packages. Cargo applies --test to every -p.
 export function cargoCommands(mode, builds, filter) {
@@ -31,6 +32,8 @@ export function cargoCommands(mode, builds, filter) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const reportDirectory = process.argv[2] === "test" && process.env.CELOX_CI_REPORT_DIR;
+  let reportIndex = 0;
   for (const args of cargoCommands(
     process.argv[2], JSON.parse(process.env.BUILDS), process.env.FILTER,
   )) {
@@ -39,7 +42,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       && !process.env.CELOX_VTEST_RUNNER)
       throw new Error("Celox CI tests require the prepared vtest executor");
     console.log("cargo", ...args);
+    if (reportDirectory) clearCurrentReport();
     const result = spawnSync("cargo", args, { stdio: "inherit" });
+    if (reportDirectory) saveCurrentReport(reportDirectory, String(reportIndex++));
     if (result.error) throw result.error;
     if (result.status !== 0) process.exit(result.status ?? 1);
   }
