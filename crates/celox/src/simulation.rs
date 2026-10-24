@@ -702,6 +702,12 @@ impl<B: SimBackend> Simulation<B> {
     /// writes may wake a process or changed an event signal. Waits and
     /// counters see the values the writes left, not each write.
     pub fn note_raw_writes(&mut self) {
+        let tracked = self.simulator.host_watch.gated_last().clone();
+        self.state
+            .note_raw_gated_writes(&mut self.simulator.backend, &tracked);
+        self.simulator
+            .host_watch
+            .note_raw_gated(&self.simulator.backend);
         self.state.note_host_writes(&self.simulator.backend, false);
     }
 

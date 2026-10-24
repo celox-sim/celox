@@ -5,7 +5,7 @@ use fxhash::{FxHashMap, FxHashSet};
 use crate::{
     SignalRef, SimulatorErrorCode,
     backend::SimBackend,
-    timing::{CountedRefs, GatedWriteRefs, Halt, Value, read, write_gated},
+    timing::{CountedRefs, GatedWriteRefs, Halt, Value, planes, read, write_gated},
 };
 
 /// The units a timed step executes: combinational settling, flip-flop
@@ -152,6 +152,9 @@ pub struct HostWatch {
     /// Gated wait terms by the offset of their signal, whose counters a
     /// write bumps with the gate as the write leaves it.
     gated: FxHashMap<usize, Vec<GatedWriteRefs>>,
+    /// The planes of each gated signal after its last write here since the
+    /// log was taken: raw writes after it change the signal from there.
+    gated_last: FxHashMap<usize, Vec<u8>>,
     log: Vec<(SignalRef, Value)>,
 }
 
@@ -164,6 +167,7 @@ impl HostWatch {
                 .collect(),
             waited,
             gated: FxHashMap::default(),
+            gated_last: FxHashMap::default(),
             log: Vec::new(),
         }
     }
@@ -192,6 +196,7 @@ impl HostWatch {
                 && let Some(gated) = self.gated.get(&signal.offset)
             {
                 write_gated(backend, signal, gated, write);
+                self.keep_gated(backend, signal);
             } else {
                 write(backend);
             }
@@ -203,8 +208,11 @@ impl HostWatch {
         if let Some(counted) = counted {
             counted.bump(backend, &old, &new);
         }
-        for term in self.gated.get(&signal.offset).into_iter().flatten() {
-            term.bump(backend, &old, &new);
+        if let Some(gated) = self.gated.get(&signal.offset) {
+            for term in gated {
+                term.bump(backend, &old, &new);
+            }
+            self.keep_gated(backend, signal);
         }
         if waited && old != new {
             self.log.push((signal, new));
@@ -219,11 +227,41 @@ impl HostWatch {
     /// Replace the log, as when returning to a saved state.
     pub fn set_log(&mut self, log: Vec<(SignalRef, Value)>) {
         self.log = log;
+        self.gated_last.clear();
     }
 
     /// Take the logged values of waited signals, in write order.
     pub fn take_log(&mut self) -> Vec<(SignalRef, Value)> {
+        self.gated_last.clear();
         std::mem::take(&mut self.log)
+    }
+
+    fn keep_gated<B: SimBackend>(&mut self, backend: &B, signal: SignalRef) {
+        if let Some(image) = planes(backend, signal) {
+            let last = self.gated_last.entry(signal.offset).or_default();
+            last.clear();
+            last.extend_from_slice(image);
+        }
+    }
+
+    /// The planes of the gated signals the host wrote here since the log
+    /// was taken, by offset, after their last write.
+    pub fn gated_last(&self) -> &FxHashMap<usize, Vec<u8>> {
+        &self.gated_last
+    }
+
+    /// The host wrote the state in place: the gated signals' current planes
+    /// are where later raw writes start from.
+    pub fn note_raw_gated<B: SimBackend>(&mut self, backend: &B) {
+        let signals: Vec<SignalRef> = self
+            .gated
+            .values()
+            .flatten()
+            .map(|term| term.signal)
+            .collect();
+        for signal in signals {
+            self.keep_gated(backend, signal);
+        }
     }
 
     pub fn has_log(&self) -> bool {

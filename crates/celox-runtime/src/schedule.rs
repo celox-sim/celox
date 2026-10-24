@@ -215,6 +215,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                     .entry(resolve(&term.signal).offset)
                     .or_default()
                     .push(GatedWriteRefs {
+                        signal: resolve(&term.signal),
                         kind: term.kind,
                         gate: gate.signal,
                         counters,
@@ -493,6 +494,7 @@ pub fn host_watch<B: SimBackend>(backend: &B, model: &ScheduleModel<AbsoluteAddr
                 .entry(backend.resolve_signal(&term.signal).offset)
                 .or_default()
                 .push(GatedWriteRefs {
+                    signal: backend.resolve_signal(&term.signal),
                     kind: term.kind,
                     gate: backend.resolve_signal(&gate.signal),
                     counters: GateCounterRefs {

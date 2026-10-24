@@ -1,14 +1,15 @@
 //! Waiting processes: registering waits and testing them against writes.
 
 use celox_design::CounterKind;
+use fxhash::FxHashMap;
 
 use super::SimulationState;
 use crate::{
     SignalRef, SimulatorErrorCode, TermRefs,
     backend::SimBackend,
     timing::{
-        GateCounterRefs, GateRefs, Halt, ProcessState, StateView, Value, copy_planes,
-        encode_planes, occurs, planes, planes_equal, planes_occur, read, write_gated,
+        GateCounterRefs, GateRefs, GatedWriteRefs, Halt, ProcessState, StateView, Value,
+        copy_planes, encode_planes, occurs, planes, planes_equal, planes_occur, read, write_gated,
     },
 };
 
@@ -470,6 +471,55 @@ impl<B: SimBackend> SimulationState<B> {
         let hit = planes_occur(kind, last, now, width);
         copy_planes(last, now, width);
         hit
+    }
+
+    /// The host wrote the state in place. Each gated term with counters
+    /// counts the change of its signal as one write, judging its gate as
+    /// the writes left it: from the signal's last tracked host write in
+    /// `tracked` (planes by offset), or from the baseline of the wait.
+    /// Between steps nothing else writes the signal, so a change of a
+    /// signal that a counted occurrence already moved is not lost.
+    pub fn note_raw_gated_writes(&mut self, backend: &mut B, tracked: &FxHashMap<usize, Vec<u8>>) {
+        if self.model.wait_gates.is_empty() {
+            return;
+        }
+        let processes = &self.model.processes;
+        let gates = &self.model.wait_gates;
+        for (process, waiter) in self.process_state.waiters.iter_mut() {
+            let sites = &gates[process];
+            let Some(gates) = sites.get(waiter.site) else {
+                continue;
+            };
+            for (index, gate) in gates.iter().enumerate() {
+                let Some(GateRefs {
+                    signal: gate,
+                    counters: Some(counters),
+                }) = *gate
+                else {
+                    continue;
+                };
+                let term = processes[process].wait_sites[waiter.site][index];
+                let Baseline::Gated { all, raw, .. } = &mut waiter.baselines[index] else {
+                    continue;
+                };
+                let Some(now) = planes(backend, term.signal).map(<[u8]>::to_vec) else {
+                    continue;
+                };
+                let last = tracked.get(&term.signal.offset).unwrap_or(&*raw);
+                if planes_occur(term.kind, last, &now, term.signal.width) {
+                    let refs = GatedWriteRefs {
+                        signal: term.signal,
+                        kind: term.kind,
+                        gate,
+                        counters,
+                    };
+                    refs.count(backend);
+                }
+                // The check that follows sees no uncounted change.
+                copy_planes(raw, &now, term.signal.width);
+                *all = backend.get_as(counters.all);
+            }
+        }
     }
 
     /// Show the waits one value the host wrote to `signal`.

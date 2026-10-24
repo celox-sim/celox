@@ -577,10 +577,16 @@ impl<B: SimBackend> Simulator<B> {
                                     let (value, mask) = split(term, image);
                                     BaselineRecord::Value { value, mask }
                                 }
-                                Baseline::Gated {
-                                    gated: seen, raw, ..
+                                Baseline::Gated { gated, all, raw } => {
+                                    let (value, mask) = split(term, raw);
+                                    BaselineRecord::Gated {
+                                        gated: *gated,
+                                        all: *all,
+                                        value,
+                                        mask,
+                                    }
                                 }
-                                | Baseline::RawCounter { seen, raw } => {
+                                Baseline::RawCounter { seen, raw } => {
                                     // The bytes a `Counter` baseline's value saves as.
                                     let (value, mask) = split(term, raw);
                                     let number =
@@ -734,8 +740,11 @@ impl<B: SimBackend> Simulator<B> {
                         |(index, ((signal, _), baseline))| {
                             let gated =
                                 site.gate(index).is_some_and(|gate| gate.counters.is_some());
-                            (counted(signal) || gated)
-                                == matches!(baseline, BaselineRecord::Counter { .. })
+                            match baseline {
+                                BaselineRecord::Gated { .. } => gated,
+                                BaselineRecord::Counter { .. } => counted(signal) || gated,
+                                BaselineRecord::Value { .. } => !counted(signal) && !gated,
+                            }
                         },
                     )
             }) {
@@ -772,7 +781,31 @@ impl<B: SimBackend> Simulator<B> {
                     baselines: waiter
                         .baselines
                         .iter()
-                        .map(|baseline| match baseline {
+                        .enumerate()
+                        .map(|(term, baseline)| match baseline {
+                            BaselineRecord::Gated {
+                                gated,
+                                all,
+                                value,
+                                mask,
+                            } => {
+                                let signal = sites[site.unwrap_or_default()].terms[term].0;
+                                let signal = self.backend.resolve_signal(&signal);
+                                let len = celox_runtime::timing::planes(&self.backend, signal)
+                                    .map_or(0, <[u8]>::len);
+                                Baseline::Gated {
+                                    gated: *gated,
+                                    all: *all,
+                                    raw: celox_runtime::timing::encode_planes(
+                                        &(
+                                            BigUint::from_bytes_le(value),
+                                            BigUint::from_bytes_le(mask),
+                                        ),
+                                        signal.width,
+                                        len,
+                                    ),
+                                }
+                            }
                             BaselineRecord::Counter { seen, value, mask } => Baseline::Counter {
                                 seen: *seen,
                                 value: (

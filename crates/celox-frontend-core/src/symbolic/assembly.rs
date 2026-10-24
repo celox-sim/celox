@@ -752,11 +752,29 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             )
             .collect();
         let counted = counted_signals(&timing, &event_addresses);
+        // A combinational process writing the signal or the gate of a gated
+        // wait keeps its procedural order (IEEE 1800-2023 9.4.2.3).
+        let gated: HashSet<AbsoluteAddr> = timing
+            .wait_sites
+            .iter()
+            .flat_map(|site| {
+                site.terms
+                    .iter()
+                    .zip(&site.gates)
+                    .filter_map(|(&(signal, _), gate)| {
+                        gate.as_ref()
+                            .filter(|gate| gate.counters.is_some())
+                            .map(|gate| [signal, gate.signal])
+                    })
+            })
+            .flatten()
+            .collect();
         choose_comb_alternatives(
             bindings,
             &instance_modules,
             &modules,
             &counted,
+            &gated,
             &mut comb_blocks,
         );
         // Count sensitivity occurrences before any optimizer can coalesce
@@ -3929,6 +3947,7 @@ fn choose_comb_alternatives(
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
     counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    gated: &HashSet<AbsoluteAddr>,
     comb_blocks: &mut Vec<LogicPath<AbsoluteAddr>>,
 ) {
     let mut imperative = HashSet::default();
@@ -3936,11 +3955,10 @@ fn choose_comb_alternatives(
     for (&instance, module) in instance_modules {
         for alternative in &modules[module].comb_alternatives {
             let locate = |var_id| bindings.locate(instance, var_id);
-            if alternative
-                .candidates
-                .iter()
-                .any(|&candidate| counted.contains_key(&locate(candidate)))
-            {
+            if alternative.candidates.iter().any(|&candidate| {
+                let candidate = locate(candidate);
+                counted.contains_key(&candidate) || gated.contains(&candidate)
+            }) {
                 for target in &alternative.targets {
                     symbolic
                         .entry(locate(target.id))

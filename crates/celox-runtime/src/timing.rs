@@ -131,6 +131,7 @@ pub fn gate_holds<B: SimBackend>(backend: &B, gate: SignalRef) -> bool {
 /// host bumps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GatedWriteRefs {
+    pub signal: SignalRef,
     pub kind: CounterKind,
     pub gate: SignalRef,
     pub counters: GateCounterRefs,
@@ -145,7 +146,7 @@ impl GatedWriteRefs {
     }
 
     /// Count one occurrence, judging the gate as it is now.
-    fn count<B: SimBackend>(&self, backend: &mut B) {
+    pub fn count<B: SimBackend>(&self, backend: &mut B) {
         let all: u32 = backend.get_as(self.counters.all);
         backend.set(self.counters.all, all.wrapping_add(1));
         if gate_holds(backend, self.gate) {
