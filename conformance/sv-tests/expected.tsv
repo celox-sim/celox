@@ -1039,8 +1039,8 @@ chapter-5/5.6.4--compiler-directives-define.sv	2state	pass
 chapter-5/5.6.4--compiler-directives-define.sv	4state	pass
 chapter-5/5.6.4--compiler-directives-include.sv	2state	pass
 chapter-5/5.6.4--compiler-directives-include.sv	4state	pass
-chapter-5/5.6.4--compiler-directives-pragma.sv	2state	fail
-chapter-5/5.6.4--compiler-directives-pragma.sv	4state	fail
+chapter-5/5.6.4--compiler-directives-pragma.sv	2state	pass
+chapter-5/5.6.4--compiler-directives-pragma.sv	4state	pass
 chapter-5/5.6.4--compiler-directives-preprocessor-macro_0.sv	2state	skip
 chapter-5/5.6.4--compiler-directives-preprocessor-macro_0.sv	4state	skip
 chapter-5/5.6.4--compiler-directives-preprocessor-macro_1.sv	2state	pass

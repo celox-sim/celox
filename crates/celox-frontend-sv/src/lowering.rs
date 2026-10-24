@@ -592,19 +592,19 @@ fn validate_specialized_instance_net_drivers(
             .signals()
             .iter()
             .filter(|signal| signal.is_net())
-            .map(|signal| (signal.name(), true))
+            .map(|signal| signal.name())
             .chain(
                 module
                     .source
                     .ports()
                     .iter()
                     .filter(|port| port.is_net())
-                    .map(|port| (port.name(), false)),
+                    .map(|port| port.name()),
             );
-        for (signal_name, require_driver) in net_names {
+        for signal_name in net_names {
             let child_driver_ranges =
                 child_output_driver_ranges(module, signal_name, module_ids, modules);
-            validate_net_driver_ranges(module, signal_name, &child_driver_ranges, require_driver)?;
+            validate_net_driver_ranges(module, signal_name, &child_driver_ranges)?;
         }
 
         let variable_names = module
@@ -768,7 +768,6 @@ fn validate_net_driver_ranges(
     module: &LoweredSvModule,
     signal_name: &str,
     child_driver_ranges: &[(usize, Option<(i128, i128)>)],
-    require_driver: bool,
 ) -> Result<(), sv::AnalyzerError> {
     let local_drivers = local_driver_ranges(
         &module.source,
@@ -801,11 +800,6 @@ fn validate_net_driver_ranges(
     {
         return Err(sv::AnalyzerError::Unsupported(format!(
             "multiple net drivers for `{signal_name}`"
-        )));
-    }
-    if require_driver && child_driver_ranges.is_empty() && local_drivers.is_empty() {
-        return Err(sv::AnalyzerError::Unsupported(format!(
-            "undriven net declaration `{signal_name}`"
         )));
     }
     Ok(())

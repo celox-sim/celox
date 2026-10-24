@@ -298,28 +298,6 @@ pub(super) fn instance_ranges(
     constant_binding::unpacked_ranges(&native.dimensions, tree, env, aliases)
 }
 
-// Child port directions are resolved by the frontend adapter. Defer its net
-// driver check for selected/concatenated connections as well as whole nets.
-pub(super) fn collect_connected_nets<'a>(expr: &'a Expr, names: &mut HashSet<&'a str>) {
-    match expr {
-        Expr::Ident(actual) => {
-            names.insert(actual);
-        }
-        Expr::Select { expr, .. }
-        | Expr::Resize { expr, .. }
-        | Expr::Unary {
-            op: UnaryOp::ToTwoState,
-            expr,
-        } => collect_connected_nets(expr, names),
-        Expr::Concat(parts) => {
-            for part in parts {
-                collect_connected_nets(part, names);
-            }
-        }
-        _ => {}
-    }
-}
-
 pub(super) fn expr_ident_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Ident(name) => Some(name.clone()),
