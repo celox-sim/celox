@@ -1112,6 +1112,144 @@ fn edge_only_memories(
         .collect()
 }
 
+/// The variables a process kernel of `module` may write after it first
+/// suspends. Such a write can land between the evaluation of an edge
+/// process and the NBA region that publishes its nonblocking assignments:
+/// an inactive-region resumption (`#0`), or a process a domain's observed
+/// blocking result wakes (IEEE 1800-2023 4.4.2.4, 4.5). The code before the
+/// first suspension of an `initial` runs at time zero before any domain
+/// evaluates, so its writes, such as memory initialization, are not
+/// included.
+///
+/// These are the writers within `module`. A writer outside it (a
+/// hierarchical reference) that can write after it suspends has to be added
+/// here.
+fn kernel_window_writes(module: &sv::ir::Module) -> HashSet<String> {
+    let subroutines = module.subroutines();
+    let mut names = HashSet::default();
+    for process in module
+        .initial_processes()
+        .iter()
+        .filter(|process| !process.is_initializer())
+    {
+        let body = process.body();
+        let first = if process.repeats() {
+            0
+        } else {
+            body.iter()
+                .position(|stmt| stmt_may_suspend(subroutines, stmt))
+                .unwrap_or(body.len())
+        };
+        kernel_written_names(
+            subroutines,
+            &body[first..],
+            &mut names,
+            &mut HashSet::default(),
+            0,
+        );
+    }
+    names
+}
+
+/// Whether `stmt` may suspend its process: a timing control, or a call of a
+/// task, in it or in a subroutine it calls.
+fn stmt_may_suspend(subroutines: &[sv::ir::Subroutine], stmt: &sv::ir::Stmt) -> bool {
+    let mut found = false;
+    let mut calls = Vec::new();
+    stmt.walk(&mut |stmt| {
+        found |= matches!(
+            stmt,
+            sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::Wait(_)
+        );
+        procedural::stmt_calls(stmt, &mut calls);
+    });
+    let mut visited = HashSet::default();
+    while !found && let Some((callee, args)) = calls.pop() {
+        let sv::ir::Callee::Subroutine(name) = callee else {
+            continue;
+        };
+        let Some(subroutine) = subroutines
+            .iter()
+            .find(|subroutine| subroutine.name == name)
+        else {
+            continue;
+        };
+        found |= subroutine.is_task;
+        procedural::default_calls(subroutine, &args, &mut calls);
+        if visited.insert(name) {
+            for stmt in &subroutine.body {
+                stmt.walk(&mut |stmt| procedural::stmt_calls(stmt, &mut calls));
+            }
+        }
+    }
+    found
+}
+
+/// Adds the names of the variables `body` writes, directly or in the
+/// subroutines it calls, to `names` (see [`DriverScan`]).
+fn kernel_written_names(
+    subroutines: &[sv::ir::Subroutine],
+    body: &[sv::ir::Stmt],
+    names: &mut HashSet<String>,
+    visited: &mut HashSet<String>,
+    depth: usize,
+) {
+    if depth > procedural::MAX_CALL_DEPTH {
+        return;
+    }
+    let mut calls = Vec::new();
+    for stmt in body {
+        stmt.walk(&mut |stmt| {
+            match stmt {
+                sv::ir::Stmt::Assign { lhs, .. } => {
+                    names.insert(lhs.name().to_string());
+                }
+                sv::ir::Stmt::AssignConcat { parts, .. } => {
+                    names.extend(parts.iter().map(|part| part.name().to_string()));
+                }
+                sv::ir::Stmt::SystemTask { task, args, .. } => {
+                    if let Some(destination) = procedural::readmem_destination(*task, args) {
+                        names.insert(destination.to_string());
+                    }
+                }
+                _ => {}
+            }
+            procedural::stmt_calls(stmt, &mut calls);
+        });
+    }
+    while let Some((callee, args)) = calls.pop() {
+        let name = match callee {
+            sv::ir::Callee::System(function) => {
+                names.extend(
+                    procedural::written_system_arguments(function, &args)
+                        .iter()
+                        .map(|lvalue| lvalue.name().to_string()),
+                );
+                continue;
+            }
+            sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => continue,
+            sv::ir::Callee::Subroutine(name) => name,
+        };
+        let Some(subroutine) = subroutines
+            .iter()
+            .find(|subroutine| subroutine.name == name)
+        else {
+            continue;
+        };
+        procedural::default_calls(subroutine, &args, &mut calls);
+        for (param, arg) in subroutine.params.iter().zip(&args) {
+            if param.direction.is_written()
+                && let Some(lvalues) = arg.as_ref().and_then(procedural::lvalue_from_expr)
+            {
+                names.extend(lvalues.iter().map(|lvalue| lvalue.name().to_string()));
+            }
+        }
+        if visited.insert(name) {
+            kernel_written_names(subroutines, &subroutine.body, names, visited, depth + 1);
+        }
+    }
+}
+
 fn validate_variable_driver_ranges(
     module: &sv::ir::Module,
     constants: &HashMap<String, i128>,
@@ -8490,6 +8628,7 @@ fn lower_ff_processes(
     }
 
     let edge_memories = edge_only_memories(module, pm.constants, pm.parameter_types);
+    let window_writes = kernel_window_writes(module);
     let random_seeds = process_random_seeds(module);
     for ((index, process), events) in module.ff_processes().iter().enumerate().zip(process_events) {
         let mut events = events
@@ -8517,6 +8656,7 @@ fn lower_ff_processes(
         } = ff::Ff::new(pm, random_seeds[&(0, index)])
             .with_sparse_memories(shared_memories)
             .with_sparse_candidates(&edge_memories)
+            .with_window_writes(&window_writes)
             .lower_process(process.body())?;
         repeated_writes.extend(repeated_ff_writes(&eval_only, &staged));
         // A process without writes still runs for its runtime events and

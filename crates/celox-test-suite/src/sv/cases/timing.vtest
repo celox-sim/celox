@@ -2462,3 +2462,106 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (assert_eq q 0)
   (assert_eq m0 0)
   (assert_eq m1 0))
+
+(case edge_nonblocking_updates_keep_later_writes_of_other_bits
+  ; An edge process evaluates, then a zero-delay resumption writes the same
+  ; variables before the NBA region (IEEE 1800-2023 4.4.2.4). The
+  ; nonblocking updates change only the bits they assign (10.4.2): the
+  ; resumption's writes to other bits, elements and variables stay, also
+  ; where no assignment executed, and an update of the same bits wins.
+  (source "nba_window.sv" #"
+                module Top(output logic [31:0] m0, m2, m3, m5, q, r);
+                    bit clk = 1'b0;
+                    bit en = 1'b0;
+                    bit [3:0] i = 4'd0;
+                    bit [4:0] k = 5'd3;
+                    bit [31:0] mem [16];
+                    bit [31:0] q_, r_;
+                    always #5 clk = ~clk;
+                    always @(posedge clk) begin
+                        mem[i][15:8] <= 8'h44;
+                        mem[i + 2] <= 32'h11;
+                        if (en) q_ <= 32'h11;
+                        r_[k] <= 1'b1;
+                    end
+                    initial begin
+                        for (int j = 0; j < 16; j++) mem[j] = 0;
+                        q_ = 0;
+                        r_ = 0;
+                        @(posedge clk);
+                        #0;
+                        mem[0][7:0] = 8'h22;
+                        mem[2][31:24] = 8'h77;
+                        mem[3] = 32'h33;
+                        mem[5][7:0] = 8'h55;
+                        q_ = 32'h66;
+                        r_[20] = 1'b1;
+                    end
+                    assign m0 = mem[0];
+                    assign m2 = mem[2];
+                    assign m3 = mem[3];
+                    assign m5 = mem[5];
+                    assign q = q_;
+                    assign r = r_;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 6)
+  (assert_eq m0 0x4422)
+  (assert_eq m2 0x11)
+  (assert_eq m3 0x33)
+  (assert_eq m5 0x55)
+  (assert_eq q 0x66 "no nonblocking assignment to q executed")
+  (assert_eq r 0x100008))
+
+(case edge_nonblocking_updates_follow_writes_their_blocking_results_wake
+  ; The edge process's blocking result wakes a waiting process in the
+  ; active region, before the NBA region (IEEE 1800-2023 4.5). Its write
+  ; stays where no nonblocking assignment executed.
+  (source "nba_active_window.sv" #"
+                module Top(output logic [7:0] q, output logic [7:0] p);
+                    bit clk = 1'b0;
+                    bit flag = 1'b0;
+                    bit en = 1'b0;
+                    bit [7:0] q_ = 8'd0, p_ = 8'd0;
+                    always #5 clk = ~clk;
+                    always @(posedge clk) begin
+                        flag = 1'b1;
+                        if (en) q_ <= 8'h11;
+                        p_ <= 8'h44;
+                    end
+                    initial begin
+                        @(posedge flag);
+                        q_ = 8'h22;
+                        p_ = 8'h33;
+                    end
+                    assign q = q_;
+                    assign p = p_;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 6)
+  (assert_eq q 0x22)
+  (assert_eq p 0x44 "the nonblocking update is later"))
+
+(case edge_blocking_results_precede_later_process_writes
+  ; A blocking assignment of an edge process takes effect when it executes:
+  ; a zero-delay resumption that writes the variable afterwards, without
+  ; reading it, leaves its own value.
+  (source "blocking_window.sv" #"
+                module Top(output logic [7:0] t);
+                    bit clk = 1'b0;
+                    bit [7:0] t_ = 8'd0;
+                    always #5 clk = ~clk;
+                    always @(posedge clk) t_ = 8'h11;
+                    initial begin
+                        @(posedge clk);
+                        #0;
+                        t_ = 8'h22;
+                    end
+                    assign t = t_;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 6)
+  (assert_eq t 0x22))
