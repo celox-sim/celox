@@ -157,6 +157,9 @@ pub struct SimModule {
     /// Variables and their sampled copies; see
     /// `RuntimeSchema::sample_shadows`.
     pub sample_shadows: Vec<(SourceVarId, SourceVarId)>,
+    /// Variables and copies that start with their value; see
+    /// `RuntimeSchema::initial_copies`.
+    pub initial_copies: Vec<(SourceVarId, SourceVarId)>,
 }
 
 /// A nonblocking site whose kernel has two paths, as

@@ -76,6 +76,13 @@ pub struct SignalRef {
 /// Copy the value of `from`, with its unknown bits, into `to`, a signal of
 /// the same width and state form.
 pub fn copy_signal<B: backend::SimBackend>(backend: &mut B, from: SignalRef, to: SignalRef) {
+    if from.array_layout.is_some() || to.array_layout.is_some() {
+        // Each array has its own layout, packed or with strided elements:
+        // the backend gathers and scatters the elements.
+        let (value, mask) = backend.get_four_state(from);
+        backend.set_four_state(to, value, mask);
+        return;
+    }
     let planes = if backend.layout().four_state && from.is_4state {
         2
     } else {
