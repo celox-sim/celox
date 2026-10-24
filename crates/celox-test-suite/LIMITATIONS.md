@@ -695,3 +695,27 @@ Verilator 5.052 has two narrower exclusions, recorded in the
   The setter's formal is `bit` (18.8), so the required conversion truncates 2 to
   0. Generated C++ confirms that Verilator uses 1. The normal 0/1 mode control,
   inline member selection and pre-hook control cases pass Verilator.
+
+## SystemVerilog packed unions
+
+The `unions` shared group covers hard and soft packed untagged unions. With
+Verilator 5.052, `packed_overlay`, `soft_overlay`, and `soft_signed_ports` pass;
+the two four-state cases report `unsupported` through the existing state-mode
+check.
+
+Icarus 13.0 rejects `union soft` declarations in `soft_overlay`,
+`soft_signed_ports`, and `soft_wide_four_state` during compilation.
+`packed_overlay` passes. `packed_mixed_state` fails when reading a `bit` member
+from mixed `logic`/`bit` union storage: for `8'b1010xxxx`, it returns
+`8'b1010xxxx` instead of `8'b10100000`. A direct procedural probe reproduces
+this independently of the shared harness; writing through the `bit` member
+converts X to zero correctly. IEEE 1800-2023 7.3.1 requires conversion from
+four-state to two-state when reading a two-state member.
+
+These cases remain enabled with their original assertions and no exclusions.
+The [retained Icarus evidence](verification/sv/icarus/unions.json) records the
+three compilation failures and the read mismatch with their exact diagnostics;
+the full-suite gate accepts only those unchanged failures, never a passing
+result in their place. Reproduce with `verify-sv-verilator` or
+`verify-sv-icarus` and `--filter unions::`. Normal reports are written under
+`target/sv-verilator/` and `target/sv-icarus/`.

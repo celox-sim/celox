@@ -7,7 +7,7 @@ mod selects;
 #[cfg(test)]
 mod tests;
 
-pub(super) use layout::native_type;
+pub(super) use layout::{AggregateKind, native_type};
 pub(super) use selects::{select_member, whole_member};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

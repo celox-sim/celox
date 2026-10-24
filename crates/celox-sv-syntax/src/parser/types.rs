@@ -4,6 +4,7 @@ use super::*;
 pub(super) struct Aggregate {
     start: usize,
     union: bool,
+    soft: bool,
     tagged: bool,
     packed: bool,
     signed: Option<bool>,
@@ -166,7 +167,11 @@ impl Parser<'_> {
                         if !union {
                             self.expect("struct")?;
                         }
-                        let tagged = self.eat("tagged");
+                        let soft = self.eat("soft");
+                        if soft && !union {
+                            return Err(self.error("only a union can be soft"));
+                        }
+                        let tagged = !soft && self.eat("tagged");
                         let packed = self.eat("packed");
                         let signed = self.signing();
                         if tagged && !union {
@@ -179,6 +184,7 @@ impl Parser<'_> {
                         jobs.push(Job::Type(TypeJob::StructNext(Aggregate {
                             start,
                             union,
+                            soft,
                             tagged,
                             packed,
                             signed,
@@ -424,6 +430,7 @@ impl Parser<'_> {
                     let Aggregate {
                         start,
                         union,
+                        soft,
                         tagged,
                         packed,
                         signed,
@@ -434,6 +441,7 @@ impl Parser<'_> {
                         start,
                         kind: DataTypeKind::Struct {
                             union,
+                            soft,
                             tagged,
                             packed,
                             fields,
