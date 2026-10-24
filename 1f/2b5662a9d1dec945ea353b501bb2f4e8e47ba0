@@ -1,0 +1,1 @@
+Make the public sampling copy helper safe for overlapping or identical valid signal views.
