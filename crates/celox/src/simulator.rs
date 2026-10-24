@@ -61,6 +61,7 @@ mod host {
             RuntimeEventKind, RuntimeEventSite, RuntimeProgram, SignalRef, VariableInfo,
         },
     };
+    use celox_design::{AssertionSite, ReportLocation, Severity};
     use celox_runtime::backend::EventHandle as _;
     use celox_testbench::{
         DisplayFormatArg, FieldSpec, format_sv_display_arg, format_veryl_display_arg,
@@ -203,12 +204,9 @@ mod host {
         Write {
             message: Vec<u8>,
         },
-        AssertContinue {
-            message: Vec<u8>,
-        },
-        AssertFatal {
-            message: Vec<u8>,
-        },
+        /// A message of a severity task or of a Veryl assertion. A
+        /// [`Severity::Fatal`] report also ends the simulation with an error.
+        Report(Report),
         /// The design executed `$finish`. The host decides whether to stop.
         Finish,
         /// The design executed `$stop` outside a process kernel. The host
@@ -217,6 +215,65 @@ mod host {
         Missed {
             count: u64,
         },
+    }
+
+    /// What a severity task reports (IEEE 1800-2023 20.10).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Report {
+        pub severity: Severity,
+        /// The formatted message, byte-exact like [`RuntimeEvent::Display`].
+        pub message: Vec<u8>,
+        /// The simulation time of the report, when the drain knows it.
+        pub time: Option<u64>,
+        /// The hierarchical name of the scope that issued the report.
+        pub scope: Option<String>,
+        /// The file and line of the task call.
+        pub location: Option<ReportLocation>,
+        /// The assertion whose action block issued the report.
+        pub assertion: Option<AssertionSite>,
+    }
+
+    impl Report {
+        /// A report with no time, scope, location or assertion.
+        pub fn new(severity: Severity, message: Vec<u8>) -> Self {
+            Self {
+                severity,
+                message,
+                time: None,
+                scope: None,
+                location: None,
+                assertion: None,
+            }
+        }
+
+        /// The report as a tool prints it: the severity, the file and line,
+        /// the message, then the time and the scope (IEEE 1800-2023 20.10).
+        pub fn render(&self) -> Vec<u8> {
+            let mut out = format!("{:?}", self.severity).into_bytes();
+            if let Some(location) = &self.location {
+                out.extend_from_slice(format!(": {}:{}", location.file, location.line).as_bytes());
+            }
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(&self.message);
+            let mut context = Vec::new();
+            if let Some(time) = self.time {
+                context.push(format!("Time: {time}"));
+            }
+            let name = match (
+                &self.scope,
+                self.assertion.as_ref().and_then(|a| a.label.as_ref()),
+            ) {
+                (Some(scope), Some(label)) => Some(format!("{scope}.{label}")),
+                (scope, label) => scope.clone().or_else(|| label.cloned()),
+            };
+            if let Some(name) = name {
+                context.push(format!("Scope: {name}"));
+            }
+            if !context.is_empty() {
+                out.extend_from_slice(format!("\n  {}", context.join("  ")).as_bytes());
+            }
+            out
+        }
     }
 
     #[derive(Debug, Clone, Copy, Default)]
@@ -490,7 +547,7 @@ mod host {
                 | RuntimeEventKind::Write
                 | RuntimeEventKind::Finish
                 | RuntimeEventKind::Stop => 'd',
-                RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal => {
+                RuntimeEventKind::Report(_) => {
                     if args.is_empty() {
                         return b"assertion failed".to_vec();
                     }
@@ -604,8 +661,14 @@ mod host {
         match site.kind {
             RuntimeEventKind::Display => RuntimeEvent::Display { message },
             RuntimeEventKind::Write => RuntimeEvent::Write { message },
-            RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
-            RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
+            RuntimeEventKind::Report(severity) => RuntimeEvent::Report(Report {
+                severity,
+                message,
+                time: ctx.tb_time,
+                scope: ctx.scope.map(str::to_owned).or_else(|| site.scope.clone()),
+                location: site.location.clone(),
+                assertion: site.assertion.clone(),
+            }),
             RuntimeEventKind::Finish => RuntimeEvent::Finish,
             RuntimeEventKind::Stop => RuntimeEvent::Stop,
         }
@@ -1085,8 +1148,8 @@ mod host {
         }
 
         /// Drain runtime events, lazily evaluating dirty combinational logic.
-        /// Fatal assertions encountered during evaluation are returned as
-        /// [`RuntimeEvent::AssertFatal`] records so the host can handle them.
+        /// Fatal reports encountered during evaluation are returned as
+        /// [`RuntimeEvent::Report`] records so the host can handle them.
         pub fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
             self.drain_runtime_events_with_context(RuntimeFormatContext::default())
         }
@@ -1148,7 +1211,7 @@ mod host {
                 .runtime_schema
                 .runtime_event_sites
                 .get(celox_runtime::comb_fatal_site(code)? as usize)?;
-            matches!(site.kind, RuntimeEventKind::AssertFatal).then_some(site)
+            site.kind.is_fatal().then_some(site)
         }
 
         fn collect_formatted_runtime_events(
@@ -1622,7 +1685,7 @@ mod host {
                     .runtime_schema
                     .runtime_event_sites
                     .get(*site_id)?;
-                if !matches!(site.kind, RuntimeEventKind::AssertFatal) {
+                if !site.kind.is_fatal() {
                     return None;
                 }
                 Some(RuntimeErrorCode::Runtime {

@@ -412,7 +412,9 @@ class Backend:
         for site in sites:
             if site>=len(metadata):raise Unsupported('missing runtime-event metadata')
             kind=metadata[site]['kind']
-            if kind not in ('Display','Write','AssertContinue'):
+            # A report other than Fatal ({'Report':'Error'} for an assertion) does not end the simulation.
+            nonfatal=kind in ('Display','Write') or (isinstance(kind,dict) and kind.get('Report') in ('Info','Warning','Error'))
+            if not nonfatal:
                 raise Unsupported('fatal runtime-event activation requires explicit observer semantics')
         if args.get('fatal_error_code') is not None:raise Unsupported('fatal comb capture outside current event model')
         values=[]
