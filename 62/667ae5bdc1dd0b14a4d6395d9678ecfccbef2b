@@ -1,0 +1,6 @@
+Revision history for #1897:
+
+rev 2 (content) 2026-10-24 16:11 UTC — Folded the sv-tests expected.tsv update (formerly #1898) and the retained Icarus/Verilator program reports into this commit so the PR passes CI on its own.
+rev 1 (initial) 2026-10-24 16:11 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1897,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"354a8713be8ac788ff9a60b677f99ccb24238f79","timestamp_iso":"2026-10-24T16:11:10Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"354a8713be8ac788ff9a60b677f99ccb24238f79","new_sha":"b6cf3ff5d6fbd16586301e05cd4331e7fb8dffda","timestamp_iso":"2026-10-24T16:11:10Z","reason":"Folded the sv-tests expected.tsv update (formerly #1898) and the retained Icarus/Verilator program reports into this commit so the PR passes CI on its own.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/354a8713be8ac788ff9a60b677f99ccb24238f79...b6cf3ff5d6fbd16586301e05cd4331e7fb8dffda"}]} -->
