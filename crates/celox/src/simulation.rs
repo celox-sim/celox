@@ -603,6 +603,12 @@ impl<B: SimBackend> Simulation<B> {
         value
     }
 
+    /// The stored four-state `(value, mask)` of `signal`, without settling
+    /// combinational logic first: what host writes and the last settle left.
+    pub fn peek_four_state(&self, signal: SignalRef) -> (num_bigint::BigUint, num_bigint::BigUint) {
+        self.simulator.backend.get_four_state(signal)
+    }
+
     /// Modifies internal state via a callback and re-stabilizes combinational logic.
     ///
     /// A write that changes an event signal, and any write while a process
@@ -638,6 +644,11 @@ impl<B: SimBackend> Simulation<B> {
         if self.shadow.take().is_some() {
             self.unchecked = Some("a slot observer writes state the shadow does not see");
         }
+    }
+
+    /// Replace the signals the observer of [`Self::observe_slots`] watches.
+    pub fn set_observed_signals(&mut self, signals: &[SignalRef]) {
+        self.state.set_observed_signals(signals.iter().copied());
     }
 
     /// Stop showing the time slots to the observer of
