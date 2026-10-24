@@ -1,0 +1,1 @@
+Review: every writer is kept; overlapping writers conflict when one of them must be the only writer, so always_ff against an always of another instance is rejected.
