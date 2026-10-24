@@ -2892,3 +2892,63 @@ endmodule
   (top Top)
   (run_to_finish)
   (assert_eq status 2))
+
+(case scope_randomize_enum_values
+  (source "scope_enum.sv" #"
+module Top(output bit done, output int errors);
+    typedef enum bit signed [7:0] {NEG=-7, MID=2, HIGH=91} original_t;
+    typedef original_t alias_t;
+    typedef enum logic [63:0] {ALL='1} wide_t;
+    alias_t value;
+    wide_t wide;
+    int plain;
+    int seen;
+    function automatic int local_random();
+        alias_t local_value;
+        if (randomize(local_value) != 1) return 0;
+        return local_value == NEG || local_value == MID || local_value == HIGH;
+    endfunction
+    initial begin
+        repeat (128) begin
+            if (std::randomize(value, plain, wide) != 1) errors++;
+            case (value)
+                NEG: seen |= 1;
+                MID: seen |= 2;
+                HIGH: seen |= 4;
+                default: errors++;
+            endcase
+            if (wide != 64'hffffffffffffffff) errors++;
+            if (local_random() != 1) errors++;
+        end
+        if (seen != 7) errors++;
+        if ($bits(std::randomize(value)) != 32) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+
+(case scope_randomize_enum_order
+  (source "scope_enum_order.sv" #"
+module Top(output bit done, output int errors);
+    typedef enum bit [7:0] {A=3, B=19, C=97} value_t;
+    value_t value;
+    int plain;
+    int result;
+    initial begin
+        value = A; plain = 17;
+        result = 0 && std::randomize(value, plain);
+        result = 1 || randomize(value);
+        if (value != A || plain != 17) errors++;
+        repeat (64) begin
+            result = (std::randomize(value, plain) == 1)
+                && (value == A || value == B || value == C);
+            if (result != 1) errors++;
+            if (randomize(value) != 1 || (value != A && value != B && value != C)) errors++;
+        end
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))

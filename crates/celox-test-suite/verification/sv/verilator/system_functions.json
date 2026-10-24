@@ -920,6 +920,52 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Functions",
+      "expectation": "Simulation",
+      "name": "system_functions::scope_randomize_enum_order",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "detail": "Verilator 5.052 scope randomization produces values outside the declared enum domain. Its generated scope helper calls basicStdRandomization with the integer bit width and no enum value table, including for a direct enum variable without a typedef alias. IEEE 1800-2023 18.3 and 18.12 require enum draws to stay in the declared set. Both shared cases retain their original domain assertions.",
+      "known_issue": {
+        "id": "sv_verilator_scope_enum_randomize",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 scope randomization produces values outside the declared enum domain. Its generated scope helper calls basicStdRandomization with the integer bit width and no enum value table, including for a direct enum variable without a typedef alias. IEEE 1800-2023 18.3 and 18.12 require enum draws to stay in the declared set. Both shared cases retain their original domain assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_scope_enum_randomize_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "phase": "skip",
+      "status": "ignored"
+    },
+    {
+      "category": "Functions",
+      "expectation": "Simulation",
+      "name": "system_functions::scope_randomize_enum_values",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "detail": "Verilator 5.052 scope randomization produces values outside the declared enum domain. Its generated scope helper calls basicStdRandomization with the integer bit width and no enum value table, including for a direct enum variable without a typedef alias. IEEE 1800-2023 18.3 and 18.12 require enum draws to stay in the declared set. Both shared cases retain their original domain assertions.",
+      "known_issue": {
+        "id": "sv_verilator_scope_enum_randomize",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 scope randomization produces values outside the declared enum domain. Its generated scope helper calls basicStdRandomization with the integer bit width and no enum value table, including for a direct enum variable without a typedef alias. IEEE 1800-2023 18.3 and 18.12 require enum draws to stay in the declared set. Both shared cases retain their original domain assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_scope_enum_randomize_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "phase": "skip",
+      "status": "ignored"
     }
   ]
 }

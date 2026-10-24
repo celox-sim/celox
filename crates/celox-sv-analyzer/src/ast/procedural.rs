@@ -73,7 +73,8 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
 /// The packed and unpacked shape of a declared type, as selects see it.
 pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
     VariableDimensions {
-        randomizable: !r#type.is_enum,
+        randomizable: !r#type.is_enum || r#type.enum_values.is_some(),
+        enum_values: r#type.enum_values.clone(),
         real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
         string: matches!(r#type.kind(), TypeKind::String),
         class: r#type.class().map(str::to_owned),
