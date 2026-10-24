@@ -929,3 +929,141 @@ module Top(output bit done, output int errors);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomization_enum_domain
+  (source "enum_randomize.sv" #"
+module Top(output bit done, output int errors);
+    typedef enum bit signed [7:0] {NEG=-7, MID=2, HIGH=MID+89} sparse_t;
+    typedef enum bit [63:0] {LOW=64'h100000000, TOP=64'h8000000000000000} wide_t;
+    class Base;
+        rand sparse_t value;
+        sparse_t selected;
+        rand wide_t wide_value;
+        rand enum bit [2:0] {ONLY=5} single;
+        rand enum {FIRST=11, SECOND=35, THIRD} extra;
+    endclass
+    Base a, b;
+    Base base;
+    int seen;
+    int old_value;
+    initial begin
+        a = new; b = new; base = a;
+        a.srandom(123); b.srandom(123);
+        repeat (256) begin
+            if (!base.randomize() || !b.randomize()) errors++;
+            if (a.value != b.value || a.wide_value != b.wide_value || a.extra != b.extra) errors++;
+            case (a.value)
+                NEG: seen |= 1;
+                MID: seen |= 2;
+                HIGH: seen |= 4;
+                default: errors++;
+            endcase
+            if (a.wide_value != LOW && a.wide_value != TOP) errors++;
+            if (a.single != 5) errors++;
+            if (a.extra != 11 && a.extra != 35 && a.extra != 36) errors++;
+        end
+        if (seen != 7) errors++;
+        a.value.rand_mode(0);
+        old_value = a.value;
+        if (!a.randomize() || a.value != old_value) errors++;
+        if (!a.randomize(selected)) errors++;
+        if (a.selected != NEG && a.selected != MID && a.selected != HIGH) errors++;
+        if (a.value != old_value || a.value.rand_mode() != 0) errors++;
+        if (!base.randomize(value)) errors++;
+        if (a.value != NEG && a.value != MID && a.value != HIGH) errors++;
+        if (a.value.rand_mode() != 0) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomization_enum_inheritance
+  (source "enum_inheritance.sv" #"
+module Top(output bit done, output int errors);
+    class Parent;
+        rand enum bit [7:0] {P=7, Q=93} x;
+    endclass
+    class Child extends Parent;
+        rand enum bit [7:0] {R=11, S=57, T=98} y;
+    endclass
+    Child child;
+    Parent parent;
+    int seen;
+    initial begin
+        child = new; parent = child;
+        repeat (128) begin
+            if (parent.randomize() != 1) errors++;
+            if (child.x != 7 && child.x != 93) errors++;
+            case (child.y)
+                11: seen |= 1;
+                57: seen |= 2;
+                98: seen |= 4;
+                default: errors++;
+            endcase
+        end
+        if (seen != 7) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomization_enum_alias
+  (source "enum_alias.sv" #"
+module Top(output bit done, output int errors);
+    typedef enum bit signed [7:0] {NEG=-7, MID=2, HIGH=91} original_t;
+    typedef original_t alias_t;
+    class Sample;
+        rand alias_t value;
+    endclass
+    Sample object;
+    int seen;
+    initial begin
+        object = new;
+        repeat (128) begin
+            if (object.randomize() != 1) errors++;
+            case (object.value)
+                NEG: seen |= 1;
+                MID: seen |= 2;
+                HIGH: seen |= 4;
+                default: errors++;
+            endcase
+        end
+        if (seen != 7) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomization_enum_fill_literals
+  (source "enum_fill.sv" #"
+module Top(output bit done, output int errors);
+    typedef enum bit [63:0] {WIDE_ALL='1} wide_t;
+    typedef enum bit [3:0] {SMALL_ALL='1} small_t;
+    typedef enum bit signed [63:0] {SIGNED_ALL='1} signed_t;
+    typedef enum bit [63:0] {ZERO='0} zero_t;
+    class Sample;
+        rand wide_t wide_value;
+        rand small_t small_value;
+        rand signed_t signed_value;
+        rand zero_t zero_value;
+    endclass
+    Sample object;
+    initial begin
+        object = new;
+        repeat (8) begin
+            if (object.randomize() != 1) errors++;
+            if (object.wide_value != 64'hffffffffffffffff) errors++;
+            if (object.small_value != 4'hf) errors++;
+            if (object.signed_value != -64'sd1) errors++;
+            if (object.zero_value != 64'd0) errors++;
+            if (object.wide_value != WIDE_ALL || object.small_value != SMALL_ALL
+                || object.signed_value != SIGNED_ALL || object.zero_value != ZERO) errors++;
+        end
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))

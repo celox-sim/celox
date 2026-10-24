@@ -555,9 +555,12 @@ pub(super) fn random_selection(
                 if property.constant {
                     return Err(unsupported("randomize argument is a const property"));
                 }
-                if property.field.handle.is_some() || property.r#type.is_enum || property.randc {
+                if property.field.handle.is_some()
+                    || (property.r#type.is_enum && property.r#type.enum_values.is_none())
+                    || property.randc
+                {
                     return Err(unsupported(
-                        "randomize arguments require integral non-enum, non-randc properties",
+                        "randomize arguments require integral, non-randc properties with a supported enum domain",
                     ));
                 }
                 bits[index + 1] = '1';

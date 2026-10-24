@@ -935,7 +935,11 @@ pub(super) fn coerce_const_parameter_value(value: i128, width: usize, signed: bo
     }
 }
 
-fn enum_initializer_fits_base_type(value: i128, value_type: ExprType, base_type: ExprType) -> bool {
+pub(super) fn enum_initializer_fits_base_type(
+    value: i128,
+    value_type: ExprType,
+    base_type: ExprType,
+) -> bool {
     // A same-width initializer may change its numeric interpretation when
     // the enum base has different signedness, but it does not lose any bits.
     if value_type.width <= base_type.width || base_type.width >= 128 {
