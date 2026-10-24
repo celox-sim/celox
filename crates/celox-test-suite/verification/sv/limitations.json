@@ -642,7 +642,7 @@
     "category": "simulator_disagreement",
     "phase": "execute",
     "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
-    "reason": "Verilator 5.052 writes the out-of-range bit of a partially out-of-range indexed part-select (minus_write[i -: 2] with i = 0) into bit 7 instead of discarding it; IEEE 1800-2023 11.5.1 ignores writes to out-of-range bits. Icarus agrees with the expected value.",
+    "reason": "Verilator 5.052 writes bits that IEEE 1800-2023 11.5.1 discards: the out-of-range bit of a partially out-of-range indexed part-select (minus_write[i -: 2] with i = 0) lands in bit 7, a constant part-select wholly outside the vector (comb_out[11:8]) writes its low bits, a partly outside one of an ascending vector (comb_up[6:9]) takes the wrong end of the value, and run-time selects within one array element whose positions are known at compile time reach past it. Icarus agrees with the expected values.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/verilator.json",
@@ -650,6 +650,9 @@
     ],
     "cases": {
       "verilator": [
+        "indexed_select::ascending_part_selects_partly_outside_write_the_bits_inside",
+        "indexed_select::constant_part_selects_partly_outside_write_the_bits_inside",
+        "indexed_select::known_run_time_selects_stay_within_their_element",
         "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang"
       ]
     }
@@ -1904,7 +1907,7 @@
     "category": "simulator_compile_limitation",
     "phase": "compile",
     "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
-    "reason": "Icarus 13.0 rejects pure virtual method declarations and interface classes with syntax errors (\"Invalid class item\", \"Invalid module item\") and fails code generation without a diagnostic (\"Code generation had 2 error(s)\") for a method called on an element of an array of class handles. IEEE 1800-2023 8.21 and 8.26 define pure virtual methods and interface classes, and 7.4 and 8.4 permit arrays of class handles. Verilator passes all three cases.",
+    "reason": "Icarus 13.0 rejects pure virtual method declarations and interface classes with syntax errors (\"Invalid class item\", \"Invalid module item\") and fails code generation without a diagnostic (\"Code generation had 2 error(s)\") for a method called on an element of an array of class handles. IEEE 1800-2023 8.21 and 8.26 define pure virtual methods and interface classes, and 7.4 and 8.4 permit arrays of class handles. Verilator passes the first three cases; see sv_verilator_interface_class_casts and sv_verilator_extended_interface_class_methods for the others.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
@@ -1914,7 +1917,62 @@
       "icarus": [
         "class::abstract_classes_and_pure_virtual_methods",
         "class::methods_of_handle_array_elements",
-        "class::classes_implementing_interface_classes"
+        "class::classes_implementing_interface_classes",
+        "class::methods_called_through_interface_class_handles",
+        "class::inherited_methods_of_extended_interface_classes",
+        "class::casts_from_interface_class_handles"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_interface_class_casts",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 returns 0 from $cast of a handle of one interface class to a variable of another interface class that the object's class also implements, so the case dereferences the unassigned null handle; the adapter-free source prints 0 1 where IEEE 1800-2023 8.16 and 8.26.5 require 1 1. Celox prints 1 1. Icarus rejects interface classes, see sv_icarus_abstract_and_interface_classes.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/interface_class_casts_verilator.json",
+      "verification/repros/interface_class_casts.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::casts_from_interface_class_handles"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_extended_interface_class_methods",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 does not find a method that an interface class inherits from an interface class it extends when the method is called through a handle of the extending class (\"Class method 'sides' not found in class 'NamedShape'\"). IEEE 1800-2023 8.26.3 makes the methods of the extended interface classes members of the extending one. Icarus rejects interface classes, see sv_icarus_abstract_and_interface_classes.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::inherited_methods_of_extended_interface_classes"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_cast",
+    "category": "simulator_compile_limitation",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not implement $cast (\"System task/function $cast() is not defined by any module\"), which IEEE 1800-2023 6.24.2 and 8.16 define. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::casts_of_class_handles"
       ]
     }
   },
@@ -1971,6 +2029,115 @@
     "cases": {
       "icarus": [
         "timing::child_port_pulses_reach_waiters_settled"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_active_region_waiters",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_active_region_waiters_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::blocking_write_waiters_run_before_nonblocking_updates",
+        "timing::blocking_write_waiters_rearm_before_nonblocking_updates"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_process_nba_positions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+    "reason": "Verilator keeps only the last of the nonblocking updates that an inner loop issues to overlapping part-selects at run-time positions when an outer loop delays between iterations (p is 1400 instead of 14e4), and writes a nonblocking update of q[8] of logic [7:0] q into bit 0. IEEE 1800-2023 10.4.2 schedules every nonblocking assignment as its own update in issue order; 11.5.1 and 7.4.6 make bits outside the target unwritten. Icarus passes the unchanged shared assertions; the adapter-free source reproduces both Verilator failures.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/process_nba_positions_verilator.json",
+      "verification/repros/process_nba_positions.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::process_nonblocking_assignments_at_run_time_positions",
+        "timing::process_nonblocking_assignments_outside_their_target"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_class_randomize",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects the built-in class randomize and srandom methods during elaboration. IEEE 1800-2023 18.6 and 18.13.3 define these methods. Verilator executes both shared cases successfully, including hooks and independent object random streams.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_class_randomize_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::randomize_without_rand_members",
+        "class::unconstrained_randomize"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_randomization_control",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects randomize, srandom and rand_mode calls, including property rand_mode calls (\"Method name nesting is not supported yet\"). IEEE 1800-2023 18.6, 18.8 and 18.11 define these class methods and inline member selection.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_randomization_control_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::randomization_inheritance",
+        "class::randomization_mode_bit_argument",
+        "class::randomization_modes_and_selection",
+        "class::randomization_pre_hook_controls_modes"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_inherited_srandom",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 reports duplicate declarations of the built-in srandom member/function when this inherited randomization case seeds the same object through both derived and base handles. IEEE 1800-2023 18.6.2 and 18.13.3 permit dynamic class randomization and object seeding. Celox preserves the assertions for inherited hidden members and hook dispatch.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_randomization_control_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::randomization_inheritance"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_rand_mode_bit_argument",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 treats rand_mode(2) as enabled for both member and object-wide setters. IEEE 1800-2023 18.8 declares a bit on_off formal, so integral 2 truncates to zero. The case records two assertion failures; generated C++ sets the mode to 1 for these calls. Celox retains the required bit conversion.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_randomization_control_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::randomization_mode_bit_argument"
       ]
     }
   }

@@ -367,6 +367,18 @@ fn return_metadata(
         signed: ty.is_some_and(Type::is_signed),
         is_2state: ty.is_some_and(|ty| ty.kind() == TypeKind::Bit),
         string: ty.is_some_and(|ty| ty.kind() == TypeKind::String),
+        pattern_type: ty
+            .filter(|ty| {
+                !ty.members.is_empty()
+                    || !ty.unpacked_ranges.is_empty()
+                    || ty.packed_ranges.len() > 1
+            })
+            .and_then(|ty| {
+                ty.pattern_target(&const_functions::Environment {
+                    constants: &*context.const_env,
+                    functions: &state.const_functions,
+                })
+            }),
     }
 }
 fn signature(
@@ -457,15 +469,76 @@ fn class_signatures(
             context,
         );
     }
-    if !constructor {
+    for method in ["randomize", "srandom", "rand_mode"] {
+        let mut formals = vec![(
+            FunctionArgumentMetadata {
+                name: classes::THIS.into(),
+                direction: ParamDirection::Input,
+                has_default: false,
+            },
+            handle.clone(),
+        )];
+        let (argument, ty) = match method {
+            "randomize" => (
+                "$selection",
+                // Signature discovery must not require an otherwise unused class
+                // to have a supported layout. A call validates the layout before
+                // using this selection formal; lowering reports layout errors.
+                classes::class(tree, &class_name, &context.const_env, &context.type_aliases)
+                    .map_or_else(
+                        |_| classes::unsigned_type(1),
+                        |layout| layout.selection_type(),
+                    ),
+            ),
+            "srandom" => ("seed", procedural::int_type()),
+            _ => ("on_off", classes::unsigned_type(1)),
+        };
+        formals.push((
+            FunctionArgumentMetadata {
+                name: argument.into(),
+                direction: ParamDirection::Input,
+                has_default: false,
+            },
+            ty,
+        ));
         publish_signature(
-            classes::Class::subroutine_name(&class_name, "new"),
-            vec![this],
-            Some(Some(handle)),
+            classes::Class::subroutine_name(&class_name, method),
+            formals,
+            Some((method == "randomize").then(procedural::int_type)),
             tree,
             context,
         );
     }
+    if !constructor && !class.interface {
+        publish_signature(
+            classes::Class::subroutine_name(&class_name, "new"),
+            vec![this],
+            Some(Some(handle.clone())),
+            tree,
+            context,
+        );
+    }
+    // `$cast` to a variable of the class (8.16).
+    let formal = |name: &str, direction| {
+        (
+            FunctionArgumentMetadata {
+                name: name.into(),
+                direction,
+                has_default: false,
+            },
+            handle.clone(),
+        )
+    };
+    publish_signature(
+        classes::Class::cast_name(&class_name),
+        vec![
+            formal(procedural::CAST_DESTINATION, ParamDirection::Inout),
+            formal(procedural::CAST_SOURCE, ParamDirection::Input),
+        ],
+        Some(Some(procedural::int_type())),
+        tree,
+        context,
+    );
     Ok(())
 }
 /// Publish the signatures of the methods of every class in the source.
@@ -474,9 +547,7 @@ pub(in crate::ast) fn all_class_signatures(
     context: &mut PackedDimensions,
 ) {
     for class in &tree.declarations().classes {
-        if !class.interface {
-            let _ = class_signatures(class, tree, context);
-        }
+        let _ = class_signatures(class, tree, context);
     }
 }
 fn publish_signature(
@@ -717,6 +788,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
                             signed: ty.is_signed(),
                             is_2state: !ty.is_4state(),
                             string: false,
+                            pattern_type: None,
                         },
                     );
                     publish(&tree.state.dimensions, &key, &context);

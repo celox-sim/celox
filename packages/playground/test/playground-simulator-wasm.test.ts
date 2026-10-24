@@ -95,20 +95,20 @@ describe.skipIf(!isWasm)("playground runtime (WASM)", () => {
 		expect(counts()).toEqual([1, 0, 1, 1]);
 		sim.negedge(clk);
 		expect(counts()).toEqual([1, 1, 1, 1]);
-		sim.cycle(clk);
-		expect(counts()).toEqual([2, 2, 2, 1]);
-		// A tick is the active edge without moving the clock.
+		// A tick is a clock period: both edges of the clock.
 		sim.tick(clk);
-		expect(counts()).toEqual([3, 2, 3, 2]);
+		expect(counts()).toEqual([2, 2, 2, 1]);
+		sim.tick(clk);
+		expect(counts()).toEqual([3, 3, 3, 2]);
 		sim.dut.en = 0n;
-		sim.cycle(clk);
-		expect(counts()).toEqual([4, 3, 3, 2]);
+		sim.tick(clk);
+		expect(counts()).toEqual([4, 4, 3, 2]);
 		// The clock is already at its inactive level: no edge.
 		sim.inactiveEdge(clk);
-		expect(counts()).toEqual([4, 3, 3, 2]);
+		expect(counts()).toEqual([4, 4, 3, 2]);
 		sim.activeEdge();
 		sim.edges([[clk, "negedge"]]);
-		expect(counts()).toEqual([5, 4, 3, 3]);
+		expect(counts()).toEqual([5, 5, 3, 3]);
 		expect(() => sim.edges([[clk, "sideways" as "posedge"]])).toThrow(
 			RangeError,
 		);
@@ -118,8 +118,8 @@ describe.skipIf(!isWasm)("playground runtime (WASM)", () => {
 		const sim = createPlaygroundSimulator(compile(LEVER, "Lever"));
 		const clk = sim.event("clk");
 		sim.dut.en = 1n;
-		sim.cycle(clk);
-		sim.cycle(clk);
+		sim.tick(clk);
+		sim.tick(clk);
 		expect(sim.dut.count).toBe(2n);
 		sim.tick(clk);
 		expect(sim.dut.count).toBe(3n);
@@ -129,7 +129,7 @@ describe.skipIf(!isWasm)("playground runtime (WASM)", () => {
 		const sim = Simulator.fromSource(LEVER, "Lever");
 		const clk = sim.event("clk");
 		sim.dut.en = 1n;
-		sim.cycle(clk);
+		sim.tick(clk);
 		sim.tick(clk);
 		expect(sim.dut.count).toBe(2n);
 		sim.dispose();

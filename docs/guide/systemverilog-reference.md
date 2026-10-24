@@ -30,7 +30,7 @@ synthesis and is tested at the design level.
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Strings | `string` variables, function arguments and results: assignment of strings, string literals and casts (`string'(x)`), `==`, `!=` and ordering comparisons, concatenation and replication (with a run-time count), character reads and writes (`s[i]`), and the methods `len`, `getc`, `putc`, `toupper`, `tolower`, `compare`, `icompare`, `substr`, `atoi` / `atohex` / `atooct` / `atobin` and `itoa` / `hextoa` / `octtoa` / `bintoa`; `%s` and format-less display of string values. See [strings](#strings) |
-| Classes | classes declared in a module: properties of 2-state integral types up to 64 bits, `string` and class handle types, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles. See [classes](#classes) |
+| Classes | classes declared in a module: properties of 2-state integral types up to 64 bits, `string` and class handle types, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes and method calls through interface class handles; `$cast` of class handles, as a function and as a task; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles. See [classes](#classes) |
 | Parameters | integral parameters and overrides preserving widths beyond 128 bits and X/Z values, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 
 ### Processes and control flow
@@ -53,7 +53,7 @@ In a timed `Simulation`, `initial` and plain `always` processes can suspend:
 | `#delay` | integral and real delays, `#(min:typ:max)` (the typical value) and [time literals](#time-literal-delays); an X or Z delay counts as zero |
 | `@(...)` | variables, `posedge` / `negedge` / `edge`, items joined by `or` or `,`, bit, part and run-time index selects, any expression including calls of pure functions, and `@*` / `@(*)`, which waits on the variables its statement reads |
 | `wait (condition)` | any condition; an X or Z condition counts as false |
-| Assignments | blocking and nonblocking; nonblocking updates take effect in the NBA region of the time slot |
+| Assignments | blocking and nonblocking, to any target a blocking assignment takes, including unpacked array elements and run-time positions; nonblocking updates take effect in the NBA region of the time slot, at the position evaluated when the assignment executes, and bits outside the target or at a position with an X or Z bit are not written |
 
 An `always` whose sensitivity list names exactly the variables its statement
 reads, as `@*` would (IEEE 1800-2023 9.4.2.2), simulates like `always @*` in
@@ -62,9 +62,15 @@ both `Simulator` and `Simulation`: `always @(a or b) y = a + b;` or
 or a nonblocking assignment. Any other sensitivity list without edges runs as
 a process: `always @(a) y = a + b;` leaves `y` unchanged when only `b`
 changes. So does a list that, as `always @*`, would close a combinational
-loop with other logic. A `Simulator` runs no processes, so building one for
-such a design fails with `SimulatorErrorKind::ProcessRequiresSimulation`; use
-`Simulation`, or write `always @*` or `always_comb`.
+loop with other logic. So does an edge-sensitive `always`
+that does not have the shape of a flip-flop: one with an edge of a select or
+an expression (`@(posedge v[0])`, `@(posedge (a & b))`), an `edge`, an item
+without an edge next to edges, a multi-bit edge signal (its least significant
+bit decides the edge), or several edges of which the body tests none as an
+asynchronous reset. Only `always_ff` must have that shape. A `Simulator` runs
+no processes, so building one for such a design fails with
+`SimulatorErrorKind::ProcessRequiresSimulation`; use `Simulation`, or write
+`always @*` or `always_comb`.
 
 ### Timed task calls
 
@@ -95,8 +101,42 @@ variable or advancing the random stream. Calls follow procedural statement order
 and short-circuit evaluation, and use the calling process's persistent random
 stream (IEEE 1800-2023 18.12).
 
-Constraints (`with`), class methods, enum variables, unpacked arrays, nets,
+Constraints (`with`), enum variables, unpacked arrays, nets,
 constants, selects and concatenation arguments are unsupported and rejected.
+
+### Class randomization
+
+`object.randomize()` randomizes enabled `rand` properties and returns signed
+`int` value `1`. Supported properties are 2-state, non-enum integral values up
+to 64 bits in classes without constraints. Inherited properties are included,
+and a call through a base handle uses the dynamic object's class and its
+`pre_randomize()` / `post_randomize()` hooks. A derived hook replaces the base
+hook; call `super.pre_randomize()` or `super.post_randomize()` explicitly to
+include the base hook's work (IEEE 1800-2023 18.6.2). Hooks must be functions
+without arguments, non-static and non-virtual. Calls inside a class may use
+`randomize()` or `this.randomize()`.
+
+`object.member.rand_mode(0)` disables a random property; `rand_mode(1)` enables
+it, and `object.member.rand_mode()` returns its current mode as signed `int`.
+The setter's argument is a `bit`. `object.rand_mode(bit)` sets all random
+properties, including inherited ones. All start enabled, and aliases share the
+same modes (18.8).
+
+`object.randomize(x, y)` temporarily selects exactly those instance properties,
+including supported properties not declared `rand`. Names are resolved in the
+receiver's class, not the caller's scope; expressions and inaccessible members
+are rejected. The temporary modes are installed before the pre-hook and restored
+after the post-hook; hooks can inspect and change them. `randomize(null)` runs
+the hooks without drawing or assigning random values (18.11). Constraints are
+not supported even for this checker form.
+
+Each object has an independent random stream, seeded from its creating process.
+`object.srandom(seed)` resets it using a 32-bit seed; checkpoints preserve both
+RNG and mode state (18.13.3, 18.14.3). Random sequences are implementation-specific.
+`randc` randomization, constraints, `with`, static random properties, and random
+enum/array/object/string properties remain unsupported. A constrained dynamic
+subclass is rejected rather than silently randomizing only its base properties.
+A call through `null` is a runtime error.
 
 ### Time literal delays {#time-literal-delays}
 
@@ -128,17 +168,14 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Class features beyond those [listed](#classes): method calls through an interface class handle, `$cast`, classes declared in packages, parameterized classes, named constructor arguments, shallow copies (`new h`), and properties that are 4-state, `real`, arrays or wider than 64 bits. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
+- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, typedefs and parameters of interface classes, classes declared in packages, parameterized classes, named constructor arguments, shallow copies (`new h`), and properties that are 4-state, `real`, arrays or wider than 64 bits. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
 - Behavioral and verification constructs: `final`, intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events and `->`, `fork` / `join`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
 - Timing controls in processes: `iff` qualifiers ([#1444](https://github.com/celox-sim/celox/issues/1444)),
   package-scoped delay values
   ([#1710](https://github.com/celox-sim/celox/issues/1710)), impure function calls in event expressions, and
-  `wait` or event expressions reading a static task argument. Nonblocking
-  assignments in a process cannot yet target an unpacked array element, a
-  run-time position or a constant position outside the target
-  ([#1709](https://github.com/celox-sim/celox/issues/1709)).
+  `wait` or event expressions reading a static task argument.
 - Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset.
 - Inferred latches inside `always_comb` are rejected by default. Set `inferred_latch = "warn"` or `"allow"` in `celox.toml` under `[diagnostics]` to permit retained blocking assignments. Ordinary `always @*` and explicit `always_latch` do not require this option.
 - Ports and instances: non-ANSI port declarations ([#426](https://github.com/celox-sim/celox/issues/426)), `ref` ports
@@ -147,10 +184,9 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Declarations: variable declaration initializers of members of an interface
   array, ANSI port default values, tagged unions, soft packed unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   unpacked structs and `real`.
-- Sequential processes: `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)) and edge operands other than a
-  plain signal ([#464](https://github.com/celox-sim/celox/issues/464)) in event lists. A plain `always` with
-  such an edge, a multi-bit edge signal, or several edges without a reset is
-  rejected too, until it runs as a process ([#1708](https://github.com/celox-sim/celox/issues/1708)).
+- Sequential processes: `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)) in event lists, and in
+  `always_ff` edge operands other than a plain signal ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit
+  edge signals, and several edges without an asynchronous reset.
 - Combinational processes: nonblocking assignments inside `always_comb`
   ([#453](https://github.com/celox-sim/celox/issues/453)).
 - Loops: a procedural loop unrolls at most 10,000 iterations; a combinational
@@ -236,7 +272,17 @@ into the runtime. Reading or writing a property or calling a method through
 `null` is a runtime error. Constructing an abstract class and a class that
 leaves a pure virtual method unimplemented are rejected (8.21). A class that
 implements an interface class implements each of its methods with the same
-return type, or, if it is abstract, re-declares it pure (8.26).
+return type, or, if it is abstract, re-declares it pure (8.26). A method called
+through a handle of an interface class runs the implementation of the object's
+class.
+
+A handle may be assigned to a variable of its class, of a base class or of an
+interface class it implements; any other assignment of a handle is an error
+(IEEE 1800-2023 8.16, 8.26.5). `$cast(dest, source)` assigns a handle whose
+object's class derives from or implements the class of `dest`, or `null`, and
+returns 1; otherwise it leaves `dest` unchanged and returns 0, or, called as a
+task, reports an error. A `$cast` between classes neither of which derives from
+the other, unless the source is an interface class, always fails (8.16).
 
 A constructor calls the constructor of the base class first, with the
 arguments of `super.new(...)` or of the `extends` clause, then runs the
@@ -251,7 +297,13 @@ saving a state file fails while any variable holds an object.
 
 A run-time select that reaches past either end of a
 vector reads `X` for the missing bits (zero in two-state simulation) and
-writes only the bits that exist.
+writes only the bits that exist. A write to a constant part-select partly
+outside the vector, by any procedural or continuous assignment, also writes
+only the bits inside: `q[9:6] = v` on `logic [7:0] q` writes `v[1:0]` to
+`q[7:6]`. A write wholly outside the vector has no effect. Reading such a
+constant part-select, and writing one of an array element or of an inner
+packed dimension that leaves its declared range, are rejected
+([#88](https://github.com/celox-sim/celox/issues/88)).
 
 ### Wildcard comparisons
 
@@ -391,6 +443,12 @@ unsupported, including when the inference option is enabled.
   in the parent sees only the settled value, as in the previous item.
   Verilator 5.052 sees only the final value of an evaluation; Icarus 13.0
   also sees the pulse through the port.
+- A blocking write of an edge-triggered `always` is an update of the active
+  region: the processes it wakes run before the same edge's nonblocking
+  updates. With `y = ~y; q <= q + 1;`, a waiter on `@(y)` reads `q` from
+  before the edge and waits again before the nonblocking updates
+  (IEEE 1800-2023 4.5). Icarus 13.0 gives the same values; Verilator 5.052
+  resumes the waiter after the nonblocking updates.
 
 ### Variable lifetimes
 

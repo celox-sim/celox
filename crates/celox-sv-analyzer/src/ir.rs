@@ -77,7 +77,21 @@ pub struct Module {
 impl Module {
     /// Represent selected edge procedures as scheduled processes. A host
     /// request must finish synchronously before the following statement runs.
-    pub fn schedule_edge_processes(mut self, mut select: impl FnMut(&FfProcess) -> bool) -> Self {
+    pub fn schedule_edge_processes(self, select: impl FnMut(&FfProcess) -> bool) -> Self {
+        self.edge_processes_as_processes(select, true)
+    }
+
+    /// Run selected plain `always` edge procedures as ordinary processes that
+    /// wait on the same events, for those that do not fit the flip-flop shape.
+    pub fn run_edge_processes_as_processes(self, select: impl FnMut(&FfProcess) -> bool) -> Self {
+        self.edge_processes_as_processes(select, false)
+    }
+
+    fn edge_processes_as_processes(
+        mut self,
+        mut select: impl FnMut(&FfProcess) -> bool,
+        scheduled_edge: bool,
+    ) -> Self {
         let mut retained = Vec::new();
         for process in std::mem::take(&mut self.ff_processes) {
             if !select(&process) {
@@ -101,7 +115,7 @@ impl Module {
             self.initial_processes.push(InitialProcess {
                 creation_order: process.creation_order,
                 site: process.site,
-                scheduled_edge: true,
+                scheduled_edge,
                 condition: None,
                 body: vec![Stmt::Loop {
                     kind: LoopKind::Forever,
@@ -360,6 +374,7 @@ pub struct Port {
     r#type: Type,
     is_net: bool,
     default: Option<ConstExpr>,
+    pattern_target: Option<crate::ast::Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,7 +432,24 @@ impl Port {
             r#type,
             is_net,
             default: None,
+            pattern_target: None,
         }
+    }
+
+    pub(crate) fn with_pattern_target(mut self, target: Option<crate::ast::Type>) -> Self {
+        self.pattern_target = target;
+        self
+    }
+
+    /// Bind caller-owned pattern values in this specialized port's type.
+    pub fn bind_pattern(
+        &self,
+        pattern: &crate::ast::BoundPattern,
+    ) -> Result<Expr, crate::AnalyzerError> {
+        let target = self.pattern_target.as_ref().ok_or_else(|| {
+            crate::AnalyzerError::Unsupported("assignment pattern port type".into())
+        })?;
+        pattern.bind_port(target)
     }
 
     pub fn name(&self) -> &str {
@@ -569,15 +601,28 @@ pub struct PortConnection {
     formal: String,
     actual: String,
     actual_expr: Option<Expr>,
+    bound_pattern: Option<crate::ast::BoundPattern>,
 }
 
 impl PortConnection {
-    pub(crate) fn new(formal: String, actual: String, actual_expr: Option<Expr>) -> Self {
+    pub(crate) fn new(
+        formal: String,
+        actual: String,
+        actual_expr: Option<Expr>,
+        bound_pattern: Option<crate::ast::BoundPattern>,
+    ) -> Self {
         Self {
             formal,
             actual,
             actual_expr,
+            bound_pattern,
         }
+    }
+
+    /// An untyped assignment pattern with caller-owned values. The receiving
+    /// port supplies its element types after parameter specialization.
+    pub fn bound_pattern(&self) -> Option<&crate::ast::BoundPattern> {
+        self.bound_pattern.as_ref()
     }
 
     pub fn formal(&self) -> &str {

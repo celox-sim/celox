@@ -202,6 +202,7 @@ pub(crate) struct LoweredSvPortConnection {
     pub formal: String,
     pub actual: String,
     pub actual_expr: Option<sv::ir::Expr>,
+    pub bound_pattern: Option<sv::ast::BoundPattern>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -2711,6 +2712,31 @@ fn lower_module_with_overrides(
     force_signals: &[String],
     level_lists: LevelLists<'_>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
+    let parameter_types = module
+        .imported_parameters()
+        .iter()
+        .chain(module.parameters())
+        .filter_map(|parameter| {
+            Some((
+                parameter.name().to_string(),
+                (
+                    parameter.resolved_width()?,
+                    parameter.resolved_signed().unwrap_or(false),
+                ),
+            ))
+        })
+        .collect();
+    let constants = module_constants_with_overrides(module, parameter_overrides);
+    let fallbacks = module
+        .ff_processes()
+        .iter()
+        .any(|process| runs_as_process(module, process, &constants, &parameter_types))
+        .then(|| {
+            module.clone().run_edge_processes_as_processes(|process| {
+                runs_as_process(module, process, &constants, &parameter_types)
+            })
+        });
+    let module = fallbacks.as_ref().unwrap_or(module);
     let mut ff_event_roles = Vec::new();
     for process in module.ff_processes() {
         let clock = clock_event_from_ff_process(process)
@@ -2733,21 +2759,6 @@ fn lower_module_with_overrides(
             });
         }
     }
-    let parameter_types = module
-        .imported_parameters()
-        .iter()
-        .chain(module.parameters())
-        .filter_map(|parameter| {
-            Some((
-                parameter.name().to_string(),
-                (
-                    parameter.resolved_width()?,
-                    parameter.resolved_signed().unwrap_or(false),
-                ),
-            ))
-        })
-        .collect();
-    let constants = module_constants_with_overrides(module, parameter_overrides);
     let shared_memories = shared_edge_memories(module, &constants, &parameter_types, warnings);
     validate_variable_driver_ranges(module, &constants, &parameter_types, &shared_memories)?;
     let scheduled = module
@@ -3180,6 +3191,7 @@ fn lower_module_with_overrides(
                         formal: connection.formal().to_string(),
                         actual: connection.actual().to_string(),
                         actual_expr: connection.actual_expr().cloned(),
+                        bound_pattern: connection.bound_pattern().cloned(),
                     })
                     .collect(),
                 array_element,
@@ -3454,6 +3466,7 @@ fn array_element_connections(
                 return Ok(LoweredSvPortConnection {
                     formal: connection.formal.clone(),
                     actual: connection.actual.clone(),
+                    bound_pattern: None,
                     actual_expr: Some(sv::ir::Expr::Select {
                         expr: Box::new(actual_expr.clone()),
                         msb: sv::ir::ConstExpr::Literal((lsb + port_width - 1).to_string()),
@@ -3489,9 +3502,48 @@ fn array_element_connections(
                 formal: connection.formal.clone(),
                 actual: connection.actual.clone(),
                 actual_expr: Some(slice),
+                bound_pattern: None,
             })
         })
         .collect()
+}
+
+fn bind_port_patterns(
+    connections: &mut [LoweredSvPortConnection],
+    child: &LoweredSvModule,
+) -> Result<(), ParserError> {
+    for connection in connections {
+        let Some(pattern) = connection.bound_pattern.take() else {
+            continue;
+        };
+        let port = child
+            .source
+            .ports()
+            .iter()
+            .find(|port| port.name() == connection.formal)
+            .ok_or_else(|| {
+                ParserError::illegal_context(
+                    "systemverilog port assignment pattern",
+                    format!("unknown port `{}`", connection.formal),
+                    None,
+                )
+            })?;
+        if port.direction() != sv::ir::PortDirection::Input {
+            return Err(ParserError::illegal_context(
+                "systemverilog port assignment pattern",
+                "only input port assignment patterns are supported",
+                None,
+            ));
+        }
+        connection.actual_expr = Some(port.bind_pattern(&pattern).map_err(|error| {
+            ParserError::illegal_context(
+                "systemverilog port assignment pattern",
+                error.to_string(),
+                None,
+            )
+        })?);
+    }
+    Ok(())
 }
 
 pub(crate) fn attach_instance_glue(
@@ -3525,6 +3577,8 @@ pub(crate) fn attach_instance_glue(
         let Some(child) = lowered_modules.get(&child_id) else {
             return Err(unsupported_sv_instance(instance.module_name.clone()));
         };
+        let mut authored_connections = instance.port_connections.clone();
+        bind_port_patterns(&mut authored_connections, child)?;
         let connections = match instance.array_element {
             Some((position, count)) => {
                 module
@@ -3536,7 +3590,7 @@ pub(crate) fn attach_instance_glue(
                         .insert(instance.instance_name.clone(), instance.array_index_base);
                 }
                 array_element_connections(
-                    &instance.port_connections,
+                    &authored_connections,
                     child,
                     position,
                     count,
@@ -3546,7 +3600,7 @@ pub(crate) fn attach_instance_glue(
                     &lowered.parameter_types,
                 )?
             }
-            None => instance.port_connections.clone(),
+            None => authored_connections,
         };
         ensure_parent_output_signals(
             module,
@@ -3678,6 +3732,14 @@ pub(crate) fn attach_instance_glue(
                 |address| Some(*address),
             ));
         }
+    }
+    // A flip-flop evaluation stores each update in the working state; two
+    // of one execution are two update events (IEEE 1800-2023 4.3, 10.4.2).
+    for unit in module.eval_only_ff_blocks.values() {
+        candidates.extend(celox_frontend_core::watch::multi_store_only_candidates(
+            unit,
+            |address| (address.region == WORKING_REGION).then_some(address.var_id),
+        ));
     }
     module.arena = arena;
     // Combinational event sites follow the flip-flop ones, including the
@@ -4376,10 +4438,35 @@ fn lower_comb_processes(
                     .collect();
             }
         }
-        // The sites of one process activate together.
+        // The sites of one process activate together. Every change of a
+        // source schedules the process (IEEE 1800-2023 4.3), also one that a
+        // later write of the same time slot undoes, so each sensitivity atom
+        // counts its occurrences.
         let base = sites.len() as u32;
+        let mut counters: Vec<(VarAtomBase<SourceVarId>, SourceVarId)> = Vec::new();
         for mut observer in std::mem::take(&mut comb.observers) {
             observer.activation_group = base;
+            for atom in &observer.sensitivity {
+                if !counters.iter().any(|(counted, _)| counted == atom) {
+                    let (counter, _) = comb.m.temp(
+                        "comb_occurrences",
+                        celox_design::EVENT_COUNTER_WIDTH,
+                        false,
+                        false,
+                    );
+                    counters.push((*atom, counter));
+                }
+            }
+            observer.sensitivity_counters = observer
+                .sensitivity
+                .iter()
+                .map(|atom| {
+                    *counters
+                        .iter()
+                        .find(|(counted, _)| counted == atom)
+                        .expect("a counter for every sensitivity atom")
+                })
+                .collect();
             observers.push(observer);
         }
         sites.append(&mut comb.sites);
@@ -7193,6 +7280,19 @@ fn packed_index_offset(variable: &SvVariable, index: i128) -> Option<usize> {
         .filter(|offset| *offset < variable.width)
 }
 
+/// The bit position of declared index `index` of `variable`, which may lie
+/// outside it; see [`packed_index_offset`].
+fn packed_index_position(variable: &SvVariable, index: i128) -> Option<i128> {
+    if !variable.array_dims.is_empty() {
+        return Some(index);
+    }
+    match variable.packed_ranges.as_slice() {
+        [(left, right)] if left >= right => index.checked_sub(*right),
+        [(_, right)] => right.checked_sub(index),
+        _ => Some(index),
+    }
+}
+
 fn unpacked_element_width(variable: &SvVariable) -> Option<usize> {
     if variable.array_dims.is_empty() {
         return None;
@@ -7348,6 +7448,83 @@ fn sv_memory_offset(variable: &SvVariable, bit_offset: usize, width: usize) -> S
             }
         }
         _ => SIROffset::Static(bit_offset),
+    }
+}
+
+/// The bits of `variable` that a constant select from declared index `msb`
+/// to `lsb` writes, and the number of low bits of the assigned value that
+/// fall below the variable. A select partly outside the variable writes only
+/// the bits inside, one wholly outside writes none (IEEE 1800-2023 11.5.1).
+fn constant_select_write(
+    variable: &SvVariable,
+    msb: i128,
+    lsb: i128,
+) -> Option<(Option<BitAccess>, usize)> {
+    let (msb, lsb) = (
+        packed_index_position(variable, msb)?,
+        packed_index_position(variable, lsb)?,
+    );
+    let (low, high) = (msb.min(lsb), msb.max(lsb));
+    let top = i128::try_from(variable.width).ok()? - 1;
+    let (start, end) = (low.max(0), high.min(top));
+    if start > end {
+        return Some((None, 0));
+    }
+    Some((
+        Some(BitAccess::new(
+            usize::try_from(start).ok()?,
+            usize::try_from(end).ok()?,
+        )),
+        usize::try_from(start - low).ok()?,
+    ))
+}
+
+/// `folded`, the select `original` with the values its position reads
+/// substituted, unless that turned a run-time select within one array
+/// element into a constant one reaching past the element: the run-time form
+/// keeps its write within the element (see `dynamic_packed_write`), while
+/// the constant position counts from bit 0 of the whole array.
+fn keep_element_window(
+    original: &sv::ir::LValue,
+    folded: sv::ir::LValue,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> sv::ir::LValue {
+    let constant =
+        |expr| sv::typecheck::eval_const_expr_with_types(expr, constants, parameter_types);
+    let (
+        sv::ir::LValue::Select {
+            msb: original_msb,
+            lsb: original_lsb,
+            ..
+        },
+        sv::ir::LValue::Select { msb, lsb, .. },
+    ) = (original, &folded)
+    else {
+        return folded;
+    };
+    if constant(original_msb).is_some() && constant(original_lsb).is_some() {
+        return folded;
+    }
+    let (Some(msb), Some(lsb)) = (constant(msb), constant(lsb)) else {
+        return folded;
+    };
+    let Some(window) =
+        dynamic_packed_write(original, variables, name_to_id, constants, parameter_types)
+            .and_then(|write| write.window)
+    else {
+        return folded;
+    };
+    let inside = |position: i128| {
+        usize::try_from(position)
+            .is_ok_and(|position| (window.lsb..=window.msb).contains(&position))
+    };
+    if inside(msb) && inside(lsb) {
+        folded
+    } else {
+        original.clone()
     }
 }
 
@@ -8346,6 +8523,40 @@ fn insert_or_merge_ff_unit(
     } else {
         blocks.insert(trigger_set, unit);
     }
+}
+
+/// A plain `always` sensitive to edges is a flip-flop only in the shape of
+/// one: a clock and asynchronous resets, each a one-bit variable. Any other
+/// edge-sensitive `always` runs as a process waiting on the same events.
+fn runs_as_process(
+    module: &sv::ir::Module,
+    process: &sv::ir::FfProcess,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> bool {
+    let multi_bit = |name: &str| {
+        let r#type = module
+            .ports()
+            .iter()
+            .find(|port| port.name() == name)
+            .map(sv::ir::Port::r#type)
+            .or_else(|| {
+                module
+                    .signals()
+                    .iter()
+                    .find(|signal| signal.name() == name)
+                    .map(sv::ir::Signal::r#type)
+            });
+        r#type
+            .and_then(|r#type| signal_type_from_sv(r#type, constants, parameter_types).ok())
+            .is_some_and(|type_info| type_info.width != 1)
+    };
+    !process.is_always_ff()
+        && (clock_event_from_ff_process(process).is_none()
+            || process
+                .events()
+                .iter()
+                .any(|event| multi_bit(event.signal())))
 }
 
 fn clock_event_from_ff_process(process: &sv::ir::FfProcess) -> Option<&sv::ir::FfEvent> {

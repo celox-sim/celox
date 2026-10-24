@@ -376,7 +376,20 @@ impl<B: SimBackend> Simulator<B> {
         let comb_writes = &self.program.runtime_schema.comb_writes;
         // A timed simulation stores its time into the time slots, and a state
         // file keeps the time in its schedule; an untimed one reads zero.
-        let time_slots: crate::HashSet<_> = self.program.runtime_schema.time_slots.iter().collect();
+        // A compiled scheduler's slots hold nothing between runs.
+        let time_slots: crate::HashSet<_> = self
+            .program
+            .runtime_schema
+            .time_slots
+            .iter()
+            .chain(
+                self.program
+                    .runtime_schema
+                    .scheduler
+                    .iter()
+                    .flat_map(|scheduler| scheduler.slots.iter()),
+            )
+            .collect();
         let mut objects: Vec<_> = self
             .backend
             .layout()
@@ -533,6 +546,13 @@ impl<B: SimBackend> Simulator<B> {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    let split = |term: usize, image: &[u8]| {
+                        let bytes = widths
+                            .get(term)
+                            .map_or(image.len(), |width| width.div_ceil(8).max(1))
+                            .min(image.len());
+                        (image[..bytes].to_vec(), image[bytes..].to_vec())
+                    };
                     WaiterRecord {
                         process: process(index),
                         site: waiter.site as u64,
@@ -554,13 +574,18 @@ impl<B: SimBackend> Simulator<B> {
                                     mask: mask.to_bytes_le(),
                                 },
                                 Baseline::Raw(image) => {
-                                    let bytes = widths
-                                        .get(term)
-                                        .map_or(image.len(), |width| width.div_ceil(8).max(1))
-                                        .min(image.len());
-                                    BaselineRecord::Value {
-                                        value: image[..bytes].to_vec(),
-                                        mask: image[bytes..].to_vec(),
+                                    let (value, mask) = split(term, image);
+                                    BaselineRecord::Value { value, mask }
+                                }
+                                Baseline::RawCounter { seen, raw } => {
+                                    // The bytes a `Counter` baseline's value saves as.
+                                    let (value, mask) = split(term, raw);
+                                    let number =
+                                        |bytes: &[u8]| BigUint::from_bytes_le(bytes).to_bytes_le();
+                                    BaselineRecord::Counter {
+                                        seen: *seen,
+                                        value: number(&value),
+                                        mask: number(&mask),
                                     }
                                 }
                             })

@@ -899,26 +899,6 @@ fn applies_unsigned_coercion_to_typed_parameter_comparisons() {
     assert_eq!(sim.get(sim.signal("all_ones")), 1u8.into());
 }
 
-/// Nonblocking assignments in processes whose target bits are not known at
-/// compile time are not lowered yet; they are rejected by name.
-#[test]
-fn rejects_process_nonblocking_assignments_without_a_constant_target() {
-    for (body, construct) in [
-        (
-            "logic [7:0] q; logic [2:0] i; initial #1 q[i] <= 1'b1;",
-            "nonblocking assignment with a run-time position in a process",
-        ),
-        (
-            "logic [7:0] mem [4]; initial #1 mem[1] <= 8'd1;",
-            "nonblocking assignment to an unpacked array in a process",
-        ),
-    ] {
-        let source = format!("module Top; {body} endmodule");
-        let error = cranelift_build_error(&source);
-        assert!(error.contains(construct), "`{body}`: {error}");
-    }
-}
-
 #[test]
 fn compile_sv_to_sir_forwards_parameter_overrides() {
     let source = r#"
@@ -2048,16 +2028,21 @@ fn uses_the_first_always_ff_event_as_a_negedge_clock() {
         .build_cranelift()
         .unwrap();
     let clk = sim.event("clk");
+    let clk_signal = sim.signal("clk");
     let rst = sim.signal("rst");
     let d = sim.signal("d");
     let q = sim.signal("q");
+    // A tick from the active level takes no active edge, so the clock idles
+    // high.
     sim.modify(|io| {
+        io.set(clk_signal, 1u8);
         io.set(rst, 0u8);
         io.set(d, 1u8);
     })
     .unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 1u8.into());
+    assert_eq!(sim.get(clk_signal), 1u8.into());
 }
 
 #[test]

@@ -3493,9 +3493,9 @@ fn rejects_unimplemented_timing_constructs() {
     for (body, construct) in [
         ("initial begin fork #1; join end", "fork-join block"),
         ("initial wait fork;", "wait fork statement"),
-        // The `event` data type is rejected before its uses.
-        ("event e; initial @e;", "unsupported internal data type"),
-        ("event e; initial ->e;", "unsupported internal data type"),
+        // The `event` data type is rejected by name before its uses.
+        ("event e; initial @e;", "named event"),
+        ("event e; initial ->e;", "named event"),
         (
             "logic clk, en; initial @(posedge clk iff en);",
             "iff-qualified event",
@@ -3509,13 +3509,10 @@ fn rejects_unimplemented_timing_constructs() {
             "intra-assignment timing control",
         ),
         ("initial begin : b disable b; end", "disable statement"),
+        ("initial disable fork;", "disable fork statement"),
         (
             "logic a, y; always_latch y <= a;",
             "nonblocking assignment inside always_latch",
-        ),
-        (
-            "function void t(); #1; endfunction",
-            "delay control in a subroutine",
         ),
     ] {
         let code = format!("module Top; {body} endmodule");
@@ -6113,7 +6110,17 @@ fn functions_still_reject_direct_timing_controls() {
         );
         let error = analyze_source(&source, Path::new("function_timing.sv"))
             .expect_err("functions cannot suspend");
-        assert!(error.to_string().contains("in a subroutine"), "{error}");
+        // IEEE 1800-2023 13.4 makes it illegal, not unimplemented.
+        assert!(
+            matches!(
+                error,
+                AnalyzerError::TimingControlOutsideProcess {
+                    context: "a function",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
     }
 }
 
@@ -6563,4 +6570,98 @@ fn explicit_output_data_types_default_to_variables() {
     assert!(!ports[2].is_net());
     assert!(ports[3].is_net());
     assert!(ports[4].is_net());
+}
+
+#[test]
+fn class_randomize_rejects_unsupported_semantics() {
+    for (members, call, expected) in [
+        (
+            "rand int x; constraint c { x == 1; }",
+            "c.randomize()",
+            "constraints",
+        ),
+        ("randc bit [1:0] x;", "c.randomize()", "randc"),
+        ("rand int x;", "c.srandom()", "argument"),
+        ("rand int x;", "c.srandom(1, 2)", "arguments"),
+        (
+            "rand int x; extern constraint c;",
+            "c.randomize()",
+            "constraints",
+        ),
+        ("rand const int x;", "c.randomize()", "const"),
+        ("static rand int x;", "c.randomize()", "static random"),
+        ("rand int x;", "C::randomize()", "object receiver"),
+        ("rand int x;", "C::srandom(1)", "object receiver"),
+        (
+            "static function int f(); return randomize(); endfunction",
+            "c.f()",
+            "object receiver",
+        ),
+        ("rand string x;", "c.randomize()", "integral non-enum"),
+        (
+            "rand int x;",
+            "c.randomize() with { x == 1; }",
+            "unsupported",
+        ),
+        ("rand int x;", "c.randomize(x + 1)", "arguments"),
+        ("rand int x;", "c.randomize(c.x)", "arguments"),
+        ("rand int x;", "c.randomize(null, x)", "arguments"),
+        (
+            "rand int x;",
+            "c.randomize(missing)",
+            "not an instance property",
+        ),
+        ("const int x = 1;", "c.randomize(x)", "const"),
+        ("local int x;", "c.randomize(x)", "non-public"),
+        ("protected int x;", "c.randomize(x)", "non-public"),
+        ("rand int x;", "c.rand_mode()", "getter requires"),
+        ("int x;", "c.x.rand_mode()", "rand or randc"),
+        (
+            "rand int x; function void pre_randomize(int arg); endfunction",
+            "c.randomize()",
+            "hooks",
+        ),
+        (
+            "function int randomize(); return 1; endfunction",
+            "c.randomize()",
+            "overriding",
+        ),
+    ] {
+        let source = format!(
+            "module Top; class C; {members} endclass C c; initial begin c = new; void'({call}); end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("randomize_unsupported.sv"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.to_lowercase().contains(expected), "{source}: {error}");
+    }
+}
+
+#[test]
+fn rand_mode_setter_cannot_be_used_as_a_value() {
+    let source = "module Top; class C; rand int x; endclass C c; int result; initial begin c = new; result = c.x.rand_mode(1); end endmodule";
+    let error = analyze_source(source, Path::new("mode_value.sv"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("setter is void"), "{error}");
+}
+
+#[test]
+fn rand_mode_name_outside_a_class_is_an_ordinary_function() {
+    let source = "module Top(output int value); function int rand_mode(); return 42; endfunction initial value = rand_mode(); endmodule";
+    analyze_source(source, Path::new("ordinary_rand_mode.sv")).unwrap();
+}
+
+#[test]
+fn randomization_signatures_do_not_force_unused_interface_class_layouts() {
+    for declaration in [
+        "interface class I; typedef int T; pure virtual function void f(T x); endclass
+         interface class J extends I; pure virtual function void g(T x); endclass",
+        "interface class I #(type T = logic); pure virtual function void f(T x); endclass
+         interface class J #(type T = logic); pure virtual function void g(T x); endclass
+         interface class K #(type U = logic) extends I#(U), J#(U); typedef U T; endclass",
+    ] {
+        let source = format!("module Top; {declaration} endmodule");
+        analyze_source(&source, Path::new("unused_interface_class.sv")).unwrap();
+    }
 }

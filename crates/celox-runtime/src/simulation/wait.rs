@@ -48,9 +48,24 @@ impl<B: SimBackend> SimulationState<B> {
                 for (term, baseline) in terms.iter().zip(&mut waiter.baselines) {
                     match term.counter {
                         Some(counter) => {
-                            *baseline = Baseline::Counter {
-                                seen: backend.get_as(counter),
-                                value: read(backend, term.signal),
+                            let seen = backend.get_as(counter);
+                            match planes(backend, term.signal) {
+                                Some(image) => {
+                                    if let Baseline::RawCounter { seen: last, raw } = baseline {
+                                        *last = seen;
+                                        copy_planes(raw, image, term.signal.width);
+                                    } else {
+                                        let mut raw = Vec::with_capacity(image.len());
+                                        copy_planes(&mut raw, image, term.signal.width);
+                                        *baseline = Baseline::RawCounter { seen, raw };
+                                    }
+                                }
+                                None => {
+                                    *baseline = Baseline::Counter {
+                                        seen,
+                                        value: read(backend, term.signal),
+                                    }
+                                }
                             }
                         }
                         None => match planes(backend, term.signal) {
@@ -80,18 +95,33 @@ impl<B: SimBackend> SimulationState<B> {
         signal: SignalRef,
         write: impl FnOnce(&mut B),
     ) {
-        if self.model.counted.is_empty() && self.process_state.waiters.is_empty() {
+        if self.model.counted.is_empty()
+            && self.model.probes_by_offset.is_empty()
+            && self.process_state.waiters.is_empty()
+        {
             write(backend);
             return;
         }
-        match self.model.counted_by_offset.get(&signal.offset).copied() {
-            Some(counted) => {
-                let old = read(backend, signal);
-                write(backend);
-                let new = read(backend, signal);
+        let counted = self.model.counted_by_offset.get(&signal.offset).copied();
+        let probes = self.model.probes_by_offset.get(&signal.offset);
+        if counted.is_none() && probes.is_none() {
+            write(backend);
+        } else {
+            let old = read(backend, signal);
+            write(backend);
+            let new = read(backend, signal);
+            if let Some(counted) = counted {
                 self.model.counted[counted].refs.bump(backend, &old, &new);
             }
-            None => write(backend),
+            // One counter can observe several ranges of the signal; a write
+            // is one occurrence.
+            let mut bumped: Vec<SignalRef> = Vec::new();
+            for probe in probes.into_iter().flatten() {
+                if !bumped.contains(&probe.counter) && probe.changed(&old, &new) {
+                    probe.bump(backend);
+                    bumped.push(probe.counter);
+                }
+            }
         }
         if !self.process_state.waiters.is_empty() {
             self.observe(backend, Some(signal));
@@ -128,20 +158,40 @@ impl<B: SimBackend> SimulationState<B> {
                     continue;
                 }
                 let baseline = &mut waiter.baselines[index];
+                // The common term: a plain signal no counter counts.
+                if let Baseline::Raw(last) = baseline {
+                    let now = state.planes(term.signal).expect("a plain signal");
+                    wake |= Self::advance(term.kind, last, now, term.signal.width);
+                    continue;
+                }
+                let counted = |seen: u32| {
+                    term.counter
+                        .is_some_and(|counter| backend.get_as::<u32>(counter) != seen)
+                };
                 wake |= match baseline {
-                    Baseline::Counter { seen, value } => {
-                        let counted = term
-                            .counter
-                            .is_some_and(|counter| backend.get_as::<u32>(counter) != *seen);
-                        let now = read(backend, term.signal);
-                        let changed = occurs(term.kind, value, &now);
-                        *value = now;
-                        counted || changed
-                    }
-                    Baseline::Raw(last) => {
+                    Baseline::RawCounter { seen, raw } => {
                         let now = state.planes(term.signal).expect("a plain signal");
-                        Self::advance(term.kind, last, now, term.signal.width)
+                        let changed = Self::advance(term.kind, raw, now, term.signal.width);
+                        counted(*seen) || changed
                     }
+                    Baseline::Counter { seen, value } => match state.planes(term.signal) {
+                        // A baseline loaded from a state file.
+                        Some(now) => {
+                            let seen = *seen;
+                            let mut raw = encode_planes(value, term.signal.width, now.len());
+                            let changed =
+                                Self::advance(term.kind, &mut raw, now, term.signal.width);
+                            *baseline = Baseline::RawCounter { seen, raw };
+                            counted(seen) || changed
+                        }
+                        None => {
+                            let now = read(backend, term.signal);
+                            let changed = occurs(term.kind, value, &now);
+                            *value = now;
+                            counted(*seen) || changed
+                        }
+                    },
+                    Baseline::Raw(_) => unreachable!("tested above"),
                     Baseline::Value(last) => match state.planes(term.signal) {
                         // A baseline loaded from a state file.
                         Some(now) => {
@@ -191,7 +241,7 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 match baseline {
                     // Counters are bumped by the write itself.
-                    Baseline::Counter { .. } => {}
+                    Baseline::Counter { .. } | Baseline::RawCounter { .. } => {}
                     Baseline::Raw(last) => {
                         let now = encode_planes(value, signal.width, last.len());
                         wake |= Self::advance(term.kind, last, &now, signal.width);
@@ -224,6 +274,9 @@ pub enum Baseline {
     /// (see [`planes`]) with the bits above its width cleared. Checks
     /// compare it with the state in place.
     Raw(Vec<u8>),
+    /// Like `Counter`, with the signal's state at the last check kept as
+    /// in [`Baseline::Raw`].
+    RawCounter { seen: u32, raw: Vec<u8> },
 }
 
 /// A process suspended at a wait.
@@ -283,6 +336,15 @@ impl Waiters {
     /// Process `process` waits as `waiter`.
     pub fn insert(&mut self, process: usize, driven: bool, waiter: Waiter) {
         self.register(process, driven, |slot| *slot = waiter);
+    }
+
+    /// The wait of process `process`, if it waits.
+    pub fn get(&self, process: usize) -> Option<&Waiter> {
+        self.waiting
+            .get(process)
+            .copied()
+            .unwrap_or(false)
+            .then(|| &self.slots[process])
     }
 
     /// Process `process` no longer waits.

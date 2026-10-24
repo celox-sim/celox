@@ -105,6 +105,65 @@ fn test_native_testbench_ff_condition_reads_pre_edge_value_after_write() {
     );
 }
 
+/// `clk.next(n)` runs gated and divided domains on every period whose
+/// inactive edge runs nothing, and leaves the clock low.
+#[test]
+fn test_native_testbench_next_runs_gated_and_divided_domains() {
+    let code = r#"
+        module Dut (
+            clk: input  '_ clock,
+            en : input  '_ logic,
+            g  : output '_ logic<8>,
+            d  : output '_ logic<8>,
+            lvl: output '_ logic,
+        ) {
+            var a: logic<2>;
+            always_ff (clk) {
+                a = a + 2'd1;
+            }
+            let divided: '_ clock = a[0];
+            always_ff (divided) {
+                d = d + 8'd1;
+            }
+            let gated: '_ clock = clk & en;
+            always_ff (gated) {
+                g = g + 8'd1;
+            }
+            assign lvl = clk;
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var en : logic;
+            var g  : logic<8>;
+            var d  : logic<8>;
+            var lvl: logic;
+            inst dut: Dut (clk, en, g, d, lvl);
+
+            initial {
+                en = 1'b1;
+                clk.next(4);
+                $assert(g == 8'd4);
+                $assert(d == 8'd2);
+                $assert(lvl == 1'b0);
+
+                en = 1'b0;
+                clk.next(3);
+                $assert(g == 8'd4);
+                $assert(d == 8'd4);
+                $assert(lvl == 1'b0);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
 #[test]
 fn test_native_testbench_overlapping_ff_writes_preserve_last_write() {
     let code = r#"
@@ -2290,15 +2349,17 @@ fn test_dual_clock() {
                 clk_a, rst_a, clk_b, rst_b, cnt_a, cnt_b,
             );
 
+            // Both clocks run throughout. `cnt_a` counts the 3 periods of
+            // `rst_b`'s assertion, then both count every period.
             initial {
                 rst_a.assert();
                 rst_b.assert();
                 clk_a.next  (10);
-                $assert     (cnt_a == 32'd10);
-                $assert     (cnt_b == 32'd0);
+                $assert     (cnt_a == 32'd13);
+                $assert     (cnt_b == 32'd10);
                 clk_b.next  (5);
-                $assert     (cnt_a == 32'd10);
-                $assert     (cnt_b == 32'd5);
+                $assert     (cnt_a == 32'd18);
+                $assert     (cnt_b == 32'd15);
                 $finish     ();
             }
         }

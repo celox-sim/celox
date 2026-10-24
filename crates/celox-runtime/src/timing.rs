@@ -9,7 +9,7 @@
 //! that writes it counts each occurrence, and a wait on it compares
 //! counters instead.
 
-use celox_design::CounterKind;
+use celox_design::{CounterKind, NbaPosition};
 use num_bigint::BigUint;
 
 pub use crate::simulation::{Baseline, HostWatch, NbaUpdate, Waiter, Waiters};
@@ -104,6 +104,29 @@ impl CountedRefs {
     }
 }
 
+/// A bit range whose changes bump an occurrence counter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProbeRefs {
+    pub lsb: usize,
+    pub msb: usize,
+    pub counter: SignalRef,
+}
+
+impl ProbeRefs {
+    /// Whether the probed range differs between `old` and `new`.
+    pub fn changed(&self, old: &Value, new: &Value) -> bool {
+        let width = self.msb - self.lsb + 1;
+        let mask = (BigUint::from(1u8) << width) - 1u8;
+        let bits = |plane: &BigUint| (plane >> self.lsb) & &mask;
+        bits(&old.0) != bits(&new.0) || bits(&old.1) != bits(&new.1)
+    }
+
+    pub fn bump<B: SimBackend>(&self, backend: &mut B) {
+        let value: u32 = backend.get_as(self.counter);
+        backend.set(self.counter, value.wrapping_add(1));
+    }
+}
+
 /// One term of a wait site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TermRefs {
@@ -123,7 +146,7 @@ pub struct NbaSiteRefs {
     pub lsb: usize,
     pub width: usize,
     pub value: SignalRef,
-    pub offset: Option<SignalRef>,
+    pub position: Option<NbaPosition<SignalRef>>,
     pub pending: Option<SignalRef>,
 }
 

@@ -302,10 +302,21 @@ pub type SemanticStatement<A> = TestbenchStatement<
 pub type SemanticComponentBinding<A> =
     ComponentBinding<A, SemanticSignal<A>, ExprBytecode<StateLocation<A>>>;
 
+/// A `$tb::clock_gen` instance: a clock that runs from time 0, rising at
+/// multiples of `period` and falling `ceil(period / 2)` after each rise,
+/// whether or not a process waits on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestbenchClock<Event> {
+    pub event: Event,
+    /// At least two.
+    pub period: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestbenchProgram<A> {
     statements: Vec<SemanticStatement<A>>,
     process_lengths: Vec<usize>,
+    clocks: Vec<TestbenchClock<A>>,
     private_variables: Vec<A>,
     random_seed: Option<u64>,
     components: Vec<TestbenchComponent>,
@@ -319,6 +330,7 @@ impl<A> Default for TestbenchProgram<A> {
         Self {
             statements: Vec::new(),
             process_lengths: Vec::new(),
+            clocks: Vec::new(),
             private_variables: Vec::new(),
             random_seed: None,
             components: Vec::new(),
@@ -333,6 +345,7 @@ impl<A> TestbenchProgram<A> {
     pub fn new(statements: Vec<SemanticStatement<A>>) -> Self {
         Self {
             process_lengths: vec![statements.len()],
+            clocks: Vec::new(),
             private_variables: Vec::new(),
             statements,
             random_seed: None,
@@ -349,6 +362,16 @@ impl<A> TestbenchProgram<A> {
         let mut program = Self::new(processes.into_iter().flatten().collect());
         program.process_lengths = lengths;
         program
+    }
+
+    /// The clock generators of the testbench.
+    pub fn with_clocks(mut self, clocks: Vec<TestbenchClock<A>>) -> Self {
+        self.clocks = clocks;
+        self
+    }
+
+    pub fn clocks(&self) -> &[TestbenchClock<A>] {
+        &self.clocks
     }
 
     /// Temporaries whose values belong to each independently suspended process.
@@ -609,6 +632,7 @@ pub type ExecutableComponentBinding<Event, Signal> = ComponentBinding<Event, Sig
 pub struct ExecutableTestbench<Event, Signal> {
     statements: Vec<ExecutableStatement<Event, Signal>>,
     process_lengths: Vec<usize>,
+    clocks: Vec<TestbenchClock<Event>>,
     private_signals: Vec<Signal>,
     random_seed: Option<u64>,
     components: Vec<TestbenchComponent>,
@@ -628,6 +652,7 @@ impl<Event, Signal> ExecutableTestbench<Event, Signal> {
     ) -> Self {
         Self {
             process_lengths: vec![statements.len()],
+            clocks: Vec::new(),
             private_signals: Vec::new(),
             statements,
             random_seed,
@@ -662,6 +687,16 @@ impl<Event, Signal> ExecutableTestbench<Event, Signal> {
             Self::new_with_random_seed(processes.into_iter().flatten().collect(), random_seed);
         program.process_lengths = lengths;
         program
+    }
+
+    /// The clock generators of the testbench.
+    pub fn with_clocks(mut self, clocks: Vec<TestbenchClock<Event>>) -> Self {
+        self.clocks = clocks;
+        self
+    }
+
+    pub fn clocks(&self) -> &[TestbenchClock<Event>] {
+        &self.clocks
     }
 
     pub fn with_private_signals(mut self, signals: Vec<Signal>) -> Self {

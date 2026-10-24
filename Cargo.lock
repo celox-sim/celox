@@ -486,11 +486,11 @@ dependencies = [
  "celox-design",
  "celox-sir",
  "celox-state-layout",
- "cranelift",
- "cranelift-frontend 0.136.4",
+ "cranelift 0.137.0",
+ "cranelift-frontend 0.137.0",
  "cranelift-jit",
- "cranelift-module",
- "cranelift-native 0.136.4",
+ "cranelift-module 0.137.0",
+ "cranelift-native 0.137.0",
  "fxhash",
  "num-bigint",
  "thiserror 2.0.21",
@@ -1056,7 +1056,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1148,7 +1148,18 @@ checksum = "b3c862fdb231aa5eeece28301f44e336180aeaba4024b74ccfa9e61866d9f549"
 dependencies = [
  "cranelift-codegen 0.136.4",
  "cranelift-frontend 0.136.4",
- "cranelift-module",
+ "cranelift-module 0.136.4",
+]
+
+[[package]]
+name = "cranelift"
+version = "0.137.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d3c50806b2e967d9fa18eee426c80628cec67b99f75ca459107375f1ba155e0"
+dependencies = [
+ "cranelift-codegen 0.137.0",
+ "cranelift-frontend 0.137.0",
+ "cranelift-module 0.137.0",
 ]
 
 [[package]]
@@ -1411,22 +1422,22 @@ checksum = "b1c5809e8636a37e5a25ecc35242d33d6e7391c49b67488b83446e2898af2a2f"
 
 [[package]]
 name = "cranelift-jit"
-version = "0.136.4"
+version = "0.137.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93ac1defcb6aa550b591e79f04bf9200c35f59631030e2eaeb142b569c940289"
+checksum = "a86db0c01bd2f7f86fedbebd6bee15ab40d74bd1a87b35e19b2a1a07612427ba"
 dependencies = [
  "anyhow",
- "cranelift-codegen 0.136.4",
- "cranelift-control 0.136.4",
- "cranelift-entity 0.136.4",
- "cranelift-module",
- "cranelift-native 0.136.4",
+ "cranelift-codegen 0.137.0",
+ "cranelift-control 0.137.0",
+ "cranelift-entity 0.137.0",
+ "cranelift-module 0.137.0",
+ "cranelift-native 0.137.0",
  "libc",
  "log",
  "memmap2",
  "region",
  "target-lexicon",
- "wasmtime-internal-jit-icache-coherence 49.0.4",
+ "wasmtime-internal-jit-icache-coherence 50.0.0",
  "windows-sys 0.61.2",
 ]
 
@@ -1439,6 +1450,18 @@ dependencies = [
  "anyhow",
  "cranelift-codegen 0.136.4",
  "cranelift-control 0.136.4",
+ "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "cranelift-module"
+version = "0.137.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb4f4b6e71b257549ffa6f14ddc0c314f332f66c7531b3c9a645c290a9d1effa"
+dependencies = [
+ "anyhow",
+ "cranelift-codegen 0.137.0",
+ "cranelift-control 0.137.0",
  "hashbrown 0.17.1",
 ]
 
@@ -1897,7 +1920,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2485,7 +2508,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3672,7 +3695,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4062,7 +4085,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4570,7 +4593,7 @@ version = "0.22.0"
 source = "git+https://github.com/veryl-lang/veryl.git?rev=4438207fb0fa64afd88be84eccf8234bb5cf8fe6#4438207fb0fa64afd88be84eccf8234bb5cf8fe6"
 dependencies = [
  "clap",
- "cranelift",
+ "cranelift 0.136.4",
  "cranelift-native 0.136.4",
  "daggy",
  "fst-writer",
@@ -5283,7 +5306,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

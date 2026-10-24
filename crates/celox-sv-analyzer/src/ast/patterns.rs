@@ -41,6 +41,7 @@ fn constant_pattern_value(
         .filter(|(name, _)| !dims.const_env.contains_key(*name))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
+    let value = substitute_expr_idents(value, &dims.array_parameter_values);
     let value =
         substitute_expr_constants_with_parameter_literals(state, value, &dims.const_env, &values);
     let Expr::Literal(value) =
@@ -95,9 +96,11 @@ fn pattern_value(
             literal.value ^= &literal.value & &literal.mask;
             literal.mask = num_bigint::BigUint::default();
         }
-        return Ok(bound_patterns::Value::Expression(Expr::Literal(
-            typecheck::format_integral_literal_binary(&literal),
-        )));
+        return Ok(bound_patterns::Value::Expression {
+            expr: Expr::Literal(typecheck::format_integral_literal_binary(&literal)),
+            signed: Some(shape.signed),
+            value_type: bound_patterns::ValueType::Known(shape.pattern_type(state, dims)),
+        });
     }
     Ok(bound_patterns::Value::list(parts))
 }
@@ -116,4 +119,120 @@ fn dimension_bounds(
         .and_then(|count| count.checked_add(1))
         .ok_or_else(bounds)?;
     Ok((left, right, count))
+}
+
+/// Apply the assignment context of a selected pattern element. A default
+/// descends through subarrays and structures; state conversion happens at
+/// the leaf so mixed bit/logic aggregates preserve their member types.
+pub(super) fn assignment_value(
+    state: &AnalysisState,
+    value: &Expr,
+    signed: bool,
+    value_type: Option<&Type>,
+    shape: &VariableDimensions,
+    dims: &PackedDimensions,
+    default: bool,
+) -> Converted<Expr> {
+    let default = default
+        && !value_type.is_some_and(|ty| shape.pattern_type(state, dims).as_ref() == Some(ty));
+    if default {
+        let array = if let Some((dim, rest)) = shape.unpacked.split_first() {
+            Some((
+                &dim.width,
+                VariableDimensions {
+                    unpacked: rest.to_vec(),
+                    ..shape.clone()
+                },
+            ))
+        } else if let Some((dim, rest)) = shape.packed.split_first()
+            && !rest.is_empty()
+        {
+            Some((
+                &dim.width,
+                VariableDimensions {
+                    packed: rest.to_vec(),
+                    signed: shape.signed_element_depth == Some(1),
+                    signed_element_depth: shape
+                        .signed_element_depth
+                        .and_then(|n| n.checked_sub(1))
+                        .filter(|n| *n > 0),
+                    ..shape.clone()
+                },
+            ))
+        } else {
+            None
+        };
+        if let Some((width, element)) = array {
+            let count = eval_ast_const_expr(state, width, &dims.const_env)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| unsupported("pattern target array size"))?;
+            return Ok(Expr::Concat(vec![
+                assignment_value(
+                    state, value, signed, value_type, &element, dims, true
+                )?;
+                count
+            ]));
+        }
+        if !shape.members.is_empty() {
+            if shape.members.len() > 1 && shape.members.iter().all(|member| member.offset() == 0) {
+                return Err(unsupported("assignment pattern for a packed union"));
+            }
+            return Ok(Expr::Concat(
+                shape
+                    .members
+                    .iter()
+                    .map(|member| {
+                        assignment_value(
+                            state,
+                            value,
+                            signed,
+                            value_type,
+                            &procedural::dimensions_from_type(member.r#type()),
+                            dims,
+                            true,
+                        )
+                    })
+                    .collect::<Converted<_>>()?,
+            ));
+        }
+    }
+    let actual = value_type
+        .map(procedural::dimensions_from_type)
+        .and_then(|shape| array_compatibility::unpacked_array_type(state, &shape, dims));
+    let target = array_compatibility::unpacked_array_type(state, shape, dims);
+    match (actual, target) {
+        (Some(actual), Some(target)) if !actual.is_assignment_compatible_with(&target) => {
+            return Err(AnalyzerError::IncompatibleUnpackedArray {
+                context: "assignment pattern element".into(),
+                actual,
+                target,
+            });
+        }
+        (Some(_), None) => {
+            return Err(unsupported(
+                "unpacked array assignment pattern item for scalar",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(unsupported(
+                "scalar assignment pattern item for unpacked array",
+            ));
+        }
+        _ => {}
+    }
+    let width = shape_width(state, shape, dims)
+        .ok_or_else(|| unsupported("assignment pattern element width"))?;
+    let resized = Expr::Resize {
+        expr: Box::new(value.clone()),
+        width,
+        signed,
+    };
+    Ok(if shape.is_2state {
+        Expr::Unary {
+            op: UnaryOp::ToTwoState,
+            expr: Box::new(resized),
+        }
+    } else {
+        resized
+    })
 }

@@ -37,6 +37,17 @@
       "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
+      "name": "timing::asynchronous_reset_driven_by_a_delay_process",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "timing::bit_select_edges_follow_the_selected_bit",
       "phase": "execute",
       "status": "passed",
@@ -224,6 +235,17 @@
       "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
+      "name": "timing::delay_process_nonblocking_updates_reach_later_edges",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "timing::delays_resume_initial_blocks_at_later_times",
       "phase": "execute",
       "status": "passed",
@@ -247,6 +269,28 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::direct_reads_settle_waiting_processes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::edge_waits_count_generated_clock_edges_in_any_declaration_order",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::edge_waits_on_script_inputs_next_to_a_generated_clock",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -358,6 +402,17 @@
       "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
+      "name": "timing::finish_from_a_delay_process_between_clock_edges",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "timing::finish_in_an_always_process_ends_the_simulation",
       "phase": "execute",
       "status": "passed",
@@ -405,6 +460,28 @@
       "name": "timing::four_state_edges_count_transitions_through_unknown",
       "phase": "compile",
       "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "timing::four_state_nonblocking_updates_keep_unknown_bits",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::generated_clocks_with_a_common_edge_sample_each_other",
+      "phase": "execute",
+      "status": "passed",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -501,6 +578,63 @@
     },
     {
       "category": "Sequential",
+      "detail": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_active_region_waiters_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_active_region_waiters",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
+        "upstream": []
+      },
+      "name": "timing::blocking_write_waiters_run_before_nonblocking_updates",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_active_region_waiters_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_active_region_waiters",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
+        "upstream": []
+      },
+      "name": "timing::blocking_write_waiters_rearm_before_nonblocking_updates",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::blocking_write_edges_read_values_before_nonblocking_updates",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::intermediate_combinational_writes_replace_split_definitions",
@@ -569,6 +703,50 @@
     },
     {
       "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::list_in_a_loop_through_always_comb_converges",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::list_missing_a_read_does_not_wake_on_it",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::list_of_every_read_with_a_nonblocking_body_runs",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::list_outside_a_loop_keeps_its_value",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Verilator executes an always procedure whose event control lists variables without edges at time zero, before any listed variable changes: y loses the value its initial procedure wrote, and a $display body prints once more. IEEE 1800-2023 6.8 initializes static declarations before initial/always processes start, and 9.4.2 makes the event control wait for a value change. Icarus passes the unchanged shared assertions; the adapter-free source reproduces the Verilator failure.",
       "expectation": "Simulation",
       "known_issue": {
@@ -618,6 +796,17 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::mixed_ff_stores_keep_their_active_and_nba_values",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::narrow_nonblocking_updates_keep_the_other_bits",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -728,7 +917,110 @@
       "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
+      "name": "timing::plain_always_edges_without_a_reset_run_as_processes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::plain_always_expression_edges_run_as_processes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::plain_always_multi_bit_edges_follow_the_lsb",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "timing::printed_finish_notice_is_design_output",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator keeps only the last of the nonblocking updates that an inner loop issues to overlapping part-selects at run-time positions when an outer loop delays between iterations (p is 1400 instead of 14e4), and writes a nonblocking update of q[8] of logic [7:0] q into bit 0. IEEE 1800-2023 10.4.2 schedules every nonblocking assignment as its own update in issue order; 11.5.1 and 7.4.6 make bits outside the target unwritten. Icarus passes the unchanged shared assertions; the adapter-free source reproduces both Verilator failures.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/process_nba_positions_verilator.json",
+          "verification/repros/process_nba_positions.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_process_nba_positions",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator keeps only the last of the nonblocking updates that an inner loop issues to overlapping part-selects at run-time positions when an outer loop delays between iterations (p is 1400 instead of 14e4), and writes a nonblocking update of q[8] of logic [7:0] q into bit 0. IEEE 1800-2023 10.4.2 schedules every nonblocking assignment as its own update in issue order; 11.5.1 and 7.4.6 make bits outside the target unwritten. Icarus passes the unchanged shared assertions; the adapter-free source reproduces both Verilator failures.",
+        "upstream": []
+      },
+      "name": "timing::process_nonblocking_assignments_at_run_time_positions",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "timing::process_nonblocking_assignments_at_unknown_positions",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator keeps only the last of the nonblocking updates that an inner loop issues to overlapping part-selects at run-time positions when an outer loop delays between iterations (p is 1400 instead of 14e4), and writes a nonblocking update of q[8] of logic [7:0] q into bit 0. IEEE 1800-2023 10.4.2 schedules every nonblocking assignment as its own update in issue order; 11.5.1 and 7.4.6 make bits outside the target unwritten. Icarus passes the unchanged shared assertions; the adapter-free source reproduces both Verilator failures.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/process_nba_positions_verilator.json",
+          "verification/repros/process_nba_positions.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_process_nba_positions",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator keeps only the last of the nonblocking updates that an inner loop issues to overlapping part-selects at run-time positions when an outer loop delays between iterations (p is 1400 instead of 14e4), and writes a nonblocking update of q[8] of logic [7:0] q into bit 0. IEEE 1800-2023 10.4.2 schedules every nonblocking assignment as its own update in issue order; 11.5.1 and 7.4.6 make bits outside the target unwritten. Icarus passes the unchanged shared assertions; the adapter-free source reproduces both Verilator failures.",
+        "upstream": []
+      },
+      "name": "timing::process_nonblocking_assignments_outside_their_target",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::process_nonblocking_assignments_to_array_elements",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -838,6 +1130,17 @@
       "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
+      "name": "timing::script_writes_between_runs_reach_generated_clock_domains",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "timing::selected_child_dependency_ignores_unreachable_reads",
       "phase": "execute",
       "status": "passed",
@@ -909,6 +1212,17 @@
       "name": "timing::staged_nonblocking_writes_wake_waiters",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::staged_nonblocking_updates_keep_their_order",
+      "phase": "execute",
+      "status": "passed",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -1094,6 +1408,17 @@
       "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
+      "name": "timing::variable_delay_clock_changes_its_period",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "timing::variable_index_events_follow_the_index",
       "phase": "execute",
       "status": "passed",
@@ -1117,6 +1442,17 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::waiting_processes_do_not_keep_an_idle_simulation_running",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::zero_delay_process_ends_a_pulse_after_its_edge_triggers",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,

@@ -1,4 +1,4 @@
-//! Rounds of a time slot with processes or counted signals: settling,
+//! Rounds of a time slot with processes: settling,
 //! derived-clock edges, domains evaluated before an inactive region and
 //! their publication.
 
@@ -219,6 +219,25 @@ impl<B: SimBackend> SimulationState<B> {
                 self.record_level(id, level);
             }
         }
+    }
+
+    /// A marked trigger evaluates a domain that commits its blocking
+    /// results in the active region (the filter of
+    /// [`Self::evaluate_before_inactive`]).
+    pub(super) fn active_commit_triggered(&self, backend: &B, round: &Round) -> bool {
+        if self.model.active_commits.is_empty() {
+            return false;
+        }
+        backend.get_triggered_bits().iter().any(|id| {
+            let info = self.model.event_info[id];
+            info.canonical_id != usize::MAX
+                && info.eval_only_event.is_some()
+                && self.model.active_commits.contains(info.canonical_id)
+                && (!info.is_cascaded
+                    || round.counted_triggered.contains(id)
+                    || round.edge_approved.contains(id)
+                    || self.stable_edge_triggered(backend, id))
+        })
     }
 
     /// Evaluate the triggered domains before an inactive region runs. Their

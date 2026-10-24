@@ -32,6 +32,7 @@ pub(in crate::ast) fn native_type(
     state: &AnalysisState,
     union: bool,
     signed: bool,
+    owner: Arc<str>,
     fields: Vec<(String, Type)>,
     ranges: Vec<PackedRange>,
     env: &HashMap<String, i128>,
@@ -44,6 +45,7 @@ pub(in crate::ast) fn native_type(
                 return None;
             }
             Some(PackedMember {
+                owner: owner.clone(),
                 name,
                 offset: 0,
                 r#type: capture_member_type(state, ty, env)?,

@@ -155,6 +155,15 @@ memory_file_word_count = "error"
 Rust の `.allow_inferred_latches(true)` と JavaScript の `allowInferredLatches: true` は、
 この診断の明示設定がない場合だけ `allow` を補います。明示した `error`・`warn`・`allow` が優先されます。
 
+`interface_array_query` の既定値は `error` です。`warn` または `allow` で、固定長の interface 配列と添字で選択した部分配列に対する `$size` を互換拡張として許可します。IEEE 1800-2023 §20.7 の対象はデータ配列であり、interface インスタンスはデータオブジェクトではありません。省略可能な次元引数は既知の整数定数に限ります。この拡張によって interface ハンドルに packed 幅が付いたり、他の配列クエリが使えるようになったりすることはありません。
+
+```toml
+[diagnostics]
+interface_array_query = "warn"
+```
+
+CLI でも同じ設定を使います: `celox run top.sv --top Top --diagnostic interface_array_query=warn`。
+
 `multiple_always_ff_drivers` は、`always_ff` と別のエッジプロセスが同じメモリへ書く場合に既定で `error` になります（IEEE 1800-2023 §9.2.2.4）。`warn` または `allow` では、非ブロッキング代入の変更範囲を次状態領域に保持してコミットします。通常の `always` 同士による共有にはこの診断は出ません。異なるプロセスが同時に同じビットへ書く順序は、移植可能な動作として保証されません。
 
 プロジェクトのシミュレータ生成時は `Veryl.toml` と同じ場所の設定を読み込みます。CLI は単独の SystemVerilog プロジェクトにも対応します。

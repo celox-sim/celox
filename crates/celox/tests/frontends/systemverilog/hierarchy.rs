@@ -1,6 +1,69 @@
 use super::*;
 
 sv_backends! {
+    fn port_pattern_constant_unpacked_defaults(sim) {
+        @case "hierarchy::port_pattern_constant_unpacked_defaults";
+    }
+
+    fn port_pattern_constant_literal_defaults(sim) {
+        @case "hierarchy::port_pattern_constant_literal_defaults";
+    }
+
+    fn port_pattern_constant_mixed_state_defaults(sim) {
+        @case "hierarchy::port_pattern_constant_mixed_state_defaults";
+    }
+
+    fn port_pattern_constant_aggregate_defaults(sim) {
+        @case "hierarchy::port_pattern_constant_aggregate_defaults";
+    }
+    fn port_pattern_default_bounds_require_matching_types(sim) {
+        @case "hierarchy::port_pattern_default_bounds_require_matching_types";
+    }
+
+    fn port_pattern_review_packed_value_types(sim) {
+        @case "hierarchy::port_pattern_review_packed_value_types";
+    }
+    fn port_pattern_review_conditional_structs(sim) {
+        @case "hierarchy::port_pattern_review_conditional_structs";
+    }
+    fn port_pattern_review_subarray_items(sim) {
+        @case "hierarchy::port_pattern_review_subarray_items";
+    }
+
+    fn port_pattern_review_aggregate_defaults(sim) {
+        @case "hierarchy::port_pattern_review_aggregate_defaults";
+    }
+
+    fn port_pattern_review_mixed_state_structs(sim) {
+        @case "hierarchy::port_pattern_review_mixed_state_structs";
+    }
+    fn port_pattern_review_member_key_collisions(sim) {
+        @case "hierarchy::port_pattern_review_member_key_collisions";
+    }
+    fn port_pattern_review_packed_struct_arrays(sim) {
+        @case "hierarchy::port_pattern_review_packed_struct_arrays";
+    }
+    fn port_pattern_review_interface_inputs(sim) {
+        @case "hierarchy::port_pattern_review_interface_inputs";
+    }
+
+    fn port_patterns_preserve_four_state_elements(sim) {
+        @case "hierarchy::port_patterns_preserve_four_state_elements";
+    }
+    fn port_patterns_reject_incorrect_element_counts(sim) {
+        @case "hierarchy::port_patterns_reject_incorrect_element_counts";
+    }
+
+    fn port_patterns_use_specialized_formal_shapes(sim) {
+        @case "hierarchy::port_patterns_use_specialized_formal_shapes";
+    }
+    fn port_patterns_keep_caller_values_and_generated_names(sim) {
+        @case "hierarchy::port_patterns_keep_caller_values_and_generated_names";
+    }
+    fn port_patterns_bind_nested_structure_elements(sim) {
+        @case "hierarchy::port_patterns_bind_nested_structure_elements";
+    }
+
     fn named_array_parameters_forward_whole_values(sim) {
         @case "hierarchy::named_array_parameters_forward_whole_values";
     }
@@ -440,6 +503,114 @@ fn rejects_incompatible_named_array_parameter_overrides() {
         assert!(
             error.to_string().contains("is not assignment compatible"),
             "{declaration}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_incompatible_port_pattern_subarray_items() {
+    for declaration in [
+        "logic [7:0] row",
+        "logic [7:0] row[3]",
+        "logic [3:0] row[2]",
+        "logic signed [7:0] row[2]",
+        "bit [7:0] row[2]",
+        "logic [7:0] row[1][2]",
+    ] {
+        let source = format!(
+            r#"
+            module Child(input logic [7:0] cfg[2][2], output wire [7:0] y);
+                assign y=cfg[0][0];
+            endmodule
+            module Top(output wire [7:0] y);
+                {declaration};
+                Child c(.cfg('{{row,row}}), .y(y));
+            endmodule
+            "#
+        );
+        let error =
+            match Simulator::from_sv_sources(vec![(&source, Path::new("subarray_item.sv"))], "Top")
+                .build_cranelift()
+            {
+                Err(error) => error,
+                Ok(_) => panic!("incompatible subarray item must be rejected: {declaration}"),
+            };
+        let error = error.to_string();
+        assert!(
+            error.contains("is not assignment compatible")
+                || (error.contains("scalar")
+                    && error.contains("assignment pattern item for unpacked array")),
+            "{declaration}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_array_values_in_scalar_port_pattern_elements() {
+    for pattern in ["'{row,row}", "'{default:row}"] {
+        let source = format!(
+            r#"
+            module Child(input logic [7:0] cfg[2], output wire [7:0] y);
+                assign y=cfg[0];
+            endmodule
+            module Top(output wire [7:0] y);
+                logic [7:0] row[2];
+                Child c(.cfg({pattern}), .y(y));
+            endmodule
+            "#
+        );
+        let error = match Simulator::from_sv_sources(
+            vec![(&source, Path::new("array_scalar_item.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        {
+            Err(error) => error,
+            Ok(_) => panic!("array value must not be truncated to a scalar: {pattern}"),
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains("assignment pattern item for scalar"),
+            "{pattern}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_recursive_port_pattern_defaults_for_packed_unions() {
+    for connection in [
+        "Child c(.cfg('{default:'x}));",
+        "Child c(.cfg(P::items_t'{default:'x}));",
+        "Cfg c(.cfg('{default:'x}));",
+        "WithParam #(.CFG('{default:'x})) c();",
+    ] {
+        let source = format!(
+            r#"
+            package P;
+                typedef union packed {{logic a; bit b;}} item_t;
+                typedef item_t items_t[2];
+            endpackage
+            module Child(input P::item_t cfg[2]); endmodule
+            interface Cfg(input P::item_t cfg[2]); endinterface
+            module WithParam #(parameter P::item_t CFG[2]='{{'0,'0}})(); endmodule
+            module Top;
+                {connection}
+            endmodule
+            "#
+        );
+        let error = match Simulator::from_sv_sources(
+            vec![(&source, Path::new("union_pattern_default.sv"))],
+            "Top",
+        )
+        .four_state(true)
+        .build_cranelift()
+        {
+            Err(error) => error,
+            Ok(_) => panic!("unsupported union default must be rejected: {connection}"),
+        };
+        assert!(
+            error.to_string().contains("packed union"),
+            "{connection}: {error}"
         );
     }
 }

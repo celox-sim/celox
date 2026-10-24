@@ -106,7 +106,7 @@ class PlaygroundInstance {
 		if (this.dirty) this.evalComb();
 	}
 
-	/** The event's active edge without moving its signal, as `tick`. */
+	/** A clock period of the event's signal, as `tick`. */
 	tickOne(eventId: number): void {
 		this.runner.tick(eventId);
 		this.dirty = false;
@@ -268,11 +268,6 @@ export function createPlaygroundSimulator(
 		inactiveEdge(event?: PlaygroundEvent) {
 			const id = resolveEventId(event);
 			sim.edges([[id, design.activeIsRising(id) ? "negedge" : "posedge"]]);
-		},
-		/** One clock cycle: `activeEdge()`, then `inactiveEdge()`. */
-		cycle(event?: PlaygroundEvent) {
-			sim.activeEdge(event);
-			sim.inactiveEdge(event);
 		},
 		event(name: string): PlaygroundEventHandle {
 			return { name, id: design.resolveEvent(name) };

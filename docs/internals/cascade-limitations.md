@@ -99,26 +99,22 @@ optimization and does not change the ordering model above.
 
 ## Event-based ticks
 
-`Simulator::tick` applies the same rules to one active edge of an event.
-Gated clocks of the event are judged from the state before the edge and
-evaluate with the ticked domain; after the commit, the rounds above run the
-domains whose clocks are computed from state and the gated clocks the commit
-moves. `Simulator::tick_events` does
-the same for coincident events, and the native testbench's `clock.next()` and
-the N-API `tick` use the same mechanism.
+`Simulator::posedge`, `negedge`, `active_edge`, `inactive_edge` and the
+coincident `edges` apply the same rules to the transition of an event signal
+they make, as a timed step does: the event's own domain runs on its active
+edge, gated clocks of either polarity are judged at the transition, and the
+signal stays at its new level. Gated clocks are judged from the state before
+the edge and evaluate with the event's own domain; after the commit, the
+rounds above run the domains whose clocks are computed from state and the
+gated clocks the commit moves.
 
-A tick is the event's active edge only, without simulation time, and does not
-change the event's signal. Domains that react to the signal's opposite edge,
-such as one clocked by `~clk` or by a falling edge of `clk & en`, do not run on
-a tick; the timed `Simulation`, which drives both levels of a clock, runs them.
-
-`Simulator::posedge`, `negedge`, `active_edge`, `inactive_edge`, `cycle` and the
-coincident `edges` move the signal instead and apply the same rules to the
-transition they make, as a timed step does: the event's own domain runs on its
-active edge, gated clocks of either polarity are judged at the transition, and
-the signal stays at its new level. `cycle` is equivalent to the two timed
-steps of one clock period. The N-API handles and the WASM bridge of the
-TypeScript package use the same plans.
+`Simulator::tick` is one clock period, the active edge followed by the
+inactive edge, and is equivalent to the two timed steps of that period;
+`Simulator::tick_events` does the same for coincident events, and the
+native testbench's `clock.next()` takes the same two edges. The
+[execution semantics](../guide/execution-semantics.md) define them by
+SystemVerilog. The N-API handles and the WASM bridge of the TypeScript
+package use the same plans.
 
 Which derived domains an event can reach is computed once when the design is
 built, together with a small program for each gate where its combinational

@@ -216,6 +216,11 @@ pub struct RuntimeCombObserver<A> {
     pub site_id: u32,
     pub activation_group: u32,
     pub sensitivity: Vec<VarAtomBase<A>>,
+    /// Occurrence counters of the sensitivity: a counter that moved since
+    /// the last check activates the observer even when the settled value
+    /// equals the last one.
+    #[serde(default = "Vec::new")]
+    pub occurrence_counters: Vec<A>,
     pub written_inputs: Vec<A>,
 }
 
@@ -641,9 +646,9 @@ pub struct NbaSite<A> {
     /// Staging object of `width` bits holding the assigned value, with the
     /// target's state representation.
     pub value: A,
-    /// Two-state staging object holding a bit offset added to `lsb`, for an
-    /// assignment whose position is computed at run time.
-    pub offset: Option<A>,
+    /// For an assignment whose position is computed at run time, the
+    /// staging objects of the position.
+    pub position: Option<NbaPosition<A>>,
     /// One-bit flag of a site whose destination has no other writer in the
     /// design (no other nonblocking site, no store of any unit, not a
     /// top-level port) and whose update order nothing observes (no wait,
@@ -667,8 +672,28 @@ impl<A: Copy> NbaSite<A> {
             lsb: self.lsb,
             width: self.width,
             value: map(self.value),
-            offset: self.offset.map(&mut map),
+            position: self.position.map(|position| position.map(&mut map)),
             pending: self.pending.map(&mut map),
+        }
+    }
+}
+
+/// The run-time position of a nonblocking assignment: two-state staging
+/// objects holding a bit offset added to the site's `lsb` and the number of
+/// bits written there, the low bits of the value and at most the site's
+/// `width`. Zero bits write nothing, as for a position outside the target
+/// or one with an unknown bit (IEEE 1800-2023 7.4.6, 11.5.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NbaPosition<A> {
+    pub offset: A,
+    pub width: A,
+}
+
+impl<A: Copy> NbaPosition<A> {
+    pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> NbaPosition<B> {
+        NbaPosition {
+            offset: map(self.offset),
+            width: map(self.width),
         }
     }
 }
@@ -826,6 +851,11 @@ pub struct RuntimeSchema<A> {
     pub process_origins: Vec<ProcessOrigin>,
     /// Counted signals and their occurrence counters.
     pub watches: Vec<EventWatch<A>>,
+    /// Bit ranges whose changes bump an occurrence counter: the sensitivity
+    /// of change-gated combinational processes and comb observers. Design
+    /// code counts its own writes; the runtime counts the writes it makes,
+    /// such as the nonblocking updates it publishes.
+    pub occurrence_probes: Vec<(VarAtomBase<A>, A)>,
     /// Wait sites of the process kernels. A process's sites appear in the
     /// order of its local site indices.
     pub wait_sites: Vec<WaitSite<A>>,
@@ -842,6 +872,189 @@ pub struct RuntimeSchema<A> {
     /// most one per module instance. Before each round a timed scheduler
     /// stores the current time into each, as [`TIME_SLOT_WIDTH`] bits.
     pub time_slots: Vec<A>,
+    /// The state a compiled scheduler exchanges with the runtime, and the
+    /// scheduler itself once one is generated. Present when the design has
+    /// process kernels.
+    pub scheduler: Option<SchedulerSchema<A>>,
+}
+
+/// Width of [`SchedulerSlots::limit`], [`SchedulerSlots::now`],
+/// [`SchedulerSlots::exit_arg`], [`SchedulerSlots::count`],
+/// [`SchedulerSlots::current`], [`SchedulerSlots::levels`],
+/// [`SchedulerSlots::ready`], [`SchedulerSlots::clock_value`],
+/// [`SchedulerSlots::clock_armed`] and every
+/// [`SchedulerSlots::wake`] object, and of each element of
+/// [`SchedulerSlots::clock_next`] and [`SchedulerSlots::clock_period`].
+pub const SCHEDULER_TIME_WIDTH: usize = 64;
+/// The most host periodic clocks a compiled scheduler runs: one element of
+/// [`SchedulerSlots::clock_next`] and [`SchedulerSlots::clock_period`], and
+/// one bit of the clock masks, per entry of [`SchedulerSchema::clocks`].
+pub const SCHEDULER_CLOCKS: usize = 64;
+/// Width of [`SchedulerSlots::exit`], [`SchedulerSlots::finish`],
+/// [`SchedulerSlots::cont`], [`SchedulerSlots::dirty`] and every [`SchedulerSlots::waiting`] and
+/// [`SchedulerSlots::baseline`] object.
+pub const SCHEDULER_FLAG_WIDTH: usize = 8;
+
+/// Hidden state objects through which a compiled scheduler and the runtime
+/// exchange a run of time slots. Between runs they hold no state: the
+/// runtime's scheduling state is the source of truth, so state files leave
+/// them out.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SchedulerSlots<A> {
+    /// The last time the run may reach.
+    pub limit: A,
+    /// The time of the last slot the run reached.
+    pub now: A,
+    /// Why the run returned, a [`SchedulerExit`] code.
+    pub exit: A,
+    /// The process an exit concerns.
+    pub exit_arg: A,
+    /// Set when a `$finish` record was emitted in the unit just run.
+    pub finish: A,
+    /// Where a shared combinational settle continues.
+    pub cont: A,
+    /// Set when state combinational logic reads may have changed since its
+    /// last settle.
+    pub dirty: A,
+    /// The number of time slots the run ran.
+    pub count: A,
+    /// The kernel running when the run returned, `u64::MAX` for none.
+    pub current: A,
+    /// The levels of the event signals at the start of the last slot, one
+    /// bit per event in event order.
+    pub levels: A,
+    /// The kernels ready to run in the current slot, one bit per kernel in
+    /// kernel order.
+    pub ready: A,
+    /// The time each process kernel resumes at, in kernel order, valid
+    /// where [`Self::waiting`] is set.
+    pub wake: Vec<A>,
+    /// Whether each process kernel waits for its wake time or event.
+    pub waiting: Vec<A>,
+    /// The level a kernel waiting for an event last saw its signal at.
+    pub baseline: Vec<A>,
+    /// The time of each host clock's next edge, one element per entry of
+    /// [`SchedulerSchema::clocks`], valid where [`Self::clock_armed`] is set.
+    pub clock_next: A,
+    /// The period of each host clock, one element per clock.
+    pub clock_period: A,
+    /// The level each host clock's next edge sets, one bit per clock.
+    pub clock_value: A,
+    /// Whether each host clock has a next edge, one bit per clock.
+    pub clock_armed: A,
+}
+
+impl<A> SchedulerSlots<A> {
+    pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> SchedulerSlots<B> {
+        SchedulerSlots {
+            limit: map(self.limit),
+            now: map(self.now),
+            exit: map(self.exit),
+            exit_arg: map(self.exit_arg),
+            finish: map(self.finish),
+            cont: map(self.cont),
+            dirty: map(self.dirty),
+            count: map(self.count),
+            current: map(self.current),
+            levels: map(self.levels),
+            ready: map(self.ready),
+            wake: self.wake.into_iter().map(&mut map).collect(),
+            waiting: self.waiting.into_iter().map(&mut map).collect(),
+            baseline: self.baseline.into_iter().map(&mut map).collect(),
+            clock_next: map(self.clock_next),
+            clock_period: map(self.clock_period),
+            clock_value: map(self.clock_value),
+            clock_armed: map(self.clock_armed),
+        }
+    }
+
+    /// Every slot.
+    pub fn iter(&self) -> impl Iterator<Item = &A> {
+        [
+            &self.limit,
+            &self.now,
+            &self.exit,
+            &self.exit_arg,
+            &self.finish,
+            &self.cont,
+            &self.dirty,
+            &self.count,
+            &self.current,
+            &self.levels,
+            &self.ready,
+            &self.clock_next,
+            &self.clock_period,
+            &self.clock_value,
+            &self.clock_armed,
+        ]
+        .into_iter()
+        .chain(&self.wake)
+        .chain(&self.waiting)
+        .chain(&self.baseline)
+    }
+}
+
+/// Why a run of the compiled scheduler returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum SchedulerExit {
+    /// The next time slot is after the limit.
+    Limit = 0,
+    /// A process or a `$finish` record finished the simulation.
+    Finish = 1,
+    /// The delay of process [`SchedulerSlots::exit_arg`] overflows the
+    /// simulation time.
+    DelayOverflow = 2,
+    /// A process suspended in a way the scheduler does not compile.
+    Internal = 3,
+    /// The next edge of host clock [`SchedulerSlots::exit_arg`] overflows
+    /// the simulation time.
+    ClockOverflow = 4,
+}
+
+impl SchedulerExit {
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Limit),
+            1 => Some(Self::Finish),
+            2 => Some(Self::DelayOverflow),
+            3 => Some(Self::Internal),
+            4 => Some(Self::ClockOverflow),
+            _ => None,
+        }
+    }
+}
+
+/// A design's compiled scheduler: the process unit that runs time slots of
+/// the kernels it compiles, and its slots.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SchedulerSchema<A> {
+    pub slots: SchedulerSlots<A>,
+    /// The index of the scheduler unit among the process units, after the
+    /// kernels; `None` when no scheduler was generated.
+    pub unit: Option<usize>,
+    /// Per process kernel, why the scheduler does not run it, or `None` when
+    /// it does.
+    pub fallback: Vec<Option<String>>,
+    /// The event signals the scheduler's kernels write or its host clocks
+    /// may drive, in the order of the bits of [`SchedulerSlots::levels`].
+    pub events: Vec<A>,
+    /// The event signals a host periodic clock may drive inside the
+    /// scheduler's slots, in the order of its clock slots.
+    pub clocks: Vec<A>,
+}
+
+impl<A> SchedulerSchema<A> {
+    pub fn map<B>(self, map: impl FnMut(A) -> B) -> SchedulerSchema<B> {
+        let mut map = map;
+        SchedulerSchema {
+            slots: self.slots.map(&mut map),
+            unit: self.unit,
+            fallback: self.fallback,
+            events: self.events.into_iter().map(&mut map).collect(),
+            clocks: self.clocks.into_iter().map(map).collect(),
+        }
+    }
 }
 
 /// Width of every [`RuntimeSchema::time_slots`] object.
@@ -864,11 +1077,13 @@ impl<A> Default for RuntimeSchema<A> {
             processes: Vec::new(),
             process_origins: Vec::new(),
             watches: Vec::new(),
+            occurrence_probes: Vec::new(),
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
             host_request_sites: Vec::new(),
             active_commits: Vec::new(),
             time_slots: Vec::new(),
+            scheduler: None,
         }
     }
 }
@@ -918,6 +1133,12 @@ pub struct EventTopology<A> {
     /// a signal needs a settle before its domains evaluate.
     #[serde(default)]
     pub combinationally_read: BTreeSet<A>,
+    /// Canonical events whose own domain reads no level of their signal: its
+    /// flip-flops do not sample the signal as data. With
+    /// [`Self::combinationally_read`] it says whether a run of the domain
+    /// observes the signal's level. Absent means it may.
+    #[serde(default)]
+    pub level_unread_by_domain: BTreeSet<A>,
 }
 
 /// A clock computed combinationally from an event's signal.
@@ -1013,6 +1234,7 @@ impl<A> Default for EventTopology<A> {
             combinational_derived: BTreeMap::new(),
             independent_derived: BTreeSet::new(),
             combinationally_read: BTreeSet::new(),
+            level_unread_by_domain: BTreeSet::new(),
         }
     }
 }
@@ -1661,6 +1883,7 @@ mod tests {
                 id: initial.address,
                 access: BitAccess { lsb: 3, msb: 7 },
             }],
+            occurrence_counters: Vec::new(),
             written_inputs: vec![initial.address],
         });
         runtime.testbench_read_roots.insert(initial.address);

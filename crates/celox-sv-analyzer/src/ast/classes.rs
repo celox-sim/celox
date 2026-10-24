@@ -22,8 +22,14 @@ pub(super) const THIS: &str = "this";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Property {
     pub name: String,
+    pub owner: String,
+    pub constant: bool,
+    pub local: bool,
+    pub protected: bool,
     pub r#type: Type,
     pub field: ObjectField,
+    pub rand: bool,
+    pub randc: bool,
     /// The initializer of the declaration, evaluated by the constructor.
     pub initializer: Option<celox_sv_syntax::ExprId>,
 }
@@ -69,8 +75,15 @@ pub(super) struct Class {
     /// Identifies the class at run time; stable across modules and runs.
     pub id: u32,
     pub base: Option<String>,
-    /// A `virtual class`, which cannot be constructed (IEEE 1800-2023 8.21).
+    /// The interface classes the class implements, or the interface class
+    /// extends (IEEE 1800-2023 8.26).
+    pub interfaces: Vec<String>,
+    /// A `virtual class` or an interface class, which cannot be constructed
+    /// (IEEE 1800-2023 8.21, 8.26).
     pub is_abstract: bool,
+    /// An interface class: it has no properties and its methods are pure
+    /// virtual (IEEE 1800-2023 8.26).
+    pub is_interface: bool,
     /// Properties of the class and its bases, bases first.
     pub properties: Vec<Property>,
     /// How many of `properties` the bases declare.
@@ -81,9 +94,57 @@ pub(super) struct Class {
     pub methods: Vec<Method>,
     /// Bytes of an object.
     pub size: u32,
+    pub has_constraints: bool,
+}
+
+/// An internal unsigned packed argument of a generated method.
+pub(super) fn unsigned_type(width: usize) -> Type {
+    let mut ty = procedural::int_type();
+    ty.is_signed = false;
+    ty.packed_ranges = vec![PackedRange::new(
+        ConstExpr::Literal((width - 1).to_string()),
+        ConstExpr::Literal("0".into()),
+    )];
+    ty
 }
 
 impl Class {
+    pub fn selection_type(&self) -> Type {
+        unsigned_type(self.properties.len() + 1)
+    }
+
+    /// Validate the supported unconstrained subset before binding a call.
+    pub fn check_randomize(&self, tree: &AnalysisContext<'_>) -> Converted<()> {
+        if self.has_constraints {
+            return Err(unsupported("class randomize with constraints"));
+        }
+        for property in &self.properties {
+            if property.randc {
+                return Err(unsupported("class randomize with randc properties"));
+            }
+            if property.rand && (property.field.handle.is_some() || property.r#type.is_enum) {
+                return Err(unsupported(
+                    "class randomize requires integral non-enum rand properties",
+                ));
+            }
+        }
+        for hook in ["pre_randomize", "post_randomize"] {
+            if let Some(method) = self.method(hook) {
+                let native = tree.declarations().subroutine(method.native);
+                if native.kind != celox_sv_syntax::SubroutineKind::Function
+                    || native.ports.as_ref().is_some_and(|ports| !ports.is_empty())
+                    || method.qualifiers.is_static
+                    || method.qualifiers.is_virtual
+                {
+                    return Err(unsupported(
+                        "randomization hooks require non-static, non-virtual functions without arguments",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The property `name`; one the class declares hides one of a base
     /// (IEEE 1800-2023 8.14).
     pub fn property(&self, name: &str) -> Option<&Property> {
@@ -138,7 +199,9 @@ impl Class {
             .filter(|method| method.owner == self.name && method.is_virtual)
     }
 
-    /// Whether the class is `ancestor` or derives from it.
+    /// Whether the class is `ancestor`, derives from it or implements it,
+    /// so that a handle of the class may be assigned to a variable of
+    /// `ancestor` (IEEE 1800-2023 8.16, 8.26.5).
     pub fn derives_from(
         &self,
         tree: &AnalysisContext<'_>,
@@ -146,16 +209,26 @@ impl Class {
         env: &HashMap<String, i128>,
         aliases: &HashMap<String, Type>,
     ) -> bool {
-        let mut class = Some(self.name.clone());
-        while let Some(name) = class {
+        let mut pending = vec![self.name.clone()];
+        let mut seen = HashSet::default();
+        while let Some(name) = pending.pop() {
             if name == ancestor {
                 return true;
             }
-            class = self::class(tree, &name, env, aliases)
-                .ok()
-                .and_then(|class| class.base.clone());
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if let Ok(class) = self::class(tree, &name, env, aliases) {
+                pending.extend(class.base.iter().chain(&class.interfaces).cloned());
+            }
         }
         false
+    }
+
+    /// The subroutine that `$cast` to a variable of `class` calls (IEEE
+    /// 1800-2023 8.16).
+    pub fn cast_name(class: &str) -> String {
+        format!("{class}::$cast")
     }
 
     /// An allocation of an uninitialized object of the class.
@@ -192,8 +265,12 @@ fn declaration<'a>(
         .find(|class| instances::normalize_identifier(&class.name.spelling) == name)
 }
 
-/// The classes that body item `item` declares, except interface classes,
-/// which have no implementation (IEEE 1800-2023 8.26).
+/// Whether `name` is an interface class (IEEE 1800-2023 8.26).
+pub(super) fn is_interface(tree: &AnalysisContext<'_>, name: &str) -> bool {
+    declaration(tree, name).is_some_and(|declaration| declaration.interface)
+}
+
+/// The classes and interface classes that body item `item` declares.
 pub(super) fn item_classes(
     item: celox_sv_syntax::BodyItemId,
     tree: &AnalysisContext<'_>,
@@ -208,9 +285,7 @@ pub(super) fn item_classes(
         .classes
         .iter()
         .filter(|class| {
-            !class.interface
-                && item.tokens.start <= class.tokens.start
-                && class.tokens.end <= item.tokens.end
+            item.tokens.start <= class.tokens.start && class.tokens.end <= item.tokens.end
         })
         .map(|class| instances::normalize_identifier(&class.name.spelling))
         .collect()
@@ -308,10 +383,15 @@ pub(super) fn class(
     }
     let declaration =
         declaration(tree, name).ok_or_else(|| unsupported(format!("class `{name}`")))?;
-    if declaration.interface {
-        return Err(unsupported("interface class"));
-    }
     let native = tree.declarations();
+    let interfaces = declaration
+        .interfaces
+        .iter()
+        .map(|&interface| interface_name(tree, interface, env, aliases))
+        .collect::<Converted<Vec<_>>>()?;
+    if declaration.interface {
+        return interface_class(tree, name, declaration, interfaces, env, aliases);
+    }
     let base = match &declaration.base {
         None => None,
         Some(base) => {
@@ -332,6 +412,14 @@ pub(super) fn class(
         .unwrap_or_default();
     let mut size = base.as_ref().map_or(0, |base| base.size);
     for property in &declaration.properties {
+        if property.declaration.constant && (property.qualifiers.rand || property.qualifiers.randc)
+        {
+            return Err(unsupported("const random class property"));
+        }
+        if property.qualifiers.is_static && (property.qualifiers.rand || property.qualifiers.randc)
+        {
+            return Err(unsupported("static random class property"));
+        }
         let ty = type_binding::procedural_type(
             property.declaration.data_type,
             native,
@@ -356,13 +444,20 @@ pub(super) fn class(
                 });
                 continue;
             }
+            let owner = name.to_owned();
             let name = property_name;
             let field = field(&tree.state, &ty, env, size)?;
             size = field.offset + field.bytes();
             properties.push(Property {
                 name,
+                owner,
+                constant: property.declaration.constant,
+                local: property.qualifiers.local,
+                protected: property.qualifiers.protected,
                 r#type: ty.clone(),
                 field,
+                rand: property.qualifiers.rand,
+                randc: property.qualifiers.randc,
                 initializer: variable.value,
             });
         }
@@ -377,6 +472,11 @@ pub(super) fn class(
     for method in &declaration.methods {
         let subroutine = native.subroutine(method.subroutine);
         let method_name = instances::normalize_identifier(&subroutine.name.spelling);
+        if matches!(method_name.as_str(), "randomize" | "srandom" | "rand_mode") {
+            return Err(unsupported(
+                "overriding built-in class randomization methods",
+            ));
+        }
         // A method overriding a virtual method is virtual (8.20).
         let is_virtual = method.qualifiers.is_virtual
             || methods
@@ -406,8 +506,13 @@ pub(super) fn class(
     // implements it with the same return type (8.26.2, 8.26.6.1). An
     // abstract class may instead re-declare it pure (8.26.7).
     let mut required = Vec::new();
-    for &interface in &declaration.interfaces {
-        interface_methods(tree, interface, env, aliases, &mut required)?;
+    for interface in &interfaces {
+        required.extend(
+            class(tree, interface, env, aliases)?
+                .methods
+                .iter()
+                .map(|method| (method.name.clone(), method.native)),
+        );
     }
     for (method_name, prototype) in required {
         match methods.iter_mut().find(|method| method.name == method_name) {
@@ -446,8 +551,12 @@ pub(super) fn class(
     let class = Rc::new(Class {
         name: name.to_owned(),
         id: class_id(name),
+        has_constraints: declaration.has_constraints
+            || base.as_ref().is_some_and(|base| base.has_constraints),
         base: base.map(|base| base.name.clone()),
+        interfaces,
         is_abstract: declaration.virtual_class,
+        is_interface: false,
         properties,
         base_properties,
         statics,
@@ -461,32 +570,85 @@ pub(super) fn class(
     Ok(class)
 }
 
-/// The methods that interface class type `interface` declares or inherits,
-/// with their prototypes, appended to `methods` (IEEE 1800-2023 8.26). A
-/// name that several interface classes declare appears once for each.
-fn interface_methods(
+/// The interface class that type `interface` of an `implements` or an
+/// interface class's `extends` list names (IEEE 1800-2023 8.26).
+fn interface_name(
     tree: &AnalysisContext<'_>,
     interface: celox_sv_syntax::TypeId,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
-    methods: &mut Vec<(String, celox_sv_syntax::SubroutineId)>,
-) -> Converted<()> {
+) -> Converted<String> {
     let native = tree.declarations();
     let name = type_binding::procedural_type(interface, native, tree, env, aliases)?
         .and_then(|ty| ty.class.clone())
         .ok_or_else(|| unsupported("implemented interface class type"))?;
-    let declaration = declaration(tree, &name)
-        .filter(|declaration| declaration.interface)
-        .ok_or_else(|| unsupported(format!("`implements` of `{name}`, not an interface class")))?;
+    if !declaration(tree, &name).is_some_and(|declaration| declaration.interface) {
+        return Err(unsupported(format!(
+            "`implements` of `{name}`, not an interface class"
+        )));
+    }
+    Ok(name)
+}
+
+/// Interface class `name`, whose methods are the pure virtual methods it
+/// declares and those of the interface classes it extends (IEEE 1800-2023
+/// 8.26). A handle of it refers to an object of a class implementing it.
+fn interface_class(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    declaration: &celox_sv_syntax::ClassDeclaration,
+    interfaces: Vec<String>,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Converted<Rc<Class>> {
+    let native = tree.declarations();
+    let mut methods: Vec<Method> = Vec::new();
+    for interface in &interfaces {
+        for method in &class(tree, interface, env, aliases)?.methods {
+            methods.retain(|known| known.name != method.name);
+            methods.push(method.clone());
+        }
+    }
     for method in &declaration.methods {
-        let method_name =
-            instances::normalize_identifier(&native.subroutine(method.subroutine).name.spelling);
-        methods.push((method_name, method.subroutine));
+        let subroutine = native.subroutine(method.subroutine);
+        // A method whose types cannot be resolved, such as one using a
+        // type parameter or a typedef of the interface class, leaves the
+        // interface class without a layout; it is lowered only when used.
+        type_binding::subroutine_formals(
+            subroutine,
+            tree,
+            &PackedDimensions::new(HashMap::default(), env, aliases),
+        )?;
+        return_type(tree, method.subroutine, env, aliases)?;
+        let method_name = instances::normalize_identifier(&subroutine.name.spelling);
+        methods.retain(|known| known.name != method_name);
+        methods.push(Method {
+            name: method_name,
+            owner: name.to_owned(),
+            native: method.subroutine,
+            qualifiers: method.qualifiers,
+            is_virtual: true,
+        });
     }
-    for &base in &declaration.interfaces {
-        interface_methods(tree, base, env, aliases, methods)?;
-    }
-    Ok(())
+    let class = Rc::new(Class {
+        name: name.to_owned(),
+        id: class_id(name),
+        base: None,
+        interfaces,
+        is_abstract: true,
+        is_interface: true,
+        has_constraints: false,
+        properties: Vec::new(),
+        base_properties: 0,
+        statics: Vec::new(),
+        methods,
+        size: 1,
+    });
+    tree.state
+        .classes
+        .borrow_mut()
+        .insert(name.to_owned(), class.clone());
+    Ok(class)
 }
 
 /// The return type of subroutine `id`, `None` for a task or `void`.
@@ -562,17 +724,16 @@ fn class_id(name: &str) -> u32 {
     hash.max(1)
 }
 
-/// The overrides that dispatcher `Class::dispatcher_name(owner, method)`
-/// calls: each implementation of the method with the classes, deriving from
-/// `owner` and not abstract, whose objects run it.
-pub(super) fn dispatch_targets(
+/// The classes whose objects a handle of class `ancestor` may refer to:
+/// those deriving from it or implementing it that are not abstract (IEEE
+/// 1800-2023 8.16), laid out.
+fn object_classes(
     tree: &AnalysisContext<'_>,
-    owner: &str,
-    method: &str,
+    ancestor: &str,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
-) -> Converted<Vec<(String, Vec<u32>)>> {
-    let mut targets: Vec<(String, Vec<u32>)> = Vec::new();
+) -> Converted<Vec<Rc<Class>>> {
+    let mut classes = Vec::new();
     let mut ids = HashMap::default();
     for declaration in &tree.declarations().classes {
         if declaration.interface || declaration.virtual_class {
@@ -583,7 +744,7 @@ pub(super) fn dispatch_targets(
         let Ok(class) = class(tree, &name, env, aliases) else {
             continue;
         };
-        if !class.derives_from(tree, owner, env, aliases) {
+        if !class.derives_from(tree, ancestor, env, aliases) {
             continue;
         }
         if let Some(other) = ids.insert(class.id, name.clone()) {
@@ -591,6 +752,23 @@ pub(super) fn dispatch_targets(
                 "classes `{other}` and `{name}` with the same run-time identifier"
             )));
         }
+        classes.push(class);
+    }
+    Ok(classes)
+}
+
+/// The overrides that dispatcher `Class::dispatcher_name(owner, method)`
+/// calls: each implementation of the method with the classes, deriving from
+/// or implementing `owner` and not abstract, whose objects run it.
+pub(super) fn dispatch_targets(
+    tree: &AnalysisContext<'_>,
+    owner: &str,
+    method: &str,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Converted<Vec<(String, Vec<u32>)>> {
+    let mut targets: Vec<(String, Vec<u32>)> = Vec::new();
+    for class in object_classes(tree, owner, env, aliases)? {
         let Some(implementation) = class.method(method) else {
             continue;
         };
@@ -601,6 +779,20 @@ pub(super) fn dispatch_targets(
         }
     }
     Ok(targets)
+}
+
+/// The run-time identifiers of the classes whose objects `$cast` may assign
+/// to a variable of class `name` (IEEE 1800-2023 8.16).
+pub(super) fn cast_targets(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Converted<Vec<u32>> {
+    Ok(object_classes(tree, name, env, aliases)?
+        .iter()
+        .map(|class| class.id)
+        .collect())
 }
 
 /// A call of object operation `op`.
