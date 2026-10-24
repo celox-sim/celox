@@ -118,6 +118,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
         return CombProcess {
             creation_order: process.creation_order,
             site: process.site,
+            process_site: process.process_site,
             sensitivity_body,
             ..CombProcess::procedural(process.kind, condition, body)
         };
@@ -140,6 +141,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
     );
     result.creation_order = process.creation_order;
     result.site = process.site;
+    result.process_site = process.process_site;
     result.sensitivity_body = sensitivity_body;
     result
 }

@@ -38,10 +38,9 @@ pub(super) fn comb_processes_from_scope(
         )?;
         for process in &mut processes[start..] {
             process.creation_order = creation_order;
-            process.site = procedural::source_span(
-                syntax_tree.declarations().body_item(item.id).tokens,
-                syntax_tree,
-            );
+            let tokens = syntax_tree.declarations().body_item(item.id).tokens;
+            process.site = procedural::source_span(tokens, syntax_tree);
+            process.process_site = procedural::process_site("always", tokens, syntax_tree);
             for assignment in &mut process.assignments {
                 item.assignment(assignment);
             }

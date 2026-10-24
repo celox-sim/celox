@@ -2629,7 +2629,10 @@ impl<'p, 'a> Ff<'p, 'a> {
     fn exec(&mut self, stmt: &sv::ir::Stmt) -> Result<bool, sv::AnalyzerError> {
         if matches!(
             stmt,
-            sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::Wait(_)
+            sv::ir::Stmt::Delay { .. }
+                | sv::ir::Stmt::WaitEvent(_)
+                | sv::ir::Stmt::WaitImplicit(_)
+                | sv::ir::Stmt::Wait(_)
         ) && (self.kernel.is_none()
             || self.active_calls.iter().any(|name| {
                 self.m
@@ -2674,6 +2677,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             sv::ir::Stmt::WaitEvent(items) => {
                 self.wait_event(items)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::WaitImplicit(reads) => {
+                self.wait_implicit(reads)?;
                 Ok(true)
             }
             sv::ir::Stmt::Wait(condition) => {
@@ -4937,6 +4944,65 @@ impl Ff<'_, '_> {
     fn wait_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
         let mut terms = Vec::new();
         let mut samples = Vec::new();
+        self.event_terms(items, &mut terms, &mut samples)?;
+        self.suspend_on(terms, samples)
+    }
+
+    /// `@*` (IEEE 1800-2023 9.4.2.2): wait for a change of a variable that
+    /// `reads` read. The module variables are those a combinational
+    /// `always @*` is sensitive to, from the same analysis, so folded
+    /// branches and the defaults of omitted subroutine arguments count. A
+    /// process-local variable it reads is sampled like an operand of an
+    /// event expression.
+    fn wait_implicit(&mut self, reads: &[sv::ir::Stmt]) -> Result<(), sv::AnalyzerError> {
+        // The expressions of timing controls are not part of the event list.
+        let reads = without_timing_controls(reads);
+        let reads = reads.as_slice();
+        let mut ids: Vec<SourceVarId> = self
+            .m
+            .implicit_reads(reads, false)
+            .into_iter()
+            .map(|atom| atom.id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut terms: Vec<_> = ids
+            .into_iter()
+            .map(|id| (id, CounterKind::Changes))
+            .collect();
+        let mut names = HashSet::default();
+        for stmt in reads {
+            stmt.clone().visit_mut(
+                &mut |expr: &mut sv::ir::Expr| expr_idents(expr, &mut names),
+                &mut |_: &mut sv::ir::LValue| {},
+                &mut |_: &mut String| {},
+            );
+        }
+        let mut locals: Vec<String> = names
+            .into_iter()
+            .filter(|name| self.m.id(name).is_some_and(|id| self.m.is_hidden(id)))
+            .collect();
+        locals.sort_unstable();
+        let locals: Vec<_> = locals
+            .into_iter()
+            .map(|name| sv::ir::EventItem {
+                edge: sv::ir::EventEdge::Any,
+                expr: sv::ir::Expr::Ident(name),
+            })
+            .collect();
+        let mut samples = Vec::new();
+        self.event_terms(&locals, &mut terms, &mut samples)?;
+        self.suspend_on(terms, samples)
+    }
+
+    /// The counter terms of `items` and the samples the process takes of
+    /// their expressions before it suspends.
+    fn event_terms(
+        &mut self,
+        items: &[sv::ir::EventItem],
+        terms: &mut Vec<(SourceVarId, CounterKind)>,
+        samples: &mut Vec<(String, sv::ir::Expr)>,
+    ) -> Result<(), sv::AnalyzerError> {
         for item in items {
             let expr = self.propagate(&item.expr);
             let edge = match item.edge {
@@ -4953,12 +5019,12 @@ impl Ff<'_, '_> {
             let id = match &expr {
                 sv::ir::Expr::Ident(name) => match self.m.id(name) {
                     Some(id) if !self.m.is_hidden(id) => id,
-                    Some(_) => self.event_expression(&expr, &mut samples)?,
+                    Some(_) => self.event_expression(&expr, samples)?,
                     // A constant never changes.
                     None if self.m.constants.contains_key(name) => continue,
                     None => return Err(unsupported(format!("event expression `{name}`"))),
                 },
-                _ => self.event_expression(&expr, &mut samples)?,
+                _ => self.event_expression(&expr, samples)?,
             };
             match item.edge {
                 sv::ir::EventEdge::Any => terms.push((id, CounterKind::Changes)),
@@ -4970,6 +5036,15 @@ impl Ff<'_, '_> {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Suspend until one of `terms` counts, after taking `samples`.
+    fn suspend_on(
+        &mut self,
+        terms: Vec<(SourceVarId, CounterKind)>,
+        samples: Vec<(String, sv::ir::Expr)>,
+    ) -> Result<(), sv::AnalyzerError> {
         for (target, value) in samples {
             self.assign(&sv::ir::LValue::Ident(target), &value)?;
         }
@@ -5217,12 +5292,68 @@ pub(super) struct KernelUnit {
 /// may not suspend.
 const LOOP_YIELD_BITS: usize = 16;
 
+/// `stmts` without their delays, event controls and waits, at any depth.
+fn without_timing_controls(stmts: &[sv::ir::Stmt]) -> Vec<sv::ir::Stmt> {
+    use sv::ir::Stmt;
+    stmts
+        .iter()
+        .filter(|stmt| {
+            !matches!(
+                stmt,
+                Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::WaitImplicit(_) | Stmt::Wait(_)
+            )
+        })
+        .map(|stmt| match stmt {
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => Stmt::If {
+                condition: condition.clone(),
+                then_body: without_timing_controls(then_body),
+                else_body: without_timing_controls(else_body),
+            },
+            Stmt::Case {
+                kind,
+                selector,
+                items,
+                default,
+            } => Stmt::Case {
+                kind: *kind,
+                selector: selector.clone(),
+                items: items
+                    .iter()
+                    .map(|item| sv::ir::CaseItem {
+                        labels: item.labels.clone(),
+                        body: without_timing_controls(&item.body),
+                    })
+                    .collect(),
+                default: default.as_deref().map(without_timing_controls),
+            },
+            Stmt::Loop {
+                kind,
+                init,
+                condition,
+                step,
+                body,
+            } => Stmt::Loop {
+                kind: kind.clone(),
+                init: without_timing_controls(init),
+                condition: condition.clone(),
+                step: without_timing_controls(step),
+                body: without_timing_controls(body),
+            },
+            stmt => stmt.clone(),
+        })
+        .collect()
+}
+
 /// Whether every pass through `stmts` suspends the process.
 fn always_suspends(stmts: &[sv::ir::Stmt]) -> bool {
     stmts.iter().any(|stmt| {
         matches!(
             stmt,
-            sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_)
+            sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::WaitImplicit(_)
         )
     })
 }
@@ -5336,6 +5467,7 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                     sv::ir::Stmt::SystemTask { .. }
                     | sv::ir::Stmt::Delay { .. }
                     | sv::ir::Stmt::WaitEvent(_)
+                    | sv::ir::Stmt::WaitImplicit(_)
                     | sv::ir::Stmt::Wait(_) => effect = true,
                     _ => {}
                 });

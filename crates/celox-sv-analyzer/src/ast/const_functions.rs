@@ -1345,7 +1345,9 @@ impl Frame<'_> {
             // diagnostic belongs to the declaration, not to evaluation.
             Stmt::SystemTask { .. } => {}
             // A function has no timing controls (IEEE 1800-2023 13.4).
-            Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::Wait(_) => return None,
+            Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::WaitImplicit(_) | Stmt::Wait(_) => {
+                return None;
+            }
             Stmt::AssignConcat { .. } | Stmt::Call { .. } => return None,
         }
         Some(Flow::Next)
