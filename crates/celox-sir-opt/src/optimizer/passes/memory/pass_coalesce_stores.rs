@@ -2,6 +2,7 @@ use crate::HashMap;
 use crate::HashSet;
 use crate::PassOptions;
 use crate::ir::*;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::block_opt::aggregate_static_offset;
@@ -51,6 +52,14 @@ struct StoreCandidate {
     comb_capture_sites: Vec<u32>,
 }
 
+#[derive(Default)]
+struct StoreGroup {
+    candidates: Vec<StoreCandidate>,
+    // Open groups have disjoint ranges. The predecessor of a new range's
+    // end suffices to detect overlap without quadratic scans of large blocks.
+    ranges: BTreeMap<usize, usize>,
+}
+
 fn coalesce_block(
     block: &mut BasicBlock<RegionedAbsoluteAddr>,
     register_map: &mut HashMap<RegisterId, RegisterType>,
@@ -62,15 +71,38 @@ fn coalesce_block(
     //
     // groups: addr -> vec of candidates (current open group)
     // sealed_groups: completed groups ready for coalescing analysis
-    let mut groups: HashMap<RegionedAbsoluteAddr, Vec<StoreCandidate>> = HashMap::default();
+    let mut groups: HashMap<RegionedAbsoluteAddr, StoreGroup> = HashMap::default();
     let mut sealed_groups: Vec<Vec<StoreCandidate>> = Vec::new();
 
     for (i, inst) in block.instructions.iter().enumerate() {
+        if inst.is_host_interaction() {
+            for (_, group) in groups.drain() {
+                if group.candidates.len() >= 2 {
+                    sealed_groups.push(group.candidates);
+                }
+            }
+        }
         match inst {
             SIRInstruction::Store(addr, SIROffset::Static(off), width, src, triggers, sites)
                 if triggers.is_empty() && sites.is_empty() =>
             {
-                groups.entry(*addr).or_default().push(StoreCandidate {
+                let Some(end) = off.checked_add(*width) else {
+                    seal_group(&mut groups, addr, &mut sealed_groups);
+                    continue;
+                };
+                let overlaps = groups.get(addr).is_some_and(|group| {
+                    group
+                        .ranges
+                        .range(..end)
+                        .next_back()
+                        .is_some_and(|(_, &previous_end)| previous_end > *off)
+                });
+                if overlaps {
+                    seal_group(&mut groups, addr, &mut sealed_groups);
+                }
+                let group = groups.entry(*addr).or_default();
+                group.ranges.insert(*off, end);
+                group.candidates.push(StoreCandidate {
                     addr: *addr,
                     inst_index: i,
                     offset: *off,
@@ -82,21 +114,12 @@ fn coalesce_block(
             SIRInstruction::Load(_, addr, _, _) => {
                 seal_group(&mut groups, addr, &mut sealed_groups);
             }
-            SIRInstruction::Commit(src, _, _, _, _) => {
-                // Commit reads from src region
+            SIRInstruction::Commit(src, dst, _, _, _) => {
                 seal_group(&mut groups, src, &mut sealed_groups);
+                seal_group(&mut groups, dst, &mut sealed_groups);
             }
-            // A Store with Dynamic offset could alias any static offset
-            SIRInstruction::Store(
-                addr,
-                SIROffset::Dynamic(_)
-                | SIROffset::Element { .. }
-                | SIROffset::PackedElements { .. },
-                _,
-                _,
-                _,
-                _,
-            ) => {
+            // Noncandidate writes can overlap an open run or expose its state.
+            SIRInstruction::Store(addr, ..) => {
                 seal_group(&mut groups, addr, &mut sealed_groups);
             }
             _ => {}
@@ -104,9 +127,9 @@ fn coalesce_block(
     }
 
     // Flush remaining open groups
-    for (_, candidates) in groups.drain() {
-        if candidates.len() >= 2 {
-            sealed_groups.push(candidates);
+    for (_, group) in groups.drain() {
+        if group.candidates.len() >= 2 {
+            sealed_groups.push(group.candidates);
         }
     }
 
@@ -273,13 +296,13 @@ fn coalesce_block(
 }
 
 fn seal_group(
-    groups: &mut HashMap<RegionedAbsoluteAddr, Vec<StoreCandidate>>,
+    groups: &mut HashMap<RegionedAbsoluteAddr, StoreGroup>,
     addr: &RegionedAbsoluteAddr,
     sealed_groups: &mut Vec<Vec<StoreCandidate>>,
 ) {
-    if let Some(candidates) = groups.remove(addr) {
-        if candidates.len() >= 2 {
-            sealed_groups.push(candidates);
+    if let Some(group) = groups.remove(addr) {
+        if group.candidates.len() >= 2 {
+            sealed_groups.push(group.candidates);
         }
     }
 }
@@ -318,6 +341,33 @@ mod tests {
             entry_block_id: BlockId(0),
             blocks,
             register_map,
+        }
+    }
+
+    #[test]
+    fn overlapping_store_seals_the_open_run() {
+        let addr = make_addr(0);
+        for middle in [
+            SIRInstruction::Store(addr, SIROffset::Static(3), 1, RegisterId(1), vec![], vec![]),
+            SIRInstruction::Commit(make_addr(1), addr, SIROffset::Static(3), 1, vec![]),
+        ] {
+            let instructions = vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(0u8)),
+                SIRInstruction::Imm(RegisterId(1), SIRValue::new(1u8)),
+                SIRInstruction::Store(addr, SIROffset::Static(2), 2, RegisterId(0), vec![], vec![]),
+                middle,
+                SIRInstruction::Store(addr, SIROffset::Static(1), 1, RegisterId(1), vec![], vec![]),
+            ];
+            let registers = [
+                (RegisterId(0), RegisterType::Logic { width: 2 }),
+                (RegisterId(1), RegisterType::Logic { width: 1 }),
+            ]
+            .into_iter()
+            .collect();
+            let mut eu = make_eu(instructions.clone(), registers);
+            CoalesceStoresPass::default().run(&mut eu, &PassOptions::default());
+            assert_eq!(eu.blocks[&BlockId(0)].instructions, instructions);
+            eu.verify();
         }
     }
 

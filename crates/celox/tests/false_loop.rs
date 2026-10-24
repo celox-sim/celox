@@ -400,8 +400,29 @@ module Top (
             (vec![], vec!["v".to_owned()]),
         )
         .build_with_trace();
+    let mut sim = result.res.unwrap();
     let trace = result.trace;
     let sir_output = trace.format_program().unwrap();
+
+    // Check the fixed point for every input before reviewing the optimized IR.
+    let select = sim.signal("sel");
+    let input = sim.signal("i");
+    let output = sim.signal("o");
+    for select_value in 0u8..2 {
+        for input_value in 0u8..4 {
+            sim.modify(|io| {
+                io.set(select, select_value);
+                io.set(input, input_value);
+            })
+            .unwrap();
+            let bit = if select_value == 1 {
+                input_value & 1
+            } else {
+                input_value >> 1
+            };
+            assert_eq!(sim.get(output), (bit * 3).into());
+        }
+    }
 
     // Snapshot will catch:
     // 1. Redundant emits of the mux/selection logic.
