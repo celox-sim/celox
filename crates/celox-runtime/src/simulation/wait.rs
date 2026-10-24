@@ -1,5 +1,7 @@
 //! Waiting processes: registering waits and testing them against writes.
 
+use std::collections::BTreeSet;
+
 use celox_design::CounterKind;
 
 use super::SimulationState;
@@ -7,8 +9,8 @@ use crate::{
     SignalRef, SimulatorErrorCode,
     backend::SimBackend,
     timing::{
-        Halt, ProcessState, StateView, Value, copy_planes, encode_planes, occurs, planes,
-        planes_equal, planes_occur, read,
+        Halt, ProcessRefs, ProcessState, StateView, Value, copy_planes, encode_planes, occurs,
+        planes, planes_equal, planes_occur, read,
     },
 };
 
@@ -148,7 +150,12 @@ impl<B: SimBackend> SimulationState<B> {
     fn check_waits(&mut self, backend: &B, only: Option<SignalRef>, driven_only: bool) {
         let processes = &self.model.processes;
         let state = StateView::new(backend);
-        let ProcessState { waiters, ready, .. } = &mut self.process_state;
+        let ProcessState {
+            waiters,
+            ready,
+            reactive,
+            ..
+        } = &mut self.process_state;
         waiters.retain(driven_only, |process, waiter| {
             let terms = &processes[process].wait_sites[waiter.site];
             let mut wake = false;
@@ -210,7 +217,7 @@ impl<B: SimBackend> SimulationState<B> {
                 };
             }
             if wake {
-                ready.insert(process);
+                wake_in_region(processes, ready, reactive, process);
             }
             !wake
         });
@@ -231,7 +238,12 @@ impl<B: SimBackend> SimulationState<B> {
     /// Show the waits one value the host wrote to `signal`.
     pub(super) fn observe_host_write(&mut self, signal: SignalRef, value: &Value) {
         let processes = &self.model.processes;
-        let ProcessState { waiters, ready, .. } = &mut self.process_state;
+        let ProcessState {
+            waiters,
+            ready,
+            reactive,
+            ..
+        } = &mut self.process_state;
         waiters.retain(false, |process, waiter| {
             let terms = &processes[process].wait_sites[waiter.site];
             let mut wake = false;
@@ -253,10 +265,26 @@ impl<B: SimBackend> SimulationState<B> {
                 }
             }
             if wake {
-                ready.insert(process);
+                wake_in_region(processes, ready, reactive, process);
             }
             !wake
         });
+    }
+}
+
+/// Make the woken `process` ready: in the Reactive region if it is a program
+/// process (IEEE 1800-2023 24.3.1), otherwise in the Active region.
+#[inline]
+pub(super) fn wake_in_region(
+    processes: &[ProcessRefs],
+    ready: &mut BTreeSet<usize>,
+    reactive: &mut BTreeSet<usize>,
+    process: usize,
+) {
+    if processes[process].program.is_some() {
+        reactive.insert(process);
+    } else {
+        ready.insert(process);
     }
 }
 

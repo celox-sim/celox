@@ -355,6 +355,8 @@ impl Plan {
             let unit = &sir.processes[index];
             let reason = if slots.is_initializer {
                 Some("a declaration initializer")
+            } else if slots.program.is_some() {
+                Some("a program process runs in the reactive region set")
             } else if slots.requires_timed_simulation {
                 Some("an edge procedure")
             } else if !process.host_requests.is_empty() {
