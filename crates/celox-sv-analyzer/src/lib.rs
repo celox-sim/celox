@@ -66,6 +66,11 @@ pub enum AnalyzerError {
     Parse(String),
     #[error("Unsupported SystemVerilog construct: {0}")]
     Unsupported(String),
+    /// A dotted name whose first component names no variable or interface
+    /// of the scope: a hierarchical name (IEEE 1800-2023 23.6) that the
+    /// caller did not resolve to a signal of another instance.
+    #[error("unresolved hierarchical reference `{path}`")]
+    HierarchicalReference { path: String },
     /// A delay, event control or wait statement in a function, an
     /// `always_comb` or an `always_ff` body (IEEE 1800-2023 9.2.2.2,
     /// 9.2.2.4, 13.4).

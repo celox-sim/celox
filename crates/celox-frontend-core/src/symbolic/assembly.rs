@@ -2,8 +2,8 @@ use num_bigint::BigUint;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::symbolic::artifact::{
-    FfPart, NbaSwitch, RelocationModule, SimModule, SplitCommit, SymbolicGlueAddr as GlueAddr,
-    SymbolicRtl,
+    FfPart, HierarchicalStart, NbaSwitch, RelocationModule, SimModule, SplitCommit,
+    SymbolicGlueAddr as GlueAddr, SymbolicRtl,
 };
 use crate::{
     FrontendLookup, FrontendTrace, FrontendTraceOptions, FusedSirOptimizationHints, HashMap,
@@ -186,6 +186,7 @@ pub(crate) struct PackageBindings {
 
 impl PackageBindings {
     fn new(
+        expanded: &HashMap<InstancePath, InstanceId>,
         instance_modules: &HashMap<InstanceId, ModuleId>,
         modules: &HashMap<ModuleId, SimModule>,
         package_instances: &HashMap<ModuleId, InstanceId>,
@@ -244,6 +245,98 @@ impl PackageBindings {
                 );
             }
         }
+        let mut paths: Option<HashMap<InstanceId, &InstancePath>> = None;
+        for (&instance_id, module_id) in instance_modules {
+            let module = &modules[module_id];
+            for (&var_id, binding) in &module.hierarchical_bindings {
+                let paths = paths
+                    .get_or_insert_with(|| expanded.iter().map(|(path, &id)| (id, path)).collect());
+                let mut path = match binding.start {
+                    HierarchicalStart::Root => Vec::new(),
+                    HierarchicalStart::Ancestor(levels) => {
+                        let own = &paths[&instance_id].0;
+                        own[..own.len().saturating_sub(levels)].to_vec()
+                    }
+                };
+                path.extend(binding.path.iter().cloned());
+                let error = |reason: &str| {
+                    ParserError::illegal_context(
+                        "hierarchical reference",
+                        format!(
+                            "module `{}` binds `{}` {reason}",
+                            module.name,
+                            module
+                                .variables
+                                .get(&var_id)
+                                .map_or_else(String::new, |variable| variable.path.join(".")),
+                        ),
+                        None,
+                    )
+                };
+                let target_instance = *expanded
+                    .get(&InstancePath(path))
+                    .ok_or_else(|| error("to an instance that does not exist"))?;
+                let target_module_id = instance_modules[&target_instance];
+                let target_module = &modules[&target_module_id];
+                let target_var = binding
+                    .targets
+                    .iter()
+                    .find(|(module, _)| *module == target_module_id)
+                    .map(|&(_, var)| var)
+                    .ok_or_else(|| error("to an instance of another module"))?;
+                let (Some(variable), Some(target)) = (
+                    module.variables.get(&var_id),
+                    target_module.variables.get(&target_var),
+                ) else {
+                    return Err(error("to an unknown variable"));
+                };
+                let (variable, target) = (&variable.metadata, &target.metadata);
+                if (
+                    variable.width,
+                    variable.is_4state,
+                    &variable.array_dims,
+                    variable.value_kind,
+                ) != (
+                    target.width,
+                    target.is_4state,
+                    &target.array_dims,
+                    target.value_kind,
+                ) {
+                    return Err(error("to a variable of another type"));
+                }
+                targets.insert(
+                    AbsoluteAddr {
+                        instance_id,
+                        var_id,
+                    },
+                    AbsoluteAddr {
+                        instance_id: target_instance,
+                        var_id: target_var,
+                    },
+                );
+            }
+        }
+        // A hierarchical name may denote a variable that itself denotes a
+        // package variable or another instance's variable.
+        if paths.is_some() {
+            let sources: Vec<_> = targets.keys().copied().collect();
+            for source in sources {
+                let mut target = targets[&source];
+                let mut steps = 0;
+                while let Some(&next) = targets.get(&target) {
+                    steps += 1;
+                    if next == source || steps > targets.len() {
+                        return Err(ParserError::illegal_context(
+                            "hierarchical reference",
+                            "a hierarchical name denotes itself".to_string(),
+                            None,
+                        ));
+                    }
+                    target = next;
+                }
+                targets.insert(source, target);
+            }
+        }
         Ok(Self { targets })
     }
 
@@ -288,7 +381,13 @@ fn check_package_variable_drivers(
     package_instances: &HashMap<ModuleId, InstanceId>,
     comb_blocks: &[celox_slt::LogicPath<AbsoluteAddr>],
 ) -> Result<(), ParserError> {
-    let packages: HashSet<AbsoluteAddr> = bindings.targets.values().copied().collect();
+    let package_instance_ids: HashSet<InstanceId> = package_instances.values().copied().collect();
+    let packages: HashSet<AbsoluteAddr> = bindings
+        .targets
+        .values()
+        .copied()
+        .filter(|target| package_instance_ids.contains(&target.instance_id))
+        .collect();
     if packages.is_empty() {
         return Ok(());
     }
@@ -663,7 +762,8 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .iter()
         .map(|(&instance, module)| (instance, modules[module].time_scale))
         .collect::<HashMap<_, _>>();
-    let bindings = &PackageBindings::new(&instance_modules, &modules, &package_instances)?;
+    let bindings =
+        &PackageBindings::new(&expanded, &instance_modules, &modules, &package_instances)?;
     let global_boundaries = timed_sub!(
         "propagate_boundaries",
         propagate_boundaries(bindings, &expanded, &instance_modules, &modules)
@@ -1644,17 +1744,33 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 })
         })
         .collect();
-    let mut initial_memory_values: Vec<InitialStateValue<AbsoluteAddr>> = initial_instances
+    // A write through a binding, such as a folded `initial` assignment
+    // through a hierarchical name, follows the declaration values of every
+    // instance, its target's among them.
+    let (mut initial_memory_values, bound_initials): (Vec<_>, Vec<_>) = initial_instances
         .into_iter()
         .flat_map(|(&instance_id, module_id)| {
             modules[module_id]
                 .initial_memory_values
                 .iter()
-                .map(move |init| InitialStateValue {
-                    address: bindings.locate(instance_id, init.address),
-                    data: init.data.clone(),
+                .map(move |init| {
+                    (
+                        bindings.is_bound(&AbsoluteAddr {
+                            instance_id,
+                            var_id: init.address,
+                        }),
+                        InitialStateValue {
+                            address: bindings.locate(instance_id, init.address),
+                            data: init.data.clone(),
+                        },
+                    )
                 })
         })
+        .partition(|(bound, _)| !bound);
+    let mut initial_memory_values: Vec<InitialStateValue<AbsoluteAddr>> = initial_memory_values
+        .drain(..)
+        .chain(bound_initials)
+        .map(|(_, init)| init)
         .collect();
     let state_objects: HashMap<AbsoluteAddr, VariableMetadata> = instance_modules
         .iter()
@@ -2298,8 +2414,11 @@ fn module_variables(
         let mut variables = HashMap::default();
         let mut paths: HashMap<Vec<String>, Option<SourceVarId>> = HashMap::default();
         for (&source_id, variable) in &module.variables {
-            // A package variable belongs to the package's instance.
-            if module.package_bindings.contains_key(&source_id) {
+            // A package variable belongs to the package's instance, and a
+            // hierarchically named one to its own instance.
+            if module.package_bindings.contains_key(&source_id)
+                || module.hierarchical_bindings.contains_key(&source_id)
+            {
                 continue;
             }
             // Only module-scope variables are externally addressable. Locals

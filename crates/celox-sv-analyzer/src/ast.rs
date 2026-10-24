@@ -257,6 +257,20 @@ pub(crate) struct ModuleParameterBindings<'a> {
     pub values: &'a HashMap<String, ConstExpr>,
     pub types: &'a [(String, Type)],
     pub patterns: &'a [(String, BoundPattern)],
+    pub hierarchical: &'a [HierarchicalSignal],
+}
+
+/// A signal of another instance that hierarchical names of the analyzed
+/// module denote (IEEE 1800-2023 23.6), resolved by the caller against the
+/// elaborated hierarchy. The module refers to it by a local signal `name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchicalSignal {
+    /// The names that denote the signal, as [`crate::ParsedSource::hierarchical_names`]
+    /// spells them.
+    pub paths: Vec<String>,
+    pub name: String,
+    pub r#type: Type,
+    pub is_net: bool,
 }
 
 impl Source {
@@ -366,6 +380,7 @@ impl Source {
                 values: parameter_overrides,
                 types: &[],
                 patterns: &[],
+                hierarchical: &[],
             },
             extra_interfaces,
             &packages,
@@ -422,6 +437,23 @@ impl Source {
                         type_parameters::bind(syntax_tree, &own_types)?;
                     imported.pattern_parameter_bindings =
                         type_parameters::bind_patterns(syntax_tree, bindings.patterns)?;
+                    // A hierarchical name reads and writes the local signal
+                    // bound to the other instance's object.
+                    for signal in bindings.hierarchical {
+                        for path in &signal.paths {
+                            imported
+                                .interface_members
+                                .insert(path.clone(), signal.name.clone());
+                        }
+                        imported.state_signals.push(Signal {
+                            is_const: false,
+                            name: signal.name.clone(),
+                            r#type: signal.r#type.clone(),
+                            is_net: signal.is_net,
+                            package_variable: None,
+                            hierarchical: signal.paths.first().cloned(),
+                        });
+                    }
                     if let Some(mut module) = interface_binding::analyze_module(
                         syntax_tree,
                         path,
@@ -1008,6 +1040,7 @@ impl Module {
         // declarations (IEEE 1800-2023 27.6, 23.9).
         let scope_heads: HashSet<&str> = signals
             .iter()
+            .filter(|signal| signal.hierarchical.is_none())
             .map(Signal::name)
             .chain(instances.iter().map(Instance::name))
             .filter_map(generate_scope_head)
@@ -1248,6 +1281,7 @@ impl Module {
         if let Some(signal) = signals.iter().find(|signal| {
             !imported.declarations_only
                 && signal.is_net()
+                && signal.hierarchical.is_none()
                 && !procedurally_written.contains(signal.name())
                 && !connected_nets.contains(signal.name())
         }) {
@@ -1711,6 +1745,9 @@ pub struct Signal {
     is_net: bool,
     /// The package variable the signal denotes, as `(package, variable)`.
     package_variable: Option<(String, String)>,
+    /// The hierarchical name of the signal of another instance the signal
+    /// denotes (IEEE 1800-2023 23.6).
+    hierarchical: Option<String>,
 }
 
 impl Signal {
@@ -1721,6 +1758,7 @@ impl Signal {
             is_net: false,
             is_const: false,
             package_variable: None,
+            hierarchical: None,
         }
     }
 
@@ -1731,7 +1769,14 @@ impl Signal {
             is_net: true,
             is_const: false,
             package_variable: None,
+            hierarchical: None,
         }
+    }
+
+    /// The hierarchical name of the signal of another instance the signal
+    /// denotes, as written.
+    pub fn hierarchical(&self) -> Option<&str> {
+        self.hierarchical.as_deref()
     }
 
     /// The package variable (IEEE 1800-2023 26.2) the signal denotes, as
@@ -2033,6 +2078,28 @@ impl Type {
 
     pub fn unpacked_ranges(&self) -> &[UnpackedRange] {
         &self.unpacked_ranges
+    }
+
+    /// A type with constant `(left, right)` packed and unpacked bounds.
+    pub fn resolved(
+        kind: TypeKind,
+        is_signed: bool,
+        packed: &[(i128, i128)],
+        unpacked: &[(i128, i128)],
+    ) -> Self {
+        let literal = |value: i128| ConstExpr::Literal(value.to_string());
+        Self {
+            is_signed,
+            packed_ranges: packed
+                .iter()
+                .map(|&(left, right)| PackedRange::new(literal(left), literal(right)))
+                .collect(),
+            unpacked_ranges: unpacked
+                .iter()
+                .map(|&(left, right)| UnpackedRange::new(literal(left), literal(right)))
+                .collect(),
+            ..Self::new(kind)
+        }
     }
 }
 

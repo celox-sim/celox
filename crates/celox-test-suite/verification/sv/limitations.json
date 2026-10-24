@@ -2012,7 +2012,8 @@
         "timing::intermediate_combinational_writes_keep_other_drivers",
         "timing::parallel_flip_flop_parts_keep_pulses",
         "timing::staged_nonblocking_writes_follow_later_blocking_writes",
-        "timing::derived_clocks_follow_superseded_publications"
+        "timing::derived_clocks_follow_superseded_publications",
+        "hierarchical_references::waits_through_names_see_intermediate_combinational_writes"
       ]
     }
   },

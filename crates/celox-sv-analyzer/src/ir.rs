@@ -383,6 +383,7 @@ pub struct Signal {
     r#type: Type,
     is_net: bool,
     package_variable: Option<(String, String)>,
+    hierarchical: Option<String>,
 }
 
 impl Signal {
@@ -392,7 +393,21 @@ impl Signal {
             r#type,
             is_net,
             package_variable: None,
+            hierarchical: None,
         }
+    }
+
+    pub(crate) fn with_hierarchical(mut self, hierarchical: Option<&str>) -> Self {
+        self.hierarchical = hierarchical.map(str::to_string);
+        self
+    }
+
+    /// The hierarchical name (IEEE 1800-2023 23.6) of the signal of another
+    /// instance the signal denotes: the module reads and writes that object,
+    /// bound by the caller that resolved the name (see
+    /// [`crate::ast::HierarchicalSignal`]).
+    pub fn hierarchical(&self) -> Option<&str> {
+        self.hierarchical.as_deref()
     }
 
     pub(crate) fn with_package_variable(mut self, package_variable: Option<(&str, &str)>) -> Self {

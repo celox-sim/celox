@@ -115,6 +115,8 @@ mod file_core;
 mod file_io;
 #[path = "frontends/systemverilog/generate.rs"]
 mod generate;
+#[path = "frontends/systemverilog/hierarchical_references.rs"]
+mod hierarchical_references;
 #[path = "frontends/systemverilog/hierarchy.rs"]
 mod hierarchy;
 #[path = "frontends/systemverilog/indexed_select.rs"]
