@@ -191,6 +191,10 @@ impl<B: SimBackend> SimulationState<B> {
             self.step_round(executor, current_time, Vec::new(), ready, false)?;
         }
         executor.try_finish_timed_step(current_time)?;
+        // What the host writes after the slot is an update of its time.
+        if executor.take_slot_writes() {
+            self.host_pending = true;
+        }
         Ok(())
     }
 

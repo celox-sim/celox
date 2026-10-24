@@ -71,15 +71,36 @@ pub(crate) fn attach(program: &mut LaidOutProgram) {
         return;
     };
     let kernels = program.runtime.runtime_schema.processes.len();
-    let (fallback, unit, events, clocks) = match Plan::new(program, &schema.slots) {
-        Err(reason) => (vec![Some(reason); kernels], None, Vec::new(), Vec::new()),
+    let (fallback, unit, events, clocks, kernel_events) = match Plan::new(program, &schema.slots) {
+        Err(reason) => (
+            vec![Some(reason); kernels],
+            None,
+            Vec::new(),
+            Vec::new(),
+            vec![Vec::new(); kernels],
+        ),
         Ok(plan) => {
             let fallback = plan.fallback.clone();
             // Without kernels, slots of host clocks alone.
             let unit = (plan.kernels.iter().any(Option::is_some) || !plan.clocks.is_empty())
                 .then(|| plan.generate(program, &schema.slots));
-            let events = plan
-                .edged()
+            let edged = plan.edged();
+            let kernel_events = plan
+                .kernels
+                .iter()
+                .map(|kernel| {
+                    kernel
+                        .iter()
+                        .flat_map(|kernel| &kernel.writes)
+                        .map(|event| {
+                            edged
+                                .binary_search(event)
+                                .expect("the scheduler's kernels write edged events")
+                        })
+                        .collect()
+                })
+                .collect();
+            let events = edged
                 .into_iter()
                 .map(|event| plan.events[event].signal)
                 .collect();
@@ -88,7 +109,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram) {
                 .iter()
                 .map(|&event| plan.events[event].signal)
                 .collect();
-            (fallback, unit, events, clocks)
+            (fallback, unit, events, clocks, kernel_events)
         }
     };
     let scheduler = program
@@ -100,6 +121,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram) {
     scheduler.fallback = fallback;
     scheduler.events = events;
     scheduler.clocks = clocks;
+    scheduler.kernel_events = kernel_events;
     if let Some(unit) = unit {
         scheduler.unit = Some(program.sir.processes.len());
         program.sir.processes.push(unit);
