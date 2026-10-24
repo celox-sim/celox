@@ -1,0 +1,1 @@
+Fix P2: retain writable tagged-member actuals and separate live tag checks at argument capture and copy-out; add task/function/system regressions.
