@@ -97,6 +97,8 @@ pub(super) struct Ff<'p, 'a> {
     /// The flush-point site of a process with deferred assertions, whose
     /// queue their actions wait in.
     flush_site: Option<u32>,
+    /// A combinational process is being lowered.
+    combinational: bool,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -153,7 +155,42 @@ impl<'p, 'a> Ff<'p, 'a> {
             host_request_sites: Vec::new(),
             nba_switches: Vec::new(),
             flush_site: None,
+            combinational: false,
         }
+    }
+
+    /// The operand of `$sampled` (IEEE 1800-2023 16.9.3) with each static
+    /// variable read through its sampled copy. Automatic variables and the
+    /// lowering's own temporaries keep their current value (16.5.1). A
+    /// combinational process reruns when its inputs change, not when their
+    /// sampled values do, so it cannot read them.
+    fn sampled(
+        &mut self,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        if self.combinational {
+            return Err(unsupported("$sampled in combinational logic"));
+        }
+        let [Some(operand)] = args else {
+            return Err(unsupported("operand of `$sampled`"));
+        };
+        let operand = self.propagate(operand);
+        let mut names = HashSet::default();
+        expr_idents(&operand, &mut names);
+        let mut renames = HashMap::default();
+        for name in names {
+            let Some(id) = self.m.id(&name) else {
+                continue;
+            };
+            if self.m.is_hidden(id) {
+                continue;
+            }
+            if self.m.var(id).value_kind.is_handle() {
+                return Err(unsupported("$sampled of a string or class handle"));
+            }
+            renames.insert(name, self.m.sampled_copy(id));
+        }
+        Ok(rename_idents(&operand, &renames))
     }
 
     /// Whether `stmts`, or a subroutine they call, including in the defaults
@@ -1032,6 +1069,14 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let (_, name) = self.m.temp("tagged_member", *width, *signed, true);
                 self.assign(&sv::ir::LValue::Ident(name.clone()), value)?;
                 Expr::Ident(name)
+            }
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Sampled),
+                args,
+                ..
+            } => {
+                let operand = self.sampled(args)?;
+                self.hoist(&operand)?
             }
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fread),
@@ -3909,6 +3954,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<Vec<LogicPath<SourceVarId>>, sv::AnalyzerError> {
         let always_comb = kind != sv::ir::CombProcessKind::AlwaysStar;
         self.direct = true;
+        self.combinational = true;
         let mut reads = self.m.implicit_reads(body, always_comb);
         reads.extend(self.m.implicit_reads(sensitivity_body, always_comb));
         for stmt in body {
@@ -5580,6 +5626,7 @@ impl Ff<'_, '_> {
                 source: None,
                 hidden: true,
                 force_control: None,
+                sampled_from: None,
                 value_kind: Default::default(),
             },
         );

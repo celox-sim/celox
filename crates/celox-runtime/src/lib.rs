@@ -72,3 +72,19 @@ pub struct SignalRef {
     pub is_4state: bool,
     pub array_layout: Option<SignalArrayLayout>,
 }
+
+/// Copy the value of `from`, with its unknown bits, into `to`, a signal of
+/// the same width and state form.
+pub fn copy_signal<B: backend::SimBackend>(backend: &mut B, from: SignalRef, to: SignalRef) {
+    let planes = if backend.layout().four_state && from.is_4state {
+        2
+    } else {
+        1
+    };
+    let bytes = celox_state_layout::get_byte_size(from.width) * planes;
+    let (memory, size) = backend.memory_as_mut_ptr();
+    assert!(from.offset + bytes <= size && to.offset + bytes <= size);
+    // SAFETY: both ranges are in the backend's memory, and they are
+    // distinct objects of the state layout.
+    unsafe { std::ptr::copy_nonoverlapping(memory.add(from.offset), memory.add(to.offset), bytes) };
+}

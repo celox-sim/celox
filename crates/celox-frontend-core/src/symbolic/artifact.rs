@@ -154,6 +154,9 @@ pub struct SimModule {
     /// The variable through which the module's code reads the simulation
     /// time; see `RuntimeSchema::time_slots`.
     pub time_slot: Option<SourceVarId>,
+    /// Variables and their sampled copies; see
+    /// `RuntimeSchema::sample_shadows`.
+    pub sample_shadows: Vec<(SourceVarId, SourceVarId)>,
 }
 
 /// A nonblocking site whose kernel has two paths, as

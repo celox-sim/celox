@@ -60,6 +60,9 @@ pub enum SystemFunction {
     Signed,
     /// `$unsigned` (11.7).
     Unsigned,
+    /// `$sampled` (IEEE 1800-2023 16.9.3): the value of its operand in the
+    /// Preponed region of the time slot.
+    Sampled,
     /// `$bits` (20.6.2).
     Bits,
     /// `$isunbounded` (20.6.3).
@@ -253,6 +256,7 @@ impl SystemFunction {
             Self::Timeprecision => "$timeprecision",
             Self::Signed => "$signed",
             Self::Unsigned => "$unsigned",
+            Self::Sampled => "$sampled",
             Self::Bits => "$bits",
             Self::Isunbounded => "$isunbounded",
             Self::Dimensions => "$dimensions",
@@ -354,7 +358,11 @@ impl SystemFunction {
     /// or it returns the simulation time. Such a call is not a constant
     /// expression, and a process evaluates it where it runs.
     pub fn reads_simulation_state(self) -> bool {
-        self.is_effectful() || matches!(self, Self::Time | Self::Stime | Self::Realtime)
+        self.is_effectful()
+            || matches!(
+                self,
+                Self::Time | Self::Stime | Self::Realtime | Self::Sampled
+            )
     }
 
     /// Whether the call writes argument `position` back, as `$random(seed)`
@@ -440,6 +448,7 @@ impl SystemFunction {
             Self::Time => Some((64, false)),
             Self::Signed
             | Self::Unsigned
+            | Self::Sampled
             | Self::Bits
             | Self::Dimensions
             | Self::UnpackedDimensions
@@ -1132,7 +1141,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$assertvacuousoff", Task),
     unsupported("$assertcontrol", Task),
     // 20.12 Sampled value system functions
-    unsupported("$sampled", Function),
+    function(SystemFunction::Sampled, 1, Some(1)),
     unsupported("$rose", Function),
     unsupported("$fell", Function),
     unsupported("$stable", Function),

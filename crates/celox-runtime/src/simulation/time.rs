@@ -192,8 +192,23 @@ impl<B: SimBackend> SimulationState<B> {
         }
         executor.try_finish_timed_step(current_time)?;
         if self.next_work_time() != Some(current_time) {
-            executor.try_end_time_slot(current_time)?;
+            self.end_time_slot(executor, current_time)?;
         }
+        Ok(())
+    }
+
+    /// The time slot `current_time` is over: the host's Observed and
+    /// Postponed work, then the sampled copies.
+    pub(super) fn end_time_slot<E>(
+        &mut self,
+        executor: &mut E,
+        current_time: u64,
+    ) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        executor.try_end_time_slot(current_time)?;
+        self.sample_values(executor.backend_mut());
         Ok(())
     }
 

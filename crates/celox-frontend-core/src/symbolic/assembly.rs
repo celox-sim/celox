@@ -1814,6 +1814,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         nba_sites,
         host_request_sites,
         time_slots,
+        sample_shadows,
         ..
     } = timing;
     let source_sir = SirProgram {
@@ -2060,6 +2061,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .collect();
     let active_commits: Vec<StateAddr> = active_commits.into_iter().map(project).collect();
     let time_slots: Vec<StateAddr> = time_slots.into_iter().map(project).collect();
+    let sample_shadows: Vec<(StateAddr, StateAddr)> = sample_shadows
+        .into_iter()
+        .map(|(variable, copy)| (project(variable), project(copy)))
+        .collect();
     let root_instance = expanded[&InstancePath(Vec::new())];
     let scheduler = scheduler_slots.map(|slots| celox_design::SchedulerSchema {
         slots: slots.map(|var_id| {
@@ -2149,6 +2154,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 .flat_map(|(source, counter)| [source.id, *counter]),
         );
     }
+    // The host copies each sampled variable into its copy.
+    timing_read_roots.extend(
+        sample_shadows
+            .iter()
+            .flat_map(|&(variable, copy)| [variable, copy]),
+    );
     // A package variable's state object maps back to the package's own
     // variable, not to one of its aliases.
     let state_to_source = source_to_state
@@ -2200,6 +2211,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             host_request_sites,
             active_commits,
             time_slots,
+            sample_shadows,
             scheduler,
             derived_edges: Vec::new(),
         },
@@ -3467,6 +3479,7 @@ struct TimingMetadata {
     nba_sites: Vec<NbaSite<AbsoluteAddr>>,
     host_request_sites: Vec<HostRequestSite<AbsoluteAddr>>,
     time_slots: Vec<AbsoluteAddr>,
+    sample_shadows: Vec<(AbsoluteAddr, AbsoluteAddr)>,
     nba_switches: Vec<NbaSwitch<AbsoluteAddr>>,
 }
 
@@ -3777,6 +3790,7 @@ fn relocate_timing(
         nba_sites: Vec::new(),
         host_request_sites: Vec::new(),
         time_slots: Vec::new(),
+        sample_shadows: Vec::new(),
         nba_switches: Vec::new(),
     };
     for (&instance, module) in instances {
@@ -3812,6 +3826,12 @@ fn relocate_timing(
                     }),
             );
         metadata.time_slots.extend(module.time_slot.map(locate));
+        metadata.sample_shadows.extend(
+            module
+                .sample_shadows
+                .iter()
+                .map(|&(variable, copy)| (locate(variable), locate(copy))),
+        );
         metadata.nba_switches.extend(
             module
                 .nba_switches

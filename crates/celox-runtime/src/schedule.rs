@@ -41,6 +41,8 @@ pub struct ResolvedSchedule<B: SimBackend> {
     pub(crate) active_commits: bit_set::BitSet,
     /// Signals the current time is stored into before each round.
     pub(crate) time_slots: Vec<SignalRef>,
+    /// Sampled variables and their copies, copied when a slot is over.
+    pub(crate) sample_shadows: Vec<(SignalRef, SignalRef)>,
     /// The compiled scheduler, when one was generated.
     pub(crate) scheduler: Option<SchedulerRefs>,
     /// Per process kernel, why the compiled scheduler does not run it, or
@@ -309,6 +311,11 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             timed: model.timed,
             active_commits,
             time_slots: model.time_slots.iter().map(resolve).collect(),
+            sample_shadows: model
+                .sample_shadows
+                .iter()
+                .map(|(variable, copy)| (resolve(variable), resolve(copy)))
+                .collect(),
             scheduler: model.scheduler.as_ref().and_then(|scheduler| {
                 let slots = &scheduler.slots;
                 Some(SchedulerRefs {

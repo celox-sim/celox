@@ -139,6 +139,25 @@ pub(super) fn numeric_system_function(
                 signed: function == SystemFunction::Signed,
             })
         }
+        // The sampled value has the type of its operand; the frontend reads
+        // it from the operand's sampled copy (IEEE 1800-2023 16.9.3).
+        SystemFunction::Sampled => {
+            let argument = arguments.pop().ok_or_else(operand_error)?;
+            let width =
+                expr_static_width(state, &argument, dimensions).ok_or_else(operand_error)?;
+            let signed =
+                dimensions::expression_signedness(&argument, dimensions, &dimensions.const_env)
+                    .ok_or_else(operand_error)?;
+            Ok(Expr::Resize {
+                expr: Box::new(Expr::Call {
+                    callee: Callee::System(function),
+                    args: vec![Some(argument)],
+                    arg_order: Vec::new(),
+                }),
+                width,
+                signed,
+            })
+        }
         SystemFunction::Ln
         | SystemFunction::Log10
         | SystemFunction::Exp
