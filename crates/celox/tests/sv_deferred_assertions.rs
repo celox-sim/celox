@@ -388,14 +388,22 @@ fn a_first_drain_returns_actions_of_the_initial_settle() {
 
 #[test]
 fn deferred_actions_are_one_display_or_severity_task_call() {
-    let source = "module Top; bit a;\n  \
-                  initial assert #0 (a) else begin $error(\"x\"); $error(\"y\"); end\n\
-                  endmodule";
-    let error = celox::Simulation::from_sv_sources(vec![(source, Path::new("deferred.sv"))], "Top")
+    for action in [
+        "begin $error(\"x\"); $error(\"y\"); end",
+        "begin $error(\"x\"); end",
+        "a = 1;",
+    ] {
+        let source =
+            format!("module Top; bit a;\n  initial assert #0 (a) else {action}\nendmodule");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("deferred.sv"))],
+            "Top",
+        )
         .build()
         .unwrap_err();
-    assert!(
-        error.to_string().contains("deferred assertion action"),
-        "{error}"
-    );
+        assert!(
+            error.to_string().contains("deferred assertion action"),
+            "{action}: {error}"
+        );
+    }
 }

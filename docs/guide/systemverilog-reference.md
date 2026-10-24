@@ -165,7 +165,7 @@ waits zero.
 | System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | Random numbers | `$urandom`, `$urandom_range`, `$random` and `$dist_uniform` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
 | Simulation time | `$time`, `$stime` and `$realtime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
-| Sampled values | `$sampled` in edge-triggered processes, processes with timing controls, `initial` blocks and the subroutines they call; `$past`, `$rose`, `$fell`, `$stable` and `$changed` in edge-triggered processes with one event; see [Sampled values](#sampled-values) |
+| Sampled values | `$sampled` in processes, combinational logic and the subroutines they call; `$past`, `$rose`, `$fell`, `$stable` and `$changed` in edge-triggered processes whose clock they infer and the subroutines those call; see [Sampled values](#sampled-values) |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop`, `$exit` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | Runtime I/O | `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb`, and [VCD controls](./vcd#systemverilog-source-controls) in timed processes |
 | State | two-state and four-state simulation |
@@ -573,12 +573,13 @@ the value at the end of the previous slot, and in the first slot the declared
 or default value (IEEE 1800-2023 4.4.2.1, 16.5.1). Each static variable the
 operand reads, the indices of its selects and the arguments of its calls
 included, is read from a copy that the simulation updates when a time slot is
-over. Automatic variables keep their current value. A `Simulator` call is a
-time slot. `$sampled` in combinational logic (`always_comb`, `always_latch`,
-an `always` lowered as combinational logic, a continuous assignment) is
-rejected: such a process reruns when its inputs change, not when their sampled
-values do. A design that uses `$sampled` runs the compiled scheduler one slot
-at a time.
+over. Automatic variables keep their current value; a static local is
+sampled like a module variable. A `Simulator` call is a time slot. In
+combinational logic (`always_comb`, `always_latch`, an `always` lowered as
+combinational logic, a continuous assignment) the process reruns when the
+operand's variables change, not when their sampled values do, and keeps the
+sampled value it read until then (4.5). A design that uses `$sampled` runs the
+compiled scheduler one slot at a time.
 
 `$past(e, k, gate)` is the sampled value of `e` at the `k`-th previous tick of
 its clock at which `gate` held, the `iff` of the clock (9.4.2.3), and `$rose`, `$fell`, `$stable`
@@ -586,13 +587,18 @@ and `$changed` compare the sampled value of their operand with the one at the
 previous tick, with case equality (`$rose` and `$fell` look at the least
 significant bit). Before enough ticks, the past value is the declared or
 default value (16.9.3). `k` is a positive constant. The clock is inferred
-(16.14.6): the functions are supported in an `always_ff` or `always` process
-whose only timing control is one edge event, such as `@(posedge clk)`, and
-which therefore runs at each tick. The process keeps a history register for
-each variable of the operand and updates it with nonblocking assignments at
-the end of each run. An explicit clocking event argument, processes with
-more than one event (such as an asynchronous reset) and calls in subroutines
-are rejected.
+(16.14.6): in an `always_ff` or `always` process whose only timing control is
+its event control, it is the clock edge when that is the only event whose
+signal the body reads nowhere else, as with an asynchronous reset that the
+body tests. A subroutine the process calls, also from the default of an
+omitted argument, infers the same clock. The process keeps a history register
+for each variable of the operand and updates it with nonblocking assignments at
+the end of each run that is a tick of the clock. With an asynchronous reset, a
+run is a tick when the clock has left the level it had before the time slot: a
+clock that returns to that level within the slot, as `clk = 0; #0 clk = 1;`
+from 1, does not move the history. An explicit clocking event argument, calls
+without a clock to infer, nested calls such as `$past($past(a))` and operands
+that read an unpacked array are rejected.
 
 ### Deferred assertions
 

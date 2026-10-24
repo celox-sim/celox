@@ -90,25 +90,48 @@ macro_rules! sampled {
                 assert_eq!(value(&mut sim, "v"), 5);
             }
 
+            /// A static local keeps its value between runs, so its sampled
+            /// value is the one the previous run left; an automatic one is
+            /// read as it is (IEEE 1800-2023 16.5.1). `a` is 0, 1, 2, 3 at
+            /// the edges 1, 3, 5, 7.
             #[test]
-            fn combinational_logic_cannot_read_sampled_values() {
+            fn static_locals_are_sampled_and_automatic_ones_are_not() {
+                let mut sim = simulation(
+                    "  bit [7:0] p, q, w;\n  \
+                     always #1 clk = ~clk;\n  \
+                     always @(posedge clk) begin\n    \
+                     bit [7:0] t;\n    \
+                     automatic bit [7:0] u;\n    \
+                     t = w; u = w;\n    \
+                     p <= $sampled(t); q <= $sampled(u);\n  \
+                     end\n  \
+                     initial begin #2 w = 1; #2 w = 2; #2 w = 3; end",
+                );
+                sim.run_until(7).unwrap();
+                assert_eq!((value(&mut sim, "p"), value(&mut sim, "q")), (2, 3));
+            }
+
+            /// A combinational process runs when its inputs change, not
+            /// when their sampled values do, so it keeps the sampled value
+            /// it read (IEEE 1800-2023 4.5, 16.9.3). `a` becomes 1 at 1 and
+            /// 2 at 3.
+            #[test]
+            fn combinational_logic_reads_sampled_values_when_it_runs() {
                 for item in [
                     "always_comb y = $sampled(a);",
                     "always @(a) y = $sampled(a);",
                     "assign y = $sampled(a);",
                 ] {
-                    let source = format!("module Top; bit a, y; {item} endmodule");
-                    let error = celox::Simulation::from_sv_sources(
-                        vec![(source.as_str(), Path::new("sampled.sv"))],
-                        "Top",
-                    )
-                    .$backend()
-                    .err()
-                    .expect("rejected");
-                    assert!(
-                        error.to_string().contains("$sampled in combinational logic"),
-                        "{item}: {error}"
+                    let body = format!(
+                        "  {item}\n  initial begin #1 a = 1; #2 a = 0; end"
                     );
+                    let mut sim = simulation(&body);
+                    let mut values = Vec::new();
+                    for time in [0, 1, 2, 3, 4] {
+                        sim.run_until(time).unwrap();
+                        values.push(value(&mut sim, "y"));
+                    }
+                    assert_eq!(values, vec![0, 0, 0, 1, 1], "{item}");
                 }
             }
         }
