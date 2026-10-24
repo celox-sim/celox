@@ -371,6 +371,15 @@ impl SystemFunction {
     /// Whether a call reads the state of the simulation: it has an effect,
     /// or it returns the simulation time. Such a call is not a constant
     /// expression, and a process evaluates it where it runs.
+    /// Whether the function reads the sampled values of its operand
+    /// (IEEE 1800-2023 16.9.3), which are those of earlier time slots.
+    pub fn reads_sampled_values(self) -> bool {
+        matches!(
+            self,
+            Self::Sampled | Self::Past | Self::Rose | Self::Fell | Self::Stable | Self::Changed
+        )
+    }
+
     pub fn reads_simulation_state(self) -> bool {
         self.is_effectful()
             || matches!(

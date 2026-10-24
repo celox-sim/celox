@@ -97,14 +97,21 @@ pub(super) struct Ff<'p, 'a> {
     /// The flush-point site of a process with deferred assertions, whose
     /// queue their actions wait in.
     flush_site: Option<u32>,
-    /// A combinational process is being lowered.
-    combinational: bool,
-    /// The process has the one clock that sampled value functions infer
-    /// (IEEE 1800-2023 16.14.6): an edge-triggered process with a single
-    /// event, which runs at each tick of it.
-    inferred_clock: bool,
+    /// The clock that the sampled value functions of the process infer
+    /// (IEEE 1800-2023 16.14.6).
+    inferred_clock: Option<Clock>,
     /// The `$past` histories of the process.
     history: Vec<History>,
+}
+
+/// The clock of an edge-triggered process.
+pub(super) struct Clock {
+    /// The clock signal.
+    pub signal: String,
+    /// Whether a tick is a rising edge.
+    pub rising: bool,
+    /// The clock is the only event of the process, so every run is a tick.
+    pub alone: bool,
 }
 
 /// The sampled values of variable `name` at the previous ticks of the clock
@@ -173,31 +180,28 @@ impl<'p, 'a> Ff<'p, 'a> {
             host_request_sites: Vec::new(),
             nba_switches: Vec::new(),
             flush_site: None,
-            combinational: false,
-            inferred_clock: false,
+            inferred_clock: None,
             history: Vec::new(),
         }
     }
 
-    /// Lower an edge-triggered process whose single event is the clock of
-    /// its sampled value functions.
-    pub fn with_inferred_clock(mut self, inferred: bool) -> Self {
-        self.inferred_clock = inferred;
+    /// Lower an edge-triggered process with the clock its sampled value
+    /// functions infer, if any.
+    pub fn with_inferred_clock(mut self, clock: Option<Clock>) -> Self {
+        self.inferred_clock = clock;
         self
     }
 
     /// The operand of `$sampled` (IEEE 1800-2023 16.9.3) with each static
     /// variable read through its sampled copy. Automatic variables and the
     /// lowering's own temporaries keep their current value (16.5.1). A
-    /// combinational process reruns when its inputs change, not when their
-    /// sampled values do, so it cannot read them.
+    /// combinational process stays sensitive to the variables themselves,
+    /// whose changes run it, not to their copies: it is lowered as a gated
+    /// unit that keeps the value it last computed.
     fn sampled(
         &mut self,
         args: &[Option<sv::ir::Expr>],
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
-        if self.combinational {
-            return Err(unsupported("$sampled in combinational logic"));
-        }
         let [Some(operand)] = args else {
             return Err(unsupported("operand of `$sampled`"));
         };
@@ -221,12 +225,30 @@ impl<'p, 'a> Ff<'p, 'a> {
     }
 
     /// Declare the `$past` histories that the sampled value functions of
-    /// `body` read, as nonblocking targets of the process.
+    /// `body`, and of the subroutines it calls, read, as nonblocking targets
+    /// of the process. A subroutine's calls infer the clock of the process
+    /// that calls it.
     fn declare_history(&mut self, body: &[sv::ir::Stmt]) -> Result<(), sv::AnalyzerError> {
         use sv::ir::SystemFunction;
         let mut calls = Vec::new();
         for stmt in body {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+        }
+        let mut visited = HashSet::default();
+        let mut index = 0;
+        while index < calls.len() {
+            if let (sv::ir::Callee::Subroutine(name), args) = calls[index].clone()
+                && let Some(subroutine) = self.m.subroutine(&name).cloned()
+            {
+                // The defaults of omitted arguments run at the call.
+                default_calls(&subroutine, &args, &mut calls);
+                if visited.insert(name) {
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+                    }
+                }
+            }
+            index += 1;
         }
         for (callee, args) in calls {
             let sv::ir::Callee::System(
@@ -239,9 +261,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             else {
                 continue;
             };
-            if !self.inferred_clock {
+            if self.inferred_clock.is_none() {
                 return Err(unsupported(format!(
-                    "`{function}` outside an edge-triggered process with one event, whose clock it infers"
+                    "`{function}` outside an edge-triggered process whose clock it infers"
                 )));
             }
             let (depth, gate) = past_depth_and_gate(function, &args)?;
@@ -346,7 +368,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .find(|history| history.name == name && history.gate == gate)
                 .ok_or_else(|| {
                     unsupported(format!(
-                        "`{function}` outside an edge-triggered process with one event, whose clock it infers"
+                        "`{function}` outside an edge-triggered process whose clock it infers"
                     ))
                 })?;
             renames.insert(name, history.chain[depth - 1].clone());
@@ -402,6 +424,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             arg_order: Vec::new(),
         };
         let mut stmts = Vec::new();
+        if self.history.is_empty() {
+            return Ok(true);
+        }
         for history in &self.history {
             let mut updates: Vec<Stmt> = history
                 .chain
@@ -425,6 +450,35 @@ impl<'p, 'a> Ff<'p, 'a> {
                     else_body: Vec::new(),
                 }),
             }
+        }
+        // A run for another event, such as an asynchronous reset, is no
+        // tick: the clock has kept the level it had before the slot.
+        let clock = self
+            .inferred_clock
+            .as_ref()
+            .expect("histories have a clock");
+        if !clock.alone {
+            let level = Expr::Literal(if clock.rising { "1'b1" } else { "1'b0" }.into());
+            let signal = Expr::Ident(clock.signal.clone());
+            let compare = |left: Expr, op, right: Expr| Expr::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
+            let tick = compare(
+                compare(
+                    sampled(signal.clone()),
+                    sv::ir::BinaryOp::NeCase,
+                    level.clone(),
+                ),
+                sv::ir::BinaryOp::LogicAnd,
+                compare(signal, sv::ir::BinaryOp::EqCase, level),
+            );
+            stmts = vec![Stmt::If {
+                condition: tick,
+                then_body: stmts,
+                else_body: Vec::new(),
+            }];
         }
         self.exec_block(&stmts)
     }
@@ -4249,7 +4303,6 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<Vec<LogicPath<SourceVarId>>, sv::AnalyzerError> {
         let always_comb = kind != sv::ir::CombProcessKind::AlwaysStar;
         self.direct = true;
-        self.combinational = true;
         let mut reads = self.m.implicit_reads(body, always_comb);
         reads.extend(self.m.implicit_reads(sensitivity_body, always_comb));
         for stmt in body {

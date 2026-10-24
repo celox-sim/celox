@@ -246,6 +246,20 @@ impl BodyBuilder<'_, '_, '_> {
                             unreachable!("matched an immediate header");
                         };
                         let statement = native.statement(id);
+                        // The action of a deferred assertion is one
+                        // subroutine call (IEEE 1800-2023 16.4), not a block.
+                        if deferred.is_some()
+                            && success.iter().chain(failure).any(|&action| {
+                                !matches!(
+                                    native.statement(action).kind,
+                                    StatementKind::Empty | StatementKind::Expression(_)
+                                )
+                            })
+                        {
+                            return Err(unsupported(
+                                "deferred assertion action other than one display or severity task call",
+                            ));
+                        }
                         jobs.push(Job::AssertionThen {
                             condition,
                             keyword: keyword.clone(),

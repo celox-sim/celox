@@ -136,6 +136,53 @@ macro_rules! past {
                 assert_eq!(value(&mut sim, "p1"), 5);
             }
 
+            /// With an asynchronous reset the body reads the reset, so the
+            /// clock is inferred (IEEE 1800-2023 16.14.6); a run for the
+            /// reset is no tick. `a` is 0, 1, 2 at the ticks 1, 3, 5, and the
+            /// reset pulses low at 4: had that run shifted the history,
+            /// `$past(a, 2)` would be 1 at 5.
+            #[test]
+            fn an_asynchronous_reset_is_no_tick() {
+                let mut sim = simulation(
+                    "  bit rst = 1;\n  \
+                     always_ff @(posedge clk or negedge rst)\n    \
+                     if (!rst) p2 <= p2 + 1; else p1 <= $past(a, 2);\n  \
+                     initial begin #2 a = 1; #2 a = 2; rst = 0; #0 rst = 1; end",
+                );
+                sim.run_until(5).unwrap();
+                assert_eq!((value(&mut sim, "p1"), value(&mut sim, "p2")), (0, 1));
+                sim.run_until(7).unwrap();
+                assert_eq!(value(&mut sim, "p1"), 1);
+            }
+
+            /// A function called by a clocked process infers its clock.
+            #[test]
+            fn subroutines_infer_the_clock_of_their_caller() {
+                let mut sim = simulation(
+                    "  function bit [7:0] previous();\n    \
+                     return $past(a);\n  \
+                     endfunction\n  \
+                     always @(posedge clk) p1 <= previous();\n  \
+                     initial begin #2 a = 1; #2 a = 2; #2 a = 3; end",
+                );
+                sim.run_until(7).unwrap();
+                assert_eq!(value(&mut sim, "p1"), 2);
+            }
+
+            /// So does the default of an omitted argument.
+            #[test]
+            fn argument_defaults_infer_the_clock_of_their_caller() {
+                let mut sim = simulation(
+                    "  function bit [7:0] pass(bit [7:0] v = $past(a));\n    \
+                     return v;\n  \
+                     endfunction\n  \
+                     always @(posedge clk) p1 <= pass();\n  \
+                     initial begin #2 a = 1; #2 a = 2; #2 a = 3; end",
+                );
+                sim.run_until(7).unwrap();
+                assert_eq!(value(&mut sim, "p1"), 2);
+            }
+
             /// Without one clock to infer, the functions are rejected.
             #[test]
             fn a_clock_must_be_inferable() {
