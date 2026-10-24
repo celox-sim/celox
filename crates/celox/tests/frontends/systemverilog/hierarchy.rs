@@ -1,6 +1,17 @@
 use super::*;
 
 sv_backends! {
+    fn packed_pattern_parameter_arguments_preserve_wide_values(sim) {
+        @case "hierarchy::packed_pattern_parameter_arguments_preserve_wide_values";
+    }
+
+    fn packed_pattern_parameters_forward_whole_values(sim) {
+        @case "hierarchy::packed_pattern_parameters_forward_whole_values";
+    }
+    fn packed_pattern_parameter_arguments_keep_types_and_unknown_bits(sim) {
+        @case "hierarchy::packed_pattern_parameter_arguments_keep_types_and_unknown_bits";
+    }
+
     fn array_parameter_elements_select_conditional_whole_arrays(sim) {
         @case "hierarchy::array_parameter_elements_select_conditional_whole_arrays";
     }
