@@ -1390,3 +1390,75 @@
   (top Top) (eval)
   (assert_eq first 0x00000000000041310000000000004130)
   (assert_eq second 0x00000000000042310000000000004230))
+
+(case packed_pattern_parameters_forward_whole_values
+  (source "packed_pattern_arguments.sv" #"
+    package Values;
+      localparam logic [1:0][4:0] A='{5'd3,5'd7};
+    endpackage
+    module Sink #(parameter P=0)(output wire [19:0] y,
+                                 output wire [31:0] width);
+      assign y=P;
+      assign width=$bits(P);
+    endmodule
+    module PatternSink #(parameter logic [3:0][4:0] P='{4{5'd1}})
+                        (output wire [19:0] y);
+      assign y=P;
+    endmodule
+    module Parent #(parameter N=2)(output wire [19:0] y,
+                                   output wire [31:0] width,
+                                   output wire [19:0] patterned);
+      localparam logic [N-1:0][4:0] A='{N{5'd16}};
+      Sink #(.P(A)) child(.y(y),.width(width));
+      PatternSink #(.P(A)) patterned_child(.y(patterned));
+    endmodule
+    module Top(output wire [19:0] four,two,pkg,pattern_four,pattern_two,literal_value,
+               output wire [31:0] four_width,two_width,pkg_width);
+      Parent #(.N(4)) a(four,four_width,pattern_four);
+      Parent #(.N(2)) b(two,two_width,pattern_two);
+      PatternSink #(.P(20'h54321)) direct_literal(literal_value);
+      Sink #(Values::A) c(pkg,pkg_width);
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq four 0x84210) (assert_eq four_width 20)
+  (assert_eq two 0x210) (assert_eq two_width 10)
+  (assert_eq pkg 0x67) (assert_eq pkg_width 10)
+  (assert_eq pattern_four 0x84210)
+  (assert_eq pattern_two 0x210)
+  (assert_eq literal_value 0x54321))
+
+(case packed_pattern_parameter_arguments_keep_types_and_unknown_bits
+  (four_state)
+  (source "typed_packed_pattern_arguments.sv" #"
+    module Sink #(parameter logic [15:0] P=0)(output wire [15:0] y);
+      assign y=P;
+    endmodule
+    module Top(output wire [15:0] s,u,b);
+      localparam logic signed [1:0][3:0] S='{4'b10xz,4'bz01x};
+      localparam logic [1:0][3:0] U='{4'b10xz,4'bz01x};
+      localparam bit [1:0][3:0] B='{4'b10xz,4'bz01x};
+      Sink #(.P(S)) a(s);
+      Sink #(.P(U)) c(u);
+      Sink #(.P(B)) d(b);
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq s (fourstate 0xffa3 0x0039))
+  (assert_eq u (fourstate 0x00a3 0x0039))
+  (assert_eq b 0x0082))
+
+(case packed_pattern_parameter_arguments_preserve_wide_values
+  (source "wide_packed_pattern_arguments.sv" #"
+    module Sink #(parameter P=0)(output wire [128:0] y,output wire [31:0] width);
+      assign y=P;
+      assign width=$bits(P);
+    endmodule
+    module Top(output wire [128:0] y,output wire [31:0] width);
+      localparam logic [2:0][42:0] A='{43'h40000000000,43'd2,43'd1};
+      Sink #(.P(A)) child(y,width);
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq y (+ (<< 1 128) (+ (<< 2 43) 1)))
+  (assert_eq width 129))

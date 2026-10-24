@@ -276,6 +276,9 @@ test("all four retained baselines accept only their existing failures", () => {
           result.accepted_failures,
           tool === "icarus"
             ? [
+                "hierarchy::packed_pattern_parameter_arguments_keep_types_and_unknown_bits",
+                "hierarchy::packed_pattern_parameter_arguments_preserve_wide_values",
+                "hierarchy::packed_pattern_parameters_forward_whole_values",
                 "unions::packed_mixed_state",
                 "unions::soft_overlay",
                 "unions::soft_signed_ports",

@@ -199,6 +199,13 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         | "unions::soft_wide_four_state" => {
                             ("compile_error", "compile", "syntax error")
                         }
+                        "hierarchy::packed_pattern_parameter_arguments_keep_types_and_unknown_bits"
+                        | "hierarchy::packed_pattern_parameter_arguments_preserve_wide_values"
+                        | "hierarchy::packed_pattern_parameters_forward_whole_values" => (
+                            "compile_error",
+                            "compile",
+                            "packed array parameters are not supported yet",
+                        ),
                         _ => panic!("unreviewed failure: {tool} {name}: {status}"),
                     };
                     assert_eq!(status, expected_status, "{name}");
