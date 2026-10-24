@@ -87,6 +87,9 @@ struct SvVariable {
     hidden: bool,
     /// Compiler-generated external override slot: (target, is_enable).
     force_control: Option<(SourceVarId, bool)>,
+    /// The variable whose sampled value this hidden copy holds
+    /// (`SimModule::sample_shadows`).
+    sampled_from: Option<SourceVarId>,
 }
 
 /// Whether `expr` reads a string variable: after its calls are hoisted, a
@@ -126,13 +129,14 @@ impl SvVariable {
     }
 
     /// A hidden variable other than the time slot, whose value the lowered
-    /// code computes. The time slot is state the scheduler writes, and an
-    /// event expression's variables are state its process and its
-    /// continuous assignment share.
+    /// code computes. The time slot and the sampled copies are state the
+    /// scheduler writes, and an event expression's variables are state its
+    /// process and its continuous assignment share.
     fn is_scratch(&self) -> bool {
         self.hidden
             && self.path != [TIME_SLOT]
             && self.force_control.is_none()
+            && self.sampled_from.is_none()
             && !self.path[0].starts_with(EVENT_PREFIX)
     }
 }
@@ -2198,6 +2202,7 @@ fn prepare_external_hierarchy_collecting(
                         source: variable.source.clone(),
                         hidden: !variable.module_affiliated,
                         force_control: None,
+                        sampled_from: None,
                     },
                 )
             })
@@ -3629,6 +3634,7 @@ fn lower_module_with_overrides(
             source: None,
             hidden: false,
             force_control: None,
+            sampled_from: None,
         };
         name_to_id.insert(port.name().to_string(), id);
         port_order.push(id);
@@ -3713,6 +3719,7 @@ fn lower_module_with_overrides(
             source: None,
             hidden: false,
             force_control: None,
+            sampled_from: None,
         };
         name_to_id.insert(signal.name().to_string(), id);
         // The package's object, or the other instance's, has its own
@@ -3793,6 +3800,7 @@ fn lower_module_with_overrides(
                 source: None,
                 hidden: false,
                 force_control: None,
+                sampled_from: None,
             },
         );
     }
@@ -4005,6 +4013,7 @@ fn lower_module_with_overrides(
             nba_switches,
             host_request_sites,
             time_slot: name_to_id.get(TIME_SLOT).copied(),
+            sample_shadows: Vec::new(),
         },
         variables,
         port_order,
@@ -4793,6 +4802,12 @@ pub(crate) fn attach_instance_glue(
     }
     // Combinational processes may read the time too.
     module.time_slot = signal_names.get(TIME_SLOT).copied();
+    let mut sample_shadows: Vec<_> = parent_variables
+        .iter()
+        .filter_map(|(&copy, variable)| variable.sampled_from.map(|variable| (variable, copy)))
+        .collect();
+    sample_shadows.sort_by_key(|&(variable, copy)| (variable.0, copy.0));
+    module.sample_shadows = sample_shadows;
     for (instance, child_id, child, connections) in resolved_instances {
         let glue = build_instance_glue(
             &parent_variables,
@@ -5187,6 +5202,7 @@ fn lower_initial_processes(
                         // Control slots are not signals of the design.
                         hidden: true,
                         force_control: None,
+                        sampled_from: None,
                     },
                 );
                 id
@@ -5831,6 +5847,7 @@ fn ensure_parent_output_signals(
             source: None,
             hidden: false,
             force_control: None,
+            sampled_from: None,
         };
         parent
             .variables
@@ -7713,6 +7730,7 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         | SystemFunction::Isunbounded
         | SystemFunction::Signed
         | SystemFunction::Unsigned
+        | SystemFunction::Sampled
         | SystemFunction::Bits
         | SystemFunction::Size
         | SystemFunction::Dimensions
@@ -9077,6 +9095,15 @@ fn runtime_select_as_shift(
 }
 
 fn expr_from_const_expr(expr: &sv::ir::ConstExpr) -> Option<sv::ir::Expr> {
+    expr_from_const_expr_with_calls(expr, false)
+}
+
+/// Reconstruct a select operand, optionally retaining nested runtime calls.
+fn expr_from_const_expr_with_calls(
+    expr: &sv::ir::ConstExpr,
+    allow_calls: bool,
+) -> Option<sv::ir::Expr> {
+    let convert = |expr| expr_from_const_expr_with_calls(expr, allow_calls);
     Some(match expr {
         sv::ir::ConstExpr::Literal(value) => sv::ir::Expr::Literal(value.clone()),
         sv::ir::ConstExpr::Ident(name) => sv::ir::Expr::Ident(name.clone()),
@@ -9086,13 +9113,13 @@ fn expr_from_const_expr(expr: &sv::ir::ConstExpr) -> Option<sv::ir::Expr> {
             lsb,
             signed,
         } => sv::ir::Expr::Select {
-            expr: Box::new(expr_from_const_expr(expr)?),
+            expr: Box::new(convert(expr)?),
             msb: (**msb).clone(),
             lsb: (**lsb).clone(),
             signed: *signed,
         },
         sv::ir::ConstExpr::Select { expr, bit } => sv::ir::Expr::Select {
-            expr: Box::new(expr_from_const_expr(expr)?),
+            expr: Box::new(convert(expr)?),
             msb: (**bit).clone(),
             lsb: (**bit).clone(),
             signed: false,
@@ -9102,28 +9129,36 @@ fn expr_from_const_expr(expr: &sv::ir::ConstExpr) -> Option<sv::ir::Expr> {
             width,
             signed,
         } => sv::ir::Expr::Resize {
-            expr: Box::new(expr_from_const_expr(expr)?),
+            expr: Box::new(convert(expr)?),
             width: *width,
             signed: *signed,
+        },
+        sv::ir::ConstExpr::Function { callee, args, .. } if allow_calls => sv::ir::Expr::Call {
+            callee: callee.clone(),
+            arg_order: Vec::new(),
+            args: args
+                .iter()
+                .map(|arg| convert(arg).map(Some))
+                .collect::<Option<_>>()?,
         },
         sv::ir::ConstExpr::Function { .. } => return None,
         sv::ir::ConstExpr::Unary { op, expr } => sv::ir::Expr::Unary {
             op: *op,
-            expr: Box::new(expr_from_const_expr(expr)?),
+            expr: Box::new(convert(expr)?),
         },
         sv::ir::ConstExpr::Binary { left, op, right } => sv::ir::Expr::Binary {
-            left: Box::new(expr_from_const_expr(left)?),
+            left: Box::new(convert(left)?),
             op: *op,
-            right: Box::new(expr_from_const_expr(right)?),
+            right: Box::new(convert(right)?),
         },
         sv::ir::ConstExpr::Mux {
             condition,
             then_expr,
             else_expr,
         } => sv::ir::Expr::Mux {
-            condition: Box::new(expr_from_const_expr(condition)?),
-            then_expr: Box::new(expr_from_const_expr(then_expr)?),
-            else_expr: Box::new(expr_from_const_expr(else_expr)?),
+            condition: Box::new(convert(condition)?),
+            then_expr: Box::new(convert(then_expr)?),
+            else_expr: Box::new(convert(else_expr)?),
         },
     })
 }

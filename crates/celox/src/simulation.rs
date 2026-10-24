@@ -271,19 +271,14 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
 
     fn compiled_slots(&self) -> celox_runtime::CompiledSlots {
         use celox_runtime::CompiledSlots;
-        // Deferred assertions mature when a slot is over, which the
-        // runtime's loop tells apart from the end of a step.
-        if self.frozen
-            || !self.components.is_empty()
-            || self.deferred_assertions
-            || !self.backend.runs_compiled_scheduler()
-        {
+        if self.frozen || !self.components.is_empty() || !self.backend.runs_compiled_scheduler() {
             return CompiledSlots::None;
         }
-        // Waveforms record, the heap collects and a slot observer looks at
-        // every slot boundary.
+        // Waveforms record, the heap collects, deferred assertions mature
+        // and a slot observer looks at every slot boundary.
         let vcd = &self.sv_vcd;
-        if self.slot_observer.is_some()
+        if self.deferred_assertions
+            || self.slot_observer.is_some()
             || self.vcd_writer.is_some()
             || vcd.path.is_some()
             || vcd.started.is_some()
@@ -458,6 +453,9 @@ impl<B: SimBackend> Simulation<B> {
         simulator.timed = true;
         simulator.skip_runtime_finish();
         state.initialize_declarations(&mut simulator)?;
+        // Before the first slot, a sampled value is the declared or default
+        // value (IEEE 1800-2023 16.5.1).
+        state.sample_values(&mut simulator.backend);
         Ok(Self {
             simulator,
             state,
@@ -761,7 +759,7 @@ impl<B: SimBackend> Simulation<B> {
     /// run at that time.
     #[inline]
     fn end_idle_slot(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
-        if !self.simulator.deferred_assertions
+        if !self.simulator.host_slot_work
             || end_time <= self.state.time()
             || self.state.next_event_time() == Some(self.state.time())
         {

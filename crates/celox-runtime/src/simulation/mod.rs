@@ -552,7 +552,21 @@ impl<B: SimBackend> SimulationState<B> {
     /// Move to `time` without running anything there, as the end of a run
     /// to a time without work does. Design code reads the new time.
     pub fn advance_time(&mut self, backend: &mut B, time: u64) {
+        if time > self.scheduler.time {
+            self.sample_values(backend);
+        }
         self.set_time(backend, time);
+    }
+
+    /// Copy each sampled variable into its copy, which then holds the value
+    /// the variable has in the Preponed region of the next time slot (IEEE
+    /// 1800-2023 4.4.2.1, 16.5.1). A timed simulation does it before
+    /// advancing to a later timestamp and once before the first slot.
+    /// Returning to the host at the same timestamp must retain the copy.
+    pub fn sample_values(&self, backend: &mut B) {
+        for &(variable, copy) in &self.model.sample_shadows {
+            crate::copy_signal(backend, variable, copy);
+        }
     }
 
     /// Store `time` where design code reads the simulation time (`$time`).

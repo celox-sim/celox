@@ -142,6 +142,29 @@ pub struct SignalRef {
     pub array_layout: Option<SignalArrayLayout>,
 }
 
+/// Copy the value of `from`, with its unknown bits, into `to`, a signal of
+/// the same width and state form.
+pub fn copy_signal<B: backend::SimBackend>(backend: &mut B, from: SignalRef, to: SignalRef) {
+    if from.array_layout.is_some() || to.array_layout.is_some() {
+        // Each array has its own layout, packed or with strided elements:
+        // the backend gathers and scatters the elements.
+        let (value, mask) = backend.get_four_state(from);
+        backend.set_four_state(to, value, mask);
+        return;
+    }
+    let planes = if backend.layout().four_state && from.is_4state {
+        2
+    } else {
+        1
+    };
+    let bytes = celox_state_layout::get_byte_size(from.width) * planes;
+    let (memory, size) = backend.memory_as_mut_ptr();
+    assert!(from.offset + bytes <= size && to.offset + bytes <= size);
+    // SAFETY: both ranges are in the backend's memory. Signal views can
+    // alias, so use the copy operation that permits overlapping ranges.
+    unsafe { std::ptr::copy(memory.add(from.offset), memory.add(to.offset), bytes) };
+}
+
 #[cfg(test)]
 mod array_layout_tests {
     use super::SignalArrayLayout;

@@ -441,12 +441,10 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        self.publish_time(executor.backend_mut(), current_time);
+        self.advance_time(executor.backend_mut(), current_time);
         if !self.model.timed {
             return self.batch_round(executor, current_time, events_to_process);
         }
-        self.scheduler.time = current_time;
-
         // Host writes the waits must see one at a time.
         for (signal, value) in executor.take_host_writes() {
             self.observe_host_write(signal, &value);

@@ -1105,6 +1105,11 @@ pub struct RuntimeSchema<A> {
     /// most one per module instance. Before each round a timed scheduler
     /// stores the current time into each, as [`TIME_SLOT_WIDTH`] bits.
     pub time_slots: Vec<A>,
+    /// Variables of `$sampled` operands and their copies, which hold the
+    /// value of the variable in the Preponed region (IEEE 1800-2023
+    /// 16.5.1): a host copies each variable into its copy when a time slot
+    /// is over, and once before the first.
+    pub sample_shadows: Vec<(A, A)>,
     /// The state a compiled scheduler exchanges with the runtime, and the
     /// scheduler itself once one is generated. Present when the design has
     /// process kernels.
@@ -1359,6 +1364,7 @@ impl<A> Default for RuntimeSchema<A> {
             host_request_sites: Vec::new(),
             active_commits: Vec::new(),
             time_slots: Vec::new(),
+            sample_shadows: Vec::new(),
             scheduler: None,
             derived_edges: Vec::new(),
             settle_partitions: None,

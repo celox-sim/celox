@@ -214,7 +214,7 @@ impl<B: SimBackend> SimulationState<B> {
         // The slot is over when nothing more is due at its time, host
         // writes included.
         if !self.host_pending && self.next_work_time() != Some(current_time) {
-            executor.try_end_time_slot(current_time)?;
+            self.end_time_slot(executor, current_time)?;
         }
         Ok(())
     }
@@ -226,6 +226,19 @@ impl<B: SimBackend> SimulationState<B> {
         !state.reactive.is_empty()
             || !state.re_inactive.is_empty()
             || !state.re_nba_queue.is_empty()
+    }
+
+    /// Run the host's Observed and Postponed work after quiescence.
+    /// The host may resume this timestamp, so sampling waits for time advance.
+    pub(super) fn end_time_slot<E>(
+        &mut self,
+        executor: &mut E,
+        current_time: u64,
+    ) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        executor.try_end_time_slot(current_time)
     }
 
     /// Count a round or a pass of the process phase against the slot's

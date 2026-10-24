@@ -418,6 +418,8 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) host_request_sites: Vec<celox_design::HostRequestSite<AbsoluteAddr>>,
     pub(crate) active_commits: Vec<AbsoluteAddr>,
     pub(crate) time_slots: Vec<AbsoluteAddr>,
+    #[serde(default)]
+    pub(crate) sample_shadows: Vec<(AbsoluteAddr, AbsoluteAddr)>,
     pub(crate) scheduler: Option<celox_design::SchedulerSchema<AbsoluteAddr>>,
     pub(crate) derived_edges: Vec<celox_design::DerivedEdgeUnits<AbsoluteAddr>>,
 }
@@ -591,6 +593,7 @@ impl NativeProgramImage {
                 host_request_sites: self.runtime_schema.host_request_sites.clone(),
                 active_commits: self.runtime_schema.active_commits.clone(),
                 time_slots: self.runtime_schema.time_slots.clone(),
+                sample_shadows: self.runtime_schema.sample_shadows.clone(),
                 scheduler: self.runtime_schema.scheduler.clone(),
                 derived_edges: self.runtime_schema.derived_edges.clone(),
                 settle_partitions: None,
@@ -2640,6 +2643,7 @@ fn compile_program(
                 declaration_startup: sir.runtime().runtime_schema.declaration_startup.clone(),
                 active_commits: sir.runtime().runtime_schema.active_commits.clone(),
                 time_slots: sir.runtime().runtime_schema.time_slots.clone(),
+                sample_shadows: sir.runtime().runtime_schema.sample_shadows.clone(),
                 scheduler: sir.runtime().runtime_schema.scheduler.clone(),
                 derived_edges: sir.runtime().runtime_schema.derived_edges.clone(),
             },

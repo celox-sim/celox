@@ -974,6 +974,7 @@ impl<'a> ProcModule<'a> {
                 source: None,
                 hidden: true,
                 force_control: None,
+                sampled_from: None,
             },
         );
         self.name_to_id.insert(name, id);
@@ -982,6 +983,24 @@ impl<'a> ProcModule<'a> {
     }
 
     /// A hidden variable with the shape of `id`, two-state when `two_state`.
+    /// The hidden copy that holds the sampled value of variable `id`
+    /// (IEEE 1800-2023 16.5.1), created on first use.
+    pub fn sampled_copy(&mut self, id: SourceVarId) -> String {
+        if let Some((name, _)) = self
+            .name_to_id
+            .iter()
+            .find(|(_, copy)| self.variables[copy].sampled_from == Some(id))
+        {
+            return name.clone();
+        }
+        let (copy, name) = self.shadow(id, "sampled", false);
+        self.variables
+            .get_mut(&copy)
+            .expect("a new copy")
+            .sampled_from = Some(id);
+        name
+    }
+
     pub fn shadow(
         &mut self,
         id: SourceVarId,
@@ -1040,6 +1059,7 @@ impl<'a> ProcModule<'a> {
             source: None,
             hidden: true,
             force_control: None,
+            sampled_from: None,
         };
         let id = next_var_id(&mut self.next_id);
         self.variables.insert(id, variable);
@@ -1070,6 +1090,7 @@ impl<'a> ProcModule<'a> {
                 source: None,
                 hidden: true,
                 force_control: None,
+                sampled_from: None,
                 ..variable
             },
         );
@@ -1597,6 +1618,7 @@ pub(super) fn register_locals(
                 source: None,
                 hidden: true,
                 force_control: None,
+                sampled_from: None,
             },
         );
         name_to_id.insert(local.name.clone(), id);
