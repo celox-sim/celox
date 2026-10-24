@@ -37,7 +37,8 @@
         "nix"
       ],
       "matchDepNames": [
-        "!rust-overlay"
+        "!rust-overlay",
+        "!xezim"
       ],
       "enabled": false
     },
@@ -204,6 +205,21 @@
         "rust-overlay"
       ],
       "minimumReleaseAge": "0 days"
+    },
+    {
+      "description": "xezim is a reference simulator of the shared test suite. Upstream commits no Cargo.lock: regenerate nix/xezim/Cargo.lock with nix/xezim/update-lock.sh. An update can change its results, so it also waits for a fresh external-suite run and a review of the retained xezim reports.",
+      "matchManagers": [
+        "nix"
+      ],
+      "matchDepNames": [
+        "xezim"
+      ],
+      "semanticCommitType": "test",
+      "semanticCommitScope": "xezim",
+      "automerge": false,
+      "labels": [
+        "dependencies"
+      ]
     },
     {
       "description": "The Veryl conformance analyzer probe matches the Veryl metadata vendored at the pinned upstream revision in lydite/conformance/veryl/run_ci.sh; update it together with that revision.",

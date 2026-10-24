@@ -19,6 +19,8 @@ mod process;
 pub mod verification;
 #[cfg(feature = "external")]
 pub mod verilator;
+#[cfg(feature = "external")]
+pub mod xezim;
 
 pub use backend::{
     Backend, Design, Event, Factory, Instance, Signal, SignalPath, Simulator, Source,

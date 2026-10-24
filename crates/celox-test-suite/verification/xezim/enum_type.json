@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\nParsed 2 file(s): 2 descriptions, 0 errors, 0 warnings\nerror: <case>/source_0.sv:11:26: cannot assign logic [1:0] to 'c' of type enum Color: an enum takes only its own members, values of its own type, or an explicit cast (IEEE 1800-2017 §6.19.3)\n",
+      "expectation": "Simulation",
+      "name": "enum_type::test_enum_assign_and_compare",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "enum_type::test_enum_case_match",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "enum_type::test_enum_ff_state_machine",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

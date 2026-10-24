@@ -1,0 +1,125 @@
+{
+  "cases": [
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "aggregate_regressions::coincident_disjoint_byte_writers",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "aggregate_regressions::concatenated_runtime_index",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "aggregate_regressions::concatenated_static_loop_initializer",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "aggregate_regressions::continuous_function_dynamic_scratch_write",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "aggregate_regressions::continuous_nested_concatenated_targets",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "aggregate_regressions::independent_clock_byte_writers",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "aggregate_regressions::independent_clock_memory_writers",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "aggregate_regressions::masked_feed_forward_dependencies",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "aggregate_regressions::parameter_element_forwarding at 73:3: assert_eq y: expected 0x810, got 0x0",
+      "expectation": "Simulation",
+      "name": "aggregate_regressions::parameter_element_forwarding",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "aggregate_regressions::parameter_runtime_element_bit at 87:5: assert_eq y: expected 0x1, got 0xX",
+      "expectation": "Simulation",
+      "name": "aggregate_regressions::parameter_runtime_element_bit",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "aggregate_regressions::shared_memory_reads_pre_edge_values",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

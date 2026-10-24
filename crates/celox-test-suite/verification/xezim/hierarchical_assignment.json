@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "compile hierarchical_assignment::disjoint_loop: xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:30:9: error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 §22.5.1)\n    30 |         `CELOX_SUITE_FINISH();\n       |         ^~~~~~~~~~~~~~~~~~~\nError: preprocessing failed (1 error(s))\n",
+      "expectation": "Simulation",
+      "name": "hierarchical_assignment::disjoint_loop",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "compile hierarchical_assignment::selections: xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:49:9: error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 §22.5.1)\n    49 |         `CELOX_SUITE_FINISH();\n       |         ^~~~~~~~~~~~~~~~~~~\nError: preprocessing failed (1 error(s))\n",
+      "expectation": "Simulation",
+      "name": "hierarchical_assignment::selections",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

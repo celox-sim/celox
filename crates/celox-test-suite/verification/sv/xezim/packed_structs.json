@@ -1,0 +1,103 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "packed_structs::packed_struct_alias_packed_dimensions at 106:5: assert_eq widths: expected 0x22, got 0x30",
+      "expectation": "Simulation",
+      "name": "packed_structs::packed_struct_alias_packed_dimensions",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "packed_structs::packed_struct_bounds_and_type_queries at 232:5: assert_eq widths: expected 0x22, got 0x10",
+      "expectation": "Simulation",
+      "name": "packed_structs::packed_struct_bounds_and_type_queries",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "packed_structs::packed_struct_field_assignments_and_registers",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "packed_structs::packed_struct_layout_and_nested_fields at 130:5: assert_eq delta: expected 0xf8, got 0x8",
+      "expectation": "Simulation",
+      "name": "packed_structs::packed_struct_layout_and_nested_fields",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "packed_structs::packed_struct_mixed_state_members",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "packed_structs::packed_struct_parameterized_ports",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "packed_structs::packed_struct_typedef_bounds_survive_generate_shadowing",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "packed_structs::packed_struct_whole_value_signedness at 260:5: assert_eq signed_member: expected 0xfff8, got 0x8",
+      "expectation": "Simulation",
+      "name": "packed_structs::packed_struct_whole_value_signedness",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "packed_structs::packed_struct_wide_four_state_layout",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

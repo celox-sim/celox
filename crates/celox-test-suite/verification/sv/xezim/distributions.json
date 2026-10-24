@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "distributions::annex_n_reference_values at 40:3: assert_eq ok: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "distributions::annex_n_reference_values",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "distributions::replay_and_normal_parameters",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

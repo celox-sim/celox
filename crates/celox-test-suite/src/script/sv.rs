@@ -14,8 +14,9 @@
 //! each, and restores a level that was neither.
 //!
 //! A timed case settles without advancing time: Icarus resumes from a
-//! read/write synchronization callback and Verilator from a clocking event in
-//! the observed region. Its script begins with `run_until` or
+//! read/write synchronization callback, Verilator from a clocking event in
+//! the observed region, and xezim once a program has run in the reactive
+//! region. Its script begins with `run_until` or
 //! `run_to_finish`, so the design's time-zero processes have run before the
 //! testbench touches it. `run_until` drains its target timestamp before the
 //! next script operation. The checks after `run_to_finish` run in a `final`
@@ -522,20 +523,28 @@ impl Generator<'_> {
         match expr {
             Expr::Literal(value) => self.literal(value),
             Expr::Var(name) => format!("v_{name}"),
-            Expr::Get(path) => match self.design.arrays.get(&path.name) {
-                // Element 0 in the least significant bits.
-                Some((_, bounds)) if path.instances.is_empty() => {
-                    let base = path_text(path);
-                    let elements: Vec<String> = bounds
-                        .indices()
-                        .into_iter()
-                        .rev()
-                        .map(|i| format!("{base}[{i}]"))
-                        .collect();
-                    format!("$signed({n}'({{{}}}))", elements.join(", "))
+            Expr::Get(path) => {
+                let value = match self.design.arrays.get(&path.name) {
+                    // Element 0 in the least significant bits.
+                    Some((_, bounds)) if path.instances.is_empty() => {
+                        let base = path_text(path);
+                        let elements: Vec<String> = bounds
+                            .indices()
+                            .into_iter()
+                            .rev()
+                            .map(|i| format!("{base}[{i}]"))
+                            .collect();
+                        format!("$signed({n}'({{{}}}))", elements.join(", "))
+                    }
+                    _ => format!("$signed({n}'({{{}}}))", path_text(path)),
+                };
+                if self.case.four_state {
+                    value
+                } else {
+                    let what = format!("{} reads {}", self.case.name, path_label(path));
+                    format!("suite_read({value}, {})", sv_string(&what))
                 }
-                _ => format!("$signed({n}'({{{}}}))", path_text(path)),
-            },
+            }
             Expr::Op(op, operands) => {
                 let args: Vec<String> = operands.iter().map(|e| self.expr(e)).collect();
                 let fold = |symbol: &str| format!("({})", args.join(&format!(" {symbol} ")));
@@ -1019,6 +1028,24 @@ impl Generator<'_> {
     }
 }
 
+/// The program that settles a timed testbench under xezim. Program code runs
+/// in the reactive region set, which the scheduler reaches only once the
+/// active region set is empty, NBA updates and the events they cause included
+/// (IEEE 1800-2023 4.5, 24.3.1). The testbench's request is a design event,
+/// so the acknowledgement follows the design's whole reaction to the stimulus
+/// before it; a bare `#0` would resume in the reactive set before the design
+/// reacts. The program starts in the reactive region too, possibly after the
+/// first request, so it compares the counts instead of waiting first.
+const XEZIM_SETTLER: &str = r#"`ifdef CELOX_SUITE_XEZIM
+program celox_suite_settler (input int request, output int ack);
+  initial forever begin
+    if (ack == request) @(request);
+    ack = request;
+  end
+endprogram
+`endif
+"#;
+
 /// Generate the testbench for `case`. Every event the script ticks must be an
 /// input port listed in `design.edges`.
 pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsupported> {
@@ -1079,19 +1106,29 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
     let _ = writeln!(out, "// Generated from {} by celox-test-suite.", case.name);
     // Script values are deliberately wider than the signals they meet.
     let _ = writeln!(out, "/* verilator lint_off WIDTH */");
+    if timed {
+        out.push_str(XEZIM_SETTLER);
+    }
     let _ = writeln!(out, "module {TESTBENCH_TOP};");
     if timed {
         let _ = writeln!(out, "  timeunit 1ps;");
         let _ = writeln!(out, "  timeprecision 1ps;");
     }
+    // A two-state run starts every input at zero. The Icarus harness zeroes
+    // storage and Verilator starts it at zero; xezim does neither for these.
     for port in &design.inputs {
         let range = port
             .array
             .map(|bounds| format!(" [{}:{}]", bounds.left, bounds.right))
             .unwrap_or_default();
+        let zero = match (case.four_state, port.array) {
+            (true, _) => "",
+            (false, None) => "\n`ifdef CELOX_SUITE_XEZIM\n    = '0\n`endif\n   ",
+            (false, Some(_)) => "\n`ifdef CELOX_SUITE_XEZIM\n    = '{default: '0}\n`endif\n   ",
+        };
         let _ = writeln!(
             out,
-            "  logic [{}:0] i_{}{range};",
+            "  logic [{}:0] i_{}{range}{zero};",
             port.width.max(1) - 1,
             port.name
         );
@@ -1156,6 +1193,19 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
     for (int i = 0; i < {width}; i++) xmask[i] = (v[i] === 1'bx) || (v[i] === 1'bz);
   endfunction
 
+  // A two-state read. Icarus and Verilator hold no unknown bits in a
+  // two-state run, but xezim starts some variables at X: reading one fails
+  // the run rather than letting comparisons and conditions decide on X.
+  function automatic logic signed [{w}:0] suite_read(input logic signed [{w}:0] v, input string what);
+`ifdef CELOX_SUITE_XEZIM
+    if ($isunknown(v)) begin
+      $display("@suite assert %s with unknown bits in a two-state run", what);
+      $fatal(1, "%s with unknown bits", what);
+    end
+`endif
+    return v;
+  endfunction
+
   function automatic logic signed [{w}:0] bitlen(input logic signed [{w}:0] v);
     bitlen = 0;
     for (int i = 0; i < {width}; i++) if (v[i]) bitlen = i + 1;
@@ -1191,17 +1241,27 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
         // Settling waits until the scheduler has run everything due at the
         // current time, without advancing it: Icarus resumes from a
         // read/write synchronization callback, Verilator from a clocking
-        // event sampled in the observed region.
+        // event sampled in the observed region, and xezim from the
+        // acknowledgement of `XEZIM_SETTLER`.
         out = out.replace(
             "  task automatic settle_now;\n    #1;\n    settled = 1;\n  endtask",
-            r#"  bit suite_progress = 0;
+            r#"`ifdef CELOX_SUITE_XEZIM
+  int suite_request = 0;
+  int suite_ack;
+  celox_suite_settler suite_settler (suite_request, suite_ack);
+`else
+  bit suite_progress = 0;
 `ifndef CELOX_SUITE_ICARUS
   clocking suite_settled @(suite_progress);
     input #0 progress = suite_progress;
   endclocking
 `endif
+`endif
   task automatic settle_now;
-`ifdef CELOX_SUITE_ICARUS
+`ifdef CELOX_SUITE_XEZIM
+    suite_request++;
+    while (suite_ack != suite_request) @(suite_ack);
+`elsif CELOX_SUITE_ICARUS
     suite_progress = 0;
     $celox_suite_settle(suite_progress);
     wait (suite_progress);
@@ -1325,7 +1385,7 @@ mod tests {
         assert!(text.contains("Top dut (.clk(i_clk), .a(i_a), .o());"));
         assert!(text.contains("i_a = t1;"));
         assert!(text.contains("repeat (128'sh2) begin"));
-        assert!(text.contains("actual = $signed(128'({dut.o}));"));
+        assert!(text.contains("actual = suite_read($signed(128'({dut.o})), \"g::t reads o\");"));
         assert!(text.contains("@suite assert g::t at"));
         assert!(text.contains("$finish;"));
     }
@@ -1378,6 +1438,32 @@ mod tests {
         )
         .unwrap();
         assert!(text.contains("@suite output 80ff00"));
+    }
+
+    #[test]
+    fn xezim_starts_two_state_inputs_at_zero_and_settles_timed_cases_in_a_program() {
+        let untimed = testbench(&case("(tick clk)"), &design()).unwrap();
+        assert!(
+            untimed
+                .contains("  logic [7:0] i_a\n`ifdef CELOX_SUITE_XEZIM\n    = '0\n`endif\n   ;\n")
+        );
+        assert!(!untimed.contains("program celox_suite_settler"));
+        let four_state = testbench(&case("(four_state) (tick clk)"), &design()).unwrap();
+        assert!(four_state.contains("  logic [7:0] i_a;\n"));
+        // Only a two-state read rejects unknown bits, and only under xezim.
+        let read = testbench(&case("(assert_eq o 1)"), &design()).unwrap();
+        assert!(read.contains("suite_read($signed(128'({dut.o})), \"g::t reads o\")"));
+        assert!(read.contains(
+            "`ifdef CELOX_SUITE_XEZIM\n    if ($isunknown(v)) begin\n      $display(\"@suite assert %s with unknown bits in a two-state run\", what);"
+        ));
+        let read = testbench(&case("(four_state) (assert_eq o 1)"), &design()).unwrap();
+        assert!(read.contains("actual = $signed(128'({dut.o}));"));
+        let timed = testbench(&case("(run_until 0) (assert_eq o 1)"), &design()).unwrap();
+        assert!(timed.contains("program celox_suite_settler (input int request, output int ack);"));
+        assert!(timed.contains("celox_suite_settler suite_settler (suite_request, suite_ack);"));
+        assert!(timed.contains(
+            "    while (suite_ack != suite_request) @(suite_ack);\n`elsif CELOX_SUITE_ICARUS"
+        ));
     }
 
     #[test]
