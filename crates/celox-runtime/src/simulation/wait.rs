@@ -165,43 +165,136 @@ impl<B: SimBackend> SimulationState<B> {
     /// Test the waits against the current state, or only their terms on
     /// signal `only` after a write of it, before combinational logic has
     /// settled. Woken processes become ready.
-    #[inline]
+    #[inline(always)]
     pub(super) fn observe(&mut self, backend: &B, only: Option<SignalRef>) {
-        self.check_waits(backend, only, false, false);
+        if self.model.wait_gates.is_empty() {
+            self.check_waits(backend, only, false);
+        } else {
+            self.check_gated_waits(backend, only, false, false);
+        }
     }
 
     /// Like [`Self::observe`] of every term, after combinational logic has
     /// settled.
-    #[inline]
+    #[inline(always)]
     pub(super) fn observe_settled(&mut self, backend: &B) {
-        self.check_waits(backend, None, false, true);
+        if self.model.wait_gates.is_empty() {
+            self.check_waits(backend, None, false);
+        } else {
+            self.check_gated_waits(backend, None, false, true);
+        }
     }
 
     /// Like [`Self::observe_settled`], at a point where only design code
     /// wrote state: terms on signals that only the host and the scheduler
     /// write cannot have changed.
-    #[inline]
+    #[inline(always)]
     pub(super) fn observe_driven(&mut self, backend: &B) {
         if !self.process_state.waiters.none_driven() {
-            self.check_waits(backend, None, true, true);
+            if self.model.wait_gates.is_empty() {
+                self.check_waits(backend, None, true);
+            } else {
+                self.check_gated_waits(backend, None, true, true);
+            }
         }
     }
 
     /// Like [`Self::observe_driven`], before combinational logic has
     /// settled.
-    #[inline]
+    #[inline(always)]
     pub(super) fn observe_driven_unsettled(&mut self, backend: &B) {
         if !self.process_state.waiters.none_driven() {
-            self.check_waits(backend, None, true, false);
+            if self.model.wait_gates.is_empty() {
+                self.check_waits(backend, None, true);
+            } else {
+                self.check_gated_waits(backend, None, true, false);
+            }
         }
     }
 
-    /// With `settled`, combinational logic has settled since the last
-    /// write. A term with an `iff` gate is judged only then: the gate may
-    /// be computed from what was written, so before then its baseline is
-    /// left as it is and the occurrence is judged, with the gate, at the
-    /// next settled check.
-    fn check_waits(
+    /// The waits of a design without `iff` gates: [`Self::check_gated_waits`]
+    /// without the gates.
+    fn check_waits(&mut self, backend: &B, only: Option<SignalRef>, driven_only: bool) {
+        let processes = &self.model.processes;
+        let state = StateView::new(backend);
+        let ProcessState { waiters, ready, .. } = &mut self.process_state;
+        waiters.retain(driven_only, |process, waiter| {
+            let terms = &processes[process].wait_sites[waiter.site];
+            let mut wake = false;
+            for (index, term) in terms.iter().enumerate() {
+                if only.is_some_and(|signal| signal != term.signal) || (driven_only && !term.driven)
+                {
+                    continue;
+                }
+                let baseline = &mut waiter.baselines[index];
+                // The common term: a plain signal no counter counts.
+                if let Baseline::Raw(last) = baseline {
+                    let now = state.planes(term.signal).expect("a plain signal");
+                    wake |= Self::advance(term.kind, last, now, term.signal.width);
+                    continue;
+                }
+                let counted = |seen: u32| {
+                    term.counter
+                        .is_some_and(|counter| backend.get_as::<u32>(counter) != seen)
+                };
+                wake |= match baseline {
+                    Baseline::RawCounter { seen, raw } => {
+                        let now = state.planes(term.signal).expect("a plain signal");
+                        let changed = Self::advance(term.kind, raw, now, term.signal.width);
+                        counted(*seen) || changed
+                    }
+                    Baseline::Counter { seen, value } => match state.planes(term.signal) {
+                        // A baseline loaded from a state file.
+                        Some(now) => {
+                            let seen = *seen;
+                            let mut raw = encode_planes(value, term.signal.width, now.len());
+                            let changed =
+                                Self::advance(term.kind, &mut raw, now, term.signal.width);
+                            *baseline = Baseline::RawCounter { seen, raw };
+                            counted(seen) || changed
+                        }
+                        None => {
+                            let now = read(backend, term.signal);
+                            let changed = occurs(term.kind, value, &now);
+                            *value = now;
+                            counted(*seen) || changed
+                        }
+                    },
+                    Baseline::Raw(_) => unreachable!("tested above"),
+                    // Only gated terms with counters have it.
+                    Baseline::Gated { .. } => false,
+                    Baseline::Value(last) => match state.planes(term.signal) {
+                        // A baseline loaded from a state file.
+                        Some(now) => {
+                            let mut raw = encode_planes(last, term.signal.width, now.len());
+                            let hit = Self::advance(term.kind, &mut raw, now, term.signal.width);
+                            *baseline = Baseline::Raw(raw);
+                            hit
+                        }
+                        None => {
+                            let now = read(backend, term.signal);
+                            let hit = occurs(term.kind, last, &now);
+                            *last = now;
+                            hit
+                        }
+                    },
+                };
+            }
+            if wake {
+                ready.insert(process);
+            }
+            !wake
+        });
+    }
+
+    /// [`Self::check_waits`] for a design with `iff` gates. With
+    /// `settled`, combinational logic has settled since the last write. A
+    /// term whose gate has no counters is judged only then: the gate may be
+    /// computed from what was written, so before then its baseline is left
+    /// as it is and the occurrence is judged, with the gate, at the next
+    /// settled check.
+    #[inline(never)]
+    fn check_gated_waits(
         &mut self,
         backend: &B,
         only: Option<SignalRef>,
@@ -211,25 +304,6 @@ impl<B: SimBackend> SimulationState<B> {
         let processes = &self.model.processes;
         let state = StateView::new(backend);
         let ProcessState { waiters, ready, .. } = &mut self.process_state;
-        if self.model.wait_gates.is_empty() {
-            waiters.retain(driven_only, |process, waiter| {
-                let terms = &processes[process].wait_sites[waiter.site];
-                let mut wake = false;
-                for (index, term) in terms.iter().enumerate() {
-                    if only.is_some_and(|signal| signal != term.signal)
-                        || (driven_only && !term.driven)
-                    {
-                        continue;
-                    }
-                    wake |= Self::occurred(&state, backend, term, &mut waiter.baselines[index]);
-                }
-                if wake {
-                    ready.insert(process);
-                }
-                !wake
-            });
-            return;
-        }
         let gates = &self.model.wait_gates;
         waiters.retain(driven_only, |process, waiter| {
             let terms = &processes[process].wait_sites[waiter.site];
@@ -318,7 +392,7 @@ impl<B: SimBackend> SimulationState<B> {
     }
 
     /// Whether `term` occurred since `baseline`, which becomes the current
-    /// state.
+    /// state: the body of [`Self::check_waits`] for one term.
     #[inline(always)]
     fn occurred(
         state: &StateView<'_>,
