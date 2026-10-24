@@ -69,9 +69,11 @@ fn optimize_bit_extracts(
     // Collect replacements: (and_inst_idx) -> replacement Load instruction
     struct Replacement {
         and_idx: usize,
-        load_inst: SIRInstruction<RegionedAbsoluteAddr>,
-        result_reg: RegisterId,
-        result_width: usize,
+        r_result: RegisterId,
+        addr: RegionedAbsoluteAddr,
+        bit_offset: usize,
+        // Bits read from memory: the mask width, truncated to the And's width.
+        load_width: usize,
         // Dead instruction indices to no-op (Shr + Imm(shift) + Imm(mask))
         dead_indices: Vec<usize>,
     }
@@ -135,7 +137,11 @@ fn optimize_bit_extracts(
             continue;
         }
 
-        let new_load = SIRInstruction::Load(*r_result, *addr, SIROffset::Static(base + k), w);
+        // The And keeps its own width: a mask narrower than the result
+        // zero-extends the extracted field, and a wider one is truncated.
+        let Some(result_width) = register_map.get(r_result).map(RegisterType::width) else {
+            continue;
+        };
 
         let dead = vec![
             shifted_def_idx, // Shr instruction
@@ -145,9 +151,10 @@ fn optimize_bit_extracts(
 
         replacements.push(Replacement {
             and_idx: idx,
-            load_inst: new_load,
-            result_reg: *r_result,
-            result_width: w,
+            r_result: *r_result,
+            addr: *addr,
+            bit_offset: base + k,
+            load_width: w.min(result_width),
             dead_indices: dead,
         });
     }
@@ -207,16 +214,43 @@ fn optimize_bit_extracts(
     }
 
     // Build replacement map
-    let mut replacement_map: HashMap<usize, SIRInstruction<RegionedAbsoluteAddr>> =
+    let mut next_register = register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
+    let mut fresh_register = |register_map: &mut HashMap<RegisterId, RegisterType>, width| {
+        next_register += 1;
+        let reg = RegisterId(next_register);
+        register_map.insert(reg, RegisterType::Logic { width });
+        reg
+    };
+    let mut replacement_map: HashMap<usize, Vec<SIRInstruction<RegionedAbsoluteAddr>>> =
         HashMap::default();
     for repl in replacements {
-        replacement_map.insert(repl.and_idx, repl.load_inst);
-        register_map.insert(
-            repl.result_reg,
-            RegisterType::Logic {
-                width: repl.result_width,
-            },
-        );
+        let load = |dst| {
+            SIRInstruction::Load(
+                dst,
+                repl.addr,
+                SIROffset::Static(repl.bit_offset),
+                repl.load_width,
+            )
+        };
+        let result_width = register_map[&repl.r_result].width();
+        let new_insts = if repl.load_width == result_width {
+            register_map.insert(
+                repl.r_result,
+                RegisterType::Logic {
+                    width: repl.load_width,
+                },
+            );
+            vec![load(repl.r_result)]
+        } else {
+            let field = fresh_register(register_map, repl.load_width);
+            let zeros = fresh_register(register_map, result_width - repl.load_width);
+            vec![
+                load(field),
+                SIRInstruction::Imm(zeros, SIRValue::new(0u64)),
+                SIRInstruction::Concat(repl.r_result, vec![zeros, field]),
+            ]
+        };
+        replacement_map.insert(repl.and_idx, new_insts);
     }
 
     // Rebuild instructions
@@ -225,8 +259,8 @@ fn optimize_bit_extracts(
         if dead_set.contains(&i) {
             continue;
         }
-        if let Some(new_inst) = replacement_map.remove(&i) {
-            out.push(new_inst);
+        if let Some(new_insts) = replacement_map.remove(&i) {
+            out.extend(new_insts);
         } else {
             out.push(inst);
         }
@@ -380,7 +414,7 @@ mod tests {
             },
         ];
         let mut register_map = HashMap::default();
-        register_map.insert(RegisterId(4), RegisterType::Logic { width: 8 });
+        register_map.insert(RegisterId(4), RegisterType::Logic { width: 2 });
         let mut use_count = HashMap::default();
         for inst in &instructions {
             record_uses(inst, &mut use_count);
