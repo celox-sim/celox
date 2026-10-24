@@ -86,16 +86,84 @@ pub struct TriggerSet<A> {
     pub resets: Vec<A>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeEventKind {
     Display,
     Write,
-    AssertContinue,
-    AssertFatal,
+    /// A message of a severity task, or of a Veryl assertion
+    /// (IEEE 1800-2023 20.10). [`Severity::Fatal`] ends the simulation with
+    /// an error.
+    Report(Severity),
     /// `$finish` executed by the design (IEEE 1800-2023 20.2).
     Finish,
     /// `$stop` executed by the design (IEEE 1800-2023 20.2).
     Stop,
+}
+
+impl RuntimeEventKind {
+    /// A report that ends the simulation with an error.
+    pub fn is_fatal(self) -> bool {
+        self == Self::Report(Severity::Fatal)
+    }
+}
+
+/// The severity of a report (IEEE 1800-2023 20.10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Severity {
+    /// `$info`: a message of no specific severity.
+    Info,
+    /// `$warning`.
+    Warning,
+    /// `$error`, and the default action of a failed `assert` or `assume`.
+    Error,
+    /// `$fatal`.
+    Fatal,
+}
+
+/// Where a report is written: the file and line of `__FILE__` and
+/// `__LINE__` at the task call (IEEE 1800-2023 20.10).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReportLocation {
+    pub file: String,
+    pub line: usize,
+}
+
+/// The assertion whose action block issues a report.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AssertionSite {
+    /// The statement label, which names the assertion within its scope
+    /// (IEEE 1800-2023 16.3).
+    pub label: Option<String>,
+    pub directive: AssertionDirective,
+    pub deferral: AssertionDeferral,
+    pub outcome: AssertionOutcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AssertionDirective {
+    Assert,
+    Assume,
+    Cover,
+}
+
+/// When an assertion reports (IEEE 1800-2023 16.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AssertionDeferral {
+    /// A simple immediate assertion: at once.
+    None,
+    /// `#0`: in the Reactive region.
+    Observed,
+    /// `final`: in the Postponed region.
+    Final,
+}
+
+/// Which action block of an assertion issues a report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AssertionOutcome {
+    /// The pass action, or the statement of a `cover`.
+    Pass,
+    /// The fail action.
+    Fail,
 }
 
 /// How a runtime event site sizes its formatted arguments.
@@ -118,6 +186,11 @@ pub struct RuntimeEventSite {
     pub sizing: DisplaySizing,
     /// Fully elaborated module-instance scope that emitted this event.
     pub scope: Option<String>,
+    #[serde(default)]
+    pub location: Option<ReportLocation>,
+    /// The assertion whose action issues this report.
+    #[serde(default)]
+    pub assertion: Option<AssertionSite>,
     pub arg_widths: Vec<usize>,
     pub arg_signed: Vec<bool>,
     pub arg_is_string: Vec<bool>,
@@ -1900,10 +1973,12 @@ mod tests {
         let mut runtime = RuntimeSchema::default();
         runtime.runtime_errors.insert(1, error.clone());
         runtime.runtime_event_sites.push(RuntimeEventSite {
-            kind: RuntimeEventKind::AssertFatal,
+            kind: RuntimeEventKind::Report(Severity::Fatal),
             template: Some("failed".to_string()),
             sizing: DisplaySizing::Veryl,
             scope: None,
+            location: None,
+            assertion: None,
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),

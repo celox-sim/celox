@@ -227,13 +227,14 @@ fn drain_sv_output<B: celox::SimBackend>(
         let (message, newline) = match event {
             celox::RuntimeEvent::Display { message } => (message, true),
             celox::RuntimeEvent::Write { message } => (message, false),
-            celox::RuntimeEvent::AssertContinue { message } => {
-                *failed = true;
-                (message, true)
-            }
-            celox::RuntimeEvent::AssertFatal { message } => {
-                fatal = true;
-                (message, true)
+            // Only errors fail the run (IEEE 1800-2023 20.10).
+            celox::RuntimeEvent::Report(report) => {
+                match report.severity {
+                    celox::Severity::Fatal => fatal = true,
+                    celox::Severity::Error => *failed = true,
+                    celox::Severity::Warning | celox::Severity::Info => {}
+                }
+                (report.render(), true)
             }
             celox::RuntimeEvent::Finish => continue,
             celox::RuntimeEvent::Stop => {
@@ -924,6 +925,34 @@ mod tests {
         let error = simulate_sv(simulation, 3, &mut output).unwrap_err();
         assert!(error.contains("exceeded --max-steps 3"));
         assert!(String::from_utf8(output).unwrap().contains("tick"));
+    }
+
+    /// Only `$error` and `$fatal` fail a run; every report is printed with
+    /// its severity and location (IEEE 1800-2023 20.10).
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn sv_reports_fail_the_run_only_from_errors() {
+        let run = |task: &str| {
+            let source = format!("module Top; initial {task}(\"note\"); endmodule");
+            let simulation = celox::Simulation::from_sv_sources(
+                vec![(source.as_str(), Path::new("top.sv"))],
+                "Top",
+            )
+            .build()
+            .unwrap();
+            let mut output = Vec::new();
+            let result = simulate_sv(simulation, 10, &mut output);
+            (result, String::from_utf8(output).unwrap())
+        };
+        let (result, output) = run("$info");
+        assert!(result.is_ok());
+        assert!(output.starts_with("Info: top.sv:1: note"), "{output}");
+        let (result, output) = run("$warning");
+        assert!(result.is_ok());
+        assert!(output.starts_with("Warning: top.sv:1: note"), "{output}");
+        let (result, output) = run("$error");
+        assert!(result.is_err());
+        assert!(output.starts_with("Error: top.sv:1: note"), "{output}");
     }
 
     fn state_file(count: u8, stale: u8) -> StateFile {

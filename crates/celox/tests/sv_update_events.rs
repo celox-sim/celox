@@ -51,7 +51,7 @@ macro_rules! update_events {
                 sim.run_until(time).unwrap();
                 sim.drain_runtime_events()
                     .into_iter()
-                    .filter(|event| matches!(event, celox::RuntimeEvent::AssertContinue { .. }))
+                    .filter(|event| matches!(event, celox::RuntimeEvent::Report(_)))
                     .count()
             }
 

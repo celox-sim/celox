@@ -23,6 +23,19 @@ class EventTests(unittest.TestCase):
         with self.assertRaisesRegex(Unsupported, 'no edge kind'):
             backend.event_edge('event', 0, 1)
 
+    def test_only_nonfatal_runtime_events_are_observed(self):
+        backend = Backend.__new__(Backend)
+        backend.event_log = []
+        for kind in ['Display', 'Write', {'Report': 'Info'}, {'Report': 'Warning'}, {'Report': 'Error'}]:
+            with self.subTest(kind=kind):
+                backend.code = {'runtime_event_sites': [{'kind': kind}]}
+                backend.runtime_event('RuntimeEvent', {'site_id': 0}, {})
+        for kind in [{'Report': 'Fatal'}, 'Finish', 'Stop']:
+            with self.subTest(kind=kind):
+                backend.code = {'runtime_event_sites': [{'kind': kind}]}
+                with self.assertRaisesRegex(Unsupported, 'fatal runtime-event activation'):
+                    backend.runtime_event('RuntimeEvent', {'site_id': 0}, {})
+
 
 if __name__ == '__main__':
     unittest.main()
