@@ -1,5 +1,6 @@
 //! The Veryl suite: cases whose designs are Veryl source.
 
+#[cfg(not(feature = "runtime-cases"))]
 mod cases;
 
 #[cfg(feature = "emit")]
@@ -69,12 +70,18 @@ fn std_source(path: &str) -> String {
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", src.src.display()))
 }
 
-/// All cases in deterministic declaration order. Filter by category or name in the
+/// All cases in deterministic order (file-name order with `runtime-cases`,
+/// otherwise catalogue declaration order). Filter by category or name in the
 /// host test runner; nothing is silently skipped by the suite itself.
 pub fn cases() -> impl Iterator<Item = &'static TestCase> {
     static CASES: std::sync::OnceLock<Vec<&'static TestCase>> = std::sync::OnceLock::new();
     CASES
         .get_or_init(|| {
+            #[cfg(feature = "runtime-cases")]
+            {
+                crate::runtime_cases::load("veryl", std_source)
+            }
+            #[cfg(not(feature = "runtime-cases"))]
             cases::GROUPS
                 .iter()
                 .flat_map(|group| crate::load_group(group.file, group.text, std_source))

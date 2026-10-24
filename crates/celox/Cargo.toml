@@ -146,5 +146,9 @@ name = "frontend_binary"
 path = "examples/frontend_binary.rs"
 required-features = ["host-runtime"]
 
+[[example]]
+name = "vtest-exec"
+required-features = ["host-runtime"]
+
 [lints]
 workspace = true

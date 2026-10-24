@@ -19,9 +19,7 @@ pub use component::{
     register_static_component_manifest,
 };
 mod debug;
-// Only its tests run the generator until a host does.
 #[cfg(feature = "host-runtime")]
-#[cfg_attr(not(all(test, feature = "systemverilog")), allow(dead_code))]
 mod derived_edge;
 mod edge_plans;
 pub use edge_plans::{
