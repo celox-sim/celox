@@ -648,6 +648,13 @@ precision includes all declared precisions and directive precisions, even in
 uninstantiated definitions (3.14.3). Selected instance arrays and generate paths
 require elaborated hierarchy lookup and are currently rejected.
 
+`%t` reports a time in the smallest time precision of the design, in a field
+of 20 columns (IEEE 1800-2023 20.4.3): `$display("%0t", $realtime)` after
+`#1.5` under `` `timescale 1ns/1ps`` prints `1500`. A design without time scales
+uses the 1 ns / 1 ps defaults, so `%t` reports picoseconds there too.
+`%t` of a `string` value, which has no time to report, is rejected, and
+`$timeformat` is not supported.
+
 `$printtimescale` displays the selected time scope in the IEEE 1800-2023
 20.4.2 form, for example `Time scale of (Top.child) is 100ns / 10ps`.
 It accepts the current scope, a design-element argument, `$unit`, or `$root`,
