@@ -3605,6 +3605,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             scope: None,
             location: report_location(site),
             assertion: assertion_site.cloned(),
+            deferred: None,
             arg_widths,
             arg_signed,
             arg_is_string,

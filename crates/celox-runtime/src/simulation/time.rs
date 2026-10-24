@@ -191,6 +191,9 @@ impl<B: SimBackend> SimulationState<B> {
             self.step_round(executor, current_time, Vec::new(), ready, false)?;
         }
         executor.try_finish_timed_step(current_time)?;
+        if self.next_work_time() != Some(current_time) {
+            executor.try_end_time_slot(current_time)?;
+        }
         Ok(())
     }
 
