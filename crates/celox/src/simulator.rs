@@ -163,6 +163,12 @@ mod host {
         derived_ticks: celox_runtime::DerivedTickPlans<B::Event>,
         /// Boxed, so that taking it out for a tick moves one pointer.
         derived_scratch: Option<Box<celox_runtime::DerivedTickScratch>>,
+        /// Per event ID, the generated units that run an edge of the event
+        /// with its derived domains. Empty without them.
+        derived_units: Arc<[Option<DerivedEdgeUnit>]>,
+        /// The flag a derived-edge unit reads to settle combinational logic
+        /// before the domains evaluate.
+        derived_settle: Option<SignalRef>,
         /// The design finished a timed simulation (`$finish`). Evaluation,
         /// host writes and waveform dumps no longer change anything.
         pub(crate) frozen: bool,
@@ -850,6 +856,8 @@ mod host {
                 celox_runtime::build_derived_tick_plans(&backend, &schedule);
             let event_edges =
                 celox_runtime::build_event_edges(&backend, &schedule.events, &schedule.kinds);
+            let (derived_units, derived_settle) =
+                derived_edge_units(&backend, &program.runtime_schema, &derived_ticks);
             let comb_observer_reads = crate::comb_activation::ObserverReads::new(
                 &backend,
                 &program.runtime_schema.comb_observers,
@@ -884,6 +892,8 @@ mod host {
                 tick_timing_eval_comb_ns: 0,
                 derived_ticks,
                 derived_scratch: Some(Box::new(derived_scratch)),
+                derived_units,
+                derived_settle,
                 frozen: false,
                 host_watch: Default::default(),
                 finish_scan_seq: 0,
@@ -1848,6 +1858,12 @@ mod host {
                 }
                 return Ok(());
             }
+            if let Some(Some(unit)) = self.derived_units.get(event.id()).copied()
+                && !self.finish_sites
+                && self.backend.runs_derived_edge_units()
+            {
+                return self.edge_unit(info, edge, unit);
+            }
             let plans = std::sync::Arc::clone(&self.derived_ticks);
             let plan = plans.get(event.id()).and_then(Option::as_ref);
             let mut scratch = self.derived_scratch.take().unwrap_or_default();
@@ -1859,6 +1875,53 @@ mod host {
             self.host_watch = watch;
             self.derived_scratch = Some(scratch);
             self.note_edge(result)
+        }
+
+        /// [`Self::edge`] of an event with a generated derived-edge unit:
+        /// move the signal, then run the unit of the edge, which judges the
+        /// gated clocks, runs the domains and the cascade rounds, as the plan
+        /// walk does.
+        #[inline(never)]
+        fn edge_unit(
+            &mut self,
+            info: celox_runtime::EventEdge,
+            edge: celox_runtime::Edge,
+            unit: DerivedEdgeUnit,
+        ) -> Result<(), RuntimeErrorCode> {
+            let mut watch = std::mem::take(&mut self.host_watch);
+            let moved = celox_runtime::move_signal(
+                &mut self.backend,
+                &info,
+                edge,
+                watched_write(&mut watch),
+            );
+            self.host_watch = watch;
+            let Some(old) = moved else {
+                return Ok(());
+            };
+            let fires = info.fires(old, edge);
+            if let Some(flag) = self.derived_settle {
+                self.backend
+                    .set(flag, u8::from(self.dirty || info.comb_read));
+            }
+            let index = match edge {
+                celox_runtime::Edge::Rising => unit.rising,
+                celox_runtime::Edge::Falling => unit.falling,
+            };
+            if let Err(error) = self.backend.run_process(index) {
+                self.dirty = true;
+                return Err(self.decorate_runtime_error(error));
+            }
+            // Without a gated clock and the event's own edge nothing ran, as
+            // in the plan walk.
+            let outcome = if unit.gated || fires {
+                celox_runtime::EdgeOutcome::Settled
+            } else if info.comb_read {
+                celox_runtime::EdgeOutcome::Moved
+            } else {
+                celox_runtime::EdgeOutcome::Stored
+            };
+            self.note_edge(Ok(outcome))
         }
 
         fn note_edge(
@@ -2828,6 +2891,46 @@ mod host {
         pub fn into_backend(self) -> NativeBackend {
             self.backend
         }
+    }
+
+    /// The generated units of one event's edges with its derived domains.
+    #[derive(Clone, Copy, Debug)]
+    struct DerivedEdgeUnit {
+        rising: usize,
+        falling: usize,
+        /// The event gates derived clocks, so an edge always runs domains.
+        gated: bool,
+    }
+
+    /// Per event ID, the generated derived-edge units of `schema`, and the flag
+    /// they read to settle first.
+    fn derived_edge_units<B: SimBackend>(
+        backend: &B,
+        schema: &celox_design::RuntimeSchema<crate::ir::AbsoluteAddr>,
+        plans: &celox_runtime::DerivedTickPlans<B::Event>,
+    ) -> (Arc<[Option<DerivedEdgeUnit>]>, Option<SignalRef>) {
+        if schema.derived_edges.is_empty() {
+            return (Arc::from([]), None);
+        }
+        let mut units = vec![None; backend.num_events()];
+        for edges in &schema.derived_edges {
+            let Some(event) = backend.resolve_event_opt(&edges.event) else {
+                continue;
+            };
+            let Some(Some(plan)) = plans.get(event.id()) else {
+                continue;
+            };
+            units[event.id()] = Some(DerivedEdgeUnit {
+                rising: edges.rising,
+                falling: edges.falling,
+                gated: plan.lever_signals().next().is_some(),
+            });
+        }
+        let flag = schema
+            .scheduler
+            .as_ref()
+            .map(|scheduler| backend.resolve_signal(&scheduler.slots.dirty));
+        (units.into(), flag)
     }
 
     /// The host's write of an event signal's level, observed by a timed

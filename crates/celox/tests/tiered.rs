@@ -394,3 +394,96 @@ endmodule
     assert!(sim.promotion_error().is_none());
     assert_eq!(sim.get_four_state(neq), expected);
 }
+
+const DERIVED: &str = r#"
+module Top (
+    clk: input clock,
+    rst: input reset,
+    en: input logic,
+    cnt: output logic<8>,
+    extra: output logic<8>,
+    more: output logic<8>,
+) {
+    var c: logic<8>;
+    var e: logic<8>;
+    var m: logic<8>;
+    var half: logic;
+    let gated: '_ clock = clk & en;
+    let divided: '_ clock = half;
+    always_ff (clk, rst) {
+        if_reset {
+            c = 0;
+            half = 0;
+        } else {
+            c += 1;
+            half = ~half;
+        }
+    }
+    always_ff (gated) {
+        e += c;
+    }
+    always_ff (divided) {
+        m += 1;
+    }
+    assign cnt = c;
+    assign extra = e;
+    assign more = m;
+}
+"#;
+
+/// Derived clock edges walk their plans until the tier with the generated
+/// derived-edge units runs (the optimizing image of a two-stage build), then
+/// run the units, matching the plan walk throughout.
+#[test]
+fn tiered_derived_edges_switch_to_generated_units() {
+    use celox::SimBackend as _;
+    let mut tiered: Simulator<TieredBackend> = SimulatorBuilder::new(DERIVED, "Top")
+        .build_tiered()
+        .unwrap();
+    let mut walked = Simulator::builder(DERIVED, "Top")
+        .disable_pass(celox::SirPass::DerivedEdgeUnits)
+        .build()
+        .unwrap();
+    let outputs = ["cnt", "extra", "more"];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut live_ticks = 0u32;
+    let mut step = 0u32;
+    while live_ticks < 32 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the generated derived-edge units never became live"
+        );
+        let (rst, en) = (u8::from(step > 1), u8::from(!step.is_multiple_of(5)));
+        let reset = tiered.signal("rst");
+        let enable = tiered.signal("en");
+        tiered
+            .modify(|io| {
+                io.set(reset, rst);
+                io.set(enable, en);
+            })
+            .unwrap();
+        let reset = walked.signal("rst");
+        let enable = walked.signal("en");
+        walked
+            .modify(|io| {
+                io.set(reset, rst);
+                io.set(enable, en);
+            })
+            .unwrap();
+        let clk = tiered.event("clk");
+        tiered.tick(clk).unwrap();
+        let clk = walked.event("clk");
+        walked.tick(clk).unwrap();
+        for name in outputs {
+            let left = tiered.get_as::<u8>(tiered.signal(name));
+            let right = walked.get_as::<u8>(walked.signal(name));
+            assert_eq!(left, right, "step {step}: {name}");
+        }
+        if tiered.backend_ref().runs_derived_edge_units() {
+            live_ticks += 1;
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        step += 1;
+    }
+}

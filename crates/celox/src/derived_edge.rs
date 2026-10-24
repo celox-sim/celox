@@ -14,7 +14,10 @@
 //! without settling for gates: two-state designs whose gated clocks all have
 //! gate programs.
 
-use celox_design::{DomainKind, GateOp, STABLE_REGION, schedule::ScheduleModel};
+use celox_design::{
+    DomainKind, GateOp, SCHEDULER_FLAG_WIDTH, STABLE_REGION, edges::active_level,
+    schedule::ScheduleModel,
+};
 use celox_sir::{BinaryOp, BlockId, SIRBuilder, SIRTerminator, SIRValue, UnaryOp};
 
 use crate::ir::{
@@ -114,6 +117,28 @@ impl EdgePlan {
         if layout.four_state {
             return Err("the design is four-state");
         }
+        // A host checks these after each unit it runs; a generated edge runs
+        // its units without returning in between.
+        if !program.runtime.runtime_schema.comb_observers.is_empty() {
+            return Err("the design observes combinational processes");
+        }
+        let comb_fatal = program.sir.eval_comb.iter().any(|unit| {
+            unit.blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .any(|inst| {
+                    matches!(
+                        inst,
+                        SIRInstruction::CombCaptureEvent {
+                            fatal_error_code: Some(_),
+                            ..
+                        }
+                    )
+                })
+        });
+        if comb_fatal {
+            return Err("combinational logic has fatal assertions");
+        }
         if domains.len() + gated.len() + 1 > MAX_ENTRIES {
             return Err("an edge reaches too many derived domains");
         }
@@ -181,6 +206,20 @@ impl EdgePlan {
 
     fn gated_bit(&self, index: usize) -> usize {
         1 + self.domains.len() + index
+    }
+
+    /// Whether entry `entry` can fire together with another: the event's own
+    /// domain with gated clocks that are not independent, the derived ones
+    /// in a round with another derived one or at the edge with the event's
+    /// own.
+    fn fires_with_others(&self, entry: usize) -> bool {
+        let derived = self.domains.len() + self.gated.len();
+        let gated_together = !self.gated.is_empty() && !self.independent;
+        if entry == 0 {
+            gated_together
+        } else {
+            derived > 1 || (entry > self.domains.len() && gated_together)
+        }
     }
 
     /// Emit one edge of the event's signal, which has already moved from
@@ -270,23 +309,47 @@ impl EdgePlan {
         let gated_ready = e.binary(MAX_ENTRIES, mask, BinaryOp::And, gated_bits);
         let any_gated = e.binary(1, gated_ready, BinaryOp::Ne, zero);
         let in_turn = e.binary(1, alone, BinaryOp::And, any_gated);
-        let one_at_a_time = e.b.new_block();
+        // Each domain's units appear once in the unit: the one-domain path
+        // also serves the independent gated domains one at a time, and only
+        // domains that can fire with another get the several-domain path.
+        let one_mask = e.b.alloc_bit(MAX_ENTRIES, false);
+        let remaining = e.b.alloc_bit(MAX_ENTRIES, false);
+        let turn = e.b.alloc_bit(1, false);
+        let one_domain = e.b.new_block_with(vec![one_mask, remaining, turn]);
+        let rest = e.b.alloc_bit(MAX_ENTRIES, false);
+        let next_turn = e.b.new_block_with(vec![rest]);
         let together = e.b.new_block();
         e.b.seal_block(SIRTerminator::Branch {
             cond: in_turn,
-            true_block: (one_at_a_time, Vec::new()),
+            true_block: (next_turn, vec![mask]),
             false_block: (together, Vec::new()),
         });
 
-        // Independent gated domains, then the event's own, each fused.
-        e.b.switch_to_block(one_at_a_time);
+        // Independent gated domains, then the event's own, each fused, one
+        // at a time (`fire_with_gated`).
+        e.b.switch_to_block(next_turn);
         let order: Vec<usize> = (0..self.gated.len())
             .map(|index| self.gated_bit(index))
             .chain(std::iter::once(0))
             .collect();
         for entry in order {
-            let units = self.entries().nth(entry).expect("an entry of the mask");
-            e.if_bit(mask, entry, |e| e.inline_all(&units.eval_apply));
+            let bit = e.constant(1 << entry, MAX_ENTRIES);
+            let selected = e.binary(MAX_ENTRIES, rest, BinaryOp::And, bit);
+            let set = e.binary(1, selected, BinaryOp::Ne, zero);
+            let take = e.b.new_block();
+            let skip = e.b.new_block();
+            e.b.seal_block(SIRTerminator::Branch {
+                cond: set,
+                true_block: (take, Vec::new()),
+                false_block: (skip, Vec::new()),
+            });
+            e.b.switch_to_block(take);
+            let all = e.constant(u64::MAX, MAX_ENTRIES);
+            let others = e.binary(MAX_ENTRIES, bit, BinaryOp::Xor, all);
+            let left = e.binary(MAX_ENTRIES, rest, BinaryOp::And, others);
+            let yes = e.constant(1, 1);
+            e.b.seal_block(SIRTerminator::Jump(one_domain, vec![bit, left, yes]));
+            e.b.switch_to_block(skip);
         }
         e.b.seal_block(SIRTerminator::Jump(fire_end, Vec::new()));
 
@@ -297,27 +360,37 @@ impl EdgePlan {
         let lower = e.binary(MAX_ENTRIES, mask, BinaryOp::Sub, one);
         let others = e.binary(MAX_ENTRIES, mask, BinaryOp::And, lower);
         let single = e.binary(1, others, BinaryOp::Eq, zero);
-        let one_domain = e.b.new_block();
         let several = e.b.new_block();
+        let no = e.constant(0, 1);
+        let none_left = e.constant(0, MAX_ENTRIES);
         e.b.seal_block(SIRTerminator::Branch {
             cond: single,
-            true_block: (one_domain, Vec::new()),
+            true_block: (one_domain, vec![mask, none_left, no]),
             false_block: (several, Vec::new()),
         });
         e.b.switch_to_block(one_domain);
         for (entry, units) in self.entries().enumerate() {
-            e.if_bit(mask, entry, |e| e.inline_all(&units.eval_apply));
+            e.if_bit(one_mask, entry, |e| e.inline_all(&units.eval_apply));
         }
-        e.b.seal_block(SIRTerminator::Jump(fire_end, Vec::new()));
+        e.b.seal_block(SIRTerminator::Branch {
+            cond: turn,
+            true_block: (next_turn, vec![remaining]),
+            false_block: (fire_end, Vec::new()),
+        });
         e.b.switch_to_block(several);
+        let joint: Vec<bool> = (0..self.domains.len() + self.gated.len() + 1)
+            .map(|entry| self.fires_with_others(entry))
+            .collect();
         for (entry, units) in self.entries().enumerate() {
-            e.if_bit(mask, entry, |e| match &units.eval_only {
-                Some(eval_only) => e.inline_all(eval_only),
-                None => e.inline_all(&units.eval_apply),
-            });
+            if joint[entry] {
+                e.if_bit(mask, entry, |e| match &units.eval_only {
+                    Some(eval_only) => e.inline_all(eval_only),
+                    None => e.inline_all(&units.eval_apply),
+                });
+            }
         }
         for (entry, units) in self.entries().enumerate() {
-            if let Some(apply) = &units.apply {
+            if let (true, Some(apply)) = (joint[entry], &units.apply) {
                 e.if_bit(mask, entry, |e| e.inline_all(apply));
             }
         }
@@ -640,26 +713,63 @@ impl Emitter<'_> {
     }
 }
 
+/// Where a generated edge unit learns whether combinational logic must
+/// settle before the domains evaluate.
+#[derive(Clone, Copy, Debug)]
+enum Settle {
+    #[cfg_attr(not(all(test, feature = "systemverilog")), allow(dead_code))]
+    Fixed(bool),
+    /// A flag object, not zero when it must.
+    Flag(AbsoluteAddr),
+}
+
 impl EdgePlan {
     /// A unit that runs one edge of the event whose signal its caller
-    /// already moved, rising or falling, with `settle` and `fires` fixed.
-    #[cfg(all(test, feature = "systemverilog"))]
-    fn unit(&self, comb: &[Unit], rising: bool, settle: bool, fires: bool) -> Unit {
+    /// already moved, rising or falling; `fires` says whether the event's own
+    /// domain sees its active edge.
+    fn unit(&self, comb: &[Unit], rising: bool, fires: bool, settle: Settle) -> Unit {
         let mut b = Builder::new();
-        let constant = |b: &mut Builder, value: bool| {
-            let register = b.alloc_bit(1, false);
-            b.emit(SIRInstruction::Imm(
-                register,
-                SIRValue::new(u64::from(value)),
-            ));
+        let constant = |b: &mut Builder, value: u64, width: usize| {
+            let register = b.alloc_bit(width, false);
+            b.emit(SIRInstruction::Imm(register, SIRValue::new(value)));
             register
         };
-        let from = constant(&mut b, !rising);
-        let to = constant(&mut b, rising);
-        let fires = constant(&mut b, fires);
-        let settle = constant(&mut b, settle);
+        let from = constant(&mut b, u64::from(!rising), 1);
+        let to = constant(&mut b, u64::from(rising), 1);
+        let source_fires = fires;
+        let fires = constant(&mut b, u64::from(fires), 1);
+        let settle = match settle {
+            Settle::Fixed(value) => constant(&mut b, u64::from(value), 1),
+            Settle::Flag(flag) => {
+                let value = b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
+                b.emit(SIRInstruction::Load(
+                    value,
+                    RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, flag),
+                    SIROffset::Static(0),
+                    SCHEDULER_FLAG_WIDTH,
+                ));
+                let zero = constant(&mut b, 0, SCHEDULER_FLAG_WIDTH);
+                let set = b.alloc_bit(1, false);
+                b.emit(SIRInstruction::Binary(set, value, BinaryOp::Ne, zero));
+                set
+            }
+        };
         let done = b.new_block();
-        self.emit(&mut b, comb, from, to, fires, settle, done, done);
+        // An edge that never fires the event's own domain leaves its units
+        // out of the unit.
+        let plan = if source_fires {
+            std::borrow::Cow::Borrowed(self)
+        } else {
+            std::borrow::Cow::Owned(EdgePlan {
+                source: DomainUnits {
+                    eval_apply: Vec::new(),
+                    eval_only: None,
+                    apply: None,
+                },
+                ..self.clone()
+            })
+        };
+        plan.emit(&mut b, comb, from, to, fires, settle, done, done);
         b.switch_to_block(done);
         b.seal_block(SIRTerminator::Return);
         let (blocks, register_map, _) = b.drain();
@@ -669,6 +779,75 @@ impl EdgePlan {
             register_map,
         }
     }
+}
+
+/// Generate the edge units of every event whose plan this module emits and
+/// record them in [`celox_design::RuntimeSchema::derived_edges`]. A unit
+/// reads the scheduler's dirty flag to know whether to settle first.
+pub(crate) fn attach(program: &mut LaidOutProgram) {
+    let schema = &program.runtime.runtime_schema;
+    let Some(flag) = schema
+        .scheduler
+        .as_ref()
+        .map(|scheduler| scheduler.slots.dirty)
+    else {
+        return;
+    };
+    let model = ScheduleModel::derive(&program.design, schema);
+    let mut edges = Vec::new();
+    for event in crate::edge_plans::event_addresses(program) {
+        let Ok(Some(plan)) = EdgePlan::new(program, &model, event) else {
+            continue;
+        };
+        // An edge of a clock or reset fires its domain when it is the active
+        // one; any other moved two-state signal always does.
+        let kind = model.kind(&event);
+        let fires = |rising: bool| match kind {
+            Some(
+                DomainKind::ClockPosedge
+                | DomainKind::ClockNegedge
+                | DomainKind::ResetAsyncHigh
+                | DomainKind::ResetAsyncLow,
+            ) => rising == (active_level(kind) == 1),
+            _ => true,
+        };
+        let mut indices = [0usize; 2];
+        for (index, rising) in [true, false].into_iter().enumerate() {
+            let unit = plan.unit(
+                &program.sir.eval_comb,
+                rising,
+                fires(rising),
+                Settle::Flag(flag),
+            );
+            indices[index] = program.sir.processes.len();
+            program.sir.processes.push(unit);
+        }
+        edges.push(celox_design::DerivedEdgeUnits {
+            event,
+            rising: indices[0],
+            falling: indices[1],
+        });
+    }
+    program.runtime.runtime_schema.derived_edges = edges;
+}
+
+/// `program` without its derived-edge units, for a tier whose host walks
+/// the derived-tick plans instead. The units follow every other process
+/// unit, so the others keep their indices.
+pub(crate) fn without_units(program: &LaidOutProgram) -> LaidOutProgram {
+    let mut program = program.clone();
+    let first = program
+        .runtime
+        .runtime_schema
+        .derived_edges
+        .iter()
+        .map(|units| units.rising.min(units.falling))
+        .min();
+    if let Some(first) = first {
+        program.sir.processes.truncate(first);
+        program.runtime.runtime_schema.derived_edges.clear();
+    }
+    program
 }
 
 /// A generated edge unit and the edge it runs, for the tests.
@@ -697,7 +876,8 @@ pub(crate) fn attach_test_units(program: &mut LaidOutProgram, sink: &TestEdgeUni
         for rising in [false, true] {
             for settle in [false, true] {
                 for fires in [false, true] {
-                    let unit = plan.unit(&program.sir.eval_comb, rising, settle, fires);
+                    let unit =
+                        plan.unit(&program.sir.eval_comb, rising, fires, Settle::Fixed(settle));
                     let index = program.sir.processes.len();
                     program.sir.processes.push(unit);
                     sink.lock().expect("unpoisoned").push(TestEdgeUnit {
@@ -726,6 +906,66 @@ mod tests {
         Simulator,
         backend::{EventHandle, SimBackend},
     };
+
+    const GATED: &str = "module Top(input logic clk, input logic en, output logic [7:0] q);
+                logic gclk;
+                logic [7:0] r = 0;
+                logic [7:0] g = 0;
+                logic [7:0] w;
+                assign gclk = clk & en;
+                // A value the host's writes of `en` change through logic.
+                assign w = en ? 8'd3 : 8'd1;
+                always_ff @(posedge clk) r <= r + w;
+                always_ff @(posedge gclk) g <= g + r;
+                assign q = g;
+            endmodule";
+
+    const INVERTED: &str = "module Top(input logic clk, input logic en, output logic [7:0] q);
+                logic nclk;
+                logic gclk;
+                logic [7:0] r = 0;
+                logic [7:0] n = 0;
+                logic [7:0] g = 0;
+                assign nclk = ~clk;
+                assign gclk = clk & en;
+                always_ff @(posedge clk) r <= r + 8'd1;
+                always_ff @(posedge nclk) n <= n + r;
+                always_ff @(negedge gclk) g <= g ^ n;
+                assign q = n + g;
+            endmodule";
+
+    const DIVIDERS: &str = "module Top(input logic clk, output logic [7:0] q);
+                logic half = 0;
+                logic quarter = 0;
+                logic [7:0] h = 0;
+                logic [7:0] w = 0;
+                always_ff @(posedge clk) half <= ~half;
+                always_ff @(posedge half) quarter <= ~quarter;
+                always_ff @(posedge half) h <= h + 8'd1;
+                always_ff @(posedge quarter) w <= w + h;
+                assign q = h + w;
+            endmodule";
+
+    const RAISED_ENABLE: &str = "module Top(input logic clk, output logic [7:0] q);
+                logic en = 0;
+                logic gclk;
+                logic [7:0] g = 0;
+                assign gclk = clk & en;
+                always_ff @(posedge clk) en <= ~en;
+                always_ff @(posedge gclk) g <= g + 8'd1;
+                assign q = g;
+            endmodule";
+
+    const INDEPENDENT: &str =
+        "module Top(input logic clk, input logic en, input logic [7:0] d, output logic [7:0] q);
+                logic gclk;
+                logic [7:0] r = 0;
+                logic [7:0] g = 0;
+                assign gclk = clk & en;
+                always_ff @(posedge clk) r <= r + d;
+                always_ff @(posedge gclk) g <= g + 8'd3;
+                assign q = r ^ g;
+            endmodule";
 
     /// The design state: the stable region after its header.
     fn state<B: SimBackend>(backend: &B) -> Vec<u8> {
@@ -851,84 +1091,80 @@ mod tests {
         }
     }
 
+    /// Drive `source` through the `Simulator` API, with derived domains run
+    /// by the generated edge units and by the plan walk, and compare every
+    /// named signal after each operation: ticks of `clk`, single and
+    /// repeated edges, and host writes of `en` when the design has it.
+    fn ticks_agree(source: &str) {
+        let build = || Simulator::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top");
+        let mut generated = build().build().unwrap();
+        let mut walked = build()
+            .disable_pass(crate::SirPass::DerivedEdgeUnits)
+            .build()
+            .unwrap();
+        assert!(
+            !generated.program.runtime_schema.derived_edges.is_empty(),
+            "no edge unit was generated"
+        );
+        assert!(walked.program.runtime_schema.derived_edges.is_empty());
+        let clk = generated.event("clk");
+        let en = generated.try_signal("en").ok();
+        let names: Vec<_> = walked.named_signals();
+        for step in 0..80usize {
+            for sim in [&mut generated, &mut walked] {
+                if let Some(en) = en
+                    && step % 7 < 2
+                {
+                    sim.modify(|io| io.set(en, u8::from(step % 3 != 0)))
+                        .unwrap();
+                }
+                match step % 5 {
+                    0 | 1 => sim.tick(clk).unwrap(),
+                    2 => sim.edge(clk, Edge::Rising).unwrap(),
+                    3 => sim.edge(clk, Edge::Rising).unwrap(),
+                    _ => sim.edge(clk, Edge::Falling).unwrap(),
+                }
+            }
+            for named in &names {
+                assert_eq!(
+                    generated.get(named.signal),
+                    walked.get(named.signal),
+                    "step {step}: {}",
+                    named.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn simulator_ticks_run_generated_edges_as_the_plan_walk() {
+        for source in [GATED, INVERTED, DIVIDERS, RAISED_ENABLE, INDEPENDENT] {
+            ticks_agree(source);
+        }
+    }
+
     #[test]
     fn gated_clocks_run_as_the_plan_walk() {
-        agrees(
-            "module Top(input logic clk, input logic en, output logic [7:0] q);
-                logic gclk;
-                logic [7:0] r = 0;
-                logic [7:0] g = 0;
-                assign gclk = clk & en;
-                always_ff @(posedge clk) r <= r + 8'd1;
-                always_ff @(posedge gclk) g <= g + r;
-                assign q = g;
-            endmodule",
-        );
+        agrees(GATED);
     }
 
     #[test]
     fn inverted_and_falling_gated_clocks_run_as_the_plan_walk() {
-        agrees(
-            "module Top(input logic clk, input logic en, output logic [7:0] q);
-                logic nclk;
-                logic gclk;
-                logic [7:0] r = 0;
-                logic [7:0] n = 0;
-                logic [7:0] g = 0;
-                assign nclk = ~clk;
-                assign gclk = clk & en;
-                always_ff @(posedge clk) r <= r + 8'd1;
-                always_ff @(posedge nclk) n <= n + r;
-                always_ff @(negedge gclk) g <= g ^ n;
-                assign q = n + g;
-            endmodule",
-        );
+        agrees(INVERTED);
     }
 
     #[test]
     fn dividers_run_as_the_plan_walk() {
-        agrees(
-            "module Top(input logic clk, output logic [7:0] q);
-                logic half = 0;
-                logic quarter = 0;
-                logic [7:0] h = 0;
-                logic [7:0] w = 0;
-                always_ff @(posedge clk) half <= ~half;
-                always_ff @(posedge half) quarter <= ~quarter;
-                always_ff @(posedge half) h <= h + 8'd1;
-                always_ff @(posedge quarter) w <= w + h;
-                assign q = h + w;
-            endmodule",
-        );
+        agrees(DIVIDERS);
     }
 
     #[test]
     fn enables_the_commit_raises_run_as_the_plan_walk() {
-        agrees(
-            "module Top(input logic clk, output logic [7:0] q);
-                logic en = 0;
-                logic gclk;
-                logic [7:0] g = 0;
-                assign gclk = clk & en;
-                always_ff @(posedge clk) en <= ~en;
-                always_ff @(posedge gclk) g <= g + 8'd1;
-                assign q = g;
-            endmodule",
-        );
+        agrees(RAISED_ENABLE);
     }
 
     #[test]
     fn independent_gated_domains_run_as_the_plan_walk() {
-        agrees(
-            "module Top(input logic clk, input logic en, input logic [7:0] d, output logic [7:0] q);
-                logic gclk;
-                logic [7:0] r = 0;
-                logic [7:0] g = 0;
-                assign gclk = clk & en;
-                always_ff @(posedge clk) r <= r + d;
-                always_ff @(posedge gclk) g <= g + 8'd3;
-                assign q = r ^ g;
-            endmodule",
-        );
+        agrees(INDEPENDENT);
     }
 }

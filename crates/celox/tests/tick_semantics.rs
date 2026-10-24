@@ -31,10 +31,22 @@ module Dut (
     output logic [7:0] r,
     output logic [7:0] c2,
     output logic [7:0] s,
+    output logic [7:0] d,
+    output logic [7:0] e,
     output logic       lvl
 );
     logic gclk;
+    logic half = 1'b0;
+    logic ren = 1'b0;
+    logic rclk;
     assign gclk = clk & en;
+    // A clock divided from `clk`, and a gate whose enable `clk`'s own domain
+    // toggles.
+    always_ff @(posedge clk) half <= ~half;
+    always_ff @(posedge half) d <= d + 8'd1;
+    always_ff @(posedge clk) ren <= ~ren;
+    assign rclk = clk & ren;
+    always_ff @(posedge rclk) e <= e + 8'd1;
     always_ff @(posedge clk) p <= p + 8'd1;
     always_ff @(negedge clk) n <= n + 8'd1;
     always_ff @(posedge gclk) g <= g + 8'd1;
@@ -48,7 +60,7 @@ module Dut (
 endmodule
 "#;
 
-const OUTPUTS: [&str; 8] = ["p", "n", "g", "ng", "r", "c2", "s", "lvl"];
+const OUTPUTS: [&str; 10] = ["p", "n", "g", "ng", "r", "c2", "s", "d", "e", "lvl"];
 
 /// Event signals with their active levels.
 const EVENTS: [(&str, u8); 3] = [("clk", 1), ("clk2", 1), ("rst_n", 0)];
@@ -93,10 +105,10 @@ fn reference(ops: &[Op]) -> Vec<Vec<u64>> {
 `timescale 1ns/1ns
 module Top;
     logic clk, clk2, en, rst_n;
-    wire [7:0] p, n, g, ng, r, c2, s;
+    wire [7:0] p, n, g, ng, r, c2, s, d, e;
     wire lvl;
     Dut u (
-        .clk, .clk2, .en, .rst_n, .p, .n, .g, .ng, .r, .c2, .s, .lvl
+        .clk, .clk2, .en, .rst_n, .p, .n, .g, .ng, .r, .c2, .s, .d, .e, .lvl
     );
     initial begin
 {body}    end
@@ -124,11 +136,18 @@ endmodule
         .collect()
 }
 
-fn hosted(ops: &[Op]) -> Vec<Vec<u64>> {
-    let mut sim = Simulator::from_sv_sources(vec![(DUT, Path::new("dut.sv"))], "Dut")
-        .four_state(false)
-        .build()
-        .unwrap();
+/// The values of `OUTPUTS` after each operation through the `Simulator`
+/// API, with derived clock domains run by their generated edge units, or by
+/// walking their plans when `walk`.
+fn hosted(ops: &[Op], walk: bool) -> Vec<Vec<u64>> {
+    let builder =
+        Simulator::from_sv_sources(vec![(DUT, Path::new("dut.sv"))], "Dut").four_state(false);
+    let builder = if walk {
+        builder.disable_pass(celox::SirPass::DerivedEdgeUnits)
+    } else {
+        builder
+    };
+    let mut sim = builder.build().unwrap();
     ops.iter()
         .map(|&op| {
             match op {
@@ -166,14 +185,26 @@ fn hosted(ops: &[Op]) -> Vec<Vec<u64>> {
 }
 
 fn check(ops: &[Op]) {
+    check_except(ops, &[]);
+}
+
+/// [`check`] of every output but `skipped`.
+fn check_except(ops: &[Op], skipped: &[&str]) {
+    let kept: Vec<usize> = (0..OUTPUTS.len())
+        .filter(|&index| !skipped.contains(&OUTPUTS[index]))
+        .collect();
+    let select = |values: &Vec<u64>| kept.iter().map(|&index| values[index]).collect::<Vec<_>>();
     let expected = reference(ops);
-    let actual = hosted(ops);
-    for (k, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
-        assert_eq!(
-            actual, expected,
-            "after {:?} (operation {k}), outputs {OUTPUTS:?}",
-            ops[k]
-        );
+    for walk in [false, true] {
+        let actual = hosted(ops, walk);
+        for (k, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+            assert_eq!(
+                select(actual),
+                select(expected),
+                "after {:?} (operation {k}, walk {walk}), outputs {OUTPUTS:?} without {skipped:?}",
+                ops[k]
+            );
+        }
     }
 }
 
@@ -207,14 +238,38 @@ fn a_tick_from_the_active_level_takes_only_the_inactive_edge() {
     ]);
 }
 
-/// Coincident ticks sample each other's values from before the edge.
+const COINCIDENT: [Op; 5] = [
+    Op::Edge("rst_n", 1),
+    Op::Tick(&["clk2"]),
+    Op::Tick(&["clk", "clk2"]),
+    Op::Tick(&["clk", "clk2"]),
+    Op::Tick(&["clk"]),
+];
+
+/// Coincident ticks sample each other's values from before the edge. The
+/// commit-raised gate's domain (`e`) is checked against Icarus below until
+/// the timed reference sees its edge in a coincident batch (#1860).
 #[test]
 fn ticks_of_several_events_are_coincident() {
-    check(&[
-        Op::Edge("rst_n", 1),
-        Op::Tick(&["clk2"]),
-        Op::Tick(&["clk", "clk2"]),
-        Op::Tick(&["clk", "clk2"]),
-        Op::Tick(&["clk"]),
-    ]);
+    check_except(&COINCIDENT, &["e"]);
+}
+
+/// At the second coincident tick `clk` rises while `ren` is already high, so
+/// `rclk` rises in the active region and `e` counts: Icarus 13.0 gives
+/// `e` = 0 0 1 2 3 after the operations. The timed reference gives 0 0 1 1 2
+/// (#1860); both `Simulator` paths agree with Icarus.
+#[test]
+#[ignore = "#1860"]
+fn coincident_ticks_run_the_domain_of_a_gate_the_commit_raised() {
+    let e = OUTPUTS.iter().position(|name| *name == "e").unwrap();
+    let values = |rows: Vec<Vec<u64>>| rows.iter().map(|row| row[e]).collect::<Vec<_>>();
+    let icarus = vec![0, 0, 1, 2, 3];
+    assert_eq!(
+        values(reference(&COINCIDENT)),
+        icarus,
+        "the timed reference"
+    );
+    for walk in [false, true] {
+        assert_eq!(values(hosted(&COINCIDENT, walk)), icarus, "walk {walk}");
+    }
 }
