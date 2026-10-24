@@ -2200,6 +2200,12 @@ mod host {
             Ok(())
         }
 
+        /// The edge facts of `event`.
+        #[cfg(all(test, feature = "systemverilog"))]
+        pub(crate) fn event_edge(&self, event: B::Event) -> celox_runtime::EventEdge {
+            self.event_edges[event.id()]
+        }
+
         /// Whether a period of `event`'s signal, a rise and a fall, runs
         /// domains only at its active edge: the event's own and those derived
         /// from it, while the inactive edge runs nothing.
