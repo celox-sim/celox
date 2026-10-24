@@ -115,9 +115,10 @@ pub(crate) fn optimize_native_merged_chain(
             .unpacked_arrays
             .iter()
             .filter(|(_, array)| {
-                (1..=64).contains(&array.element_width)
-                    && array.element_stride * 8 != array.element_width
-                    && array.plane_size <= 256
+                // Element boundaries are a storage contract, including for
+                // large arrays and wide elements. Omitting them lets merged
+                // block optimization coalesce writes across padding gaps.
+                array.element_width != 0 && array.element_stride * 8 != array.element_width
             })
             .flat_map(|(&address, array)| {
                 [STABLE_REGION, WORKING_REGION, SPARSE_WORKING_REGION].map(move |region| {
