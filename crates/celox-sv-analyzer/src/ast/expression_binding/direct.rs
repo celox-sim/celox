@@ -216,6 +216,7 @@ pub(in crate::ast) fn cast_target_native(
 }
 
 enum Finish {
+    ScopeRandomize(Vec<Option<Vec<i128>>>),
     Unary(String),
     Binary(String),
     Mux,
@@ -233,7 +234,7 @@ enum Finish {
     /// A string operation on the bound children, see [`strings`].
     StringCall(StringOp),
     /// A read of property `property` of the object handle child.
-    ObjectLoad(crate::ast::classes::Property),
+    ObjectLoad(Box<crate::ast::classes::Property>),
     /// A call of method subroutine `name` with `formals` formals; the first
     /// child is the object handle when `receiver` is one.
     MethodCall {
@@ -499,6 +500,7 @@ pub(in crate::ast) fn bind_value(
                             }
                             let actuals =
                                 args.iter().filter_map(|arg| arg.value).collect::<Vec<_>>();
+                            let mut domains = Vec::with_capacity(actuals.len());
                             for &actual in &actuals {
                                 let ExprKind::Name(name) = &native.expression(actual).kind else {
                                     return Err(unsupported(
@@ -509,11 +511,17 @@ pub(in crate::ast) fn bind_value(
                                 let shape = dimensions
                                     .get(&name)
                                     .ok_or_else(|| unsupported("scope randomize variable"))?;
-                                if !shape.unpacked.is_empty() || !shape.randomizable {
+                                if !shape.unpacked.is_empty()
+                                    || !shape.randomizable
+                                    || shape.real
+                                    || shape.string
+                                    || shape.class.is_some()
+                                {
                                     return Err(unsupported(
-                                        "scope randomize requires a packed non-enum variable",
+                                        "scope randomize requires a packed variable with a supported enum domain",
                                     ));
                                 }
+                                domains.push(shape.enum_values.clone());
                                 if !expressions::query_actual_is_writable(
                                     &Expr::Ident(name),
                                     dimensions,
@@ -524,12 +532,7 @@ pub(in crate::ast) fn bind_value(
                                 }
                             }
                             jobs.push(Job::Finish(
-                                Finish::Call {
-                                    name: "std::randomize".into(),
-                                    args: actuals.iter().copied().map(Some).collect(),
-                                    order: Vec::new(),
-                                    system: Some(SystemFunction::ScopeRandomize),
-                                },
+                                Finish::ScopeRandomize(domains),
                                 actuals.len(),
                                 scope.clone(),
                             ));
@@ -756,9 +759,10 @@ pub(in crate::ast) fn bind_value(
                         let (property, receiver) = objects::property(tree, id, native, dimensions)?
                             .expect("checked by the guard");
                         match receiver {
-                            Some(receiver) => {
-                                (Finish::ObjectLoad(property), vec![(receiver, None)])
-                            }
+                            Some(receiver) => (
+                                Finish::ObjectLoad(Box::new(property)),
+                                vec![(receiver, None)],
+                            ),
                             None => {
                                 values.push(objects::load(&property, objects::this()));
                                 continue;
@@ -928,6 +932,46 @@ pub(in crate::ast) fn bind_value(
                     Finish::Concat => Expr::Concat(operands),
                     Finish::StringCall(op) => {
                         strings::call(op, strings::operands(op, operands, dimensions))
+                    }
+                    Finish::ScopeRandomize(domains) => {
+                        // Preserve the original call when no enum is present.
+                        // Every scalar operation succeeds and returns signed int 1;
+                        // bitwise AND preserves that type and evaluates all operands.
+                        if domains.iter().all(Option::is_none) {
+                            Expr::Call {
+                                callee: Callee::System(SystemFunction::ScopeRandomize),
+                                args: operands.into_iter().map(Some).collect(),
+                                arg_order: Vec::new(),
+                            }
+                        } else {
+                            let mut calls =
+                                operands.into_iter().zip(domains).map(|(operand, domain)| {
+                                    let mut args = vec![Some(operand)];
+                                    let function = if let Some(values) = domain {
+                                        args.extend(values.into_iter().map(|value| {
+                                            Some(Expr::Literal(format_typed_parameter_literal(
+                                                value,
+                                                64,
+                                                value < 0,
+                                            )))
+                                        }));
+                                        SystemFunction::ScopeRandomizeEnum
+                                    } else {
+                                        SystemFunction::ScopeRandomize
+                                    };
+                                    Expr::Call {
+                                        callee: Callee::System(function),
+                                        args,
+                                        arg_order: Vec::new(),
+                                    }
+                                });
+                            let first = calls.next().ok_or_else(disagreement)?;
+                            calls.fold(first, |left, right| Expr::Binary {
+                                left: Box::new(left),
+                                op: BinaryOp::BitAnd,
+                                right: Box::new(right),
+                            })
+                        }
                     }
                     Finish::ObjectLoad(property) => {
                         let handle = operands.pop().ok_or_else(disagreement)?;
