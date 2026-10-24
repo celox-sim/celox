@@ -1,0 +1,1 @@
+Fix remaining P2 reviews #1909/#1910: evaluate guarded constant member reads and validate tagged targets before time/query fast paths; add regressions and review changed external diagnostics.
