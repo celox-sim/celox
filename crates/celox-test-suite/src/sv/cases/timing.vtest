@@ -2109,6 +2109,34 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (run_to_finish)
   (expect_output "y=0111 w=11 n=3\n"))
 
+; A wait on a part-select of a variable an always_comb rewrites through 0.
+; The continuous assignment updates w when y changes (IEEE 1800-2023 10.3);
+; a simulator may interleave it with the process (4.7), but Celox, like
+; Icarus and Verilator, evaluates it after the process: one event per
+; settled change of y[3:0].
+(case intermediate_combinational_writes_reach_part_select_waiters_settled
+  (source "part_select.sv" #"
+                module Top;
+                    logic [7:0] y, a = 8'h15;
+                    logic [3:0] w;
+                    logic c = 0;
+                    int n;
+                    always_comb begin y = 8'h0; if (c) y = a; end
+                    assign w = y[3:0];
+                    initial #1 forever begin @(w); n++; end
+                    initial begin
+                        #2 c = 1;
+                        #1 a = 8'h16;
+                        #1 a = 8'h26;
+                        #1 $display("y=%h w=%h n=%0d", y, w, n);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=26 w=6 n=2\n"))
+
 ; The counted variable is an output port that the parent connects to a
 ; concatenation.
 (case intermediate_combinational_writes_reach_concatenated_ports
