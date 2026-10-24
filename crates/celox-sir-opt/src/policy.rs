@@ -116,6 +116,12 @@ define_sir_passes! {
     /// Compatibility selector for Cranelift oversized-function planning.
     /// This is not a SIR transform and is consumed at the backend boundary.
     TailCallSplit => "tail_call_split",
+    /// Run the edges of events with derived clock domains (gated clocks,
+    /// dividers) in generated units instead of walking their plans in Rust.
+    /// Not a SIR transform: the builder consumes it. The units compile the
+    /// clock's domain once more, so disabling it trades tick speed for build
+    /// time.
+    DerivedEdgeUnits => "derived_edge_units",
 }
 /// Diagnostics and additional verification for the SIR optimizer.
 ///
@@ -278,11 +284,12 @@ impl OptimizeOptions {
         self.opt_level.default_enabled(pass)
     }
 
-    /// Returns true if any pass other than TailCallSplit is enabled.
+    /// Returns true if any SIR transform is enabled: any pass other than
+    /// the TailCallSplit and DerivedEdgeUnits selectors.
     pub fn any_enabled(&self) -> bool {
-        SirPass::ALL
-            .iter()
-            .any(|&p| p != SirPass::TailCallSplit && self.is_enabled(p))
+        SirPass::ALL.iter().any(|&p| {
+            !matches!(p, SirPass::TailCallSplit | SirPass::DerivedEdgeUnits) && self.is_enabled(p)
+        })
     }
 
     /// The base optimization level.
