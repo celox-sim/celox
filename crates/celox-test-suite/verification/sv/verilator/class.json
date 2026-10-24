@@ -193,6 +193,29 @@
     {
       "category": "Types",
       "expectation": "Simulation",
+      "name": "class::randomization_enum_alias",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "detail": "Verilator 5.052 randomizes an enum typedef alias as its underlying 8-bit integer, producing values outside the declared set {-7, 2, 91}. Generated __VBasicRand assigns a masked VL_RANDOM_RNG_I value instead of selecting from an enum table. IEEE 1800-2023 18.3 restricts enum randomization to declared values; the direct enum and inheritance cases pass unchanged.",
+      "known_issue": {
+        "id": "sv_verilator_enum_alias_randomization",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 randomizes an enum typedef alias as its underlying 8-bit integer, producing values outside the declared set {-7, 2, 91}. Generated __VBasicRand assigns a masked VL_RANDOM_RNG_I value instead of selecting from an enum table. IEEE 1800-2023 18.3 restricts enum randomization to declared values; the direct enum and inheritance cases pass unchanged.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_enum_randomization_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "phase": "skip",
+      "status": "ignored"
+    },
+    {
+      "category": "Types",
+      "expectation": "Simulation",
       "name": "class::randomization_inheritance",
       "stronger_than_sv": false,
       "tag_reasons": {},

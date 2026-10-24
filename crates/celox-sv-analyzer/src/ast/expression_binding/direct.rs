@@ -233,7 +233,7 @@ enum Finish {
     /// A string operation on the bound children, see [`strings`].
     StringCall(StringOp),
     /// A read of property `property` of the object handle child.
-    ObjectLoad(crate::ast::classes::Property),
+    ObjectLoad(Box<crate::ast::classes::Property>),
     /// A call of method subroutine `name` with `formals` formals; the first
     /// child is the object handle when `receiver` is one.
     MethodCall {
@@ -756,9 +756,10 @@ pub(in crate::ast) fn bind_value(
                         let (property, receiver) = objects::property(tree, id, native, dimensions)?
                             .expect("checked by the guard");
                         match receiver {
-                            Some(receiver) => {
-                                (Finish::ObjectLoad(property), vec![(receiver, None)])
-                            }
+                            Some(receiver) => (
+                                Finish::ObjectLoad(Box::new(property)),
+                                vec![(receiver, None)],
+                            ),
                             None => {
                                 values.push(objects::load(&property, objects::this()));
                                 continue;
