@@ -169,7 +169,7 @@ test("profiling reuse rejects pre-CLI artifacts before capture", () => {
 
 test("compilation scaling uses walltime consistently and has a bounded execution", () => {
   const benchmark = job(codspeed, "codspeed");
-  assert.match(benchmark, /runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04/);
+  assert.match(benchmark, /runs-on: codspeed-macro-arm64-graviton-ubuntu-22-04/);
   assert.match(benchmark, /timeout-minutes: 60/);
   assert.match(benchmark, /cargo codspeed build --locked --measurement-mode walltime -p celox --bench compilation/);
   assert.match(benchmark, /id: benchmarks\n        timeout-minutes: 15\n        uses: CodSpeedHQ\/action@v5/);

@@ -24,17 +24,17 @@ jobs:
   runner-probe:
     name: Probe CodSpeed runner
     if: github.event_name == 'workflow_dispatch' && inputs.runner_probe
-    runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
+    runs-on: codspeed-macro-arm64-graviton-ubuntu-22-04
     timeout-minutes: 2
     steps:
-      - name: Verify the x64 runner is available
-        run: test "$(uname -m)" = x86_64
+      - name: Verify the ARM64 runner is available
+        run: test "$(uname -m)" = aarch64
 
   codspeed:
     name: CodSpeed
     if: inputs.runner_probe != true
     timeout-minutes: 60
-    runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
+    runs-on: codspeed-macro-arm64-graviton-ubuntu-22-04
     outputs:
       run-id: ${{ steps.benchmarks.outputs.run-id }}
     permissions:

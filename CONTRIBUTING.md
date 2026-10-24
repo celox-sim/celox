@@ -107,7 +107,7 @@ interpreter, native and Cranelift backends in both two-state and four-state mode
 wide-value latch checks, and a small sorter compilation smoke test.
 The 257/512-bit per-bit graph cases and sorter sizes 4/8/16/32 are measured by
 `benches/compilation.rs` in the existing daily/manual CodSpeed workflow.
-Compilation benchmarks use CodSpeed walltime measurement on its x64 Ryzen
+Compilation benchmarks use CodSpeed walltime measurement on its ARM64 Graviton
 Macro Runner: CPU simulation made
 a single 512-bit case take tens of minutes. The benchmark step has a 15-minute
 timeout and the complete job a 60-minute limit; a timeout is reported as failure.
