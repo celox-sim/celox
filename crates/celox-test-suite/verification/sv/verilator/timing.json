@@ -1575,28 +1575,6 @@
     },
     {
       "category": "Sequential",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "timing::derived_clocks_follow_several_nonblocking_updates",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "timing::derived_clocks_follow_active_region_commits",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
       "detail": "Verilator 5.052 wakes a process waiting on a variable only for the value an evaluation leaves: an always_comb or edge-triggered body that rewrites a variable 1 -> 0 -> 1, and nonblocking updates `y <= 0; y <= 1;` from 1, wake no waiter, nor does a pulse that one always_ff writes to some bits of a variable while other processes write its other bits, or a nonblocking update that rises from the final blocking value. IEEE 1800-2023 4.3 and 9.4.2 make every store an update event that triggers the waiter, and 10.4.2 applies nonblocking updates in issue order, each its own update. Standalone probes print the spec counts in Icarus 13.0 and 1 or 0 in Verilator.",
       "expectation": "Simulation",
       "known_issue": {
