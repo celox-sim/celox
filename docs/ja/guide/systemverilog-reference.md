@@ -24,7 +24,7 @@ outline: [2, 3]
 
 | 領域 | サポート内容 |
 | --- | --- |
-| 型 | `logic`、`bit`、`reg`、packed ベクタ、任意の定数境界と昇順・降順の多次元 packed 配列、packed 構造体、hard packed untagged union、enum（暗黙値を含む）、`typedef`、メモリとして使う unpacked 配列、符号付き・符号なし |
+| 型 | `logic`、`bit`、`reg`、packed ベクタ、任意の定数境界と昇順・降順の多次元 packed 配列、packed 構造体、hard / soft packed untagged union、enum（暗黙値を含む）、`typedef`、メモリとして使う unpacked 配列、符号付き・符号なし |
 | 式 | `**` を含む算術、論理、シフト、比較、リダクション、連結・複製、`?:`、`inside`、`==?` / `!=?`、キャスト（`N'(x)`、`signed'(x)`、`T'(x)`）、`$signed` / `$unsigned` |
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
@@ -164,7 +164,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
-- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、soft packed union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、`real`。
+- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、`real`。
 - 順序回路のプロセス：イベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）、および `always_ff` での
   単純な信号以外のエッジオペランド（[#464](https://github.com/celox-sim/celox/issues/464)）、複数ビットのエッジ信号、
   非同期リセットを持たない複数のエッジ。
@@ -257,10 +257,27 @@ package が `p` から実際に import した名前だけです。export を経�
 ブロックローカル変数は、`always_comb` と `always_ff` で字句スコープを持ちます。
 モジュールの信号と同名の変数や、別のブロック・プロセスでの同名変数を扱えます。
 
-### hard packed untagged union
+### packed untagged union
 
 hard packed untagged union のメンバーは、同じビットベクタを共有します。
 全メンバーの幅が一致する必要があります（IEEE 1800-2023 7.3.1）。
+`union soft` / `union soft packed` は幅の異なるメンバーを許容します。
+全体の幅は最大メンバーの幅となり、各メンバーは最下位ビットから配置されます。
+小さいメンバーへの書き込みでは残りの上位ビットを保持します。
+packed union と packed 構造体の入れ子にも対応します。
+
+```systemverilog
+union soft packed {
+    logic [15:0] word_value;
+    logic [7:0] byte_value;
+} data;
+// data.word_value = 16'h1234 の後で data.byte_value = 8'hab とすると data = 16'h12ab。
+```
+
+union 全体の演算は宣言時の符号指定に従います（既定は unsigned）。
+`bit` / `logic` 混在時は 4-state の領域を共有し、2-state メンバーを
+読み書きする際には X/Z を 0 に変換します。
+tagged union と unpacked union は未対応です。
 
 ### 名前付きサブルーチン引数
 
