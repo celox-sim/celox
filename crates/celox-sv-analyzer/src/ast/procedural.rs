@@ -1940,7 +1940,85 @@ pub(super) fn subroutines_with_symbolic_parameters(
             }
         }
     }
+    // A class of the scope, or of another package, that overrides a virtual
+    // method of a class that another scope declares is reached through that
+    // method's dispatcher, which the declaring scope lowered for the classes
+    // it saw: the scope lowers the dispatcher again, over every class it
+    // sees, when the dispatcher misses one (IEEE 1800-2023 8.20).
+    let imported = scope::imported(&tree.state);
+    for class in &imported.classes {
+        for method in class.dispatched_methods() {
+            let name = classes::Class::dispatcher_name(&class.name, &method.name);
+            if subroutines.iter().any(|known| known.name == name) {
+                continue;
+            }
+            let Some(dispatcher) = imported.subroutines.iter().find(|known| known.name == name)
+            else {
+                continue;
+            };
+            let targets = classes::dispatch_targets(
+                tree,
+                &class.name,
+                &method.name,
+                const_env,
+                module_type_aliases,
+            )?;
+            let covered = case_ids(&dispatcher.body);
+            if targets
+                .iter()
+                .all(|(_, ids)| ids.iter().all(|id| covered.contains(id)))
+            {
+                continue;
+            }
+            let mut dispatcher = dispatcher.clone();
+            dispatcher.body = vec![dispatch_body(
+                &targets,
+                &dispatcher.params,
+                dispatcher.return_var.as_deref(),
+            )];
+            subroutines.push(dispatcher);
+        }
+        // So does a `$cast` to a variable of the class (8.16).
+        let name = classes::Class::cast_name(&class.name);
+        if subroutines.iter().any(|known| known.name == name) {
+            continue;
+        }
+        let Some(cast) = imported.subroutines.iter().find(|known| known.name == name) else {
+            continue;
+        };
+        let targets = classes::cast_targets(tree, &class.name, const_env, module_type_aliases)?;
+        let covered = case_ids(&cast.body);
+        if targets.iter().all(|id| covered.contains(id)) {
+            continue;
+        }
+        let mut cast = cast.clone();
+        if let Some(Stmt::Case { items, .. }) = cast.body.first_mut()
+            && let Some(item) = items.first_mut()
+        {
+            item.labels = std::iter::once(0)
+                .chain(targets)
+                .map(|id| CaseLabel::Value(Expr::Literal(format!("32'd{id}"))))
+                .collect();
+            subroutines.push(cast);
+        }
+    }
     Ok(subroutines)
+}
+
+/// The class identifiers that the case on the class of an object in `body`,
+/// the body of a dispatcher or a `$cast` helper, selects.
+fn case_ids(body: &[Stmt]) -> HashSet<u32> {
+    let Some(Stmt::Case { items, .. }) = body.first() else {
+        return HashSet::default();
+    };
+    items
+        .iter()
+        .flat_map(|item| &item.labels)
+        .filter_map(|label| match label {
+            CaseLabel::Value(Expr::Literal(literal)) => literal.strip_prefix("32'd")?.parse().ok(),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Shared native subroutine lowering for execution and expression-form plans.
@@ -2413,7 +2491,7 @@ impl BodyBuilder<'_, '_, '_> {
                 &self.dims.type_aliases,
             )?;
             let mut args = vec![Some(Expr::Ident(this.to_owned()))];
-            let (actuals, order) = base.constructor_arguments(native, arguments)?;
+            let (actuals, order) = base.constructor_arguments(arguments)?;
             for actual in actuals {
                 args.push(
                     actual

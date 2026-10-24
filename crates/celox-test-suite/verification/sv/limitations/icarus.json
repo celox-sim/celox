@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 17,
     "emission_error": 0,
-    "compile_error": 133,
+    "compile_error": 135,
     "runtime_error": 8,
     "unsupported": 0,
     "ignored": 0
@@ -1461,6 +1461,22 @@
       "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:34: syntax error\n<case>/source_0.sv:34: error: Malformed statement\n",
       "expectation": "Simulation",
       "name": "class::shallow_copies",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Invalid class item.\n<case>/source_0.sv:27: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::classes_of_packages",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::classes_of_the_compilation_unit",
       "phase": "compile",
       "status": "compile_error"
     }

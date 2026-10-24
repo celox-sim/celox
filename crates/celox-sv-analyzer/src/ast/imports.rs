@@ -225,6 +225,15 @@ pub(super) fn item_names(id: celox_sv_syntax::BodyItemId, tree: &SyntaxTree) -> 
                 add(&instance.name);
             }
         }
+        // The classes a class item declares (IEEE 1800-2023 8.3).
+        BodyItemKind::Unconverted { category, .. } if category == "class" => {
+            let tokens = native.body_item(id).tokens;
+            for class in &native.classes {
+                if tokens.start <= class.tokens.start && class.tokens.end <= tokens.end {
+                    add(&class.name);
+                }
+            }
+        }
         _ => {}
     }
     for id in types {
@@ -372,18 +381,6 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
         return HashMap::default();
     };
     let nested = nested_declarations(tree);
-    let qualified: HashSet<_> = native
-        .expressions
-        .iter()
-        .filter_map(|expression| match &expression.kind {
-            ExprKind::Member {
-                expression,
-                separator,
-                ..
-            } if separator == "::" => Some(*expression),
-            _ => None,
-        })
-        .collect();
     // Bare pattern keys name members; they do not bind wildcard imports.
     let pattern_keys: HashSet<_> = native
         .expressions
@@ -410,13 +407,12 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
             names.entry(name).or_default().push(offset);
         }
     };
+    // The scope of `C::x` is a name too: it may be a class that a wildcard
+    // import makes visible (IEEE 1800-2023 8.23, 26.3), while a package name
+    // binds nothing.
     for expression in &native.expressions {
         if let ExprKind::Name(name) = &expression.kind
             && !pattern_keys.contains(&expression.tokens.start)
-            && !qualified.iter().any(|base| {
-                native.expression(*base).tokens == expression.tokens
-                    && matches!(&native.expression(*base).kind, ExprKind::Name(_))
-            })
         {
             add(&name.spelling, expression.tokens.start);
         }
@@ -433,6 +429,27 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
         offsets.dedup();
     }
     names
+}
+
+/// The positions of the names that are the scope of `s::x`.
+fn qualifier_offsets(tree: &SyntaxTree) -> HashSet<usize> {
+    use celox_sv_syntax::ExprKind;
+    let native = tree.declarations();
+    native
+        .expressions
+        .iter()
+        .filter_map(|expression| match &expression.kind {
+            ExprKind::Member {
+                expression,
+                separator,
+                ..
+            } if separator == "::" => {
+                let base = native.expression(*expression);
+                matches!(base.kind, ExprKind::Name(_)).then_some(base.tokens.start)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Native generate scopes, keyed by their authored body owner.
@@ -883,6 +900,21 @@ pub(super) fn resolve_imports(
         // A qualified name names a declaration of the package, or one it
         // exports: `q::x` then denotes the declaration `x` denotes in `q`
         // (IEEE 1800-2023 26.6).
+        // `C::x` names a member of a class `C` that an import makes visible
+        // (IEEE 1800-2023 8.23, 26.3).
+        if packages.get(package_name).is_none()
+            && (imports
+                .explicit
+                .iter()
+                .any(|(_, item)| item == package_name)
+                || imports.wildcard.iter().any(|imported| {
+                    packages
+                        .get(imported)
+                        .is_some_and(|imported| imported.provides(package_name).is_some())
+                }))
+        {
+            continue;
+        }
         let package_symbols = package(package_name)?;
         if !package_symbols.declares(name) {
             let target = package_symbols.provides(name).ok_or_else(|| {
@@ -1009,6 +1041,14 @@ pub(super) fn resolve_imports(
     } else {
         unqualified_names(tree)
     };
+    // The scope of `p::x` that names a package refers to no item.
+    let qualifiers = qualifier_offsets(tree);
+    referenced.retain(|name, offsets| {
+        if packages.get(name).is_some() {
+            offsets.retain(|offset| !qualifiers.contains(offset));
+        }
+        !offsets.is_empty()
+    });
     // A reference in a generate block is looked up in that block and the
     // blocks around it first (IEEE 1800-2023 26.3): the references the
     // imports of a block bind, by name, with the block and the declaration.
