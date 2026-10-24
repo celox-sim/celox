@@ -160,6 +160,7 @@ timed_cases! {
     fn parallel_flip_flop_parts_keep_pulses = "timing::parallel_flip_flop_parts_keep_pulses";
     fn staged_nonblocking_writes_follow_later_blocking_writes = "timing::staged_nonblocking_writes_follow_later_blocking_writes";
     fn intermediate_combinational_writes_replace_split_definitions = "timing::intermediate_combinational_writes_replace_split_definitions";
+    fn intermediate_combinational_writes_reach_part_select_waiters_settled = "timing::intermediate_combinational_writes_reach_part_select_waiters_settled";
     fn intermediate_combinational_writes_reach_concatenated_ports = "timing::intermediate_combinational_writes_reach_concatenated_ports";
     fn blocking_write_waiters_run_before_nonblocking_updates = "timing::blocking_write_waiters_run_before_nonblocking_updates";
     fn blocking_write_waiters_rearm_before_nonblocking_updates = "timing::blocking_write_waiters_rearm_before_nonblocking_updates";
