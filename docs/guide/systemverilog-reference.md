@@ -25,7 +25,7 @@ synthesis and is tested at the design level.
 
 | Area | Supported |
 | --- | --- |
-| Types | `logic`, `bit`, `reg`, packed vectors, multidimensional packed arrays with ascending or descending ranges and arbitrary constant bounds, packed structs and hard packed untagged unions, enums (with implicit values), `typedef`, unpacked arrays used as memories, signed and unsigned |
+| Types | `logic`, `bit`, `reg`, packed vectors, multidimensional packed arrays with ascending or descending ranges and arbitrary constant bounds, packed structs, hard and soft packed untagged unions, enums (with implicit values), `typedef`, unpacked arrays used as memories, signed and unsigned |
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
@@ -184,7 +184,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   ([#427](https://github.com/celox-sim/celox/issues/427)), wildcard `.*` connections ([#442](https://github.com/celox-sim/celox/issues/442)), gate primitives ([#457](https://github.com/celox-sim/celox/issues/457)),
   `bind`.
 - Declarations: variable declaration initializers of members of an interface
-  array, ANSI port default values, tagged unions, soft packed unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
+  array, ANSI port default values, tagged unions, unpacked unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   unpacked structs and `real`.
 - Sequential processes: `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)) in event lists, and in
   `always_ff` edge operands other than a plain signal ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit
@@ -369,10 +369,27 @@ parameters; recursive specializations and nesting beyond 64 levels are rejected.
 Block-local variables have lexical scope in `always_comb` and `always_ff`.
 Locals may shadow module signals and reuse names in separate blocks or processes.
 
-### Hard packed untagged unions
+### Packed untagged unions
 
 Hard packed untagged unions share one bit vector between all members;
 every member must have the same width (IEEE 1800-2023 7.3.1).
+Soft packed unions (`union soft` or `union soft packed`) allow different member
+widths. Their size is the largest member width, each member starts at the least
+significant bit, and writing a smaller member preserves the remaining upper
+bits. Nested packed unions and structures use the same layout rules.
+
+```systemverilog
+union soft packed {
+    logic [15:0] word_value;
+    logic [7:0] byte_value;
+} data;
+// After data.word_value = 16'h1234, data.byte_value = 8'hab leaves data = 16'h12ab.
+```
+
+Whole-union operations use the declared signedness (unsigned by default).
+Mixed `bit`/`logic` unions retain four-state storage, with X/Z converted to zero
+when reading or writing a two-state member. Tagged and unpacked unions remain
+unsupported.
 
 ### Named subroutine arguments
 

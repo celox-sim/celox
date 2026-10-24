@@ -17,7 +17,8 @@
     "icarus/synthesizable.json",
     "icarus/system_functions.json",
     "icarus/timing.json",
-    "icarus/types.json"
+    "icarus/types.json",
+    "icarus/unions.json"
   ],
   "exclude_stronger_than_sv": false,
   "include_ignored": false,

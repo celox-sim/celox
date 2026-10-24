@@ -183,6 +183,7 @@ pub enum DataTypeKind {
     TypeOf(ExprId),
     Struct {
         union: bool,
+        soft: bool,
         tagged: bool,
         packed: bool,
         fields: Vec<Field>,

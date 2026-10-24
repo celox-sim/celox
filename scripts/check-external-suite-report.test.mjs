@@ -271,10 +271,21 @@ test("all four retained baselines accept only their existing failures", () => {
         exitStatus,
         suite,
       );
-      assert.equal(
-        result.accepted_failures.length,
-        suite === "sv" ? 0 : tool === "icarus" ? 11 : 2,
-      );
+      if (suite === "sv") {
+        assert.deepEqual(
+          result.accepted_failures,
+          tool === "icarus"
+            ? [
+                "unions::packed_mixed_state",
+                "unions::soft_overlay",
+                "unions::soft_signed_ports",
+                "unions::soft_wide_four_state",
+              ]
+            : [],
+        );
+      } else {
+        assert.equal(result.accepted_failures.length, tool === "icarus" ? 11 : 2);
+      }
     }
   }
 });
