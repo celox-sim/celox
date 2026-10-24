@@ -1,0 +1,59 @@
+{
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "compile tb_string::array_elements: xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:30:9: error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 §22.5.1)\n    30 |         `CELOX_SUITE_FINISH();\n       |         ^~~~~~~~~~~~~~~~~~~\nError: preprocessing failed (1 error(s))\n",
+      "expectation": "Simulation",
+      "name": "tb_string::array_elements",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "compile tb_string::assignment: xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:36:9: error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 §22.5.1)\n    36 |         `CELOX_SUITE_FINISH();\n       |         ^~~~~~~~~~~~~~~~~~~\nError: preprocessing failed (1 error(s))\n",
+      "expectation": "Simulation",
+      "name": "tb_string::assignment",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "compile tb_string::comparison: xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:35:9: error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 §22.5.1)\n    35 |         `CELOX_SUITE_FINISH();\n       |         ^~~~~~~~~~~~~~~~~~~\nError: preprocessing failed (1 error(s))\n",
+      "expectation": "Simulation",
+      "name": "tb_string::comparison",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "compile tb_string::control_flow: xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:36:9: error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 §22.5.1)\n    36 |         `CELOX_SUITE_FINISH();\n       |         ^~~~~~~~~~~~~~~~~~~\nError: preprocessing failed (1 error(s))\n",
+      "expectation": "Simulation",
+      "name": "tb_string::control_flow",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "compile tb_string::function_argument: xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:30:9: error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 §22.5.1)\n    30 |         `CELOX_SUITE_FINISH();\n       |         ^~~~~~~~~~~~~~~~~~~\nError: preprocessing failed (1 error(s))\n",
+      "expectation": "Simulation",
+      "name": "tb_string::function_argument",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

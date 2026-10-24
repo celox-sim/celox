@@ -1,0 +1,312 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::abstract_classes_and_pure_virtual_methods",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::casts_from_interface_class_handles at 713:3: expect_output: expected [49, 32, 56, 10, 49, 32, 49, 10, 48, 32, 56, 10], got [48, 32, 48, 10, 49, 32, 49, 10, 49, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "class::casts_from_interface_class_handles",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::casts_of_class_handles at 669:3: expect_output: expected [49, 32, 52, 10, 48, 32, 52, 10, 49, 32, 49, 10, 49, 32, 52, 10, 114, 111, 99, 107, 10, 49, 32, 49, 10, 52, 10], got [49, 32, 48, 10, 48, 32, 48, 10, 49, 32, 49, 10, 49, 32, 52, 10, 114, 111, 99, 107, 10, 49, 32, 49, 10, 48, 10]",
+      "expectation": "Simulation",
+      "name": "class::casts_of_class_handles",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::classes_implementing_interface_classes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "the simulation ended before the script did",
+      "expectation": "Simulation",
+      "name": "class::constructors_chain_to_base",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::derived_properties_hide_base_properties",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::extern_methods_and_tasks at 116:46: assert_eq result: expected 0x6d, got 0x64",
+      "expectation": "Simulation",
+      "name": "class::extern_methods_and_tasks",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::implicit_constructors_and_this",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::inherited_methods_of_extended_interface_classes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::inherited_properties_and_methods",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::methods_called_through_interface_class_handles",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::methods_of_handle_array_elements",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::objects_properties_and_methods",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::objects_referring_to_objects",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "the simulation ended before the script did",
+      "expectation": "Simulation",
+      "name": "class::objects_survive_heap_collections",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::randomization_enum_alias at 1038:46: assert_eq errors: expected 0x0, got 0x81",
+      "expectation": "Simulation",
+      "name": "class::randomization_enum_alias",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::randomization_enum_domain at 979:46: assert_eq errors: expected 0x0, got 0x1e5",
+      "expectation": "Simulation",
+      "name": "class::randomization_enum_domain",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::randomization_enum_fill_literals at 1069:46: assert_eq errors: expected 0x0, got 0x18",
+      "expectation": "Simulation",
+      "name": "class::randomization_enum_fill_literals",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::randomization_enum_inheritance at 1010:46: assert_eq errors: expected 0x0, got 0xff",
+      "expectation": "Simulation",
+      "name": "class::randomization_enum_inheritance",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::randomization_inheritance at 835:46: assert_eq errors: expected 0x0, got 0x1",
+      "expectation": "Simulation",
+      "name": "class::randomization_inheritance",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::randomization_mode_bit_argument at 931:46: assert_eq errors: expected 0x0, got 0x3",
+      "expectation": "Simulation",
+      "name": "class::randomization_mode_bit_argument",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::randomization_modes_and_selection at 882:46: assert_eq errors: expected 0x0, got 0x1414",
+      "expectation": "Simulation",
+      "name": "class::randomization_modes_and_selection",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::randomization_pre_hook_controls_modes at 908:46: assert_eq errors: expected 0x0, got 0x2",
+      "expectation": "Simulation",
+      "name": "class::randomization_pre_hook_controls_modes",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::randomize_without_rand_members",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::static_properties_and_methods",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::string_methods_on_properties",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::unconstrained_randomize",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::virtual_methods_dispatch_on_object_class",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

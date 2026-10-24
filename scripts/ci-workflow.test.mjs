@@ -198,7 +198,13 @@ test("scheduled and manual validation run all paths and external suites", () => 
   assert.match(job("changes"), /QUEUE_VALIDATION: .*startsWith\(github\.head_ref, 'mergify\/merge-queue\/'\)/);
   assert.match(external, /fail-fast: false/);
   assert.match(external, /suite: \[veryl, sv\]/);
-  assert.match(external, /tool: \[verilator, icarus\]/);
+  assert.match(external, /tool: \[verilator, icarus, xezim\]/);
+  // Only the xezim jobs build xezim, through its own development shell.
+  assert.match(
+    external,
+    /VERIFY_SHELL: \$\{\{ matrix\.tool == 'xezim' && '\.#xezim' \|\| '\.' \}\}/,
+  );
+  assert.doesNotMatch(external, /nix develop --no-update-lock-file/);
   assert.match(external, /--test oracles -- --ignored/);
   // The check reads the complete results, with run counts and reuse flags;
   // a retained --report copy omits them.
