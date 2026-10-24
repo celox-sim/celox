@@ -1,6 +1,6 @@
 #![cfg(feature = "systemverilog")]
-//! The actions of deferred immediate assertions in processes wait in the
-//! process's deferred assertion report queue: `#0` ones mature in the
+//! The actions of deferred immediate assertions wait in the deferred
+//! assertion report queue of their process: `#0` ones mature in the
 //! Observed region, `final` ones in the Postponed region, and a flush point
 //! of the process discards those still waiting (IEEE 1800-2023 16.4).
 use celox::{AssertionDeferral, Report, RuntimeEvent, Severity};
@@ -124,6 +124,65 @@ macro_rules! deferred {
                 );
             }
 
+            /// Combinational processes run again when a source changes; the
+            /// second run flushes the failure of the first (IEEE 1800-2023
+            /// 16.4.2). A module item is the same assertion in an
+            /// `always_comb` (16.4.3).
+            #[test]
+            fn rerunning_a_combinational_process_flushes_waiting_actions() {
+                let glitch = "initial begin #1 a = 1; #0 b = 1; end";
+                for assertion in [
+                    "always_comb d: assert #0 (a == b) else $error(\"d\");",
+                    "always_comb d: assert final (a == b) else $error(\"d\");",
+                    "always @(a or b) d: assert #0 (a == b) else $error(\"d\");",
+                    "d: assert #0 (a == b) else $error(\"d\");",
+                    "d: assume final (a == b) else $error(\"d\");",
+                ] {
+                    assert_eq!(run(&format!("  {assertion}\n  {glitch}"), 1), vec![], "{assertion}");
+                    let mut reports = run(&format!("  {assertion}\n  initial #1 a = 1;"), 1);
+                    assert_eq!(reports.len(), 1, "{assertion}: {reports:?}");
+                    assert_eq!(reports.remove(0).0, "d", "{assertion}");
+                }
+            }
+
+            /// A design without events may never step; the initial settle
+            /// of combinational logic belongs to time zero, whose slot is
+            /// over once nothing more is due.
+            #[test]
+            fn actions_of_the_initial_settle_mature_without_a_step() {
+                let mut sim = simulation("  d: assume #0 (a) else $error(\"d\");");
+                sim.run_until(0).unwrap();
+                assert_eq!(
+                    summary(sim.drain_runtime_events()),
+                    vec![("d".to_owned(), Some(AssertionDeferral::Observed))]
+                );
+            }
+
+            /// A deferred cover reports its pass action when it matures.
+            #[test]
+            fn deferred_cover_reports_when_it_matures() {
+                let cover = "  c: cover #0 (a != b) $info(\"c\");\n  ";
+                assert_eq!(run(&format!("{cover}initial begin #1 a = 1; #0 b = 1; end"), 1), vec![]);
+                assert_eq!(
+                    run(&format!("{cover}initial #1 a = 1;"), 1),
+                    vec![("c".to_owned(), Some(AssertionDeferral::Observed))]
+                );
+            }
+
+            /// A deferred `$fatal` of a combinational process ends the
+            /// simulation when it matures, not while combinational logic
+            /// settles.
+            #[test]
+            fn a_combinational_deferred_fatal_ends_the_simulation_when_it_matures() {
+                let mut sim = simulation(
+                    "  always_comb f: assert final (a == b) else $fatal(1, \"boom\");\n  \
+                     initial begin #1 a = 1; #0 b = 1; #1 a = 0; end",
+                );
+                sim.run_until(1).unwrap();
+                assert!(sim.run_until(5).is_err());
+                assert_eq!(sim.time(), 2);
+            }
+
             /// A deferred `$fatal` ends the simulation when it matures, at
             /// the end of its time slot.
             #[test]
@@ -244,6 +303,87 @@ fn deferred_actions_mature_at_the_end_of_edges_and_derived_ticks() {
         .map(|(label, _)| label)
         .collect();
     assert_eq!(labels, ["o", "d", "o", "o", "d", "o", "o", "d", "o"]);
+}
+
+/// Without a scheduler, a settle of combinational logic ends the host
+/// call's time slot.
+#[test]
+fn combinational_deferred_actions_mature_when_logic_settles() {
+    let source = "module Top(input bit a);\n  \
+                  always_comb d: assert #0 (a) else $error(\"d\");\n\
+                  endmodule";
+    let mut sim =
+        celox::Simulator::from_sv_sources(vec![(source, Path::new("deferred.sv"))], "Top")
+            .build()
+            .unwrap();
+    assert_eq!(
+        summary(sim.drain_runtime_events()),
+        vec![("d".to_owned(), Some(AssertionDeferral::Observed))]
+    );
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(summary(sim.drain_runtime_events()), vec![]);
+}
+
+/// A drain returns a deferred `$fatal` of combinational logic as a fatal
+/// report.
+#[test]
+fn draining_a_combinational_deferred_fatal_returns_its_report() {
+    let source = "module Top(input bit a);\n  \
+                  always_comb assert #0 (a) else $fatal(1, \"failed\");\n\
+                  endmodule";
+    let mut sim =
+        celox::Simulator::from_sv_sources(vec![(source, Path::new("deferred.sv"))], "Top")
+            .build()
+            .unwrap();
+    let events = sim.drain_runtime_events();
+    assert!(
+        matches!(
+            events.as_slice(),
+            [RuntimeEvent::Report(Report { severity: Severity::Fatal, message, .. })]
+                if message == b"failed"
+        ),
+        "{events:?}"
+    );
+}
+
+/// A tick is one time slot: the settle before its flip-flops does not end
+/// it, so the settle after them flushes what failed in between.
+#[test]
+fn a_tick_flushes_actions_of_the_settle_before_its_flip_flops() {
+    let source = "module Top(input bit clk);\n  \
+                  bit q;\n  \
+                  always_ff @(posedge clk) q <= 1'b1;\n  \
+                  always_comb assert #0 (!clk || q) else $error(\"failed\");\n\
+                  endmodule";
+    let mut sim =
+        celox::Simulator::from_sv_sources(vec![(source, Path::new("deferred.sv"))], "Top")
+            .build()
+            .unwrap();
+    assert_eq!(summary(sim.drain_runtime_events()), vec![]);
+    // The host write leaves the logic to settle before the flip-flops.
+    let q = sim.signal("q");
+    sim.set(q, 0u8);
+    let clk = sim.event("clk");
+    sim.tick(clk).unwrap();
+    assert_eq!(summary(sim.drain_runtime_events()), vec![]);
+}
+
+/// The first drain of a simulation settles its combinational logic before
+/// the slot matures, and returns what failed.
+#[test]
+fn a_first_drain_returns_actions_of_the_initial_settle() {
+    let source = "module Top;\n  bit a;\n  \
+                  d: assert #0 (a) else $error(\"d\");\n\
+                  endmodule";
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("deferred.sv"))], "Top")
+            .build()
+            .unwrap();
+    assert_eq!(
+        summary(sim.drain_runtime_events()),
+        vec![("d".to_owned(), Some(AssertionDeferral::Observed))]
+    );
 }
 
 #[test]

@@ -4230,10 +4230,10 @@ fn build_comb_observer_capture_paths(
                 | RuntimeEventKind::Finish
                 | RuntimeEventKind::Stop
         );
-        let fatal_error_code = sites[observer.site_id as usize]
-            .kind
-            .is_fatal()
-            .then_some(observer.site_id as i64);
+        // A deferred `$fatal` ends the simulation when it matures.
+        let fatal_error_code = (sites[observer.site_id as usize].kind.is_fatal()
+            && sites[observer.site_id as usize].deferred.is_none())
+        .then_some(observer.site_id as i64);
         let pre_lower_nodes = observer_pre_lower_nodes(observer, arena);
         for idx in &order_after {
             comb_blocks[idx.0]
@@ -4286,10 +4286,10 @@ fn build_comb_observer_capture_paths(
                         | RuntimeEventKind::Finish
                         | RuntimeEventKind::Stop
                 );
-                let member_fatal_error_code = sites[member.site_id as usize]
-                    .kind
-                    .is_fatal()
-                    .then_some(member.site_id as i64);
+                // A deferred `$fatal` ends the simulation when it matures.
+                let member_fatal_error_code = (sites[member.site_id as usize].kind.is_fatal()
+                    && sites[member.site_id as usize].deferred.is_none())
+                .then_some(member.site_id as i64);
                 let member_expr = match member
                     .loop_runner
                     .or(member.guard)

@@ -3934,6 +3934,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let width = self.m.var(id).width;
             self.targets.push((id, BitAccess::new(0, width - 1)));
         }
+        let flush_site = self.deferred_flush_site(body);
         if self.exec_block(body)? {
             self.b.seal_block(SIRTerminator::Return);
         }
@@ -4095,6 +4096,13 @@ impl<'p, 'a> Ff<'p, 'a> {
             false_block: (done, vec![]),
         });
         self.b.switch_to_block(execute);
+        // Each run is a resume of the process (IEEE 1800-2023 16.4.2).
+        if let Some(site_id) = flush_site {
+            self.b.emit(SIRInstruction::RuntimeEvent {
+                site_id,
+                args: Vec::new(),
+            });
+        }
         self.b.inline_execution_unit(&body_unit);
         if !always_comb {
             // @* is not waiting during its body. Its own writes cannot wake

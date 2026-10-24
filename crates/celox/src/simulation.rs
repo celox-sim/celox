@@ -365,6 +365,7 @@ impl<B: SimBackend> Simulation<B> {
         // Only a timed simulation ends at an RTL `$finish`; a bare
         // `Simulator`, ticks included, leaves that to the host.
         simulator.finish_sites = simulator.schedule.finish_sites;
+        simulator.timed = true;
         simulator.skip_runtime_finish();
         state.initialize_declarations(&mut simulator)?;
         Ok(Self {
@@ -820,6 +821,16 @@ impl<B: SimBackend> Simulation<B> {
     /// Takes the runtime events (`$display`, messages, `$finish`, ...) the
     /// design emitted since the last call, in emission order.
     pub fn drain_runtime_events(&mut self) -> Vec<crate::RuntimeEvent> {
+        // A slot with nothing more due is over, also before the first step:
+        // the initial settle of combinational logic belongs to time zero.
+        // A fatal action is drained as a fatal report.
+        if self.simulator.deferred_assertions
+            && self.state.next_event_time() != Some(self.state.time())
+        {
+            // Lazily settled logic runs in the slot too.
+            self.simulator.settle_for_runtime_event_drain();
+            let _ = self.simulator.mature_deferred_assertions();
+        }
         let mut events = std::mem::take(&mut self.reports.events);
         events.extend(self.simulator.drain_runtime_events());
         events
