@@ -21,6 +21,8 @@ pub struct ResolvedSchedule<B: SimBackend> {
     pub(crate) signal_to_id: FxHashMap<SignalRef, usize>,
     pub(crate) signal_index_by_id: Vec<usize>,
     pub(crate) processes: Vec<ProcessRefs>,
+    /// The kernels of program instances, in declaration order.
+    pub(crate) program_processes: Vec<usize>,
     /// Counted signals and the domains their counters trigger.
     pub(crate) counted: Vec<CountedDomainRefs>,
     pub(crate) counted_by_offset: FxHashMap<usize, usize>,
@@ -190,6 +192,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             .iter()
             .map(|process| ProcessRefs {
                 is_initializer: process.slots.is_initializer,
+                program: process.slots.program.as_ref().map(resolve),
                 resume: resolve(&process.slots.resume),
                 starts_with_event_wait: process.slots.requires_timed_simulation,
                 status: resolve(&process.slots.status),
@@ -299,6 +302,12 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             event_info,
             signal_to_id,
             signal_index_by_id,
+            program_processes: processes
+                .iter()
+                .enumerate()
+                .filter(|(_, process)| process.program.is_some())
+                .map(|(index, _)| index)
+                .collect(),
             processes,
             counted,
             counted_by_offset,

@@ -18,6 +18,10 @@ use crate::{
 /// Bookkeeping of one round of a time slot.
 #[derive(Default)]
 pub(super) struct Round {
+    /// The round's process phase is the reactive region set's: it runs
+    /// program processes, and the design activity they create follows it
+    /// (IEEE 1800-2023 4.5).
+    pub(super) reactive: bool,
     /// The stopped process resumes before any newly woken ready processes.
     pub(super) resume_process: Option<usize>,
     /// Event ids whose trigger survives the settling filter.
@@ -89,7 +93,8 @@ impl Round {
 
 impl Round {
     /// Start a round, keeping the buffers of earlier ones.
-    fn reset(&mut self, track_stable_edges: bool) {
+    fn reset(&mut self, track_stable_edges: bool, reactive: bool) {
+        self.reactive = reactive;
         self.resume_process = None;
         self.scheduled_trigger_ids.make_empty();
         self.track_stable_edges = track_stable_edges;
@@ -422,7 +427,8 @@ impl<B: SimBackend> SimulationState<B> {
     /// trigger evaluate, zero-delay processes run in the inactive region,
     /// and only then are nonblocking assignments published. A round
     /// without ready processes and counted signals does exactly the batch
-    /// step.
+    /// step. In a `reactive` round the process phase is that of the reactive
+    /// region set, and the domains its processes trigger evaluate after it.
     pub(super) fn step_round<E>(
         &mut self,
         executor: &mut E,
@@ -430,6 +436,7 @@ impl<B: SimBackend> SimulationState<B> {
         events_to_process: Vec<SimEvent<B>>,
         ready_processes: Vec<usize>,
         entry: bool,
+        reactive: bool,
     ) -> Result<(), Halt>
     where
         E: SimulationExecutor<Backend = B>,
@@ -474,7 +481,7 @@ impl<B: SimBackend> SimulationState<B> {
         }
 
         let mut round = self.scratch.take().unwrap_or_default();
-        round.reset(events_to_process.is_empty());
+        round.reset(events_to_process.is_empty(), reactive);
         round.begin_scan(self.model.domain_kinds.len());
         self.process_state.ready.extend(ready_processes);
         executor.backend_mut().clear_triggered_bits();
