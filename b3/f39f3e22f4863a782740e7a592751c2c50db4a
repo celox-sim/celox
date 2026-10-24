@@ -1,1 +1,6 @@
-Review: mature only at outer untimed boundaries, drain fatal actions as reports, settle before the first drain matures
+Revision history for #1878:
+
+rev 2 (content) 2026-10-24 11:03 UTC — Review: mature only at outer untimed boundaries, drain fatal actions as reports, settle before the first drain matures
+rev 1 (initial) 2026-10-24 11:03 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1878,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"87fc9d661a22c3746014e910487282399c253490","timestamp_iso":"2026-10-24T11:03:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"87fc9d661a22c3746014e910487282399c253490","new_sha":"b3f39f3e22f4863a782740e7a592751c2c50db4a","timestamp_iso":"2026-10-24T11:03:30Z","reason":"Review: mature only at outer untimed boundaries, drain fatal actions as reports, settle before the first drain matures","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/87fc9d661a22c3746014e910487282399c253490...b3f39f3e22f4863a782740e7a592751c2c50db4a"}]} -->
