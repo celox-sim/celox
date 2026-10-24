@@ -1,0 +1,9 @@
+Revision history for #1914:
+
+rev 3 (content) 2026-10-24 19:05 UTC
+rev 2 (rebase) 2026-10-24 17:57 UTC — Rebase on current master d34520d60d at user request, including1907 moving compilation scaling checks to CodSpeed so ordinary CI no longer runs the expensive scaling cases. Preserve the existing PR identities and dependency order.
+rev 1 (initial) 2026-10-24 17:57 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1914,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"4e0e9aee922e677118635e42efa0bde3d313d11b","timestamp_iso":"2026-10-24T17:57:18Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"4e0e9aee922e677118635e42efa0bde3d313d11b","new_sha":"4cb978149858dcd0e97138fb6dc81c2ced189c68","timestamp_iso":"2026-10-24T17:57:18Z","reason":"Rebase on current master d34520d60d at user request, including1907 moving compilation scaling checks to CodSpeed so ordinary CI no longer runs the expensive scaling cases. Preserve the existing PR identities and dependency order.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/4e0e9aee922e677118635e42efa0bde3d313d11b...4cb978149858dcd0e97138fb6dc81c2ced189c68"},{"number":3,"change_type":"content","old_sha":"4cb978149858dcd0e97138fb6dc81c2ced189c68","new_sha":"80baa99e2d2f812e2764f6d0332a084fde106e91","timestamp_iso":"2026-10-24T19:05:37Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/4cb978149858dcd0e97138fb6dc81c2ced189c68...80baa99e2d2f812e2764f6d0332a084fde106e91"}]} -->
+
+Resolve conflicts with current master after1913 merged; keep packed-parameter semantics, executable Icarus failure evidence and Rust validation intact.
