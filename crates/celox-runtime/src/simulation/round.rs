@@ -543,6 +543,15 @@ impl<B: SimBackend> SimulationState<B> {
         loop {
             let mut any_new_outer_loop_trigger = false;
             let mut newly_triggered = Vec::new();
+            // The host sees the wave's edges before its domains commit, and
+            // its writes are in state before they evaluate.
+            if executor.before_domains(current_time)? {
+                for (signal, value) in executor.take_host_writes() {
+                    self.observe_host_write(signal, &value);
+                }
+                executor.eval_comb()?;
+                self.observe_driven(executor.backend());
+            }
 
             loop {
                 let mut any_new_sequential_trigger = false;
