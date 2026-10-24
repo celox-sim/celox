@@ -1,0 +1,1 @@
+Rebase on current master d34520d60d at user request, including1907 moving compilation scaling checks to CodSpeed so ordinary CI no longer runs the expensive scaling cases. Preserve the existing PR identities and dependency order.
