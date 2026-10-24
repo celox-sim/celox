@@ -198,6 +198,13 @@ parameters, as in `8.26.3--type_access_extends` and
 `6.24.2--cast_fn`, `6.24.2--cast_task` and `8.16--cast_func` keep failing
 because they cast to integral and enum variables.
 
+Accepting undriven nets updates both rows for
+`5.6.4--compiler-directives-pragma` from fail to pass. Its `protected_wire`
+has no driver and now elaborates with the standard net default (IEEE 1800-2023
+6.6 and 6.7.1). The official runner selects elaboration for this probe; runtime
+high-impedance values are checked by the shared undriven-net simulation cases.
+The full pinned CI run changes only these two verdicts across 2,054 mode runs.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.

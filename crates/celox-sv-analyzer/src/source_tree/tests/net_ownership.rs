@@ -116,14 +116,18 @@ fn native_net_declarators_and_initializers_are_authoritative() {
             assert!(source.modules()[0].signals().is_empty());
             assert_eq!(source.modules()[0].assignments().len(), 1);
         } else if matches!(defect, "name" | "initializer") {
-            let error = Source::from_syntax(&tree).unwrap_err();
+            let source = Source::from_syntax(&tree).unwrap();
+            let module = &source.modules()[0];
             let undriven = if defect == "name" { "other" } else { "b" };
             assert!(
-                error
-                    .to_string()
-                    .contains(&format!("undriven net declaration `{undriven}`")),
-                "{error}"
+                module
+                    .signals()
+                    .iter()
+                    .any(|signal| signal.name() == undriven)
             );
+            assert!(!module.assignments().iter().any(|assignment| {
+                matches!(assignment.lhs_value(), LValue::Ident(name) if name == undriven)
+            }));
         } else {
             let source = Source::from_syntax(&tree).unwrap();
             let module = &source.modules()[0];
