@@ -162,6 +162,11 @@ pub enum AnalyzerError {
     /// least significant bit to judge the edge on (IEEE 1800-2023 6.12).
     #[error("`{edge}` of a real expression: edge event controls do not apply to reals")]
     RealEdgeEvent { edge: &'static str },
+    /// An item a program shall not contain: an `always` procedure, or a
+    /// declaration or instance of a module, interface or program (IEEE
+    /// 1800-2023 24.3).
+    #[error("{item} in program `{program}`: a program shall not contain it (IEEE 1800-2023 24.3)")]
+    IllegalProgramItem { program: String, item: String },
 }
 
 impl miette::Diagnostic for AnalyzerError {}

@@ -72,6 +72,7 @@ pub struct Module {
     declaration_subroutines: Vec<Subroutine>,
     dpi_imports: Vec<DpiImport>,
     imported_parameters: Vec<Parameter>,
+    program: bool,
 }
 
 impl Module {
@@ -194,7 +195,19 @@ impl Module {
             declaration_subroutines: Vec::new(),
             dpi_imports: Vec::new(),
             imported_parameters: Vec::new(),
+            program: false,
         }
+    }
+
+    pub(crate) fn with_program(mut self, program: bool) -> Self {
+        self.program = program;
+        self
+    }
+
+    /// Whether this is a program (IEEE 1800-2023 24.3): its `initial`
+    /// procedures run in the reactive region set (24.3.1).
+    pub fn is_program(&self) -> bool {
+        self.program
     }
 
     pub(crate) fn with_imported_parameters(mut self, parameters: Vec<Parameter>) -> Self {

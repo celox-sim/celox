@@ -979,8 +979,8 @@ chapter-23/23.2--module-definition.sv	2state	pass
 chapter-23/23.2--module-definition.sv	4state	pass
 chapter-23/23.2--module-label.sv	2state	pass
 chapter-23/23.2--module-label.sv	4state	pass
-chapter-24/24.3--program.sv	2state	fail
-chapter-24/24.3--program.sv	4state	fail
+chapter-24/24.3--program.sv	2state	pass
+chapter-24/24.3--program.sv	4state	pass
 chapter-25/25.3-interface.sv	2state	pass
 chapter-25/25.3-interface.sv	4state	pass
 chapter-26/26.2--package-decl.sv	2state	pass
