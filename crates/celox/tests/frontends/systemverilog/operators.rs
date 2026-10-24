@@ -189,6 +189,10 @@ sv_backends! {
     fn wide_wildcard_comparisons_normalize_unknown_to_x(sim) {
         @case "operators::wide_wildcard_comparisons_normalize_unknown_to_x";
     }
+
+    fn masked_shift_fields_keep_expression_width(sim) {
+        @case "operators::masked_shift_fields_keep_expression_width";
+    }
 }
 
 sv_backends! {
