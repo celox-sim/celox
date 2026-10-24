@@ -3279,17 +3279,19 @@ fn evaluated_parameter_overrides(
             continue;
         };
         if !matches!(value, sv::ir::ConstExpr::Literal(value) if value == "$") {
-            sv::typecheck::eval_const_integral_literal_with_types(
+            let integral = sv::typecheck::eval_const_integral_literal_with_types(
                 value,
                 &constants,
                 &HashMap::default(),
-            )
-            .ok_or_else(|| {
-                sv::AnalyzerError::Unsupported(format!(
-                    "non-integer module parameter override `{}`",
+            );
+            if integral.is_none()
+                && sv::typecheck::eval_const_real_expr(value, &constants).is_none()
+            {
+                return Err(sv::AnalyzerError::Unsupported(format!(
+                    "nonconstant module parameter override `{}`",
                     parameter.name
-                ))
-            })?;
+                )));
+            }
         }
         evaluated.insert(parameter.name.clone(), value.clone());
     }
@@ -9139,6 +9141,24 @@ pub(crate) fn unsupported_sv_inout(path: String) -> ParserError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parameter_override_validation_rejects_unresolved_values() {
+        let overrides = [LoweredSvParameterOverride {
+            name: "P".into(),
+            value: Some(sv::ir::ConstExpr::Ident("unresolved".into())),
+            bound_type: None,
+            bound_pattern: None,
+        }];
+        let error = evaluated_parameter_overrides(&overrides).unwrap_err();
+        assert_eq!(error.tracking_issue(), 461);
+        assert!(
+            error
+                .to_string()
+                .contains("nonconstant module parameter override `P`"),
+            "{error}"
+        );
+    }
 
     /// The process kernels of `source`, other than declaration initializers.
     fn procedure_kernels(source: &str) -> usize {
