@@ -16,6 +16,7 @@
     "icarus/string.json",
     "icarus/synthesizable.json",
     "icarus/system_functions.json",
+    "icarus/tagged_unions.json",
     "icarus/timing.json",
     "icarus/types.json",
     "icarus/unions.json"

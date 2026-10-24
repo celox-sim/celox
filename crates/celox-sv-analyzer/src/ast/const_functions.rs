@@ -475,6 +475,7 @@ fn collect_module_constant_functions(
     let mut dimensions = PackedDimensions::new(HashMap::default(), const_env, type_aliases);
     dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
     dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes);
+    dimensions.subroutine_directions = Arc::new(subroutine_directions.clone());
     let mut locals = Vec::new();
     let mut counter = 0usize;
     let mut state = procedural::BodyState {
@@ -615,7 +616,10 @@ fn simulation_state_readers(functions: &[Subroutine]) -> HashMap<String, Analyze
                 Callee::System(system) if system.reads_simulation_state() => {
                     reads.get_or_insert(*system);
                 }
-                Callee::System(_) | Callee::String(_) | Callee::Object(_) => {}
+                Callee::System(_)
+                | Callee::String(_)
+                | Callee::Object(_)
+                | Callee::Checked { .. } => {}
                 Callee::Subroutine(callee) => calls.push(callee.as_str()),
             }
         }

@@ -243,3 +243,6 @@ mod real_extensions;
 
 #[path = "frontends/systemverilog/unions.rs"]
 mod unions;
+
+#[path = "frontends/systemverilog/tagged_unions.rs"]
+mod tagged_unions;

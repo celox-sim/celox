@@ -743,3 +743,45 @@ the full-suite gate accepts only those unchanged failures, never a passing
 result in their place. Reproduce with `verify-sv-verilator` or
 `verify-sv-icarus` and `--filter unions::`. Normal reports are written under
 `target/sv-verilator/` and `target/sv-icarus/`.
+
+## SystemVerilog tagged packed unions
+
+The `tagged_unions` shared group covers constructors (including `void`),
+nested tags, checked member reads and writes, conditional/short-circuit access,
+typed casts and ports, clocked copies, signed payloads and wide four-state values.
+Task/function output and inout arguments retain writable members (including
+concatenations and nested members), with live tag checks before the call and
+before copy-out. System-function destinations and seeds use the same checks.
+Whole-union output/inout actuals require the same declared union type as the
+formal; integral formals and system outputs cannot fabricate a union tag.
+Function returns and argument defaults accept context-typed `tagged` constructors;
+default expressions retain the enclosing declaration scope. Checked
+member arguments retain their runtime checks even when expression inlining
+would otherwise discard an unused formal.
+Layout and access rules follow IEEE 1800-2023 7.3.2 and 11.9. Invalid active-tag
+access is tested separately in Celox's runtime-event harness.
+
+Verilator 5.052 rejects `void` and `tagged` expressions in the seven two-state
+cases; its adapter reports the two four-state cases as unsupported. Icarus 13.0
+rejects all nine cases during parsing. The cases remain executable with their
+original assertions and no exclusions. Reviewed compilation diagnostics are
+retained in [Verilator evidence](verification/sv/verilator/tagged_unions.json)
+and [Icarus evidence](verification/sv/icarus/tagged_unions.json), with exact
+failure matching in the full-suite gate. Reproduce with `verify-sv-verilator`
+or `verify-sv-icarus` and `--filter tagged_unions::`.
+
+This implementation supports scalar packed tagged unions. Unpacked tagged
+unions, `matches`/`case matches`, and continuous or concatenation drivers of
+tagged members remain unsupported. Whole-union copies through ports and
+continuous assignments are supported. Port connections currently require a
+signal of the same declared tagged union type; constructor expressions at
+instance connections require an intermediate typed signal. Use four-state simulation to preserve
+undefined initial tags and unused payload bits.
+
+
+Whole-value equality currently compares the packed representation, including
+undefined payload padding. The review request for active-payload-only equality
+needs a specification ruling and is tracked in
+[issue #1889](https://github.com/celox-sim/celox/issues/1889); it is not yet a
+confirmed conformance defect. Equality behavior is unchanged pending that
+investigation.
