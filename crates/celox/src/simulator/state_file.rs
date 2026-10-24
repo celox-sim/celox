@@ -577,7 +577,10 @@ impl<B: SimBackend> Simulator<B> {
                                     let (value, mask) = split(term, image);
                                     BaselineRecord::Value { value, mask }
                                 }
-                                Baseline::RawCounter { seen, raw } => {
+                                Baseline::Gated {
+                                    gated: seen, raw, ..
+                                }
+                                | Baseline::RawCounter { seen, raw } => {
                                     // The bytes a `Counter` baseline's value saves as.
                                     let (value, mask) = split(term, raw);
                                     let number =
@@ -717,7 +720,7 @@ impl<B: SimBackend> Simulator<B> {
                 .collect::<Vec<_>>();
             let site = usize::try_from(waiter.site).ok();
             // Each baseline has the kind of its term: a counter for a
-            // counted signal, a value otherwise.
+            // counted signal or a gate with counters, a value otherwise.
             let counted = |signal: &crate::AbsoluteAddr| {
                 self.program
                     .runtime_schema
@@ -727,13 +730,14 @@ impl<B: SimBackend> Simulator<B> {
             };
             if !site.and_then(|site| sites.get(site)).is_some_and(|site| {
                 site.terms.len() == waiter.baselines.len()
-                    && site
-                        .terms
-                        .iter()
-                        .zip(&waiter.baselines)
-                        .all(|((signal, _), baseline)| {
-                            counted(signal) == matches!(baseline, BaselineRecord::Counter { .. })
-                        })
+                    && site.terms.iter().zip(&waiter.baselines).enumerate().all(
+                        |(index, ((signal, _), baseline))| {
+                            let gated =
+                                site.gate(index).is_some_and(|gate| gate.counters.is_some());
+                            (counted(signal) || gated)
+                                == matches!(baseline, BaselineRecord::Counter { .. })
+                        },
+                    )
             }) {
                 unknown.push(format!("{} wait site {}", waiter.process, waiter.site));
                 continue;
@@ -746,13 +750,19 @@ impl<B: SimBackend> Simulator<B> {
                 .filter(|site| site.process == index)
                 .nth(site.unwrap_or_default())
                 .is_some_and(|site| {
-                    site.terms.iter().any(|(signal, _)| {
-                        self.program
-                            .runtime_schema
-                            .rtl_writes
-                            .iter()
-                            .any(|atom| atom.id == *signal)
-                    })
+                    // A gate without counters counts as driven
+                    // (`TermModel::driven`).
+                    site.gates
+                        .iter()
+                        .flatten()
+                        .any(|gate| gate.counters.is_none())
+                        || site.terms.iter().any(|(signal, _)| {
+                            self.program
+                                .runtime_schema
+                                .rtl_writes
+                                .iter()
+                                .any(|atom| atom.id == *signal)
+                        })
                 });
             waiters.insert(
                 index,

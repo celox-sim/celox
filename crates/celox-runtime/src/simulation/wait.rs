@@ -4,11 +4,11 @@ use celox_design::CounterKind;
 
 use super::SimulationState;
 use crate::{
-    SignalRef, SimulatorErrorCode,
+    SignalRef, SimulatorErrorCode, TermRefs,
     backend::SimBackend,
     timing::{
-        Halt, ProcessState, StateView, Value, copy_planes, encode_planes, occurs, planes,
-        planes_equal, planes_occur, read,
+        GateCounterRefs, GateRefs, Halt, ProcessState, StateView, Value, copy_planes,
+        encode_planes, occurs, planes, planes_equal, planes_occur, read, write_gated,
     },
 };
 
@@ -33,6 +33,7 @@ impl<B: SimBackend> SimulationState<B> {
             .get(site)
             .ok_or_else(|| Self::site_error(process, site))?;
         let driven = terms.iter().any(|term| term.driven);
+        let gates = &self.model.wait_gates;
         self.process_state
             .waiters
             .register(process, driven, |waiter| {
@@ -82,6 +83,24 @@ impl<B: SimBackend> SimulationState<B> {
                         },
                     }
                 }
+                let gates = gates.get(process).map_or(&[][..], |sites| &sites[site]);
+                for (index, gate) in gates.iter().enumerate() {
+                    if let Some(GateRefs {
+                        counters: Some(counters),
+                        ..
+                    }) = gate
+                    {
+                        let signal = terms[index].signal;
+                        let image = planes(backend, signal).expect("a plain signal");
+                        let mut raw = Vec::with_capacity(image.len());
+                        copy_planes(&mut raw, image, signal.width);
+                        waiter.baselines[index] = Baseline::Gated {
+                            gated: backend.get_as(counters.gated),
+                            all: backend.get_as(counters.all),
+                            raw,
+                        };
+                    }
+                }
             });
         Ok(())
     }
@@ -105,13 +124,28 @@ impl<B: SimBackend> SimulationState<B> {
         let counted = self.model.counted_by_offset.get(&signal.offset).copied();
         let probes = self.model.probes_by_offset.get(&signal.offset);
         if counted.is_none() && probes.is_none() {
-            write(backend);
+            if !self.model.gated_writes.is_empty()
+                && let Some(gated) = self.model.gated_writes.get(&signal.offset)
+            {
+                write_gated(backend, signal, gated, write);
+            } else {
+                write(backend);
+            }
         } else {
             let old = read(backend, signal);
             write(backend);
             let new = read(backend, signal);
             if let Some(counted) = counted {
                 self.model.counted[counted].refs.bump(backend, &old, &new);
+            }
+            for term in self
+                .model
+                .gated_writes
+                .get(&signal.offset)
+                .into_iter()
+                .flatten()
+            {
+                term.bump(backend, &old, &new);
             }
             // One counter can observe several ranges of the signal; a write
             // is one occurrence.
@@ -129,22 +163,57 @@ impl<B: SimBackend> SimulationState<B> {
     }
 
     /// Test the waits against the current state, or only their terms on
-    /// signal `only` after a write of it. Woken processes become ready.
-    #[inline]
+    /// signal `only` after a write of it, before combinational logic has
+    /// settled. Woken processes become ready.
+    #[inline(always)]
     pub(super) fn observe(&mut self, backend: &B, only: Option<SignalRef>) {
-        self.check_waits(backend, only, false);
-    }
-
-    /// Like [`Self::observe`], at a point where only design code wrote
-    /// state: terms on signals that only the host and the scheduler write
-    /// cannot have changed.
-    #[inline]
-    pub(super) fn observe_driven(&mut self, backend: &B) {
-        if !self.process_state.waiters.none_driven() {
-            self.check_waits(backend, None, true);
+        if self.model.wait_gates.is_empty() {
+            self.check_waits(backend, only, false);
+        } else {
+            self.check_gated_waits(backend, only, false, false);
         }
     }
 
+    /// Like [`Self::observe`] of every term, after combinational logic has
+    /// settled.
+    #[inline(always)]
+    pub(super) fn observe_settled(&mut self, backend: &B) {
+        if self.model.wait_gates.is_empty() {
+            self.check_waits(backend, None, false);
+        } else {
+            self.check_gated_waits(backend, None, false, true);
+        }
+    }
+
+    /// Like [`Self::observe_settled`], at a point where only design code
+    /// wrote state: terms on signals that only the host and the scheduler
+    /// write cannot have changed.
+    #[inline(always)]
+    pub(super) fn observe_driven(&mut self, backend: &B) {
+        if !self.process_state.waiters.none_driven() {
+            if self.model.wait_gates.is_empty() {
+                self.check_waits(backend, None, true);
+            } else {
+                self.check_gated_waits(backend, None, true, true);
+            }
+        }
+    }
+
+    /// Like [`Self::observe_driven`], before combinational logic has
+    /// settled.
+    #[inline(always)]
+    pub(super) fn observe_driven_unsettled(&mut self, backend: &B) {
+        if !self.process_state.waiters.none_driven() {
+            if self.model.wait_gates.is_empty() {
+                self.check_waits(backend, None, true);
+            } else {
+                self.check_gated_waits(backend, None, true, false);
+            }
+        }
+    }
+
+    /// The waits of a design without `iff` gates: [`Self::check_gated_waits`]
+    /// without the gates.
     fn check_waits(&mut self, backend: &B, only: Option<SignalRef>, driven_only: bool) {
         let processes = &self.model.processes;
         let state = StateView::new(backend);
@@ -192,6 +261,8 @@ impl<B: SimBackend> SimulationState<B> {
                         }
                     },
                     Baseline::Raw(_) => unreachable!("tested above"),
+                    // Only gated terms with counters have it.
+                    Baseline::Gated { .. } => false,
                     Baseline::Value(last) => match state.planes(term.signal) {
                         // A baseline loaded from a state file.
                         Some(now) => {
@@ -216,6 +287,179 @@ impl<B: SimBackend> SimulationState<B> {
         });
     }
 
+    /// [`Self::check_waits`] for a design with `iff` gates. With
+    /// `settled`, combinational logic has settled since the last write. A
+    /// term whose gate has no counters is judged only then: the gate may be
+    /// computed from what was written, so before then its baseline is left
+    /// as it is and the occurrence is judged, with the gate, at the next
+    /// settled check.
+    #[inline(never)]
+    fn check_gated_waits(
+        &mut self,
+        backend: &B,
+        only: Option<SignalRef>,
+        driven_only: bool,
+        settled: bool,
+    ) {
+        let processes = &self.model.processes;
+        let state = StateView::new(backend);
+        let ProcessState { waiters, ready, .. } = &mut self.process_state;
+        let gates = &self.model.wait_gates;
+        waiters.retain(driven_only, |process, waiter| {
+            let terms = &processes[process].wait_sites[waiter.site];
+            let gates = &gates[process][waiter.site];
+            let mut wake = false;
+            for (index, term) in terms.iter().enumerate() {
+                if only.is_some_and(|signal| signal != term.signal) || (driven_only && !term.driven)
+                {
+                    continue;
+                }
+                let baseline = &mut waiter.baselines[index];
+                match gates.get(index).copied().flatten() {
+                    None => wake |= Self::occurred(&state, backend, term, baseline),
+                    Some(GateRefs {
+                        signal: gate,
+                        counters: Some(counters),
+                    }) => {
+                        wake |=
+                            Self::gated_occurred(&state, backend, term, gate, counters, baseline);
+                    }
+                    Some(_) if !settled => {}
+                    // The occurrence is consumed even when the gate does not
+                    // hold (IEEE 1800-2023 9.4.2.3).
+                    Some(gate) => {
+                        if Self::occurred(&state, backend, term, baseline) {
+                            if Self::gate_holds(&state, backend, gate.signal) {
+                                wake = true;
+                            } else if let Some(counter) = term.counter
+                                && let Baseline::RawCounter { seen, .. }
+                                | Baseline::Counter { seen, .. } = baseline
+                            {
+                                // The counted occurrences are consumed: a later
+                                // check judges only new ones.
+                                *seen = backend.get_as(counter);
+                            }
+                        }
+                    }
+                }
+            }
+            if wake {
+                ready.insert(process);
+            }
+            !wake
+        });
+    }
+
+    /// Whether a gated `term` with `counters` occurred since the wait began:
+    /// a write counted it while `gate` held, or the signal changed without
+    /// any write counting it, as a raw host write does, while `gate` holds.
+    fn gated_occurred(
+        state: &StateView<'_>,
+        backend: &B,
+        term: &TermRefs,
+        gate: SignalRef,
+        counters: GateCounterRefs,
+        baseline: &mut Baseline,
+    ) -> bool {
+        let now = state.planes(term.signal).expect("a plain signal");
+        let all = state.counter(counters.all);
+        if !matches!(baseline, Baseline::Gated { .. }) {
+            // A baseline loaded from a state file.
+            let (gated, value) = match baseline {
+                Baseline::Counter { seen, value } => (*seen, value.clone()),
+                Baseline::Value(value) => (backend.get_as(counters.gated), value.clone()),
+                _ => (backend.get_as(counters.gated), read(backend, term.signal)),
+            };
+            *baseline = Baseline::Gated {
+                gated,
+                all,
+                raw: encode_planes(&value, term.signal.width, now.len()),
+            };
+        }
+        let Baseline::Gated {
+            gated,
+            all: counted,
+            raw,
+        } = baseline
+        else {
+            unreachable!("converted above");
+        };
+        let changed = Self::advance(term.kind, raw, now, term.signal.width);
+        let uncounted = changed && all == *counted;
+        *counted = all;
+        state.counter(counters.gated) != *gated
+            || (uncounted && Self::gate_holds(state, backend, gate))
+    }
+
+    /// Whether `term` occurred since `baseline`, which becomes the current
+    /// state: the body of [`Self::check_waits`] for one term.
+    #[inline(always)]
+    fn occurred(
+        state: &StateView<'_>,
+        backend: &B,
+        term: &TermRefs,
+        baseline: &mut Baseline,
+    ) -> bool {
+        // The common term: a plain signal no counter counts.
+        if let Baseline::Raw(last) = baseline {
+            let now = state.planes(term.signal).expect("a plain signal");
+            return Self::advance(term.kind, last, now, term.signal.width);
+        }
+        let counted = |seen: u32| {
+            term.counter
+                .is_some_and(|counter| backend.get_as::<u32>(counter) != seen)
+        };
+        match baseline {
+            Baseline::RawCounter { seen, raw } => {
+                let now = state.planes(term.signal).expect("a plain signal");
+                let changed = Self::advance(term.kind, raw, now, term.signal.width);
+                counted(*seen) || changed
+            }
+            Baseline::Counter { seen, value } => match state.planes(term.signal) {
+                // A baseline loaded from a state file.
+                Some(now) => {
+                    let seen = *seen;
+                    let mut raw = encode_planes(value, term.signal.width, now.len());
+                    let changed = Self::advance(term.kind, &mut raw, now, term.signal.width);
+                    *baseline = Baseline::RawCounter { seen, raw };
+                    counted(seen) || changed
+                }
+                None => {
+                    let now = read(backend, term.signal);
+                    let changed = occurs(term.kind, value, &now);
+                    *value = now;
+                    counted(*seen) || changed
+                }
+            },
+            Baseline::Raw(_) => unreachable!("tested above"),
+            // Only gated terms with counters have it.
+            Baseline::Gated { .. } => false,
+            Baseline::Value(last) => match state.planes(term.signal) {
+                // A baseline loaded from a state file.
+                Some(now) => {
+                    let mut raw = encode_planes(last, term.signal.width, now.len());
+                    let hit = Self::advance(term.kind, &mut raw, now, term.signal.width);
+                    *baseline = Baseline::Raw(raw);
+                    hit
+                }
+                None => {
+                    let now = read(backend, term.signal);
+                    let hit = occurs(term.kind, last, &now);
+                    *last = now;
+                    hit
+                }
+            },
+        }
+    }
+
+    /// Whether the least significant bit of `gate` is a known 1.
+    fn gate_holds(state: &StateView<'_>, backend: &B, gate: SignalRef) -> bool {
+        state.gate_holds(gate).unwrap_or_else(|| {
+            let (value, unknown) = read(backend, gate);
+            value.bit(0) && !unknown.bit(0)
+        })
+    }
+
     /// Whether the change from the image `last` to `now` is an occurrence of
     /// `kind`; `last` becomes `now`.
     #[inline]
@@ -231,17 +475,27 @@ impl<B: SimBackend> SimulationState<B> {
     /// Show the waits one value the host wrote to `signal`.
     pub(super) fn observe_host_write(&mut self, signal: SignalRef, value: &Value) {
         let processes = &self.model.processes;
+        let gates = &self.model.wait_gates;
         let ProcessState { waiters, ready, .. } = &mut self.process_state;
         waiters.retain(false, |process, waiter| {
-            let terms = &processes[process].wait_sites[waiter.site];
+            let gates = gates
+                .get(process)
+                .map_or(&[][..], |sites| &sites[waiter.site]);
             let mut wake = false;
-            for (term, baseline) in terms.iter().zip(&mut waiter.baselines) {
-                if term.signal != signal {
+            for (index, (term, baseline)) in processes[process].wait_sites[waiter.site]
+                .iter()
+                .zip(&mut waiter.baselines)
+                .enumerate()
+            {
+                // A gated term is judged at the next settled check.
+                if term.signal != signal || gates.get(index).is_some_and(Option::is_some) {
                     continue;
                 }
                 match baseline {
                     // Counters are bumped by the write itself.
-                    Baseline::Counter { .. } | Baseline::RawCounter { .. } => {}
+                    Baseline::Counter { .. }
+                    | Baseline::RawCounter { .. }
+                    | Baseline::Gated { .. } => {}
                     Baseline::Raw(last) => {
                         let now = encode_planes(value, signal.width, last.len());
                         wake |= Self::advance(term.kind, last, &now, signal.width);
@@ -277,6 +531,11 @@ pub enum Baseline {
     /// Like `Counter`, with the signal's state at the last check kept as
     /// in [`Baseline::Raw`].
     RawCounter { seen: u32, raw: Vec<u8> },
+    /// A term whose `iff` gate a write judges at the write
+    /// ([`celox_design::GateCounters`]): the gated counter when the wait
+    /// began, the counter of all occurrences and the signal's state as in
+    /// [`Baseline::Raw`] at the last check.
+    Gated { gated: u32, all: u32, raw: Vec<u8> },
 }
 
 /// A process suspended at a wait.

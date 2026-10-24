@@ -35,9 +35,6 @@ impl BodyBuilder<'_, '_, '_> {
                     EventControl::Items(items) => {
                         let mut result = Vec::with_capacity(items.len());
                         for item in items {
-                            if item.iff.is_some() {
-                                return Err(unsupported("iff-qualified event"));
-                            }
                             let edge = match item.edge {
                                 TimingEdge::Any => EventEdge::Any,
                                 TimingEdge::Pos => EventEdge::Pos,
@@ -47,6 +44,7 @@ impl BodyBuilder<'_, '_, '_> {
                             result.push(EventItemBase {
                                 edge,
                                 expr: self.native_value(item.expression)?,
+                                iff: item.iff.map(|iff| self.native_value(iff)).transpose()?,
                             });
                         }
                         Ok(Stmt::WaitEvent(result))

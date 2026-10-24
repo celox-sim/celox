@@ -12,11 +12,11 @@ use crate::{
 };
 use celox_design::{
     BitAccess, CombDerivedClock, CounterKind, CounterSlots, DomainKind, ElaboratedDesign,
-    EventTopology, EventWatch, ExternFunction, GateOp, HostRequestSite, InitialStateData,
-    InitialStateValue, InstanceId, ModuleId, NbaSite, ProcessSlots, RegionedAbsoluteAddrBase,
-    RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite,
-    RuntimeSchema, STABLE_REGION, StateAddr, StateObjectId, TriggerSet, VarAtomBase,
-    VariableMetadata, WORKING_REGION, WaitSite,
+    EventTopology, EventWatch, ExternFunction, GateCounters, GateOp, HostRequestSite,
+    InitialStateData, InitialStateValue, InstanceId, ModuleId, NbaSite, ProcessSlots,
+    RegionedAbsoluteAddrBase, RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo,
+    RuntimeEventKind, RuntimeEventSite, RuntimeSchema, STABLE_REGION, StateAddr, StateObjectId,
+    TriggerSet, VarAtomBase, VariableMetadata, WORKING_REGION, WaitSite,
 };
 use celox_sir::{
     BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIROffset,
@@ -861,6 +861,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                         offset: offset.clone(),
                         four_state,
                         counters: vec![(CounterKind::Changes, stable(counter))],
+                        gated: Vec::new(),
                     },
                 )
             };
@@ -893,6 +894,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                             offset: offset.clone(),
                             four_state,
                             counters: vec![(CounterKind::Changes, stable(counter))],
+                            gated: Vec::new(),
                         },
                     )
                 };
@@ -912,11 +914,39 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                             offset: offset.clone(),
                             four_state,
                             counters: vec![(CounterKind::Changes, counter)],
+                            gated: Vec::new(),
                         })
                     });
                 }
             }
         }
+        let ff_written: HashSet<AbsoluteAddr> = eval_apply_ffs
+            .values()
+            .chain(eval_only_ffs.values())
+            .chain(apply_ffs.values())
+            .flatten()
+            .chain(
+                parallel_ff_units
+                    .values()
+                    .flatten()
+                    .flat_map(|(_, part)| [&part.evaluate, &part.apply]),
+            )
+            .chain(
+                split_commits
+                    .values()
+                    .flatten()
+                    .flatten()
+                    .flat_map(|split| [&split.active, &split.nba]),
+            )
+            .flat_map(|unit| unit.blocks.values())
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(destination, ..)
+                | SIRInstruction::Commit(_, destination, ..) => Some(destination.absolute_addr()),
+                _ => None,
+            })
+            .collect();
+        let gated = gated_terms(&mut timing, &comb_blocks, &ff_written);
         let ff_units = eval_apply_ffs
             .values_mut()
             .chain(eval_only_ffs.values_mut())
@@ -938,6 +968,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         let counted = instrument_counted_signals(
             &timing,
             counted,
+            &gated,
             &variables,
             four_state,
             &mut processes,
@@ -969,6 +1000,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                             .into_iter()
                             .map(|kind| (kind, regioned(STABLE_REGION, slots.counter(kind))))
                             .collect(),
+                        gated: Vec::new(),
                     },
                 )
             };
@@ -1591,10 +1623,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             split_commits,
             &comb_sources,
             processes.iter().map(|process| &process.kernel),
-            timing
-                .wait_sites
-                .iter()
-                .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal)),
+            timing.wait_sites.iter().flat_map(WaitSite::reads),
             &events,
             &clock_domains,
         );
@@ -1744,7 +1773,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             let mut observed: HashSet<AbsoluteAddr> = timing
                 .wait_sites
                 .iter()
-                .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal))
+                .flat_map(WaitSite::reads)
                 .chain(timing.counter_slots.iter().map(|slots| slots.signal))
                 .chain(
                     clock_domains
@@ -2083,11 +2112,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 .map(|(_, counter)| counter)
                 .collect::<Vec<_>>()
         })
-        .chain(
-            wait_sites
-                .iter()
-                .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal)),
-        )
+        .chain(wait_sites.iter().flat_map(WaitSite::reads))
         .chain(
             nba_sites
                 .iter()
@@ -3942,18 +3967,135 @@ fn choose_comb_alternatives(
     });
 }
 
+/// A term with a gate counter (IEEE 1800-2023 9.4.2.3): the kind of its
+/// signal's occurrences, the gate, and the counters a write bumps.
+type GatedTerm = (CounterKind, AbsoluteAddr, GateCounters<AbsoluteAddr>);
+
+/// The gated terms whose counters the writes of their signal bump, by
+/// signal. A gate counts at the write only when the signal and the gate are
+/// variables that process kernels, combinational processes, the runtime or
+/// the host write: a continuous assignment is a scheduled evaluation (4.7),
+/// and a flip-flop publishes its writes after the process evaluated them
+/// (#1830). The other gates lose their counters, so the runtime reads them
+/// when it detects the occurrence.
+fn gated_terms(
+    timing: &mut TimingMetadata,
+    comb_blocks: &[LogicPath<AbsoluteAddr>],
+    ff_written: &HashSet<AbsoluteAddr>,
+) -> HashMap<AbsoluteAddr, Vec<GatedTerm>> {
+    let continuous: HashSet<AbsoluteAddr> = comb_blocks
+        .iter()
+        .filter_map(|path| match &path.target {
+            LogicPathTarget::Var(target) => Some(target.id),
+            _ => None,
+        })
+        .collect();
+    let mut gated: HashMap<AbsoluteAddr, Vec<GatedTerm>> = HashMap::default();
+    for site in &mut timing.wait_sites {
+        for (&(signal, kind), gate) in site.terms.iter().zip(&mut site.gates) {
+            let Some(gate) = gate else {
+                continue;
+            };
+            let Some(counters) = gate.counters else {
+                continue;
+            };
+            if ff_written.contains(&signal)
+                || continuous.contains(&signal)
+                || continuous.contains(&gate.signal)
+            {
+                gate.counters = None;
+                continue;
+            }
+            gated
+                .entry(signal)
+                .or_default()
+                .push((kind, gate.signal, counters));
+        }
+    }
+    gated
+}
+
+/// The code that counts the writes of `signal` in its `counted` counters
+/// and the counters of its `gated` terms, each object addressed through
+/// `address`, or `None` if nothing counts them.
+fn watch_code<A>(
+    signal: AbsoluteAddr,
+    counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    gated: &HashMap<AbsoluteAddr, Vec<GatedTerm>>,
+    variables: &HashMap<AbsoluteAddr, (usize, bool)>,
+    four_state: bool,
+    address: impl Fn(AbsoluteAddr) -> A,
+) -> Option<crate::watch::WatchCode<A>> {
+    let slots = counted.get(&signal);
+    let terms = gated.get(&signal);
+    if slots.is_none() && terms.is_none() {
+        return None;
+    }
+    let (width, is_4state) = variables[&signal];
+    Some(crate::watch::WatchCode {
+        signal: address(signal),
+        offset: celox_sir::SIROffset::Static(0),
+        width,
+        four_state: four_state && is_4state,
+        counters: slots
+            .into_iter()
+            .flat_map(|slots| {
+                CounterKind::ALL
+                    .into_iter()
+                    .map(|kind| (kind, address(slots.counter(kind))))
+            })
+            .collect(),
+        gated: terms
+            .into_iter()
+            .flatten()
+            .map(|&(kind, gate, counters)| crate::watch::GatedCode {
+                kind,
+                gate: address(gate),
+                gate_four_state: four_state && variables[&gate].1,
+                gated: address(counters.gated),
+                all: address(counters.all),
+            })
+            .collect(),
+    })
+}
+
 /// Instrument the process kernels, combinational process units and
-/// flip-flop units that write a `counted` signal, and return `counted`; no
-/// other unit changes.
+/// flip-flop units that write a `counted` signal, and the process kernels
+/// and combinational process units that write the signal of a `gated` term,
+/// and return `counted`; no other unit changes.
 fn instrument_counted_signals<'u>(
     timing: &TimingMetadata,
     counted: BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    gated: &HashMap<AbsoluteAddr, Vec<GatedTerm>>,
     variables: &HashMap<AbsoluteAddr, (usize, bool)>,
     four_state: bool,
     processes: &mut [RelocatedProcess],
     comb_blocks: &mut [LogicPath<AbsoluteAddr>],
     ff_units: impl Iterator<Item = &'u mut ExecutionUnit<RegionedAbsoluteAddr>>,
 ) -> BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> {
+    if counted.is_empty() && gated.is_empty() {
+        return counted;
+    }
+    let code = |signal: AbsoluteAddr, address: &dyn Fn(AbsoluteAddr) -> RegionedAbsoluteAddr| {
+        watch_code(signal, &counted, gated, variables, four_state, address)
+    };
+    let code_comb = |signal: AbsoluteAddr| {
+        watch_code(signal, &counted, gated, variables, four_state, |var| var)
+    };
+    let stable = |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, var);
+    for process in processes {
+        crate::watch::instrument_unit(&mut process.kernel, |address| {
+            if address.region != STABLE_REGION {
+                return None;
+            }
+            code(address.absolute_addr(), &stable)
+        });
+    }
+    for path in comb_blocks {
+        if let LogicPathTarget::Process { unit, .. } = &mut path.target {
+            crate::watch::instrument_unit(unit, |address| code_comb(*address));
+        }
+    }
     if counted.is_empty() {
         return counted;
     }
@@ -3962,44 +4104,6 @@ fn instrument_counted_signals<'u>(
         let (width, is_4state) = variables[&signal];
         Some((slots, width, four_state && is_4state))
     };
-    for process in processes {
-        crate::watch::instrument_unit(&mut process.kernel, |address| {
-            if address.region != STABLE_REGION {
-                return None;
-            }
-            let (slots, width, four_state) = code(address.absolute_addr())?;
-            let stable =
-                |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, var);
-            Some(crate::watch::WatchCode {
-                signal: stable(slots.signal),
-                offset: celox_sir::SIROffset::Static(0),
-                width,
-                four_state,
-                counters: CounterKind::ALL
-                    .into_iter()
-                    .map(|kind| (kind, stable(slots.counter(kind))))
-                    .collect(),
-            })
-        });
-    }
-    for path in comb_blocks {
-        if let LogicPathTarget::Process { unit, .. } = &mut path.target {
-            crate::watch::instrument_unit(unit, |address| {
-                let (slots, width, four_state) = code(*address)?;
-                Some(crate::watch::WatchCode {
-                    signal: slots.signal,
-                    offset: celox_sir::SIROffset::Static(0),
-                    width,
-                    four_state,
-                    counters: CounterKind::ALL
-                        .into_iter()
-                        .map(|kind| (kind, slots.counter(kind)))
-                        .collect(),
-                })
-            });
-        }
-    }
-    let stable = |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, var);
     let working = |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, var);
     let watch = |signal: AbsoluteAddr| {
         let (slots, width, four_state) = code(signal)?;
@@ -4012,6 +4116,7 @@ fn instrument_counted_signals<'u>(
                 .into_iter()
                 .map(|kind| (kind, stable(slots.counter(kind))))
                 .collect(),
+            gated: Vec::new(),
         })
     };
     // A flip-flop writes its next state, and a commit publishes it. Repeated

@@ -174,6 +174,20 @@ timed_cases! {
     fn plain_always_edges_without_a_reset_run_as_processes = "timing::plain_always_edges_without_a_reset_run_as_processes";
 }
 
+// A second list: one invocation expands one item per recursion level.
+timed_cases! {
+    fn iff_events_occur_only_while_the_condition_holds = "timing::iff_events_occur_only_while_the_condition_holds";
+    fn iff_conditions_see_writes_before_the_event = "timing::iff_conditions_see_writes_before_the_event";
+    fn iff_conditions_apply_to_their_own_items = "timing::iff_conditions_apply_to_their_own_items";
+    fn iff_conditions_read_automatic_task_arguments = "timing::iff_conditions_read_automatic_task_arguments";
+    fn unknown_iff_conditions_are_false = "timing::unknown_iff_conditions_are_false";
+    fn plain_always_iff_events_run_as_processes = "timing::plain_always_iff_events_run_as_processes";
+    fn iff_conditions_are_judged_before_edge_processes_run = "timing::iff_conditions_are_judged_before_edge_processes_run";
+    fn iff_conditions_are_judged_at_the_write = "timing::iff_conditions_are_judged_at_the_write";
+    fn iff_conditions_follow_nonblocking_update_order = "timing::iff_conditions_follow_nonblocking_update_order";
+    fn iff_conditions_consume_occurrences_while_false = "timing::iff_conditions_consume_occurrences_while_false";
+}
+
 #[test]
 fn timed_task_activations_survive_each_optimization_level() {
     let source = r#"
@@ -434,7 +448,6 @@ fn event_expressions_with_effects_are_rejected() {
 #[test]
 fn unimplemented_timing_features_are_rejected() {
     for (body, construct, issue) in [
-        ("bit a; initial @(a iff a);", "iff-qualified event", 1444),
         ("initial fork #1; join", "fork-join block", 88),
         ("initial fork #1; join_none", "fork-join block", 88),
         ("event e; initial -> e;", "named event", 88),
@@ -1015,4 +1028,222 @@ fn nonblocking_assignments_to_reversed_array_slices_reverse_the_elements() {
     sim.run_until(2).unwrap();
     // m[1:0] <= w writes w[0] to m[1], as m[3:2] = w writes w[0] to m[3].
     assert_eq!(sim.get(sim.signal("elements")), 0xaabb_aabbu32.into());
+}
+
+/// An `iff` wait on a clock only the scheduler drives: the occurrence is
+/// judged with the condition after the edge settles, on every backend.
+#[test]
+fn iff_waits_on_scheduled_clocks_see_their_condition() {
+    let source = r#"
+        module Top(input bit clk, output int n, m);
+            timeunit 1ns / 1ns;
+            bit en, q;
+            wire gate = en & 1'b1;
+            always_ff @(posedge clk) q <= ~q;
+            initial forever begin @(posedge clk iff gate); n++; end
+            initial forever begin @(posedge clk); m++; end
+            initial begin
+                #25 en = 1;
+                #40 en = 0;
+            end
+        endmodule
+    "#;
+    let mut backends = vec!["cranelift", "cranelift-parallel"];
+    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+        backends.extend(["native", "native-parallel"]);
+    }
+    for backend in backends {
+        let builder = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("iff_clock.sv"))],
+            "Top",
+        );
+        let builder = if backend.ends_with("-parallel") {
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+        } else {
+            builder
+        };
+        // The backends build different simulation types.
+        macro_rules! check {
+            ($sim:expr) => {{
+                let mut sim = $sim.unwrap();
+                // Rising edges at 0, 10, ..., 90; the waits begin after the
+                // first. `en` is 1 from 25 to 65.
+                sim.add_clock("clk", 10, 0);
+                sim.run_until(95).unwrap();
+                let [n, m] = ["n", "m"].map(|name| sim.signal(name));
+                assert_eq!(sim.get(m), 9u32.into(), "{backend}");
+                assert_eq!(sim.get(n), 4u32.into(), "{backend}");
+            }};
+        }
+        if backend.starts_with("native") {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check!(builder.build_native());
+        } else {
+            check!(builder.build_cranelift());
+        }
+    }
+}
+
+/// An `iff` wait on a clock only the scheduler drives, with a gate the host
+/// writes: each edge is judged with the gate the host left, on every
+/// backend.
+#[test]
+fn iff_waits_on_scheduled_clocks_judge_host_written_gates() {
+    let source = r#"
+        module Top(input bit clk, input bit en, output int n);
+            timeunit 1ns / 1ns;
+            bit q;
+            always_ff @(posedge clk) q <= ~q;
+            initial forever begin @(posedge clk iff en); n++; end
+        endmodule
+    "#;
+    let mut backends = vec!["cranelift", "cranelift-parallel"];
+    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+        backends.extend(["native", "native-parallel"]);
+    }
+    for backend in backends {
+        let builder = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("iff_host_gate.sv"))],
+            "Top",
+        );
+        let builder = if backend.ends_with("-parallel") {
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+        } else {
+            builder
+        };
+        // The backends build different simulation types.
+        macro_rules! check {
+            ($sim:expr) => {{
+                let mut sim = $sim.unwrap();
+                let [en, n] = ["en", "n"].map(|name| sim.signal(name));
+                // Rising edges at 0, 10, ..., 90; `en` is 1 from 25 to 65.
+                sim.add_clock("clk", 10, 0);
+                sim.run_until(25).unwrap();
+                sim.modify(|io| io.set(en, 1u8)).unwrap();
+                sim.run_until(65).unwrap();
+                sim.modify(|io| io.set(en, 0u8)).unwrap();
+                sim.run_until(95).unwrap();
+                assert_eq!(sim.get(n), 4u32.into(), "{backend}");
+            }};
+        }
+        if backend.starts_with("native") {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check!(builder.build_native());
+        } else {
+            check!(builder.build_cranelift());
+        }
+    }
+}
+
+/// The baselines of `iff` waits whose gate is judged at the write survive a
+/// state file: a simulation loaded between edges wakes as the uninterrupted
+/// one does, and saves the same baselines again.
+#[test]
+fn gated_wait_baselines_survive_a_state_file() {
+    let source = r#"
+        module Top(output int n);
+            timeunit 1ns / 1ns;
+            bit clk, en;
+            initial forever begin @(posedge clk iff en); n++; end
+            initial begin
+                #1 en = 1;
+                #1 clk = 1; en = 0;
+                #1 clk = 0;
+                #1 en = 1;
+                #1 clk = 1;
+                #1 clk = 0; en = 0;
+                #1 clk = 1;
+            end
+        endmodule
+    "#;
+    let build = || {
+        celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("gated_state.sv"))],
+            "Top",
+        )
+        .build()
+        .unwrap()
+    };
+    let through_bytes = |file: &celox::StateFile| {
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        celox::StateFile::read_from(bytes.as_slice()).unwrap()
+    };
+    let count = |sim: &mut celox::Simulation| {
+        let n = sim.signal("n");
+        sim.get(n)
+    };
+    let mut whole = build();
+    whole.run_until(10).unwrap();
+    assert_eq!(count(&mut whole), 2u32.into());
+    for at in [2, 4] {
+        let mut first = build();
+        first.run_until(at).unwrap();
+        let file = through_bytes(&first.save_state().unwrap());
+        let mut loaded = build();
+        loaded.load_state(&file).unwrap();
+        assert_eq!(
+            through_bytes(&loaded.save_state().unwrap()),
+            file,
+            "at {at}"
+        );
+        loaded.run_until(10).unwrap();
+        assert_eq!(count(&mut loaded), 2u32.into(), "at {at}");
+    }
+}
+
+/// A host pulse `clk = 1; clk = 0;` between two steps, while the `iff`
+/// condition holds, is one event of the wait (IEEE 1800-2023 9.4.2.3).
+#[test]
+fn host_pulses_of_iff_gated_clocks_wake_once() {
+    let source = r#"
+        module Top(input bit clk, input bit en, output int n);
+            timeunit 1ns / 1ns;
+            initial forever begin @(posedge clk iff en); n++; end
+        endmodule
+    "#;
+    let mut backends = vec!["cranelift", "cranelift-parallel"];
+    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+        backends.extend(["native", "native-parallel"]);
+    }
+    for backend in backends {
+        let builder = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("iff_host_pulse.sv"))],
+            "Top",
+        );
+        let builder = if backend.ends_with("-parallel") {
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+        } else {
+            builder
+        };
+        // The backends build different simulation types.
+        macro_rules! check {
+            ($sim:expr) => {{
+                let mut sim = $sim.unwrap();
+                let [clk, en, n] = ["clk", "en", "n"].map(|name| sim.signal(name));
+                sim.run_until(1).unwrap();
+                sim.modify(|io| io.set(en, 1u8)).unwrap();
+                sim.run_until(2).unwrap();
+                sim.modify(|io| {
+                    io.set(clk, 1u8);
+                    io.set(clk, 0u8);
+                })
+                .unwrap();
+                sim.run_until(3).unwrap();
+                assert_eq!(sim.get(n), 1u32.into(), "{backend}");
+            }};
+        }
+        if backend.starts_with("native") {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check!(builder.build_native());
+        } else {
+            check!(builder.build_cranelift());
+        }
+    }
 }

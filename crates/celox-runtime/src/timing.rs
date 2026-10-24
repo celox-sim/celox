@@ -104,6 +104,89 @@ impl CountedRefs {
     }
 }
 
+/// The `iff` gate of a wait term ([`celox_design::WaitGate`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GateRefs {
+    pub signal: SignalRef,
+    /// The counters of a gate judged at each write
+    /// ([`celox_design::GateCounters`]).
+    pub counters: Option<GateCounterRefs>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GateCounterRefs {
+    pub gated: SignalRef,
+    pub all: SignalRef,
+}
+
+/// Whether the least significant bit of `gate` is a known 1.
+pub fn gate_holds<B: SimBackend>(backend: &B, gate: SignalRef) -> bool {
+    StateView::new(backend).gate_holds(gate).unwrap_or_else(|| {
+        let (value, unknown) = read(backend, gate);
+        value.bit(0) && !unknown.bit(0)
+    })
+}
+
+/// A gated term whose counters a write of its signal by the runtime or the
+/// host bumps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GatedWriteRefs {
+    pub kind: CounterKind,
+    pub gate: SignalRef,
+    pub counters: GateCounterRefs,
+}
+
+impl GatedWriteRefs {
+    /// Count a change from `old` to `new`, judging the gate after it.
+    pub fn bump<B: SimBackend>(&self, backend: &mut B, old: &Value, new: &Value) {
+        if occurs(self.kind, old, new) {
+            self.count(backend);
+        }
+    }
+
+    /// Count one occurrence, judging the gate as it is now.
+    fn count<B: SimBackend>(&self, backend: &mut B) {
+        let all: u32 = backend.get_as(self.counters.all);
+        backend.set(self.counters.all, all.wrapping_add(1));
+        if gate_holds(backend, self.gate) {
+            let gated: u32 = backend.get_as(self.counters.gated);
+            backend.set(self.counters.gated, gated.wrapping_add(1));
+        }
+    }
+}
+
+/// Run `write`, which writes `signal` in `backend`, and count it in the
+/// gated `terms` on the signal, comparing the signal's planes in place.
+pub fn write_gated<B: SimBackend>(
+    backend: &mut B,
+    signal: SignalRef,
+    terms: &[GatedWriteRefs],
+    write: impl FnOnce(&mut B),
+) {
+    // A plain signal's planes fit a small buffer; others are read as values.
+    const SMALL: usize = 32;
+    let len = planes(backend, signal).map_or(usize::MAX, <[u8]>::len);
+    if len > SMALL {
+        let old = read(backend, signal);
+        write(backend);
+        let new = read(backend, signal);
+        for term in terms {
+            term.bump(backend, &old, &new);
+        }
+        return;
+    }
+    let mut old = [0u8; SMALL];
+    old[..len].copy_from_slice(planes(backend, signal).expect("a plain signal"));
+    write(backend);
+    let mut new = [0u8; SMALL];
+    new[..len].copy_from_slice(planes(backend, signal).expect("a plain signal"));
+    for term in terms {
+        if planes_occur(term.kind, &old[..len], &new[..len], signal.width) {
+            term.count(backend);
+        }
+    }
+}
+
 /// A bit range whose changes bump an occurrence counter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProbeRefs {
@@ -216,6 +299,19 @@ impl<'a> StateView<'a> {
         }
     }
 
+    /// Whether the least significant bit of a plain `gate` is a known 1.
+    pub fn gate_holds(&self, gate: SignalRef) -> Option<bool> {
+        let image = self.planes(gate)?;
+        let bytes = gate.width.div_ceil(8).max(1);
+        Some(image[0] & 1 == 1 && image.get(bytes).is_none_or(|unknown| unknown & 1 == 0))
+    }
+
+    /// The value of a 32-bit two-state counter.
+    pub fn counter(&self, counter: SignalRef) -> u32 {
+        let bytes = &self.memory[counter.offset..counter.offset + 4];
+        u32::from_le_bytes(bytes.try_into().expect("four bytes"))
+    }
+
     /// See [`planes`].
     pub fn planes(&self, signal: SignalRef) -> Option<&'a [u8]> {
         if signal.array_layout.is_some() {
@@ -305,7 +401,7 @@ pub fn encode_planes(value: &Value, width: usize, len: usize) -> Vec<u8> {
 /// Whether the change from plane image `old` to `new` of a `width`-bit
 /// signal is an occurrence of `kind` (Table 9-2 on the least significant
 /// bit).
-#[inline]
+#[inline(always)]
 pub fn planes_occur(kind: CounterKind, old: &[u8], new: &[u8], width: usize) -> bool {
     if kind == CounterKind::Changes {
         return !planes_equal(old, new, width);

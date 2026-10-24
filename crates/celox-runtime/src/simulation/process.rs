@@ -223,7 +223,7 @@ impl<B: SimBackend> SimulationState<B> {
                 // one, the check following the settle sees them: a settle
                 // does not write what processes write.
                 if again || !self.process_state.ready.is_empty() {
-                    self.observe_driven(executor.backend());
+                    self.observe_driven_unsettled(executor.backend());
                 }
                 if !again {
                     break;
@@ -285,7 +285,7 @@ impl<B: SimBackend> SimulationState<B> {
                 // host's view of the state, and what the settle derived.
                 entry = false;
                 if !self.process_state.waiters.is_empty() {
-                    self.observe(executor.backend(), None);
+                    self.observe_settled(executor.backend());
                 }
             } else {
                 self.observe_driven(executor.backend());

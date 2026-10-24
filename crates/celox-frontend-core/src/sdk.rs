@@ -1366,6 +1366,7 @@ fn lower_statements(
                             (source_id(term.signal), kind)
                         })
                         .collect(),
+                    gates: Vec::new(),
                 });
                 // The runtime resumes the process at the first occurrence
                 // after the wait began; no condition is left to check.
@@ -1390,6 +1391,7 @@ fn lower_statements(
                         .into_iter()
                         .map(|signal| (signal, CounterKind::Changes))
                         .collect(),
+                    gates: Vec::new(),
                 });
                 let mut error = None;
                 kernel.wait_level(index, |builder| {
