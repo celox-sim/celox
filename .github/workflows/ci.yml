@@ -364,6 +364,15 @@ jobs:
           cargo test --locked -p celox-test-suite --features "$VERIFY_TOOL"
           --test oracles -- --ignored
 
+      # The VPI host's time-step regions against Icarus, through the same
+      # cocotb test module, with the locked cocotb and Icarus versions.
+      - name: Cross-check cocotb time-step regions against Icarus
+        if: matrix.suite == 'sv' && matrix.tool == 'icarus'
+        run: >-
+          nix develop --no-update-lock-file --command
+          cargo test --locked -p celox-vpi --features systemverilog
+          --test cocotb_e2e icarus_and_celox_agree_on_dut_processes -- --ignored --exact
+
       - name: Catalogue every shared case
         if: ${{ !cancelled() }}
         run: |
