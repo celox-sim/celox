@@ -49,6 +49,9 @@ pub(super) struct ScopeSymbols {
     pub aliases: HashMap<String, String>,
     /// Hierarchical interface member paths bound to semantic signal names.
     pub interface_members: HashMap<String, String>,
+    /// The paths of `interface_members` that are hierarchical names of the
+    /// scope's own declarations.
+    pub local_aliases: HashSet<String>,
     pub interface_types: HashMap<String, String>,
     pub interface_arrays: HashMap<String, interface_binding::ArrayBinding>,
     pub interface_scopes: HashMap<String, interface_binding::ScopeBinding>,
@@ -422,6 +425,7 @@ impl ScopeSymbols {
                 .iter()
                 .map(|(path, name)| (path.clone(), rename.name(name)))
                 .collect(),
+            local_aliases: self.local_aliases.clone(),
             type_parameter_bindings: self.type_parameter_bindings.clone(),
             pattern_parameter_bindings: self.pattern_parameter_bindings.clone(),
             const_env,
