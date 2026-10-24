@@ -121,9 +121,10 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
                     TermModel {
                         signal,
                         kind,
-                        // A gated term is judged at checks after settling,
-                        // which only check driven terms.
-                        driven: driven.contains(&signal) || gate.is_some(),
+                        // A gate without counters is judged at checks
+                        // after settling, which only check driven terms.
+                        driven: driven.contains(&signal)
+                            || gate.is_some_and(|gate| gate.counters.is_none()),
                         gate,
                     }
                 })

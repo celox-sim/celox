@@ -8,7 +8,7 @@ use crate::{
     backend::SimBackend,
     timing::{
         GateCounterRefs, GateRefs, Halt, ProcessState, StateView, Value, copy_planes,
-        encode_planes, occurs, planes, planes_equal, planes_occur, read,
+        encode_planes, occurs, planes, planes_equal, planes_occur, read, write_gated,
     },
 };
 
@@ -123,11 +123,14 @@ impl<B: SimBackend> SimulationState<B> {
         }
         let counted = self.model.counted_by_offset.get(&signal.offset).copied();
         let probes = self.model.probes_by_offset.get(&signal.offset);
-        let gated = (!self.model.gated_writes.is_empty())
-            .then(|| self.model.gated_writes.get(&signal.offset))
-            .flatten();
-        if counted.is_none() && probes.is_none() && gated.is_none() {
-            write(backend);
+        if counted.is_none() && probes.is_none() {
+            if !self.model.gated_writes.is_empty()
+                && let Some(gated) = self.model.gated_writes.get(&signal.offset)
+            {
+                write_gated(backend, signal, gated, write);
+            } else {
+                write(backend);
+            }
         } else {
             let old = read(backend, signal);
             write(backend);
@@ -135,7 +138,13 @@ impl<B: SimBackend> SimulationState<B> {
             if let Some(counted) = counted {
                 self.model.counted[counted].refs.bump(backend, &old, &new);
             }
-            for term in gated.into_iter().flatten() {
+            for term in self
+                .model
+                .gated_writes
+                .get(&signal.offset)
+                .into_iter()
+                .flatten()
+            {
                 term.bump(backend, &old, &new);
             }
             // One counter can observe several ranges of the signal; a write
@@ -269,7 +278,7 @@ impl<B: SimBackend> SimulationState<B> {
         baseline: &mut Baseline,
     ) -> bool {
         let now = state.planes(term.signal).expect("a plain signal");
-        let all: u32 = backend.get_as(counters.all);
+        let all = state.counter(counters.all);
         if !matches!(baseline, Baseline::Gated { .. }) {
             // A baseline loaded from a state file.
             let (gated, value) = match baseline {
@@ -294,7 +303,7 @@ impl<B: SimBackend> SimulationState<B> {
         let changed = Self::advance(term.kind, raw, now, term.signal.width);
         let uncounted = changed && all == *counted;
         *counted = all;
-        backend.get_as::<u32>(counters.gated) != *gated
+        state.counter(counters.gated) != *gated
             || (uncounted && Self::gate_holds(state, backend, gate))
     }
 
@@ -361,16 +370,10 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Whether the least significant bit of `gate` is a known 1.
     fn gate_holds(state: &StateView<'_>, backend: &B, gate: SignalRef) -> bool {
-        match state.planes(gate) {
-            Some(image) => {
-                let bytes = gate.width.div_ceil(8).max(1);
-                image[0] & 1 == 1 && image.get(bytes).is_none_or(|unknown| unknown & 1 == 0)
-            }
-            None => {
-                let (value, unknown) = read(backend, gate);
-                value.bit(0) && !unknown.bit(0)
-            }
-        }
+        state.gate_holds(gate).unwrap_or_else(|| {
+            let (value, unknown) = read(backend, gate);
+            value.bit(0) && !unknown.bit(0)
+        })
     }
 
     /// Whether the change from the image `last` to `now` is an occurrence of

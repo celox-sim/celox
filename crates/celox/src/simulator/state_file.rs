@@ -750,8 +750,12 @@ impl<B: SimBackend> Simulator<B> {
                 .filter(|site| site.process == index)
                 .nth(site.unwrap_or_default())
                 .is_some_and(|site| {
-                    // A gated term counts as driven (`TermModel::driven`).
-                    site.gates.iter().any(Option::is_some)
+                    // A gate without counters counts as driven
+                    // (`TermModel::driven`).
+                    site.gates
+                        .iter()
+                        .flatten()
+                        .any(|gate| gate.counters.is_none())
                         || site.terms.iter().any(|(signal, _)| {
                             self.program
                                 .runtime_schema

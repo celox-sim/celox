@@ -12,7 +12,7 @@ use crate::{
     SimulatorErrorCode,
     backend::SimBackend,
     scheduler::SimEvent,
-    timing::{Halt, read},
+    timing::{Halt, read, write_gated},
 };
 
 /// Bookkeeping of one round of a time slot.
@@ -448,22 +448,28 @@ impl<B: SimBackend> SimulationState<B> {
         for (index, event) in events_to_process.iter().enumerate() {
             let signal = event.signal;
             let value = event.next_val;
-            let counted = self.model.counted_by_offset.get(&signal.offset).copied();
-            let gated = (!self.model.gated_writes.is_empty())
-                .then(|| self.model.gated_writes.get(&signal.offset))
-                .flatten();
-            if counted.is_some() || gated.is_some() {
+            if let Some(&counted) = self.model.counted_by_offset.get(&signal.offset) {
                 let backend = executor.backend_mut();
                 let old = read(backend, signal);
                 backend.set(signal, value);
                 let new = read(backend, signal);
-                if let Some(counted) = counted {
-                    self.model.counted[counted].refs.bump(backend, &old, &new);
-                }
+                self.model.counted[counted].refs.bump(backend, &old, &new);
                 // The gate as the scheduled values before this one left it.
-                for term in gated.into_iter().flatten() {
+                for term in self
+                    .model
+                    .gated_writes
+                    .get(&signal.offset)
+                    .into_iter()
+                    .flatten()
+                {
                     term.bump(backend, &old, &new);
                 }
+            } else if !self.model.gated_writes.is_empty()
+                && let Some(gated) = self.model.gated_writes.get(&signal.offset)
+            {
+                write_gated(executor.backend_mut(), signal, gated, |backend| {
+                    backend.set(signal, value)
+                });
             } else {
                 executor.backend_mut().set(signal, value);
             }

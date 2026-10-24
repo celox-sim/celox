@@ -5,7 +5,7 @@ use fxhash::{FxHashMap, FxHashSet};
 use crate::{
     SignalRef, SimulatorErrorCode,
     backend::SimBackend,
-    timing::{CountedRefs, GatedWriteRefs, Halt, Value, read},
+    timing::{CountedRefs, GatedWriteRefs, Halt, Value, read, write_gated},
 };
 
 /// The units a timed step executes: combinational settling, flip-flop
@@ -187,9 +187,14 @@ impl HostWatch {
     ) {
         let counted = self.counted.get(&signal.offset).copied();
         let waited = self.waited.contains(&signal.offset);
-        let gated = self.gated.get(&signal.offset);
-        if counted.is_none() && !waited && gated.is_none() {
-            write(backend);
+        if counted.is_none() && !waited {
+            if !self.gated.is_empty()
+                && let Some(gated) = self.gated.get(&signal.offset)
+            {
+                write_gated(backend, signal, gated, write);
+            } else {
+                write(backend);
+            }
             return;
         }
         let old = read(backend, signal);
@@ -198,7 +203,7 @@ impl HostWatch {
         if let Some(counted) = counted {
             counted.bump(backend, &old, &new);
         }
-        for term in gated.into_iter().flatten() {
+        for term in self.gated.get(&signal.offset).into_iter().flatten() {
             term.bump(backend, &old, &new);
         }
         if waited && old != new {
