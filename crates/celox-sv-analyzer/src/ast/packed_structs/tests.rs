@@ -12,6 +12,9 @@ fn preserves_layout_signedness_and_state_kind() {
                 mixed_t mixed;
                 union packed signed { logic signed [7:0] a; bit [7:0] b; } mixed_union;
                 union packed { bit [129:0] a; bit [129:0] b; } wide_union;
+                union soft { bit [3:0] narrow_value; bit [15:0] wide_value; } soft_union;
+                union soft packed signed { logic [15:0] wide_value; bit [3:0] narrow_value; } signed_soft;
+                union soft { bit [2:0] narrow_value; union soft { bit [129:0] wide; bit flag; } nested; } nested_soft;
                 signed_t signed_value;
                 struct packed { byte a; shortint b; int c; longint d; } atoms;
             endmodule
@@ -26,6 +29,9 @@ fn preserves_layout_signedness_and_state_kind() {
         ("atoms", 120, false, ir::TypeKind::Bit),
         ("mixed_union", 8, true, ir::TypeKind::Logic),
         ("wide_union", 130, false, ir::TypeKind::Bit),
+        ("soft_union", 16, false, ir::TypeKind::Bit),
+        ("signed_soft", 16, true, ir::TypeKind::Logic),
+        ("nested_soft", 130, false, ir::TypeKind::Bit),
     ] {
         let ty = signals
             .iter()
@@ -44,6 +50,9 @@ fn rejects_invalid_or_unsupported_struct_shapes() {
         "struct { logic a; } value;",
         "union packed { logic a; logic [1:0] b; } value;",
         "union tagged packed { logic a; logic b; } value;",
+        "union soft { real a; bit [63:0] b; } value;",
+        "union soft { logic a[2]; logic b; } value;",
+        "union soft { logic a; logic a; } value;",
         "union packed { logic a; logic b; } value; always_comb value = '{a: 1'b1, b: 1'b0};",
         "struct packed { real a; } value;",
         "struct packed { logic a[2]; } value;",
