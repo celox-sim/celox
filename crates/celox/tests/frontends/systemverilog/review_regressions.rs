@@ -947,29 +947,6 @@ fn coerces_ir_parameter_constants_to_their_declared_widths() {
 }
 
 #[test]
-fn validates_net_drivers_after_parameter_specialization() {
-    let error = cranelift_build_error(
-        r#"
-        module Driver(output logic y); assign y = 1'b1; endmodule
-        module Sink(input logic a); endmodule
-        module Child #(parameter ENABLE = 1) (output logic y);
-            wire w;
-            if (ENABLE) Driver driver(.y(w));
-            Sink sink(.a(w));
-            assign y = 1'b0;
-        endmodule
-        module Top(output logic y);
-            Child #(.ENABLE(0)) child(.y(y));
-        endmodule
-        "#,
-    );
-    assert!(
-        error.contains("undriven net declaration `w`"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
 fn applies_unsigned_coercion_to_mixed_signed_constant_comparisons() {
     let source = r#"
         module Top(output logic y);
@@ -982,23 +959,6 @@ fn applies_unsigned_coercion_to_mixed_signed_constant_comparisons() {
             .build_cranelift()
             .unwrap();
     assert_eq!(sim.get(sim.signal("y")), 0u8.into());
-}
-
-#[test]
-fn does_not_count_child_inputs_as_net_drivers() {
-    let error = cranelift_build_error(
-        r#"
-        module Sink(input logic a, output logic y); assign y = a; endmodule
-        module Top(output logic y);
-            wire w;
-            Sink sink(.a(w), .y(y));
-        endmodule
-        "#,
-    );
-    assert!(
-        error.contains("undriven net declaration `w`"),
-        "unexpected error: {error}"
-    );
 }
 
 #[test]
@@ -1412,8 +1372,7 @@ fn rejects_runtime_selected_child_outputs_to_nets() {
         "#,
     );
     assert!(
-        error.contains("undriven net declaration `values`")
-            || error.contains("systemverilog output port lvalue connection"),
+        error.contains("systemverilog output port lvalue connection"),
         "unexpected error: {error}"
     );
 }
@@ -5628,12 +5587,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "gate primitive instantiation",
             r#"
             module Top(input logic a, b, output logic y); and (y, a, b); endmodule
-        "#,
-        ),
-        (
-            "undriven net declaration `w`",
-            r#"
-            module Top(output logic y); wire w; assign y = (w === 1'bz); endmodule
         "#,
         ),
         (

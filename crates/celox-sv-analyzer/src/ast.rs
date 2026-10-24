@@ -188,7 +188,7 @@ use ff_process::ff_processes_from_scope;
 use functions::{functions_from_scope, procedural_truth_condition};
 use inlining::{expand_expr_calls, expr_signedness_with_return_types, substitute_expr_idents};
 pub(crate) use instances::normalize_identifier;
-use instances::{collect_connected_nets, expr_ident_name, instances_from_scope};
+use instances::{expr_ident_name, instances_from_scope};
 use parameters::{
     apply_parameter_overrides, coerce_const_parameter_value, const_env_from_parameters,
     const_expr_from_i128, const_expr_to_expr, enum_member_constants_from_scope,
@@ -1264,37 +1264,6 @@ impl Module {
                     repeats: false,
                 },
             );
-        }
-        let procedurally_written = procedural::written_names(
-            comb_processes
-                .iter()
-                .flat_map(|process| process.body.iter())
-                .chain(ff_processes.iter().flat_map(|process| process.body.iter())),
-        );
-        let mut connected_nets = HashSet::default();
-        for connection in instances
-            .iter()
-            .flat_map(|instance| instance.port_connections())
-        {
-            if let Some(expr) = connection.actual_expr() {
-                collect_connected_nets(expr, &mut connected_nets);
-            }
-            if let Some(pattern) = connection.bound_pattern() {
-                pattern.visit_expressions(&mut |expr| {
-                    collect_connected_nets(expr, &mut connected_nets)
-                });
-            }
-        }
-        if let Some(signal) = signals.iter().find(|signal| {
-            !imported.declarations_only
-                && signal.is_net()
-                && !procedurally_written.contains(signal.name())
-                && !connected_nets.contains(signal.name())
-        }) {
-            return Err(AnalyzerError::Unsupported(format!(
-                "undriven net declaration `{}`",
-                signal.name()
-            )));
         }
         // A call of a name an import binds calls the package subroutine or
         // DPI import. Calls of subroutines declared in a generate block were

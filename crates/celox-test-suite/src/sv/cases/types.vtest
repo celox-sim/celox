@@ -408,3 +408,55 @@
   (top Top)
   (eval)
   (assert_eq matched 1))
+
+(case undriven_internal_nets_are_high_impedance
+  (four_state)
+  (source "undriven_internal.sv" #"
+    module Driver(output wire y);
+      assign y=1'b1;
+    endmodule
+    module Sink(input wire a, output wire y);
+      assign y=a;
+    endmodule
+    module Parent #(parameter ENABLE=1)(output wire y);
+      wire w;
+      if (ENABLE) Driver driver(.y(w));
+      Sink sink(.a(w),.y(y));
+    endmodule
+    module Top(output wire [7:0] floating,
+               output wire [11:0] array_values,
+               output wire enabled,disabled,
+               output bit [3:0] two_state);
+      wire unused;
+      wire [7:0] w;
+      wire [3:0] words[3];
+      assign floating=w;
+      assign array_values={words[2],words[1],words[0]};
+      assign two_state=w[3:0];
+      Parent #(.ENABLE(1)) a(enabled);
+      Parent #(.ENABLE(0)) b(disabled);
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq floating (fourstate 0 0xff))
+  (assert_eq array_values (fourstate 0 0xfff))
+  (assert_eq enabled 1)
+  (assert_eq disabled (fourstate 0 1))
+  (assert_eq two_state 0))
+
+(case undriven_internal_nets_convert_to_two_state_zero
+  (source "undriven_two_state.sv" #"
+    module Sink(input bit [7:0] a, output wire [7:0] y);
+      assign y=a;
+    endmodule
+    module Top(output bit [7:0] y, output bit [11:0] array_values);
+      wire unused;
+      wire [7:0] w;
+      wire [3:0] words[3];
+      Sink sink(w,y);
+      assign array_values={words[2],words[1],words[0]};
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq y 0)
+  (assert_eq array_values 0))
