@@ -1,0 +1,6 @@
+Revision history for #1896:
+
+rev 2 (content) 2026-10-24 20:11 UTC — Review fixes: the Re-NBA and NBA publish share helpers (publish_queued/publish_flagged), and program kernel checks scan the precomputed program_processes list instead of every process.  Rebased onto origin/master (cranelift 0.137) at the coordinator's request.
+rev 1 (initial) 2026-10-24 20:11 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1896,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"dee80f04c80d1b862b51412a4830a6ea6dcebb0d","timestamp_iso":"2026-10-24T20:11:53Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"dee80f04c80d1b862b51412a4830a6ea6dcebb0d","new_sha":"883befed556beb5f4e042388950ceec6cb79756f","timestamp_iso":"2026-10-24T20:11:53Z","reason":"Review fixes: the Re-NBA and NBA publish share helpers (publish_queued/publish_flagged), and program kernel checks scan the precomputed program_processes list instead of every process.\n\nRebased onto origin/master (cranelift 0.137) at the coordinator's request.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/dee80f04c80d1b862b51412a4830a6ea6dcebb0d...883befed556beb5f4e042388950ceec6cb79756f"}]} -->
