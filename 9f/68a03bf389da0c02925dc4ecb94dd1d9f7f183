@@ -1,6 +1,1 @@
-Revision history for #1847:
-
-rev 2 (rebase) 2026-10-24 05:41 UTC — Resolve conflicts with master after #1816 merged and restore stack queue eligibility
-rev 1 (initial) 2026-10-24 05:41 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":1847,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"01c7e9f9c2d401001c6964c34d4127fe1ce8076d","timestamp_iso":"2026-10-24T05:41:05Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"01c7e9f9c2d401001c6964c34d4127fe1ce8076d","new_sha":"9f68a03bf389da0c02925dc4ecb94dd1d9f7f183","timestamp_iso":"2026-10-24T05:41:05Z","reason":"Resolve conflicts with master after #1816 merged and restore stack queue eligibility","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/01c7e9f9c2d401001c6964c34d4127fe1ce8076d...9f68a03bf389da0c02925dc4ecb94dd1d9f7f183"}]} -->
+Rebase dependent scope enum randomization with parent conflict resolution
