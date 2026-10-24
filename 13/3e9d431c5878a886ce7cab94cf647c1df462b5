@@ -1,0 +1,1 @@
+Update the two reviewed sv-tests pragma expectations from fail to pass: accepting its undriven protected_wire correctly enables elaboration in both state modes. CI run40112270471 shows these are the only changes across2054 official mode runs; retain all other expectations.
