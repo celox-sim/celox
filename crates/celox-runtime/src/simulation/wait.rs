@@ -254,8 +254,18 @@ impl<B: SimBackend> SimulationState<B> {
                     // The occurrence is consumed even when the gate does not
                     // hold (IEEE 1800-2023 9.4.2.3).
                     Some(gate) => {
-                        wake |= Self::occurred(&state, backend, term, baseline)
-                            && Self::gate_holds(&state, backend, gate.signal);
+                        if Self::occurred(&state, backend, term, baseline) {
+                            if Self::gate_holds(&state, backend, gate.signal) {
+                                wake = true;
+                            } else if let Some(counter) = term.counter
+                                && let Baseline::RawCounter { seen, .. }
+                                | Baseline::Counter { seen, .. } = baseline
+                            {
+                                // The counted occurrences are consumed: a later
+                                // check judges only new ones.
+                                *seen = backend.get_as(counter);
+                            }
+                        }
                     }
                 }
             }
