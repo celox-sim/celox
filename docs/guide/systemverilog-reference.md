@@ -18,6 +18,7 @@ synthesis and is tested at the design level.
 | --- | --- |
 | Modules | ANSI ports, `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them) |
 | Generate | `for` (with `genvar`), `if`, `case`; constant expressions including `**` |
+| Hierarchical references | reads of nets and variables of other instances, and procedural writes of their variables, including selects of unpacked array elements (`u.mem[i][7:0] = v`), through names that start at an instance of the module (also of a generate block or an instance array element), at the module's own name, at an enclosing module's name (upward) or at `$root`; see [Hierarchical references](#hierarchical-references) |
 | Packages | types, parameters, enums and functions, through `import p::*;`, `import p::x;` and `p::x` |
 | Interfaces | interfaces with value and type parameters, header package imports, `localparam`s, `typedef`s, variables and nets, logic (`assign`, `always_comb`, `always_ff`, generate) and functions; interface instances and instance arrays, also inside generate blocks and other interfaces; interface ports with or without a modport, generic `interface` and `interface.mp` ports, and arrays of interface ports; explicit and implicit named interface connections (`.bus(bus)` and `.bus`); modport `input` / `output` members and imported functions; access to members, parameters and functions through an instance or port (`h[i].m`, `h.P`, `h.f(...)`, `h[i].f(...)` with a constant element index) |
 
@@ -213,7 +214,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   function, a call with the wrong number of arguments, an omitted argument
   without a declared default, and a task used as a value are errors.
 - DPI-C beyond the subset described in [DPI-C imports](#dpi-c-imports), DPI
-  exports, tri-state buses and multiple drivers, hierarchical references.
+  exports, tri-state buses and multiple drivers.
 
 ### Interface restrictions {#interface-restrictions}
 
@@ -251,6 +252,21 @@ Elements are addressed by their declared
 index: `child_signal(&[("u", 3)], "y")` and `dut.u[3]` reach `u[3]` of
 `Child u[3:2](...)`, and `InstanceHierarchy::index` holds the index. Arrays
 with a negative bound are rejected.
+
+### Hierarchical references {#hierarchical-references}
+
+A hierarchical name is resolved once against the elaborated hierarchy and
+then reads and writes the object of the instance it denotes, like a name of
+that instance: there is no run-time lookup. Only the selected element of an
+array, such as `i` in `u.mem[i]`, may vary at run time. Each instance of a
+module resolves its upward names from its own position; an upward name must
+denote the same relative object from every instance of the module.
+
+Not supported, and rejected with the name: continuous assignments to a
+variable and any driver of a net through a hierarchical name, names in port
+connections, names of tasks, functions, named blocks, parameters or
+structure members of another scope, names that start inside a generate block
+relative to it, and names of `real`, `string` or class-typed signals.
 
 ### Strings {#strings}
 

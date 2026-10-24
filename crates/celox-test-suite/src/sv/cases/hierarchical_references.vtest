@@ -1,0 +1,399 @@
+(group hierarchical_references (category hierarchy))
+
+; Downward hierarchical names (IEEE 1800-2023 23.6) read nets and variables
+; of instances below the referencing module.
+(case reads_signals_of_instances_below
+  (source "downward_reads.sv" #"
+        module Leaf(input logic [7:0] a, output logic [7:0] y);
+            logic [7:0] doubled;
+            assign doubled = a << 1;
+            assign y = doubled + 8'd1;
+        endmodule
+        module Mid(input logic [7:0] a, output logic [7:0] y);
+            wire [7:0] inner = a ^ 8'h0f;
+            Leaf leaf(.a(inner), .y(y));
+        endmodule
+        module Top;
+            logic clk = 0;
+            logic [7:0] a = 8'd3;
+            logic [7:0] y;
+            logic [7:0] seen;
+            Mid mid(.a(a), .y(y));
+            always #5 clk = ~clk;
+            always @(posedge clk) seen <= mid.leaf.doubled;
+            initial begin
+                #1 $display("inner=%0d doubled=%0d low=%0d", mid.inner, mid.leaf.doubled,
+                    mid.leaf.doubled[3:0]);
+                a = 8'd5;
+                #10 $display("seen=%0d y=%0d", seen, Top.mid.leaf.y);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "inner=12 doubled=24 low=8\nseen=20 y=21\n"))
+
+; Procedural assignments through hierarchical names write variables of other
+; instances, including element bit selects of unpacked arrays, alongside the
+; writes of the instance's own processes.
+(case writes_memory_elements_of_instances_below
+  (source "downward_writes.sv" #"
+        module Ram #(parameter W = 2, parameter A = 2)(input logic clk, input logic we,
+            input logic [A-1:0] addr, input logic [W-1:0] d, output logic [W-1:0] q);
+            logic [W-1:0] mem [(2**A)-1:0];
+            always @(posedge clk) begin
+                if (we) mem[addr] <= d;
+                q <= mem[addr];
+            end
+        endmodule
+        module Banks(input logic clk, input logic we, input logic [2:0] addr,
+            input logic [15:0] d, output logic [15:0] q);
+            Ram #(.W(8), .A(3)) lo(.clk(clk), .we(we), .addr(addr), .d(d[7:0]), .q(q[7:0]));
+            Ram #(.W(8), .A(3)) hi(.clk(clk), .we(we), .addr(addr), .d(d[15:8]), .q(q[15:8]));
+        endmodule
+        module Top;
+            logic clk = 0;
+            logic we = 0;
+            logic [2:0] addr = 0;
+            logic [15:0] d = 0;
+            logic [15:0] q;
+            integer i;
+            Banks banks(.clk(clk), .we(we), .addr(addr), .d(d), .q(q));
+            always #5 clk = ~clk;
+            initial begin
+                for (i = 0; i < 8; i = i + 1) begin
+                    Top.banks.lo.mem[i][7:0] = 8'h10 + i;
+                    banks.hi.mem[i] = 8'h80 + i;
+                end
+                banks.hi.mem[7][3:0] = 4'h0;
+                addr = 3'd6;
+                @(posedge clk) #1 $display("q=%h", q);
+                we = 1; addr = 3'd2; d = 16'hbeef;
+                @(posedge clk) #1 we = 0;
+                $display("lo2=%h hi2=%h hi7=%h", banks.lo.mem[2], banks.hi.mem[2],
+                    banks.hi.mem[7]);
+                banks.lo.mem[2] = 8'h5a;
+                @(posedge clk) #1 $display("q=%h", q);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "q=8616\nlo2=ef hi2=be hi7=80\nq=be5a\n"))
+
+; A component may name an element of an instance array or an instance of a
+; generate block.
+(case names_instance_array_elements_and_generated_instances
+  (source "scoped_instances.sv" #"
+        module Cell #(parameter V = 0)(output logic [7:0] y);
+            logic [7:0] value = V;
+            assign y = value;
+        endmodule
+        module Top;
+
+            logic [7:0] g0, g1;
+            Cell #(.V(7)) cells [1:0] (.y());
+            for (genvar k = 0; k < 2; k++) begin : g
+                Cell #(.V(20 + k)) c(.y());
+            end
+            initial begin
+                cells[1].value = 8'd9;
+                #1 $display("%0d %0d %0d %0d", cells[0].value, cells[1].value,
+                    g[0].c.value, g[1].c.y);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "7 9 20 21\n"))
+
+; Upward names (IEEE 1800-2023 23.8) start at the module name of an
+; enclosing instance; each instance of the referencing module resolves its
+; own copy.
+(case reads_signals_of_enclosing_instances_by_module_name
+  (source "upward.sv" #"
+        module Leaf;
+            logic [7:0] seen;
+            logic [7:0] ticks = 8'd0;
+            always_comb seen = Mid.local_v + Top.base;
+            always @(posedge Top.clk) ticks <= ticks + 8'd1;
+        endmodule
+        module Mid;
+            logic [7:0] local_v = 8'd5;
+            Leaf leaf();
+        endmodule
+        module Top;
+            logic clk = 0;
+            logic [7:0] base = 8'd40;
+            Mid m0();
+            Mid m1();
+            always #5 clk = ~clk;
+            initial begin
+                #1 m1.local_v = 8'd6;
+                #1 $display("%0d %0d", m0.leaf.seen, m1.leaf.seen);
+                base = 8'd50;
+                #20 $display("%0d %0d ticks=%0d", m0.leaf.seen, Top.m1.leaf.seen, m1.leaf.ticks);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "45 46\n55 56 ticks=2\n"))
+
+; Hierarchical blocking writes from another module's processes in the time
+; step of a nonblocking element write: those to other elements, or before the
+; nonblocking update to the same element, keep their effect (IEEE 1800-2023
+; 4.4.2.2, 10.4.2).
+(case foreign_writes_interleave_with_nonblocking_element_writes
+  (source "foreign_writes.sv" #"
+        module A(input logic clk, input logic we, input logic [1:0] wa, input logic [7:0] wd);
+            logic [7:0] mem [4];
+            always @(posedge clk) if (we) mem[wa] <= wd;
+        endmodule
+        module Top;
+            logic clk = 0;
+            logic we = 0;
+            logic [1:0] wa = 0;
+            logic [7:0] wd = 0;
+            A a(.clk(clk), .we(we), .wa(wa), .wd(wd));
+            always #5 clk = ~clk;
+            always @(posedge clk) if (we) a.mem[3][3:0] = 4'h5;
+            initial begin
+                for (int i = 0; i < 4; i++) a.mem[i] = 8'h10 * i;
+                we = 1; wa = 1; wd = 8'haa;
+                @(posedge clk);
+                a.mem[1][7:4] = 4'hf;
+                a.mem[2] = 8'h77;
+                #1 $display("%h %h %h %h", a.mem[0], a.mem[1], a.mem[2], a.mem[3]);
+                wa = 2; wd = 8'hbb;
+                @(posedge clk);
+                a.mem[0][0] = 1'b1;
+                #1 we = 0;
+                $display("%h %h %h %h", a.mem[0], a.mem[1], a.mem[2], a.mem[3]);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "00 aa 77 35\n01 aa bb 35\n"))
+
+; Modules may write each other's arrays through hierarchical names, here a
+; downward and an upward one, next to the nonblocking writes of their own.
+(case mutual_hierarchical_writes_next_to_nonblocking_writes
+  (source "mutual.sv" #"
+        module B(input logic clk);
+            logic [7:0] bm [2];
+            always @(posedge clk) bm[0] <= bm[0] + 8'd1;
+            always @(posedge clk) A.am[1] = bm[0];
+        endmodule
+        module A(input logic clk);
+            logic [7:0] am [2];
+            B b(.clk(clk));
+            always @(posedge clk) am[0] <= am[0] + 8'd2;
+            always @(posedge clk) b.bm[1] = am[0];
+        endmodule
+        module Top;
+            logic clk = 0;
+            A a(.clk(clk));
+            always #5 clk = ~clk;
+            initial begin
+                a.am[0] = 0; a.am[1] = 0; a.b.bm[0] = 0; a.b.bm[1] = 0;
+                #16 $display("%0d %0d %0d %0d", a.am[0], a.am[1], a.b.bm[0], a.b.bm[1]);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "4 1 2 2\n"))
+
+; A hierarchical blocking write of some bits of an element keeps its effect
+; when a nonblocking write of other bits of the same element follows it in
+; the time step.
+(case foreign_bit_writes_survive_nonblocking_writes_of_other_bits
+  (source "same_element.sv" #"
+        module A(input logic clk);
+            logic [7:0] mem [4];
+            always @(posedge clk) mem[3][7:4] <= 4'ha;
+        endmodule
+        module Top;
+            logic clk = 0;
+            A a(.clk(clk));
+            always #5 clk = ~clk;
+            always @(posedge clk) a.mem[3][3:0] = 4'h5;
+            initial begin
+                a.mem[3] = 8'h00;
+                @(posedge clk);
+                #1 $display("%h", a.mem[3]);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "a5\n"))
+
+; The index of an instance array element in a hierarchical name is a
+; constant expression (IEEE 1800-2023 23.6), here a local parameter and a
+; sized literal.
+(case names_instance_array_elements_by_constant_expressions
+  (source "constant_indices.sv" #"
+        module Cell;
+            logic [7:0] value = 8'd3;
+        endmodule
+        module Top;
+            localparam IDX = 1;
+            Cell cells [1:0] ();
+            initial begin
+                cells[IDX].value = 8'd9;
+                #1 $display("%0d %0d", cells[1'b1].value, cells[IDX - 1].value);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "9 3\n"))
+
+; The declaration initializer of a variable takes effect before any initial
+; procedure starts (IEEE 1800-2023 6.8), so an initial write through a
+; hierarchical name overrides it.
+(case initial_writes_through_names_follow_declaration_initializers
+  (source "initial_order.sv" #"
+        module Child;
+            logic [7:0] v = 8'd1;
+        endmodule
+        module Top;
+            Child c();
+            initial c.v = 8'd5;
+            initial begin
+                #1 $display("%0d", c.v);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "5\n"))
+
+; An upward name resolves in the instance that encloses each referencing
+; instance, also when those instances have different parameter values.
+(case upward_names_resolve_in_each_parameterized_parent
+  (source "upward_parameterized.sv" #"
+        module Leaf;
+            logic [7:0] seen;
+            always_comb seen = Mid.local_v + 8'd1;
+        endmodule
+        module Mid #(parameter W = 1);
+            logic [7:0] local_v = W;
+            logic [W-1:0] other;
+            Leaf leaf();
+        endmodule
+        module Top;
+            Mid #(.W(1)) m0();
+            Mid #(.W(2)) m1();
+            initial begin
+                #1 $display("%0d %0d", m0.leaf.seen, m1.leaf.seen);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "2 3\n"))
+
+; A task called from an edge process writes an element of another
+; instance's array through a hierarchical name, next to that instance's
+; nonblocking writes of other elements.
+(case subroutines_write_through_hierarchical_names
+  (source "task_writes.sv" #"
+        module A(input logic clk, input logic we, input logic [1:0] wa, input logic [7:0] wd);
+            logic [7:0] mem [4];
+            always @(posedge clk) if (we) mem[wa] <= wd;
+        endmodule
+        module Top;
+            logic clk = 0;
+            logic we = 0;
+            logic [1:0] wa = 0;
+            logic [7:0] wd = 0;
+            A a(.clk(clk), .we(we), .wa(wa), .wd(wd));
+            task automatic poke;
+                a.mem[3][3:0] = 4'h5;
+            endtask
+            always #5 clk = ~clk;
+            always @(posedge clk) if (we) poke();
+            initial begin
+                for (int i = 0; i < 4; i++) a.mem[i] = 8'h10 * i;
+                we = 1;
+                wa = 1;
+                wd = 8'haa;
+                @(posedge clk);
+                #1 $display("%h %h %h %h", a.mem[0], a.mem[1], a.mem[2], a.mem[3]);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "00 aa 20 35\n"))
+
+; A write through a hierarchical name from an inactive-region resumption
+; (`#0`) lands between the evaluation of an edge process and the NBA region
+; that publishes its nonblocking bit write, which then updates only that bit
+; (IEEE 1800-2023 4.4.2.3, 10.4.2).
+(case foreign_inactive_writes_precede_nonblocking_bit_writes
+  (source "inactive_window.sv" #"
+        module C(input logic clk, input logic [2:0] idx);
+            logic [7:0] q = 8'd0;
+            always @(posedge clk) q[idx] <= 1'b1;
+        endmodule
+        module Top;
+            logic clk = 0;
+            logic [2:0] idx = 3'd7;
+            C c(.clk(clk), .idx(idx));
+            always #5 clk = ~clk;
+            initial begin
+                @(posedge clk);
+                #0 c.q[0] = 1'b1;
+                #1 $display("%h", c.q);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "81\n"))
+
+; A wait through a hierarchical name sees every store to the variable it
+; names, including one a later store of the same always_comb evaluation
+; overwrites (IEEE 1800-2023 4.3, 9.4.2), as a wait in the module does.
+(case waits_through_names_see_intermediate_combinational_writes
+  (source "intermediate.sv" #"
+        module Child;
+            logic c = 0;
+            logic [7:0] a = 8'h15, b = 8'h1, y;
+            always_comb begin y = 8'h0; if (c && b != 8'h9) y = a; end
+            initial begin
+                #2 c = 1;
+                #1 a = 8'h16;
+                #1 b = 8'h2;
+            end
+        endmodule
+        module Top;
+            int n;
+            Child child();
+            initial #1 forever begin @(child.y); n++; end
+            initial begin
+                #5 $display("y=%h n=%0d", child.y, n);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=16 n=3\n"))

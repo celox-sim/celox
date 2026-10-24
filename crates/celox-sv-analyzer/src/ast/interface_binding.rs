@@ -475,6 +475,7 @@ pub(super) fn analyze_module(
                         is_net: port.is_net,
                         is_const: false,
                         package_variable: None,
+                        hierarchical: None,
                     };
                     module.symbols.as_mut().unwrap().signals.push(signal);
                     let Some(connection) = connections

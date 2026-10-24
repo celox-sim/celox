@@ -1961,6 +1961,7 @@ pub fn lower_frontend_artifact(
         reset_clock_map,
         processes,
         package_bindings: HashMap::default(),
+        hierarchical_bindings: HashMap::default(),
         counter_slots,
         pending_slots: Vec::new(),
         comb_alternatives: Vec::new(),

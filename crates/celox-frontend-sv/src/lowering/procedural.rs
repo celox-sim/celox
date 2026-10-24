@@ -2576,6 +2576,36 @@ pub(super) fn written_names(stmts: &[sv::ir::Stmt], names: &mut HashSet<String>)
     }
 }
 
+/// The names a statement list of `module` writes, also through the
+/// subroutines it calls.
+pub(super) fn written_names_with_calls(
+    module: &sv::ir::Module,
+    stmts: &[sv::ir::Stmt],
+    names: &mut HashSet<String>,
+) {
+    written_names(stmts, names);
+    let mut calls = Vec::new();
+    for stmt in stmts {
+        stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+    }
+    let mut visited = HashSet::default();
+    while let Some((callee, _)) = calls.pop() {
+        let sv::ir::Callee::Subroutine(name) = callee else {
+            continue;
+        };
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let Some(subroutine) = module.subroutines().iter().find(|sub| sub.name == name) else {
+            continue;
+        };
+        written_names(&subroutine.body, names);
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+        }
+    }
+}
+
 /// The lvalue an output argument writes back to.
 /// The variables a call of `function` writes through its arguments, such as
 /// the seed of `$random(seed)`.

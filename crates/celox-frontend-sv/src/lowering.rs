@@ -41,6 +41,7 @@ mod comb;
 mod comb_retention;
 mod ff;
 mod floating;
+mod hierarchy;
 mod procedural;
 
 type RegionedVarAddr = RegionedVarAddrBase<SourceVarId>;
@@ -323,6 +324,7 @@ fn interface_signatures_collecting(
                 warnings,
                 &[],
                 LevelLists::Processes,
+                &HashMap::default(),
             )?;
             Ok(InterfaceSignature {
                 name: prototype.name,
@@ -587,11 +589,65 @@ fn validate_specialized_instance_net_drivers(
             }
         }
 
+        // A hierarchical name denotes another instance's object, which its
+        // own instance checks; only procedural writes of variables may
+        // reach it through the name.
+        let mut written = None;
+        for signal in module.source.signals() {
+            let Some(name) = signal.hierarchical() else {
+                continue;
+            };
+            let driven = if signal.is_net() {
+                written
+                    .get_or_insert_with(|| {
+                        let source = &module.source;
+                        let mut written = HashSet::default();
+                        for body in source
+                            .comb_processes()
+                            .iter()
+                            .map(sv::ir::CombProcess::body)
+                            .chain(source.ff_processes().iter().map(sv::ir::FfProcess::body))
+                            .chain(
+                                source
+                                    .initial_processes()
+                                    .iter()
+                                    .map(|process| process.body()),
+                            )
+                        {
+                            procedural::written_names_with_calls(source, body, &mut written);
+                        }
+                        written
+                    })
+                    .contains(signal.name())
+            } else {
+                !continuous_driver_ranges(
+                    &module.source,
+                    signal.name(),
+                    &module.constants,
+                    &module.parameter_types,
+                )
+                .is_empty()
+            };
+            if driven
+                || !child_output_driver_ranges(module, signal.name(), module_ids, modules)
+                    .is_empty()
+            {
+                return Err(sv::AnalyzerError::Unsupported(format!(
+                    "{} through hierarchical name `{name}`",
+                    if signal.is_net() {
+                        "driver of a net"
+                    } else {
+                        "continuous assignment to a variable"
+                    }
+                )));
+            }
+        }
+
         let net_names = module
             .source
             .signals()
             .iter()
-            .filter(|signal| signal.is_net())
+            .filter(|signal| signal.is_net() && signal.hierarchical().is_none())
             .map(|signal| (signal.name(), true))
             .chain(
                 module
@@ -611,7 +667,7 @@ fn validate_specialized_instance_net_drivers(
             .source
             .signals()
             .iter()
-            .filter(|signal| !signal.is_net())
+            .filter(|signal| !signal.is_net() && signal.hierarchical().is_none())
             .map(|signal| signal.name())
             .chain(
                 module
@@ -847,6 +903,7 @@ fn lower_package_states(
                 warnings,
                 &[],
                 LevelLists::Processes,
+                &HashMap::default(),
             )?;
             lowered.sim_module.time_precision = Some(
                 celox_design::TimePrecision::try_from(packages.global_time_precision())
@@ -1004,10 +1061,15 @@ fn driver_ranges_overlap(drivers: &[(usize, Option<(i128, i128)>)]) -> bool {
 
 /// Memories may have several edge-sensitive writers. Their NBA stores update
 /// selected elements; always_ff additionally requires a single writing process.
+///
+/// A memory that repeating processes of other modules write through
+/// hierarchical names (`foreign_writes`) has writers outside the module, so
+/// its edge writes update selected elements too.
 fn shared_edge_memories(
     module: &sv::ir::Module,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> HashSet<String> {
     let mut memories = HashSet::default();
@@ -1023,6 +1085,15 @@ fn shared_edge_memories(
             .iter()
             .any(|(id, _)| !(first_ff..end_ff).contains(id))
         {
+            continue;
+        }
+        if foreign_writes
+            .get(signal.name())
+            .is_some_and(|writes| writes.repeating > 0)
+        {
+            if !drivers.is_empty() {
+                memories.insert(signal.name().into());
+            }
             continue;
         }
         let overlaps = drivers.iter().enumerate().any(|(i, a)| {
@@ -1062,12 +1133,14 @@ fn shared_edge_memories(
 /// only the 64-bit chunks the process wrote, so a write from another scope
 /// that lands between the evaluation and the commit of the process can be
 /// lost only within those chunks, where a whole-array commit loses it
-/// everywhere. A writer outside `module` (a hierarchical reference) that
-/// must not lose such writes has to be excluded here.
+/// everywhere. Arrays that processes of other modules write through
+/// hierarchical names (`foreign_writes`) keep the whole-array commit, which
+/// they are ordered against.
 fn edge_only_memories(
     module: &sv::ir::Module,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
 ) -> HashSet<String> {
     let first_ff = module.comb_processes().len();
     let end_ff = first_ff + module.ff_processes().len();
@@ -1100,6 +1173,7 @@ fn edge_only_memories(
             !s.is_net()
                 && !s.r#type().unpacked_ranges().is_empty()
                 && nonblocking.contains(s.name())
+                && !foreign_writes.contains_key(s.name())
         })
         .filter(|signal| {
             let drivers = local_driver_ranges(module, signal.name(), constants, parameter_types);
@@ -1121,10 +1195,13 @@ fn edge_only_memories(
 /// evaluates, so its writes, such as memory initialization, are not
 /// included.
 ///
-/// These are the writers within `module`. A writer outside it (a
-/// hierarchical reference) that can write after it suspends has to be added
-/// here.
-fn kernel_window_writes(module: &sv::ir::Module) -> HashSet<String> {
+/// Processes of other modules that write variables of `module` through
+/// hierarchical names (`foreign_writes`) may run in that window as well, so
+/// those variables are included whatever region the writes run in.
+fn kernel_window_writes(
+    module: &sv::ir::Module,
+    foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
+) -> HashSet<String> {
     let subroutines = module.subroutines();
     let mut names = HashSet::default();
     for process in module
@@ -1148,6 +1225,7 @@ fn kernel_window_writes(module: &sv::ir::Module) -> HashSet<String> {
             0,
         );
     }
+    names.extend(foreign_writes.keys().cloned());
     names
 }
 
@@ -1250,6 +1328,77 @@ fn kernel_written_names(
             kernel_written_names(subroutines, &subroutine.body, names, visited, depth + 1);
         }
     }
+}
+
+/// Check the drivers of the variables that processes of other modules write
+/// through hierarchical names as if those processes were the module's own: a
+/// continuous or `always_comb` driver excludes every other writer (IEEE
+/// 1800-2023 6.5, 9.2.2.2), an `always_ff` one every other process
+/// (9.2.2.4), and two repeating processes may only write a shared memory,
+/// whose edge writes update selected elements.
+fn validate_foreign_drivers(
+    module: &sv::ir::Module,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+    shared_memories: &HashSet<String>,
+    foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
+) -> Result<(), sv::AnalyzerError> {
+    if foreign_writes.is_empty() {
+        return Ok(());
+    }
+    let first_ff = module.comb_processes().len();
+    let mut written_once = None;
+    let mut always_ff = None;
+    for (name, writes) in foreign_writes {
+        // Drivers of nets through hierarchical names are rejected with the
+        // instance's net drivers.
+        if module
+            .signals()
+            .iter()
+            .any(|signal| signal.name() == name && signal.is_net())
+        {
+            continue;
+        }
+        let drivers = local_driver_ranges(module, name, constants, parameter_types);
+        let continuous = drivers.iter().any(|(id, _)| *id < first_ff);
+        let repeating = writes.repeating + usize::from(!drivers.is_empty());
+        let local_always_ff = always_ff
+            .get_or_insert_with(|| {
+                let mut written = HashSet::default();
+                for process in module.ff_processes().iter().filter(|p| p.is_always_ff()) {
+                    procedural::written_names_with_calls(module, process.body(), &mut written);
+                }
+                written
+            })
+            .contains(name);
+        let local_once = written_once
+            .get_or_insert_with(|| {
+                let mut written = HashSet::default();
+                for process in module.initial_processes().iter().filter(|p| !p.repeats()) {
+                    procedural::written_names_with_calls(module, process.body(), &mut written);
+                }
+                written
+            })
+            .contains(name);
+        let reason = if continuous {
+            Some("its module drives it continuously or from always_comb")
+        } else if writes.always_ff && (!drivers.is_empty() || local_once || writes.repeating > 1) {
+            Some("an always_ff process writes it")
+        } else if local_always_ff {
+            Some("an always_ff process of its module writes it")
+        } else if repeating > 1 && !shared_memories.contains(name) {
+            Some("another process writes it too")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "multiple variable drivers for `{name}`, which another module writes through a \
+                 hierarchical name: {reason}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_variable_driver_ranges(
@@ -1946,6 +2095,7 @@ fn prepare_external_hierarchy_collecting(
             false,
             warnings,
             LevelLists::Processes,
+            HierarchicalNames::default(),
         )?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
@@ -1990,6 +2140,7 @@ fn prepare_external_hierarchy_collecting(
                     false,
                     warnings,
                     LevelLists::Processes,
+                    HierarchicalNames::default(),
                 )?,
             ))
         })
@@ -2020,6 +2171,7 @@ fn prepare_external_hierarchy_collecting(
             four_state,
             allow_inferred_latches,
             true,
+            &HashSet::default(),
             warnings,
         )?;
         modules.insert(
@@ -2441,21 +2593,35 @@ fn schedule_sources_collecting(
     module_specialization_counts.insert(root_key.name.clone(), 1usize);
     let mut queue = vec![root_key.clone()];
     let mut index = 0;
+    let mut elaborated = HashMap::default();
+    let mut hierarchical_modules = Vec::new();
     while index < queue.len() {
         let key = queue[index].clone();
         index += 1;
         let base = analyzed
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-        let lowered = specialize_module(
+        let module_id = module_ids[&key];
+        let module = match specialize_module(
             base,
             &key,
             four_state,
             false,
             warnings,
             LevelLists::Processes,
-        )?;
-        for instance in &lowered.instances {
+            HierarchicalNames::default(),
+        ) {
+            Ok(lowered) => hierarchy::ElaboratedModule::from_lowered(lowered),
+            // Elaborate the hierarchy below the module before resolving its
+            // hierarchical names.
+            Err(error) if hierarchical_reference_path(&error).is_some() => {
+                hierarchical_modules.push(module_id);
+                specialize_module_declarations(base, &key)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let module = elaborated.entry(module_id).or_insert(module);
+        for instance in module.instances() {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name) {
                 return Err(unsupported_sv_instance(child_key.name.clone()).into());
@@ -2475,33 +2641,96 @@ fn schedule_sources_collecting(
         }
     }
 
+    let keys: HashMap<ModuleId, &LoweredSvModuleKey> =
+        module_ids.iter().map(|(key, &id)| (id, key)).collect();
+    let hierarchy = hierarchy::Hierarchy::new(
+        (&root_key, root_id),
+        &keys,
+        &module_ids,
+        &elaborated,
+        &analyzed,
+    );
+    // The signals that hierarchical names write gain writers outside their
+    // own modules. Collect them from the analyzed modules, independently of
+    // the order the modules are lowered in.
+    let mut references = HashMap::default();
+    let mut analyses = HashMap::default();
+    let mut foreign_writes: HashMap<ModuleId, HashMap<String, hierarchy::ForeignWrites>> =
+        HashMap::default();
+    for &module_id in &hierarchical_modules {
+        let key = keys[&module_id];
+        let mut resolved = hierarchy::resolve(&hierarchy, module_id)?;
+        let ir = loop {
+            let signals: Vec<_> = resolved
+                .iter()
+                .map(|reference| reference.signal.clone())
+                .collect();
+            match analyze_specialization(&analyzed[&key.name], key, &signals, &mut Vec::new()) {
+                Ok(ir) => break ir,
+                // A name with an instance index that is a constant
+                // expression reaches the analysis with the index evaluated.
+                Err(error) => match hierarchical_reference_path(&error) {
+                    Some(path)
+                        if hierarchy::resolve_name(
+                            &hierarchy,
+                            module_id,
+                            &path.split('.').map(str::to_string).collect::<Vec<_>>(),
+                            &mut resolved,
+                        )? => {}
+                    _ => return Err(error.into()),
+                },
+            }
+        };
+        if let Some(module) = ir.modules().iter().find(|module| module.name() == key.name) {
+            hierarchy::collect_foreign_writes(module, &resolved, &mut foreign_writes);
+        }
+        references.insert(module_id, resolved);
+        analyses.insert(module_id, ir);
+    }
+    // The elaboration only served to resolve the hierarchical names.
+    drop(hierarchy);
+    drop(elaborated);
+
     // A combinational loop through an `always @(list)` lowered like
     // `always @*` may converge as a process: demote the lists in the loop
     // and schedule again, until no lowered list takes part in it.
     let no_demotions = HashSet::default();
     let mut demoted: HashMap<ModuleId, HashSet<usize>> = HashMap::default();
     let mut trace = trace;
+    let no_foreign_writes = HashMap::default();
     loop {
+        let mut specialize = |key: &LoweredSvModuleKey,
+                              module_id: ModuleId|
+         -> Result<LoweredSvModule, FrontendError> {
+            let base = analyzed
+                .get(&key.name)
+                .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
+            let level_lists = LevelLists::Lowered {
+                demoted: demoted.get(&module_id).unwrap_or(&no_demotions),
+            };
+            let signals: Vec<_> = references
+                .get(&module_id)
+                .into_iter()
+                .flatten()
+                .map(|reference: &hierarchy::HierarchicalReference| reference.signal.clone())
+                .collect();
+            Ok(specialize_module(
+                base,
+                key,
+                four_state,
+                parallel.enabled(),
+                warnings,
+                level_lists,
+                HierarchicalNames {
+                    signals: &signals,
+                    foreign_writes: foreign_writes.get(&module_id).unwrap_or(&no_foreign_writes),
+                    analyzed: analyses.get(&module_id),
+                },
+            )?)
+        };
         let lowered_modules = module_ids
             .iter()
-            .map(|(key, &module_id)| {
-                let base = analyzed
-                    .get(&key.name)
-                    .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-                let level_lists = LevelLists::Lowered {
-                    demoted: demoted.get(&module_id).unwrap_or(&no_demotions),
-                };
-                let lowered = specialize_module(
-                    base,
-                    key,
-                    four_state,
-                    parallel.enabled(),
-                    warnings,
-                    level_lists,
-                )
-                .map_err(FrontendError::from)?;
-                Ok((module_id, lowered))
-            })
+            .map(|(key, &module_id)| Ok((module_id, specialize(key, module_id)?)))
             .collect::<Result<HashMap<_, _>, FrontendError>>()?;
         validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
         let root = &lowered_modules[&root_id];
@@ -2521,11 +2750,27 @@ fn schedule_sources_collecting(
             &mut HashSet::default(),
         )?;
 
+        // Waits and flip-flop domains of other modules may watch the
+        // signals that hierarchical names reach.
+        let mut hierarchical_targets: HashMap<ModuleId, HashSet<String>> = HashMap::default();
+        for reference in references.values().flatten() {
+            for (module, target) in &reference.targets {
+                hierarchical_targets
+                    .entry(*module)
+                    .or_default()
+                    .insert(target.clone());
+            }
+        }
+        let no_targets = HashSet::default();
         let mut modules = HashMap::default();
         let mut module_names = HashMap::default();
         for (key, &module_id) in &module_ids {
             let lowered = &lowered_modules[&module_id];
             let mut sim_module = lowered.sim_module.clone();
+            if let Some(references) = references.get(&module_id) {
+                sim_module.hierarchical_bindings =
+                    hierarchy::bindings(references, lowered, &lowered_modules)?;
+            }
             attach_instance_glue(
                 &mut sim_module,
                 lowered,
@@ -2535,6 +2780,7 @@ fn schedule_sources_collecting(
                 four_state,
                 allow_inferred_latches,
                 false,
+                hierarchical_targets.get(&module_id).unwrap_or(&no_targets),
                 warnings,
             )?;
             module_names.insert(module_id, key.name.clone());
@@ -2716,6 +2962,60 @@ fn validate_sv_module_graph(
     Ok(())
 }
 
+/// The value, type and pattern parameter bindings of specialization `key`.
+/// Type bindings are already resolved in the caller scope.
+#[allow(clippy::type_complexity)]
+fn specialization_overrides(
+    key: &LoweredSvModuleKey,
+) -> Result<
+    (
+        HashMap<String, sv::ir::ConstExpr>,
+        Vec<(String, sv::ast::Type)>,
+        Vec<(String, sv::ast::BoundPattern)>,
+    ),
+    sv::AnalyzerError,
+> {
+    let overrides = evaluated_parameter_overrides(&key.parameter_overrides)?;
+    let types = key
+        .parameter_overrides
+        .iter()
+        .filter_map(|parameter| Some((parameter.name.clone(), parameter.bound_type.clone()?)))
+        .collect();
+    let patterns = key
+        .parameter_overrides
+        .iter()
+        .filter_map(|parameter| Some((parameter.name.clone(), parameter.bound_pattern.clone()?)))
+        .collect();
+    Ok((overrides, types, patterns))
+}
+
+/// Analyze specialization `key` of `module`, whose hierarchical names denote
+/// `hierarchical`.
+fn analyze_specialization(
+    module: &AnalyzedSvModule,
+    key: &LoweredSvModuleKey,
+    hierarchical: &[sv::ast::HierarchicalSignal],
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+) -> Result<sv::Ir, sv::AnalyzerError> {
+    let (overrides, type_overrides, pattern_overrides) = specialization_overrides(key)?;
+    let analyzed = module.source.analyze_module_with_hierarchy(
+        &module.name,
+        &overrides,
+        &type_overrides,
+        &pattern_overrides,
+        &module.interfaces,
+        &module.packages,
+        hierarchical,
+    );
+    if let Err(error) = &analyzed {
+        warnings.extend(crate::warning::analyzer_warnings(error.warnings()));
+    }
+    let ir = analyzed?;
+    warnings.extend(crate::warning::analyzer_warnings(ir.warnings()));
+    Ok(ir)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn specialize_module(
     module: &AnalyzedSvModule,
     key: &LoweredSvModuleKey,
@@ -2723,32 +3023,19 @@ fn specialize_module(
     ff_parts: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
     level_lists: LevelLists<'_>,
+    hierarchical: HierarchicalNames<'_>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
-    let overrides = evaluated_parameter_overrides(&key.parameter_overrides)?;
-    // Type bindings are already resolved in the caller scope.
-    let type_overrides: Vec<_> = key
-        .parameter_overrides
-        .iter()
-        .filter_map(|parameter| Some((parameter.name.clone(), parameter.bound_type.clone()?)))
-        .collect();
-    let pattern_overrides: Vec<_> = key
-        .parameter_overrides
-        .iter()
-        .filter_map(|parameter| Some((parameter.name.clone(), parameter.bound_pattern.clone()?)))
-        .collect();
-    let analyzed = module.source.analyze_module(
-        &module.name,
-        &overrides,
-        &type_overrides,
-        &pattern_overrides,
-        &module.interfaces,
-        &module.packages,
-    );
-    if let Err(error) = &analyzed {
-        warnings.extend(crate::warning::analyzer_warnings(error.warnings()));
-    }
-    let ir = analyzed?;
-    warnings.extend(crate::warning::analyzer_warnings(ir.warnings()));
+    let analyzed;
+    let ir = match hierarchical.analyzed {
+        Some(ir) => {
+            warnings.extend(crate::warning::analyzer_warnings(ir.warnings()));
+            ir
+        }
+        None => {
+            analyzed = analyze_specialization(module, key, hierarchical.signals, warnings)?;
+            &analyzed
+        }
+    };
     let specialized = ir
         .modules()
         .iter()
@@ -2773,8 +3060,54 @@ fn specialize_module(
         warnings,
         &local_forces,
         level_lists,
+        hierarchical.foreign_writes,
     )?;
-    for instance in &mut lowered.instances {
+    propagate_force_signals(&mut lowered.instances, &key.force_signals);
+    lowered.sim_module.time_precision = Some(
+        celox_design::TimePrecision::try_from(module.packages.global_time_precision())
+            .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
+    );
+    lowered.sim_module.time_scale = scope_time_scale(&module.packages, &module.name)?;
+    Ok(lowered)
+}
+
+/// What hierarchical names (IEEE 1800-2023 23.6) contribute to the
+/// lowering of a specialization.
+#[derive(Clone, Copy)]
+struct HierarchicalNames<'a> {
+    /// The signals of other instances that the module's names denote.
+    signals: &'a [sv::ast::HierarchicalSignal],
+    /// The module's signals that names in other modules write.
+    foreign_writes: &'a HashMap<String, hierarchy::ForeignWrites>,
+    /// The analysis of the module with `signals`, if it is done already.
+    analyzed: Option<&'a sv::Ir>,
+}
+
+impl Default for HierarchicalNames<'_> {
+    fn default() -> Self {
+        static EMPTY: std::sync::LazyLock<HashMap<String, hierarchy::ForeignWrites>> =
+            std::sync::LazyLock::new(HashMap::default);
+        Self {
+            signals: &[],
+            foreign_writes: &EMPTY,
+            analyzed: None,
+        }
+    }
+}
+
+/// The hierarchical name at which the analysis of a module failed, which
+/// needs the specialized hierarchy below it.
+fn hierarchical_reference_path(error: &sv::AnalyzerError) -> Option<&str> {
+    match error {
+        sv::AnalyzerError::HierarchicalReference { path } => Some(path),
+        sv::AnalyzerError::WithWarnings { error, .. } => hierarchical_reference_path(error),
+        _ => None,
+    }
+}
+
+/// Hand each instance the force targets of `force_signals` below it.
+fn propagate_force_signals(instances: &mut [LoweredSvInstance], force_signals: &[String]) {
+    for instance in instances {
         let name = if let Some((index, _)) = instance.array_element {
             format!(
                 "{}[{}]",
@@ -2785,18 +3118,33 @@ fn specialize_module(
             instance.instance_name.clone()
         };
         let prefix = format!("{name}.");
-        instance.force_signals = key
-            .force_signals
+        instance.force_signals = force_signals
             .iter()
             .filter_map(|path| path.strip_prefix(&prefix).map(str::to_string))
             .collect();
     }
-    lowered.sim_module.time_precision = Some(
-        celox_design::TimePrecision::try_from(module.packages.global_time_precision())
-            .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
-    );
-    lowered.sim_module.time_scale = scope_time_scale(&module.packages, &module.name)?;
-    Ok(lowered)
+}
+
+/// The declarations and instances of specialization `key`.
+fn specialize_module_declarations(
+    module: &AnalyzedSvModule,
+    key: &LoweredSvModuleKey,
+) -> Result<hierarchy::ElaboratedModule, sv::AnalyzerError> {
+    let (overrides, type_overrides, pattern_overrides) = specialization_overrides(key)?;
+    let ir = module.source.analyze_module_hierarchy(
+        &module.name,
+        &overrides,
+        &type_overrides,
+        &pattern_overrides,
+        &module.interfaces,
+        &module.packages,
+    )?;
+    let specialized = ir
+        .modules()
+        .iter()
+        .find(|candidate| candidate.name() == module.name)
+        .ok_or_else(|| sv::AnalyzerError::Unsupported(format!("module `{}`", module.name)))?;
+    hierarchy::ElaboratedModule::from_declarations(specialized, &key.force_signals)
 }
 
 fn scope_time_scale(
@@ -2816,6 +3164,7 @@ fn scope_time_scale(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_module(
     module: &sv::ir::Module,
     four_state: bool,
@@ -2824,6 +3173,7 @@ fn lower_module(
     warnings: &mut Vec<crate::warning::PendingWarning>,
     force_signals: &[String],
     level_lists: LevelLists<'_>,
+    foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     lower_module_with_overrides(
         module,
@@ -2834,6 +3184,7 @@ fn lower_module(
         warnings,
         force_signals,
         level_lists,
+        foreign_writes,
     )
 }
 
@@ -2915,21 +3266,9 @@ fn lower_module_with_overrides(
     warnings: &mut Vec<crate::warning::PendingWarning>,
     force_signals: &[String],
     level_lists: LevelLists<'_>,
+    foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
-    let parameter_types = module
-        .imported_parameters()
-        .iter()
-        .chain(module.parameters())
-        .filter_map(|parameter| {
-            Some((
-                parameter.name().to_string(),
-                (
-                    parameter.resolved_width()?,
-                    parameter.resolved_signed().unwrap_or(false),
-                ),
-            ))
-        })
-        .collect();
+    let parameter_types = module_parameter_types(module);
     let constants = module_constants_with_overrides(module, parameter_overrides);
     let fallbacks = module
         .ff_processes()
@@ -2963,8 +3302,21 @@ fn lower_module_with_overrides(
             });
         }
     }
-    let shared_memories = shared_edge_memories(module, &constants, &parameter_types, warnings);
+    let shared_memories = shared_edge_memories(
+        module,
+        &constants,
+        &parameter_types,
+        foreign_writes,
+        warnings,
+    );
     validate_variable_driver_ranges(module, &constants, &parameter_types, &shared_memories)?;
+    validate_foreign_drivers(
+        module,
+        &constants,
+        &parameter_types,
+        &shared_memories,
+        foreign_writes,
+    )?;
     let scheduled = module
         .ff_processes()
         .iter()
@@ -3097,8 +3449,12 @@ fn lower_module_with_overrides(
             force_control: None,
         };
         name_to_id.insert(signal.name().to_string(), id);
-        // The package's object has its own default value.
-        if (signal.is_net() || type_info.is_4state) && signal.package_variable().is_none() {
+        // The package's object, or the other instance's, has its own
+        // default value.
+        if (signal.is_net() || type_info.is_4state)
+            && signal.package_variable().is_none()
+            && signal.hierarchical().is_none()
+        {
             let written_mask = (BigUint::from(1u8) << type_info.width) - BigUint::from(1u8);
             let value = if signal.is_net() {
                 BigUint::default()
@@ -3300,6 +3656,7 @@ fn lower_module_with_overrides(
             ff_parts,
             &ff_event_roles,
             &shared_memories,
+            foreign_writes,
             &mut repeated_ff_writes,
         )?;
         (
@@ -3340,69 +3697,7 @@ fn lower_module_with_overrides(
         .iter()
         .map(|(&id, variable)| (id, variable.to_symbolic_variable()))
         .collect();
-    let mut instances = Vec::new();
-    for instance in module.instances() {
-        if let Some(condition) = instance.condition() {
-            let condition =
-                sv::typecheck::eval_const_expr_with_types(condition, &constants, &parameter_types)
-                    .ok_or_else(|| {
-                        sv::AnalyzerError::Unsupported(
-                            "unknown conditional-generate condition".to_string(),
-                        )
-                    })?;
-            if condition == 0 {
-                continue;
-            }
-        }
-        // An instance array is one instance per element, all under one name.
-        // Elements are listed from the lowest index up and numbered from the
-        // lower bound, so the hierarchy uses the declared indices; each keeps
-        // its position in declaration order, which decides its connections.
-        let array_index_base = match instance.array_range() {
-            Some((left, right)) => usize::try_from(left.min(right)).map_err(|_| {
-                sv::AnalyzerError::Unsupported(format!(
-                    "module instance array `{}` with a negative index",
-                    instance.name()
-                ))
-            })?,
-            None => 0,
-        };
-        let elements = instance.array_len().map_or(vec![None], |len| {
-            let descending = instance
-                .array_range()
-                .is_some_and(|(left, right)| left >= right);
-            (0..len)
-                .map(|offset| {
-                    let position = if descending { len - 1 - offset } else { offset };
-                    Some((position, len))
-                })
-                .collect()
-        });
-        for array_element in elements {
-            instances.push(LoweredSvInstance {
-                module_name: instance.module_name().to_string(),
-                instance_name: instance.name().to_string(),
-                force_signals: Vec::new(),
-                parameter_overrides: lower_parameter_overrides(
-                    instance,
-                    &constants,
-                    &parameter_types,
-                ),
-                port_connections: instance
-                    .port_connections()
-                    .iter()
-                    .map(|connection| LoweredSvPortConnection {
-                        formal: connection.formal().to_string(),
-                        actual: connection.actual().to_string(),
-                        actual_expr: connection.actual_expr().cloned(),
-                        bound_pattern: connection.bound_pattern().cloned(),
-                    })
-                    .collect(),
-                array_element,
-                array_index_base,
-            });
-        }
-    }
+    let instances = lower_instances(module, &constants, &parameter_types)?;
 
     Ok(LoweredSvModule {
         source: module.clone(),
@@ -3434,6 +3729,7 @@ fn lower_module_with_overrides(
             reset_clock_map,
             processes,
             package_bindings: HashMap::default(),
+            hierarchical_bindings: HashMap::default(),
             counter_slots: Vec::new(),
             pending_slots: Vec::new(),
             comb_alternatives: Vec::new(),
@@ -3500,6 +3796,79 @@ fn evaluated_parameter_overrides(
         evaluated.insert(parameter.name.clone(), value.clone());
     }
     Ok(evaluated)
+}
+
+/// The instances of a specialized module, one per element of an instance
+/// array, without those of false conditional-generate branches.
+fn lower_instances(
+    module: &sv::ir::Module,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Result<Vec<LoweredSvInstance>, sv::AnalyzerError> {
+    let mut instances = Vec::new();
+    for instance in module.instances() {
+        if let Some(condition) = instance.condition() {
+            let condition =
+                sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
+                    .ok_or_else(|| {
+                        sv::AnalyzerError::Unsupported(
+                            "unknown conditional-generate condition".to_string(),
+                        )
+                    })?;
+            if condition == 0 {
+                continue;
+            }
+        }
+        // An instance array is one instance per element, all under one name.
+        // Elements are listed from the lowest index up and numbered from the
+        // lower bound, so the hierarchy uses the declared indices; each keeps
+        // its position in declaration order, which decides its connections.
+        let array_index_base = match instance.array_range() {
+            Some((left, right)) => usize::try_from(left.min(right)).map_err(|_| {
+                sv::AnalyzerError::Unsupported(format!(
+                    "module instance array `{}` with a negative index",
+                    instance.name()
+                ))
+            })?,
+            None => 0,
+        };
+        let elements = instance.array_len().map_or(vec![None], |len| {
+            let descending = instance
+                .array_range()
+                .is_some_and(|(left, right)| left >= right);
+            (0..len)
+                .map(|offset| {
+                    let position = if descending { len - 1 - offset } else { offset };
+                    Some((position, len))
+                })
+                .collect()
+        });
+        for array_element in elements {
+            instances.push(LoweredSvInstance {
+                module_name: instance.module_name().to_string(),
+                instance_name: instance.name().to_string(),
+                force_signals: Vec::new(),
+                parameter_overrides: lower_parameter_overrides(
+                    instance,
+                    constants,
+                    parameter_types,
+                ),
+                port_connections: instance
+                    .port_connections()
+                    .iter()
+                    .map(|connection| LoweredSvPortConnection {
+                        formal: connection.formal().to_string(),
+                        actual: connection.actual().to_string(),
+                        actual_expr: connection.actual_expr().cloned(),
+                        bound_pattern: connection.bound_pattern().cloned(),
+                    })
+                    .collect(),
+                array_element,
+                array_index_base,
+            });
+        }
+    }
+    Ok(instances)
 }
 
 fn lower_parameter_overrides(
@@ -3842,6 +4211,7 @@ pub(crate) fn attach_instance_glue(
     four_state: bool,
     allow_inferred_latches: bool,
     foreign: bool,
+    hierarchical_targets: &HashSet<String>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<(), ParserError> {
     let mut signal_names = lowered.signal_names.clone();
@@ -3975,7 +4345,8 @@ pub(crate) fn attach_instance_glue(
     // An `always_comb` alternative is kept only if a wait or a flip-flop
     // domain counts one of its targets. Within the module, they name its
     // wait terms, its triggers and whole-variable copies of them; beyond
-    // it, ports, instance connections and package variables. Every counter
+    // it, ports, instance connections, package variables and the signals
+    // hierarchical names reach, in either module. Every counter
     // a design declares also keeps nonblocking writes queued, so a design
     // with a nonblocking switch lowers every alternative, and so does a
     // module of a design with foreign modules, which this module does not see.
@@ -4031,6 +4402,12 @@ pub(crate) fn attach_instance_glue(
                 .filter_map(|name| signal_names.get(name).copied()),
         );
         seeds.extend(port_assignments.iter().map(|(target, _)| *target));
+        seeds.extend(module.hierarchical_bindings.keys().copied());
+        seeds.extend(
+            hierarchical_targets
+                .iter()
+                .filter_map(|name| signal_names.get(name).copied()),
+        );
         seeds
     });
     let (comb_blocks, arena, created, comb_observers, comb_sites, comb_alternatives) =
@@ -8751,6 +9128,7 @@ fn lower_ff_processes(
     ff_parts: bool,
     ff_event_roles: &[FfEventRole],
     shared_memories: &HashSet<String>,
+    foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
     repeated_writes: &mut Vec<FfWriteStream>,
 ) -> Result<SvFfBlocks, sv::AnalyzerError> {
     let mut parallel_ff_parts = HashMap::<_, Vec<_>>::default();
@@ -8821,7 +9199,19 @@ fn lower_ff_processes(
             Ok((id, role.kind))
         })
         .collect::<Result<Vec<_>, sv::AnalyzerError>>()?;
-    let mut event_vars = FfEventVars::new(global_events.into_iter());
+    // A hierarchical name denotes another instance's object, whose own
+    // declaration decides how it is sensed there: sense it on copies here.
+    let hierarchical: HashSet<SourceVarId> = module
+        .signals()
+        .iter()
+        .filter(|signal| signal.hierarchical().is_some())
+        .filter_map(|signal| pm.id(signal.name()))
+        .collect();
+    let mut event_vars = FfEventVars::new(
+        global_events
+            .into_iter()
+            .filter(|(id, _)| !hierarchical.contains(id)),
+    );
     // Reflection must retain associations from scheduled host processes too.
     // Resolve sensed roles just as retained FF trigger sets do, including aliases
     // when one authored signal has more than one clock/reset role.
@@ -8838,8 +9228,9 @@ fn lower_ff_processes(
         }
     }
 
-    let edge_memories = edge_only_memories(module, pm.constants, pm.parameter_types);
-    let window_writes = kernel_window_writes(module);
+    let edge_memories =
+        edge_only_memories(module, pm.constants, pm.parameter_types, foreign_writes);
+    let window_writes = kernel_window_writes(module, foreign_writes);
     let random_seeds = process_random_seeds(module);
     for ((index, process), events) in module.ff_processes().iter().enumerate().zip(process_events) {
         let mut events = events
@@ -8966,12 +9357,28 @@ fn runs_as_process(
             .and_then(|r#type| signal_type_from_sv(r#type, constants, parameter_types).ok())
             .is_some_and(|type_info| type_info.width != 1)
     };
+    // A blocking write through a hierarchical name updates the other
+    // instance's object at once, outside that instance's flip-flop commit.
+    let writes_other_instance = || {
+        let mut hierarchical = module
+            .signals()
+            .iter()
+            .filter(|signal| signal.hierarchical().is_some())
+            .peekable();
+        if hierarchical.peek().is_none() {
+            return false;
+        }
+        let mut written = HashSet::default();
+        procedural::written_names_with_calls(module, process.body(), &mut written);
+        hierarchical.any(|signal| written.contains(signal.name()))
+    };
     !process.is_always_ff()
         && (clock_event_from_ff_process(process).is_none()
             || process
                 .events()
                 .iter()
-                .any(|event| multi_bit(event.signal())))
+                .any(|event| multi_bit(event.signal()))
+            || writes_other_instance())
 }
 
 fn clock_event_from_ff_process(process: &sv::ir::FfProcess) -> Option<&sv::ir::FfEvent> {
@@ -9438,6 +9845,24 @@ fn sv_comparison_operand_width(
     )
 }
 
+/// The widths and signedness of the parameters a module can name.
+fn module_parameter_types(module: &sv::ir::Module) -> HashMap<String, (usize, bool)> {
+    module
+        .imported_parameters()
+        .iter()
+        .chain(module.parameters())
+        .filter_map(|parameter| {
+            Some((
+                parameter.name().to_string(),
+                (
+                    parameter.resolved_width()?,
+                    parameter.resolved_signed().unwrap_or(false),
+                ),
+            ))
+        })
+        .collect()
+}
+
 fn module_constants_with_overrides(
     module: &sv::ir::Module,
     parameter_overrides: &[LoweredSvParameterOverride],
@@ -9718,15 +10143,15 @@ mod tests {
             comb_alternatives(&format!("{child}\n{port}")).contains("y"),
             "child output port"
         );
-        // Only ports reach the variables of another module: a hierarchical
-        // reference is rejected, so no wait names them otherwise.
+        // A hierarchical name reaches the variables of another module too.
         let hierarchical = "module Top(input bit [7:0] s);
                Child child(.s(s), .y());
                initial forever @(child.y) ;
              endmodule";
-        let error = try_comb_alternatives(&format!("{child}\n{hierarchical}"))
-            .expect_err("a hierarchical reference is rejected");
-        assert!(error.to_string().contains("child.y"), "{error}");
+        assert!(
+            comb_alternatives(&format!("{child}\n{hierarchical}")).contains("y"),
+            "hierarchical name"
+        );
     }
 
     /// Only the `always @(list)` processes of a combinational loop stay
