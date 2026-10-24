@@ -193,6 +193,7 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("gate primitive instantiation", 457),
     ("undriven net declaration", 460),
     ("non-integer module parameter override", 461),
+    ("nonconstant module parameter override", 461),
     ("always_ff event expression", 464),
     ("package net", 1146),
 ];

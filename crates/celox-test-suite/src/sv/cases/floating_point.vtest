@@ -263,3 +263,97 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "file=[    1.50] expr=[3.0]\nwrite=[1.5e+00]\n"))
+
+; IEEE 1800-2023 6.20.2: untyped parameters take the type of their final value.
+(case real_parameter_overrides_preserve_fractional_values
+  (source "real_parameter_overrides.sv" #"
+    module Leaf #(parameter P=1)(output wire [63:0] bits,
+        output int truncated, rounded);
+      localparam COUNT_W=$clog2($rtoi(P)+1);
+      localparam logic [COUNT_W-1:0] COUNT=COUNT_W'($rtoi(P));
+      assign bits=$realtobits(P);
+      assign truncated=COUNT;
+      assign rounded=P;
+    endmodule
+    module Negative #(parameter P=-1)(output wire [63:0] bits,
+        output int truncated, rounded);
+      assign bits=$realtobits(P);
+      assign truncated=$rtoi(P);
+      assign rounded=P;
+    endmodule
+    module Relay #(parameter P=2)(output wire [63:0] bits,
+        output int truncated, rounded);
+      Leaf #(.P(P+0.25)) leaf(.bits(bits),.truncated(truncated),.rounded(rounded));
+    endmodule
+    module Top(output wire [63:0] direct_bits, forwarded_bits, negative_bits,
+        output int direct_truncated, direct_rounded,
+        forwarded_truncated, forwarded_rounded,
+        negative_truncated, negative_rounded);
+      localparam PERIOD=6.4;
+      Leaf #(.P(125000/PERIOD)) direct(.bits(direct_bits),.truncated(direct_truncated),
+          .rounded(direct_rounded));
+      Relay #(.P(125000/PERIOD)) forwarded(.bits(forwarded_bits),.truncated(forwarded_truncated),
+          .rounded(forwarded_rounded));
+      Negative #(.P(-2.5)) negative(.bits(negative_bits),.truncated(negative_truncated),
+          .rounded(negative_rounded));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq direct_bits 0x40d312d000000000)
+  (assert_eq forwarded_bits 0x40d312e000000000)
+  (assert_eq negative_bits 0xc004000000000000)
+  (assert_eq direct_truncated 19531) (assert_eq direct_rounded 19531)
+  (assert_eq forwarded_truncated 19531) (assert_eq forwarded_rounded 19532)
+  (assert_eq negative_truncated 0xfffffffe) (assert_eq negative_rounded 0xfffffffd))
+
+(case real_parameter_overrides_keep_declared_conversion_contexts
+  (source "typed_real_parameter_overrides.sv" #"
+    module Typed #(parameter real R=0.0, parameter shortreal S=0.0, parameter int I=0)
+        (output wire [63:0] real_bits, output wire [31:0] short_bits, output int integer_value);
+      assign real_bits=$realtobits(R);
+      assign short_bits=$shortrealtobits(S);
+      assign integer_value=I;
+    endmodule
+    module Top(output wire [63:0] fractional_bits, integer_bits,
+        output wire [31:0] narrowed_bits, negative_zero_bits,
+        output int negative_value, positive_value);
+      localparam real LARGE=16777217.0;
+      Typed #(.R(LARGE/2.0),.S(LARGE),.I(-2.5)) negative(.real_bits(fractional_bits),
+          .short_bits(narrowed_bits),.integer_value(negative_value));
+      Typed #(.R(5),.S(-0.0),.I(2.5)) positive(.real_bits(integer_bits),
+          .short_bits(negative_zero_bits),.integer_value(positive_value));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq fractional_bits 0x4160000010000000)
+  (assert_eq integer_bits 0x4014000000000000)
+  (assert_eq narrowed_bits 0x4b800000)
+  (assert_eq negative_zero_bits 0x80000000)
+  (assert_eq negative_value 0xfffffffd) (assert_eq positive_value 3))
+
+(case real_parameter_overrides_from_math_and_generate_scopes
+  (source "generated_real_parameter_overrides.sv" #"
+    package Values;
+      localparam real STEP=0.25;
+    endpackage
+    module Leaf #(parameter P=0)(output wire [63:0] bits);
+      assign bits=$realtobits(P);
+    endmodule
+    module Top(output wire [191:0] generated_bits,
+        output wire [63:0] math_bits, selected_bits);
+      import Values::*;
+      localparam BASE=$sqrt(2.25);
+      for(genvar i=0;i<3;i++) begin: g
+        Leaf #(.P(BASE+i*STEP)) leaf(.bits(generated_bits[i*64 +: 64]));
+      end
+      Leaf #(.P($sqrt(2.25))) math(.bits(math_bits));
+      Leaf #(.P(1 ? -0.0 : 1.5)) selected(.bits(selected_bits));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq generated_bits 0x40000000000000003ffc0000000000003ff8000000000000)
+  (assert_eq math_bits 0x3ff8000000000000)
+  (assert_eq selected_bits 0x8000000000000000))

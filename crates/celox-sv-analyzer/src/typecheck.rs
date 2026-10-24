@@ -328,6 +328,15 @@ pub fn eval_const_expr_with_types(
     eval_const_expr(&expr, constants)
 }
 
+/// Evaluate a numeric constant expression in a real context.
+///
+/// Integral subexpressions retain their integer arithmetic before conversion.
+/// Callers that only validate a parameter binding should preserve the original
+/// expression so the receiving declaration still supplies its type context.
+pub fn eval_const_real_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> Option<f64> {
+    real::evaluate(expr, constants)
+}
+
 /// Evaluate a literal constant expression without discarding four-state masks.
 pub fn eval_const_integral_literal_with_types(
     expr: &ConstExpr,
