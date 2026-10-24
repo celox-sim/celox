@@ -6303,11 +6303,10 @@ fn scope_randomize_validates_variable_arguments() {
         ("bit value[2];", "randomize(value)"),
         ("wire value;", "randomize(value)"),
         ("const bit value = 1;", "randomize(value)"),
-        ("enum bit [1:0] {A=0, B=3} value;", "randomize(value)"),
-        (
-            "typedef enum bit [1:0] {A=0, B=3} E; E value;",
-            "std::randomize(value)",
-        ),
+        ("real value;", "randomize(value)"),
+        ("string value;", "randomize(value)"),
+        ("class C; endclass C value;", "randomize(value)"),
+        ("enum bit [1:0] {A=3, B} value;", "randomize(value)"),
         ("bit value;", "std::randomize(value) with {value == 1;}"),
     ] {
         let source = format!("module Top; {declaration} bit ok; initial ok = {call}; endmodule");
