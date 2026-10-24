@@ -18,4 +18,4 @@ pre-push:
     # builds, and documentation builds remain required in GitHub Actions.
     cargo-check:
       priority: 3
-      run: cargo check --workspace --locked
+      run: cargo check --workspace --exclude lydite-celox --locked
