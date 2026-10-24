@@ -1,7 +1,1 @@
-Revision history for #1872:
-
-rev 3 (rebase) 2026-10-24 18:09 UTC — Rebased onto the revised #1850.
-rev 2 (content) 2026-10-24 11:45 UTC — Review: every writer is kept; overlapping writers conflict when one of them must be the only writer, so always_ff against an always of another instance is rejected.
-rev 1 (initial) 2026-10-24 11:45 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":1872,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"a93c2e6938493338aa1afefbc3f3d9e439d5813f","timestamp_iso":"2026-10-24T11:45:12Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"a93c2e6938493338aa1afefbc3f3d9e439d5813f","new_sha":"3f205620f6070c8b3f56881180ae29fa7697cc42","timestamp_iso":"2026-10-24T11:45:12Z","reason":"Review: every writer is kept; overlapping writers conflict when one of them must be the only writer, so always_ff against an always of another instance is rejected.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/a93c2e6938493338aa1afefbc3f3d9e439d5813f...3f205620f6070c8b3f56881180ae29fa7697cc42"},{"number":3,"change_type":"rebase","old_sha":"3f205620f6070c8b3f56881180ae29fa7697cc42","new_sha":"fd7a7c39343610bf3ee64616fd2454781738e124","timestamp_iso":"2026-10-24T18:09:38Z","reason":"Rebased onto the revised #1850.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/3f205620f6070c8b3f56881180ae29fa7697cc42...fd7a7c39343610bf3ee64616fd2454781738e124"}]} -->
+Rebased onto master with class enum randomization (#1859 and earlier); class test files merged and the Verilator/Icarus class reports regenerated.
