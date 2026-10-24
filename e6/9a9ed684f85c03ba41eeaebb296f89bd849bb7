@@ -1,0 +1,1 @@
+Fix CI expectation drift: review official sv-tests artifacts and promote tagged/packed.sv from fail to pass in both state modes; all 2054 verdicts match.
