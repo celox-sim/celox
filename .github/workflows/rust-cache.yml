@@ -53,6 +53,47 @@ jobs:
       - name: Build test targets to populate dependencies
         if: steps.cache.outputs.cache-hit != 'true'
         run: >-
-          cargo nextest list --locked --workspace --message-format json
+          cargo nextest list --locked --workspace --exclude 'lydite*' --message-format json
           --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/runtime-cases
           > /dev/null
+
+  rust-default-tests:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: Populate default-feature dependency cache
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+      - name: Build default-feature library test dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo test --locked -p celox --lib --no-run
+
+  napi-windows:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: Populate Windows NAPI dependency cache
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+      - uses: pnpm/action-setup@v6
+        if: steps.cache.outputs.cache-hit != 'true'
+      - uses: actions/setup-node@v7
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build NAPI with the CI command
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: pnpm run build:napi
