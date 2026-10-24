@@ -1,0 +1,1 @@
+Fix P1: preserve destination assignment sizing before checked tagged-member write temporaries; add width, part-select and signed regression coverage.
