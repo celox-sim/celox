@@ -829,6 +829,7 @@ impl<B: SimBackend> Simulator<B> {
                 inactive,
                 nba_queue,
                 domain_counters,
+                ..ProcessState::default()
             },
         ))
     }

@@ -4537,6 +4537,7 @@ fn lower_initial_processes(
                 is_initializer: process.is_initializer(),
                 requires_timed_simulation: process.is_scheduled_edge(),
                 const_delays: false,
+                program: None,
                 resume: declare("resume", PROCESS_RESUME_WIDTH),
                 status: declare("status", PROCESS_STATUS_WIDTH),
                 delay: declare("delay", PROCESS_DELAY_WIDTH),

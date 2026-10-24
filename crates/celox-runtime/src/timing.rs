@@ -154,6 +154,10 @@ pub struct NbaSiteRefs {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessRefs {
     pub is_initializer: bool,
+    /// The status slot naming the program instance of a program kernel
+    /// ([`celox_design::ProcessSlots::program`]), which runs in the reactive
+    /// region set.
+    pub program: Option<SignalRef>,
     pub resume: SignalRef,
     /// A converted edge procedure starts by registering its event control
     /// before scheduled time-zero inputs are applied.
@@ -172,6 +176,7 @@ impl ProcessRefs {
     pub fn new(status: SignalRef, delay: SignalRef) -> Self {
         Self {
             is_initializer: false,
+            program: None,
             resume: status,
             starts_with_event_wait: false,
             status,
@@ -333,6 +338,15 @@ pub struct ProcessState {
     pub inactive: std::collections::BTreeSet<usize>,
     /// Queued nonblocking assignments, in issue order.
     pub nba_queue: Vec<NbaUpdate>,
+    /// Program processes ready to run in the Reactive region of the current
+    /// time (IEEE 1800-2023 4.4.2.6).
+    pub reactive: std::collections::BTreeSet<usize>,
+    /// Program processes that resume in the Re-Inactive region (`#0`,
+    /// 4.4.2.7).
+    pub re_inactive: std::collections::BTreeSet<usize>,
+    /// Nonblocking assignments of program processes for the Re-NBA region
+    /// (4.4.2.8), in issue order.
+    pub re_nba_queue: Vec<NbaUpdate>,
     /// Counter values each counted domain last triggered on, by counted
     /// signal index and kind.
     pub domain_counters: Vec<[u32; 3]>,

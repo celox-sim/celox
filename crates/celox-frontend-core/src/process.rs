@@ -368,6 +368,13 @@ impl ProcessKernelBuilder {
         self.end(ProcessStatus::Finish);
     }
 
+    /// End the kernel and the other kernels of its program instance
+    /// (`$exit`, IEEE 1800-2023 24.7). No block is open afterwards.
+    pub fn exit(&mut self) {
+        self.wait_site = None;
+        self.end(ProcessStatus::Exit);
+    }
+
     /// Complete the kernel. If a block is still open, the process ends there.
     pub fn build(mut self) -> ExecutionUnit<RegionedSourceAddr> {
         if self.builder.has_open_block() {
