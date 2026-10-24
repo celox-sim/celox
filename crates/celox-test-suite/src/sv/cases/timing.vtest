@@ -2680,3 +2680,26 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (top Top)
   (run_to_finish)
   (expect_output "n=2\n"))
+
+; A pulse of a counted variable while the condition is false is consumed:
+; the condition turning true later wakes no process (IEEE 1800-2023
+; 9.4.2.3), with a condition judged after settling and with one judged at
+; the write.
+(case iff_conditions_consume_occurrences_while_false
+  (source "iff_consumed.sv" #"
+                module Top;
+                  bit y, z, en, m = 1;
+                  int n, k;
+                  initial forever begin @(posedge y iff (en & m)); n++; end
+                  initial forever begin @(posedge z iff en); k++; end
+                  initial begin
+                    #1 y = 1; y = 0; z = 1; z = 0;
+                    #1 en = 1;
+                    #1 $display("n=%0d k=%0d", n, k);
+                    $finish;
+                  end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "n=0 k=0\n"))
