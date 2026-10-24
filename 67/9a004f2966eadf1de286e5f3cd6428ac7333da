@@ -1,1 +1,6 @@
-Rebase on current master d34520d60d at user request, including1907 moving compilation scaling checks to CodSpeed so ordinary CI no longer runs the expensive scaling cases. Preserve the existing PR identities and dependency order.
+Revision history for #1913:
+
+rev 2 (rebase) 2026-10-24 17:57 UTC — Rebase on current master d34520d60d at user request, including1907 moving compilation scaling checks to CodSpeed so ordinary CI no longer runs the expensive scaling cases. Preserve the existing PR identities and dependency order.
+rev 1 (initial) 2026-10-24 17:57 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1913,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"1ec48bbdd5b57a5171ba3711e7d2a5efc8e8bb2e","timestamp_iso":"2026-10-24T17:57:18Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"1ec48bbdd5b57a5171ba3711e7d2a5efc8e8bb2e","new_sha":"679a004f2966eadf1de286e5f3cd6428ac7333da","timestamp_iso":"2026-10-24T17:57:18Z","reason":"Rebase on current master d34520d60d at user request, including1907 moving compilation scaling checks to CodSpeed so ordinary CI no longer runs the expensive scaling cases. Preserve the existing PR identities and dependency order.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/1ec48bbdd5b57a5171ba3711e7d2a5efc8e8bb2e...679a004f2966eadf1de286e5f3cd6428ac7333da"}]} -->
