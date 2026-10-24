@@ -421,6 +421,11 @@ impl Plan {
             let term = &process.waits[0].first();
             let wait = (|| -> Result<Wait, &'static str> {
                 let term = term.ok_or("the process waits for a level")?;
+                // The compiled wait tests the edge alone (IEEE 1800-2023
+                // 9.4.2.3: an `iff` condition is judged at the occurrence).
+                if term.gate.is_some() {
+                    return Err("the process waits with an iff condition");
+                }
                 if process
                     .waits
                     .iter()
