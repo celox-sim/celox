@@ -1,0 +1,6 @@
+Revision history for #1850:
+
+rev 2 (content) 2026-10-24 07:16 UTC — Rebased onto the revised #1796/#1810 and master; class resolution keeps the visibility rule of #1796.
+rev 1 (initial) 2026-10-24 07:16 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1850,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"85455f4c502d101da856a644d4ed6aae21964059","timestamp_iso":"2026-10-24T07:16:43Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"85455f4c502d101da856a644d4ed6aae21964059","new_sha":"6de9ff1cce4909fe6858ff7c321ca23f239299dd","timestamp_iso":"2026-10-24T07:16:43Z","reason":"Rebased onto the revised #1796/#1810 and master; class resolution keeps the visibility rule of #1796.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/85455f4c502d101da856a644d4ed6aae21964059...6de9ff1cce4909fe6858ff7c321ca23f239299dd"}]} -->
