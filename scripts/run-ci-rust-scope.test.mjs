@@ -35,6 +35,26 @@ test("empty or invalid plans cannot silently pass CI", () => {
   assert.throws(() => cargoCommands("test", builds, ""));
 });
 
+test("runtime loading is enabled only for Celox test builds, without changing scope", () => {
+  const original = structuredClone(builds);
+  const tests = cargoCommands("test", builds, filter);
+  const lint = cargoCommands("lint", builds, filter);
+  assert.equal(tests[0][tests[0].indexOf("--features") + 1], "celox-test-suite/icarus");
+  assert.equal(tests[1][tests[1].indexOf("--features") + 1],
+    "celox/systemverilog,celox-test-suite/runtime-cases");
+  assert.equal(lint[1][lint[1].indexOf("--features") + 1], "celox/systemverilog");
+  assert.deepEqual(builds, original);
+});
+
+test("Celox CI tests reject missing executor setup before launching Cargo", () => {
+  const result = spawnSync(process.execPath, ["scripts/run-ci-rust-scope.mjs", "test"], {
+    env: { ...process.env, BUILDS: JSON.stringify([builds[1]]), FILTER: filter,
+      CELOX_VTEST_RUNNER: "" }, encoding: "utf8",
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /require the prepared vtest executor/);
+});
+
 test("the runner stops and propagates a failed scoped Cargo invocation", () => {
   const directory = mkdtempSync(join(tmpdir(), "celox-cargo-failure-"));
   try {

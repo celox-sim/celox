@@ -2,6 +2,8 @@
 #![forbid(unsafe_code)]
 
 mod backend;
+#[cfg(feature = "runtime-cases")]
+mod runtime_cases;
 mod scalar;
 pub mod script;
 pub mod sv;
