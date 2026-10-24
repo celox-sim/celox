@@ -248,11 +248,11 @@ test("queue CI retains the whole workspace and ordinary PRs use scoped tests", (
   // Anything but an explicit scope, including a failed detection, runs all.
   assert.match(
     rust,
-    /name: Run workspace tests with CI features\n        if: needs\.changes\.outputs\.rust_full != 'false'\n/,
+    /name: Run workspace tests with CI features\n        id: workspace-tests\n        if: needs\.changes\.outputs\.rust_full != 'false'\n/,
   );
   assert.match(
     rust,
-    /name: Run the tests this pull request can affect\n        if: needs\.changes\.outputs\.rust_full == 'false' && /,
+    /name: Run the tests this pull request can affect\n        id: scoped-tests\n        if: needs\.changes\.outputs\.rust_full == 'false' && /,
   );
   assert.match(
     job("changes"),
@@ -381,6 +381,12 @@ test("cache warming shares the Rust Tests key and builds without running tests",
     /pull_request:|cargo nextest run|cargo test|shared-key:/,
   );
   assert.match(warm, /steps.cache.outputs.cache-hit != 'true'/);
+  for (const text of [warm, job("rust-tests")]) {
+    assert.match(text, /key: vtest-v1/);
+    assert.match(text, /run: node scripts\/run-vtest.mjs --prepare-ci/);
+  }
+  assert.match(warm, /name: Build the optimized vtest executor to populate dependencies\n        if: steps.cache.outputs.cache-hit != 'true'/);
+  assert.match(warm, /"scripts\/run-vtest.mjs"/);
   assert.match(
     warm,
     /cargo nextest list --locked --workspace --message-format json/,
@@ -408,7 +414,7 @@ function cargoArguments(jobName, stepName, env) {
       features: (env.FEATURES ?? "").split(",").filter(Boolean),
     }]);
     const result = spawnSync("bash", ["-e", "-c", script], {
-      env: { ...process.env, ...env, BUILDS: builds, PATH: `${directory}:${process.env.PATH}` }, encoding: "utf8",
+      env: { ...process.env, CELOX_VTEST_RUNNER: "/ci/vtest-exec", ...env, BUILDS: builds, PATH: `${directory}:${process.env.PATH}` }, encoding: "utf8",
     });
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
@@ -425,7 +431,7 @@ test("scoped Cargo commands build only the selected integration targets", () => 
   };
   assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", env), [
     "nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass",
-    "-p", "celox", "--features", "celox/systemverilog",
+    "-p", "celox", "--features", "celox/systemverilog,celox-test-suite/runtime-cases",
     "--test", "flip_flop", "--test", "systemverilog", "-E", env.FILTER,
   ]);
   assert.deepEqual(cargoArguments("lint", "Lint the crates this pull request can affect", env), [
@@ -438,6 +444,43 @@ test("scoped Cargo commands build only the selected integration targets", () => 
   assert.deepEqual(cargoArguments("lint", "Build the API documentation this pull request can affect", {
     LIBRARIES: "celox-runtime celox",
   }), ["doc", "--locked", "--no-deps", "-p", "celox-runtime", "-p", "celox"]);
+});
+
+test("CI prepares one executor for full runs and scopes containing Celox", () => {
+  const rust = job("rust-tests");
+  const step = rust.split("      - name: Build the optimized vtest executor\n")[1]
+    .split("\n      #")[0];
+  assert.match(step, /if: needs.changes.outputs.rust_full != 'false' \|\| contains\(format\(' \{0\} ', needs.changes.outputs.rust_packages\), ' celox '\)/);
+  assert.match(step, /run: node scripts\/run-vtest.mjs --prepare-ci/);
+  assert.ok(rust.indexOf("Build the optimized vtest executor") < rust.indexOf("Run workspace tests"));
+  assert.match(rust, /cargo nextest run[^\n]*\n[^\n]*celox-test-suite\/runtime-cases/);
+  assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", {
+    PACKAGES: "celox-heap", FEATURES: "", TARGETS: "", FILTER: "package(celox-heap)",
+    CELOX_VTEST_RUNNER: "",
+  }), ["nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass",
+    "-p", "celox-heap", "-E", "package(celox-heap)"]);
+});
+
+test("CI reports each Rust run to Mergify without weakening test failures", () => {
+  const rust = job("rust-tests");
+  assert.match(rust, /CELOX_CI_REPORT_DIR: work\/ci-reports\/rust/);
+  assert.match(rust, /HAS_MERGIFY_TOKEN: \$\{\{ secrets.MERGIFY_TOKEN != '' \}\}/);
+  assert.match(rust, /run: node scripts\/ci-rust-reports.mjs reset/);
+  assert.match(rust, /name: Collect Rust test reports\n        if: success\(\) \|\| failure\(\)/);
+  assert.match(rust, /run: node scripts\/ci-rust-reports.mjs collect/);
+  assert.match(rust, /name: Run workspace tests with CI features\n        id: workspace-tests/);
+  assert.match(rust, /name: Run the tests this pull request can affect\n        id: scoped-tests/);
+  assert.doesNotMatch(rust, /continue-on-error/);
+  const upload = rust.split("      - name: Upload Rust test results to Mergify\n")[1]
+    .split("\n      #")[0];
+  assert.match(upload, /if: \(success\(\) \|\| failure\(\)\) && env.HAS_MERGIFY_TOKEN == 'true' && hashFiles\('work\/ci-reports\/rust\/\*.xml'\) != ''/);
+  assert.match(upload, /uses: mergifyio\/gha-mergify-ci@[0-9a-f]{40} # v27/);
+  assert.match(upload, /report_path: work\/ci-reports\/rust\/\*.xml/);
+  assert.match(upload, /job_name: rust-tests/);
+  assert.match(upload, /test_step_outcome: .*steps.workspace-tests.outcome.*steps.scoped-tests.outcome/);
+  assert.match(rust, /name: rust-test-results\n          path: work\/ci-reports\/rust\/\*.xml\n          retention-days: 14/);
+  const nextest = readFileSync(new URL("../.config/nextest.toml", import.meta.url), "utf8");
+  assert.match(nextest, /\[profile.ci.junit\]\npath = "junit.xml"/);
 });
 
 test("scoped checks preserve full-run fallbacks and use their own package scopes", () => {

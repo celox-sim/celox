@@ -363,7 +363,10 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
 
 /// Run the suite case `name` on `backend`. The SV frontend is recursive, so
 /// the case runs on a thread with room on its stack.
-pub fn run_case(name: &'static str, backend: &'static str) {
+pub fn run_case(name: &str, backend: &str) {
+    if super::vtest_exec::dispatch("sv", name, backend) {
+        return;
+    }
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)

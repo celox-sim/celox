@@ -166,6 +166,12 @@ incremental   = true
 [profile.bench]
 debug = true
 
+# Optimize the shared vtest executor while keeping development checks enabled.
+# External dependencies retain the dev profile's package-specific optimization.
+[profile.vtest]
+inherits = "dev"
+opt-level = 1
+
 # Profile for wasm-pack builds. LTO is disabled to avoid a known issue
 # where proc-macro dependencies (syn) get incorrectly compiled for the
 # wasm32 target under full LTO.
