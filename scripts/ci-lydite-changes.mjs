@@ -6,7 +6,7 @@ import { changedFilesBetween, readWorkspace } from "./ci-rust-scope.mjs";
 
 export const isLydite = (name) =>
   name === "lydite" || name.startsWith("lydite-");
-const all = () => ({ core: true, bridge: true });
+const all = () => ({ core: true });
 
 // Cargo.lock's `[[package]]` entries, keyed by "name version", with the names
 // each one depends on.
@@ -40,7 +40,7 @@ export function lockChanges(baseText, headText) {
 
 // Follow actual Cargo edges, including optional, build and dev dependencies.
 // Celox consumes none of the proof engine; only lydite-celox consumes Celox.
-// `lock` is lockChanges() of the diff; without it a Cargo.lock edit runs both.
+// `lock` is lockChanges() of the diff; without it a Cargo.lock edit runs core checks.
 export function lyditeScope(files, packages, lock = null) {
   if (files === null) return all();
   const byName = new Map(packages.map((pkg) => [pkg.name, pkg]));
@@ -61,8 +61,7 @@ export function lyditeScope(files, packages, lock = null) {
     .filter((p) => isLydite(p.name) && p.name !== "lydite-celox")
     .map((p) => p.name);
   const core = closure(coreRoots);
-  const bridge = closure(["lydite-celox"]);
-  const result = { core: false, bridge: false };
+  const result = { core: false };
   const owners = [...packages].sort((a, b) => b.dir.length - a.dir.length);
   for (const raw of files) {
     const path = raw.replace(/^\.\//, "");
@@ -75,7 +74,6 @@ export function lyditeScope(files, packages, lock = null) {
         return [...lock.changed].some((name) => seen.has(name));
       };
       result.core ||= reaches(coreRoots);
-      result.bridge ||= reaches(["lydite-celox"]);
       continue;
     }
     if (
@@ -111,7 +109,6 @@ export function lyditeScope(files, packages, lock = null) {
       )
         continue;
       result.core ||= core.has(owner.name);
-      result.bridge ||= bridge.has(owner.name);
     } else if (
       ["crates/", "vendor/", "testdata/", "conformance/"].some((prefix) =>
         path.startsWith(prefix),
@@ -125,21 +122,9 @@ export function lyditeScope(files, packages, lock = null) {
   return result;
 }
 
-// Celox dependency changes reach the bridge, but its replay and proof corpus
-// are too heavy for every Celox PR. PRs run the bridge only for Lydite-owned
-// sources; daily runs cover Celox and CI changes and report failures.
-const ownsBridge = (path) =>
-  ["lydite/", "crates/lydite"].some((prefix) =>
-    path.replace(/^\.\//, "").startsWith(prefix),
-  );
-
 export function pullRequestScope(files, packages, lock = null) {
-  // Release PRs and their queue drafts only bump versions.
-  if (files !== null && isVersionOnlyRelease(files))
-    return { core: false, bridge: false };
-  const scope = lyditeScope(files, packages, lock);
-  if (files === null) return scope;
-  return { ...scope, bridge: scope.bridge && files.some(ownsBridge) };
+  if (files !== null && isVersionOnlyRelease(files)) return { core: false };
+  return lyditeScope(files, packages, lock);
 }
 
 // The lockfile at the merge base and at head, as changedFilesBetween compares.

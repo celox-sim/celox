@@ -305,7 +305,7 @@ if (
   });
 }
 
-// Lydite tests are selected independently by lydite-checks.yml, including its bridge.
+// Lydite core tests run independently; bridge CI is disabled.
 export function celoxRustTestScope(files, packages) {
   return rustTestScope(
     files.filter((path) => !/^(?:\.\/)?(?:lydite\/|crates\/lydite(?:-|\/))/.test(path)),
@@ -324,7 +324,10 @@ export function rustScopeOutputs(files) {
       const packages = readWorkspace(root);
       scope = celoxRustTestScope(files, packages);
       // Lydite owns its tests, but lint and API documentation still live here.
-      checks = rustTestScope(files, packages);
+      checks = rustTestScope(
+        files.filter((path) => !/^(?:\.\/)?crates\/lydite-celox\//.test(path)),
+        packages.filter((pkg) => pkg.name !== "lydite-celox"),
+      );
     } catch (error) {
       console.warn(`Unable to scope the Rust tests: ${error.message}`);
     }
