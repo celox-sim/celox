@@ -1,0 +1,164 @@
+{
+  "cases": [
+    {
+      "category": "FourState",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "verification/limitations/xezim.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0 / xezim 0.11.3",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "four_state_expression_semantics::effectful_ternary_takes_known_true_branch_despite_unknown_bits",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "FourState",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "verification/limitations/xezim.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0 / xezim 0.11.3",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "four_state_expression_semantics::ff_procedural_control_uses_known_nonzero_truth",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "FourState",
+      "detail": "four_state_expression_semantics::ff_unknown_reset_is_not_active at 287:7: assert_eq q_low: expected 0x1, got 0x0 (q_low, reset=X)",
+      "expectation": "Simulation",
+      "name": "four_state_expression_semantics::ff_unknown_reset_is_not_active",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "FourState",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "four_state_expression_semantics::indeterminate_short_circuit_lhs_executes_effectful_rhs",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "FourState",
+      "detail": "four_state_expression_semantics::indeterminate_ternary_executes_effectful_arms_in_order at 68:3: assert_eq q_output: expected 0x2, got 0x3",
+      "expectation": "Simulation",
+      "name": "four_state_expression_semantics::indeterminate_ternary_executes_effectful_arms_in_order",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "FourState",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "four_state_expression_semantics::logical_not_known_one_dominates_unknown_bits",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "FourState",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "four_state_expression_semantics::logical_unknown_truth_table_matches_comb_and_ff",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "FourState",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "four_state_expression_semantics::ternary_unknown_condition_merges_branch_bits",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "FourState",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "four_state_expression_semantics::wide_logical_unknown_truth_table_uses_dominant_values",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "FourState",
+      "detail": "four_state_expression_semantics::wide_ternary_condition_known_one_dominates_unknown_bits at 322:7: assert_eq c: expected 0xa5, got 0xX (c, lower unknown bit is X)",
+      "expectation": "Simulation",
+      "name": "four_state_expression_semantics::wide_ternary_condition_known_one_dominates_unknown_bits",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "FourState",
+      "detail": "four_state_expression_semantics::wide_ternary_unknown_condition_merges_every_arm_chunk at 434:5: assert_eq c: expected 0xX000000000000000X000000000000000X, got 0xX000000000000000X000000000000000X (c, cond=X)",
+      "expectation": "Simulation",
+      "name": "four_state_expression_semantics::wide_ternary_unknown_condition_merges_every_arm_chunk",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "FourState",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "four_state_expression_semantics::wide_unaligned_partial_store_and_slice_preserve_four_state_bits",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

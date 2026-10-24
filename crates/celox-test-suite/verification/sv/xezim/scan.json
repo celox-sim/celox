@@ -1,0 +1,48 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "scan::sscanf_integral_fields_and_failure_counts at 24:3: assert_eq ok: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "scan::sscanf_integral_fields_and_failure_counts",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "scan::sscanf_multiple_outputs_and_packed_input",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "scan::sscanf_radix_unknowns_and_unknown_input at 57:3: assert_eq ok: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "scan::sscanf_radix_unknowns_and_unknown_input",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "scan::sscanf_real_fields_width_and_suppression at 79:3: assert_eq ok: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "scan::sscanf_real_fields_width_and_suppression",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

@@ -40,7 +40,8 @@
       "inputs": {
         "nix-packages": "nix-packages",
         "nixpkgs": "nixpkgs",
-        "rust-overlay": "rust-overlay"
+        "rust-overlay": "rust-overlay",
+        "xezim": "xezim"
       }
     },
     "rust-overlay": {
@@ -61,6 +62,23 @@
         "owner": "oxalica",
         "repo": "rust-overlay",
         "rev": "5b9f1198b59bcb31c5c3250b332e7d77590e6306",
+        "type": "github"
+      }
+    },
+    "xezim": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792800355,
+        "narHash": "sha256-hMrSyzLTQZjKaFPwLBRWJy9HRrzF9O28BS7qXePZ8Gg=",
+        "owner": "aionhw",
+        "repo": "xezim",
+        "rev": "058f2bba58648452e5799d17572356ebcae7d163",
+        "type": "github"
+      },
+      "original": {
+        "owner": "aionhw",
+        "repo": "xezim",
+        "rev": "058f2bba58648452e5799d17572356ebcae7d163",
         "type": "github"
       }
     }
