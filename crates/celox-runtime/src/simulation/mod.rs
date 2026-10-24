@@ -454,7 +454,7 @@ impl<B: SimBackend> SimulationState<B> {
         E: SimulationExecutor<Backend = B>,
     {
         self.slot_passes = 0;
-        match self.step_round(executor, time, Vec::new(), Vec::new(), true) {
+        match self.step_round(executor, time, Vec::new(), Vec::new(), true, false) {
             Ok(()) => {
                 self.finish_timed_boundary(executor, time)?;
                 Ok(Some(time))

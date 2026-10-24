@@ -32,7 +32,14 @@ impl<B: SimBackend> SimulationState<B> {
         let Some((lsb, width)) = refs.range(backend) else {
             return Ok(());
         };
-        self.process_state.nba_queue.push(NbaUpdate {
+        // A program process's update waits for the Re-NBA region (IEEE
+        // 1800-2023 24.3.1).
+        let queue = if self.model.processes[process].program.is_some() {
+            &mut self.process_state.re_nba_queue
+        } else {
+            &mut self.process_state.nba_queue
+        };
+        queue.push(NbaUpdate {
             target: refs.target,
             lsb,
             width,
@@ -57,6 +64,7 @@ impl<B: SimBackend> SimulationState<B> {
             self.model
                 .processes
                 .iter()
+                .filter(|process| process.program.is_none())
                 .flat_map(|process| &process.nba_sites)
                 .filter_map(|site| site.pending)
                 .filter(|&pending| backend.get_as::<u8>(pending) != 0)
@@ -88,6 +96,9 @@ impl<B: SimBackend> SimulationState<B> {
         self.process_state.nba_queue = queued;
         if flagged > 0 {
             for process in 0..self.model.processes.len() {
+                if self.model.processes[process].program.is_some() {
+                    continue;
+                }
                 for site in 0..self.model.processes[process].nba_sites.len() {
                     let backend = executor.backend_mut();
                     let Some(pending) = self.model.processes[process].nba_sites[site].pending
@@ -123,6 +134,74 @@ impl<B: SimBackend> SimulationState<B> {
             round.transitions.clear();
         }
         round.track_stable_edges = true;
+        true
+    }
+
+    /// Publish the nonblocking assignments of program processes (the Re-NBA
+    /// region, IEEE 1800-2023 4.4.2.8): the queued ones in issue order, then
+    /// the flagged ones. Like the writes of a process run, each is recorded
+    /// in `round.transitions` for the caller to settle. Returns whether any
+    /// was published.
+    pub(super) fn publish_re_nba<E>(&mut self, executor: &mut E, round: &mut Round) -> bool
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        let flagged = |backend: &B, site: &NbaSiteRefs| {
+            site.pending
+                .is_some_and(|pending| backend.get_as::<u8>(pending) != 0)
+        };
+        let any_flagged = self.model.has_pending_nba_sites
+            && self
+                .model
+                .processes
+                .iter()
+                .filter(|process| process.program.is_some())
+                .flat_map(|process| &process.nba_sites)
+                .any(|site| flagged(executor.backend(), site));
+        if self.process_state.re_nba_queue.is_empty() && !any_flagged {
+            return false;
+        }
+        self.event_values(executor.backend(), &mut round.before);
+        let mut queued = std::mem::take(&mut self.process_state.re_nba_queue);
+        for update in &queued {
+            self.publish_update(
+                executor.backend_mut(),
+                update,
+                NbaValue::Queued(&update.value),
+            );
+            self.record_transitions(executor.backend(), round);
+        }
+        // Keep the queue's storage for the next time slot.
+        queued.clear();
+        self.process_state.re_nba_queue = queued;
+        if any_flagged {
+            for process in 0..self.model.processes.len() {
+                if self.model.processes[process].program.is_none() {
+                    continue;
+                }
+                for site in 0..self.model.processes[process].nba_sites.len() {
+                    let site = self.model.processes[process].nba_sites[site];
+                    let backend = executor.backend_mut();
+                    if !flagged(backend, &site) {
+                        continue;
+                    }
+                    if let Some(pending) = site.pending {
+                        backend.set(pending, 0u8);
+                    }
+                    let Some((lsb, width)) = site.range(backend) else {
+                        continue;
+                    };
+                    let update = NbaUpdate {
+                        target: site.target,
+                        lsb,
+                        width,
+                        value: Value::default(),
+                    };
+                    self.publish_update(backend, &update, NbaValue::Staged(site.value));
+                    self.record_transitions(executor.backend(), round);
+                }
+            }
+        }
         true
     }
 

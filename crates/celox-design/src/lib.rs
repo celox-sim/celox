@@ -291,6 +291,9 @@ pub enum ProcessStatus {
     /// A synchronous host operation. The delay slot holds its family and
     /// local site index; the same process resumes after the host responds.
     HostRequest,
+    /// A program kernel called `$exit` (IEEE 1800-2023 24.7): it and every
+    /// other kernel of its program instance ([`ProcessSlots::program`]) end.
+    Exit,
 }
 
 impl ProcessStatus {
@@ -308,6 +311,7 @@ impl ProcessStatus {
             Self::Yield => 8,
             Self::Stop => 9,
             Self::HostRequest => 10,
+            Self::Exit => 11,
         }
     }
 
@@ -323,6 +327,7 @@ impl ProcessStatus {
             8 => Some(Self::Yield),
             9 => Some(Self::Stop),
             10 => Some(Self::HostRequest),
+            11 => Some(Self::Exit),
             _ => None,
         }
     }
@@ -465,6 +470,12 @@ pub struct ProcessSlots<A> {
     /// Every delay the kernel suspends for is a constant of at least one
     /// time unit.
     pub const_delays: bool,
+    /// For an `initial` procedure of a program instance (IEEE 1800-2023
+    /// 24.3), the status slot of that instance's first such kernel, which
+    /// every kernel of the instance names: the kernel runs in the reactive
+    /// region set (24.3.1), and `$exit` and the end of the instance's
+    /// kernels act on them together (24.7). `None` for design code.
+    pub program: Option<A>,
     pub resume: A,
     pub status: A,
     pub delay: A,
@@ -476,6 +487,7 @@ impl<A> ProcessSlots<A> {
             is_initializer: self.is_initializer,
             requires_timed_simulation: self.requires_timed_simulation,
             const_delays: self.const_delays,
+            program: self.program.map(&mut map),
             resume: map(self.resume),
             status: map(self.status),
             delay: map(self.delay),
@@ -1774,6 +1786,7 @@ mod tests {
             ProcessStatus::from_code(10),
             Some(ProcessStatus::HostRequest)
         );
+        assert_eq!(ProcessStatus::from_code(11), Some(ProcessStatus::Exit));
     }
 
     #[test]
