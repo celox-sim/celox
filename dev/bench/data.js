@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792884954738,
+  "lastUpdate": 1792885205870,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -405611,6 +405611,42 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-celox-tiered-aarch64/heliodor_suite_71_linux_boot_end_to_end",
             "unit": "ms",
             "value": 212716.121758
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "27f96bc5840664273fd3b055f3326cfdd6eec1a9",
+          "message": "perf(runtime)!: compare counted wait baselines in place (#1803)",
+          "timestamp": "2026-10-23T07:45:18Z",
+          "url": "https://github.com/celox-sim/celox/commit/27f96bc5840664273fd3b055f3326cfdd6eec1a9"
+        },
+        "date": 1792885205870,
+        "cpu": "Neoverse-N2",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-tiered-aarch64/heliodor_suite_71_linux_boot_startup",
+            "unit": "ms",
+            "value": 12040.956862
+          },
+          {
+            "name": "heliodor-veryl-tiered-aarch64/heliodor_suite_71_linux_boot_execution",
+            "unit": "ms",
+            "value": 230069.584325
+          },
+          {
+            "name": "heliodor-veryl-tiered-aarch64/heliodor_suite_71_linux_boot_end_to_end",
+            "unit": "ms",
+            "value": 242110.542187
           }
         ]
       }
