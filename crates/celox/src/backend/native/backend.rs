@@ -410,6 +410,7 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) active_commits: Vec<AbsoluteAddr>,
     pub(crate) time_slots: Vec<AbsoluteAddr>,
     pub(crate) scheduler: Option<celox_design::SchedulerSchema<AbsoluteAddr>>,
+    pub(crate) derived_edges: Vec<celox_design::DerivedEdgeUnits<AbsoluteAddr>>,
 }
 
 /// Pointer-free native compiler artifact which can be attached to the
@@ -526,6 +527,7 @@ impl NativeProgramImage {
                 active_commits: self.runtime_schema.active_commits.clone(),
                 time_slots: self.runtime_schema.time_slots.clone(),
                 scheduler: self.runtime_schema.scheduler.clone(),
+                derived_edges: self.runtime_schema.derived_edges.clone(),
             },
             testbench: self.testbench.clone(),
         }
@@ -621,12 +623,19 @@ impl NativeProgramImage {
                     usize::MAX
                 }
             });
-        if self.process_offsets.len()
-            != self
-                .runtime_schema
-                .processes
-                .len()
-                .saturating_add(scheduler_units)
+        // The derived-edge units follow the kernels and the scheduler.
+        let derived_units = 2 * self.runtime_schema.derived_edges.len();
+        let derived_in_range = self.runtime_schema.derived_edges.iter().all(|units| {
+            units.rising < self.process_offsets.len() && units.falling < self.process_offsets.len()
+        });
+        if !derived_in_range
+            || self.process_offsets.len()
+                != self
+                    .runtime_schema
+                    .processes
+                    .len()
+                    .saturating_add(scheduler_units)
+                    .saturating_add(derived_units)
         {
             return Err("process kernels and their control slots disagree".into());
         }
@@ -2443,6 +2452,7 @@ fn compile_program(
                 active_commits: sir.runtime().runtime_schema.active_commits.clone(),
                 time_slots: sir.runtime().runtime_schema.time_slots.clone(),
                 scheduler: sir.runtime().runtime_schema.scheduler.clone(),
+                derived_edges: sir.runtime().runtime_schema.derived_edges.clone(),
             },
             layout: layout.clone(),
             native_memory_size,

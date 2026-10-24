@@ -2201,6 +2201,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             active_commits,
             time_slots,
             scheduler,
+            derived_edges: Vec::new(),
         },
     };
 

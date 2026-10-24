@@ -540,6 +540,10 @@ pub struct TieredBackend {
     /// first stage adopts a low-latency baseline image, this receiver yields
     /// the optimizing image for an in-place shared-code replacement.
     upgrade_receiver: Option<mpsc::Receiver<Result<CompiledCode, SimulatorError>>>,
+    /// The adopted code has the generated derived-edge units: a single-stage
+    /// image or the optimizing one. The baseline image leaves them out, so
+    /// their build cost lands in the optimizing tier.
+    derived_edges_live: bool,
     /// Evaluate-only events whose apply phase has not run yet. Promotion is
     /// deferred while this is non-zero so the compiled apply phase always
     /// observes the interpreted evaluate-only results through an intact
@@ -799,6 +803,7 @@ impl TieredBackend {
             cancel,
             compiler_worker,
             upgrade_receiver: None,
+            derived_edges_live: false,
             pending_split_applies: 0,
             promotion_threshold,
             interpreted_steps: 0,
@@ -859,6 +864,8 @@ impl TieredBackend {
         let (baseline_sender, baseline_receiver) = mpsc::channel();
         let (upgrade_sender, upgrade_receiver) = mpsc::channel();
         let background_laid_out = laid_out.clone();
+        // The baseline image runs derived edges by walking their plans.
+        let baseline_laid_out = crate::derived_edge::without_units(laid_out);
         let worker_baseline_options = baseline_options.clone();
         // A failed spawn keeps the interpreter as the permanent tier with the
         // reason recorded, matching the single-stage background-failure policy.
@@ -868,11 +875,7 @@ impl TieredBackend {
                 let span = tracing::info_span!("celox.tiered.compile", target = "native");
                 span.in_scope(|| {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        compile(
-                            &background_laid_out,
-                            &worker_baseline_options,
-                            &worker_cancel,
-                        )
+                        compile(&baseline_laid_out, &worker_baseline_options, &worker_cancel)
                     }))
                     .unwrap_or_else(|_| {
                         Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
@@ -929,6 +932,7 @@ impl TieredBackend {
             cancel,
             compiler_worker,
             upgrade_receiver: Some(upgrade_receiver),
+            derived_edges_live: false,
             pending_split_applies: 0,
             promotion_threshold,
             interpreted_steps: 0,
@@ -1141,6 +1145,8 @@ impl TieredBackend {
                 }
             }
             self.phase = Phase::Compiled(compiled);
+            // A second stage still to come means this is the baseline image.
+            self.derived_edges_live = self.upgrade_receiver.is_none();
             self.promotion = Promotion::Promoted;
             self.promoted_after_interpreted_steps = Some(self.interpreted_steps);
             if let Some(timing) = &mut self.execution_timing
@@ -1205,6 +1211,7 @@ impl TieredBackend {
             && compiled.replace_native_code(code)
         {
             tracing::info!("tiered backend adopted optimizing native code");
+            self.derived_edges_live = true;
         }
     }
 }
@@ -1223,6 +1230,10 @@ impl SimBackend for TieredBackend {
     /// runtime's loop.
     fn runs_compiled_scheduler(&self) -> bool {
         matches!(self.phase, Phase::Compiled(_))
+    }
+
+    fn runs_derived_edge_units(&self) -> bool {
+        matches!(self.phase, Phase::Compiled(_)) && self.derived_edges_live
     }
 
     type Event = TieredEventRef;
