@@ -30,7 +30,7 @@ impl ModuleIndex {
         for handle in tree.root_scopes()? {
             let scoped = tree.scoped(handle)?;
             let unit = scoped.root_unit()?;
-            if unit.kind != celox_sv_syntax::UnitKind::Module
+            if !unit.kind.is_module_like()
                 || unit.port_style == celox_sv_syntax::PortStyle::Wildcard
             {
                 continue;
@@ -51,11 +51,11 @@ impl ModuleIndex {
             }
         }
         if let Some(declarations) = declarations {
-            use celox_sv_syntax::{PortKind, PortStyle, UnitKind};
+            use celox_sv_syntax::{PortKind, PortStyle};
             let units = declarations
                 .all_units()
                 .filter(|unit| {
-                    unit.kind == UnitKind::Module
+                    unit.kind.is_module_like()
                         && !unit.external
                         && unit.port_style != PortStyle::Wildcard
                 })

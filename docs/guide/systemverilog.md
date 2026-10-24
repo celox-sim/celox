@@ -79,7 +79,7 @@ The main supported areas are:
 
 | Area | Examples |
 | --- | --- |
-| Design structure | Modules, hierarchy, parameters, generate blocks, packages, interfaces and modports |
+| Design structure | Modules, hierarchy, parameters, generate blocks, packages, interfaces and modports, and programs, whose procedures run in the reactive region set |
 | Data | Packed vectors, multidimensional packed arrays, structs, enums and unpacked memories |
 | RTL processes | `assign`, `always_comb`, `always @*`, blocking `always_latch`, edge-triggered `always` and `always_ff` |
 | Timed processes | `initial` and `always` with `#delay` (also time literals such as `#5ns`), `@(...)` on variables, edges, selects, expressions and `@*`, `wait (...)`, nonblocking assignments and task calls with timing controls |

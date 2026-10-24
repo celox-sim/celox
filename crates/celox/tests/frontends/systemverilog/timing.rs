@@ -48,6 +48,20 @@ macro_rules! timed_cases {
     };
 }
 
+// Program blocks (IEEE 1800-2023 Clause 24) and the reactive region set.
+timed_cases! {
+    fn program_reads_design_after_nonblocking_updates_settle = "program::program_reads_design_after_nonblocking_updates_settle";
+    fn program_nonblocking_updates_follow_design_updates = "program::program_nonblocking_updates_follow_design_updates";
+    fn program_zero_delay_resumes_in_the_re_inactive_region = "program::program_zero_delay_resumes_in_the_re_inactive_region";
+    fn design_activity_of_a_program_waits_for_the_reactive_region_set = "program::design_activity_of_a_program_waits_for_the_reactive_region_set";
+    fn program_exit_ends_its_initial_procedures = "program::program_exit_ends_its_initial_procedures";
+    fn simulation_ends_when_program_procedures_end = "program::simulation_ends_when_program_procedures_end";
+    fn program_ports_connect_to_design_nets = "program::program_ports_connect_to_design_nets";
+    fn programs_reject_always_procedures = "program::programs_reject_always_procedures";
+    fn programs_reject_instances = "program::programs_reject_instances";
+    fn program_waits_see_host_driven_edges_after_design_updates = "program::program_waits_see_host_driven_edges_after_design_updates";
+}
+
 timed_cases! {
     fn timed_task_automatic_scalar_calls_keep_separate_storage = "timing::timed_task_automatic_scalar_calls_keep_separate_storage";
     fn timed_task_four_state_storage_survives_suspension = "timing::timed_task_four_state_storage_survives_suspension";
@@ -1030,4 +1044,113 @@ fn nonblocking_assignments_to_reversed_array_slices_reverse_the_elements() {
     sim.run_until(2).unwrap();
     // m[1:0] <= w writes w[0] to m[1], as m[3:2] = w writes w[0] to m[3].
     assert_eq!(sim.get(sim.signal("elements")), 0xaabb_aabbu32.into());
+}
+
+/// A program that executes `$stop` leaves its other procedures of the time
+/// slot in the reactive region set (IEEE 1800-2023 24.3.1, 20.2). The
+/// simulation cannot be saved there; continued, the slot runs its Re-Inactive
+/// and Re-NBA regions and then the design activity they create (4.5), which
+/// leaves the reactive region set empty, so a state file saved then resumes as
+/// the uninterrupted simulation does.
+#[test]
+fn programs_continue_after_a_stop_and_survive_a_state_file() {
+    let source = r#"
+        module Top(output bit [7:0] a, b, c);
+            timeunit 1ns / 1ns;
+            bit go;
+            always @(posedge go) c <= c + 8'd1;
+            Tb t(a, b, go);
+        endmodule
+        program Tb(output bit [7:0] a, b, output bit go);
+            timeunit 1ns / 1ns;
+            initial begin #1 $stop; a = 1; #0 a = 2; b <= 3; go = 1; #2 go = 0; #1 go = 1; end
+            initial begin #1 b = 4; #0 b = 5; end
+            // Keeps the program running past the stop.
+            initial forever #1;
+        endprogram
+    "#;
+    let build = |four_state: bool| {
+        celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("reactive_state.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap()
+    };
+    let through_bytes = |file: &celox::StateFile| {
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        celox::StateFile::read_from(bytes.as_slice()).unwrap()
+    };
+    let values = |sim: &mut celox::Simulation| {
+        ["a", "b", "c"].map(|name| {
+            let signal = sim.signal(name);
+            sim.get(signal)
+        })
+    };
+    for four_state in [false, true] {
+        let mut whole = build(four_state);
+        whole.run_until(10).unwrap();
+        assert!(whole.is_stopped(), "four_state={four_state}");
+        assert!(whole.save_state().is_err(), "four_state={four_state}");
+        whole.run_until(1).unwrap();
+        // The Re-NBA update `b <= 3` follows `#0 b = 5`, and the flip-flop the
+        // program clocks runs after both.
+        assert_eq!(
+            values(&mut whole),
+            [2u8.into(), 3u8.into(), 1u8.into()],
+            "four_state={four_state}"
+        );
+        let file = through_bytes(&whole.save_state().unwrap());
+        let mut loaded = build(four_state);
+        loaded.load_state(&file).unwrap();
+        assert_eq!(
+            through_bytes(&loaded.save_state().unwrap()),
+            file,
+            "four_state={four_state}"
+        );
+        whole.run_until(10).unwrap();
+        loaded.run_until(10).unwrap();
+        let expected = values(&mut whole);
+        assert_eq!(expected[2], 2u8.into(), "four_state={four_state}");
+        assert_eq!(values(&mut loaded), expected, "four_state={four_state}");
+    }
+}
+
+/// A design process that a program's write wakes runs in the active region
+/// set with the flip-flop that write clocks, before the nonblocking update
+/// (IEEE 1800-2023 4.5): it reads the flip-flop's old value, as Icarus 13.0,
+/// Verilator 5.052 and xezim 0.11.3 do.
+#[test]
+fn design_processes_a_program_wakes_run_before_the_nonblocking_updates() {
+    let source = r#"
+        module Top(output logic [7:0] seen, q);
+            timeunit 1ns / 1ns;
+            wire go;
+            initial q = 0;
+            always_ff @(posedge go) q <= q + 8'd1;
+            always @(posedge go) seen = q;
+            P p(go);
+        endmodule
+        program P(output logic go);
+            timeunit 1ns / 1ns;
+            initial begin go = 0; #1 go = 1; #10; end
+        endprogram
+    "#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("program_wakes.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(5).unwrap();
+        let values = ["seen", "q"].map(|name| {
+            let signal = sim.signal(name);
+            sim.get(signal)
+        });
+        assert_eq!(values, [0u8.into(), 1u8.into()], "four_state={four_state}");
+    }
 }

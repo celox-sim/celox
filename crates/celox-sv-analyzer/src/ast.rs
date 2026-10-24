@@ -288,7 +288,7 @@ impl Source {
             let scoped_context = context.child(&scoped, &parameter_overrides);
             let syntax_tree = &scoped_context;
             let unit = syntax_tree.root_unit()?;
-            if unit.kind != celox_sv_syntax::UnitKind::Module {
+            if !unit.kind.is_module_like() {
                 continue;
             }
             match unit.port_style {
@@ -477,8 +477,7 @@ impl Source {
             let scoped = syntax_tree.scoped(handle)?;
             let syntax_tree = &scoped;
             let unit = syntax_tree.root_unit()?;
-            if unit.kind == celox_sv_syntax::UnitKind::Module
-                && unit.port_style != celox_sv_syntax::PortStyle::Wildcard
+            if unit.kind.is_module_like() && unit.port_style != celox_sv_syntax::PortStyle::Wildcard
             {
                 names.push(syntax_tree.root_name()?);
             }
@@ -495,9 +494,7 @@ impl Source {
             let scoped = syntax_tree.scoped(handle)?;
             let syntax_tree = &scoped;
             let unit = syntax_tree.root_unit()?;
-            if unit.kind == celox_sv_syntax::UnitKind::Module
-                && unit.port_style == celox_sv_syntax::PortStyle::Ansi
-            {
+            if unit.kind.is_module_like() && unit.port_style == celox_sv_syntax::PortStyle::Ansi {
                 let name = syntax_tree.root_name()?;
                 let context = AnalysisContext::unspecialized(syntax_tree);
                 interfaces.insert(name, module_interface_from_scope(&context)?);
@@ -512,7 +509,8 @@ impl Source {
 
     pub(crate) fn warnings(&self) -> Vec<warnings::AnalyzerWarning> {
         let mut warnings = self.diagnostics.clone();
-        for module in &self.modules {
+        // A program's functions run in its threads, where `$exit` applies.
+        for module in self.modules.iter().filter(|module| !module.program) {
             warnings::append(&mut warnings, module.constant_functions.warnings());
         }
         warnings
@@ -522,6 +520,9 @@ impl Source {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
     name: String,
+    /// A program (IEEE 1800-2023 24.3), whose processes run in the reactive
+    /// region set.
+    program: bool,
     parameters: Vec<Parameter>,
     ports: Vec<Port>,
     signals: Vec<Signal>,
@@ -625,6 +626,7 @@ impl Module {
     ) -> Result<Self, AnalyzerError> {
         let unit = syntax_tree.scope_handle().unit(syntax_tree.declarations());
         let is_package = unit.is_none_or(|unit| unit.kind == celox_sv_syntax::UnitKind::Package);
+        let program = unit.is_some_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Program);
         let name = unit.map_or_else(
             || packages::UNIT.to_string(),
             |unit| instances::normalize_identifier(&unit.name.spelling),
@@ -1417,6 +1419,7 @@ impl Module {
 
         Ok(Self {
             name,
+            program,
             parameters,
             ports,
             signals,
@@ -1487,6 +1490,11 @@ impl Module {
 
     pub fn dpi_imports(&self) -> &[crate::ir::DpiImport] {
         &self.dpi_imports
+    }
+
+    /// Whether this is a program (IEEE 1800-2023 24.3).
+    pub fn is_program(&self) -> bool {
+        self.program
     }
 }
 

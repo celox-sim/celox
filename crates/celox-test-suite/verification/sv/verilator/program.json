@@ -1,0 +1,228 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 and Icarus 13.0 run the initial procedures of a program in the active region set: a program reads design values before the design's nonblocking updates of the same time slot, its #0 resumes before the design's, and a flip-flop clocked by a program write runs before the program's #0 and its nonblocking update of the flip-flop's input. IEEE 1800-2023 24.3.1 schedules program procedures, their delays and event controls in the Reactive region, #0 in the Re-Inactive region and their nonblocking updates in the Re-NBA region, and 4.5 runs the reactive region set only once the active region set is empty and empties it before the active region set runs again.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/programs-icarus.json",
+          "verification/sv/limitations/programs-verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_program_reactive_region",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 and Icarus 13.0 run the initial procedures of a program in the active region set: a program reads design values before the design's nonblocking updates of the same time slot, its #0 resumes before the design's, and a flip-flop clocked by a program write runs before the program's #0 and its nonblocking update of the flip-flop's input. IEEE 1800-2023 24.3.1 schedules program procedures, their delays and event controls in the Reactive region, #0 in the Re-Inactive region and their nonblocking updates in the Re-NBA region, and 4.5 runs the reactive region set only once the active region set is empty and empties it before the active region set runs again.",
+        "upstream": []
+      },
+      "name": "program::design_activity_of_a_program_waits_for_the_reactive_region_set",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 continues a program initial procedure after $exit and does not end the program's other initial procedures. IEEE 1800-2023 24.7 ends every initial procedure of the calling program.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/programs-verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_program_exit",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 continues a program initial procedure after $exit and does not end the program's other initial procedures. IEEE 1800-2023 24.7 ends every initial procedure of the calling program.",
+        "upstream": []
+      },
+      "name": "program::program_exit_ends_its_initial_procedures",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 and Icarus 13.0 run the initial procedures of a program in the active region set: a program reads design values before the design's nonblocking updates of the same time slot, its #0 resumes before the design's, and a flip-flop clocked by a program write runs before the program's #0 and its nonblocking update of the flip-flop's input. IEEE 1800-2023 24.3.1 schedules program procedures, their delays and event controls in the Reactive region, #0 in the Re-Inactive region and their nonblocking updates in the Re-NBA region, and 4.5 runs the reactive region set only once the active region set is empty and empties it before the active region set runs again.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/programs-icarus.json",
+          "verification/sv/limitations/programs-verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_program_reactive_region",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 and Icarus 13.0 run the initial procedures of a program in the active region set: a program reads design values before the design's nonblocking updates of the same time slot, its #0 resumes before the design's, and a flip-flop clocked by a program write runs before the program's #0 and its nonblocking update of the flip-flop's input. IEEE 1800-2023 24.3.1 schedules program procedures, their delays and event controls in the Reactive region, #0 in the Re-Inactive region and their nonblocking updates in the Re-NBA region, and 4.5 runs the reactive region set only once the active region set is empty and empties it before the active region set runs again.",
+        "upstream": []
+      },
+      "name": "program::program_nonblocking_updates_follow_design_updates",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "program::program_ports_connect_to_design_nets",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 and Icarus 13.0 run the initial procedures of a program in the active region set: a program reads design values before the design's nonblocking updates of the same time slot, its #0 resumes before the design's, and a flip-flop clocked by a program write runs before the program's #0 and its nonblocking update of the flip-flop's input. IEEE 1800-2023 24.3.1 schedules program procedures, their delays and event controls in the Reactive region, #0 in the Re-Inactive region and their nonblocking updates in the Re-NBA region, and 4.5 runs the reactive region set only once the active region set is empty and empties it before the active region set runs again.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/programs-icarus.json",
+          "verification/sv/limitations/programs-verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_program_reactive_region",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 and Icarus 13.0 run the initial procedures of a program in the active region set: a program reads design values before the design's nonblocking updates of the same time slot, its #0 resumes before the design's, and a flip-flop clocked by a program write runs before the program's #0 and its nonblocking update of the flip-flop's input. IEEE 1800-2023 24.3.1 schedules program procedures, their delays and event controls in the Reactive region, #0 in the Re-Inactive region and their nonblocking updates in the Re-NBA region, and 4.5 runs the reactive region set only once the active region set is empty and empties it before the active region set runs again.",
+        "upstream": []
+      },
+      "name": "program::program_reads_design_after_nonblocking_updates_settle",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 and Icarus 13.0 run the initial procedures of a program in the active region set: a program reads design values before the design's nonblocking updates of the same time slot, its #0 resumes before the design's, and a flip-flop clocked by a program write runs before the program's #0 and its nonblocking update of the flip-flop's input. IEEE 1800-2023 24.3.1 schedules program procedures, their delays and event controls in the Reactive region, #0 in the Re-Inactive region and their nonblocking updates in the Re-NBA region, and 4.5 runs the reactive region set only once the active region set is empty and empties it before the active region set runs again.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/programs-icarus.json",
+          "verification/sv/limitations/programs-verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_program_reactive_region",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 and Icarus 13.0 run the initial procedures of a program in the active region set: a program reads design values before the design's nonblocking updates of the same time slot, its #0 resumes before the design's, and a flip-flop clocked by a program write runs before the program's #0 and its nonblocking update of the flip-flop's input. IEEE 1800-2023 24.3.1 schedules program procedures, their delays and event controls in the Reactive region, #0 in the Re-Inactive region and their nonblocking updates in the Re-NBA region, and 4.5 runs the reactive region set only once the active region set is empty and empties it before the active region set runs again.",
+        "upstream": []
+      },
+      "name": "program::program_waits_see_host_driven_edges_after_design_updates",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 and Icarus 13.0 run the initial procedures of a program in the active region set: a program reads design values before the design's nonblocking updates of the same time slot, its #0 resumes before the design's, and a flip-flop clocked by a program write runs before the program's #0 and its nonblocking update of the flip-flop's input. IEEE 1800-2023 24.3.1 schedules program procedures, their delays and event controls in the Reactive region, #0 in the Re-Inactive region and their nonblocking updates in the Re-NBA region, and 4.5 runs the reactive region set only once the active region set is empty and empties it before the active region set runs again.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/programs-icarus.json",
+          "verification/sv/limitations/programs-verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_program_reactive_region",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 and Icarus 13.0 run the initial procedures of a program in the active region set: a program reads design values before the design's nonblocking updates of the same time slot, its #0 resumes before the design's, and a flip-flop clocked by a program write runs before the program's #0 and its nonblocking update of the flip-flop's input. IEEE 1800-2023 24.3.1 schedules program procedures, their delays and event controls in the Reactive region, #0 in the Re-Inactive region and their nonblocking updates in the Re-NBA region, and 4.5 runs the reactive region set only once the active region set is empty and empties it before the active region set runs again.",
+        "upstream": []
+      },
+      "name": "program::program_zero_delay_resumes_in_the_re_inactive_region",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 rejects an always procedure and a module instance in a program with syntax errors, which the run cannot count as language rejections. Both are illegal in a program (IEEE 1800-2023 24.3), and Icarus rejects them with diagnostics that name the rule.",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/programs-verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_program_items",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects an always procedure and a module instance in a program with syntax errors, which the run cannot count as language rejections. Both are illegal in a program (IEEE 1800-2023 24.3), and Icarus rejects them with diagnostics that name the rule.",
+        "upstream": []
+      },
+      "name": "program::programs_reject_always_procedures",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 rejects an always procedure and a module instance in a program with syntax errors, which the run cannot count as language rejections. Both are illegal in a program (IEEE 1800-2023 24.3), and Icarus rejects them with diagnostics that name the rule.",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/programs-verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_program_items",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects an always procedure and a module instance in a program with syntax errors, which the run cannot count as language rejections. Both are illegal in a program (IEEE 1800-2023 24.3), and Icarus rejects them with diagnostics that name the rule.",
+        "upstream": []
+      },
+      "name": "program::programs_reject_instances",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 and Icarus 13.0 do not end the simulation when every initial procedure of every program has ended: Icarus keeps running the design's forever loop and Verilator runs until the testbench times out. IEEE 1800-2023 24.3 ends the simulation then with an implicit $finish.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/programs-icarus.json",
+          "verification/sv/limitations/programs-verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_program_completion",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 and Icarus 13.0 do not end the simulation when every initial procedure of every program has ended: Icarus keeps running the design's forever loop and Verilator runs until the testbench times out. IEEE 1800-2023 24.3 ends the simulation then with an implicit $finish.",
+        "upstream": []
+      },
+      "name": "program::simulation_ends_when_program_procedures_end",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

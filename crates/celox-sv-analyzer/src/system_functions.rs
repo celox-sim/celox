@@ -463,8 +463,7 @@ pub enum SystemTask {
     /// `$stop` (20.2).
     Stop,
     /// `$exit` (20.2, 24.7), which ends the initial procedures of the
-    /// program block that calls it. Celox has no program blocks, and a call
-    /// from outside one is ignored.
+    /// program block that calls it; a call from outside one is ignored.
     Exit,
     /// `$printtimescale` (20.4.1); the analyzer rewrites it into a
     /// [`SystemTask::Display`] of the message.
