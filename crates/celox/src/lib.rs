@@ -48,7 +48,10 @@ pub use backend::SimulatorErrorCode as RuntimeErrorCode;
 pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,
 };
-pub use celox_design::{DomainKind, ElaboratedDesign, EventTopology, ProcessOrigin, RuntimeSchema};
+pub use celox_design::{
+    AssertionDeferral, AssertionDirective, AssertionOutcome, AssertionSite, DomainKind,
+    ElaboratedDesign, EventTopology, ProcessOrigin, ReportLocation, RuntimeSchema, Severity,
+};
 pub use celox_frontend_core::FrontendArtifactError;
 pub use celox_frontend_sdk as frontend_sdk;
 pub use celox_frontend_sdk::FrontendArtifact;
@@ -117,7 +120,7 @@ mod host_api {
     pub use crate::simulator::NativeCompilation;
     pub use crate::simulator::{
         Checkpoint, CheckpointError, DeadStorePolicy, DumpError, InstanceHierarchy, NamedEvent,
-        NamedSignal, RuntimeEvent, RuntimeEventDrain, RuntimeFormatContext, Simulator,
+        NamedSignal, Report, RuntimeEvent, RuntimeEventDrain, RuntimeFormatContext, Simulator,
         SimulatorBuilder, SimulatorOptions, StateError, StateImage, StateMismatch, StateSchema,
         TierPromotion,
     };

@@ -99,9 +99,18 @@ sv_backends! {
         @build Simulator::from_sv_sources(vec![(source, Path::new("tagged_read.sv"))], "Top").four_state(true);
         let clk = sim.event("clk");
         assert!(sim.tick(clk).is_err());
-        assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::AssertFatal {
-            message: b"tagged union member does not match the active tag".to_vec(),
-        }]);
+        let reports: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .map(|event| match event {
+                celox::RuntimeEvent::Report(report) => (report.severity, report.message),
+                event => panic!("unexpected event {event:?}"),
+            })
+            .collect();
+        assert_eq!(reports, vec![(
+            celox::Severity::Fatal,
+            b"tagged union member does not match the active tag".to_vec(),
+        )]);
     }
     fn inactive_write_fails_on_clock(sim) {
         @setup {
@@ -119,9 +128,18 @@ sv_backends! {
         @build Simulator::from_sv_sources(vec![(source, Path::new("tagged_write.sv"))], "Top").four_state(true);
         let clk = sim.event("clk");
         assert!(sim.tick(clk).is_err());
-        assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::AssertFatal {
-            message: b"tagged union member does not match the active tag".to_vec(),
-        }]);
+        let reports: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .map(|event| match event {
+                celox::RuntimeEvent::Report(report) => (report.severity, report.message),
+                event => panic!("unexpected event {event:?}"),
+            })
+            .collect();
+        assert_eq!(reports, vec![(
+            celox::Severity::Fatal,
+            b"tagged union member does not match the active tag".to_vec(),
+        )]);
     }
     fn uninitialized_tag_fails_on_clock(sim) {
         @setup {
@@ -135,9 +153,18 @@ sv_backends! {
         @build Simulator::from_sv_sources(vec![(source, Path::new("tagged_unknown.sv"))], "Top").four_state(true);
         let clk = sim.event("clk");
         assert!(sim.tick(clk).is_err());
-        assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::AssertFatal {
-            message: b"tagged union member does not match the active tag".to_vec(),
-        }]);
+        let reports: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .map(|event| match event {
+                celox::RuntimeEvent::Report(report) => (report.severity, report.message),
+                event => panic!("unexpected event {event:?}"),
+            })
+            .collect();
+        assert_eq!(reports, vec![(
+            celox::Severity::Fatal,
+            b"tagged union member does not match the active tag".to_vec(),
+        )]);
     }
 }
 

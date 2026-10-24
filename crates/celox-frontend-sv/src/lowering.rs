@@ -12,9 +12,9 @@ use std::path::Path;
 use celox_design::{
     BinaryOp, BitAccess, DisplaySizing, DomainKind, ExternFunction, ExternSignature, ExternType,
     InitialStateData, InitialStateValue, ModuleId, NbaSite, PROCESS_DELAY_WIDTH,
-    PROCESS_STATUS_WIDTH, PortTypeKind, ProcessSlots, RegionedVarAddrBase, RuntimeErrorInfo,
-    RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TIME_SLOT_WIDTH, TriggerSet, UnaryOp,
-    VarAtomBase, WORKING_REGION, WaitSite,
+    PROCESS_STATUS_WIDTH, PortTypeKind, ProcessSlots, RegionedVarAddrBase, ReportLocation,
+    RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, STABLE_REGION, Severity, TIME_SLOT_WIDTH,
+    TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION, WaitSite,
 };
 use celox_frontend_core::process::PROCESS_RESUME_WIDTH;
 use celox_frontend_core::symbolic::artifact::{

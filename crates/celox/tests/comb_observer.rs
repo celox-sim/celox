@@ -18,9 +18,9 @@ module Top(d: input logic<24>, out: output logic<24>) {
 }
 "#, "Top").four_state(true);
     let d = sim.signal("d");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     sim.modify(|io| io.set(d, [0x80u8, 0, 0xff])).unwrap();
-    assert_eq!(sim.drain_runtime_events(), vec![
+    assert_eq!(bare(sim.drain_runtime_events()), vec![
         celox::RuntimeEvent::Write { message: vec![255, 0, 128, 128] },
         celox::RuntimeEvent::Display { message: vec![255, 0, 128] },
     ]);
@@ -49,12 +49,12 @@ module Top (
 
     let d = sim.signal("d");
     let tmp = sim.signal("tmp");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     assert_eq!(sim.get_as::<u8>(tmp), 1);
 
     sim.modify(|io| io.set(d, 10u8)).unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"before=1 ret=12".to_vec(),
         }],
@@ -88,15 +88,15 @@ module Top (
     let d = sim.signal("d");
     let prior = sim.signal("prior");
     let tmp = sim.signal("tmp");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     assert_eq!(sim.get_as::<u8>(tmp), 1);
 
     sim.modify(|io| io.set(prior, 7u8)).unwrap();
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(d, 10u8)).unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"before=1 local=7 ret=12".to_vec(),
         }],
@@ -126,11 +126,11 @@ module Top (
 "#, "Top");
 
     let d = sim.signal("d");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(d, 10u8)).unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"ret=12 out=11".to_vec(),
         }],
@@ -169,11 +169,11 @@ module Top (
 "#, "Top");
 
     let d = sim.signal("d");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(d, 10u8)).unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"first=12 second=11".to_vec(),
         }],
@@ -214,11 +214,11 @@ module Top (
 "#, "Top");
 
     let d = sim.signal("d");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(d, 10u8)).unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"first=1 second=12".to_vec(),
         }],
@@ -254,11 +254,11 @@ module Top (
 "#, "Top");
 
     let d = sim.signal("d");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(d, 10u8)).unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"first=12 module=11".to_vec(),
         }],
@@ -284,14 +284,14 @@ module Top (
 "#, "Top").four_state(true);
 
     let a = sim.signal("a");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     sim.modify(|io| io.set(a, 1u8)).unwrap();
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     sim.modify(|io| {
         io.set_four_state(a, celox::BigUint::from(1u8), celox::BigUint::from(1u8));
     }).unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"x=0".to_vec(),
         }],
@@ -343,12 +343,12 @@ module Top (
 
     let d = sim.signal("d");
     let tmp_o = sim.signal("tmp_o");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(d, 1u8)).unwrap();
     assert_eq!(sim.get(tmp_o), 1u8.into());
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"index=1".to_vec(),
         }],
@@ -385,13 +385,13 @@ module Top (
     let d = sim.signal("d");
     let q = sim.signal("q");
     let q_output = sim.signal("q_output");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(d, 10u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(q), 1);
     assert_eq!(sim.get_as::<u8>(q_output), 11);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"if=10".to_vec(),
         }],
@@ -423,21 +423,21 @@ module Top (
     let and_enable = sim.signal("and_enable");
     let or_enable = sim.signal("or_enable");
     let d = sim.signal("d");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(and_enable, 0u8);
         io.set(or_enable, 1u8);
         io.set(d, 10u8);
     }).unwrap();
-    assert!(sim.drain_runtime_events().is_empty());
+    assert!(bare(sim.drain_runtime_events()).is_empty());
 
     sim.modify(|io| {
         io.set(and_enable, 1u8);
         io.set(or_enable, 0u8);
     }).unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"rhs=10".to_vec(),
@@ -478,7 +478,7 @@ module Top (
     let d = sim.signal("d");
     let q = sim.signal("q");
     let q_output = sim.signal("q_output");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(d, 2u8);
@@ -486,7 +486,7 @@ module Top (
     assert_eq!(sim.get_as::<u8>(q), 1);
     assert_eq!(sim.get_as::<u8>(q_output), 12);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"target=2".to_vec(),
         }],
@@ -521,13 +521,13 @@ module Top (
     let sel = sim.signal("sel");
     let data = sim.signal("data");
     let tmp = sim.signal("tmp");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(sel, 2u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(data), 4);
     assert_eq!(sim.get_as::<u8>(tmp), 12);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"index=2".to_vec(),
         }],
@@ -559,12 +559,12 @@ module Top (
 
     let d = sim.signal("d");
     let tmp = sim.signal("tmp");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(d, 10u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(tmp), 11);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"wrapped=10".to_vec(),
         }],
@@ -590,12 +590,12 @@ module Top (
 "#, "Top");
 
     let sel = sim.signal("sel");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(sel, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(sim.signal("value")), 11);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"case=11".to_vec(),
         }],
@@ -632,13 +632,13 @@ module Top (
     let d = sim.signal("d");
     let q = sim.signal("q");
     let q_output = sim.signal("q_output");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(d, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(q), 3);
     assert_eq!(sim.get_as::<u8>(q_output), 2);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"bound=1".to_vec(),
         }],
@@ -664,32 +664,32 @@ module Top (
     let unrelated = sim.signal("unrelated");
     let y = sim.signal("y");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(y), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"y=1".to_vec(),
         }],
     );
 
     assert_eq!(sim.get_as::<u8>(y), 1);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 
     sim.modify(|io| io.set(unrelated, 7u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(y), 1);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(y), 1);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 
     sim.modify(|io| io.set(a, 3u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(y), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"y=1".to_vec(),
         }],
@@ -721,19 +721,19 @@ module Top (
     let unrelated = sim.signal("unrelated");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 5u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"tmp=5".to_vec(),
         }],
     );
 
     sim.modify(|io| io.set(unrelated, 7u8)).unwrap();
-    assert_eq!(sim.drain_runtime_events(), Vec::new());
+    assert_eq!(bare(sim.drain_runtime_events()), Vec::new());
 }
 
 fn test_comb_constant_display_runs_on_initial_eval_only(sim) {
@@ -756,7 +756,7 @@ module Top (
     // no sensitivity inputs.
     sim.eval_comb().unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"hi".to_vec(),
         }],
@@ -764,7 +764,7 @@ module Top (
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     sim.eval_comb().unwrap();
-    assert_eq!(sim.drain_runtime_events(), Vec::new());
+    assert_eq!(bare(sim.drain_runtime_events()), Vec::new());
 }
 
 fn test_comb_constant_fatal_assert_runs_on_initial_eval(sim) {
@@ -789,10 +789,8 @@ module Top {
         },
     );
     assert_eq!(
-        sim.drain_runtime_events(),
-        vec![celox::RuntimeEvent::AssertFatal {
-            message: b"constant fail".to_vec(),
-        }],
+        bare(sim.drain_runtime_events()),
+        vec![celox::RuntimeEvent::Report(celox::Report::new(celox::Severity::Fatal, b"constant fail".to_vec()))],
     );
 }
 
@@ -879,7 +877,7 @@ module Top (
     // list and the sensitized values have not changed from their defaults.
     sim.eval_comb().unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"a=0".to_vec(),
         }],
@@ -907,10 +905,8 @@ module Top (
         },
     );
     assert_eq!(
-        sim.drain_runtime_events(),
-        vec![celox::RuntimeEvent::AssertFatal {
-            message: b"a must be set".to_vec(),
-        }],
+        bare(sim.drain_runtime_events()),
+        vec![celox::RuntimeEvent::Report(celox::Report::new(celox::Severity::Fatal, b"a must be set".to_vec()))],
     );
 }
 
@@ -930,11 +926,11 @@ module Top (
 
     let a = sim.signal("a");
     let out = sim.signal("out");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 7u8)).unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"a=7".to_vec(),
         }],
@@ -959,18 +955,18 @@ module Top (
 
     let a = sim.signal("a");
     let out = sim.signal("out");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
 
     sim.modify(|io| io.set(a, 11u8)).unwrap();
     assert_eq!(
-        drain.drain(),
+        bare(drain.drain()),
         vec![celox::RuntimeEvent::Display {
             message: b"a=11".to_vec(),
         }],
     );
     assert_eq!(sim.get_as::<u8>(out), 11);
-    assert_eq!(drain.drain(), Vec::new());
+    assert_eq!(bare(drain.drain()), Vec::new());
 }
 
 fn test_comb_runtime_event_drain_handle_sees_direct_set_capture(sim) {
@@ -990,12 +986,12 @@ module Top (
 
     let a = sim.signal("a");
     let out = sim.signal("out");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
 
     sim.set(a, 12u8);
     assert_eq!(
-        drain.drain(),
+        bare(drain.drain()),
         vec![celox::RuntimeEvent::Display {
             message: b"a=12".to_vec(),
         }],
@@ -1022,17 +1018,17 @@ module Top (
     let out = sim.signal("out");
     sim.eval_comb().unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"a=0".to_vec(),
         }],
     );
     let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
-    assert_eq!(drain.drain(), Vec::new());
+    assert_eq!(bare(drain.drain()), Vec::new());
 
     sim.modify(|io| io.set(a, 13u8)).unwrap();
     assert_eq!(
-        drain.drain(),
+        bare(drain.drain()),
         vec![celox::RuntimeEvent::Display {
             message: b"a=13".to_vec(),
         }],
@@ -1068,14 +1064,14 @@ module Top (
     let out = sim.signal("out");
 
     sim.eval_comb().unwrap();
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
 
     sim.modify(|io| io.set(d, 3u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 3);
     assert_eq!(
-        drain.drain(),
+        bare(drain.drain()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"ff=3".to_vec(),
@@ -1114,7 +1110,7 @@ module Top (
     let out = sim.signal("out");
 
     sim.eval_comb().unwrap();
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
 
     sim.modify(|io| io.set(a, 9u8)).unwrap();
@@ -1122,7 +1118,7 @@ module Top (
     sim.tick(clk).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 9);
     assert_eq!(
-        drain.drain(),
+        bare(drain.drain()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"comb=9".to_vec(),
@@ -1151,37 +1147,39 @@ module Top (
     let a = sim.signal("a");
     let y = sim.signal("y");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 0u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(y), 0);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(y), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
-        vec![celox::RuntimeEvent::AssertContinue {
-            message: b"bad y=1".to_vec(),
-        }],
+        bare(sim.drain_runtime_events()),
+        vec![celox::RuntimeEvent::Report(celox::Report::new(
+            celox::Severity::Error,
+            b"bad y=1".to_vec()
+        ))],
     );
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(y), 1);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 
     sim.modify(|io| io.set(a, 3u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(y), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
-        vec![celox::RuntimeEvent::AssertContinue {
-            message: b"bad y=1".to_vec(),
-        }],
+        bare(sim.drain_runtime_events()),
+        vec![celox::RuntimeEvent::Report(celox::Report::new(
+            celox::Severity::Error,
+            b"bad y=1".to_vec()
+        ))],
     );
 
     sim.modify(|io| io.set(a, 2u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(y), 0);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 }
 
 fn test_comb_assert_fatal_stops_comb_eval_and_keeps_event(sim) {
@@ -1201,7 +1199,7 @@ module Top (
 
     let a = sim.signal("a");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     let err = sim.eval_comb().unwrap_err();
@@ -1213,10 +1211,8 @@ module Top (
         },
     );
     assert_eq!(
-        sim.drain_runtime_events(),
-        vec![celox::RuntimeEvent::AssertFatal {
-            message: b"fatal y".to_vec(),
-        }],
+        bare(sim.drain_runtime_events()),
+        vec![celox::RuntimeEvent::Report(celox::Report::new(celox::Severity::Fatal, b"fatal y".to_vec()))],
     );
 }
 
@@ -1243,15 +1239,15 @@ module Top (
     let a = sim.signal("a");
     let unrelated = sim.signal("unrelated");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert!(sim.eval_comb().is_err());
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(unrelated, 9u8)).unwrap();
     sim.eval_comb().unwrap();
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 }
 
 fn test_comb_display_pending_events_drain_before_later_ff_events(sim) {
@@ -1280,14 +1276,14 @@ module Top (
     let y = sim.signal("y");
 
     sim.eval_comb().unwrap();
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 5u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(y), 5);
     sim.modify(|io| io.set(d, 7u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"comb=5".to_vec(),
@@ -1334,20 +1330,20 @@ module Top (
     let y = sim.signal("y");
 
     sim.eval_comb().unwrap();
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(d, 7u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get_as::<u8>(y), 7);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"q=7".to_vec(),
         }],
     );
 
     sim.tick(clk).unwrap();
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 }
 
 fn test_comb_display_tracks_downstream_comb_settle_sensitivity(sim) {
@@ -1373,12 +1369,12 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 9u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 9);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"x=9".to_vec(),
         }],
@@ -1416,7 +1412,7 @@ module Top (
     let out_a = sim.signal("out_a");
     let out_b = sim.signal("out_b");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(src, 5u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out_a), 5);
@@ -1427,7 +1423,7 @@ module Top (
     // to coalesce multiple sensitivity changes into one pending process
     // execution and emit the side effect once at the settled observation point.
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"a=5 b=5".to_vec(),
         }],
@@ -1460,12 +1456,12 @@ module Top (
     let a = sim.signal("a");
     let o = sim.signal("o");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(o), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"x1=0".to_vec(),
@@ -1500,12 +1496,12 @@ module Top (
     let a = sim.signal("a");
     let o = sim.signal("o");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(o), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"observed=0".to_vec(),
@@ -1542,12 +1538,12 @@ module Top (
     let a = sim.signal("a");
     let o = sim.signal("o");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(o), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"x3=0".to_vec(),
@@ -1583,12 +1579,12 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 3);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"x1=0 x2=0".to_vec(),
@@ -1632,7 +1628,7 @@ module Top (
     let j = sim.signal("j");
     let o = sim.signal("o");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(i, 0u8);
@@ -1642,7 +1638,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(o), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"xj=0".to_vec(),
@@ -1682,12 +1678,12 @@ module Top (
     let a = sim.signal("a");
     let o = sim.signal("o");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(o), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"hit x1=1".to_vec(),
         }],
@@ -1716,7 +1712,7 @@ module Top (
 
     let a = sim.signal("a");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     let err = sim.eval_comb().unwrap_err();
@@ -1728,10 +1724,8 @@ module Top (
         },
     );
     assert_eq!(
-        sim.drain_runtime_events(),
-        vec![celox::RuntimeEvent::AssertFatal {
-            message: b"x1 became 1".to_vec(),
-        }],
+        bare(sim.drain_runtime_events()),
+        vec![celox::RuntimeEvent::Report(celox::Report::new(celox::Severity::Fatal, b"x1 became 1".to_vec()))],
     );
 }
 
@@ -1763,7 +1757,7 @@ module Top (
     let b = sim.signal("b");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(a, 1u8);
@@ -1772,7 +1766,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 3);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"first=0".to_vec(),
@@ -1819,7 +1813,7 @@ module Top (
     let count = sim.signal("count");
     let o = sim.signal("o");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(count, 2u8);
@@ -1828,7 +1822,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(o), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"i=0 x1=0".to_vec(),
@@ -1882,12 +1876,12 @@ module Top (
     let a = sim.signal("a");
     let o = sim.signal("o");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(o), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"x1=0".to_vec(),
@@ -1926,13 +1920,13 @@ module Top (
     let out = sim.signal("out");
 
     sim.eval_comb().unwrap();
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(d, 3u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 3);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"ff=3".to_vec(),
@@ -1965,15 +1959,15 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 5u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 5);
     assert_eq!(
-        sim.drain_runtime_events_with_context(celox::RuntimeFormatContext {
+        bare(sim.drain_runtime_events_with_context(celox::RuntimeFormatContext {
             tb_time: Some(42),
             scope: Some("tb.top"),
-        }),
+        })),
         vec![celox::RuntimeEvent::Display {
             message: b"loc=tb.top time=42 a=5".to_vec(),
         }],
@@ -1996,15 +1990,15 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 5u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 5);
     assert_eq!(
-        sim.drain_runtime_events_with_context(celox::RuntimeFormatContext {
+        bare(sim.drain_runtime_events_with_context(celox::RuntimeFormatContext {
             tb_time: Some(42),
             scope: Some("tb.top"),
-        }),
+        })),
         vec![celox::RuntimeEvent::Display {
             message: b"loc=tb.top a=5".to_vec(),
         }],
@@ -2039,13 +2033,13 @@ module Top (
     let z = sim.signal("z");
 
     sim.eval_comb().unwrap();
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 3u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(y), 3);
     assert_eq!(sim.get_as::<u8>(z), 0);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"active=3".to_vec(),
         }],
@@ -2054,7 +2048,7 @@ module Top (
     sim.modify(|io| io.set(a, 4u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(y), 4);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"active=4".to_vec(),
         }],
@@ -2063,14 +2057,12 @@ module Top (
     sim.modify(|io| io.set(b, 7u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(z), 7);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"inactive_display=7".to_vec(),
             },
-            celox::RuntimeEvent::AssertContinue {
-                message: b"inactive_assert=7".to_vec(),
-            },
+            celox::RuntimeEvent::Report(celox::Report::new(celox::Severity::Error, b"inactive_assert=7".to_vec())),
         ],
     );
 }
@@ -2106,13 +2098,13 @@ module Top (
     let inactive_out = sim.signal("inactive_out");
 
     sim.eval_comb().unwrap();
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 5u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 7);
     assert_eq!(sim.get_as::<u8>(inactive_out), 0);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"first=6".to_vec(),
@@ -2126,7 +2118,7 @@ module Top (
     sim.modify(|io| io.set(a, 6u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 8);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"first=7".to_vec(),
@@ -2163,7 +2155,7 @@ module Top (
     let base = sim.signal("base");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(count, 3u8);
@@ -2172,7 +2164,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 16);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"before i=0 sum=10".to_vec(),
@@ -2216,7 +2208,7 @@ module Top (
     let b = sim.signal("b");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(sel, 1u8);
@@ -2226,7 +2218,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 21);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"then=20".to_vec(),
         }],
@@ -2235,7 +2227,7 @@ module Top (
     sim.modify(|io| io.set(sel, 0u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 41);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"else=40".to_vec(),
         }],
@@ -2259,7 +2251,7 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set_four_state(
@@ -2271,7 +2263,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_four_state(out).0, num_bigint::BigUint::from(0x1234_5678_9abc_def0u64));
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"a=000000000000000000010010001101000101011001111000100110101011110011011110xxxx0000"
                 .to_vec(),
@@ -2303,12 +2295,12 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 9u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 10);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"bump=10".to_vec(),
         }],
@@ -2361,19 +2353,19 @@ module Top (
     let stop = sim.signal("stop");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(a, 5u8);
         io.set(stop, 1u8);
     }).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 5);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 
     sim.modify(|io| io.set(stop, 0u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 5);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"notify=5".to_vec(),
         }],
@@ -2426,7 +2418,7 @@ module Top (
     let count = sim.signal("count");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(a, 7u8);
@@ -2435,7 +2427,7 @@ module Top (
     }).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 8);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"notify=7".to_vec(),
         }],
@@ -2444,7 +2436,7 @@ module Top (
     sim.modify(|io| io.set(stop, 0u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 7);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"notify=7".to_vec(),
@@ -2503,7 +2495,7 @@ module Top (
     let count = sim.signal("count");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(a, 7u8);
@@ -2512,7 +2504,7 @@ module Top (
         io.set(count, 3u8);
     }).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 7);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 }
 
 fn test_function_loop_with_return_and_break_preserves_effects(sim) {
@@ -2549,7 +2541,7 @@ module Top (
     let stop = sim.signal("stop");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(a, 9u8);
@@ -2557,7 +2549,7 @@ module Top (
     }).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 9);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"loop=0".to_vec(),
@@ -2606,7 +2598,7 @@ module Top (
     let stop = sim.signal("stop");
     let return_early = sim.signal("return_early");
     let out = sim.signal("out");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(value, 9u8);
@@ -2614,7 +2606,7 @@ module Top (
     }).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 9);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"after-loop".to_vec(),
         }],
@@ -2622,7 +2614,7 @@ module Top (
 
     sim.modify(|io| io.set(return_early, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 10);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 }
 
 fn test_comb_function_packed_array_literal_preserves_source_order(sim) {
@@ -2701,7 +2693,7 @@ module Top (
 
     let q = sim.signal("q");
     assert_eq!(sim.get_as::<u8>(q), 0xf8);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 }
 
 fn test_named_function_inputs_evaluate_in_source_order(sim) {
@@ -2752,7 +2744,7 @@ module Top (
     let inner_count = sim.signal("inner_count");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(a, 11u8);
@@ -2762,7 +2754,7 @@ module Top (
     }).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 11);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"inner=0,0".to_vec(),
@@ -2788,7 +2780,7 @@ module Top (
     sim.modify(|io| io.set(stop, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 13);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"inner=0,0".to_vec(),
@@ -2832,12 +2824,12 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 6u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 13);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"arg=6".to_vec(),
         }],
@@ -2870,27 +2862,25 @@ module Top (
     let out = sim.signal("out");
 
     sim.eval_comb().unwrap();
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(unrelated, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 
     sim.modify(|io| io.set(a, 0u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 1);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 
     sim.modify(|io| io.set(a, 0u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0);
     assert_eq!(
-        sim.drain_runtime_events(),
-        vec![celox::RuntimeEvent::AssertContinue {
-            message: b"zero=0".to_vec(),
-        }],
+        bare(sim.drain_runtime_events()),
+        vec![celox::RuntimeEvent::Report(celox::Report::new(celox::Severity::Error, b"zero=0".to_vec()))],
     );
 }
 
@@ -2914,12 +2904,12 @@ module Top (
     let a = sim.signal("a");
     let sum = sim.signal("sum");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 2u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(sum), 9);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"i=0 sum=2".to_vec(),
@@ -2953,12 +2943,12 @@ module Top (
     let a = sim.signal("a");
     let seen = sim.signal("seen");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(seen), 2);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"first=1".to_vec(),
@@ -2995,7 +2985,7 @@ module Top (
     let b = sim.signal("b");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(a, 1u8);
@@ -3004,7 +2994,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"before=0".to_vec(),
         }],
@@ -3012,12 +3002,12 @@ module Top (
 
     sim.modify(|io| io.set(b, 4u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 5);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 
     sim.modify(|io| io.set(a, 2u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 6);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"before=1".to_vec(),
         }],
@@ -3050,7 +3040,7 @@ module Top (
     let hi = sim.signal("hi");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(idx, 2u8);
@@ -3060,7 +3050,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0xA4);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"mid=4".to_vec(),
         }],
@@ -3069,7 +3059,7 @@ module Top (
     sim.modify(|io| io.set(hi, 0xBu8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0xB4);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"mid=4".to_vec(),
         }],
@@ -3105,7 +3095,7 @@ module Top (
     let tail = sim.signal("tail");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(idx, 2u8);
@@ -3115,7 +3105,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0xAA);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"mid=85".to_vec(),
         }],
@@ -3124,7 +3114,7 @@ module Top (
     sim.modify(|io| io.set(tail, 0xBBu8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0xBB);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"mid=85".to_vec(),
         }],
@@ -3163,7 +3153,7 @@ module Top (
     let y = sim.signal("y");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(base, 0u8);
@@ -3176,7 +3166,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"mid=1".to_vec(),
         }],
@@ -3185,7 +3175,7 @@ module Top (
     sim.modify(|io| io.set(y, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"mid=1".to_vec(),
         }],
@@ -3198,7 +3188,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"mid=0".to_vec(),
         }],
@@ -3229,12 +3219,12 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 3u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 5);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"first=3".to_vec(),
@@ -3281,7 +3271,7 @@ module Top (
     let c = sim.signal("c");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(en, 1u8);
@@ -3292,7 +3282,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 19);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"then=7".to_vec(),
         }],
@@ -3301,7 +3291,7 @@ module Top (
     sim.modify(|io| io.set(en, 0u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 19);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"else=11".to_vec(),
         }],
@@ -3331,12 +3321,12 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 2u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 9);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"i=0 tmp=2".to_vec(),
@@ -3381,7 +3371,7 @@ module Top (
     let tail = sim.signal("tail");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(a, 10u8);
@@ -3390,7 +3380,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 99);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"after_f=13".to_vec(),
         }],
@@ -3431,7 +3421,7 @@ module Top (
     let tail = sim.signal("tail");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(a, 10u8);
@@ -3439,7 +3429,7 @@ module Top (
     })
     .unwrap();
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"after_split=11,12".to_vec(),
         }],
@@ -3471,7 +3461,7 @@ module Top (
     let hi = sim.signal("hi");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(lo, 0x5u8);
@@ -3480,7 +3470,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0xA5);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"mid=133".to_vec(),
         }],
@@ -3512,7 +3502,7 @@ module Top (
     let base = sim.signal("base");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(count, 4u8);
@@ -3521,7 +3511,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 16);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"sum=16".to_vec(),
         }],
@@ -3553,7 +3543,7 @@ module Top (
     let base = sim.signal("base");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(count, 4u8);
@@ -3562,7 +3552,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 16);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"i=0 sum=10".to_vec(),
@@ -3611,7 +3601,7 @@ module Top (
     let out = sim.signal("out");
 
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"first=0".to_vec(),
         }],
@@ -3624,7 +3614,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 13);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"i=0 sum=10".to_vec(),
@@ -3658,12 +3648,12 @@ module Top (
     let count = sim.signal("count");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(count, 2u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 2);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"same".to_vec(),
@@ -3706,7 +3696,7 @@ module Top (
     let out_a = sim.signal("out_a");
     let out_b = sim.signal("out_b");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(count, 2u8);
@@ -3716,7 +3706,7 @@ module Top (
     assert_eq!(sim.get_as::<u8>(out_a), 6);
     assert_eq!(sim.get_as::<u8>(out_b), 16);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"i=0".to_vec(),
@@ -3755,7 +3745,7 @@ module Top (
     let base = sim.signal("base");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(count, 3u8);
@@ -3764,7 +3754,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 13);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"before=10".to_vec(),
@@ -3810,25 +3800,25 @@ module Top (
     let unrelated = sim.signal("unrelated");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     let value: num_bigint::BigUint = (num_bigint::BigUint::from(0x12u8) << 64)
         | num_bigint::BigUint::from(0x34u8);
     sim.modify(|io| io.set_wide(a, value.clone())).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0x34);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"lo=52 hi=18".to_vec(),
         }],
     );
 
     sim.modify(|io| io.set_wide(a, value)).unwrap();
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 
     sim.modify(|io| io.set(unrelated, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0x34);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 }
 
 fn test_comb_display_downstream_dynamic_write_crossing_word_boundary(sim) {
@@ -3857,7 +3847,7 @@ module Top (
     let val = sim.signal("val");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(idx, 60u8);
@@ -3866,14 +3856,14 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0xAB);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"slice=171".to_vec(),
         }],
     );
 
     sim.modify(|io| io.set(val, 0xABu8)).unwrap();
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 }
 
 fn test_comb_display_store_coalesce_does_not_enable_unrelated_chunk(sim) {
@@ -3902,7 +3892,7 @@ module Top (
     let hi = sim.signal("hi");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(lo, 5u8);
@@ -3911,7 +3901,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 5);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"lo=5".to_vec(),
         }],
@@ -3919,7 +3909,7 @@ module Top (
 
     sim.modify(|io| io.set(hi, 2u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 5);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 }
 
 fn test_comb_display_ff_to_downstream_comb_store_enables_observer(sim) {
@@ -3953,20 +3943,20 @@ module Top (
     let out = sim.signal("out");
 
     sim.eval_comb().unwrap();
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(d, 11u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 11);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"x=11".to_vec(),
         }],
     );
 
     sim.tick(clk).unwrap();
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 }
 
 fn test_comb_display_port_alias_write_enables_downstream_observer(sim) {
@@ -4002,19 +3992,19 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 21u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 21);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"internal=21".to_vec(),
         }],
     );
 
     sim.modify(|io| io.set(a, 21u8)).unwrap();
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 }
 
 fn test_comb_display_four_state_mask_only_input_change_triggers(sim) {
@@ -4034,7 +4024,7 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set_four_state(
@@ -4046,7 +4036,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_four_state(out).0, num_bigint::BigUint::from(0xA0u8));
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"a=10100000".to_vec(),
         }],
@@ -4065,7 +4055,7 @@ module Top (
         num_bigint::BigUint::from(0x0Fu8)
     );
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"a=1010zzzz".to_vec(),
         }],
@@ -4096,13 +4086,13 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set_wide(a, num_bigint::BigUint::from(0x5Au8)))
         .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0x5A);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"slice=90".to_vec(),
         }],
@@ -4132,7 +4122,7 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set_four_state(
@@ -4144,7 +4134,7 @@ module Top (
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0x10);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"lo=00010000".to_vec(),
         }],
@@ -4163,7 +4153,7 @@ module Top (
         num_bigint::BigUint::from(0x0Fu8)
     );
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"lo=0001zzzz".to_vec(),
         }],
@@ -4203,12 +4193,12 @@ module Top (
     let b = sim.signal("b");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(b, 0x33u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0x33);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"v=51".to_vec(),
         }],
@@ -4241,7 +4231,7 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| {
         io.set(sel, 1u8);
@@ -4249,12 +4239,12 @@ module Top (
     })
     .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 9);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 
     sim.modify(|io| io.set(sel, 0u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"tmp=0".to_vec(),
         }],
@@ -4287,19 +4277,19 @@ module Top (
     let a = sim.signal("a");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(a, 7u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 7);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"y=7".to_vec(),
         }],
     );
 
     sim.modify(|io| io.set(a, 7u8)).unwrap();
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 }
 
 fn test_comb_expression_operands_observe_prior_output_write(sim) {
@@ -4324,10 +4314,10 @@ module Top (a: input logic<8>, out: output logic<8>) {
 
     let a = sim.signal("a");
     let out = sim.signal("out");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     sim.modify(|io| io.set(a, 12u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 13);
-    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
+    assert_eq!(bare(sim.drain_runtime_events()), vec![celox::RuntimeEvent::Display {
         message: b"observed=12".to_vec(),
     }]);
 }
@@ -4354,19 +4344,19 @@ module Top (sel: input logic, a: input logic<8>, b: input logic<8>, out: output 
     let a = sim.signal("a");
     let b = sim.signal("b");
     let out = sim.signal("out");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     sim.modify(|io| {
         io.set(sel, 1u8);
         io.set(a, 7u8);
         io.set(b, 9u8);
     }).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 7);
-    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
+    assert_eq!(bare(sim.drain_runtime_events()), vec![celox::RuntimeEvent::Display {
         message: b"left=7".to_vec(),
     }]);
     sim.modify(|io| io.set(sel, 0u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 9);
-    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
+    assert_eq!(bare(sim.drain_runtime_events()), vec![celox::RuntimeEvent::Display {
         message: b"right=9".to_vec(),
     }]);
 }
@@ -4390,10 +4380,10 @@ module Top (a: input logic<8>, out: output logic<8>) {
 
     let a = sim.signal("a");
     let out = sim.signal("out");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     sim.modify(|io| io.set(a, 23u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 23);
-    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
+    assert_eq!(bare(sim.drain_runtime_events()), vec![celox::RuntimeEvent::Display {
         message: b"inner=23".to_vec(),
     }]);
 }
@@ -4430,13 +4420,13 @@ module Top (index: input logic<2>, value: input logic<8>, out: output logic<8>) 
     let index = sim.signal("index");
     let value = sim.signal("value");
     let out = sim.signal("out");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     sim.modify(|io| {
         io.set(index, 2u8);
         io.set(value, 55u8);
     }).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 42);
-    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
+    assert_eq!(bare(sim.drain_runtime_events()), vec![celox::RuntimeEvent::Display {
         message: b"index=2".to_vec(),
     }]);
 }
@@ -4466,18 +4456,18 @@ module Top (sel: input logic, a: input logic<8>, out: output logic<8>) {
     let sel = sim.signal("sel");
     let a = sim.signal("a");
     let out = sim.signal("out");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     sim.modify(|io| {
         io.set(sel, 0u8);
         io.set(a, 17u8);
     }).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 1);
-    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
+    assert_eq!(bare(sim.drain_runtime_events()), vec![celox::RuntimeEvent::Display {
         message: b"after=1".to_vec(),
     }]);
     sim.modify(|io| io.set(sel, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 17);
-    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
+    assert_eq!(bare(sim.drain_runtime_events()), vec![celox::RuntimeEvent::Display {
         message: b"after=17".to_vec(),
     }]);
 }
@@ -4531,13 +4521,13 @@ module Top (
     let value = sim.signal("value");
     let first_out = sim.signal("first_out");
     let slots_out = sim.signal("slots_out");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(value, 10u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(first_out), 12);
     assert_eq!(sim.get_as::<u8>(slots_out), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"preview=12".to_vec(),
         }],
@@ -4584,13 +4574,13 @@ module Top (
     let value = sim.signal("value");
     let first_out = sim.signal("first_out");
     let slots_out = sim.signal("slots_out");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
 
     sim.modify(|io| io.set(value, 10u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(first_out), 12);
     assert_eq!(sim.get_as::<u8>(slots_out), 1);
     assert_eq!(
-        sim.drain_runtime_events(),
+        bare(sim.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"preview=12".to_vec(),
         }],
@@ -4625,9 +4615,9 @@ module Top (value: input logic<8>, out: output logic<8>) {
 
     let value = sim.signal("value");
     let out = sim.signal("out");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     sim.modify(|io| io.set(value, 31u8)).unwrap();
-    assert_eq!(sim.drain_runtime_events(), vec![
+    assert_eq!(bare(sim.drain_runtime_events()), vec![
         celox::RuntimeEvent::Display { message: b"bound=31".to_vec() },
         celox::RuntimeEvent::Display { message: b"body=31".to_vec() },
     ]);
@@ -4659,10 +4649,10 @@ module Top (value: input logic, out: output logic) {
 
     let value = sim.signal("value");
     let out = sim.signal("out");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     sim.modify(|io| io.set(value, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 1);
-    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
+    assert_eq!(bare(sim.drain_runtime_events()), vec![celox::RuntimeEvent::Display {
         message: b"index_seen=1".to_vec(),
     }]);
 }
@@ -4700,17 +4690,17 @@ module Top (
     let skip = sim.signal("skip");
     let value = sim.signal("value");
     let out = sim.signal("out");
-    sim.drain_runtime_events();
+    bare(sim.drain_runtime_events());
     sim.modify(|io| {
         io.set(skip, 1u8);
         io.set(value, 45u8);
     }).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0);
-    assert_eq!(sim.drain_runtime_events(), vec![]);
+    assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 
     sim.modify(|io| io.set(skip, 0u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 45);
-    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
+    assert_eq!(bare(sim.drain_runtime_events()), vec![celox::RuntimeEvent::Display {
         message: b"active_bound=45".to_vec(),
     }]);
 }
@@ -4741,7 +4731,7 @@ module Top (trigger: input logic, out: output logic<2>) {
 
     let out = sim.signal("out");
     assert_eq!(sim.get_as::<u8>(out), 2);
-    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
+    assert_eq!(bare(sim.drain_runtime_events()), vec![celox::RuntimeEvent::Display {
         message: b"concat_seen=1".to_vec(),
     }]);
 }
@@ -4775,7 +4765,7 @@ module Top (trigger: input logic, out: output logic<2>) {
 
     let out = sim.signal("out");
     assert_eq!(sim.get_as::<u8>(out), 2);
-    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
+    assert_eq!(bare(sim.drain_runtime_events()), vec![celox::RuntimeEvent::Display {
         message: b"function_concat_seen=1".to_vec(),
     }]);
 }
@@ -5514,4 +5504,18 @@ module Top (
             .contains("output port destination must use constant indices and selects"),
         "{error}"
     );
+}
+
+/// The drained events without the time, scope, location and assertion of
+/// their reports, which these tests do not check.
+fn bare(events: Vec<celox::RuntimeEvent>) -> Vec<celox::RuntimeEvent> {
+    events
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Report(report) => {
+                celox::RuntimeEvent::Report(celox::Report::new(report.severity, report.message))
+            }
+            event => event,
+        })
+        .collect()
 }

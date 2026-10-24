@@ -71,7 +71,7 @@ module Top (
         })
         .unwrap();
         sim.tick(clk).unwrap();
-        assert!(sim.drain_runtime_events().is_empty());
+        assert!(bare(sim.drain_runtime_events()).is_empty());
 
         for (value, mask, label) in [
             (BigUint::from(0u8), BigUint::from(0u8), "0"),
@@ -84,10 +84,8 @@ module Top (
             .unwrap();
             sim.tick(clk).unwrap();
             assert_eq!(
-                sim.drain_runtime_events(),
-                vec![celox::RuntimeEvent::AssertContinue {
-                    message: b"bad condition".to_vec(),
-                }],
+                bare(sim.drain_runtime_events()),
+                vec![celox::RuntimeEvent::Report(celox::Report::new(celox::Severity::Error, b"bad condition".to_vec()))],
                 "cond={label}",
             );
         }
@@ -108,7 +106,7 @@ module Top (
         let cond = sim.signal("cond");
         let known_one = BigUint::from(1u8) << 100usize;
         let unknown = BigUint::from(1u8) << 2usize;
-        sim.drain_runtime_events();
+        bare(sim.drain_runtime_events());
 
         for (unknown_value, label) in [(1u8, "X"), (0u8, "Z")] {
             sim.modify(|io| {
@@ -120,7 +118,7 @@ module Top (
             })
             .unwrap();
             assert!(
-                sim.drain_runtime_events().is_empty(),
+                bare(sim.drain_runtime_events()).is_empty(),
                 "known one plus {label} must pass",
             );
 
@@ -129,10 +127,8 @@ module Top (
             })
             .unwrap();
             assert_eq!(
-                sim.drain_runtime_events(),
-                vec![celox::RuntimeEvent::AssertContinue {
-                    message: b"bad condition".to_vec(),
-                }],
+                bare(sim.drain_runtime_events()),
+                vec![celox::RuntimeEvent::Report(celox::Report::new(celox::Severity::Error, b"bad condition".to_vec()))],
                 "only {label} must fail",
             );
         }
@@ -152,4 +148,18 @@ module Top (
     fn wide_unaligned_partial_store_and_slice_preserve_four_state_bits(sim) {
         @case "four_state_expression_semantics::wide_unaligned_partial_store_and_slice_preserve_four_state_bits";
     }
+}
+
+/// The drained events without the time, scope, location and assertion of
+/// their reports, which these tests do not check.
+fn bare(events: Vec<celox::RuntimeEvent>) -> Vec<celox::RuntimeEvent> {
+    events
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Report(report) => {
+                celox::RuntimeEvent::Report(celox::Report::new(report.severity, report.message))
+            }
+            event => event,
+        })
+        .collect()
 }

@@ -188,13 +188,11 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
     let mut output = |sim: &mut celox::Simulation| -> Result<(), String> {
         for event in sim.drain_runtime_events() {
             match event {
-                celox::RuntimeEvent::Display { message }
-                | celox::RuntimeEvent::AssertContinue { message } => {
-                    stdout.write_all(&message).unwrap();
-                    stdout.write_all(b"\n").unwrap();
-                }
-                celox::RuntimeEvent::Write { message } => stdout.write_all(&message).unwrap(),
-                celox::RuntimeEvent::AssertFatal { message } => {
+                celox::RuntimeEvent::Report(celox::Report {
+                    severity: celox::Severity::Fatal,
+                    message,
+                    ..
+                }) => {
                     stdout.write_all(&message).unwrap();
                     stdout.write_all(b"\n").unwrap();
                     return Err(format!(
@@ -204,6 +202,12 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
                             .unwrap_or_else(|_| message.escape_ascii().to_string())
                     ));
                 }
+                celox::RuntimeEvent::Display { message }
+                | celox::RuntimeEvent::Report(celox::Report { message, .. }) => {
+                    stdout.write_all(&message).unwrap();
+                    stdout.write_all(b"\n").unwrap();
+                }
+                celox::RuntimeEvent::Write { message } => stdout.write_all(&message).unwrap(),
                 celox::RuntimeEvent::Finish | celox::RuntimeEvent::Stop => {}
                 celox::RuntimeEvent::Missed { count } => {
                     return Err(format!("{count} runtime events were lost"));
