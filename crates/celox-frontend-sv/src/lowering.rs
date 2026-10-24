@@ -1052,6 +1052,66 @@ fn shared_edge_memories(
     memories
 }
 
+/// The unpacked arrays that only edge-triggered processes of `module` drive.
+/// A process that writes one of them only by nonblocking assignments, at
+/// least one of them at a run-time element, publishes just the elements it
+/// wrote (see `Ff::lower_process`) instead of seeding and committing the
+/// whole array on every edge.
+///
+/// This uses the drivers within `module`. The sparse commit copies back
+/// only the 64-bit chunks the process wrote, so a write from another scope
+/// that lands between the evaluation and the commit of the process can be
+/// lost only within those chunks, where a whole-array commit loses it
+/// everywhere. A writer outside `module` (a hierarchical reference) that
+/// must not lose such writes has to be excluded here.
+fn edge_only_memories(
+    module: &sv::ir::Module,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> HashSet<String> {
+    let first_ff = module.comb_processes().len();
+    let end_ff = first_ff + module.ff_processes().len();
+    // Only an array a nonblocking assignment of an edge process writes can
+    // qualify; the driver scan is for those.
+    let mut nonblocking = HashSet::default();
+    for process in module.ff_processes() {
+        for stmt in process.body() {
+            stmt.walk(&mut |stmt| match stmt {
+                sv::ir::Stmt::Assign {
+                    lhs,
+                    nonblocking: true,
+                    ..
+                } => {
+                    nonblocking.insert(lhs.name());
+                }
+                sv::ir::Stmt::AssignConcat {
+                    parts,
+                    nonblocking: true,
+                    ..
+                } => nonblocking.extend(parts.iter().map(sv::ir::LValue::name)),
+                _ => {}
+            });
+        }
+    }
+    module
+        .signals()
+        .iter()
+        .filter(|s| {
+            !s.is_net()
+                && !s.r#type().unpacked_ranges().is_empty()
+                && nonblocking.contains(s.name())
+        })
+        .filter(|signal| {
+            let drivers = local_driver_ranges(module, signal.name(), constants, parameter_types);
+            !drivers.is_empty()
+                && drivers
+                    .iter()
+                    .all(|(id, _)| (first_ff..end_ff).contains(id))
+        })
+        .map(|signal| signal.name().to_string())
+        .collect()
+}
+
 fn validate_variable_driver_ranges(
     module: &sv::ir::Module,
     constants: &HashMap<String, i128>,
@@ -8430,6 +8490,7 @@ fn lower_ff_processes(
         }
     }
 
+    let edge_memories = edge_only_memories(module, pm.constants, pm.parameter_types);
     let random_seeds = process_random_seeds(module);
     for ((index, process), events) in module.ff_processes().iter().enumerate().zip(process_events) {
         let mut events = events
@@ -8456,6 +8517,7 @@ fn lower_ff_processes(
             staged,
         } = ff::Ff::new(pm, random_seeds[&(0, index)])
             .with_sparse_memories(shared_memories)
+            .with_sparse_candidates(&edge_memories)
             .lower_process(process.body())?;
         repeated_writes.extend(repeated_ff_writes(&eval_only, &staged));
         // A process without writes still runs for its runtime events and
