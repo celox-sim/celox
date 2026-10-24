@@ -370,6 +370,9 @@ pub(in crate::ast) fn validate(
                     push(&mut jobs, *value);
                 }
             }
+            ExprKind::Copy(_) => {
+                return Err(unsupported("shallow copy in skipped operand"));
+            }
             ExprKind::Parameterized { .. } => {
                 return Err(unsupported("parameterized value in skipped operand"));
             }

@@ -523,6 +523,25 @@ pub(in crate::ast) fn constructor(
     dimensions: &PackedDimensions,
     class_name: &str,
 ) -> Converted<Option<Expr>> {
+    // `new h` copies the properties of the object of `h` into a new object
+    // of its class; handles are copied, not the objects they refer to (IEEE
+    // 1800-2023 8.12).
+    if let ExprKind::Copy(source) = &native.expression(ungroup(id, native)).kind {
+        let Some(source_class) = native_class(tree, *source, native, dimensions) else {
+            return Err(unsupported(
+                "shallow copy of a value that is not a class handle",
+            ));
+        };
+        if !derives_from(tree, dimensions, &source_class, class_name)? {
+            return Err(AnalyzerError::IncompatibleClassHandle {
+                context: "shallow copy".to_owned(),
+                actual: source_class,
+                target: class_name.to_owned(),
+            });
+        }
+        let handle = bind_value(*source, native, tree, dimensions, None)?;
+        return Ok(Some(classes::object_call(ObjectOp::Copy, vec![handle])));
+    }
     let (callee, arguments): (ExprId, &[celox_sv_syntax::Argument]) =
         match &native.expression(ungroup(id, native)).kind {
             ExprKind::Call {

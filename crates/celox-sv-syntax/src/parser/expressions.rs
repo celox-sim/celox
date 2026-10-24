@@ -50,6 +50,10 @@ pub(super) enum Job {
         minimum: u8,
         member: Name,
     },
+    Copy {
+        start: usize,
+        minimum: u8,
+    },
     GroupTypical {
         start: usize,
         minimum: u8,
@@ -312,6 +316,7 @@ impl Parser<'_> {
                     pending.push(*expression);
                 }
                 ExprKind::Group(value)
+                | ExprKind::Copy(value)
                 | ExprKind::Member {
                     expression: value, ..
                 } => pending.push(*value),
@@ -581,6 +586,22 @@ impl Parser<'_> {
                                 });
                                 jobs.push(Job::Expression(0));
                             }
+                        }
+                        // `new h` copies the object of `h`; `new` followed
+                        // by `(`, or by nothing, constructs one (8.7, 8.12).
+                        "new"
+                            if self.indices.get(self.at + 1).is_some_and(|&index| {
+                                let token = &self.tokens[index];
+                                matches!(
+                                    token.kind,
+                                    TokenKind::Identifier | TokenKind::EscapedIdentifier
+                                ) && (!self.reserved_identifier(token)
+                                    || matches!(token.text.as_str(), "this" | "super"))
+                            }) =>
+                        {
+                            self.at += 1;
+                            jobs.push(Job::Copy { start, minimum });
+                            jobs.push(Job::Expression(0));
                         }
                         "(" => {
                             self.at += 1;
@@ -923,6 +944,10 @@ impl Parser<'_> {
                         minimum,
                         ExprKind::Tagged { member, value },
                     )?;
+                }
+                Job::Copy { start, minimum } => {
+                    let value = values.pop().unwrap().expression();
+                    self.tail(&mut jobs, start, minimum, ExprKind::Copy(value))?;
                 }
                 Job::GroupTypical {
                     start,
