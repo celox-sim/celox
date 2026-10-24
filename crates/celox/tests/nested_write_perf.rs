@@ -1,28 +1,8 @@
 use celox::Simulator;
 
-const NESTED_WRITE: &str = r#"
-pub module AdcGroupNestedWriteMre (
-    i_primary       : input  logic [8],
-    i_overflow      : input  logic [8],
-    i_primary_active: input  logic [2],
-    o_pop           : output logic [8],
-) {
-    always_comb {
-        for bank in 0..2 {
-            for lane in 0..4 {
-                let index: u32 = bank * 4 + lane;
-                o_pop[index] = 0;
-                if i_primary[index] {
-                    o_pop[index] = 1;
-                }
-                if i_overflow[index] && !i_primary_active[bank] {
-                    o_pop[index] = 1;
-                }
-            }
-        }
-    }
-}
-"#;
+#[path = "test_utils/nested_write.rs"]
+mod nested_write;
+use nested_write::NESTED_WRITE;
 
 #[test]
 fn nested_loop_partial_writes_compile_and_simulate() {
@@ -46,173 +26,69 @@ fn nested_loop_partial_writes_compile_and_simulate() {
     assert_eq!(sim.get(o_pop), 0b1110_0001u8.into());
 }
 
-fn deep_nested_write(width: usize) -> String {
-    let (banks, lanes) = if width == 257 { (1, 257) } else { (2, 256) };
-    NESTED_WRITE
-        .replace("logic [8]", &format!("logic [{width}]"))
-        .replace("0..2", &format!("0..{banks}"))
-        .replace("0..4", &format!("0..{lanes}"))
-        .replace("bank * 4", &format!("bank * {lanes}"))
+#[test]
+fn complete_per_bit_interpreter_8_2state() {
+    nested_write::complete!(build_interpreter, 8, false);
 }
-
-macro_rules! deep_complete_regression {
-    ($name:ident, $build:ident, $width:expr, $four_state:expr) => {
-        #[test]
-        fn $name() {
-            let width = $width;
-            let four_state = $four_state;
-            let source = deep_nested_write(width);
-            let mut sim = Simulator::builder(&source, "AdcGroupNestedWriteMre")
-                .four_state(four_state)
-                .$build()
-                .expect("deep fully assigned writes must compile");
-            let primary = sim.signal("i_primary");
-            let overflow = sim.signal("i_overflow");
-            let active = sim.signal("i_primary_active");
-            let out = sim.signal("o_pop");
-            let requests = (celox::BigUint::from(1u8) << (width - 1)) | celox::BigUint::from(1u8);
-            let extra = celox::BigUint::from(1u8) << (width / 2);
-            sim.modify(|io| {
-                io.set_wide(primary, requests.clone());
-                io.set_wide(overflow, extra.clone());
-                io.set(active, 0u8);
-            })
-            .unwrap();
-            assert_eq!(sim.get(out), requests | extra);
-            sim.modify(|io| {
-                io.set(primary, 0u8);
-                io.set(overflow, 0u8);
-            })
-            .unwrap();
-            assert_eq!(sim.get(out), celox::BigUint::from(0u8));
-        }
-    };
-}
-macro_rules! deep_incomplete_regression {
-    ($name:ident, $build:ident, $four_state:expr) => {
-        #[test]
-        fn $name() {
-            use celox::{DiagnosticLevel, DiagnosticPolicy};
-            use miette::Diagnostic;
-            let four_state = $four_state;
-            let source = deep_nested_write(512).replace("0..256", "0..255");
-            let mut policy = DiagnosticPolicy::default();
-            policy.set("inferred_latch", DiagnosticLevel::Warn);
-            let mut sim = Simulator::builder(&source, "AdcGroupNestedWriteMre")
-                .diagnostic_policy(policy)
-                .four_state(four_state)
-                .$build()
-                .unwrap();
-            assert!(sim.warnings().iter().any(|warning| {
-                warning
-                    .code()
-                    .is_some_and(|code| code.to_string() == "inferred_latch")
-            }));
-            let primary = sim.signal("i_primary");
-            let out = sim.signal("o_pop");
-            let overflow = sim.signal("i_overflow");
-            let active = sim.signal("i_primary_active");
-            // Unwritten bank tails retain their externally seeded values across activations.
-            let retained =
-                (celox::BigUint::from(1u8) << 511usize) | (celox::BigUint::from(1u8) << 255usize);
-            sim.modify(|io| {
-                io.set_wide(out, retained.clone());
-                io.set(primary, 1u8);
-                io.set(overflow, 0u8);
-                io.set(active, 0u8);
-            })
-            .unwrap();
-            assert_eq!(sim.get(out), &retained | celox::BigUint::from(1u8));
-            sim.modify(|io| {
-                io.set(primary, 0u8);
-            })
-            .unwrap();
-            assert_eq!(sim.get(out), retained);
-        }
-    };
-}
-deep_complete_regression!(
-    deep_per_bit_interpreter_257_2state,
-    build_interpreter,
-    257,
-    false
-);
-deep_complete_regression!(
-    deep_per_bit_interpreter_512_2state,
-    build_interpreter,
-    512,
-    false
-);
-deep_incomplete_regression!(
-    deep_incomplete_per_bit_interpreter_2state,
-    build_interpreter,
-    false
-);
-deep_complete_regression!(
-    deep_per_bit_interpreter_257_4state,
-    build_interpreter,
-    257,
-    true
-);
-deep_complete_regression!(
-    deep_per_bit_interpreter_512_4state,
-    build_interpreter,
-    512,
-    true
-);
-deep_incomplete_regression!(
-    deep_incomplete_per_bit_interpreter_4state,
-    build_interpreter,
-    true
-);
-deep_complete_regression!(deep_per_bit_native_257_2state, build_native, 257, false);
-deep_complete_regression!(deep_per_bit_native_512_2state, build_native, 512, false);
-deep_incomplete_regression!(deep_incomplete_per_bit_native_2state, build_native, false);
-deep_complete_regression!(deep_per_bit_native_257_4state, build_native, 257, true);
-deep_complete_regression!(deep_per_bit_native_512_4state, build_native, 512, true);
-deep_incomplete_regression!(deep_incomplete_per_bit_native_4state, build_native, true);
-deep_complete_regression!(
-    deep_per_bit_cranelift_257_2state,
-    build_cranelift,
-    257,
-    false
-);
-deep_complete_regression!(
-    deep_per_bit_cranelift_512_2state,
-    build_cranelift,
-    512,
-    false
-);
-deep_incomplete_regression!(
-    deep_incomplete_per_bit_cranelift_2state,
-    build_cranelift,
-    false
-);
-deep_complete_regression!(
-    deep_per_bit_cranelift_257_4state,
-    build_cranelift,
-    257,
-    true
-);
-deep_complete_regression!(
-    deep_per_bit_cranelift_512_4state,
-    build_cranelift,
-    512,
-    true
-);
-deep_incomplete_regression!(
-    deep_incomplete_per_bit_cranelift_4state,
-    build_cranelift,
-    true
-);
 
 #[test]
-fn deep_incomplete_per_bit_writes_strictly_reject() {
-    let source = deep_nested_write(512).replace("0..256", "0..255");
-    let error = Simulator::builder(&source, "AdcGroupNestedWriteMre")
-        .build_interpreter()
-        .expect_err("incomplete deep writes must infer a latch");
-    assert!(error.to_string().contains("inferred_latch"), "{error}");
+fn incomplete_per_bit_interpreter_8_2state() {
+    nested_write::incomplete!(build_interpreter, 8, false);
+}
+
+#[test]
+fn complete_per_bit_interpreter_8_4state() {
+    nested_write::complete!(build_interpreter, 8, true);
+}
+
+#[test]
+fn incomplete_per_bit_interpreter_8_4state() {
+    nested_write::incomplete!(build_interpreter, 8, true);
+}
+
+#[test]
+fn complete_per_bit_native_8_2state() {
+    nested_write::complete!(build_native, 8, false);
+}
+
+#[test]
+fn incomplete_per_bit_native_8_2state() {
+    nested_write::incomplete!(build_native, 8, false);
+}
+
+#[test]
+fn complete_per_bit_native_8_4state() {
+    nested_write::complete!(build_native, 8, true);
+}
+
+#[test]
+fn incomplete_per_bit_native_8_4state() {
+    nested_write::incomplete!(build_native, 8, true);
+}
+
+#[test]
+fn complete_per_bit_cranelift_8_2state() {
+    nested_write::complete!(build_cranelift, 8, false);
+}
+
+#[test]
+fn incomplete_per_bit_cranelift_8_2state() {
+    nested_write::incomplete!(build_cranelift, 8, false);
+}
+
+#[test]
+fn complete_per_bit_cranelift_8_4state() {
+    nested_write::complete!(build_cranelift, 8, true);
+}
+
+#[test]
+fn incomplete_per_bit_cranelift_8_4state() {
+    nested_write::incomplete!(build_cranelift, 8, true);
+}
+
+#[test]
+fn small_incomplete_writes_strictly_reject() {
+    nested_write::strictly_reject(8);
 }
 
 fn wide_nested_write(width: usize, incomplete: bool) -> String {

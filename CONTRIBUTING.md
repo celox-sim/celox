@@ -53,6 +53,27 @@ of a changed failure; proof contracts change when executable coverage changes.
 See the [runner documentation](crates/celox-test-suite/README.md#independent-verification).
 Daily CI uses `--fresh` and runs the complete corpus afresh.
 
+## Compilation scaling in CodSpeed
+
+Normal PR and merge-queue CI retains small nested-write semantic regressions on
+interpreter, native and Cranelift backends in both two-state and four-state modes,
+wide-value latch checks, and a small sorter compilation smoke test.
+The 257/512-bit per-bit graph cases and sorter sizes 4/8/16/32 are measured by
+`benches/compilation.rs` in the existing daily/manual CodSpeed workflow.
+Nested-write benchmarks reuse the same semantic assertions as the small tests.
+Scaling cases use one iteration without per-case warmups or adaptive sampling;
+a small counter warms process-global analyzer state before measurement.
+Sorter sizes are separate CodSpeed measurements; performance comparisons replace
+process-time ratio assertions in ordinary tests. Failures use the existing
+CodSpeed reporting workflow.
+
+Build and run them with the same CodSpeed harness as CI:
+
+```sh
+cargo codspeed build --locked -p celox --bench compilation
+cargo codspeed run -p celox
+```
+
 ## Finish validation
 
 Validation is complete when the selected required checks pass and relevant

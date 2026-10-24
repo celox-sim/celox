@@ -10,9 +10,3 @@ fail-fast = false
 # Flag hangs instead of letting a runner sit until the job timeout.
 slow-timeout = { period = "60s", terminate-after = 10 }
 failure-output = "immediate-final"
-
-[[profile.ci.overrides]]
-# Deep per-bit graphs consume substantial compiler memory and CPU. Reserve the
-# pool so these regressions retain the same timeout without competing builds.
-filter = 'binary_id(celox::nested_write_perf) & test(/^deep_per_bit_/)'
-threads-required = "num-test-threads"
