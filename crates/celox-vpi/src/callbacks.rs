@@ -85,6 +85,8 @@ pub(super) struct CallbackState {
     time: u64,
     pub(super) finish: bool,
     pub(super) running: bool,
+    /// The time whose ReadOnly region a timed simulation ran last.
+    read_only_at: Option<u64>,
     pub(super) detach_on_stop: bool,
     error: Option<String>,
 }
@@ -381,6 +383,224 @@ pub(super) fn run() -> bool {
     let finished = with_host(|host| borrow_cell(&host.callbacks, |state| state.finish));
     // End-of-simulation callbacks are the one region intentionally dispatched
     // after finish has already been requested.
+    for id in registration_ids(CB_END_OF_SIMULATION) {
+        fire(id);
+    }
+    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.running = false));
+    finished
+}
+
+/// The signals of the value-change callbacks: those whose edges a timed
+/// simulation shows before its domains commit.
+fn watched_signals() -> Vec<celox::SignalRef> {
+    let selections = with_host(|host| {
+        borrow_cell(&host.callbacks, |state| {
+            state
+                .callbacks
+                .values()
+                .filter_map(|registration| callback_signal(&registration.data))
+                .collect::<Vec<_>>()
+        })
+    });
+    super::with_runtime(|runtime| {
+        selections
+            .into_iter()
+            .filter_map(|selection| selection.signal(runtime))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn set_time(time: u64) {
+    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.time = time));
+}
+
+fn current_time() -> u64 {
+    with_host(|host| borrow_cell(&host.callbacks, |state| state.time))
+}
+
+/// Whether a VPI write changed the timed simulation since the last call.
+fn take_timed_writes() -> bool {
+    super::with_timed_mut(super::TimedRuntime::take_wrote).unwrap_or(false)
+}
+
+/// What the regions after a slot's processes reached.
+enum Regions {
+    /// A callback wrote: the simulation settles the writes at the same
+    /// time, and the regions start again.
+    Wrote,
+    /// Every region ran; the next is the next time.
+    Done,
+}
+
+/// The regions of a settled time slot: value changes, then ReadWrite until
+/// the callbacks write nothing, then ReadOnly (IEEE 1800-2023 4.4.2).
+fn settled_regions() -> Regions {
+    take_timed_writes();
+    loop {
+        if finish_requested() {
+            return Regions::Done;
+        }
+        if dispatch_value_changes() {
+            if take_timed_writes() {
+                return Regions::Wrote;
+            }
+            continue;
+        }
+        let read_write = registration_ids(CB_READ_WRITE_SYNCH);
+        if read_write.is_empty() {
+            break;
+        }
+        for id in read_write {
+            fire(id);
+            if finish_requested() {
+                return Regions::Done;
+            }
+        }
+        if take_timed_writes() {
+            return Regions::Wrote;
+        }
+    }
+    fire_all(CB_READ_ONLY_SYNCH);
+    with_host(|host| {
+        borrow_cell_mut(&host.callbacks, |state| {
+            state.read_only_at = Some(state.time)
+        })
+    });
+    Regions::Done
+}
+
+/// Shows a timed simulation's slots to the VPI callbacks: value changes of
+/// clocks before the domains commit, and the regions of each settled slot.
+struct TimedObserver;
+
+impl celox::SlotObserver<celox::NativeBackend> for TimedObserver {
+    fn before_domains(&mut self, io: &mut celox::SlotIo<'_, celox::NativeBackend>, time: u64) {
+        in_slot(io, time, || {
+            dispatch_value_changes();
+        });
+    }
+
+    fn end_of_slot(&mut self, io: &mut celox::SlotIo<'_, celox::NativeBackend>, time: u64) {
+        in_slot(io, time, || {
+            settled_regions();
+        });
+    }
+}
+
+/// Run `regions` with the VPI entry points reaching the state through `io`.
+fn in_slot(io: &mut celox::SlotIo<'_, celox::NativeBackend>, time: u64, regions: impl FnOnce()) {
+    set_time(time);
+    // Safety: `io` outlives the dispatch below and nothing else uses it until
+    // `leave_slot`.
+    super::with_timed_mut(|timed| unsafe { timed.enter_slot(io) });
+    regions();
+    super::with_timed_mut(super::TimedRuntime::leave_slot);
+}
+
+/// Run `step` on the timed simulation, out of the session while it runs so
+/// that its observer's callbacks can reach the VPI entry points.
+fn timed_step(
+    step: impl FnOnce(
+        &mut celox::Simulation<celox::NativeBackend>,
+    ) -> Result<(), celox::RuntimeErrorCode>,
+) {
+    let watched = watched_signals();
+    let Some(mut simulation) = super::with_timed_mut(|timed| timed.simulation.take()).flatten()
+    else {
+        return;
+    };
+    simulation.set_observed_signals(&watched);
+    let result = step(&mut simulation);
+    let ended = simulation.is_finished() || simulation.is_stopped();
+    super::with_timed_mut(|timed| timed.simulation = Some(simulation));
+    super::process_runtime_events();
+    if let Err(error) = result {
+        fail(format!("simulation failed: {error}"));
+    } else if ended {
+        // `$stop` ends a run that has no interactive mode, as `vpiStop` does.
+        request_finish();
+    }
+}
+
+fn with_simulation<R>(
+    operation: impl FnOnce(&mut celox::Simulation<celox::NativeBackend>) -> R,
+) -> Option<R> {
+    super::with_timed_mut(|timed| timed.simulation.as_mut().map(operation)).flatten()
+}
+
+/// The VPI regions of every time slot of a timed simulation, until
+/// `vpiFinish`, the design's `$finish`, or no activity remains.
+pub(super) fn run_timed() -> bool {
+    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.running = true));
+    if let Some(Some(mut simulation)) = super::with_timed_mut(|timed| timed.simulation.take()) {
+        simulation.observe_slots(Box::new(TimedObserver), &[]);
+        super::with_timed_mut(|timed| timed.simulation = Some(simulation));
+    }
+    fire_all(CB_START_OF_SIMULATION);
+    let mut iterations = 0usize;
+    while !finish_requested() {
+        iterations += 1;
+        if iterations > 1_000_000 {
+            fail(
+                "VPI callback scheduler exceeded 1000000 iterations without advancing time"
+                    .to_string(),
+            );
+            break;
+        }
+        let due = with_host(|host| {
+            borrow_cell(&host.callbacks, |state| {
+                state
+                    .callbacks
+                    .values()
+                    .filter_map(|registration| registration.due)
+                    .min()
+            })
+        });
+        let event = with_simulation(|simulation| simulation.next_event_time()).flatten();
+        let Some(time) = due.into_iter().chain(event).min() else {
+            break;
+        };
+        if time > current_time() {
+            timed_step(|simulation| simulation.advance_to(time));
+            if finish_requested() {
+                break;
+            }
+            set_time(time);
+            iterations = 0;
+            fire_all(CB_NEXT_SIM_TIME);
+        }
+        for id in due_ids() {
+            fire(id);
+            if finish_requested() {
+                break;
+            }
+        }
+        with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.read_only_at = None));
+        timed_step(|simulation| simulation.run_until(time));
+        // The slot ran no regions when nothing but callbacks happened at
+        // this time: run them here, settling what they write.
+        while !finish_requested()
+            && with_host(|host| borrow_cell(&host.callbacks, |state| state.read_only_at))
+                != Some(time)
+        {
+            with_simulation(|simulation| simulation.eval_comb());
+            take_timed_writes();
+            if let Regions::Done = settled_regions() {
+                break;
+            }
+            timed_step(|simulation| simulation.run_until(time));
+            iterations += 1;
+            if iterations > 1_000_000 {
+                fail(
+                    "VPI callback scheduler exceeded 1000000 iterations without advancing time"
+                        .to_string(),
+                );
+                break;
+            }
+        }
+    }
+    let finished = finish_requested();
     for id in registration_ids(CB_END_OF_SIMULATION) {
         fire(id);
     }

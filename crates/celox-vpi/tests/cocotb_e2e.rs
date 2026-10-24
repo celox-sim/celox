@@ -104,6 +104,87 @@ fn cocotb_observes_edges_before_nonblocking_updates() {
 
 #[test]
 #[ignore = "requires a cocotb installation; CI runs this test explicitly"]
+fn cocotb_runs_dut_processes_in_step() {
+    check_cocotb_native_design(&["processes.sv"], "test_processes", ".");
+}
+
+/// The `TRACE` lines a cocotb run of `test_processes` logged.
+fn traces(output: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .filter_map(|line| {
+            line.split_once("TRACE ")
+                .map(|(_, trace)| trace.to_string())
+        })
+        .collect()
+}
+
+/// The DUT processes of `processes.sv` see what they see on Icarus.
+#[test]
+#[ignore = "requires cocotb and Icarus Verilog; run locally"]
+fn icarus_and_celox_agree_on_dut_processes() {
+    let python = env::var_os("CELOX_COCOTB_PYTHON")
+        .expect("CELOX_COCOTB_PYTHON must name the cocotb Python interpreter");
+    let python = python.to_string_lossy().into_owned();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cocotb");
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("processes-sim");
+    let compile = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .args(["vpi", "build"])
+        .arg(fixture.join("processes.sv"))
+        .args(["--top", "Top", "--output"])
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let site_packages = python_output(
+        &python,
+        &["-c", "import site; print(':'.join(site.getsitepackages()))"],
+    );
+    let celox = Command::new(&executable)
+        .args(["--test-module", "test_processes", "--python", &python])
+        .arg("--results-file")
+        .arg(temporary.path().join("results.xml"))
+        .current_dir(&fixture)
+        .env(
+            "PYTHONPATH",
+            format!("{}:{site_packages}", fixture.display()),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        celox.status.success(),
+        "{}",
+        String::from_utf8_lossy(&celox.stderr)
+    );
+    let icarus = Command::new(&python)
+        .arg(fixture.join("run_icarus.py"))
+        .arg(fixture.join("processes.sv"))
+        .arg("test_processes")
+        .arg(temporary.path().join("icarus"))
+        .env("PYTHONPATH", &fixture)
+        .output()
+        .unwrap();
+    assert!(
+        icarus.status.success(),
+        "{}",
+        String::from_utf8_lossy(&icarus.stderr)
+    );
+    let expected = traces(&icarus.stdout);
+    assert!(
+        !expected.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&icarus.stdout)
+    );
+    assert_eq!(traces(&celox.stdout), expected);
+}
+
+#[test]
+#[ignore = "requires a cocotb installation; CI runs this test explicitly"]
 fn cocotb_accepts_femtosecond_clock_periods() {
     check_cocotb_native_design_with_options(
         &["edge_phase.sv"],

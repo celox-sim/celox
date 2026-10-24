@@ -9,8 +9,7 @@ use std::{
 };
 
 use celox::{
-    NativeProgramImage, NativeProgramInstance, StateDifference, StateFile, StateObject, StateRole,
-    format_state_value,
+    NativeProgramImage, StateDifference, StateFile, StateObject, StateRole, format_state_value,
 };
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
@@ -395,27 +394,60 @@ fn build(arguments: BuildArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// The SystemVerilog compilation options of `design`.
+#[cfg(feature = "systemverilog")]
+fn configure_sv<'a, T>(
+    design: &'a Design,
+    builder: celox::SimulatorBuilder<'a, T>,
+) -> celox::SimulatorBuilder<'a, T> {
+    let builder = builder
+        .four_state(design.four_state.unwrap_or(false))
+        .diagnostic_policy(design.diagnostics.clone())
+        .sv_timescale(design.timescale)
+        .signal_access(design.signal_access.clone())
+        .opt_level(design.opt_level.unwrap_or(celox::OptLevel::O1));
+    design.apply_parameters(builder)
+}
+
 fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> {
     if design.is_sv() {
         #[cfg(feature = "systemverilog")]
         {
             let sources = design.sv_sources()?;
-            let refs = sources
+            let refs: Vec<_> = sources
                 .iter()
                 .map(|(text, path)| (text.as_str(), path.as_path()))
                 .collect();
-            let builder = celox::Simulator::from_sv_sources(refs, &design.top)
-                .four_state(design.four_state.unwrap_or(false))
-                .diagnostic_policy(design.diagnostics.clone())
-                .sv_timescale(design.timescale)
-                .signal_access(design.signal_access.clone())
-                .opt_level(design.opt_level.unwrap_or(celox::OptLevel::O1));
-            let simulator = design
-                .apply_parameters(builder)
-                .compile_native()
-                .map_err(|error| format!("compilation failed:\n{error}"))?;
-            report_warnings(simulator.warnings())?;
-            return Ok(simulator.into_program_image());
+            let untimed = configure_sv(
+                design,
+                celox::Simulator::from_sv_sources(refs.clone(), &design.top),
+            )
+            .compile_native();
+            let image = match untimed {
+                Ok(simulator) => {
+                    report_warnings(simulator.warnings())?;
+                    simulator.into_program_image()
+                }
+                // A design with processes runs as a timed simulation, in step
+                // with the VPI time callbacks.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        celox::SimulatorErrorKind::ProcessRequiresSimulation(_)
+                    ) =>
+                {
+                    let simulation = configure_sv(
+                        design,
+                        celox::Simulation::from_sv_sources(refs, &design.top),
+                    )
+                    .compile_native()
+                    .map_err(|error| format!("compilation failed:\n{error}"))?;
+                    report_warnings(simulation.warnings())?;
+                    simulation.into_program_image()
+                }
+                Err(error) => return Err(format!("compilation failed:\n{error}")),
+            };
+            return Ok(image);
         }
         #[cfg(not(feature = "systemverilog"))]
         return Err(
@@ -690,10 +722,7 @@ fn run_simulation(image: NativeProgramImage, arguments: SimulationArgs) -> Resul
     }
     set_environment("COCOTB_RESULTS_FILE", &results_file);
 
-    // Safety: the image is compiler-produced data attached to this executable.
-    let instance = unsafe { NativeProgramInstance::from_image(image) }
-        .map_err(|error| format!("failed to load attached design: {error}"))?;
-    celox_vpi::driver::run_cocotb(instance, &vpi)?;
+    celox_vpi::driver::run_cocotb_image(image, &vpi)?;
     check_results(&python, &results_file)
 }
 
