@@ -48,6 +48,9 @@ pub(super) struct Ff<'p, 'a> {
     /// Variables written other than at a constant range or one element of
     /// an unpacked array, which a sparse publication does not support.
     other_writes: HashSet<SourceVarId>,
+    /// Variables a process kernel may write between the evaluation of this
+    /// process and the NBA region (see `kernel_window_writes`).
+    window_writes: HashSet<SourceVarId>,
     b: SIRBuilder<Addr>,
     /// Variables read from the working region.
     working: HashSet<SourceVarId>,
@@ -120,6 +123,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             sparse_candidates: HashSet::default(),
             element_writes: HashSet::default(),
             other_writes: HashSet::default(),
+            window_writes: HashSet::default(),
             b: SIRBuilder::new(),
             working: HashSet::default(),
             nonblocking: HashSet::default(),
@@ -161,6 +165,11 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     pub fn with_sparse_candidates(mut self, names: &HashSet<String>) -> Self {
         self.sparse_candidates = names.iter().filter_map(|name| self.m.id(name)).collect();
+        self
+    }
+
+    pub fn with_window_writes(mut self, names: &HashSet<String>) -> Self {
+        self.window_writes = names.iter().filter_map(|name| self.m.id(name)).collect();
         self
     }
 
@@ -249,6 +258,44 @@ impl<'p, 'a> Ff<'p, 'a> {
             sv::ir::LValue::Select { .. } => constant.unwrap_or(whole),
         };
         self.targets.push((id, access));
+    }
+
+    /// The variables the subroutines `body` calls assign, directly or
+    /// through further calls.
+    fn subroutine_assignments(&self, body: &[sv::ir::Stmt]) -> HashSet<SourceVarId> {
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+        }
+        let mut assigned = HashSet::default();
+        let mut visited = HashSet::default();
+        while let Some((callee, args)) = calls.pop() {
+            let sv::ir::Callee::Subroutine(name) = callee else {
+                continue;
+            };
+            let Some(subroutine) = self.m.subroutine(&name) else {
+                continue;
+            };
+            default_calls(subroutine, &args, &mut calls);
+            if !visited.insert(name) {
+                continue;
+            }
+            for stmt in &subroutine.body {
+                stmt.walk(&mut |stmt| {
+                    match stmt {
+                        sv::ir::Stmt::Assign { lhs, .. } => {
+                            assigned.extend(self.m.id(lhs.name()));
+                        }
+                        sv::ir::Stmt::AssignConcat { parts, .. } => {
+                            assigned.extend(parts.iter().filter_map(|part| self.m.id(part.name())));
+                        }
+                        _ => {}
+                    }
+                    stmt_calls(stmt, &mut calls);
+                });
+            }
+        }
+        assigned
     }
 
     /// Collect the variables a body writes, following calls into subroutines.
@@ -3966,6 +4013,25 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<FfProcessUnits, sv::AnalyzerError> {
         let mut visited = HashSet::default();
         self.scan(body, &mut visited);
+        // A variable only this process's nonblocking assignments write here,
+        // and that a process kernel may write before they are published,
+        // takes only the bits they wrote: the kernel's write stays in the
+        // others, even when no assignment executed (IEEE 1800-2023 10.4.2).
+        // Staging rewrites the assignments of the body; a variable a called
+        // subroutine assigns keeps its whole next state.
+        let called = self.subroutine_assignments(body);
+        let exact: HashSet<SourceVarId> = self
+            .nonblocking
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.window_writes.contains(id)
+                    && !called.contains(id)
+                    && !self.working.contains(id)
+                    && !self.m.is_hidden(*id)
+                    && !self.sparse_memories.contains(id)
+            })
+            .collect();
         // Publish only the written elements of an array this process alone
         // updates by nonblocking element writes, rather than seeding and
         // committing all of it on every edge. The element stores keep
@@ -3977,6 +4043,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             .copied()
             .filter(|id| {
                 self.element_writes.contains(id)
+                    && !exact.contains(id)
                     && !self.working.contains(id)
                     && !self.other_writes.contains(id)
                     && !self.m.is_hidden(*id)
@@ -4024,6 +4091,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             .intersection(&self.working)
             .copied()
             .filter(|&id| !self.m.is_hidden(id) && self.m.var(id).array_dims.is_empty())
+            .chain(exact.iter().copied())
             .collect();
         mixed.sort_by_key(|id| id.0);
         let staged: Vec<NbaStage> = mixed
@@ -4046,7 +4114,14 @@ impl<'p, 'a> Ff<'p, 'a> {
         } else {
             stage_nonblocking(body, &staged, self.m)
         };
-        let ordinary_targets: Vec<_> = targets
+        // A variable staged for an exact publication has no next state of
+        // its own: only its merge publishes it.
+        let published: Vec<_> = targets
+            .iter()
+            .copied()
+            .filter(|target| !exact.contains(&target.id))
+            .collect();
+        let ordinary_targets: Vec<_> = published
             .iter()
             .copied()
             .filter(|target| !self.sparse_memories.contains(&target.id))
@@ -4054,9 +4129,21 @@ impl<'p, 'a> Ff<'p, 'a> {
         emit_ff_seeds(&mut self.b, &ordinary_targets);
         for stage in &staged {
             let width = self.m.var(stage.mask).width;
-            let zero = self.b.alloc_bit(width, false);
-            self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
-            self.store(stage.mask, SIROffset::Static(0), width, zero);
+            if self.m.var(stage.id).array_dims.is_empty() {
+                let zero = self.b.alloc_bit(width, false);
+                self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+                self.store(stage.mask, SIROffset::Static(0), width, zero);
+            } else {
+                // Nothing writes the mask's stable state, which stays zero;
+                // a store may not span the elements of an array.
+                self.b.emit(SIRInstruction::Commit(
+                    stable(stage.mask),
+                    working(stage.mask),
+                    SIROffset::Static(0),
+                    width,
+                    Vec::new(),
+                ));
+            }
         }
         if self.exec_block(&body)? {
             self.b.seal_block(SIRTerminator::Return);
@@ -4078,14 +4165,14 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
             }
         }
-        let (active_targets, nba_targets): (Vec<_>, Vec<_>) = targets
+        let (active_targets, nba_targets): (Vec<_>, Vec<_>) = published
             .iter()
             .copied()
             .partition(|target| self.working.contains(&target.id));
         let mut apply = SIRBuilder::new();
         emit_sparse_memory_commits(
             &mut apply,
-            &targets,
+            &published,
             &self.sparse_memories,
             self.m.variables,
         );
@@ -4328,6 +4415,12 @@ fn emit_nba_merges(builder: &mut SIRBuilder<Addr>, staged: &[NbaStage], pm: &Pro
     for stage in staged {
         let _ = &stage.name;
         let variable = pm.var(stage.id);
+        if let Some(element_width) =
+            unpacked_element_width(variable).filter(|_| !variable.array_dims.is_empty())
+        {
+            emit_array_nba_merge(builder, stage, variable, element_width);
+            continue;
+        }
         let width = variable.width;
         let current = if variable.is_4state {
             builder.alloc_logic(width)
@@ -4387,6 +4480,96 @@ fn emit_nba_merges(builder: &mut SIRBuilder<Addr>, staged: &[NbaStage], pm: &Pro
             Vec::new(),
         ));
     }
+}
+
+/// [`emit_nba_merges`] for an unpacked array: a loop merges each element,
+/// since an access may not span elements.
+fn emit_array_nba_merge(
+    builder: &mut SIRBuilder<Addr>,
+    stage: &NbaStage,
+    variable: &SvVariable,
+    element_width: usize,
+) {
+    let count = variable.width / element_width;
+    let four_state = variable.is_4state;
+    let alloc = |builder: &mut SIRBuilder<Addr>| {
+        if four_state {
+            builder.alloc_logic(element_width)
+        } else {
+            builder.alloc_bit(element_width, false)
+        }
+    };
+    let first = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(first, SIRValue::new(0u8)));
+    let index = builder.alloc_bit(64, false);
+    let header = builder.new_block_with(vec![index]);
+    let body_index = builder.alloc_bit(64, false);
+    let body = builder.new_block_with(vec![body_index]);
+    let exit = builder.new_block();
+    builder.seal_block(SIRTerminator::Jump(header, vec![first]));
+
+    builder.switch_to_block(header);
+    let limit = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(limit, SIRValue::new(count as u64)));
+    let more = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Binary(more, index, BinaryOp::LtU, limit));
+    builder.seal_block(SIRTerminator::Branch {
+        cond: more,
+        true_block: (body, vec![index]),
+        false_block: (exit, Vec::new()),
+    });
+
+    builder.switch_to_block(body);
+    let offset = SIROffset::Element {
+        index: body_index,
+        element_width,
+        bit_offset: 0,
+        dynamic_bit_offset: None,
+    };
+    let current = alloc(builder);
+    builder.emit(SIRInstruction::Load(
+        current,
+        stable(stage.id),
+        offset.clone(),
+        element_width,
+    ));
+    let value = alloc(builder);
+    builder.emit(SIRInstruction::Load(
+        value,
+        working(stage.value),
+        offset.clone(),
+        element_width,
+    ));
+    let mask = builder.alloc_bit(element_width, false);
+    builder.emit(SIRInstruction::Load(
+        mask,
+        working(stage.mask),
+        offset.clone(),
+        element_width,
+    ));
+    let keep = builder.alloc_bit(element_width, false);
+    builder.emit(SIRInstruction::Unary(keep, UnaryOp::BitNot, mask));
+    let kept = alloc(builder);
+    builder.emit(SIRInstruction::Binary(kept, current, BinaryOp::And, keep));
+    let taken = alloc(builder);
+    builder.emit(SIRInstruction::Binary(taken, value, BinaryOp::And, mask));
+    let merged = alloc(builder);
+    builder.emit(SIRInstruction::Binary(merged, kept, BinaryOp::Or, taken));
+    builder.emit(SIRInstruction::Store(
+        stable(stage.id),
+        offset,
+        element_width,
+        merged,
+        Vec::new(),
+        Vec::new(),
+    ));
+    let one = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+    let next = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Binary(next, body_index, BinaryOp::Add, one));
+    builder.seal_block(SIRTerminator::Jump(header, vec![next]));
+
+    builder.switch_to_block(exit);
 }
 
 impl Ff<'_, '_> {

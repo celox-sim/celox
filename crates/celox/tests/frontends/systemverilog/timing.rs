@@ -776,6 +776,20 @@ sv_backends! {
     }
 }
 
+sv_backends! {
+    fn edge_nonblocking_updates_keep_later_writes_of_other_bits(sim) {
+        @case "timing::edge_nonblocking_updates_keep_later_writes_of_other_bits";
+    }
+
+    fn edge_nonblocking_updates_follow_writes_their_blocking_results_wake(sim) {
+        @case "timing::edge_nonblocking_updates_follow_writes_their_blocking_results_wake";
+    }
+
+    fn edge_blocking_results_precede_later_process_writes(sim) {
+        @case "timing::edge_blocking_results_precede_later_process_writes";
+    }
+}
+
 /// An edge whose evaluation a `$fatal` ends before its commit leaves no
 /// held write of a watched variable behind: when the host continues, the
 /// later edges rewrite `y[0]` to its own value and wake no waiter.
