@@ -34,7 +34,7 @@ test("initialization removes only this job's stale reports and creates no target
   resetReports(directory, source);
   assert.ok(!existsSync(directory));
   mkdirSync(directory);
-  for (const name of ["nextest-full.xml", "nextest-0.xml", "unrelated.xml"])
+  for (const name of ["nextest-full.xml", "nextest-0.xml", "nextest-cocotb-0.xml", "unrelated.xml"])
     writeFileSync(join(directory, name), "old");
   writeFileSync(source, "old");
   resetReports(directory, source);
@@ -48,4 +48,14 @@ test("full runs use a stable report name and reject invalid paths", (t) => {
   assert.throws(() => saveCurrentReport(directory, "../escape", source), /Invalid Rust report name/);
   assert.ok(existsSync(source));
   assert.equal(saveCurrentReport(directory, "full", source), join(directory, "nextest-full.xml"));
+});
+
+test("cocotb reports do not overwrite normal test reports", (t) => {
+  const { source, directory } = fixture(t);
+  writeFileSync(source, "normal");
+  saveCurrentReport(directory, "full", source);
+  writeFileSync(source, "cocotb failure");
+  saveCurrentReport(directory, "cocotb-0", source);
+  assert.equal(readFileSync(join(directory, "nextest-full.xml"), "utf8"), "normal");
+  assert.equal(readFileSync(join(directory, "nextest-cocotb-0.xml"), "utf8"), "cocotb failure");
 });

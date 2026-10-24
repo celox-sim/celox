@@ -223,7 +223,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: vtest-v1
+          key: vtest-v2
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Initialize Rust test reports
@@ -258,7 +258,7 @@ jobs:
         id: workspace-tests
         if: needs.changes.outputs.rust_full != 'false'
         run: >-
-          cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci
+          cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci --cargo-profile vtest
           --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/runtime-cases
 
       - name: Run the tests this pull request can affect
@@ -273,6 +273,15 @@ jobs:
       - name: Collect Rust test reports
         if: success() || failure()
         run: node scripts/ci-rust-reports.mjs collect
+
+      - name: Run cocotb VPI end-to-end test
+        id: cocotb-tests
+        if: needs.changes.outputs.rust_vpi_e2e != 'false'
+        env:
+          RUST_FULL: ${{ needs.changes.outputs.rust_full }}
+          BUILDS: ${{ needs.changes.outputs.rust_builds }}
+        run: |
+          CELOX_COCOTB_PYTHON="$(command -v python)" node scripts/run-ci-cocotb.mjs
 
       - name: Retain Rust test reports
         if: (success() || failure()) && hashFiles('work/ci-reports/rust/*.xml') != ''
@@ -289,14 +298,14 @@ jobs:
           token: ${{ secrets.MERGIFY_TOKEN }}
           report_path: work/ci-reports/rust/*.xml
           job_name: rust-tests
-          test_step_outcome: ${{ steps.workspace-tests.outcome != 'skipped' && steps.workspace-tests.outcome || steps.scoped-tests.outcome }}
+          test_step_outcome: ${{ steps.cocotb-tests.outcome == 'failure' && 'failure' || steps.workspace-tests.outcome != 'skipped' && steps.workspace-tests.outcome || steps.scoped-tests.outcome }}
 
       # nextest does not run documentation tests.
       - name: Run workspace documentation tests with CI features
         if: needs.changes.outputs.rust_full != 'false'
         run: >-
-          cargo test --locked --workspace --exclude 'lydite*' --doc
-          --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus
+          cargo test --locked --profile vtest --workspace --exclude 'lydite*' --doc
+          --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/runtime-cases
 
       - name: Run the documentation tests of the changed libraries
         if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_libraries != ''
@@ -307,28 +316,25 @@ jobs:
           args=()
           for package in $LIBRARIES; do args+=(-p "$package"); done
           if [ -n "$FEATURES" ]; then args+=(--features "$FEATURES"); fi
-          cargo test --locked --doc "${args[@]}"
+          cargo test --locked --profile vtest --doc "${args[@]}"
 
+  rust-default-tests:
+    name: Rust default-feature tests
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.rust == 'true' && (needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_libraries), ' celox ')))) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
       - name: Verify default-feature library and documentation tests
-        if: needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_libraries), ' celox ')
         run: |
           cargo test --locked -p celox --lib
           cargo test --locked -p celox --doc
-
-      - name: Run cocotb VPI end-to-end test
-        if: needs.changes.outputs.rust_vpi_e2e != 'false'
-        env:
-          FEATURES: ${{ needs.changes.outputs.rust_full != 'false' && 'celox/systemverilog' || needs.changes.outputs.rust_features }}
-        run: |
-          args=()
-          # Match the feature set of VPI's scoped nextest build. Features of
-          # other selected packages (such as external adapters) are unrelated.
-          for feature in ${FEATURES//,/ }; do
-            case "$feature" in celox/*) args+=(--features "$feature");; esac
-          done
-          CELOX_COCOTB_PYTHON="$(command -v python)" \
-            cargo test --locked -p celox-vpi --features systemverilog "${args[@]}" --test cocotb_e2e \
-            cocotb_ -- --ignored
 
   external-suites:
     name: External suite (${{ matrix.suite }}, ${{ matrix.tool }})
@@ -630,13 +636,15 @@ jobs:
   # into a successful check merely because a downstream job was skipped.
   rust:
     name: Rust Test & NAPI Build
-    needs: [changes, rust-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites]
+    needs: [changes, rust-tests, rust-default-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     env:
       CHANGES_RESULT: ${{ needs.changes.result }}
       RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
       RUST_RESULT: ${{ needs.rust-tests.result }}
+      DEFAULT_REQUIRED: ${{ needs.changes.result != 'success' || (needs.changes.outputs.rust == 'true' && (needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_libraries), ' celox '))) }}
+      DEFAULT_RESULT: ${{ needs.rust-default-tests.result }}
       SV_TESTS_REQUIRED: ${{ needs.changes.outputs.rust != 'false' && needs.changes.outputs.rust_sv_tests != 'false' }}
       SV_TESTS_RESULT: ${{ needs.sv-tests.result }}
       # Platform coverage is mandatory in queue and full validation runs.
@@ -655,6 +663,9 @@ jobs:
           test "$CHANGES_RESULT" = success
           if [ "$RUST_REQUIRED" != false ] || [ "$RUST_RESULT" != skipped ]; then
             test "$RUST_RESULT" = success
+          fi
+          if [ "$DEFAULT_REQUIRED" != false ] || [ "$DEFAULT_RESULT" != skipped ]; then
+            test "$DEFAULT_RESULT" = success
           fi
           if [ "$SV_TESTS_REQUIRED" != false ] || [ "$SV_TESTS_RESULT" != skipped ]; then
             test "$SV_TESTS_RESULT" = success
@@ -959,6 +970,7 @@ jobs:
         docs,
         lint,
         rust-tests,
+        rust-default-tests,
         sv-tests,
         external-suites,
         common-cells,

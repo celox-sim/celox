@@ -166,7 +166,7 @@ incremental   = true
 [profile.bench]
 debug = true
 
-# Optimize the shared vtest executor while keeping development checks enabled.
+# Optimize the shared vtest executor and CI tests, keeping development checks enabled.
 # External dependencies retain the dev profile's package-specific optimization.
 [profile.vtest]
 inherits = "dev"
