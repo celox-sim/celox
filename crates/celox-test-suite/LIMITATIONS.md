@@ -709,6 +709,17 @@ IEEE 1800-2023 18.3. Only `class::randomization_enum_alias` is excluded;
 [the mismatch evidence](verification/repros/sv_enum_randomization_verilator.json)
 retains its unchanged domain assertion.
 
+Scope enum randomization has two narrow tool exclusions for
+`system_functions::scope_randomize_enum_values` and
+`system_functions::scope_randomize_enum_order`. Icarus 13.0 rejects scope
+randomization calls (`sv_icarus_scope_enum_randomize`;
+[compile diagnostics](verification/repros/sv_scope_enum_randomize_icarus.json)).
+Verilator 5.052 generates `basicStdRandomization` calls using only integer widths,
+without the enum domain, and draws undeclared values (`sv_verilator_scope_enum_randomize`;
+[mismatch evidence](verification/repros/sv_scope_enum_randomize_verilator.json)).
+IEEE 1800-2023 18.3 and 18.12 require the declared enum domain. The shared
+assertions remain unchanged, including the direct-enum case without an alias.
+
 ## SystemVerilog packed unions
 
 The `unions` shared group covers hard and soft packed untagged unions. With

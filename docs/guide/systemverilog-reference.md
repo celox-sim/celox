@@ -104,7 +104,12 @@ variable or advancing the random stream. Calls follow procedural statement order
 and short-circuit evaluation, and use the calling process's persistent random
 stream (IEEE 1800-2023 18.12).
 
-Constraints (`with`), enum variables, unpacked arrays, nets,
+Scalar enums up to 64 bits are also supported: randomization selects only their
+known declared values, including typedef aliases and signed or sparse values.
+The process random stream, short-circuit behavior, and checkpoint state apply
+to enums as well. Mixed enum and integer argument lists are supported.
+
+Constraints (`with`), enums with unsupported or unresolved domains, unpacked arrays, nets,
 constants, selects and concatenation arguments are unsupported and rejected.
 
 ### Class randomization

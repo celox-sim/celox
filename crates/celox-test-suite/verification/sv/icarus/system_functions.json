@@ -1619,6 +1619,52 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Functions",
+      "expectation": "Simulation",
+      "name": "system_functions::scope_randomize_enum_order",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "detail": "Icarus 13.0 rejects scope randomize and std::randomize calls before simulation. IEEE 1800-2023 18.12 permits randomization of visible scope variables, including enums under 18.3.",
+      "known_issue": {
+        "id": "sv_icarus_scope_enum_randomize",
+        "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects scope randomize and std::randomize calls before simulation. IEEE 1800-2023 18.12 permits randomization of visible scope variables, including enums under 18.3.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_scope_enum_randomize_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "phase": "skip",
+      "status": "ignored"
+    },
+    {
+      "category": "Functions",
+      "expectation": "Simulation",
+      "name": "system_functions::scope_randomize_enum_values",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "detail": "Icarus 13.0 rejects scope randomize and std::randomize calls before simulation. IEEE 1800-2023 18.12 permits randomization of visible scope variables, including enums under 18.3.",
+      "known_issue": {
+        "id": "sv_icarus_scope_enum_randomize",
+        "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects scope randomize and std::randomize calls before simulation. IEEE 1800-2023 18.12 permits randomization of visible scope variables, including enums under 18.3.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_scope_enum_randomize_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "phase": "skip",
+      "status": "ignored"
     }
   ]
 }
