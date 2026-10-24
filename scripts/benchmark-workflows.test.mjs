@@ -50,7 +50,7 @@ test("CodSpeed reports the current upload even after failure or cancellation", (
   const benchmark = job(codspeed, "codspeed");
   const report = job(codspeed, "report");
   assert.match(benchmark, /run-id: \$\{\{ steps\.benchmarks\.outputs\.run-id \}\}/);
-  assert.match(benchmark, /id: benchmarks\n\s+uses: CodSpeedHQ\/action@v5/);
+  assert.match(benchmark, /id: benchmarks\n\s+timeout-minutes: 15\n\s+uses: CodSpeedHQ\/action@v5/);
   assert.match(report, /needs: codspeed/);
   assert.match(report, /checks: read/);
   assert.match(report, /issues: write/);
@@ -164,4 +164,16 @@ test("profiling reuse rejects pre-CLI artifacts before capture", () => {
   assert.match(check, /if \[\[ ! -f target\/release\/celox \]\]/);
   assert.match(check, /predates the celox run CLI/);
   assert.match(check, /exit 1/);
+});
+
+
+test("compilation scaling uses walltime consistently and has a bounded execution", () => {
+  const benchmark = job(codspeed, "codspeed");
+  assert.match(benchmark, /runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04/);
+  assert.match(benchmark, /timeout-minutes: 60/);
+  assert.match(benchmark, /cargo codspeed build --locked --measurement-mode walltime -p celox --bench compilation/);
+  assert.match(benchmark, /id: benchmarks\n        timeout-minutes: 15\n        uses: CodSpeedHQ\/action@v5/);
+  assert.match(benchmark, /mode: walltime/);
+  assert.match(benchmark, /run: cargo codspeed run --measurement-mode walltime -p celox --bench compilation/);
+  assert.doesNotMatch(benchmark, /simulation|continue-on-error/);
 });

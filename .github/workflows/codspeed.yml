@@ -18,7 +18,8 @@ permissions: {}
 jobs:
   codspeed:
     name: CodSpeed
-    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
     outputs:
       run-id: ${{ steps.benchmarks.outputs.run-id }}
     permissions:
@@ -39,14 +40,15 @@ jobs:
           tool: cargo-codspeed@5.0.1
 
       - name: Build compile-time benchmarks
-        run: cargo codspeed build --locked -p celox --bench compilation
+        run: cargo codspeed build --locked --measurement-mode walltime -p celox --bench compilation
 
       - name: Run compile-time benchmarks
         id: benchmarks
+        timeout-minutes: 15
         uses: CodSpeedHQ/action@v5
         with:
-          mode: simulation
-          run: cargo codspeed run -p celox
+          mode: walltime
+          run: cargo codspeed run --measurement-mode walltime -p celox --bench compilation
 
   report:
     name: Report CodSpeed
