@@ -2,7 +2,8 @@
 //! processes, driven through the timed `Simulation`.
 //!
 //! Every exclusion names what Celox lacks for the case, so the change that
-//! adds it removes the exclusion. Supported cases run on every backend.
+//! adds it removes the exclusion. Supported cases run on every backend,
+//! and natively also from a serialized native image.
 
 macro_rules! timed_cases {
     () => {};
@@ -23,6 +24,13 @@ macro_rules! timed_cases {
             $(#[$attr])*
             fn cranelift() {
                 crate::suite::run_case($case, "cranelift");
+            }
+
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[test]
+            $(#[$attr])*
+            fn native_image() {
+                crate::suite::run_case($case, "native-image");
             }
 
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
