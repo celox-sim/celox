@@ -556,31 +556,19 @@ fn classes_of_packages_in_other_sources_are_used_through_their_layouts() {
 }
 
 #[test]
-fn misused_classes_of_other_scopes_are_rejected() {
-    for (source, want) in [
-        (
-            "package p; class Box #(int N = 2); endclass endpackage
-             module Top; import p::*; Box #(3) box; endmodule",
-            "specialization of parameterized class `p::Box` outside the scope that declares it",
-        ),
-        // A package variable has one writing instance (#1146), static
-        // properties of package classes too.
-        (
-            "package p; class C; static int n; function new(); n++; endfunction endclass endpackage
-             module W; p::C c; initial c = new; endmodule
-             module Top; W a(); W b(); endmodule",
-            "multiple drivers of package",
-        ),
-    ] {
-        let Err(error) =
-            celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
-                .build()
-        else {
-            panic!("`{source}` is rejected");
-        };
-        let error = error.to_string();
-        assert!(error.contains(want), "{error}");
-    }
+fn specializations_of_classes_of_other_scopes_are_rejected() {
+    let source = "package p; class Box #(int N = 2); endclass endpackage
+        module Top; import p::*; Box #(3) box; endmodule";
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top").build()
+    else {
+        panic!("`{source}` is rejected");
+    };
+    let error = error.to_string();
+    assert!(
+        error.contains("outside the scope that declares it"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -592,6 +580,28 @@ fn a_class_of_another_module_does_not_hide_a_package() {
         .build_cranelift()
         .unwrap();
     assert_eq!(sim.get(sim.signal("bits")), 3u32.into());
+}
+
+#[test]
+fn processes_of_several_instances_share_the_static_properties_of_a_package_class() {
+    let source = "`timescale 1ns/1ns
+        package p;
+            class C;
+                static int made;
+                function new(); made++; endfunction
+            endclass
+        endpackage
+        module W; p::C c; initial c = new; endmodule
+        module Top(output int made);
+            W first();
+            W second();
+            initial #1 made = p::C::made;
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("made")), 2u32.into());
 }
 
 #[test]

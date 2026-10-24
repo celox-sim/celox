@@ -953,13 +953,13 @@ fn validate_package_variable_drivers<'a>(
     // A driver is one process or child output of one instance; a process may
     // assign the variable several times.
     type Driver = (ModuleId, usize, bool, usize);
-    let mut drivers: HashMap<(String, String), Vec<(Driver, Option<(i128, i128)>)>> =
+    let mut drivers: HashMap<(String, String), Vec<(Driver, Option<(i128, i128)>, bool)>> =
         HashMap::default();
     for (&module_id, module) in modules {
         let multiplicity = instances.get(&module_id).copied().unwrap_or(0);
         for (var_id, package, variable) in &module.package_variables {
             let name = &module.variables[var_id].path[0];
-            let local = local_driver_ranges(
+            let local = driver_ranges(
                 &module.source,
                 name,
                 &module.constants,
@@ -971,20 +971,31 @@ fn validate_package_variable_drivers<'a>(
                 .or_default();
             for copy in 0..multiplicity {
                 for &(driver, range) in &local {
-                    entry.push(((module_id, copy, false, driver), range));
+                    let exclusive = exclusive_driver(&module.source, driver);
+                    entry.push(((module_id, copy, false, driver), range, exclusive));
                 }
                 for &(driver, range) in &children {
-                    entry.push(((module_id, copy, true, driver), range));
+                    entry.push(((module_id, copy, true, driver), range, true));
                 }
             }
         }
     }
+    // Processes of several instances may write a package variable, as any
+    // processes may write a variable, unless one of them must be its only
+    // writer (IEEE 1800-2023 6.5, 9.2.2).
     for ((package, variable), ranges) in drivers {
-        let overlap = ranges.iter().enumerate().any(|(index, (driver, range))| {
-            ranges[index + 1..].iter().any(|(other, other_range)| {
-                other != driver && net_driver_ranges_overlap(*range, *other_range)
-            })
-        });
+        let overlap = ranges
+            .iter()
+            .enumerate()
+            .any(|(index, (driver, range, exclusive))| {
+                ranges[index + 1..]
+                    .iter()
+                    .any(|(other, other_range, other_exclusive)| {
+                        other != driver
+                            && (*exclusive || *other_exclusive)
+                            && net_driver_ranges_overlap(*range, *other_range)
+                    })
+            });
         if overlap {
             return Err(sv::AnalyzerError::Unsupported(format!(
                 "multiple drivers of package variable `{package}::{variable}`"
@@ -1415,6 +1426,38 @@ fn condition_is_active(
 }
 
 fn local_driver_ranges(
+    module: &sv::ir::Module,
+    signal_name: &str,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Vec<(usize, Option<(i128, i128)>)> {
+    driver_ranges(module, signal_name, constants, parameter_types)
+}
+
+/// Whether process `driver` of [`driver_ranges`] must be the only writer of
+/// the variables it writes: an `always_comb` or continuous assignment, an
+/// edge procedure, or an `always_ff` run as a process, but not another
+/// ordinary `always` process (IEEE 1800-2023 6.5, 9.2.2).
+fn exclusive_driver(module: &sv::ir::Module, driver: usize) -> bool {
+    let edge = module.comb_processes().len() + module.ff_processes().len();
+    driver < edge || {
+        let process = module
+            .initial_processes()
+            .iter()
+            .filter(|process| process.repeats())
+            .nth(driver - edge);
+        process.is_some_and(|process| {
+            process.is_scheduled_edge()
+                || process
+                    .site()
+                    .is_some_and(|site| site.construct == "always_ff")
+        })
+    }
+}
+
+/// The ranges of `signal_name` that the processes of `module` write, each
+/// with the process that writes it.
+fn driver_ranges(
     module: &sv::ir::Module,
     signal_name: &str,
     constants: &HashMap<String, i128>,

@@ -179,7 +179,7 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, enumeration constants declared in a class, specializations of a parameterized class outside the package or compilation unit that declares it, a static property of a package or compilation-unit class that processes of two module instances write (see [packages](#packages)), and properties that are 4-state, `real`, arrays or wider than 64 bits. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
+- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, enumeration constants declared in a class, specializations of a parameterized class outside the package or compilation unit that declares it, and properties that are 4-state, `real`, arrays or wider than 64 bits. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
 - Behavioral and verification constructs: `final`, intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events and `->`, `fork` / `join`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
@@ -322,8 +322,8 @@ A class declared in a package or the compilation unit is laid out and its
 methods are lowered where it is declared, once (IEEE 1800-2023 3.12.1, 26.3):
 a module uses it through an import, as `p::C`, or by its name when the
 compilation unit declares it, also from another source file. Its static
-properties are variables of the package, so their writers follow the rules of
-package variables. A module class may extend it and override its virtual
+properties are variables of the package, shared by every module that uses
+the class. A module class may extend it and override its virtual
 methods; calls of those methods through handles in the module then also reach
 the overrides of the module's classes. A specialization of a parameterized class
 is made where the class is declared, so outside that scope only the
@@ -364,8 +364,10 @@ An import in a generate block makes names visible in that block (and the
 blocks inside it), ahead of the module's own declarations and imports.
 A package variable is one object shared by every module that uses it,
 including SystemVerilog modules instantiated from Veryl, and keeps its
-initializer. `sim.signal("p::v")` names it. Several drivers of one package
-variable are rejected, counting every instance of a module that writes it.
+initializer. `sim.signal("p::v")` names it. Any processes may write it, also
+those of several instances; a continuous assignment, `always_comb` or
+`always_ff` that writes it must be its only writer (IEEE 1800-2023 6.5, 9.2.2),
+counting every instance of the module that holds it.
 A package variable cannot be a clock or reset yet, and its initializer must
 be constant. `export` declarations (26.6) make imported declarations
 visible to the importers of a package: `export p::*;` exports only the
@@ -534,8 +536,8 @@ initialization process. Constant function calls use
 fresh values and do not affect runtime storage (13.4.3).
 
 Task locals that keep their values and nonconstant static initializers remain
-unsupported; declare those locals `automatic`. Package function state follows
-the existing package-variable restrictions on multiple procedural drivers.
+unsupported; declare those locals `automatic`. Package function state is a
+package variable, which the processes of every instance may write.
 An interface whose default lifetime (`interface automatic`) differs from that of the
 module it is used in is rejected.
 
