@@ -1679,6 +1679,9 @@ mod host {
         /// When true, JIT-compiled functions emit trigger detection code for
         /// edge-based event discovery. Only needed by [`crate::Simulation`].
         pub emit_triggers: bool,
+        /// Generated derived-edge units the tests run, recorded here.
+        #[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+        pub(crate) derived_edge_units: Option<crate::derived_edge::TestEdgeUnits>,
         /// Emit the additional combinational entries needed to reapply foreign
         /// force overrides between procedural store boundaries.
         pub native_force_support: bool,
@@ -1924,6 +1927,8 @@ mod host {
                 diagnostic_policy: Default::default(),
                 sv_timescale: None,
                 emit_triggers: false,
+                #[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+                derived_edge_units: None,
                 native_force_support: false,
                 signal_access: crate::SignalAccessOptions::default(),
                 dead_store_policy: DeadStorePolicy::Off,
@@ -2077,6 +2082,17 @@ mod host {
         #[cfg(test)]
         pub(crate) fn emit_triggers(mut self) -> Self {
             self.options.emit_triggers = true;
+            self
+        }
+
+        /// Append the generated derived-edge units of every event and record
+        /// them in `sink`.
+        #[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+        pub(crate) fn derived_edge_units(
+            mut self,
+            sink: crate::derived_edge::TestEdgeUnits,
+        ) -> Self {
+            self.options.derived_edge_units = Some(sink);
             self
         }
 
@@ -2831,6 +2847,10 @@ mod host {
                 && self.options.scheduler != crate::SchedulerMode::Reference
             {
                 crate::scheduler::attach(&mut laid_out);
+            }
+            #[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+            if let Some(sink) = &self.options.derived_edge_units {
+                crate::derived_edge::attach_test_units(&mut laid_out, sink);
             }
 
             // Link DPI-C imports before code generation, so a missing C
