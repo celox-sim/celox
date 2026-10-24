@@ -478,6 +478,53 @@
     (assert_eq next 0)
     (assert_eq picked (? (< i 8) 0 (fourstate 1 1)))))
 
+(case nonblocking_runtime_element_writes_apply_in_order
+  ; Nonblocking writes to run-time elements of one array apply after the
+  ; process in statement order: reads see the old values, the last write to
+  ; an element wins, also through different index expressions, and a later
+  ; part-select write merges into an earlier whole element write (IEEE
+  ; 1800-2023 10.4.2). Elements next to written ones keep their values.
+  (source "nba_runtime_elements.sv" #"
+                module Top(input logic clk, input logic we, input logic [3:0] a, b,
+                           input logic [3:0] c, input logic [31:0] d,
+                           input logic [3:0] ra, rb,
+                           output logic [31:0] qa, qb, old);
+                    logic [31:0] mem [16];
+                    initial for (int i = 0; i < 16; i++) mem[i] = i;
+                    always_ff @(posedge clk) begin
+                        old <= mem[a];
+                        if (we) begin
+                            mem[a] <= d;
+                            mem[b] <= mem[a] + 32'd1;
+                            mem[a][7:0] <= 8'h5a;
+                        end
+                        mem[c] <= 32'hffff_ffff;
+                    end
+                    assign qa = mem[ra];
+                    assign qb = mem[rb];
+                endmodule
+            "#)
+  (top Top)
+  (for (w x y z v r s ea eb eo)
+       (list (1 2 5 11 0x1000 2 5 0x105a 3 2)
+             (1 7 7 6 0x2000 7 6 0x5a 0xffffffff 7)
+             (0 2 0 11 0 3 4 3 4 0x105a)
+             (1 4 5 11 0xabcd0000 4 5 0xabcd005a 5 4)
+             (1 4 0 4 1 4 0 0xffffffff 0xabcd005b 0xabcd005a)
+             (0 0 0 11 0 2 11 0x105a 0xffffffff 0xabcd005b))
+    (modify
+      (set we w)
+      (set a x)
+      (set b y)
+      (set c z)
+      (set d v)
+      (set ra r)
+      (set rb s))
+    (tick clk)
+    (assert_eq qa ea)
+    (assert_eq qb eb)
+    (assert_eq old eo)))
+
 (case declaration_initializers_define_the_initial_state
   (source "initializers.sv" #"
                 module Top(input logic clk, input logic [1:0] index,

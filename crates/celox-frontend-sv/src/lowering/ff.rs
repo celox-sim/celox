@@ -39,6 +39,15 @@ struct FunctionBlocks {
 pub(super) struct Ff<'p, 'a> {
     pub m: &'p mut ProcModule<'a>,
     sparse_memories: HashSet<SourceVarId>,
+    /// Arrays only edge-triggered processes drive. One this process writes
+    /// only by nonblocking element writes, at least one at a run-time
+    /// element, joins `sparse_memories`.
+    sparse_candidates: HashSet<SourceVarId>,
+    /// Variables written at a run-time element of an unpacked array.
+    element_writes: HashSet<SourceVarId>,
+    /// Variables written other than at a constant range or one element of
+    /// an unpacked array, which a sparse publication does not support.
+    other_writes: HashSet<SourceVarId>,
     b: SIRBuilder<Addr>,
     /// Variables read from the working region.
     working: HashSet<SourceVarId>,
@@ -108,6 +117,9 @@ impl<'p, 'a> Ff<'p, 'a> {
         Self {
             m,
             sparse_memories: HashSet::default(),
+            sparse_candidates: HashSet::default(),
+            element_writes: HashSet::default(),
+            other_writes: HashSet::default(),
             b: SIRBuilder::new(),
             working: HashSet::default(),
             nonblocking: HashSet::default(),
@@ -144,6 +156,11 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     pub fn with_sparse_memories(mut self, names: &HashSet<String>) -> Self {
         self.sparse_memories = names.iter().filter_map(|name| self.m.id(name)).collect();
+        self
+    }
+
+    pub fn with_sparse_candidates(mut self, names: &HashSet<String>) -> Self {
+        self.sparse_candidates = names.iter().filter_map(|name| self.m.id(name)).collect();
         self
     }
 
@@ -204,8 +221,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             .flatten()
             .and_then(|write| write.window)
             .unwrap_or(BitAccess::new(0, variable.width - 1));
-        let access = match lvalue {
-            sv::ir::LValue::Ident(_) => BitAccess::new(0, variable.width - 1),
+        let constant = match lvalue {
+            sv::ir::LValue::Ident(_) => None,
             sv::ir::LValue::Select { msb, lsb, .. } => sv::typecheck::eval_const_expr_with_types(
                 msb,
                 self.m.constants,
@@ -216,8 +233,20 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.m.constants,
                 self.m.parameter_types,
             ))
-            .and_then(|(msb, lsb)| constant_select_write(variable, msb, lsb)?.0)
-            .unwrap_or(whole),
+            .and_then(|(msb, lsb)| constant_select_write(variable, msb, lsb)?.0),
+        };
+        if constant.is_none() {
+            // `write` takes the same order: a constant range, then one
+            // run-time element, then a read-modify-write of the variable.
+            if element_write {
+                self.element_writes.insert(id);
+            } else {
+                self.other_writes.insert(id);
+            }
+        }
+        let access = match lvalue {
+            sv::ir::LValue::Ident(_) => BitAccess::new(0, variable.width - 1),
+            sv::ir::LValue::Select { .. } => constant.unwrap_or(whole),
         };
         self.targets.push((id, access));
     }
@@ -3937,6 +3966,23 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<FfProcessUnits, sv::AnalyzerError> {
         let mut visited = HashSet::default();
         self.scan(body, &mut visited);
+        // Publish only the written elements of an array this process alone
+        // updates by nonblocking element writes, rather than seeding and
+        // committing all of it on every edge. The element stores keep
+        // statement order, so the last write to an element wins, and reads
+        // see stable state (IEEE 1800-2023 4.6, 10.4.2).
+        let sparse: Vec<_> = self
+            .sparse_candidates
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.element_writes.contains(id)
+                    && !self.working.contains(id)
+                    && !self.other_writes.contains(id)
+                    && !self.m.is_hidden(*id)
+            })
+            .collect();
+        self.sparse_memories.extend(sparse);
         if self
             .working
             .iter()

@@ -8760,6 +8760,62 @@ fn shared_ff_memories_keep_native_sparse_next_state() {
     }
 }
 
+/// An array one edge process updates only by nonblocking element writes
+/// publishes the written elements, not a seed and commit of the whole array
+/// per edge (#1855). A blocking write keeps the whole-array next state.
+#[test]
+fn nonblocking_runtime_element_writes_use_sparse_next_state() {
+    use celox_design::{SPARSE_WORKING_REGION, WORKING_REGION};
+    use celox_sir::SIRInstruction;
+
+    for (body, sparse) in [
+        ("mem[addr] <= data; mem[3][7:0] <= data[7:0];", true),
+        ("mem[addr] = data;", false),
+        ("mem[addr] <= data; mem <= '{default: 0};", false),
+    ] {
+        let source = format!(
+            r#"module Top(input bit clk, input bit [11:0] addr, input bit [31:0] data,
+                output wire [31:0] q);
+                bit [31:0] mem[4096];
+                always_ff @(posedge clk) begin {body} end
+                assign q = mem[addr];
+            endmodule"#
+        );
+        let result =
+            Simulator::from_sv_sources(vec![(source.as_str(), Path::new("nba_ram.sv"))], "Top")
+                .trace_pre_optimized_sir()
+                .build_with_trace();
+        let sim = result.res.unwrap();
+        let memory = sim.program().get_addr(&[], &["mem"]).unwrap();
+        let program = result.trace.pre_optimized_sir.unwrap();
+        let mut regions = Vec::new();
+        for instruction in program
+            .sir
+            .eval_apply_ffs
+            .values()
+            .flatten()
+            .flat_map(|unit| unit.blocks.values())
+            .flat_map(|block| &block.instructions)
+        {
+            match instruction {
+                SIRInstruction::Store(address, ..) if address.absolute_addr() == memory => {
+                    regions.push(address.region);
+                }
+                SIRInstruction::Commit(source, destination, ..)
+                    if source.absolute_addr() == memory
+                        || destination.absolute_addr() == memory =>
+                {
+                    regions.push(source.region);
+                    regions.push(destination.region);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(regions.contains(&SPARSE_WORKING_REGION), sparse, "{body}");
+        assert_eq!(regions.contains(&WORKING_REGION), !sparse, "{body}");
+    }
+}
+
 #[test]
 fn rejects_overlapping_continuous_concatenation_drivers() {
     for declaration in ["wire [7:0] q", "logic [7:0] q"] {
