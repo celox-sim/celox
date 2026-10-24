@@ -86,7 +86,7 @@ export function checkExternalSuiteReport(
   const rows = validateReport(current, "current report");
   const previous = validateReport(baseline, "baseline report");
   assert.ok(
-    ["verilator", "icarus"].includes(current.tool),
+    ["verilator", "icarus", "xezim"].includes(current.tool),
     "unknown simulator",
   );
   assert.equal(

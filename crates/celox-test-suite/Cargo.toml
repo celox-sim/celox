@@ -21,6 +21,7 @@ emit = ["dep:veryl-analyzer", "dep:veryl-emitter", "dep:veryl-parser", "dep:very
 external = ["emit", "dep:clap", "dep:serde_json", "dep:sha2", "dep:celox-sv-analyzer"]
 verilator = ["external"]
 icarus = ["external"]
+xezim = ["external"]
 
 [[bin]]
 name = "verify-verilator"
@@ -41,6 +42,16 @@ required-features = ["verilator"]
 name = "verify-sv-icarus"
 path = "src/bin/verify-sv-icarus.rs"
 required-features = ["icarus"]
+
+[[bin]]
+name = "verify-xezim"
+path = "src/bin/verify-xezim.rs"
+required-features = ["xezim"]
+
+[[bin]]
+name = "verify-sv-xezim"
+path = "src/bin/verify-sv-xezim.rs"
+required-features = ["xezim"]
 
 [[example]]
 name = "inspect-mismatch-ir"

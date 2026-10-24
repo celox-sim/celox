@@ -11,7 +11,7 @@ export function cocotbCommands(full, builds) {
   if (full !== "false") return [[
     "nextest", "run", "--locked", "--workspace", "--exclude", "lydite*",
     "--profile", "ci",
-    "--features", "celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/runtime-cases",
+    "--features", "celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases",
     "--run-ignored", "only", "-E", cocotbFilter,
   ]];
   // Validate all plans first, including ones we do not need to execute.

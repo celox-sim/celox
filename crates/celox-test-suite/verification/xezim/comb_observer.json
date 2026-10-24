@@ -1,0 +1,155 @@
+{
+  "cases": [
+    {
+      "category": "Combinational",
+      "detail": "comb_observer::test_comb_function_array_literal_accepts_array_returning_items at 166:3: assert_eq expression: expected 0x3, got 0x0",
+      "expectation": "Simulation",
+      "name": "comb_observer::test_comb_function_array_literal_accepts_array_returning_items",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "comb_observer::test_comb_function_array_literal_array_item_preserves_element_type reads q with unknown bits in a two-state run",
+      "expectation": "Simulation",
+      "name": "comb_observer::test_comb_function_array_literal_array_item_preserves_element_type",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "comb_observer::test_comb_function_array_literal_converts_scalar_items_per_element",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "xezim build exit status: 1; see <case>/build.log\nParsed 2 file(s): 2 descriptions, 0 errors, 0 warnings\nerror: <case>/source_0.sv:16:26: cannot assign logic signed [3:0] $[2] to argument 'x' of 'pick' of type logic signed [7:0] $[2]: element types logic signed [7:0] and logic signed [3:0] are not equivalent (IEEE 1800-2017 §6.22.2, §7.6)\nerror: <case>/source_0.sv:17:26: cannot assign logic signed [3:0] $[2] to argument 'x' of 'pick' of type logic signed [7:0] $[2]: element types logic signed [7:0] and logic signed [3:0] are not equivalent (IEEE 1800-2017 §6.22.2, §7.6)\n",
+      "expectation": "Simulation",
+      "name": "comb_observer::test_comb_function_direct_array_argument_converts_each_element",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "comb_observer::test_comb_function_direct_array_return_preserves_all_elements at 217:3: assert_eq expression: expected 0x4, got 0x0",
+      "expectation": "Simulation",
+      "name": "comb_observer::test_comb_function_direct_array_return_preserves_all_elements",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "comb_observer::test_comb_function_loop_bounds_apply_output_effects_left_to_right",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "comb_observer::test_comb_function_loop_skips_conditions_after_break",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "comb_observer::test_comb_function_nested_array_literals_preserve_each_dimension_order at 56:3: assert_eq expression: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "comb_observer::test_comb_function_nested_array_literals_preserve_each_dimension_order",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "comb_observer::test_comb_function_nested_array_scalar_default_converts_each_element at 112:3: assert_eq expression: expected 0xf8, got 0x0",
+      "expectation": "Simulation",
+      "name": "comb_observer::test_comb_function_nested_array_scalar_default_converts_each_element",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "comb_observer::test_comb_function_packed_array_literal_preserves_source_order at 29:3: assert_eq expression: expected 0x22, got 0x11",
+      "expectation": "Simulation",
+      "name": "comb_observer::test_comb_function_packed_array_literal_preserves_source_order",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "assignment_pattern_evaluation": "Requires source-order evaluation or a particular evaluation count for effectful assignment-pattern items; SV does not guarantee these choices (IEEE 1800-2023 10.9.1, 11.4.2)."
+      },
+      "tags": [
+        "assignment_pattern_evaluation"
+      ]
+    },
+    {
+      "category": "Combinational",
+      "detail": "xezim build exit status: 1; see <case>/build.log\nParsed 2 file(s): 2 descriptions, 0 errors, 0 warnings\nerror: <case>/source_0.sv:15:17: cannot assign logic signed [3:0] $[2] to argument 'x' of 'capture' of type logic signed [7:0] $[2]: element types logic signed [7:0] and logic signed [3:0] are not equivalent (IEEE 1800-2017 §6.22.2, §7.6)\n",
+      "expectation": "Simulation",
+      "name": "comb_observer::test_comb_statement_function_direct_array_argument_converts_each_element",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "comb_observer::test_named_function_inputs_evaluate_in_source_order at 276:3: assert_eq expression: expected 0xd, got 0x0",
+      "expectation": "Simulation",
+      "name": "comb_observer::test_named_function_inputs_evaluate_in_source_order",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "evaluation_order": "Requires a particular evaluation order for effectful arguments or expression operands; SV does not guarantee that order (IEEE 1800-2023 13.5, 11.4.2)."
+      },
+      "tags": [
+        "evaluation_order"
+      ]
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "comb_observer::test_named_function_outputs_apply_in_source_order",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}
