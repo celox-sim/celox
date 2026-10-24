@@ -256,6 +256,15 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         self.dump_unless_rewound(timestamp);
     }
 
+    /// Combinational logic still to settle belongs to `timestamp`, so its
+    /// reports read that time: settle it before the run moves on.
+    fn try_leave_time(&mut self, _timestamp: u64) -> Result<(), RuntimeErrorCode> {
+        if self.timestamped_reports && self.dirty {
+            self.eval_comb_checked()?;
+        }
+        Ok(())
+    }
+
     /// Deferred assertions mature in the Observed and Postponed regions of
     /// the slot (IEEE 1800-2023 16.4).
     fn try_end_time_slot(&mut self, _timestamp: u64) -> Result<(), Halt> {

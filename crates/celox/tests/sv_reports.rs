@@ -33,12 +33,24 @@ fn report(
     }
 }
 
+/// `reports`, issued at `time`.
+fn at(time: u64, reports: Vec<Report>) -> Vec<Report> {
+    reports
+        .into_iter()
+        .map(|report| Report {
+            time: Some(time),
+            ..report
+        })
+        .collect()
+}
+
 macro_rules! reports {
     ($module:ident, $backend:ident) => {
         mod $module {
             use super::*;
 
-            /// The reports of `body` in `module Top` until time 1.
+            /// The reports of `body` in `module Top` until time 10, drained
+            /// after the run.
             fn reports(body: &str) -> Vec<Report> {
                 let source = format!("`timescale 1ns/1ns\nmodule Top;\n{body}\nendmodule");
                 let mut sim = celox::Simulation::from_sv_sources(
@@ -47,7 +59,7 @@ macro_rules! reports {
                 )
                 .$backend()
                 .unwrap();
-                sim.run_until(1).unwrap();
+                sim.run_until(10).unwrap();
                 sim.drain_runtime_events()
                     .into_iter()
                     .filter_map(|event| match event {
@@ -68,11 +80,14 @@ macro_rules! reports {
                          $error(\"e\");\n  \
                          end"
                     ),
-                    vec![
-                        report(Severity::Info, "i 1", 5, None),
-                        report(Severity::Warning, "w", 6, None),
-                        report(Severity::Error, "e", 7, None),
-                    ]
+                    at(
+                        1,
+                        vec![
+                            report(Severity::Info, "i 1", 5, None),
+                            report(Severity::Warning, "w", 6, None),
+                            report(Severity::Error, "e", 7, None),
+                        ]
+                    )
                 );
             }
 
@@ -91,7 +106,7 @@ macro_rules! reports {
                          assume (!a) $info(\"assumed\");\n  \
                          end"
                     ),
-                    vec![
+                    at(1, vec![
                         report(
                             Severity::Warning,
                             "a low",
@@ -111,7 +126,7 @@ macro_rules! reports {
                             Some((Some("c1"), Cover, Pass))
                         ),
                         report(Severity::Info, "assumed", 9, Some((None, Assume, Pass))),
-                    ]
+                    ])
                 );
             }
 
@@ -131,12 +146,15 @@ macro_rules! reports {
                          end\n  \
                          end"
                     ),
-                    vec![report(
-                        Severity::Error,
-                        "assert failed",
-                        7,
-                        Some((Some("inner"), Assert, Fail))
-                    )]
+                    at(
+                        1,
+                        vec![report(
+                            Severity::Error,
+                            "assert failed",
+                            7,
+                            Some((Some("inner"), Assert, Fail))
+                        )]
+                    )
                 );
             }
 
@@ -144,8 +162,24 @@ macro_rules! reports {
             fn always_comb_reports_keep_their_location() {
                 assert_eq!(
                     reports("  bit a;\n  always_comb if (!a) $warning(\"low\");"),
-                    vec![report(Severity::Warning, "low", 4, None)]
+                    at(0, vec![report(Severity::Warning, "low", 4, None)])
                 );
+            }
+
+            /// A report keeps the time of its step however late the host
+            /// drains it (IEEE 1800-2023 20.10).
+            #[test]
+            fn reports_keep_their_time_when_drained_late() {
+                let times: Vec<_> = reports(
+                    "  initial begin\n    \
+                     #1 $warning(\"w\");\n    \
+                     #3 $error(\"e\");\n  \
+                     end",
+                )
+                .into_iter()
+                .map(|report| report.time)
+                .collect();
+                assert_eq!(times, vec![Some(1), Some(4)]);
             }
 
             /// With `failOn`, a run stops after the time step of the first
@@ -280,6 +314,40 @@ macro_rules! reports {
                 let failure = sim.failure().unwrap();
                 assert_eq!(failure.severity, Severity::Error);
                 assert!(failure.message.starts_with(b"missed "), "{failure:?}");
+            }
+
+            /// The initial settle of combinational logic is at time zero,
+            /// also when the first work is a clock edge at a later time,
+            /// reached by `run_until` or by `step`.
+            #[test]
+            fn initial_reports_before_a_later_first_slot_are_at_time_zero() {
+                let source = "`timescale 1ns/1ns\nmodule Top(input bit clk);\n  \
+                              bit q, a;\n  \
+                              always_ff @(posedge clk) q <= !q;\n  \
+                              always_comb if (!a) $warning(\"low\");\nendmodule";
+                for step in [false, true] {
+                    let mut sim = celox::Simulation::from_sv_sources(
+                        vec![(source, Path::new("reports.sv"))],
+                        "Top",
+                    )
+                    .$backend()
+                    .unwrap();
+                    sim.add_clock("clk", 2, 5);
+                    if step {
+                        assert_eq!(sim.step().unwrap(), Some(5));
+                    } else {
+                        sim.run_until(10).unwrap();
+                    }
+                    let times: Vec<_> = sim
+                        .drain_runtime_events()
+                        .into_iter()
+                        .map(|event| match event {
+                            celox::RuntimeEvent::Report(report) => report.time,
+                            event => panic!("unexpected event {event:?}"),
+                        })
+                        .collect();
+                    assert_eq!(times, vec![Some(0)], "step: {step}");
+                }
             }
 
             #[test]
