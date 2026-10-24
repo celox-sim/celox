@@ -14,9 +14,3 @@ failure-output = "immediate-final"
 [profile.ci.junit]
 path = "junit.xml"
 store-success-output = false
-
-[[profile.ci.overrides]]
-# Deep per-bit graphs consume substantial compiler memory and CPU. Reserve the
-# pool so these regressions retain the same timeout without competing builds.
-filter = 'binary_id(celox::nested_write_perf) & test(/^deep_per_bit_/)'
-threads-required = "num-test-threads"
