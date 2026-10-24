@@ -1,0 +1,33 @@
+{
+  "cases": [
+    {
+      "category": "Functions",
+      "detail": "system_functions::scope_randomize_enum_order at 2887:46: assert_eq errors: expected 0x0, got 0x7e",
+      "expectation": "Simulation",
+      "name": "system_functions::scope_randomize_enum_order",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::scope_randomize_enum_values at 2862:46: assert_eq errors: expected 0x0, got 0x181",
+      "expectation": "Simulation",
+      "name": "system_functions::scope_randomize_enum_values",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052"
+}

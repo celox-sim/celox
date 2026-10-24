@@ -57,6 +57,7 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
         name.to_string(),
         VariableDimensions {
             randomizable: true,
+            enum_values: None,
             real: false,
             string: false,
             class: None,

@@ -122,9 +122,12 @@ impl Class {
             if property.randc {
                 return Err(unsupported("class randomize with randc properties"));
             }
-            if property.rand && (property.field.handle.is_some() || property.r#type.is_enum) {
+            if property.rand
+                && (property.field.handle.is_some()
+                    || (property.r#type.is_enum && property.r#type.enum_values.is_none()))
+            {
                 return Err(unsupported(
-                    "class randomize requires integral non-enum rand properties",
+                    "class randomize requires integral rand properties with a supported enum domain",
                 ));
             }
         }

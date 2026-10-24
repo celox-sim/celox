@@ -1,0 +1,33 @@
+{
+  "cases": [
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:14: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "system_functions::scope_randomize_enum_order",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Malformed statement\n<case>/source_0.sv:17: error: Malformed conditional expression.\n<case>/source_0.sv:28: syntax error\n<case>/source_0.sv:28: error: Malformed statement\n<case>/source_0.sv:28: error: Malformed conditional expression.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::scope_randomize_enum_values",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)"
+}

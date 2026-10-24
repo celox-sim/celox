@@ -103,6 +103,8 @@ pub enum SystemFunction {
     Urandom,
     /// Scope randomization of packed variables, without constraints (18.12).
     ScopeRandomize,
+    /// Internal scalar enum randomization: destination followed by legal values.
+    ScopeRandomizeEnum,
     /// `$urandom_range` (18.13.2).
     UrandomRange,
     /// `$fopen` (21.3.1).
@@ -280,6 +282,7 @@ impl SystemFunction {
             Self::ValuePlusargs => "$value$plusargs",
             Self::Urandom => "$urandom",
             Self::ScopeRandomize => "std::randomize",
+            Self::ScopeRandomizeEnum => "$__celox_randomize_enum",
             Self::UrandomRange => "$urandom_range",
             Self::Fopen => "$fopen",
             Self::Fread => "$fread",
@@ -343,6 +346,7 @@ impl SystemFunction {
                 | Self::Fscanf
                 | Self::UrandomRange
                 | Self::ScopeRandomize
+                | Self::ScopeRandomizeEnum
         )
     }
 
@@ -357,6 +361,7 @@ impl SystemFunction {
     /// updates its seed variable.
     pub fn writes_argument(self, position: usize) -> bool {
         self == Self::ScopeRandomize
+            || (self == Self::ScopeRandomizeEnum && position == 0)
             || (matches!(
                 self,
                 Self::Random
@@ -406,7 +411,8 @@ impl SystemFunction {
             | Self::Clog2
             | Self::Countbits
             | Self::Countones
-            | Self::ScopeRandomize => Some((32, true)),
+            | Self::ScopeRandomize
+            | Self::ScopeRandomizeEnum => Some((32, true)),
             Self::Onehot | Self::Onehot0 | Self::Isunknown | Self::Isunbounded => Some((1, false)),
             Self::Random
             | Self::DistUniform

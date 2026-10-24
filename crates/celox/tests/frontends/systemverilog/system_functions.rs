@@ -3226,3 +3226,66 @@ fn time_format_rejects_string_operands() {
         );
     }
 }
+
+sv_backends! {
+    fn scope_randomize_enum_values(sim) { @case "system_functions::scope_randomize_enum_values"; }
+    fn scope_randomize_enum_order(sim) { @case "system_functions::scope_randomize_enum_order"; }
+}
+
+sv_backends! {
+    fn scope_randomize_enum_checkpoint(sim) {
+        @setup { let source = r#"
+            module Top(input bit clk, output logic [63:0] value);
+                typedef enum logic signed [63:0] {NEG=-7, POS=2, ALL='1} E;
+                E e;
+                always @(posedge clk) begin
+                    void'(std::randomize(e));
+                    value = e;
+                end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("enum_checkpoint.sv"))], "Top").four_state(true);
+        let clk = sim.event("clk");
+        let value = sim.signal("value");
+        let saved = sim.checkpoint().unwrap();
+        let mut expected = Vec::new();
+        for _ in 0..16 {
+            sim.tick(clk).unwrap();
+            let (bits, mask) = sim.get_four_state(value);
+            assert_eq!(mask, 0u8.into());
+            expected.push(bits);
+        }
+        assert!(expected.windows(2).any(|pair| pair[0] != pair[1]));
+        sim.restore(&saved).unwrap();
+        for bits in expected {
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get_four_state(value), (bits, 0u8.into()));
+        }
+    }
+}
+
+sv_backends! {
+    fn scope_randomize_enum_retries_rejected_draw(sim) {
+        @setup { let source = r#"
+            module Top(output bit done, output int unsigned next);
+                typedef enum bit [7:0] {A=3, B=19, C=97} E;
+                E e;
+                int ignored;
+                initial begin
+                    // The process LCG reaches zero on the next draw. Its
+                    // bijective mixer preserves zero, rejected for 3 choices.
+                    ignored = $urandom(32'd4150723358);
+                    ignored = std::randomize(e);
+                    next = $urandom();
+                    done = 1;
+                end
+            endmodule
+        "#; }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("enum_rejection.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+        // Rejection consumes zero, then 1013904223, leaving the following
+        // LCG value for the explicit $urandom call.
+        assert_eq!(sim.get(sim.signal("next")), 1196435762u32.into());
+    }
+}

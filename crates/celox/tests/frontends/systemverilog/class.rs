@@ -378,3 +378,13 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("errors")), 0u8.into());
     }
 }
+
+sv_backends! {
+    fn class_randomization_enum_inheritance(sim) { @case "class::randomization_enum_inheritance"; }
+    fn class_randomization_enum_alias(sim) { @case "class::randomization_enum_alias"; }
+    fn class_randomization_enum_domain(sim) { @case "class::randomization_enum_domain"; }
+}
+
+sv_backends! {
+    fn class_randomization_enum_fill_literals(sim) { @case "class::randomization_enum_fill_literals"; }
+}

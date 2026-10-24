@@ -1969,6 +1969,8 @@ pub enum PortDirection {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Type {
     is_enum: bool,
+    /// Resolved legal values for a scalar enum; None if its domain is unsupported.
+    enum_values: Option<Vec<i128>>,
     kind: TypeKind,
     is_signed: bool,
     packed_ranges: Vec<PackedRange>,
@@ -1986,6 +1988,7 @@ impl Type {
     fn implicit() -> Self {
         Self {
             is_enum: false,
+            enum_values: None,
             kind: TypeKind::Implicit,
             is_signed: false,
             packed_ranges: Vec::new(),
@@ -2000,6 +2003,7 @@ impl Type {
         Self {
             kind,
             is_enum: false,
+            enum_values: None,
             is_signed: false,
             packed_ranges: Vec::new(),
             unpacked_ranges: Vec::new(),
@@ -2727,6 +2731,7 @@ struct UnpackedDimension {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VariableDimensions {
     randomizable: bool,
+    enum_values: Option<Vec<i128>>,
     real: bool,
     /// A `string`: each element is a heap handle, not packed bits.
     string: bool,
