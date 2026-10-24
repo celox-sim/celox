@@ -454,7 +454,8 @@ mod tests {
 
     /// A compiled kernel's `$finish` leaves the state the reference leaves:
     /// a kernel due in the same slot that did not run yet is still ready,
-    /// and a state file taken afterwards is the same.
+    /// combinational logic holds the last slot's settle, and a state file
+    /// taken afterwards is the same.
     #[test]
     fn compiled_slots_end_at_a_kernel_finish_as_the_reference_does() {
         let clock = "always #5 clk = ~clk;";
@@ -462,12 +463,13 @@ mod tests {
             for order in [[finish, clock], [clock, finish]] {
                 let source = format!(
                     "`timescale 1ns/1ns
-                    module Top(output logic [7:0] count);
+                    module Top(output logic [7:0] count, output logic [7:0] twice);
                         logic clk = 1'b0;
                         {}
                         {}
                         initial count = 8'd0;
                         always_ff @(posedge clk) count <= count + 8'd1;
+                        assign twice = count * 8'd2;
                     endmodule",
                     order[0], order[1]
                 );
@@ -962,17 +964,18 @@ mod tests {
 
     /// The next edge of a host clock that overflows the simulation time
     /// fails the run as the reference's, after the clocks before it in the
-    /// slot re-armed.
+    /// slot re-armed and the slot settled.
     #[test]
     fn host_clock_overflow_fails_as_the_reference() {
         let source = r#"
             `timescale 1ns/1ns
-            module Top(input logic a, input logic b, output logic [7:0] n);
+            module Top(input logic a, input logic b, output logic [7:0] n, output logic [7:0] y);
                 logic [7:0] ra = 8'd0;
                 logic [7:0] rb = 8'd0;
                 initial begin n = 8'd0; forever @(posedge b) n = n + 8'd1; end
                 always_ff @(posedge a) ra <= ra + n;
                 always_ff @(posedge b) rb <= rb + ra;
+                assign y = ra ^ rb;
             endmodule
         "#;
         let run = |mode: SchedulerMode| {
@@ -1059,6 +1062,125 @@ mod tests {
                 (400, &[]),
             ],
         );
+    }
+
+    /// Settles wait for their readers, which see what they see in the
+    /// reference: a domain whose next state combinational logic computes,
+    /// a kernel that samples a combinational output after a delay, one that
+    /// samples it at an edge, in the pass after the clock's kernel changed
+    /// it, and the host between runs.
+    #[test]
+    fn deferred_settles_reach_their_readers() {
+        for reader in [
+            "",
+            "always #3 seen = y;",
+            "initial forever @(negedge clk) seen = y + stim;",
+        ] {
+            let source = format!(
+                "`timescale 1ns/1ns
+                module Top(input logic [7:0] k, output logic [7:0] y);
+                    logic clk = 1'b0;
+                    logic [7:0] stim = 8'd0;
+                    logic [7:0] r = 8'd0;
+                    logic [7:0] q = 8'd0;
+                    logic [7:0] seen = 8'd0;
+                    logic [7:0] t = 8'd0;
+                    logic [7:0] nxt;
+                    always #5 begin t = t + 8'd1; clk = ~clk; end
+                    always #7 stim = stim + 8'd1;
+                    {reader}
+                    always_comb nxt = r + stim + k;
+                    always_ff @(posedge clk) r <= nxt;
+                    always_ff @(posedge clk) q <= q + stim;
+                    assign y = r ^ q ^ seen ^ t;
+                endmodule"
+            );
+            host_driven_agrees(
+                &source,
+                &[
+                    (100, &[Host::Set("k", 1)]),
+                    (200, &[Host::Set("k", 5)]),
+                    (300, &[]),
+                ],
+            );
+        }
+    }
+
+    /// A domain whose next state combinational logic computes runs its
+    /// fused units with a settle pending: they compute what it reads.
+    #[test]
+    fn fused_domains_compute_what_they_read() {
+        let source = r#"
+            module Top (
+                clk: input clock,
+                k  : input logic<8>,
+                y  : output logic<8>,
+            ) {
+                var r  : logic<8>;
+                var nxt: logic<8>;
+                always_comb {
+                    nxt = r + k;
+                }
+                always_ff (clk) {
+                    r = nxt;
+                }
+                assign y = r ^ k;
+            }
+        "#;
+        let run = |mode: SchedulerMode| {
+            let mut sim = Simulation::builder(source, "Top")
+                .scheduler_mode(mode)
+                .build()
+                .unwrap();
+            sim.add_clock("clk", 10, 5);
+            let k = sim.signal("k");
+            let mut states = Vec::new();
+            for (end, value) in [(100, 1u8), (200, 5), (300, 9)] {
+                sim.modify(|io| io.set(k, value)).unwrap();
+                sim.run_until(end).unwrap();
+                states.push(sim.save_state().unwrap());
+            }
+            (states, sim.scheduler_stats().compiled_slots)
+        };
+        let (expected, _) = run(SchedulerMode::Reference);
+        for mode in MODES {
+            let (states, compiled) = run(mode);
+            assert_eq!(states, expected, "{mode:?}");
+            assert!(compiled > 0, "{mode:?}");
+        }
+    }
+
+    /// A `$fatal` in a domain ends the run with combinational logic as the
+    /// slot's settle before the domain left it.
+    #[test]
+    fn compiled_slots_fail_in_a_domain_as_the_reference() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [7:0] y);
+                logic clk = 1'b0;
+                logic [7:0] r = 8'd0;
+                always #5 clk = ~clk;
+                always_ff @(posedge clk) begin
+                    r <= r + 8'd1;
+                    if (r == 8'd6) $fatal(1, "stop");
+                end
+                assign y = r * 8'd3;
+            endmodule
+        "#;
+        let run = |mode: SchedulerMode| {
+            let mut sim = build_in(source, mode);
+            let result = sim.run_until(1000).map_err(|error| error.to_string());
+            (result, sim.time(), sim.save_state().unwrap(), sim)
+        };
+        let (result, time, state, _) = run(SchedulerMode::Reference);
+        assert!(result.is_err(), "{result:?}");
+        for mode in MODES {
+            let (mode_result, mode_time, mode_state, sim) = run(mode);
+            assert_eq!(mode_result, result, "{mode:?}");
+            assert_eq!(mode_time, time, "{mode:?}");
+            assert_eq!(mode_state, state, "{mode:?}");
+            assert!(sim.scheduler_stats().compiled_slots > 0, "{mode:?}");
+        }
     }
 
     /// A design without process kernels runs its host clocks in compiled
@@ -1158,16 +1280,18 @@ mod tests {
 
     /// A compiled run of several slots that fails in a later one: the
     /// shadow catches up to that slot and fails the same way, so every mode
-    /// reports the reference's error and leaves its state.
+    /// reports the reference's error and leaves its state, combinational
+    /// outputs as the last slot settled them.
     #[test]
     fn compiled_runs_that_fail_after_several_slots_agree() {
         let source = r#"
             `timescale 1fs/1fs
-            module Top(output logic [7:0] x);
+            module Top(output logic [7:0] x, output logic [7:0] y);
                 logic clk = 1'b0;
                 logic [7:0] r = 8'd0;
                 always #5 clk = ~clk;
                 always_ff @(posedge clk) r <= r + 8'd1;
+                assign y = r + x;
                 initial begin
                     x = 8'd0;
                     #30 x = 8'd1;

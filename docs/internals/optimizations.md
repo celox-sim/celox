@@ -101,6 +101,13 @@ unnecessary:
   compile the clock's domain once more; the `derived_edge_units` selector
   (`-sir:derived_edge_units`, `SirPass::DerivedEdgeUnits`) turns them off to
   trade tick speed for build time.
+- in the time slots a compiled scheduler runs, a combinational settle waits
+  until its results are read: it runs, where the reference loop last
+  settled, before a process kernel or domain that reads combinational outputs
+  or may end the run mid-slot (`$finish`, an error), and before the run
+  returns, so every reader sees the reference's values. A domain that only
+  reads combinational outputs runs its fused evaluate-and-commit units instead
+  where the frontend provides them (Veryl).
 
 These choices preserve the ordering model defined in
 [Runtime Semantics](./cascade-limitations.md). They do not change signal values or
