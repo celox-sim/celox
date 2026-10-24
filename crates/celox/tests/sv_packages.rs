@@ -739,7 +739,7 @@ fn rejects_unsupported_package_state() {
 }
 
 #[test]
-fn veryl_instances_of_one_initializer_are_several_drivers() {
+fn veryl_instances_may_initialize_one_package_variable() {
     let sv = "package p; logic [7:0] shared; endpackage
         module W(input logic [7:0] a); initial p::shared = 8'd1; endmodule";
     let veryl = r#"
@@ -753,14 +753,12 @@ module Top (
     assign y = a;
 }
 "#;
-    let error = Simulator::builder(veryl, "Top")
+    // Initial blocks of several instances may write one package variable,
+    // as any processes may write a variable (IEEE 1800-2023 6.5).
+    Simulator::builder(veryl, "Top")
         .with_sv_sources(vec![(sv, std::path::Path::new("initial.sv"))])
         .build()
-        .expect_err("two instances initializing one package variable");
-    assert!(
-        format!("{error:?}").contains("multiple drivers of package variable `p::shared`"),
-        "{error:?}"
-    );
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[test]
@@ -1580,4 +1578,26 @@ fn nested_generate_block_imports_restore_the_module_binding() {
             "{body}"
         );
     }
+}
+
+#[test]
+fn ordinary_processes_do_not_share_a_package_variable_with_always_ff() {
+    // `always_ff` must be the only writer of its variables (IEEE 1800-2023
+    // 9.2.2.4), also when another instance writes it from an `always`.
+    let error = celox::Simulation::from_sv_sources(
+        vec![(
+            "package p; logic q; endpackage
+             module F(input logic clk, input logic d); always_ff @(posedge clk) p::q <= d; endmodule
+             module T; always #1 p::q = 0; endmodule
+             module Top(input logic clk); F f(.clk(clk), .d(1'b1)); T t(); endmodule",
+            std::path::Path::new("exclusive.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .expect_err("an always and an always_ff writing one package variable");
+    assert!(
+        format!("{error:?}").contains("multiple drivers of package variable `p::q`"),
+        "{error:?}"
+    );
 }

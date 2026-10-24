@@ -277,9 +277,8 @@ impl PackageBindings {
     }
 }
 
-/// Reject a package variable that two flip-flop processes write, that the
-/// initial writes of two instances write, or that a continuous driver and
-/// any other process write. Instances of one module are separate drivers.
+/// Reject a package variable that two flip-flop processes write, or that a
+/// continuous driver and any other process write. Instances of one module are separate drivers.
 /// Overlapping continuous drivers are rejected by the scheduler.
 fn check_package_variable_drivers(
     bindings: &PackageBindings,
@@ -414,11 +413,10 @@ fn check_package_variable_drivers(
                         .then_some(*address)
                 })
         };
-    // Two flip-flop processes, or initial writes of two instances, race.
+    // Two flip-flop processes race. Initial writes and processes of several
+    // instances may write one package variable, as any processes may write
+    // a variable (IEEE 1800-2023 6.5).
     if let Some(address) = conflict(&ff_writes, &|left, right| left != right) {
-        return Err(error(&address));
-    }
-    if let Some(address) = conflict(&initial_writes, &|left, right| left.0 != right.0) {
         return Err(error(&address));
     }
     // A continuous driver overlaps every other write.
