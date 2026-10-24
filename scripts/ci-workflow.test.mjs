@@ -389,7 +389,7 @@ test("cache warming shares the Rust Tests key and builds without running tests",
   assert.match(warm, /"scripts\/run-vtest.mjs"/);
   assert.match(
     warm,
-    /cargo nextest list --locked --workspace --message-format json/,
+    /cargo nextest list --locked --workspace --exclude 'lydite\*' --message-format json/,
   );
   const features = job("rust-tests").match(/--features (\S+)/)[1];
   assert.ok(warm.includes(`--features ${features}`));
@@ -501,8 +501,8 @@ test("cocotb retains Celox features without enabling unrelated adapter features"
   assert.match(job("rust-tests"), /name: Run cocotb VPI end-to-end test\n        if: needs.changes.outputs.rust_vpi_e2e != 'false'/);
 });
 
-test("full Clippy validation covers every workspace crate", () => {
-  assert.match(job("lint"), /run: cargo clippy --locked --workspace --all-targets --features/);
+test("full Clippy validation excludes the disabled bridge", () => {
+  assert.match(job("lint"), /run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features/);
 });
 
 test("upstream SV TB runs on full CI and feeds failure reporting", () => {

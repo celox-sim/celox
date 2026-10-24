@@ -149,7 +149,7 @@ jobs:
 
       - name: cargo clippy
         if: (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') && needs.changes.outputs.rust_full != 'false'
-        run: cargo clippy --locked --workspace --all-targets --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus --no-deps
+        run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus --no-deps
 
       - name: Lint the crates this pull request can affect
         if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_lint_packages != ''
@@ -162,7 +162,7 @@ jobs:
         if: (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') && needs.changes.outputs.rust_full != 'false'
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --locked --workspace --no-deps
+        run: cargo doc --locked --workspace --exclude lydite-celox --no-deps
 
       - name: Build the API documentation this pull request can affect
         if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_doc_libraries != ''

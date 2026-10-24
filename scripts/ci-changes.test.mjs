@@ -597,3 +597,13 @@ test("VPI test-only edits do not select the unrelated ignored cocotb end-to-end 
     assert.equal(rustScopeOutputs([path]).rust_vpi_e2e, true);
   assert.equal(rustScopeOutputs(null).rust_vpi_e2e, true);
 });
+
+
+test("disabled bridge is absent from every scoped test, lint and documentation plan", () => {
+  for (const path of ["crates/lydite-celox/src/lib.rs", "crates/celox/src/lib.rs", "crates/lydite-ir/src/lib.rs"]) {
+    const scope = rustScopeOutputs([path]);
+    assert.equal(scope.rust_full, false, path);
+    for (const key of ["rust_packages", "rust_libraries", "rust_lint_packages", "rust_doc_libraries", "rust_builds", "rust_lint_builds"])
+      assert.ok(!scope[key].includes("lydite-celox"), `${path}: ${key}`);
+  }
+});

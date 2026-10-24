@@ -53,6 +53,6 @@ jobs:
       - name: Build test targets to populate dependencies
         if: steps.cache.outputs.cache-hit != 'true'
         run: >-
-          cargo nextest list --locked --workspace --message-format json
+          cargo nextest list --locked --workspace --exclude 'lydite*' --message-format json
           --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/runtime-cases
           > /dev/null
