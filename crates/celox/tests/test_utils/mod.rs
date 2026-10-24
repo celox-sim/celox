@@ -1,6 +1,7 @@
 pub mod suite;
 pub mod veryl_sim;
 pub mod veryl_sv;
+pub mod vtest_exec;
 
 #[path = "../fixtures/veryl_std.rs"]
 #[allow(dead_code)]
