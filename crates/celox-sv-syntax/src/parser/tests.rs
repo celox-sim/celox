@@ -2251,6 +2251,16 @@ fn numeric_literal_grammar_keeps_integer_real_time_and_macro_base_spellings() {
         parse(&format!("module M #(parameter P={literal}); endmodule"));
     }
     parse("`define BASE 'h ff\nmodule M #(parameter P=8 `BASE); endmodule");
+    for (definitions, literal) in [
+        ("`define W 4", "5'd`W"),
+        ("`define V ff", "8'h`V"),
+        ("`define V 1x", "'sb`V"),
+        ("`define V 0f", "8'h`V"),
+    ] {
+        parse(&format!(
+            "{definitions}\nmodule M #(parameter P={literal}); endmodule"
+        ));
+    }
 }
 
 #[test]
@@ -2705,6 +2715,12 @@ fn resetall_is_only_legal_outside_design_elements() {
 
 #[test]
 fn based_literal_expression_values_are_compact_without_losing_source_tokens() {
+    let native = parse("`define W 4\nmodule M; initial x=5'd`W; endmodule");
+    assert!(
+        native.expressions.iter().any(
+            |expression| matches!(&expression.kind, ExprKind::Literal(text) if text == "5'd4")
+        )
+    );
     for (authored, value) in [("'h x", "'hx"), ("8'd 6", "8'd6"), ("4 'h f", "4'hf")] {
         let source = format!("module M; initial x={authored}; endmodule");
         let native = parse(&source);
