@@ -2015,6 +2015,7 @@ fn prepare_external_hierarchy_collecting(
             &lowered_modules,
             four_state,
             allow_inferred_latches,
+            true,
             warnings,
         )?;
         modules.insert(
@@ -2529,6 +2530,7 @@ fn schedule_sources_collecting(
                 &lowered_modules,
                 four_state,
                 allow_inferred_latches,
+                false,
                 warnings,
             )?;
             module_names.insert(module_id, key.name.clone());
@@ -3754,6 +3756,7 @@ pub(crate) fn attach_instance_glue(
     lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
     four_state: bool,
     allow_inferred_latches: bool,
+    foreign: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<(), ParserError> {
     let mut signal_names = lowered.signal_names.clone();
@@ -3883,6 +3886,67 @@ pub(crate) fn attach_instance_glue(
     let waits = lowered_modules
         .values()
         .any(|module| !module.sim_module.wait_sites.is_empty());
+    // An `always_comb` alternative is kept only if a wait or a flip-flop
+    // domain counts one of its targets. Within the module, they name its
+    // wait terms, its triggers and whole-variable copies of them; beyond
+    // it, ports, instance connections and package variables. Every counter
+    // a design declares also keeps nonblocking writes queued, so a design
+    // with a nonblocking switch lowers every alternative, and so does a
+    // module of a design with foreign modules, which this module does not see.
+    let watch_seeds = (waits
+        && !foreign
+        && !lowered_modules
+            .values()
+            .any(|module| !module.sim_module.nba_switches.is_empty()))
+    .then(|| {
+        let mut seeds: HashSet<SourceVarId> = module
+            .wait_sites
+            .iter()
+            .flat_map(|site| site.terms.iter().map(|&(signal, _)| signal))
+            .collect();
+        let triggers = module
+            .eval_only_ff_blocks
+            .keys()
+            .chain(module.apply_ff_blocks.keys())
+            .chain(module.eval_apply_ff_blocks.keys())
+            .chain(module.split_commit_ff_blocks.keys())
+            .chain(module.parallel_ff_parts.keys());
+        for trigger in triggers {
+            seeds.insert(trigger.clock);
+            seeds.extend(trigger.resets.iter().copied());
+        }
+        for &(copy, signal) in &lowered.event_copies {
+            seeds.extend([copy, signal]);
+        }
+        seeds.extend(lowered.package_variables.iter().map(|(id, _, _)| *id));
+        let instantiated = lowered_modules.values().any(|other| {
+            other
+                .instances
+                .iter()
+                .any(|instance| &LoweredSvModuleKey::instance_key(instance) == current_key)
+        });
+        if instantiated {
+            seeds.extend(
+                parent_variables
+                    .iter()
+                    .filter(|(_, variable)| variable.kind.is_port())
+                    .map(|(id, _)| *id),
+            );
+        }
+        let mut names = HashSet::default();
+        for (_, _, _, connections) in &resolved_instances {
+            for actual in connections.iter().filter_map(|c| c.actual_expr.as_ref()) {
+                procedural::expr_idents(actual, &mut names);
+            }
+        }
+        seeds.extend(
+            names
+                .iter()
+                .filter_map(|name| signal_names.get(name).copied()),
+        );
+        seeds.extend(port_assignments.iter().map(|(target, _)| *target));
+        seeds
+    });
     let (comb_blocks, arena, created, comb_observers, comb_sites, comb_alternatives) =
         lower_comb_processes(
             &lowered.source,
@@ -3897,6 +3961,7 @@ pub(crate) fn attach_instance_glue(
             &mut module.extern_functions,
             warnings,
             waits,
+            watch_seeds.as_ref(),
         )
         .map_err(|error| match error {
             sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
@@ -4464,6 +4529,7 @@ fn lower_comb_processes(
     extern_functions: &mut Vec<ExternFunction>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
     waits: bool,
+    watch_seeds: Option<&HashSet<SourceVarId>>,
 ) -> Result<
     (
         Vec<LogicPath<SourceVarId>>,
@@ -4492,6 +4558,8 @@ fn lower_comb_processes(
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
     let random_seeds = process_random_seeds(module);
+    let watchable =
+        watch_seeds.map(|seeds| watchable_variables(&pm, module, port_assignments, seeds));
     for (index, process) in module.comb_processes().iter().enumerate() {
         if let Some(condition) = process.condition() {
             let condition =
@@ -4552,6 +4620,15 @@ fn lower_comb_processes(
                 targets.sort_unstable();
                 targets.dedup();
                 comb_blocks.extend(paths);
+                if let Some(watchable) = &watchable
+                    && targets
+                        .iter()
+                        .map(|target| target.id)
+                        .chain(pm.written_variables(process.body()))
+                        .all(|id| !watchable.contains(&id))
+                {
+                    continue;
+                }
                 if let Some((paths, alternative)) = lower_comb_alternative(
                     &mut pm,
                     process,
@@ -4688,6 +4765,53 @@ fn lower_comb_processes(
     *extern_functions = std::mem::take(&mut pm.extern_functions);
     let created = std::mem::take(&mut pm.created);
     Ok((comb_blocks, arena, created, observers, sites, alternatives))
+}
+
+/// `seeds` and every variable a combinational process or a port assignment
+/// connects to them, in either direction. Clock-domain unification aliases
+/// only whole-variable copies, but any variable a process writes and any it
+/// writes or reads join one group, at any width and through any expression.
+fn watchable_variables(
+    pm: &procedural::ProcModule<'_>,
+    module: &sv::ir::Module,
+    port_assignments: &[(SourceVarId, Vec<sv::ir::Stmt>)],
+    seeds: &HashSet<SourceVarId>,
+) -> HashSet<SourceVarId> {
+    let mut groups: Vec<Vec<SourceVarId>> = Vec::new();
+    let mut group = |writes: HashSet<SourceVarId>, reads: HashSet<VarAtomBase<SourceVarId>>| {
+        if !writes.is_empty() {
+            groups.push(
+                writes
+                    .into_iter()
+                    .chain(reads.iter().map(|read| read.id))
+                    .collect(),
+            );
+        }
+    };
+    for process in module.comb_processes() {
+        let mut reads = pm.implicit_reads(process.body(), true);
+        reads.extend(pm.implicit_reads(process.sensitivity_body(), true));
+        group(pm.written_variables(process.body()), reads);
+    }
+    for (target, body) in port_assignments {
+        let mut writes = pm.written_variables(body);
+        writes.insert(*target);
+        group(writes, pm.implicit_reads(body, true));
+    }
+    let mut watchable = seeds.clone();
+    loop {
+        let before = groups.len();
+        groups.retain(|group| {
+            if !group.iter().any(|id| watchable.contains(id)) {
+                return true;
+            }
+            watchable.extend(group.iter().copied());
+            false
+        });
+        if groups.len() == before {
+            return watchable;
+        }
+    }
 }
 
 /// The imperative unit of an `always_comb` process lowered symbolically to
@@ -9385,6 +9509,138 @@ mod tests {
             .iter()
             .filter(|process| !process.is_initializer)
             .count()
+    }
+
+    /// The targets of the `always_comb` alternatives the modules of `source`
+    /// lowered, by name.
+    fn comb_alternatives(source: &str) -> BTreeSet<String> {
+        try_comb_alternatives(source).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn try_comb_alternatives(source: &str) -> Result<BTreeSet<String>, FrontendError> {
+        let mut trace = FrontendTrace::default();
+        schedule_sources(
+            &[(source, Path::new("top.sv"))],
+            "Top",
+            &[],
+            &[],
+            &[],
+            false,
+            &celox_frontend_core::ParallelScheduleOptions::default(),
+            &FrontendTraceOptions {
+                sim_modules: true,
+                ..Default::default()
+            },
+            Some(&mut trace),
+            &mut Vec::new(),
+        )?;
+        Ok(trace
+            .sim_modules
+            .expect("traced modules")
+            .values()
+            .flat_map(|module| {
+                module.comb_alternatives.iter().flat_map(|alternative| {
+                    alternative
+                        .targets
+                        .iter()
+                        .map(|target| module.variables[&target.id].path.join("."))
+                })
+            })
+            .collect())
+    }
+
+    /// An `always_comb` that stores a variable twice gets its imperative
+    /// alternative only where a wait or a flip-flop domain may watch it,
+    /// directly or through any expression of combinational logic or a port.
+    #[test]
+    fn comb_alternatives_only_for_watchable_targets() {
+        let multi_store = "always_comb begin y = 0; if (s[0]) y = s; end";
+        for (case, body, keeps) in [
+            ("unwatched", "bit u; initial forever @(u) ;", false),
+            ("source waited", "initial forever @(s) ;", true),
+            ("waited", "initial forever @(y) ;", true),
+            (
+                "part-select",
+                "bit [3:0] w; assign w = y[3:0]; initial forever @(w) ;",
+                true,
+            ),
+            (
+                "concatenation",
+                "bit [15:0] w; assign w = {y, s}; initial forever @(w) ;",
+                true,
+            ),
+            (
+                "arithmetic",
+                "bit [8:0] w; assign w = y + 9'd1; initial forever @(w) ;",
+                true,
+            ),
+            (
+                "aliased clock",
+                "bit c; assign c = y[0]; bit q; always_ff @(posedge c) q <= ~q;
+                 bit u; initial forever @(u) ;",
+                true,
+            ),
+            (
+                "output argument of an expression call",
+                "function automatic bit copy(input bit v, output bit o);
+                   o = v; return 1;
+                 endfunction
+                 bit w; always_comb if (copy(y[0], w)) begin end
+                 bit q; always_ff @(posedge w) q <= ~q;
+                 bit t; initial forever @(t) ;",
+                true,
+            ),
+            (
+                "output argument of a nested call",
+                "function automatic bit draw(output int o);
+                   return $random(o) == 0;
+                 endfunction
+                 int w; always @* if (draw(w) && y[0]) begin end
+                 initial forever @(w) ;",
+                true,
+            ),
+            (
+                "argument a system function writes",
+                "int w; always @* if ($random(w) == 0 && y[0]) begin end
+                 initial forever @(w) ;",
+                true,
+            ),
+            (
+                "nonblocking switch",
+                "bit [7:0] t; bit u; initial forever @(u) t <= u;",
+                true,
+            ),
+        ] {
+            let source = format!(
+                "module Top(input bit [7:0] s);
+                   bit [7:0] y;
+                   {multi_store}
+                   {body}
+                 endmodule"
+            );
+            assert_eq!(comb_alternatives(&source).contains("y"), keeps, "{case}");
+        }
+        let child = "module Child(input bit [7:0] s, output bit [7:0] y);
+               always_comb begin y = 0; if (s[0]) y = s; end
+             endmodule";
+        let port = "module Top(input bit [7:0] s);
+               bit [7:0] y;
+               Child child(.s(s), .y(y));
+               initial forever @(y) ;
+             endmodule";
+        assert!(
+            comb_alternatives(&format!("{child}\n{port}")).contains("y"),
+            "child output port"
+        );
+        // Only ports reach the variables of another module: a hierarchical
+        // reference is rejected, so no wait names them otherwise.
+        let hierarchical = "module Top(input bit [7:0] s);
+               Child child(.s(s), .y());
+               initial forever @(child.y) ;
+             endmodule";
+        let error = try_comb_alternatives(&format!("{child}\n{hierarchical}"))
+            .expect_err("a hierarchical reference is rejected");
+        assert!(error.to_string().contains("child.y"), "{error}");
     }
 
     /// Only the `always @(list)` processes of a combinational loop stay
