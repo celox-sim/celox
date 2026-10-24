@@ -107,7 +107,9 @@ unnecessary:
   or may end the run mid-slot (`$finish`, an error), and before the run
   returns, so every reader sees the reference's values. A domain that only
   reads combinational outputs runs its fused evaluate-and-commit units instead
-  where the frontend provides them (Veryl).
+  where the frontend provides them (Veryl). Combinational logic that keeps state
+  between settles (latches, guarded processes such as `always @*`, feedback)
+  settles where the reference loop does.
 
 These choices preserve the ordering model defined in
 [Runtime Semantics](./cascade-limitations.md). They do not change signal values or

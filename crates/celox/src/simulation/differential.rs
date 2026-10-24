@@ -1106,6 +1106,51 @@ mod tests {
         }
     }
 
+    /// Combinational logic that keeps state between settles (a latch, the
+    /// snapshots an `always @*` waits on) settles where the reference
+    /// does: every activation in between counts, though no reader observes
+    /// it before the run ends.
+    #[test]
+    fn stateful_combinational_logic_settles_every_activation() {
+        let opened = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [7:0] n);
+                logic [7:0] d = 8'd0;
+                logic en = 1'b0;
+                logic [7:0] q = 8'd0;
+                initial begin
+                    #5 d = 8'd7; en = 1'b1;
+                    #5 en = 1'b0;
+                    #5 d = 8'd9;
+                end
+                always_latch if (en) q = d;
+                assign n = q;
+            endmodule
+        "#;
+        agrees_with_the_reference(opened, 30);
+        for process in [
+            "always_latch if (g) l = d;",
+            "always @* if (g) l = d;",
+            "always @* l = d + 8'd1;",
+        ] {
+            let source = format!(
+                "`timescale 1ns/1ns
+                module Top(output logic [7:0] n);
+                    logic clk = 1'b0;
+                    logic [7:0] d = 8'd0;
+                    logic g = 1'b1;
+                    logic [7:0] l;
+                    always #5 begin clk = ~clk; d = d + 8'd1; end
+                    always_ff @(posedge clk) g <= ~g;
+                    {process}
+                    assign n = l;
+                endmodule"
+            );
+            agrees_with_the_reference(&source, 30);
+            agrees_with_the_reference(&source, 300);
+        }
+    }
+
     /// A domain whose next state combinational logic computes runs its
     /// fused units with a settle pending: they compute what it reads.
     #[test]

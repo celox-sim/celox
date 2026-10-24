@@ -184,7 +184,9 @@ struct Plan {
 /// reads); the host, before the run returns. Observers of the settled state
 /// are units that load storage combinational logic writes, and units that
 /// may end the run in the middle of a slot (`$finish`, an error), where the
-/// reference's state is the last settle's.
+/// reference's state is the last settle's. Only a settle that is a function
+/// of its inputs may wait: one that reads what an earlier settle left (see
+/// [`retains_state`]) is an activation of its own.
 struct Lazy {
     /// Per process kernel, whether its runs observe the settled state.
     kernels: Vec<bool>,
@@ -591,13 +593,17 @@ impl Plan {
         });
         // A settle may wait for its readers only when it is a function of
         // its inputs that cannot fail: when it would end the run, it must do
-        // so in its own slot.
+        // so in its own slot; when it reads what an earlier settle left (a
+        // latch, a guarded process's snapshots of its inputs, feedback), the
+        // settles in between are activations of their own.
+        let comb_stores: HashSet<AbsoluteAddr> = sir.eval_comb.iter().flat_map(stores).collect();
         let lazy = settle_reads
             .as_ref()
-            .filter(|_| !sir.eval_comb.iter().any(fails))
+            .filter(|_| {
+                !sir.eval_comb.iter().any(fails)
+                    && !retains_state(&sir.eval_comb, &storage, &comb_stores)
+            })
             .map(|_| {
-                let comb_stores: HashSet<AbsoluteAddr> =
-                    sir.eval_comb.iter().flat_map(stores).collect();
                 // The waits never watch what combinational logic writes, so
                 // they see the same with a settle pending.
                 debug_assert!(
@@ -1901,6 +1907,150 @@ fn loads(unit: &Unit) -> impl Iterator<Item = AbsoluteAddr> + '_ {
         }
         _ => None,
     })
+}
+
+/// Whether a settle of `units` may read what an earlier settle left: a load
+/// of storage they write (`stores`, by representative) that stores earlier
+/// in the same settle do not cover on every path.
+fn retains_state(
+    units: &[Unit],
+    storage: &impl Fn(AbsoluteAddr) -> AbsoluteAddr,
+    stores: &HashSet<AbsoluteAddr>,
+) -> bool {
+    /// The bits of each home a settle has stored so far, as sorted,
+    /// disjoint `[start, end)` ranges.
+    type Covered = HashMap<(u32, AbsoluteAddr), Vec<(usize, usize)>>;
+    fn add(covered: &mut Covered, key: (u32, AbsoluteAddr), start: usize, end: usize) {
+        let ranges = covered.entry(key).or_default();
+        ranges.push((start, end));
+        ranges.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+        for &(start, end) in ranges.iter() {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        *ranges = merged;
+    }
+    fn meet(a: &Covered, b: &Covered) -> Covered {
+        let mut met = Covered::default();
+        for (key, left) in a {
+            let Some(right) = b.get(key) else { continue };
+            let both: Vec<(usize, usize)> = left
+                .iter()
+                .flat_map(|&(ls, le)| {
+                    right.iter().filter_map(move |&(rs, re)| {
+                        let (start, end) = (ls.max(rs), le.min(re));
+                        (start < end).then_some((start, end))
+                    })
+                })
+                .collect();
+            if !both.is_empty() {
+                met.insert(*key, both);
+            }
+        }
+        met
+    }
+    // Runs `block` from `covered`; `false` when a load reads what it does
+    // not cover.
+    let step = |block: &celox_sir::BasicBlock<RegionedAbsoluteAddr>, covered: &mut Covered| {
+        for inst in &block.instructions {
+            match inst {
+                SIRInstruction::Load(_, source, offset, width)
+                | SIRInstruction::Commit(source, _, offset, width, _) => {
+                    let home = storage(source.absolute_addr());
+                    if stores.contains(&home) {
+                        let read = match offset {
+                            SIROffset::Static(start) => {
+                                covered.get(&(source.region, home)).is_some_and(|ranges| {
+                                    ranges
+                                        .iter()
+                                        .any(|&(s, e)| s <= *start && start + width <= e)
+                                })
+                            }
+                            _ => false,
+                        };
+                        if !read {
+                            return false;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            match inst {
+                SIRInstruction::Store(target, SIROffset::Static(start), width, ..)
+                | SIRInstruction::Commit(_, target, SIROffset::Static(start), width, _) => add(
+                    covered,
+                    (target.region, storage(target.absolute_addr())),
+                    *start,
+                    start + width,
+                ),
+                _ => {}
+            }
+        }
+        true
+    };
+    let mut entry = Covered::default();
+    for unit in units {
+        // What every path stores before each block, from the paths found
+        // so far: a fixed point from above, as loops only remove.
+        let mut before: HashMap<celox_sir::BlockId, Covered> = HashMap::default();
+        before.insert(unit.entry_block_id, entry.clone());
+        let mut after: HashMap<celox_sir::BlockId, Covered> = HashMap::default();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let mut ids: Vec<_> = unit.blocks.keys().copied().collect();
+            ids.sort_unstable();
+            for id in ids {
+                let Some(start) = before.get(&id).cloned() else {
+                    continue;
+                };
+                let mut covered = start;
+                if !step(&unit.blocks[&id], &mut covered) {
+                    return true;
+                }
+                if after.get(&id) == Some(&covered) {
+                    continue;
+                }
+                let successors: Vec<_> = match &unit.blocks[&id].terminator {
+                    SIRTerminator::Jump(target, _) => vec![*target],
+                    SIRTerminator::Branch {
+                        true_block,
+                        false_block,
+                        ..
+                    } => vec![true_block.0, false_block.0],
+                    SIRTerminator::Switch { cases, default, .. } => cases
+                        .iter()
+                        .map(|case| case.target)
+                        .chain([*default])
+                        .collect(),
+                    SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+                };
+                for successor in successors {
+                    let next = match before.get(&successor) {
+                        Some(known) => meet(known, &covered),
+                        None => covered.clone(),
+                    };
+                    before.insert(successor, next);
+                }
+                after.insert(id, covered);
+                changed = true;
+            }
+        }
+        // The next unit starts from what every return of this one stored.
+        let mut returns = unit
+            .blocks
+            .iter()
+            .filter(|(_, block)| matches!(block.terminator, SIRTerminator::Return))
+            .filter_map(|(id, _)| after.get(id));
+        entry = match returns.next() {
+            Some(first) => returns.fold(first.clone(), |met, next| meet(&met, next)),
+            None => Covered::default(),
+        };
+    }
+    false
 }
 
 /// Whether `unit` may end with an error.
