@@ -67,6 +67,7 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// Whether the body's variables are automatic by default.
     automatic: bool,
     task_timing: bool,
+    return_shape: Option<VariableDimensions>,
     pub(super) sensitivity_body: Vec<Stmt>,
 }
 
@@ -142,6 +143,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         Self {
             automatic,
             task_timing: false,
+            return_shape: None,
             sensitivity_body: Vec::new(),
             tree,
             dims: dims.clone(),
@@ -472,6 +474,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             if let celox_sv_syntax::ExprKind::Concatenation(items) = &native.expression(id).kind {
                 pending.extend(items.iter().rev().copied());
             } else {
+                if expression_binding::member_context(id, native, self.tree, &self.dims)?
+                    .is_some_and(|(guards, _)| !guards.is_empty())
+                {
+                    return Err(unsupported(
+                        "concatenation assignment to a tagged union member",
+                    ));
+                }
+                self.reject_tagged_integral_target(id)?;
                 let mut target =
                     expression_binding::variable_lvalue(id, native, self.tree, &self.dims)?;
                 self.rename_lvalue(&mut target);
@@ -520,6 +530,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         if let Some(stmt) = self.property_assignment(op, nonblocking, left, right)? {
             return Ok(stmt);
         }
+        if op != "=" {
+            self.reject_tagged_integral_target(left)?;
+        }
         let (written, lhs) = self.native_lvalue(left)?;
         if op != "="
             && expression_binding::native_string(
@@ -531,7 +544,24 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         {
             return Err(unsupported(format!("operator `{op}` on a string")));
         }
-        let mut rhs = if op == "=" {
+        let member_context = expression_binding::member_context(
+            left,
+            self.tree.declarations(),
+            self.tree,
+            &self.dims,
+        )?;
+        let mut rhs = if op == "="
+            && let Some((_, ty)) = &member_context
+        {
+            let shape = procedural::dimensions_from_type(ty);
+            expression_binding::bind_value(
+                right,
+                self.tree.declarations(),
+                self.tree,
+                &self.dims,
+                Some(&shape),
+            )?
+        } else if op == "=" {
             expression_binding::expression(
                 right,
                 self.tree.declarations(),
@@ -544,15 +574,23 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 expression_binding::value(right, self.tree.declarations(), self.tree, &self.dims)?;
             assignment_op_expr(&self.tree.state, &written, op, value, &self.dims)?
         };
-        // A two-state member of a four-state packed struct drops unknown bits.
+        // Preserve assignment sizing before checked accesses introduce a temporary
+        // (IEEE 1800-2023 11.8.2), using the selected destination width.
+        // A two-state member of a four-state packed struct also drops unknown bits.
         if matches!(
             written,
             LValue::Select {
                 is_2state: true,
                 ..
             }
-        ) {
+        ) || member_context
+            .as_ref()
+            .is_some_and(|(guards, _)| !guards.is_empty())
+        {
             rhs = coerce_procedural_assignment_rhs(&self.tree.state, rhs, &written, &self.dims);
+        }
+        if let Some((guards, _)) = member_context {
+            rhs = packed_structs::checked_value(guards, rhs, &self.tree.state, &self.dims)?;
         }
         self.rename_expr(&mut rhs);
         Ok(Stmt::Assign {
@@ -831,6 +869,17 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         })
     }
 
+    fn reject_tagged_integral_target(&self, root: celox_sv_syntax::ExprId) -> Converted<()> {
+        if dimensions::operand_shape(root, self.tree, &self.dims)?.is_some_and(|ty| {
+            ty.members
+                .first()
+                .is_some_and(packed_structs::PackedMember::is_tagged)
+        }) {
+            return Err(unsupported("integral update of a tagged union"));
+        }
+        Ok(())
+    }
+
     fn inc_or_dec(&self, root: celox_sv_syntax::ExprId) -> Result<Stmt, AnalyzerError> {
         let celox_sv_syntax::ExprKind::Unary {
             operator,
@@ -856,6 +905,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 expression_binding::object_receiver(self.tree, receiver, native, &self.dims)?;
             return self.property_store(&property, handle, op, Expr::Literal("1".into()));
         }
+        self.reject_tagged_integral_target(*expression)?;
         let (written, lhs) = self.native_lvalue(*expression)?;
         let mut rhs = assignment_op_expr(
             &self.tree.state,
@@ -864,6 +914,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             Expr::Literal("1".into()),
             &self.dims,
         )?;
+        if let Some((guards, _)) =
+            expression_binding::member_context(*expression, native, self.tree, &self.dims)?
+        {
+            rhs = packed_structs::checked_value(guards, rhs, &self.tree.state, &self.dims)?;
+        }
         self.rename_expr(&mut rhs);
         Ok(Stmt::Assign {
             lhs,
@@ -1978,10 +2033,17 @@ pub(super) fn lower_subroutine(
     // any formal can shadow those names (IEEE 1800-2023 13.5.3).
     let defaults = params
         .iter()
-        .map(|(_, _, _, default)| {
+        .map(|(_, _, ty, default)| {
             default
                 .map(|root| {
-                    let mut value = expression_binding::bind(root, tree, &builder.dims)?;
+                    let shape = ty.tagged_identity().map(|_| dimensions_from_type(ty));
+                    let mut value = expression_binding::bind_value(
+                        root,
+                        tree.declarations(),
+                        tree,
+                        &builder.dims,
+                        shape.as_ref(),
+                    )?;
                     builder.rename_expr(&mut value);
                     Ok(value)
                 })
@@ -2028,6 +2090,10 @@ pub(super) fn lower_subroutine(
     if let (Some(name), Some(ty)) = (&return_var, &return_type) {
         formal_types.insert(name.clone(), scoped_type(ty.clone(), declaration_env));
     }
+    builder.return_shape = return_type
+        .as_ref()
+        .filter(|ty| ty.tagged_identity().is_some())
+        .map(dimensions_from_type);
     let parameter_locals_end = builder.state.locals.len();
     let mut items = native.items.clone();
     let mut prologue = Vec::new();

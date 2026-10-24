@@ -356,7 +356,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                     self.urandom_state();
                     continue;
                 }
-                sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => continue,
+                sv::ir::Callee::String(_)
+                | sv::ir::Callee::Object(_)
+                | sv::ir::Callee::Checked { .. } => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
@@ -938,6 +940,28 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(expr.clone());
         }
         Ok(match expr {
+            Expr::Call {
+                callee: sv::ir::Callee::Checked { width, signed },
+                args,
+                ..
+            } => {
+                let [Some(condition), Some(value)] = args.as_slice() else {
+                    return Err(unsupported("invalid tagged access check"));
+                };
+                self.system_task(
+                    sv::ir::SystemTask::Assert,
+                    &[
+                        sv::ir::SystemTaskArg::Expr(condition.clone()),
+                        sv::ir::SystemTaskArg::Str(
+                            "tagged union member does not match the active tag".into(),
+                        ),
+                    ],
+                    None,
+                )?;
+                let (_, name) = self.m.temp("tagged_member", *width, *signed, true);
+                self.assign(&sv::ir::LValue::Ident(name.clone()), value)?;
+                Expr::Ident(name)
+            }
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fread),
                 args,
@@ -1733,9 +1757,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         use sv::ir::{BinaryOp, Expr};
         let (current, store_back) = match seed {
             Some(seed) => {
-                let lvalues = lvalue_from_expr(seed)
-                    .ok_or_else(|| unsupported("seed variable of `$random`"))?;
-                (self.hoist(seed)?, Some(lvalues))
+                let (lvalues, read, guards) = self.capture_system_actual(seed)?;
+                (self.hoist(&read)?, Some((lvalues, guards)))
             }
             None => (Expr::Ident(self.dist_seed().1), None),
         };
@@ -1802,10 +1825,13 @@ impl<'p, 'a> Ff<'p, 'a> {
         };
         let result = self.hidden("random_result", &value, true)?;
         match store_back {
-            Some(lvalues) => match lvalues.as_slice() {
-                [lvalue] => self.assign(lvalue, &next)?,
-                parts => self.assign_concat(parts, &next)?,
-            },
+            Some((lvalues, guards)) => {
+                self.check_tagged_guards(&guards)?;
+                match lvalues.as_slice() {
+                    [lvalue] => self.assign(lvalue, &next)?,
+                    parts => self.assign_concat(parts, &next)?,
+                }
+            }
             None => {
                 let (id, _) = self.dist_seed();
                 let next = self.eval(&next, Some((32, false)))?;
@@ -1826,7 +1852,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             .first()
             .and_then(Option::as_ref)
             .ok_or_else(|| unsupported("seed of `$dist_uniform`"))?;
-        let (lvalues, seed_read) = self.capture_system_actual(seed)?;
+        let (lvalues, seed_read, guards) = self.capture_system_actual(seed)?;
         let seed_width = self
             .m
             .comparison_width(&seed_read, &seed_read)
@@ -1974,6 +2000,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             signed: true,
         };
         let restored = mux(invalid, original, next);
+        self.check_tagged_guards(&guards)?;
         match lvalues.as_slice() {
             [lvalue] => self.assign(lvalue, &restored)?,
             parts => self.assign_concat(parts, &restored)?,
@@ -1985,15 +2012,33 @@ impl<'p, 'a> Ff<'p, 'a> {
         })
     }
 
+    fn check_tagged_guards(&mut self, guards: &[sv::ir::Expr]) -> Result<(), sv::AnalyzerError> {
+        for guard in guards {
+            self.system_task(
+                sv::ir::SystemTask::Assert,
+                &[
+                    sv::ir::SystemTaskArg::Expr(guard.clone()),
+                    sv::ir::SystemTaskArg::Str(
+                        "tagged union member does not match the active tag".into(),
+                    ),
+                ],
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Capture an inout/output actual's reference before reading or writing
     /// it, including selectors changed by the call or by other selectors.
     fn capture_system_actual(
         &mut self,
         expr: &sv::ir::Expr,
-    ) -> Result<(Vec<sv::ir::LValue>, sv::ir::Expr), sv::AnalyzerError> {
+    ) -> Result<(Vec<sv::ir::LValue>, sv::ir::Expr, Vec<sv::ir::Expr>), sv::AnalyzerError> {
         use sv::ir::{Expr, LValue};
         let parts =
             lvalue_from_expr(expr).ok_or_else(|| unsupported("integral output/inout actual"))?;
+        let guards = tagged_actual_guards(expr);
+        self.check_tagged_guards(&guards)?;
         let signed = self.expr_signed(expr);
         let mut captured = Vec::new();
         for part in parts {
@@ -2017,7 +2062,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         } else {
             Expr::Concat(reads)
         };
-        Ok((captured, read))
+        Ok((captured, read, guards))
     }
 
     fn host_hidden(
@@ -2062,7 +2107,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             .ok_or_else(|| unsupported("distribution seed"))?;
         // Capture selectors once before evaluating the other actuals, and
         // suspend with an int formal rather than writing the caller's storage.
-        let (lvalues, captured) = self.capture_system_actual(seed)?;
+        let (lvalues, captured, guards) = self.capture_system_actual(seed)?;
         let formal = self.int_formal(captured);
         let (seed_id, seed_result) =
             self.host_hidden("distribution_seed", &formal, 32, true, true)?;
@@ -2099,6 +2144,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         });
         self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Distribution, site))
             .map_err(kernel_error)?;
+        self.check_tagged_guards(&guards)?;
         match lvalues.as_slice() {
             [lvalue] => self.assign(lvalue, &seed_result)?,
             parts => self.assign_concat(parts, &seed_result)?,
@@ -2144,7 +2190,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .get(1)
                 .and_then(Option::as_ref)
                 .ok_or_else(|| unsupported("plusargs destination"))?;
-            let (lvalues, captured) = self.capture_system_actual(expr)?;
+            let (lvalues, captured, guards) = self.capture_system_actual(expr)?;
             let width = self
                 .m
                 .comparison_width(expr, expr)
@@ -2157,7 +2203,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 signed: false,
                 is_string: false,
             });
-            Some((lvalues, result))
+            Some((lvalues, result, guards))
         } else {
             None
         };
@@ -2182,7 +2228,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         });
         self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Plusargs, site))
             .map_err(kernel_error)?;
-        if let Some((lvalues, result)) = target {
+        if let Some((lvalues, result, guards)) = target {
+            self.check_tagged_guards(&guards)?;
             match lvalues.as_slice() {
                 [lvalue] => self.assign(lvalue, &result)?,
                 parts => self.assign_concat(parts, &result)?,
@@ -3647,13 +3694,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .flatten()
                 .or_else(|| param.default.clone());
             if param.direction.is_written() {
-                let lvalues = actual.as_ref().and_then(lvalue_from_expr).ok_or_else(|| {
+                let reference = actual
+                    .as_ref()
+                    .ok_or_else(|| unsupported("missing output argument"))?;
+                let lvalues = lvalue_from_expr(reference).ok_or_else(|| {
                     unsupported(format!(
                         "output argument `{}` of `{name}`",
                         param.source_name
                     ))
                 })?;
-                outputs.push((param.name.clone(), id, lvalues));
+                let guards = tagged_actual_guards(reference);
+                self.check_tagged_guards(&guards)?;
+                outputs.push((param.name.clone(), id, lvalues, guards));
             }
             if param.direction.is_read() {
                 let actual = actual.ok_or_else(|| {
@@ -3741,7 +3793,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.jump(return_block);
         }
         self.b.switch_to_block(return_block);
-        for (formal, id, lvalues) in outputs {
+        for (formal, id, lvalues, guards) in outputs {
+            self.check_tagged_guards(&guards)?;
             let signed = self.m.var(id).signed;
             if let [lvalue] = lvalues.as_slice() {
                 self.assign(lvalue, &sv::ir::Expr::Ident(formal))?;
@@ -5716,6 +5769,7 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                 sv::ir::Callee::String(_) => continue,
                 // A property can change without the handle changing.
                 sv::ir::Callee::Object(op) => return Some(op.to_string()),
+                sv::ir::Callee::Checked { .. } => return Some("tagged union access".into()),
                 sv::ir::Callee::Subroutine(name) => name,
             };
             if !visited.insert(name.clone()) {

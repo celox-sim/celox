@@ -218,6 +218,24 @@ pub(crate) fn eval_const_expr_in_env(
                 crate::ast::const_functions::eval_call(name, args, constants)
             }
             Callee::System(function) => eval_system_function(*function, args, constants),
+            Callee::Checked { width, signed } => {
+                let [guard, payload] = args.as_slice() else {
+                    return None;
+                };
+                // IEEE 1800-2023 7.3.2: a member can only be read with its active tag.
+                // Keep the guard even when evaluating a constant function (13.4.3).
+                if eval_const_expr_in_env(guard, constants)? == 0 {
+                    return None;
+                }
+                eval_const_expr_in_env(
+                    &ConstExpr::Resize {
+                        expr: Box::new(payload.clone()),
+                        width: *width,
+                        signed: *signed,
+                    },
+                    constants,
+                )
+            }
             Callee::String(_) | Callee::Object(_) => None,
         },
         ConstExpr::Unary { op, expr: operand } => {
