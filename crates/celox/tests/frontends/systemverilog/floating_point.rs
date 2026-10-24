@@ -1,6 +1,16 @@
 use super::*;
 
 sv_backends! {
+    fn real_parameter_overrides_preserve_fractional_values(sim) {
+        @case "floating_point::real_parameter_overrides_preserve_fractional_values";
+    }
+    fn real_parameter_overrides_keep_declared_conversion_contexts(sim) {
+        @case "floating_point::real_parameter_overrides_keep_declared_conversion_contexts";
+    }
+    fn real_parameter_overrides_from_math_and_generate_scopes(sim) {
+        @case "floating_point::real_parameter_overrides_from_math_and_generate_scopes";
+    }
+
     fn real_math_runtime_functions(sim) { @case "real_math::runtime_functions"; }
     fn real_math_constant_functions(sim) { @case "real_math::constant_functions"; }
     fn real_arithmetic_and_rounding(sim) { @case "floating_point::real_arithmetic_and_rounding"; }
