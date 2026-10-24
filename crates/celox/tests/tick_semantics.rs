@@ -246,20 +246,17 @@ const COINCIDENT: [Op; 5] = [
     Op::Tick(&["clk"]),
 ];
 
-/// Coincident ticks sample each other's values from before the edge. The
-/// commit-raised gate's domain (`e`) is checked against Icarus below until
-/// the timed reference sees its edge in a coincident batch (#1860).
+/// Coincident ticks sample each other's values from before the edge.
 #[test]
 fn ticks_of_several_events_are_coincident() {
-    check_except(&COINCIDENT, &["e"]);
+    check(&COINCIDENT);
 }
 
 /// At the second coincident tick `clk` rises while `ren` is already high, so
 /// `rclk` rises in the active region and `e` counts: Icarus 13.0 gives
-/// `e` = 0 0 1 2 3 after the operations. The timed reference gives 0 0 1 1 2
-/// (#1860); both `Simulator` paths agree with Icarus.
+/// `e` = 0 0 1 2 3 after the operations, and so do the timed reference
+/// (#1860) and both `Simulator` paths.
 #[test]
-#[ignore = "#1860"]
 fn coincident_ticks_run_the_domain_of_a_gate_the_commit_raised() {
     let e = OUTPUTS.iter().position(|name| *name == "e").unwrap();
     let values = |rows: Vec<Vec<u64>>| rows.iter().map(|row| row[e]).collect::<Vec<_>>();
