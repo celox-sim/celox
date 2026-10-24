@@ -1745,6 +1745,37 @@ mod host {
         ))
     }
 
+    /// A native image records waveforms only if its arrays are packed,
+    /// which an image compiled with VCD enabled has: a VCD file of the host
+    /// (`vcd_path`) or of the design (`$dumpvars`) needs one.
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        target_arch = "aarch64"
+    ))]
+    fn validate_native_vcd_layout(
+        layout: &crate::MemoryLayout,
+        program: &crate::ir::RuntimeProgram,
+        vcd_path: &Option<std::path::PathBuf>,
+    ) -> Result<(), SimulatorError> {
+        let source_vcd = program
+            .runtime_schema
+            .host_request_sites
+            .iter()
+            .any(|site| site.kind == celox_design::HostRequestKind::Vcd);
+        if (vcd_path.is_some() || source_vcd)
+            && layout.unpacked_arrays.values().any(|array| {
+                !array.element_width.is_multiple_of(8)
+                    || array.element_stride != array.element_width / 8
+            })
+        {
+            return Err(SimulatorError::from(crate::CodegenError::message(
+                "VCD requires packed array storage; compile this native image with VCD enabled",
+            )));
+        }
+        Ok(())
+    }
+
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
@@ -1763,22 +1794,8 @@ mod host {
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
-        let source_vcd = sim
-            .program
-            .runtime_schema
-            .host_request_sites
-            .iter()
-            .any(|site| site.kind == celox_design::HostRequestKind::Vcd);
-        if vcd_path.is_some() || source_vcd {
-            if sim.layout().unpacked_arrays.values().any(|array| {
-                !array.element_width.is_multiple_of(8)
-                    || array.element_stride != array.element_width / 8
-            }) {
-                return Err(SimulatorError::from(crate::CodegenError::message(
-                    "VCD requires packed array storage; compile this native image with VCD enabled",
-                ))
-                .with_warnings(std::mem::take(&mut sim.warnings)));
-            }
+        if let Err(error) = validate_native_vcd_layout(sim.layout(), &sim.program, &vcd_path) {
+            return Err(error.with_warnings(std::mem::take(&mut sim.warnings)));
         }
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
@@ -3956,6 +3973,8 @@ mod host {
                     .with_warnings(warnings));
             }
 
+            validate_native_vcd_layout(image.layout(), &program, &vcd_path)
+                .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             let load = |image, options: &SimulatorOptions| {
                 // Safety: callers either produced the image in this process
                 // or loaded it from an explicitly trusted native-image
