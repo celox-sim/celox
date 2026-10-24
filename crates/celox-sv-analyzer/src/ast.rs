@@ -977,12 +977,52 @@ impl Module {
             }
         }
         let mut array_initial_processes = Vec::new();
+        let mut packed_pattern_values = HashMap::default();
         for parameter in &array_parameters {
             let process = parameter.initial_process(syntax_tree, &packed_dimensions)?;
             if let Stmt::Assign { rhs, .. } = &process.body[0] {
                 packed_dimensions
                     .array_parameter_values
                     .insert(parameter.signal.name.clone(), rhs.clone());
+                let name = parameter.signal.name();
+                let shape = packed_dimensions.get(name).expect("array parameter shape");
+                if shape.unpacked.is_empty()
+                    && !shape.real
+                    && !shape.string
+                    && shape.class.is_none()
+                {
+                    // An integral value parameter is self-determined before
+                    // conversion at a receiving declaration (6.20.2). The
+                    // pattern's concatenation must retain its declared sign.
+                    let signed = shape.signed;
+                    let is_2state = shape.is_2state;
+                    let width = expr_static_width(
+                        &syntax_tree.state,
+                        &Expr::Ident(name.to_string()),
+                        &packed_dimensions,
+                    )
+                    .ok_or_else(|| unsupported("packed pattern parameter width"))?;
+                    let mut value = Expr::Resize {
+                        expr: Box::new(rhs.clone()),
+                        width,
+                        signed,
+                    };
+                    if is_2state {
+                        value = Expr::Unary {
+                            op: UnaryOp::ToTwoState,
+                            expr: Box::new(value),
+                        };
+                    }
+                    let value = fold_const_integral_expr_preserving_mask(
+                        &syntax_tree.state,
+                        value,
+                        &packed_dimensions.const_env,
+                    );
+                    packed_dimensions
+                        .parameter_values
+                        .insert(name.to_string(), value.clone());
+                    packed_pattern_values.insert(name.to_string(), value);
+                }
             }
             array_initial_processes.push(process);
         }
@@ -1032,6 +1072,7 @@ impl Module {
             &const_env,
             &imported,
         );
+        parameter_values.extend(packed_pattern_values);
         for (name, value) in &enum_constants.exprs {
             parameter_values
                 .entry(name.clone())

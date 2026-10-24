@@ -56,6 +56,29 @@ fn declared_type(
     )
 }
 
+/// A scalar value override replaces a packed pattern default. Keep unpacked
+/// values and caller-bound patterns on the aggregate binding path.
+pub(super) fn uses_signal_representation(
+    parameter: &celox_sv_syntax::Parameter,
+    tree: &AnalysisContext<'_>,
+    const_env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Converted<bool> {
+    if !is_array_parameter(parameter, tree.declarations()) {
+        return Ok(false);
+    }
+    let name = instances::normalize_identifier(&parameter.name.spelling);
+    if !parameter.local
+        && tree.parameter_overrides.contains_key(&name)
+        && matches!(&parameter.kind, celox_sv_syntax::ParameterKind::Value { dimensions, .. } if dimensions.is_empty())
+        && declared_type(parameter, tree, const_env, aliases)?
+            .is_some_and(|ty| ty.unpacked_ranges.is_empty())
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 /// Array parameters declared directly in the selected native unit/scope.
 pub(super) fn array_parameters_from_scope(
     tree: &AnalysisContext<'_>,
@@ -118,7 +141,7 @@ fn array_parameters_from_declaration(
             .pattern_parameter_bindings
             .get(&native.id)
             .cloned();
-        if !is_array_parameter(native, tree.declarations()) && bound.is_none() {
+        if !uses_signal_representation(native, tree, const_env, type_aliases)? && bound.is_none() {
             continue;
         }
         let name = instances::normalize_identifier(&native.name.spelling);
