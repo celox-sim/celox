@@ -1,0 +1,1 @@
+Address P2: update the retained-baseline regression test to assert the four reviewed SV Icarus case IDs; rerun all repository script tests after the evidence change.
