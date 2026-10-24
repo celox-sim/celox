@@ -350,6 +350,7 @@ fn extend_variable_dimensions_from_const_env(
         let packed_ranges = ranges.split_off(unpacked);
         let ty = Type {
             is_enum: false,
+            enum_values: None,
             kind: TypeKind::Logic,
             is_signed: variable_type_is_signed(const_env, name),
             packed_ranges,

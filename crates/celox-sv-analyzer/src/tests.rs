@@ -6610,7 +6610,11 @@ fn class_randomize_rejects_unsupported_semantics() {
             "c.f()",
             "object receiver",
         ),
-        ("rand string x;", "c.randomize()", "integral non-enum"),
+        (
+            "rand string x;",
+            "c.randomize()",
+            "integral rand properties",
+        ),
         (
             "rand int x;",
             "c.randomize() with { x == 1; }",
@@ -6676,5 +6680,21 @@ fn randomization_signatures_do_not_force_unused_interface_class_layouts() {
     ] {
         let source = format!("module Top; {declaration} endmodule");
         analyze_source(&source, Path::new("unused_interface_class.sv")).unwrap();
+    }
+}
+
+#[test]
+fn class_randomize_rejects_unresolved_enum_domains() {
+    for members in ["A=3, B", "A=0, B=0", "A=2'bx, B=1"] {
+        let source = format!(
+            "module Top;
+            class C; rand enum bit [1:0] {{{members}}} value; endclass
+            C c; initial begin c = new; void'(c.randomize()); end
+            endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("enum_domain.sv")).is_err(),
+            "{members}"
+        );
     }
 }
