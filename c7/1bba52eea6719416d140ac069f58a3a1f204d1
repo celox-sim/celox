@@ -1,1 +1,6 @@
-Address P1: retain reviewed Icarus union failures so full-suite and release gates recognize exact known diagnostics.
+Revision history for #1837:
+
+rev 2 (content) 2026-10-24 02:46 UTC — Address P1: retain reviewed Icarus union failures so full-suite and release gates recognize exact known diagnostics.
+rev 1 (initial) 2026-10-24 02:46 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1837,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"45431e299a643851a6bff9d59c84c218e9968991","timestamp_iso":"2026-10-24T02:46:14Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"45431e299a643851a6bff9d59c84c218e9968991","new_sha":"c71bba52eea6719416d140ac069f58a3a1f204d1","timestamp_iso":"2026-10-24T02:46:14Z","reason":"Address P1: retain reviewed Icarus union failures so full-suite and release gates recognize exact known diagnostics.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/45431e299a643851a6bff9d59c84c218e9968991...c71bba52eea6719416d140ac069f58a3a1f204d1"}]} -->
