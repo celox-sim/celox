@@ -21,15 +21,14 @@ jobs:
       - name: Dispatch full CI on develop
         run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref develop
 
-  # lydite-checks.yml schedules the default branch itself; its bridge lanes do not run
-  # for Celox PRs, so check develop's in-tree Celox daily as well.
+  # Lydite core validation also runs on develop; bridge gates are disabled.
   queue-lydite-develop:
     name: Queue develop Lydite validation
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Dispatch every Lydite lane on develop
+      - name: Dispatch Lydite core validation on develop
         run: gh workflow run lydite-checks.yml --repo "$GITHUB_REPOSITORY" --ref develop
 
   # heliodor-bench.yml schedules the stable master lane directly. Dispatch the
