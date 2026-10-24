@@ -1,8 +1,7 @@
-CI bridge: lydite's proof backend accepts nonfatal Report kinds; message lists the review fixes
-
 Revision history for #1875:
 
+rev 3 (content) 2026-10-24 12:11 UTC
 rev 2 (content) 2026-10-24 11:03 UTC — Review: keep the attribution of nested assertions; bump CONTAINER_VERSION for the report sites
 rev 1 (initial) 2026-10-24 11:03 UTC
 
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":1875,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"2da588a274508cc4a2658882dc106f3068aecfb7","timestamp_iso":"2026-10-24T11:03:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"2da588a274508cc4a2658882dc106f3068aecfb7","new_sha":"1a9cabce314675684d48c6761098c47b68812cce","timestamp_iso":"2026-10-24T11:03:30Z","reason":"Review: keep the attribution of nested assertions; bump CONTAINER_VERSION for the report sites","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/2da588a274508cc4a2658882dc106f3068aecfb7...1a9cabce314675684d48c6761098c47b68812cce"}]} -->
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1875,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"2da588a274508cc4a2658882dc106f3068aecfb7","timestamp_iso":"2026-10-24T11:03:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"2da588a274508cc4a2658882dc106f3068aecfb7","new_sha":"1a9cabce314675684d48c6761098c47b68812cce","timestamp_iso":"2026-10-24T11:03:30Z","reason":"Review: keep the attribution of nested assertions; bump CONTAINER_VERSION for the report sites","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/2da588a274508cc4a2658882dc106f3068aecfb7...1a9cabce314675684d48c6761098c47b68812cce"},{"number":3,"change_type":"content","old_sha":"1a9cabce314675684d48c6761098c47b68812cce","new_sha":"e96ed5a178672f56a1224dd9e5451dccf459128c","timestamp_iso":"2026-10-24T12:11:39Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/1a9cabce314675684d48c6761098c47b68812cce...e96ed5a178672f56a1224dd9e5451dccf459128c"}]} -->
