@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { runtimeCasesFeature } from "./run-vtest.mjs";
 
 // Keep target flags local to their packages. Cargo applies --test to every -p.
 export function cargoCommands(mode, builds, filter) {
@@ -17,7 +18,9 @@ export function cargoCommands(mode, builds, filter) {
       ? ["nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass"]
       : ["clippy", "--locked"];
     for (const name of packages) args.push("-p", name);
-    if (features.length) args.push("--features", features.join(","));
+    const enabled = mode === "test" && packages.includes("celox")
+      ? [...new Set([...features, runtimeCasesFeature])] : features;
+    if (enabled.length) args.push("--features", enabled.join(","));
     for (const target of targets) args.push("--test", target);
     if (mode === "lint") {
       if (!targets.length) args.push("--all-targets");
@@ -31,6 +34,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   for (const args of cargoCommands(
     process.argv[2], JSON.parse(process.env.BUILDS), process.env.FILTER,
   )) {
+    if (process.argv[2] === "test"
+      && args.some((arg, index) => arg === "celox" && args[index - 1] === "-p")
+      && !process.env.CELOX_VTEST_RUNNER)
+      throw new Error("Celox CI tests require the prepared vtest executor");
     console.log("cargo", ...args);
     const result = spawnSync("cargo", args, { stdio: "inherit" });
     if (result.error) throw result.error;

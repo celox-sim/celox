@@ -381,6 +381,12 @@ test("cache warming shares the Rust Tests key and builds without running tests",
     /pull_request:|cargo nextest run|cargo test|shared-key:/,
   );
   assert.match(warm, /steps.cache.outputs.cache-hit != 'true'/);
+  for (const text of [warm, job("rust-tests")]) {
+    assert.match(text, /key: vtest-v1/);
+    assert.match(text, /run: node scripts\/run-vtest.mjs --prepare-ci/);
+  }
+  assert.match(warm, /name: Build the optimized vtest executor to populate dependencies\n        if: steps.cache.outputs.cache-hit != 'true'/);
+  assert.match(warm, /"scripts\/run-vtest.mjs"/);
   assert.match(
     warm,
     /cargo nextest list --locked --workspace --message-format json/,
@@ -408,7 +414,7 @@ function cargoArguments(jobName, stepName, env) {
       features: (env.FEATURES ?? "").split(",").filter(Boolean),
     }]);
     const result = spawnSync("bash", ["-e", "-c", script], {
-      env: { ...process.env, ...env, BUILDS: builds, PATH: `${directory}:${process.env.PATH}` }, encoding: "utf8",
+      env: { ...process.env, CELOX_VTEST_RUNNER: "/ci/vtest-exec", ...env, BUILDS: builds, PATH: `${directory}:${process.env.PATH}` }, encoding: "utf8",
     });
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
@@ -425,7 +431,7 @@ test("scoped Cargo commands build only the selected integration targets", () => 
   };
   assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", env), [
     "nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass",
-    "-p", "celox", "--features", "celox/systemverilog",
+    "-p", "celox", "--features", "celox/systemverilog,celox-test-suite/runtime-cases",
     "--test", "flip_flop", "--test", "systemverilog", "-E", env.FILTER,
   ]);
   assert.deepEqual(cargoArguments("lint", "Lint the crates this pull request can affect", env), [
@@ -438,6 +444,21 @@ test("scoped Cargo commands build only the selected integration targets", () => 
   assert.deepEqual(cargoArguments("lint", "Build the API documentation this pull request can affect", {
     LIBRARIES: "celox-runtime celox",
   }), ["doc", "--locked", "--no-deps", "-p", "celox-runtime", "-p", "celox"]);
+});
+
+test("CI prepares one executor for full runs and scopes containing Celox", () => {
+  const rust = job("rust-tests");
+  const step = rust.split("      - name: Build the optimized vtest executor\n")[1]
+    .split("\n      #")[0];
+  assert.match(step, /if: needs.changes.outputs.rust_full != 'false' \|\| contains\(format\(' \{0\} ', needs.changes.outputs.rust_packages\), ' celox '\)/);
+  assert.match(step, /run: node scripts\/run-vtest.mjs --prepare-ci/);
+  assert.ok(rust.indexOf("Build the optimized vtest executor") < rust.indexOf("Run workspace tests"));
+  assert.match(rust, /cargo nextest run[^\n]*\n[^\n]*celox-test-suite\/runtime-cases/);
+  assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", {
+    PACKAGES: "celox-heap", FEATURES: "", TARGETS: "", FILTER: "package(celox-heap)",
+    CELOX_VTEST_RUNNER: "",
+  }), ["nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass",
+    "-p", "celox-heap", "-E", "package(celox-heap)"]);
 });
 
 test("scoped checks preserve full-run fallbacks and use their own package scopes", () => {

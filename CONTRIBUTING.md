@@ -61,7 +61,10 @@ Rust binaries, so edits to an existing case do not require recompilation. Adding
 a test registration or changing Rust still requires a build. The first run builds
 both the optimized executor and ordinary test binaries; the executor profile has
 its own Cargo cache. Ordinary Cargo test commands retain the embedded, in-process
-path, and CI continues to use that path.
+path. CI's Rust Tests job prepares the executor once and uses it for both full
+workspace runs and scoped runs that include Celox. Scopes without Celox skip that
+build. The default-branch cache warmer builds both executor and test dependencies
+under the same cache key; vtest preparation failures fail the test job.
 
 For debugging a single case after building, the executor also accepts
 `<veryl|sv> <group::case> <backend>` directly, for example:

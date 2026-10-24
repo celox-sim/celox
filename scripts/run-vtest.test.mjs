@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { executorPath, run } from "./run-vtest.mjs";
+import { executorPath, prepareCi, run } from "./run-vtest.mjs";
 
 const artifact = JSON.stringify({
   reason: "compiler-artifact", target: { name: "vtest-exec", kind: ["example"] },
@@ -39,4 +39,32 @@ test("missing or ambiguous executors fail closed", () => {
   assert.throws(() => executorPath('{"reason":"build-finished"}\n'), /one vtest executor/);
   assert.throws(() => executorPath(`${artifact}\n${artifact}`), /one vtest executor/);
   assert.equal(executorPath(`{"reason":"build-finished"}\n${artifact}\n`), "/managed target/vtest/examples/vtest-exec");
+});
+
+test("CI preparation only builds and exports the executor for later test steps", () => {
+  const calls = [];
+  const writes = [];
+  assert.equal(prepareCi((...args) => {
+    calls.push(args);
+    return { status: 0, stdout: artifact };
+  }, { GITHUB_ENV: "/job/environment" }, (...args) => writes.push(args)), 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][1][0], "build");
+  assert.ok(calls[0][1].includes("vtest"));
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0][0], "/job/environment");
+  assert.match(writes[0][1], /^CELOX_VTEST_RUNNER=\/managed target\/vtest\/examples\/vtest-exec\n/);
+  assert.match(writes[0][1], /\nCELOX_VTEST_ROOT=.*\/crates\/celox-test-suite\/src\n$/);
+});
+
+test("failed CI preparation cannot export a stale executor or silently skip setup", () => {
+  const unexpected = () => assert.fail("unexpected build or environment export");
+  assert.throws(() => prepareCi(unexpected, {}, unexpected), /requires GITHUB_ENV/);
+  assert.equal(prepareCi(() => ({ status: 17 }), { GITHUB_ENV: "/job/env" }, unexpected), 17);
+  assert.throws(() => prepareCi(() => ({ status: 0, stdout: "" }),
+    { GITHUB_ENV: "/job/env" }, unexpected), /one vtest executor/);
+  const message = JSON.parse(artifact);
+  message.executable += "\nUNRELATED=value";
+  assert.throws(() => prepareCi(() => ({ status: 0, stdout: JSON.stringify(message) }),
+    { GITHUB_ENV: "/job/env" }, unexpected), /Invalid executor environment/);
 });
