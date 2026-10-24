@@ -701,6 +701,28 @@ impl<B: SimBackend> Simulation<B> {
         Ok(())
     }
 
+    /// Run every time slot before `time`, then move to `time` without
+    /// running its slot: the next [`Self::step`] or [`Self::run_until`]
+    /// runs it, together with the host writes made in between. A target not
+    /// after the current time changes nothing. Like [`Self::run_until`], it
+    /// returns early, before `time`, at a `$stop` or `$finish`.
+    pub fn advance_to(&mut self, time: u64) -> Result<(), RuntimeErrorCode> {
+        let Some(last) = time.checked_sub(1).filter(|&last| last >= self.time()) else {
+            return Ok(());
+        };
+        self.run_until(last)?;
+        if self.time() != last || self.is_finished() || self.is_stopped() {
+            return Ok(());
+        }
+        self.state.advance_time(&mut self.simulator.backend, time);
+        if let Some(shadow) = &mut self.shadow {
+            shadow
+                .state
+                .advance_time(&mut shadow.simulator.backend, time);
+        }
+        Ok(())
+    }
+
     /// Like [`Self::run_until`], but takes at most `max_steps` steps.
     /// Returns `false`, with the simulation at the time of its last step,
     /// when another step would be needed to reach `end_time`, including when
