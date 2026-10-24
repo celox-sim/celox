@@ -98,7 +98,9 @@ pub(crate) fn components(tree: &SyntaxTree) -> HashMap<String, Vec<AnalyzerWarni
     for unit in tree.declarations().all_units() {
         if matches!(
             unit.kind,
-            celox_sv_syntax::UnitKind::Module | celox_sv_syntax::UnitKind::Interface
+            celox_sv_syntax::UnitKind::Module
+                | celox_sv_syntax::UnitKind::Program
+                | celox_sv_syntax::UnitKind::Interface
         ) {
             append(
                 warnings

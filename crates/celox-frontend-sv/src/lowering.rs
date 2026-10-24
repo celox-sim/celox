@@ -4371,8 +4371,10 @@ fn lower_initial_processes(
             .copied()
             .unwrap_or(0x4d59_5df4);
         // An `always` process never finishes, so it is never folded into
-        // initial state.
-        if process.repeats() {
+        // initial state. A program's `initial` procedure runs in the reactive
+        // region set (IEEE 1800-2023 24.3.1), after the design's processes of
+        // time zero, so it is not folded either.
+        if process.repeats() || (module.is_program() && !process.is_initializer()) {
             runtime.push((process, random_seed));
             continue;
         }
@@ -4417,7 +4419,7 @@ fn lower_initial_processes(
             .max()
             .unwrap_or_default(),
     );
-    let slots: Vec<_> = runtime
+    let mut slots: Vec<_> = runtime
         .iter()
         .enumerate()
         .map(|(index, (process, _))| {
@@ -4458,6 +4460,21 @@ fn lower_initial_processes(
             }
         })
         .collect();
+    // Every `initial` kernel of a program instance names the status slot of
+    // the first, the instance's identity for `$exit` and its end (IEEE
+    // 1800-2023 24.3, 24.7).
+    if module.is_program() {
+        let program = slots
+            .iter()
+            .zip(&runtime)
+            .find(|(_, (process, _))| !process.is_initializer())
+            .map(|(slots, _)| slots.status);
+        for (slots, (process, _)) in slots.iter_mut().zip(&runtime) {
+            if !process.is_initializer() {
+                slots.program = program;
+            }
+        }
+    }
     // The kernels add their event sites, runtime errors and extern functions
     // after those of the sequential processes. Their hidden variables are
     // state the kernels keep.
