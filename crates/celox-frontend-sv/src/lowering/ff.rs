@@ -2869,9 +2869,14 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             return Ok(true);
         }
-        // IEEE 1800-2023 24.7: `$exit` outside a program block is ignored,
-        // with a warning.
+        // IEEE 1800-2023 24.7: `$exit` in a thread of a program's `initial`
+        // procedure ends the program's initial procedures; elsewhere it is
+        // ignored, with a warning.
         if task == sv::ir::SystemTask::Exit {
+            if self.m.program && self.kernel.is_some() {
+                self.with_kernel(ProcessKernelBuilder::exit);
+                return Ok(false);
+            }
             self.m
                 .warn(crate::FrontendWarningKind::ExitOutsideProgram, site);
             return Ok(true);

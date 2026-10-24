@@ -215,13 +215,16 @@ pub(super) fn reject_silently_ignored_constructs(
     parameter_dimensions: &ScopedMap<VariableDimensions>,
     parameter_values: &HashMap<String, Expr>,
 ) -> Converted<()> {
+    if let Ok(unit) = syntax_tree.root_unit() {
+        validate_program_structure(unit, syntax_tree.declarations())?;
+    }
     let mut dimensions =
         PackedDimensions::new(parameter_dimensions.clone(), const_env, type_aliases);
     dimensions.parameter_values = parameter_values.clone().into();
     validate_scope(None, syntax_tree, &dimensions)?;
     if syntax_tree
         .root_unit()
-        .is_ok_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Module)
+        .is_ok_and(|unit| unit.kind.is_module_like())
     {
         let active = generate::items(syntax_tree, const_env, type_aliases)?;
         let mut views = generate::ScopeViews::new(&dimensions);
@@ -231,6 +234,75 @@ pub(super) fn reject_silently_ignored_constructs(
             let _constant_functions = item.enter();
             let _interface_scope = item.interface_scope();
             validate_scope(Some(item), syntax_tree, views.dimensions(item))?;
+        }
+    }
+    Ok(())
+}
+
+/// A program is a leaf: it shall not contain `always` procedures or
+/// declarations or instances of modules, interfaces or other programs (IEEE
+/// 1800-2023 24.3), generate blocks included. A program nested in a module
+/// is implicitly instantiated there, which Celox does not do.
+fn validate_program_structure(
+    unit: &celox_sv_syntax::Unit,
+    native: &celox_sv_syntax::Declarations,
+) -> Converted<()> {
+    use celox_sv_syntax::{BodyItemKind, ProcedureKind, UnitKind};
+    let program = unit.kind == UnitKind::Program;
+    let illegal = |item: String| {
+        Err(AnalyzerError::IllegalProgramItem {
+            program: instances::normalize_identifier(&unit.name.spelling),
+            item,
+        })
+    };
+    let mut pending = unit.items.iter().rev().copied().collect::<Vec<_>>();
+    while let Some(id) = pending.pop() {
+        match &native.body_item(id).kind {
+            BodyItemKind::Procedure(procedure) if program => {
+                let keyword = match native.procedure(*procedure).kind {
+                    ProcedureKind::Always => "always",
+                    ProcedureKind::AlwaysComb => "always_comb",
+                    ProcedureKind::AlwaysLatch => "always_latch",
+                    ProcedureKind::AlwaysFf => "always_ff",
+                    ProcedureKind::Initial | ProcedureKind::Final => continue,
+                };
+                return illegal(format!("`{keyword}` procedure"));
+            }
+            BodyItemKind::Instance(_) if program => return illegal("an instance".into()),
+            BodyItemKind::Unit(nested) => {
+                let nested = native.unit(*nested);
+                if program {
+                    let kind = match nested.kind {
+                        UnitKind::Module => "module",
+                        UnitKind::Interface => "interface",
+                        UnitKind::Package => "package",
+                        UnitKind::Program => "program",
+                    };
+                    return illegal(format!(
+                        "{kind} declaration `{}`",
+                        instances::normalize_identifier(&nested.name.spelling)
+                    ));
+                }
+                if nested.kind == UnitKind::Program {
+                    return Err(unsupported("program declaration nested in a module"));
+                }
+            }
+            BodyItemKind::Region(items) | BodyItemKind::Block { items, .. } => {
+                pending.extend(items.iter().rev().copied());
+            }
+            BodyItemKind::Conditional {
+                then_body,
+                otherwise,
+                ..
+            } => {
+                pending.extend(otherwise);
+                pending.push(*then_body);
+            }
+            BodyItemKind::Case { arms, .. } => {
+                pending.extend(arms.iter().rev().map(|arm| arm.body));
+            }
+            BodyItemKind::Loop { body, .. } => pending.push(*body),
+            _ => {}
         }
     }
     Ok(())
@@ -253,7 +325,7 @@ fn validate_scope(
     let is_module = owner.is_none()
         && syntax_tree
             .root_unit()
-            .is_ok_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Module);
+            .is_ok_and(|unit| unit.kind.is_module_like());
     let items = owner.map_or_else(|| syntax_tree.body_membership(), |id| Ok(vec![id]))?;
     validate_body_items(&items, native, !is_module)?;
     parameters::skipped::validate_scope(owner, is_module, syntax_tree, indexed_dimensions)?;

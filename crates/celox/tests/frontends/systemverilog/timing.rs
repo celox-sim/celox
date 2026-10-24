@@ -48,6 +48,20 @@ macro_rules! timed_cases {
     };
 }
 
+// Program blocks (IEEE 1800-2023 Clause 24) and the reactive region set.
+timed_cases! {
+    fn program_reads_design_after_nonblocking_updates_settle = "program::program_reads_design_after_nonblocking_updates_settle";
+    fn program_nonblocking_updates_follow_design_updates = "program::program_nonblocking_updates_follow_design_updates";
+    fn program_zero_delay_resumes_in_the_re_inactive_region = "program::program_zero_delay_resumes_in_the_re_inactive_region";
+    fn design_activity_of_a_program_waits_for_the_reactive_region_set = "program::design_activity_of_a_program_waits_for_the_reactive_region_set";
+    fn program_exit_ends_its_initial_procedures = "program::program_exit_ends_its_initial_procedures";
+    fn simulation_ends_when_program_procedures_end = "program::simulation_ends_when_program_procedures_end";
+    fn program_ports_connect_to_design_nets = "program::program_ports_connect_to_design_nets";
+    fn programs_reject_always_procedures = "program::programs_reject_always_procedures";
+    fn programs_reject_instances = "program::programs_reject_instances";
+    fn program_waits_see_host_driven_edges_after_design_updates = "program::program_waits_see_host_driven_edges_after_design_updates";
+}
+
 timed_cases! {
     fn timed_task_automatic_scalar_calls_keep_separate_storage = "timing::timed_task_automatic_scalar_calls_keep_separate_storage";
     fn timed_task_four_state_storage_survives_suspension = "timing::timed_task_four_state_storage_survives_suspension";
