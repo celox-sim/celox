@@ -213,11 +213,35 @@ List package definitions before their consumers. It does not discover a
 must all be `.sv` files; for Veryl, pass one project entry file. The
 `celox-vpi-compile` binary accepts the same source list.
 
-cocotb drives the design, so the compiled executable runs no HDL process.
-Compilation fails for a design with an `initial` process, an ordinary `always`
-process or another procedure Celox runs as a process, and names the first one;
-constant `initial` blocks and declaration initializers still set initial
-values.
+### Designs with processes
+
+A SystemVerilog design with processes, such as an `initial` block with delays
+or system tasks, an `always` block with delays or event controls, or a clock
+generator like `always #5 clk = ~clk`, compiles into a timed simulation. The
+executable runs its processes in step with cocotb: cocotb's timers and the
+design's delays share one time axis, and the design's `$display`/`$write`
+output and `$finish` work as in `celox run`. A design without processes
+compiles as before.
+
+Within one time step, the VPI callbacks cocotb waits on run at these points:
+
+| cocotb trigger (VPI callback) | Runs |
+|---|---|
+| `Timer` (`cbAfterDelay`), `NextTimeStep` (`cbNextSimTime`) | at the start of the time step, before the design's processes |
+| `RisingEdge`, `FallingEdge`, `Edge` of a clock or reset (`cbValueChange`) | after the edge, before the flip-flops it triggers make their nonblocking updates |
+| `Edge` of another signal (`cbValueChange`) | when the time step has settled: after the nonblocking updates and the combinational logic that follows them |
+| `ReadWrite` (`cbReadWriteSynch`) | when the time step has settled; writes there settle again at the same time |
+| `ReadOnly` (`cbReadOnlySynch`) | at the end of the time step |
+
+A write from cocotb is a blocking assignment at the current time. Reporting a
+change of a signal other than a clock or reset only once the time step has
+settled is a choice of this implementation: IEEE 1800-2023 4.7 lets a simulator
+process those events in any order, and Icarus Verilog, for example, reports a
+register's change before its combinational readers follow it.
+
+`$stop` ends the run, as `vpiStop` does, because the executable has no
+interactive mode. Pausing instead is tracked in
+[#1886](https://github.com/celox-sim/celox/issues/1886).
 
 ## Run cocotb
 
