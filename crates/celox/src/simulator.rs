@@ -174,6 +174,10 @@ mod host {
         pub(crate) frozen: bool,
         /// Host writes a timed simulation observes one at a time.
         pub(crate) host_watch: celox_runtime::HostWatch,
+        /// What a timed simulation's host observes inside its time slots.
+        pub(crate) slot_observer: Option<Box<dyn crate::SlotObserver<B>>>,
+        /// The slot observer wrote at the end of the last time slot.
+        pub(crate) slot_writes: bool,
         /// Runtime-event sequence up to which a timed simulation looked for
         /// `$finish` records.
         pub(crate) finish_scan_seq: u64,
@@ -896,6 +900,8 @@ mod host {
                 derived_settle,
                 frozen: false,
                 host_watch: Default::default(),
+                slot_observer: None,
+                slot_writes: false,
                 finish_scan_seq: 0,
                 finish_sites: false,
                 event_edges,
