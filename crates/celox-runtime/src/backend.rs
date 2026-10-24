@@ -151,6 +151,13 @@ pub trait SimBackend {
         true
     }
 
+    /// Whether the code now running has the generated derived-edge units
+    /// (`RuntimeSchema::derived_edges`); otherwise a host walks the
+    /// derived-tick plans.
+    fn runs_derived_edge_units(&self) -> bool {
+        true
+    }
+
     // ── event enumeration ───────────────────────────────────────
     fn id_to_addr_slice(&self) -> &[AbsoluteAddr];
     fn id_to_event_slice(&self) -> &[Self::Event];

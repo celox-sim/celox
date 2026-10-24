@@ -2848,6 +2848,14 @@ mod host {
             {
                 crate::scheduler::attach(&mut laid_out);
             }
+            #[cfg(feature = "host-runtime")]
+            if self
+                .options
+                .optimize_options
+                .is_enabled(crate::optimizer::SirPass::DerivedEdgeUnits)
+            {
+                crate::derived_edge::attach(&mut laid_out);
+            }
             #[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
             if let Some(sink) = &self.options.derived_edge_units {
                 crate::derived_edge::attach_test_units(&mut laid_out, sink);

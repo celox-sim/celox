@@ -876,6 +876,22 @@ pub struct RuntimeSchema<A> {
     /// scheduler itself once one is generated. Present when the design has
     /// process kernels.
     pub scheduler: Option<SchedulerSchema<A>>,
+    /// Generated units that run an edge of an event with every derived
+    /// clock domain it reaches, for the events that have them.
+    pub derived_edges: Vec<DerivedEdgeUnits<A>>,
+}
+
+/// The process units that run the edges of one event together with its
+/// derived clock domains, the signal having already moved. Each reads
+/// [`SchedulerSlots::dirty`] to know whether combinational logic must
+/// settle before the domains evaluate.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DerivedEdgeUnits<A> {
+    /// The canonical event.
+    pub event: A,
+    /// Indices among the process units of the rising and the falling edge.
+    pub rising: usize,
+    pub falling: usize,
 }
 
 /// Width of [`SchedulerSlots::limit`], [`SchedulerSlots::now`],
@@ -1084,6 +1100,7 @@ impl<A> Default for RuntimeSchema<A> {
             active_commits: Vec::new(),
             time_slots: Vec::new(),
             scheduler: None,
+            derived_edges: Vec::new(),
         }
     }
 }
