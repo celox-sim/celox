@@ -11,6 +11,10 @@
 //! each kernel in [`SchedulerSlots::wake`]. It inlines the units the
 //! reference loop calls, so their code is unchanged.
 //!
+//! A settle whose results nothing reads before the next one is deferred
+//! (see [`Lazy`]): it runs only before what observes it, at the point the
+//! reference loop ran it.
+//!
 //! Periodic host clocks (`add_clock`) on clock events no design code writes
 //! run in the same loop: their edges apply at the start of a slot, before
 //! any kernel, and re-arm at its end. A design without kernels gets the
@@ -166,6 +170,46 @@ struct Plan {
     /// The storage combinational logic reads, when a settle whose inputs did
     /// not change may be skipped; `None` when every settle runs.
     settle_reads: Option<HashSet<AbsoluteAddr>>,
+    /// Where the settles run when they wait until their results are read;
+    /// `None` when every settle runs where the reference loop's does.
+    lazy: Option<Lazy>,
+}
+
+/// Deferred settles. The reference loop settles after every pass of the
+/// process phase and after the NBA region; the unit keeps such a settle
+/// pending (the dirty flag stays set) until something observes its
+/// results, and runs it where the reference ran it last, so every observer
+/// sees what it sees in the reference: a kernel, before the slot it may run
+/// in; a domain, before it evaluates (or the fused unit computes what it
+/// reads); the host, before the run returns. Observers of the settled state
+/// are units that load storage combinational logic writes, and units that
+/// may end the run in the middle of a slot (`$finish`, an error), where the
+/// reference's state is the last settle's. Only a settle that is a function
+/// of its inputs may wait: one that reads what an earlier settle left (see
+/// [`retains_state`]) is an activation of its own.
+struct Lazy {
+    /// Per process kernel, whether its runs observe the settled state.
+    kernels: Vec<bool>,
+    /// Per event, how its domain evaluates with a settle pending.
+    domains: Vec<DomainSettle>,
+    /// Whether the units of several triggered domains observe the settled
+    /// state.
+    several: bool,
+    /// The latest slot from which no delay of a kernel overflows: a run that
+    /// returns for an overflow in the middle of a later slot returns the last
+    /// settle's state.
+    latest: u64,
+}
+
+/// How a domain evaluates while a settle is pending.
+enum DomainSettle {
+    /// It does not observe the settled state.
+    Pending,
+    /// It reads what combinational logic writes: its fused units compute
+    /// what it reads, then evaluate and apply, leaving the settle pending.
+    Fused(Vec<Unit>),
+    /// The settle runs first.
+    Settled,
 }
 
 impl Plan {
@@ -355,6 +399,8 @@ impl Plan {
             let unit = &sir.processes[index];
             let reason = if slots.is_initializer {
                 Some("a declaration initializer")
+            } else if slots.program.is_some() {
+                Some("a program process runs in the reactive region set")
             } else if slots.requires_timed_simulation {
                 Some("an edge procedure")
             } else if !process.host_requests.is_empty() {
@@ -547,6 +593,95 @@ impl Plan {
                 })
                 .collect()
         });
+        // A settle may wait for its readers only when it is a function of
+        // its inputs that cannot fail: when it would end the run, it must do
+        // so in its own slot; when it reads what an earlier settle left (a
+        // latch, a guarded process's snapshots of its inputs, feedback), the
+        // settles in between are activations of their own.
+        let comb_stores: HashSet<AbsoluteAddr> = sir.eval_comb.iter().flat_map(stores).collect();
+        let lazy = settle_reads
+            .as_ref()
+            .filter(|_| {
+                !sir.eval_comb.iter().any(fails)
+                    && !retains_state(&sir.eval_comb, &storage, &comb_stores)
+            })
+            .map(|_| {
+                // The waits never watch what combinational logic writes, so
+                // they see the same with a settle pending.
+                debug_assert!(
+                    kernels
+                        .iter()
+                        .flatten()
+                        .filter_map(|kernel| kernel.wait.as_ref())
+                        .all(|wait| !comb_stores.contains(&storage(wait.signal))),
+                    "a compiled wait watches a combinational output"
+                );
+                let reads =
+                    |unit: &Unit| loads(unit).any(|source| comb_stores.contains(&storage(source)));
+                let ends = |unit: &Unit| fails(unit) || emits_finish(unit, &finish_sites);
+                let observes = |unit: &Unit| reads(unit) || ends(unit);
+                let mut longest = 0;
+                for (index, kernel) in kernels.iter().enumerate() {
+                    if kernel.as_ref().is_some_and(|kernel| kernel.wait.is_none()) {
+                        let bound =
+                            delay_bound(&sir.processes[index], schema.processes[index].delay);
+                        longest = longest.max(bound);
+                    }
+                }
+                let domains = events
+                    .iter()
+                    .map(|event| {
+                        if event.eval_apply.iter().any(ends) {
+                            return DomainSettle::Settled;
+                        }
+                        if !event.eval_apply.iter().any(reads) {
+                            return DomainSettle::Pending;
+                        }
+                        let fused = &sir.eval_comb_apply_ffs;
+                        let aliased = fused.keys().any(|key| {
+                            *key != event.signal && topology.canonical(*key) == event.signal
+                        });
+                        match fused.get(&event.signal) {
+                            Some(units) if !aliased => DomainSettle::Fused(units.clone()),
+                            _ => DomainSettle::Settled,
+                        }
+                    })
+                    .collect();
+                let several = events.iter().any(|event| {
+                    event
+                        .eval_only
+                        .iter()
+                        .chain(&event.apply)
+                        .flatten()
+                        .any(observes)
+                });
+                Lazy {
+                    // A kernel's `$finish` is its status.
+                    kernels: kernels
+                        .iter()
+                        .enumerate()
+                        .map(|(index, kernel)| {
+                            let unit = &sir.processes[index];
+                            kernel.is_some()
+                                && (observes(unit)
+                                    || !statuses_only(
+                                        unit,
+                                        schema.processes[index].status,
+                                        &[
+                                            ProcessStatus::Delay,
+                                            ProcessStatus::InactiveDelay,
+                                            ProcessStatus::Wait,
+                                            ProcessStatus::Nba,
+                                            ProcessStatus::Done,
+                                        ],
+                                    ))
+                        })
+                        .collect(),
+                    domains,
+                    several,
+                    latest: u64::MAX - longest,
+                }
+            });
         let plan = Self {
             events,
             kernels,
@@ -554,6 +689,7 @@ impl Plan {
             fallback,
             finish_sites,
             settle_reads,
+            lazy,
         };
         let edged = plan.edged();
         if edged.len() > 1
@@ -593,13 +729,17 @@ impl Plan {
     fn generate(&self, program: &LaidOutProgram, slots: &SchedulerSlots<AbsoluteAddr>) -> Unit {
         let schema = &program.runtime.runtime_schema;
         let edged = self.edged();
+        let mut b = Builder::new();
+        let comb = b.new_block();
         let mut g = Generator {
-            b: Builder::new(),
+            b,
             slots,
             finish_sites: &self.finish_sites,
             exits: Vec::new(),
             settle_reads: self.settle_reads.as_ref(),
             shared: program.shared_storage(),
+            comb,
+            continuations: Vec::new(),
         };
         let waits: Vec<(usize, &Wait)> = self
             .kernels
@@ -641,10 +781,14 @@ impl Plan {
             any = g.binary(1, any, BinaryOp::Or, waiting);
         }
         // Or the earliest next edge of a host clock, when the run has any.
+        // The clocks armed at the start of the slot, which the re-arm at its
+        // end compares with.
+        let mut started = None;
         if !self.clocks.is_empty() {
             let armed = g.load(slots.clock_armed, SCHEDULER_TIME_WIDTH);
             let zero = g.constant(0, SCHEDULER_CLOCKS);
             let clocked = g.binary(1, armed, BinaryOp::Ne, zero);
+            started = Some((armed, clocked));
             let scan = g.b.new_block();
             let joined_time = g.b.alloc_bit(SCHEDULER_TIME_WIDTH, false);
             let joined_any = g.b.alloc_bit(1, false);
@@ -677,13 +821,70 @@ impl Plan {
         let stop = g.binary(1, after, BinaryOp::Or, none);
         let run = g.b.new_block();
         let limit_exit = g.exit_block(SchedulerExit::Limit);
+        // The host reads the run's results settled.
+        let stopped = match &self.lazy {
+            Some(_) => g.b.new_block(),
+            None => limit_exit,
+        };
         g.b.seal_block(SIRTerminator::Branch {
             cond: stop,
-            true_block: (limit_exit, Vec::new()),
+            true_block: (stopped, Vec::new()),
             false_block: (run, Vec::new()),
         });
+        if self.lazy.is_some() {
+            g.b.switch_to_block(stopped);
+            g.settle_then(limit_exit);
+        }
 
+        // The kernels due now are ready.
         g.b.switch_to_block(run);
+        let mut ready = g.constant(0, MAX_KERNELS);
+        for &index in &delays {
+            let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
+            let waiting = g.waiting(index);
+            let due = g.binary(1, wake, BinaryOp::Eq, time);
+            let due = g.binary(1, due, BinaryOp::And, waiting);
+            let bit = g.bit(due, ordinals[index]);
+            ready = g.binary(MAX_KERNELS, ready, BinaryOp::Or, bit);
+        }
+        g.store(slots.ready, SCHEDULER_TIME_WIDTH, ready);
+        // A pending settle runs, as at the end of the last slot, before a
+        // kernel that observes it may run: one due now, any waiting one,
+        // which may wake in any pass, or any one in a slot after which a
+        // delay may overflow.
+        if let Some(lazy) = &self.lazy {
+            let waits = waits.iter().any(|&(index, _)| lazy.kernels[index]);
+            let observers = delays
+                .iter()
+                .filter(|&&index| lazy.kernels[index])
+                .fold(0u64, |mask, &index| mask | 1 << ordinals[index]);
+            let late = lazy.latest < u64::MAX;
+            if waits || observers != 0 || late {
+                let mut observed = g.constant(u64::from(waits), 1);
+                if observers != 0 {
+                    let mask = g.constant(observers, MAX_KERNELS);
+                    let due = g.binary(MAX_KERNELS, ready, BinaryOp::And, mask);
+                    let zero = g.constant(0, MAX_KERNELS);
+                    let due = g.binary(1, due, BinaryOp::Ne, zero);
+                    observed = g.binary(1, observed, BinaryOp::Or, due);
+                }
+                if late {
+                    let latest = g.constant(lazy.latest, SCHEDULER_TIME_WIDTH);
+                    let after = g.binary(1, time, BinaryOp::GtU, latest);
+                    observed = g.binary(1, observed, BinaryOp::Or, after);
+                }
+                let settle = g.b.new_block();
+                let slot = g.b.new_block();
+                g.b.seal_block(SIRTerminator::Branch {
+                    cond: observed,
+                    true_block: (settle, Vec::new()),
+                    false_block: (slot, Vec::new()),
+                });
+                g.b.switch_to_block(settle);
+                g.settle_then(slot);
+                g.b.switch_to_block(slot);
+            }
+        }
         g.store(slots.now, SCHEDULER_TIME_WIDTH, time);
         let count = g.load(slots.count, SCHEDULER_TIME_WIDTH);
         let one = g.constant(1, SCHEDULER_TIME_WIDTH);
@@ -711,18 +912,6 @@ impl Plan {
             levels = g.binary(MAX_EVENTS, levels, BinaryOp::Or, value);
         }
         g.store(slots.levels, SCHEDULER_TIME_WIDTH, levels);
-        // The kernels due now are ready; the edges of the slot collect in
-        // `exit_arg`.
-        let mut ready = g.constant(0, MAX_KERNELS);
-        for &index in &delays {
-            let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
-            let waiting = g.waiting(index);
-            let due = g.binary(1, wake, BinaryOp::Eq, time);
-            let due = g.binary(1, due, BinaryOp::And, waiting);
-            let bit = g.bit(due, ordinals[index]);
-            ready = g.binary(MAX_KERNELS, ready, BinaryOp::Or, bit);
-        }
-        g.store(slots.ready, SCHEDULER_TIME_WIDTH, ready);
         // The host clocks due now set their levels, in event order, before
         // any kernel runs; their edges start the slot's edges, which
         // collect in `exit_arg`. A clock whose edge applied waits for its
@@ -732,14 +921,7 @@ impl Plan {
         let finish_exit = g.exit_block(SchedulerExit::Finish);
         let internal_exit = g.exit_block(SchedulerExit::Internal);
         let pick = g.b.new_block();
-        // The clocks armed at the start of the slot, which the re-arm at its
-        // end compares with.
-        let mut started = None;
-        if !self.clocks.is_empty() {
-            let armed = g.load(slots.clock_armed, SCHEDULER_TIME_WIDTH);
-            let zero = g.constant(0, SCHEDULER_CLOCKS);
-            let clocked = g.binary(1, armed, BinaryOp::Ne, zero);
-            started = Some((armed, clocked));
+        if let Some((armed, clocked)) = started {
             let apply = g.b.new_block();
             g.b.seal_block(SIRTerminator::Branch {
                 cond: clocked,
@@ -967,57 +1149,23 @@ impl Plan {
         }
 
         // The settles after a pass and after the domains share one copy of
-        // combinational logic.
+        // combinational logic. A deferred settle after a pass runs for the
+        // kernels that may run in another.
         g.b.switch_to_block(pass_end);
         let none = g.constant(u64::MAX, SCHEDULER_TIME_WIDTH);
         g.store(slots.current, SCHEDULER_TIME_WIDTH, none);
-        let comb = g.b.new_block();
-        g.call_comb(comb, 1);
-
-        // A settle whose inputs did not change since the last one would
-        // write what combinational logic already holds: it is skipped.
-        g.b.switch_to_block(comb);
-        if g.settle_reads.is_some() {
-            let dirty = g.load(slots.dirty, SCHEDULER_FLAG_WIDTH);
-            let zero = g.constant(0, SCHEDULER_FLAG_WIDTH);
-            let changed = g.binary(1, dirty, BinaryOp::Ne, zero);
-            let settle = g.b.new_block();
-            let settled = g.b.new_block();
-            g.b.seal_block(SIRTerminator::Branch {
-                cond: changed,
-                true_block: (settle, Vec::new()),
-                false_block: (settled, Vec::new()),
-            });
-            g.b.switch_to_block(settle);
-            for unit in &program.sir.eval_comb {
-                g.inline(unit, finish_exit);
-            }
-            let clean = g.constant(0, SCHEDULER_FLAG_WIDTH);
-            g.store(slots.dirty, SCHEDULER_FLAG_WIDTH, clean);
-            g.b.seal_block(SIRTerminator::Jump(settled, Vec::new()));
-            g.b.switch_to_block(settled);
-        } else {
-            for unit in &program.sir.eval_comb {
-                g.inline(unit, finish_exit);
-            }
-        }
-        let continuation = g.load(slots.cont, SCHEDULER_FLAG_WIDTH);
         let settled = g.b.new_block();
         let slot_end = g.b.new_block();
-        g.b.seal_block(SIRTerminator::Switch {
-            selector: continuation,
-            cases: vec![
-                SIRSwitchCase {
-                    value: 1u8.into(),
-                    target: settled,
-                },
-                SIRSwitchCase {
-                    value: 2u8.into(),
-                    target: slot_end,
-                },
-            ],
-            default: internal_exit,
-        });
+        let wait_observers = self
+            .lazy
+            .as_ref()
+            .is_some_and(|lazy| waits.iter().any(|&(index, _)| lazy.kernels[index]));
+        match &self.lazy {
+            Some(_) => {
+                g.b.seal_block(SIRTerminator::Jump(settled, Vec::new()));
+            }
+            None => g.settle_then(settled),
+        }
 
         // After the settle of a pass the waits see its writes; woken
         // kernels run in another pass.
@@ -1027,11 +1175,20 @@ impl Plan {
         let zero = g.constant(0, MAX_KERNELS);
         let more = g.binary(1, ready, BinaryOp::Ne, zero);
         let domains = g.b.new_block();
+        let another = if wait_observers {
+            g.b.new_block()
+        } else {
+            pick
+        };
         g.b.seal_block(SIRTerminator::Branch {
             cond: more,
-            true_block: (pick, Vec::new()),
+            true_block: (another, Vec::new()),
             false_block: (domains, Vec::new()),
         });
+        if wait_observers {
+            g.b.switch_to_block(another);
+            g.settle_then(pick);
+        }
 
         // The domains the edges trigger, then the NBA region.
         g.b.switch_to_block(domains);
@@ -1049,7 +1206,10 @@ impl Plan {
 
         // Without a domain, published nonblocking values settle once more.
         g.b.switch_to_block(untriggered);
-        if staged.is_empty() {
+        if self.lazy.is_some() {
+            g.publish(&staged);
+            g.b.seal_block(SIRTerminator::Jump(slot_end, Vec::new()));
+        } else if staged.is_empty() {
             g.b.seal_block(SIRTerminator::Jump(slot_end, Vec::new()));
         } else {
             let mut any = g.constant(0, 1);
@@ -1065,7 +1225,7 @@ impl Plan {
                 false_block: (slot_end, Vec::new()),
             });
             g.b.switch_to_block(publish_settle);
-            g.call_comb(comb, 2);
+            g.settle_then(slot_end);
         }
 
         g.b.switch_to_block(triggered);
@@ -1103,7 +1263,17 @@ impl Plan {
                     false_block: (next, Vec::new()),
                 });
                 g.b.switch_to_block(unit);
-                for unit in &event.eval_apply {
+                let units = match self.lazy.as_ref().map(|lazy| &lazy.domains[index]) {
+                    None | Some(DomainSettle::Pending) => &event.eval_apply,
+                    Some(DomainSettle::Fused(units)) => units,
+                    Some(DomainSettle::Settled) => {
+                        let evaluate = g.b.new_block();
+                        g.settle_then(evaluate);
+                        g.b.switch_to_block(evaluate);
+                        &event.eval_apply
+                    }
+                };
+                for unit in units {
                     g.inline_writer(unit, finish_exit);
                 }
                 g.b.seal_block(SIRTerminator::Jump(evaluated, Vec::new()));
@@ -1116,6 +1286,15 @@ impl Plan {
             if edged.len() < 2 {
                 g.b.seal_block(SIRTerminator::Jump(internal_exit, Vec::new()));
             } else {
+                let mut mask = mask;
+                let mut zero = zero;
+                if self.lazy.as_ref().is_some_and(|lazy| lazy.several) {
+                    let evaluate = g.b.new_block();
+                    g.settle_then(evaluate);
+                    g.b.switch_to_block(evaluate);
+                    mask = g.load(slots.exit_arg, MAX_EVENTS);
+                    zero = g.constant(0, MAX_EVENTS);
+                }
                 for phase in [Phase::Evaluate, Phase::Apply] {
                     for &index in &edged {
                         let event = &self.events[index];
@@ -1150,7 +1329,12 @@ impl Plan {
         // combinational logic settles.
         g.b.switch_to_block(evaluated);
         g.publish(&staged);
-        g.call_comb(comb, 2);
+        match &self.lazy {
+            Some(_) => {
+                g.b.seal_block(SIRTerminator::Jump(slot_end, Vec::new()));
+            }
+            None => g.settle_then(slot_end),
+        }
 
         // At the end of the slot each clock whose edge applied waits for the
         // opposite level, half a period later, in event order (as
@@ -1210,7 +1394,13 @@ impl Plan {
                 g.b.switch_to_block(overflowed);
                 let clock = g.constant(bit as u64, SCHEDULER_TIME_WIDTH);
                 g.store(slots.exit_arg, SCHEDULER_TIME_WIDTH, clock);
-                g.b.seal_block(SIRTerminator::Jump(overflow_exit, Vec::new()));
+                // The slot is complete: the host reads its results settled.
+                match &self.lazy {
+                    Some(_) => g.settle_then(overflow_exit),
+                    None => {
+                        g.b.seal_block(SIRTerminator::Jump(overflow_exit, Vec::new()));
+                    }
+                }
                 g.b.switch_to_block(in_range);
                 g.store_at(
                     slots.clock_next,
@@ -1231,6 +1421,7 @@ impl Plan {
             g.b.switch_to_block(rearmed);
         }
         g.b.seal_block(SIRTerminator::Jump(header, Vec::new()));
+        g.emit_settle(&program.sir.eval_comb, finish_exit, internal_exit);
         g.finish()
     }
 }
@@ -1249,6 +1440,11 @@ struct Generator<'a> {
     /// See [`Plan::settle_reads`].
     settle_reads: Option<&'a HashSet<AbsoluteAddr>>,
     shared: HashMap<AbsoluteAddr, AbsoluteAddr>,
+    /// The shared settle, emitted by [`Self::emit_settle`].
+    comb: celox_sir::BlockId,
+    /// Where the shared settle continues, by case: case `i + 1` continues
+    /// at `continuations[i]`.
+    continuations: Vec<celox_sir::BlockId>,
 }
 
 impl Generator<'_> {
@@ -1519,17 +1715,78 @@ impl Generator<'_> {
         }
     }
 
-    /// Run the shared settle, continuing at case `continuation` of its end.
-    fn call_comb(&mut self, comb: celox_sir::BlockId, continuation: u8) {
-        let value = self.constant(u64::from(continuation), SCHEDULER_FLAG_WIDTH);
+    /// Run the shared settle, then continue at `target`. The registers
+    /// `target` and its successors use must be defined in it or in the slot
+    /// loop's header, which alone dominates every entry of the settle.
+    fn settle_then(&mut self, target: celox_sir::BlockId) {
+        let case = match self.continuations.iter().position(|&block| block == target) {
+            Some(index) => index,
+            None => {
+                self.continuations.push(target);
+                self.continuations.len() - 1
+            }
+        };
+        let value = self.constant(case as u64 + 1, SCHEDULER_FLAG_WIDTH);
         self.store(self.slots.cont, SCHEDULER_FLAG_WIDTH, value);
-        self.b.seal_block(SIRTerminator::Jump(comb, Vec::new()));
+        self.b
+            .seal_block(SIRTerminator::Jump(self.comb, Vec::new()));
+    }
+
+    /// Emit the shared settle: combinational logic, skipped when its inputs
+    /// did not change since the last one, as it would write what it already
+    /// holds; then the continuation of its caller.
+    fn emit_settle(
+        &mut self,
+        units: &[Unit],
+        finish_exit: celox_sir::BlockId,
+        internal_exit: celox_sir::BlockId,
+    ) {
+        self.b.switch_to_block(self.comb);
+        if self.settle_reads.is_some() {
+            let dirty = self.load(self.slots.dirty, SCHEDULER_FLAG_WIDTH);
+            let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
+            let changed = self.binary(1, dirty, BinaryOp::Ne, zero);
+            let settle = self.b.new_block();
+            let settled = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: changed,
+                true_block: (settle, Vec::new()),
+                false_block: (settled, Vec::new()),
+            });
+            self.b.switch_to_block(settle);
+            for unit in units {
+                self.inline(unit, finish_exit);
+            }
+            let clean = self.constant(0, SCHEDULER_FLAG_WIDTH);
+            self.store(self.slots.dirty, SCHEDULER_FLAG_WIDTH, clean);
+            self.b.seal_block(SIRTerminator::Jump(settled, Vec::new()));
+            self.b.switch_to_block(settled);
+        } else {
+            for unit in units {
+                self.inline(unit, finish_exit);
+            }
+        }
+        let continuation = self.load(self.slots.cont, SCHEDULER_FLAG_WIDTH);
+        let cases = self
+            .continuations
+            .iter()
+            .enumerate()
+            .map(|(index, &target)| SIRSwitchCase {
+                value: (index as u8 + 1).into(),
+                target,
+            })
+            .collect();
+        self.b.seal_block(SIRTerminator::Switch {
+            selector: continuation,
+            cases,
+            default: internal_exit,
+        });
     }
 
     /// Inline `unit`. A `$finish` record it emits ends the run after it, as
     /// the reference loop ends the slot after the unit that emitted one.
     fn inline(&mut self, unit: &Unit, finish_exit: celox_sir::BlockId) {
-        if self.finish_sites.is_empty() || !self.emits_finish(unit) {
+        if self.finish_sites.is_empty() || !emits_finish(unit, self.finish_sites) {
             self.b.inline_execution_unit(unit);
             return;
         }
@@ -1545,13 +1802,6 @@ impl Generator<'_> {
             false_block: (next, Vec::new()),
         });
         self.b.switch_to_block(next);
-    }
-
-    fn emits_finish(&self, unit: &Unit) -> bool {
-        instructions(unit).any(|inst| {
-            matches!(inst, SIRInstruction::RuntimeEvent { site_id, .. }
-                if self.finish_sites.contains(site_id))
-        })
     }
 
     /// A copy of `unit` that sets the finish slot after every `$finish`
@@ -1649,6 +1899,202 @@ fn homes_overlap_only_whole(layout: &crate::backend::MemoryLayout) -> bool {
     homes.sort_unstable_by_key(|&(start, end)| (start, std::cmp::Reverse(end)));
     homes.dedup_by_key(|home| home.0);
     homes.windows(2).all(|pair| pair[0].1 <= pair[1].0)
+}
+
+/// The storage `unit` reads.
+fn loads(unit: &Unit) -> impl Iterator<Item = AbsoluteAddr> + '_ {
+    instructions(unit).filter_map(|inst| match inst {
+        SIRInstruction::Load(_, source, ..) | SIRInstruction::Commit(source, ..) => {
+            Some(source.absolute_addr())
+        }
+        _ => None,
+    })
+}
+
+/// Whether a settle of `units` may read what an earlier settle left: a load
+/// of storage they write (`stores`, by representative) that stores earlier
+/// in the same settle do not cover on every path.
+fn retains_state(
+    units: &[Unit],
+    storage: &impl Fn(AbsoluteAddr) -> AbsoluteAddr,
+    stores: &HashSet<AbsoluteAddr>,
+) -> bool {
+    /// The bits of each home a settle has stored so far, as sorted,
+    /// disjoint `[start, end)` ranges.
+    type Covered = HashMap<(u32, AbsoluteAddr), Vec<(usize, usize)>>;
+    fn add(covered: &mut Covered, key: (u32, AbsoluteAddr), start: usize, end: usize) {
+        let ranges = covered.entry(key).or_default();
+        ranges.push((start, end));
+        ranges.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+        for &(start, end) in ranges.iter() {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        *ranges = merged;
+    }
+    fn meet(a: &Covered, b: &Covered) -> Covered {
+        let mut met = Covered::default();
+        for (key, left) in a {
+            let Some(right) = b.get(key) else { continue };
+            let both: Vec<(usize, usize)> = left
+                .iter()
+                .flat_map(|&(ls, le)| {
+                    right.iter().filter_map(move |&(rs, re)| {
+                        let (start, end) = (ls.max(rs), le.min(re));
+                        (start < end).then_some((start, end))
+                    })
+                })
+                .collect();
+            if !both.is_empty() {
+                met.insert(*key, both);
+            }
+        }
+        met
+    }
+    // Runs `block` from `covered`; `false` when a load reads what it does
+    // not cover.
+    let step = |block: &celox_sir::BasicBlock<RegionedAbsoluteAddr>, covered: &mut Covered| {
+        for inst in &block.instructions {
+            match inst {
+                SIRInstruction::Load(_, source, offset, width)
+                | SIRInstruction::Commit(source, _, offset, width, _) => {
+                    let home = storage(source.absolute_addr());
+                    if stores.contains(&home) {
+                        let read = match offset {
+                            SIROffset::Static(start) => {
+                                covered.get(&(source.region, home)).is_some_and(|ranges| {
+                                    ranges
+                                        .iter()
+                                        .any(|&(s, e)| s <= *start && start + width <= e)
+                                })
+                            }
+                            _ => false,
+                        };
+                        if !read {
+                            return false;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            match inst {
+                SIRInstruction::Store(target, SIROffset::Static(start), width, ..)
+                | SIRInstruction::Commit(_, target, SIROffset::Static(start), width, _) => add(
+                    covered,
+                    (target.region, storage(target.absolute_addr())),
+                    *start,
+                    start + width,
+                ),
+                _ => {}
+            }
+        }
+        true
+    };
+    let mut entry = Covered::default();
+    for unit in units {
+        // What every path stores before each block, from the paths found
+        // so far: a fixed point from above, as loops only remove.
+        let mut before: HashMap<celox_sir::BlockId, Covered> = HashMap::default();
+        before.insert(unit.entry_block_id, entry.clone());
+        let mut after: HashMap<celox_sir::BlockId, Covered> = HashMap::default();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let mut ids: Vec<_> = unit.blocks.keys().copied().collect();
+            ids.sort_unstable();
+            for id in ids {
+                let Some(start) = before.get(&id).cloned() else {
+                    continue;
+                };
+                let mut covered = start;
+                if !step(&unit.blocks[&id], &mut covered) {
+                    return true;
+                }
+                if after.get(&id) == Some(&covered) {
+                    continue;
+                }
+                let successors: Vec<_> = match &unit.blocks[&id].terminator {
+                    SIRTerminator::Jump(target, _) => vec![*target],
+                    SIRTerminator::Branch {
+                        true_block,
+                        false_block,
+                        ..
+                    } => vec![true_block.0, false_block.0],
+                    SIRTerminator::Switch { cases, default, .. } => cases
+                        .iter()
+                        .map(|case| case.target)
+                        .chain([*default])
+                        .collect(),
+                    SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+                };
+                for successor in successors {
+                    let next = match before.get(&successor) {
+                        Some(known) => meet(known, &covered),
+                        None => covered.clone(),
+                    };
+                    before.insert(successor, next);
+                }
+                after.insert(id, covered);
+                changed = true;
+            }
+        }
+        // The next unit starts from what every return of this one stored.
+        let mut returns = unit
+            .blocks
+            .iter()
+            .filter(|(_, block)| matches!(block.terminator, SIRTerminator::Return))
+            .filter_map(|(id, _)| after.get(id));
+        entry = match returns.next() {
+            Some(first) => returns.fold(first.clone(), |met, next| meet(&met, next)),
+            None => Covered::default(),
+        };
+    }
+    false
+}
+
+/// Whether `unit` may end with an error.
+fn fails(unit: &Unit) -> bool {
+    unit.blocks
+        .values()
+        .any(|block| matches!(block.terminator, SIRTerminator::Error(_)))
+}
+
+/// Whether `unit` may record a `$finish`, one of `finish_sites`.
+fn emits_finish(unit: &Unit, finish_sites: &HashSet<u32>) -> bool {
+    instructions(unit).any(|inst| {
+        matches!(inst, SIRInstruction::RuntimeEvent { site_id, .. }
+            if finish_sites.contains(site_id))
+    })
+}
+
+/// The longest delay `unit` stores into `delay`: `u64::MAX` unless every
+/// one is a constant.
+fn delay_bound(unit: &Unit, delay: AbsoluteAddr) -> u64 {
+    let constants: HashMap<RegisterId, u64> = instructions(unit)
+        .filter_map(|inst| match inst {
+            SIRInstruction::Imm(register, value) => u64::try_from(&value.payload)
+                .ok()
+                .map(|value| (*register, value)),
+            _ => None,
+        })
+        .collect();
+    let delay = stable(delay);
+    instructions(unit)
+        .filter_map(|inst| match inst {
+            SIRInstruction::Store(target, offset, _, value, ..) if *target == delay => {
+                Some(match offset {
+                    SIROffset::Static(0) => constants.get(value).copied().unwrap_or(u64::MAX),
+                    _ => u64::MAX,
+                })
+            }
+            SIRInstruction::Commit(_, target, ..) if *target == delay => Some(u64::MAX),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn stable(address: AbsoluteAddr) -> RegionedAbsoluteAddr {

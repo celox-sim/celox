@@ -1,6 +1,63 @@
 use super::*;
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn native_merged_optimization_preserves_large_and_wide_array_boundaries() {
+    for width in [58, 65, 129] {
+        let source = format!(
+            r#"
+            module Top(input logic [7:0] index, output logic [{top}:0] y);
+                function [{width}:0] identity(input logic [7:0] selected);
+                    logic [{top}:0] words[{top}:0];
+                    for (integer i=0; i<{width}; i=i+1) begin
+                        words[i]='0;
+                        words[i][i]=1'b1;
+                    end
+                    identity[{top}:0]=words[selected];
+                endfunction
+                assign y=identity(index);
+            endmodule
+            "#,
+            top = width - 1,
+        );
+        for four_state in [false, true] {
+            for level in [
+                celox::OptLevel::O0,
+                celox::OptLevel::O1,
+                celox::OptLevel::O2,
+            ] {
+                let mut sim = Simulator::from_sv_sources(
+                    vec![(&source, Path::new("native_array_boundaries.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .opt_level(level)
+                .build_native()
+                .unwrap();
+                let index = sim.signal("index");
+                let y = sim.signal("y");
+                for bit in 0..width {
+                    sim.modify(|io| io.set(index, bit as u32)).unwrap();
+                    assert_eq!(
+                        sim.get(y),
+                        BigUint::from(1u8) << bit,
+                        "width={width}, four_state={four_state}, level={level:?}, bit={bit}",
+                    );
+                }
+            }
+        }
+    }
+}
+
 sv_backends! {
+    fn static_function_partial_writes_preserve_last_write(sim) {
+        @case "procedural::static_function_partial_writes_preserve_last_write";
+    }
+
+    fn static_function_unpacked_scratch_bits_at_element_boundaries(sim) {
+        @case "procedural::static_function_unpacked_scratch_bits_at_element_boundaries";
+    }
+
     fn constant_functions_inside_selected_parameter_initializers(sim) {
         @case "procedural::constant_functions_inside_selected_parameter_initializers";
     }

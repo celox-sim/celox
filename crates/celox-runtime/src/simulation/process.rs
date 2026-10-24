@@ -1,12 +1,19 @@
 //! The process phase of a round: running ready kernels and filing them
 //! where they resume.
 
+use std::collections::BTreeSet;
+
 use celox_design::{HostRequestKind, ProcessStatus};
 
 use super::SimulationState;
 use super::host::SimulationExecutor;
 use super::round::Round;
-use crate::{SimulatorErrorCode, backend::SimBackend, timing::Halt};
+use super::wait::wake_in_region;
+use crate::{
+    SimulatorErrorCode,
+    backend::SimBackend,
+    timing::{Halt, ProcessState},
+};
 
 impl<B: SimBackend> SimulationState<B> {
     /// Execute static declaration initializers before any ordinary process,
@@ -132,13 +139,25 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 Some(ProcessStatus::InactiveDelay) => {
                     let delay = delay();
-                    if delay == 0 {
-                        self.process_state.inactive.insert(process);
-                    } else {
+                    if delay != 0 {
                         self.wake_after(current_time, delay, process)?;
+                    } else if self.model.processes[process].program.is_some() {
+                        // A program process resumes in the Re-Inactive
+                        // region (IEEE 1800-2023 4.4.2.7).
+                        self.process_state.re_inactive.insert(process);
+                    } else {
+                        self.process_state.inactive.insert(process);
                     }
                 }
-                Some(ProcessStatus::Done) => {}
+                Some(ProcessStatus::Done) => {
+                    if self.model.processes[process].program.is_some() {
+                        self.program_kernel_ended(executor.backend())?;
+                    }
+                }
+                Some(ProcessStatus::Exit) => {
+                    self.exit_program(executor.backend_mut(), process)?;
+                    self.program_kernel_ended(executor.backend())?;
+                }
                 Some(ProcessStatus::Finish) => return Err(Halt::Finish),
                 Some(ProcessStatus::Wait | ProcessStatus::Pending) => {
                     let site = delay() as usize;
@@ -169,7 +188,10 @@ impl<B: SimBackend> SimulationState<B> {
                 // simulation does.
                 Some(ProcessStatus::Stop) => {
                     self.stopped = true;
-                    self.process_state.ready.insert(process);
+                    let ProcessState {
+                        ready, reactive, ..
+                    } = &mut self.process_state;
+                    wake_in_region(&self.model.processes, ready, reactive, process);
                     return Err(Halt::Stop);
                 }
                 Some(ProcessStatus::Yield) => {
@@ -195,17 +217,18 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        if self.process_state.ready.is_empty() {
+        let reactive = round.reactive;
+        if self.region_ready(reactive).is_empty() {
             return Ok(false);
         }
         self.event_values(executor.backend(), &mut round.before);
         let mut resume_process = round.resume_process.take();
         if let Some(process) = resume_process {
-            self.process_state.ready.remove(&process);
+            self.region_ready(reactive).remove(&process);
         }
         while let Some(process) = resume_process
             .take()
-            .or_else(|| self.process_state.ready.pop_first())
+            .or_else(|| self.region_ready(reactive).pop_first())
         {
             loop {
                 let again = self.run_process(executor, current_time, process, returns);
@@ -222,7 +245,7 @@ impl<B: SimBackend> SimulationState<B> {
                 // Before the next run, its edges must be seen. After the last
                 // one, the check following the settle sees them: a settle
                 // does not write what processes write.
-                if again || !self.process_state.ready.is_empty() {
+                if again || !self.region_ready(reactive).is_empty() {
                     self.observe_driven(executor.backend());
                 }
                 if !again {
@@ -231,6 +254,55 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         Ok(true)
+    }
+
+    /// The processes ready in the Reactive region if `reactive`, otherwise in
+    /// the Active region.
+    #[inline]
+    fn region_ready(&mut self, reactive: bool) -> &mut BTreeSet<usize> {
+        if reactive {
+            &mut self.process_state.reactive
+        } else {
+            &mut self.process_state.ready
+        }
+    }
+
+    /// `$exit` of program kernel `process` (IEEE 1800-2023 24.7): every
+    /// kernel of its program instance ends, as if it had run to its end.
+    fn exit_program(&mut self, backend: &mut B, process: usize) -> Result<(), Halt> {
+        let program = self.model.processes[process]
+            .program
+            .ok_or(SimulatorErrorCode::InternalError)?;
+        for &index in &self.model.program_processes {
+            let refs = &self.model.processes[index];
+            if refs.program != Some(program) {
+                continue;
+            }
+            backend.set(refs.status, ProcessStatus::Done.code());
+            let state = &mut self.process_state;
+            state.waiters.remove(index);
+            state.ready.remove(&index);
+            state.reactive.remove(&index);
+            state.re_inactive.remove(&index);
+        }
+        let model = &self.model;
+        self.process_wakeups
+            .retain(|std::cmp::Reverse((_, index))| {
+                model.processes[*index].program != Some(program)
+            });
+        Ok(())
+    }
+
+    /// A program kernel ended. Once every program kernel has, the simulation
+    /// ends with an implicit `$finish` (IEEE 1800-2023 24.3).
+    fn program_kernel_ended(&self, backend: &B) -> Result<(), Halt> {
+        let done = ProcessStatus::Done.code();
+        let all_done = self
+            .model
+            .program_processes
+            .iter()
+            .all(|&process| backend.get_as::<u8>(self.model.processes[process].status) == done);
+        if all_done { Err(Halt::Finish) } else { Ok(()) }
     }
 
     /// Mark the edges the processes of a pass caused and settle them.
@@ -289,6 +361,27 @@ impl<B: SimBackend> SimulationState<B> {
                 }
             } else {
                 self.observe_driven(executor.backend());
+            }
+            if round.reactive {
+                // The Reactive region is empty: the Re-Inactive region's
+                // processes resume, and once both are empty the Re-NBA region
+                // publishes the program's nonblocking assignments. Design
+                // processes and domains wait for the active region set (IEEE
+                // 1800-2023 4.5, 24.3.1).
+                if !self.process_state.reactive.is_empty() {
+                    continue;
+                }
+                if !self.process_state.re_inactive.is_empty() {
+                    let inactive = std::mem::take(&mut self.process_state.re_inactive);
+                    self.process_state.reactive.extend(inactive);
+                    continue;
+                }
+                if self.publish_re_nba(executor, round) {
+                    self.settle_pass(executor, round)?;
+                    self.observe_driven(executor.backend());
+                    continue;
+                }
+                return Ok(());
             }
             if !self.process_state.ready.is_empty() {
                 continue;
