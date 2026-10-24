@@ -110,8 +110,11 @@ constants, selects and concatenation arguments are unsupported and rejected.
 ### Class randomization
 
 `object.randomize()` randomizes enabled `rand` properties and returns signed
-`int` value `1`. Supported properties are 2-state, non-enum integral values up
-to 64 bits in classes without constraints. Inherited properties are included,
+`int` value `1`. Supported properties are 2-state integral values, including scalar enums, up
+to 64 bits in classes without constraints. Enum randomization selects uniformly
+from the declared values, including sparse and negative values (18.3, 18.4.1).
+Enums with unresolved or X/Z values and ranged enumerator declarations remain
+unsupported for randomization. Inherited properties are included,
 and a call through a base handle uses the dynamic object's class and its
 `pre_randomize()` / `post_randomize()` hooks. A derived hook replaces the base
 hook; call `super.pre_randomize()` or `super.post_randomize()` explicitly to
@@ -137,7 +140,7 @@ Each object has an independent random stream, seeded from its creating process.
 `object.srandom(seed)` resets it using a 32-bit seed; checkpoints preserve both
 RNG and mode state (18.13.3, 18.14.3). Random sequences are implementation-specific.
 `randc` randomization, constraints, `with`, static random properties, and random
-enum/array/object/string properties remain unsupported. A constrained dynamic
+array/object/string properties remain unsupported. A constrained dynamic
 subclass is rejected rather than silently randomizing only its base properties.
 A call through `null` is a runtime error.
 
