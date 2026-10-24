@@ -513,6 +513,10 @@ sv_backends! {
 
     fn character_formats_preserve_non_utf8_bytes(sim) { @case "system_functions::character_formats_preserve_non_utf8_bytes"; }
     fn time_format_consumes_its_expression_argument(sim) { @case "system_functions::time_format_consumes_its_expression_argument"; }
+    fn time_format_defaults_to_the_smallest_precision(sim) { @case "system_functions::time_format_defaults_to_the_smallest_precision"; }
+    fn time_format_scales_each_scope_to_the_smallest_precision(sim) { @case "system_functions::time_format_scales_each_scope_to_the_smallest_precision"; }
+    fn time_format_scales_string_literals(sim) { @case "system_functions::time_format_scales_string_literals"; }
+    fn time_format_values_are_self_determined(sim) { @case "system_functions::time_format_values_are_self_determined"; }
     fn string_literals_follow_numeric_format_specifiers(sim) { @case "system_functions::string_literals_follow_numeric_format_specifiers"; }
     // Veryl extension calls emitted unchanged into SV, not SV assert statements.
     fn veryl_assert_continue_ff_captures_arguments_before_reporting(sim) {
@@ -3132,5 +3136,93 @@ fn scope_randomize_survives_all_optimization_levels() {
             sim.tick(clk).unwrap();
             assert_eq!(sim.get(value), first, "{level:?} four_state={four_state}");
         }
+    }
+}
+
+/// A signed value that %t converts keeps its sign when it is scaled to the
+/// smallest time precision, as Icarus 13.0 prints it. Verilator 5.052 prints
+/// the 32-bit pattern of an `int` as unsigned (4294967294000 for -2), so
+/// this is no suite case.
+#[test]
+fn time_format_keeps_the_sign_of_signed_values() {
+    let source = r#"
+        `timescale 1ns/1ps
+        module Top(input logic go);
+            int n;
+            logic signed [7:0] s;
+            always_comb begin
+                n = -2;
+                s = -8'sd3;
+                if (go) $display("[%0t] [%0t]", n, s);
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("signed_time.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let go = sim.signal("go");
+    sim.modify(|io| io.set(go, 0u8)).unwrap();
+    sim.drain_runtime_events();
+    sim.modify(|io| io.set(go, 1u8)).unwrap();
+    let messages: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Display { message } => message,
+            event => panic!("unexpected event: {event:?}"),
+        })
+        .collect();
+    assert_eq!(messages, vec![b"[-2000] [-3000]".to_vec()]);
+}
+
+/// A triple-quoted string literal that %t converts is its packed bytes too
+/// (IEEE 1800-2023 5.9), scaled like any other value. Verilator 5.052 prints
+/// 65000; Icarus 13.0 cannot parse triple-quoted literals, so this is no
+/// suite case.
+#[test]
+fn time_format_scales_triple_quoted_literals() {
+    let source = r#"
+        `timescale 1ns/1ps
+        module Top(input logic go);
+            always_comb if (go) $display("[%0t]", """A""");
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("triple_time.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let go = sim.signal("go");
+    sim.modify(|io| io.set(go, 0u8)).unwrap();
+    sim.drain_runtime_events();
+    sim.modify(|io| io.set(go, 1u8)).unwrap();
+    let messages: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Display { message } => message,
+            event => panic!("unexpected event: {event:?}"),
+        })
+        .collect();
+    assert_eq!(messages, vec![b"[65000]".to_vec()]);
+}
+
+/// A `string` value has no time to report: %t of one is rejected rather than
+/// printing its storage handle. Verilator 5.052 rejects it too ("format of
+/// '%t' illegal with non-numeric argument"); Icarus 13.0 prints the
+/// conversion unformatted.
+#[test]
+fn time_format_rejects_string_operands() {
+    for timescale in ["`timescale 1ns/1ps", "`timescale 1ns/1ns"] {
+        let source = format!(
+            "{timescale}\nmodule Top(input logic go); string s = \"A\"; always_comb if (go) $display(\"[%0t]\", s); endmodule"
+        );
+        let error =
+            Simulator::from_sv_sources(vec![(source.as_str(), Path::new("string_time.sv"))], "Top")
+                .build_cranelift()
+                .expect_err("a string %t operand must be rejected")
+                .to_string();
+        assert!(
+            error.contains("string operand of a %t conversion"),
+            "{timescale}: {error}"
+        );
     }
 }

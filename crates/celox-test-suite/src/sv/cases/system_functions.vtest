@@ -2386,6 +2386,7 @@ endmodule
 
 (case time_format_consumes_its_expression_argument
   (source "time_format.sv" #"
+`timescale 1ns/1ns
 module Top(input logic clk);
     always_ff @(posedge clk) begin
         $display("t:[%t] d:[%d]", 32'd7, 8'shfe);
@@ -2396,6 +2397,72 @@ endmodule
   (top Top)
   (tick clk)
   (expect_output "t:[                   7] d:[  -2]\nsmall:[17] padded:[    9] next:[af] %t\n"))
+
+; Without `$timeformat`, %t reports a time in the smallest time precision of
+; the design, in a field of 20 columns (IEEE 1800-2023 20.4.3, Table 20-3):
+; a value in the time unit of its scope is scaled to it. Timed cases run at
+; 1 ns / 1 ps.
+(case time_format_defaults_to_the_smallest_precision
+  (source "time_format_default.sv" #"
+module Top;
+    int n = 7;
+    initial begin
+        #1.5;
+        $display("[%t] [%0t] [%0t] [%0t] [%0d]", $time, $time, $realtime, n, $time);
+        $write("w=%0t\n", $realtime);
+        $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "[                2000] [2000] [1500] [7000] [2]\nw=1500\n"))
+
+; The smallest precision of all the design's time scales sets the unit of
+; %t in every scope.
+(case time_format_scales_each_scope_to_the_smallest_precision
+  (source "time_format_scopes.sv" #"
+`timescale 1ns/1ps
+module Top(input logic clk);
+    Child child(.clk);
+    always_ff @(posedge clk) $display("top [%0t] [%t]", 32'd7, 8'd3);
+endmodule
+`timescale 1us/1us
+module Child(input logic clk);
+    always_ff @(posedge clk) $display("child [%0t]", 32'd2);
+endmodule
+"#)
+  (top Top)
+  (tick clk)
+  (expect_output "top [7000] [                3000]\nchild [2000000]\n"))
+
+; A string literal that %t converts is its packed bytes (IEEE 1800-2023 5.9),
+; scaled like any other value.
+(case time_format_scales_string_literals
+  (source "time_format_strings.sv" #"
+`timescale 1ns/1ps
+module Top(input logic clk);
+    always_ff @(posedge clk) $display("[%0t] [%t]", "A", "AB");
+endmodule
+"#)
+  (top Top)
+  (tick clk)
+  (expect_output "[65000] [            16706000]\n"))
+
+; A value that %t converts is self-determined (IEEE 1800-2023 11.6.1, 21.2.1):
+; it is evaluated at its own width before it is scaled.
+(case time_format_values_are_self_determined
+  (source "time_format_self_determined.sv" #"
+`timescale 1ns/1ps
+module Top(input logic clk);
+    logic [7:0] a = 8'hff;
+    logic [3:0] b = 4'd9, c = 4'd8;
+    always_ff @(posedge clk) $display("[%0t] [%0t] [%0t]", a + 8'd1, b + c, {b, c});
+endmodule
+"#)
+  (top Top)
+  (tick clk)
+  (expect_output "[0] [1000] [152000]\n"))
 
 (case string_literals_follow_numeric_format_specifiers
   (source "string_format.sv" #"
