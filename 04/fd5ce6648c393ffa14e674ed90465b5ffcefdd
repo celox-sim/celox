@@ -1,0 +1,1 @@
+Review: settle lazily evaluated logic before the step of every later slot, also for step(); container version 38
