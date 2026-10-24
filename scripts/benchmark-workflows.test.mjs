@@ -59,9 +59,9 @@ test("CodSpeed reports the current upload even after failure or cancellation", (
   assert.match(report, /run: node scripts\/report-codspeed\.mjs/);
   assert.doesNotMatch(codspeed, /continue-on-error:/);
   assert.match(codspeed, /cancel-in-progress: false/);
-  const condition = new Function("github", "always", `return (${expression(report, "if")});`);
+  const condition = new Function("github", "always", "inputs", `return (${expression(report, "if")});`);
   for (const branch of ["master", "develop", "feature"]) {
-    assert.equal(condition({ ref_name: branch }, () => true), branch !== "feature");
+    assert.equal(condition({ ref_name: branch }, () => true, { runner_probe: false }), branch !== "feature");
   }
 });
 
@@ -176,4 +176,23 @@ test("compilation scaling uses walltime consistently and has a bounded execution
   assert.match(benchmark, /mode: walltime/);
   assert.match(benchmark, /run: cargo codspeed run --measurement-mode walltime -p celox --bench compilation/);
   assert.doesNotMatch(benchmark, /simulation|continue-on-error/);
+});
+
+
+test("runner probe cannot build or benchmark and does not report a skipped benchmark as failure", () => {
+  const probe = job(codspeed, "runner-probe");
+  const runner = block => block.match(/runs-on: (\S+)/)[1];
+  assert.equal(runner(probe), runner(job(codspeed, "codspeed")));
+  assert.doesNotMatch(probe, /checkout|cargo|CodSpeedHQ\/action/);
+  assert.match(probe, /timeout-minutes: 2/);
+  const probeCondition = new Function("github", "inputs", `return (${expression(probe, "if")});`);
+  const benchCondition = new Function("inputs", `return (${expression(job(codspeed, "codspeed"), "if")});`);
+  const reportCondition = new Function("github", "inputs", "always", `return (${expression(job(codspeed, "report"), "if")});`);
+  for (const runner_probe of [true, false]) {
+    const inputs = { runner_probe };
+    assert.equal(Boolean(probeCondition({ event_name: "workflow_dispatch" }, inputs)), runner_probe);
+    assert.equal(benchCondition(inputs), !runner_probe);
+    assert.equal(reportCondition({ ref_name: "master" }, inputs, () => true), !runner_probe);
+  }
+  assert.equal(benchCondition({}), true);
 });

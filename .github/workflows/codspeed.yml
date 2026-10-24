@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "17 2 * * *"
   workflow_dispatch:
+    inputs:
+      runner_probe:
+        description: Check Macro Runner availability without building or benchmarking
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -16,8 +21,18 @@ env:
 permissions: {}
 
 jobs:
+  runner-probe:
+    name: Probe CodSpeed runner
+    if: github.event_name == 'workflow_dispatch' && inputs.runner_probe
+    runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
+    timeout-minutes: 2
+    steps:
+      - name: Verify the x64 runner is available
+        run: test "$(uname -m)" = x86_64
+
   codspeed:
     name: CodSpeed
+    if: inputs.runner_probe != true
     timeout-minutes: 60
     runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
     outputs:
@@ -53,7 +68,7 @@ jobs:
   report:
     name: Report CodSpeed
     needs: codspeed
-    if: always() && (github.ref_name == 'master' || github.ref_name == 'develop')
+    if: always() && inputs.runner_probe != true && (github.ref_name == 'master' || github.ref_name == 'develop')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
