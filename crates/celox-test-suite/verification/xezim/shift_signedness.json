@@ -1,0 +1,70 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "shift_signedness::test_shift_constant_folding_native",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "shift_signedness::test_shift_constant_folding_wide",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "shift_signedness::test_shift_right_arithmetic_native at 21:3: assert_eq o_comb: expected 0xc000000000000000, got 0x4000000000000000 (Comb arithmetic shift failed)",
+      "expectation": "Simulation",
+      "name": "shift_signedness::test_shift_right_arithmetic_native",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "shift_signedness::test_shift_right_arithmetic_wide at 108:3: assert_eq o_comb: expected 0xc0000000000000000000000000000000, got 0x40000000000000000000000000000000 (Comb wide arithmetic shift failed)",
+      "expectation": "Simulation",
+      "name": "shift_signedness::test_shift_right_arithmetic_wide",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "shift_signedness::test_shift_right_logical_signed_native",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "shift_signedness::test_shift_right_logical_wide",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

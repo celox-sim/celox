@@ -10,6 +10,7 @@ export const CI_FEATURES = Object.freeze([
   "celox/systemverilog",
   "celox-test-suite/verilator",
   "celox-test-suite/icarus",
+  "celox-test-suite/xezim",
 ]);
 
 // Suffixes of the tests that `all_backends!` and `sv_backends!` generate for

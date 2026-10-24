@@ -1,5 +1,5 @@
 //! The rejection classifiers against this suite's retained diagnostics.
-#![cfg(any(feature = "verilator", feature = "icarus"))]
+#![cfg(any(feature = "verilator", feature = "icarus", feature = "xezim"))]
 use std::path::PathBuf;
 
 /// The emitted sources a retained diagnostic names.
@@ -172,5 +172,43 @@ mod verilator {
             checked += 1;
         }
         assert_eq!(checked, 6);
+    }
+}
+
+#[cfg(feature = "xezim")]
+mod xezim {
+    use super::*;
+    use celox_test_suite::xezim::is_source_rejection;
+
+    #[test]
+    fn retained_systemverilog_negative_diagnostics_are_source_rejections() {
+        let report: serde_json::Value = celox_test_suite::verification::read_report(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("verification/sv/xezim.json"),
+        )
+        .unwrap();
+        let mut checked = 0;
+        for case in report["cases"].as_array().unwrap() {
+            if case["status"] != "rejected" {
+                continue;
+            }
+            let (status, log) = case["detail"].as_str().unwrap().split_once('\n').unwrap();
+            let code = status
+                .strip_prefix("xezim build exit status: ")
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let sources = logged_sources(log);
+            assert!(
+                is_source_rejection(Some(code), log, &sources),
+                "{}",
+                case["name"]
+            );
+            assert!(!is_source_rejection(Some(code), log, &["other.sv".into()]));
+            checked += 1;
+        }
+        assert_eq!(checked, 3);
     }
 }

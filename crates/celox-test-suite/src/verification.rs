@@ -68,6 +68,7 @@ pub struct Suite {
 pub enum Tool {
     Verilator,
     Icarus,
+    Xezim,
 }
 
 impl Tool {
@@ -75,6 +76,7 @@ impl Tool {
         match self {
             Tool::Verilator => "verilator",
             Tool::Icarus => "icarus",
+            Tool::Xezim => "xezim",
         }
     }
 
@@ -82,12 +84,13 @@ impl Tool {
         match self {
             Tool::Verilator => ("verilator", "--version"),
             Tool::Icarus => ("iverilog", "-V"),
+            Tool::Xezim => ("xezim", "-V"),
         }
     }
 
     /// Whether the tool can validate four-state expectations.
     fn four_state(self) -> bool {
-        matches!(self, Tool::Icarus)
+        matches!(self, Tool::Icarus | Tool::Xezim)
     }
 }
 
@@ -142,6 +145,7 @@ pub fn run(tool: Tool, suite: &Suite, frontend: &'static dyn Frontend) -> Result
                 frontend, design, directory,
             )?),
             Tool::Icarus => Box::new(crate::icarus::Icarus::build(frontend, design, directory)?),
+            Tool::Xezim => Box::new(crate::xezim::Xezim::build(frontend, design, directory)?),
         })
     };
     let build_script = move |case: &TestCase, directory: &Path| -> Result<Box<dyn Backend>> {
@@ -150,6 +154,9 @@ pub fn run(tool: Tool, suite: &Suite, frontend: &'static dyn Frontend) -> Result
                 frontend, case, directory,
             )?),
             Tool::Icarus => Box::new(crate::icarus::Icarus::build_script(
+                frontend, case, directory,
+            )?),
+            Tool::Xezim => Box::new(crate::xezim::Xezim::build_script(
                 frontend, case, directory,
             )?),
         })
@@ -430,6 +437,7 @@ fn context_fingerprint(
     let tools: &[&str] = match tool {
         Tool::Verilator => &["verilator", "verilator_bin", "make", "c++", "timeout"],
         Tool::Icarus => &["iverilog", "vvp", "iverilog-vpi", "c++", "timeout"],
+        Tool::Xezim => &["xezim", "timeout"],
     };
     let path = std::env::var_os("PATH")?;
     let mut identities = Vec::new();
@@ -847,6 +855,9 @@ mod script_failure_tests {
                 Tool::Verilator => Ok(Box::new(crate::verilator::Verilator::build_script(
                     &frontend, case, directory,
                 )?) as Box<dyn Backend>),
+                Tool::Xezim => Ok(Box::new(crate::xezim::Xezim::build_script(
+                    &frontend, case, directory,
+                )?) as Box<dyn Backend>),
             }
         });
         let log = std::fs::read(directory.join("protocol.log")).unwrap();
@@ -867,6 +878,12 @@ mod script_failure_tests {
     #[ignore = "requires live Verilator, C++ and timeout tools"]
     fn binary_assertion_failure_is_mismatch_on_verilator() {
         binary_assertion_failure(Tool::Verilator);
+    }
+
+    #[test]
+    #[ignore = "requires live xezim and timeout tools"]
+    fn binary_assertion_failure_is_mismatch_on_xezim() {
+        binary_assertion_failure(Tool::Xezim);
     }
 }
 

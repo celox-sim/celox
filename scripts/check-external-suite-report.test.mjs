@@ -237,9 +237,9 @@ test("truncated, cached, corrupt and incorrectly classified reports fail closed"
   }
 });
 
-test("all four retained baselines accept only their existing failures", () => {
+test("every retained baseline accepts only its existing failures", () => {
   for (const suite of ["veryl", "sv"]) {
-    for (const tool of ["verilator", "icarus"]) {
+    for (const tool of ["verilator", "icarus", "xezim"]) {
       const file = `../crates/celox-test-suite/verification/${suite === "sv" ? "sv/" : ""}${tool}.json`;
       const baseline = readVerificationReport(new URL(file, import.meta.url));
       const current = {
@@ -271,7 +271,16 @@ test("all four retained baselines accept only their existing failures", () => {
         exitStatus,
         suite,
       );
-      if (suite === "sv") {
+      if (tool === "xezim") {
+        // xezim retains its reviewed failures instead of excluding them.
+        const failures = current.cases.filter(
+          (row) =>
+            !["passed", "rejected", "unsupported", "ignored"].includes(
+              row.status,
+            ),
+        ).length;
+        assert.equal(result.accepted_failures.length, failures);
+      } else if (suite === "sv") {
         assert.deepEqual(
           result.accepted_failures,
           tool === "icarus"

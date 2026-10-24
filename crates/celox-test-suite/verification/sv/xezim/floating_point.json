@@ -1,0 +1,180 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "floating_point::real_arithmetic_and_rounding at 27:34: assert_eq quotient: expected 0xfffffffc, got 0x7ffffffd",
+      "expectation": "Simulation",
+      "name": "floating_point::real_arithmetic_and_rounding",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "floating_point::real_bits_and_comparisons",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "floating_point::real_conversion_functions at 196:3: assert_eq integer_real_bits: expected 0xbff0000000000000, got 0x41efffffffe00000",
+      "expectation": "Simulation",
+      "name": "floating_point::real_conversion_functions",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "floating_point::real_display_formats at 238:3: expect_output: expected [102, 61, 91, 32, 32, 32, 32, 49, 46, 53, 48, 93, 32, 101, 61, 91, 49, 46, 53, 48, 48, 101, 43, 48, 48, 93, 32, 103, 61, 91, 49, 46, 53, 93, 32, 115, 104, 111, 114, 116, 61, 91, 49, 46, 53, 93, 32, 101, 120, 112, 114, 61, 91, 51, 46, 48, 93, 32, 115, 105, 103, 110, 101, 100, 61, 91, 45, 50, 46, 48, 93, 32, 117, 110, 115, 105, 103, 110, 101, 100, 61, 91, 52, 50, 57, 52, 57, 54, 55, 50, 57, 53, 46, 48, 93, 10, 102, 108, 97, 103, 115, 61, 91, 43, 49, 46, 53, 93, 91, 48, 48, 48, 48, 48, 48, 49, 46, 53, 48, 93, 32, 49, 46, 53, 48, 48, 48, 48, 10], got [102, 61, 91, 32, 32, 32, 32, 49, 46, 53, 48, 93, 32, 101, 61, 91, 49, 46, 53, 48, 48, 101, 43, 48, 48, 93, 32, 103, 61, 91, 49, 46, 53, 93, 32, 115, 104, 111, 114, 116, 61, 91, 49, 46, 53, 93, 32, 101, 120, 112, 114, 61, 91, 51, 46, 48, 93, 32, 115, 105, 103, 110, 101, 100, 61, 91, 45, 50, 46, 48, 93, 32, 117, 110, 115, 105, 103, 110, 101, 100, 61, 91, 52, 50, 57, 52, 57, 54, 55, 50, 57, 53, 46, 48, 93, 10, 102, 108, 97, 103, 115, 61, 91, 43, 49, 46, 53, 93, 91, 48, 48, 48, 48, 48, 48, 49, 46, 53, 48, 93, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 49, 46, 53, 10]",
+      "expectation": "Simulation",
+      "name": "floating_point::real_display_formats",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "floating_point::real_display_negative_zero",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "floating_point::real_file_display_formats",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "floating_point::real_narrow_integer_conversion",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "floating_point::real_parameter_and_default_storage",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "floating_point::real_parameter_overrides_from_math_and_generate_scopes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "floating_point::real_parameter_overrides_keep_declared_conversion_contexts",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "floating_point::real_parameter_overrides_preserve_fractional_values",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "floating_point::real_ports_and_subroutines at 175:31: assert_eq result: expected 0xfffffffc, got 0x7ffffffd",
+      "expectation": "Simulation",
+      "name": "floating_point::real_ports_and_subroutines",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "floating_point::real_truth_and_unknown_integer_conversion",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "floating_point::real_zero_divisor",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "floating_point::sequential_real at 97:3: assert_eq result: expected 0xfffffffe, got 0x7fffffff",
+      "expectation": "Simulation",
+      "name": "floating_point::sequential_real",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "floating_point::shortreal_storage_precision at 78:3: assert_eq narrow: expected 0x1000000, got 0x1000001",
+      "expectation": "Simulation",
+      "name": "floating_point::shortreal_storage_precision",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

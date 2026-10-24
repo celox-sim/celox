@@ -1,0 +1,81 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "partial_word_shift::four_state_matrix at 308:11: assert_eq y63: expected 0x6000000000000002, got 0x2000000000000002 (runtime SAR width=63)",
+      "expectation": "Simulation",
+      "name": "partial_word_shift::four_state_matrix",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "partial_word_shift::four_state_wide_counts at 472:9: assert_eq y129: expected 0x180000000000000ZZ, got 0x80000000000000ZZ (SAR with 129-bit count)",
+      "expectation": "Simulation",
+      "name": "partial_word_shift::four_state_wide_counts",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "partial_word_shift::sar_padding_does_not_escape at 358:9: assert_eq y65: expected 0x18000000000000002, got 0x8000000000000002 (SAR padding width=65)",
+      "expectation": "Simulation",
+      "name": "partial_word_shift::sar_padding_does_not_escape",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "partial_word_shift::sign_x_65 at 26:3: assert_eq y: expected 0xX000000000000002, got 0xX000000000000002",
+      "expectation": "Simulation",
+      "name": "partial_word_shift::sign_x_65",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "partial_word_shift::sign_z_65 at 15:3: assert_eq y: expected 0xZ000000000000002, got 0xZ000000000000002",
+      "expectation": "Simulation",
+      "name": "partial_word_shift::sign_z_65",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "partial_word_shift::two_state_matrix at 161:11: assert_eq y63: expected 0x6000000000000002, got 0x2000000000000002 (runtime SAR width=63)",
+      "expectation": "Simulation",
+      "name": "partial_word_shift::two_state_matrix",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "partial_word_shift::two_state_runtime_matrix at 428:11: assert_eq y63: expected 0x6000000000000002, got 0x2000000000000002 (runtime SAR width=63)",
+      "expectation": "Simulation",
+      "name": "partial_word_shift::two_state_runtime_matrix",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

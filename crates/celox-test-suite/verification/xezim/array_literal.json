@@ -1,0 +1,114 @@
+{
+  "cases": [
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_comb_assignment",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_default_comb_assignment",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_default_fills_2d_array",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_default_fills_param_sized_array",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_default_in_ff_reset",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_default_only",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_nested_default_multidim_assignment",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_repeat_plus_default",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_single_element_size_one_array",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_two_explicit_plus_default",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

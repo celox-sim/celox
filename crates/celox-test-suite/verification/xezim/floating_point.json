@@ -1,0 +1,81 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "floating_point::arithmetic_and_rounding at 27:34: assert_eq quotient: expected 0xfffffffc, got 0x7ffffffd",
+      "expectation": "Simulation",
+      "name": "floating_point::arithmetic_and_rounding",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "floating_point::f32_precision_and_conversion at 45:3: assert_eq narrow: expected 0x1000000, got 0x1000001",
+      "expectation": "Simulation",
+      "name": "floating_point::f32_precision_and_conversion",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "floating_point::formatted_display_and_write",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "floating_point::integral_constants_from_float",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "floating_point::scalar_port_and_function_conversions at 84:3: assert_eq q: expected 0xfffffffd, got 0xfffffffe",
+      "expectation": "Simulation",
+      "name": "floating_point::scalar_port_and_function_conversions",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "floating_point::sequential_float at 66:3: assert_eq result: expected 0xfffffffe, got 0x7fffffff",
+      "expectation": "Simulation",
+      "name": "floating_point::sequential_float",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "floating_point::unknown_integer_conversion",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}
