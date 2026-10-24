@@ -83,6 +83,28 @@
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
+      "name": "class::classes_of_packages",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::classes_of_the_compilation_unit",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "class::constructors_chain_to_base",
       "phase": "execute",
       "status": "passed",

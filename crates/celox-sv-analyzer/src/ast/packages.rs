@@ -138,6 +138,17 @@ impl Packages {
         &self.warnings
     }
 
+    /// The first error that analyzing a compilation unit found. A unit is
+    /// otherwise analyzed only when a module uses one of its items, and a
+    /// design of compilation-unit items alone is checked through this.
+    pub fn compilation_unit_error(&self) -> Option<&AnalyzerError> {
+        let mut paths = self.units.keys().collect::<Vec<_>>();
+        paths.sort();
+        paths
+            .into_iter()
+            .find_map(|path| self.units[path].scope.as_ref().err())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.packages.is_empty()
     }
@@ -243,6 +254,11 @@ impl Packages {
                 continue;
             }
             let visibility = unit_visibility(tree)?;
+            // The classes of each compilation unit are its own, though those
+            // of two sources may share a name.
+            state.classes.borrow_mut().clear();
+            state.class_specializations.borrow_mut().clear();
+            state.class_declaration_scopes.borrow_mut().clear();
             let scope = analyze_package(UNIT, tree, &packages, &state);
             if scope
                 .as_ref()
@@ -500,6 +516,17 @@ fn analyze_package_scope(
         .symbols
         .take()
         .expect("a package analysis keeps the package symbols");
+    // The static properties of its classes are variables of the package,
+    // shared by every scope that uses them (IEEE 1800-2023 8.9).
+    for class in &symbols.classes {
+        variables.extend(
+            class
+                .statics
+                .iter()
+                .filter(|property| property.owner == class.name)
+                .map(|property| property.variable.clone()),
+        );
+    }
     // The package's variables, and those it imports, are shared objects;
     // the other signals are constants, copied with their initializers.
     let (state, constants): (Vec<_>, Vec<_>) = std::mem::take(&mut symbols.signals)
@@ -545,8 +572,10 @@ fn analyze_package_scope(
         .map(|declared| (declared.clone(), qualified(declared)))
         .collect();
     let mut own_locals = HashSet::default();
+    // The members of its classes are qualified by the classes already.
+    let prefix = format!("{name}::");
     for local in symbols.local_names() {
-        if !imported_locals.contains(&local) {
+        if !imported_locals.contains(&local) && !local.starts_with(&prefix) {
             names.insert(local.clone(), qualified(&local));
             own_locals.insert(local);
         }

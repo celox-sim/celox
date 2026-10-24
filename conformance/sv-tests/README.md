@@ -230,6 +230,23 @@ method call changes the original. Full official runs at the pinned revision
 report 554 passing cases in 2state and 556 in 4state, with no passing case
 regressing.
 
+Classes of packages and of the compilation unit update 62 more rows: both
+state modes of 31 chapter 18 cases that declare classes outside any module
+change from fail to pass, as such sources now elaborate their compilation unit.
+Seven declare no constraints: `18.4.1--rand-modifier`,
+`18.12--randomization-of-scope-variables_0`, `18.13.1--urandom_0`,
+`18.13.1--urandom_2`, `18.13.2--urandom_range_0` and
+`18.15--manually-seeding-randomize_0` were each simulated with a module that
+constructs the class and calls its methods or `randomize()`, and printed the
+expected results; `18.4.2--randc-modifier` elaborates while `randomize()` of
+its `randc` property is rejected. The other 24 pass by elaboration alone:
+their constraint blocks are parsed but not checked, and `randomize()` of a
+class with constraints is rejected. `18.5.8.1--foreach-iterative-constraints_0`,
+`18.5.8.2--array-reduction-iterative-constraints_0` and
+`18.6.3--behavior-of-randomization-methods_0` keep failing on their array and
+static random properties. Full official runs at the pinned revision report 585
+passing cases in 2state and 587 in 4state, with no passing case regressing.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.

@@ -162,6 +162,20 @@ fn run(options: &Options) -> Result<(), String> {
         .map(|(text, path)| celox_sv_analyzer::ParsedSource::parse(text, path))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
+    // Sources of packages and compilation-unit items alone, such as
+    // classes, elaborate those scopes (IEEE 1800-2023 3.12.1).
+    if options.mode == Mode::Elaboration
+        && options.top.is_none()
+        && parsed.iter().all(|source| source.module_names().is_empty())
+    {
+        let parsed = parsed.iter().collect::<Vec<_>>();
+        let packages = celox_sv_analyzer::ParsedSource::analyze_packages(&parsed)
+            .map_err(|error| error.to_string())?;
+        if let Some(error) = packages.compilation_unit_error() {
+            return Err(error.to_string());
+        }
+        return Ok(());
+    }
     let top = select_top(&parsed, options.top.as_deref())?;
     match options.mode {
         Mode::Parsing => unreachable!("parsing returned before root selection"),

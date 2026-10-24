@@ -559,7 +559,7 @@ pub(in crate::ast) fn declare_scopes(
     for class in &native.classes {
         if super::enclosing_unit(native, class.tokens).map(|unit| unit.tokens) == scope {
             scopes.insert(
-                instances::normalize_identifier(&class.name.spelling),
+                super::declared_name(tree, class),
                 (env.clone(), aliases.clone()),
             );
         }
@@ -592,11 +592,13 @@ fn type_argument(
             let name = instances::normalize_identifier(&name.spelling);
             match context.type_aliases.get(&name) {
                 Some(ty) => Some(ty.clone()),
-                None if super::declaration(tree, &name).is_some() => {
-                    let name = specialize(tree, &name, &[], context)?;
-                    Some(super::handle(&name))
-                }
-                None => None,
+                None => match super::resolve(tree, &name) {
+                    Some(name) => {
+                        let name = specialize(tree, &name, &[], context)?;
+                        Some(super::handle(&name))
+                    }
+                    None => None,
+                },
             }
         }
         ExprKind::Parameterized {
@@ -604,13 +606,13 @@ fn type_argument(
             arguments,
         } => match &native.expression(*expression).kind {
             ExprKind::Name(name) => {
-                let name = specialize(
-                    tree,
-                    &instances::normalize_identifier(&name.spelling),
-                    arguments,
-                    context,
-                )?;
-                Some(super::handle(&name))
+                match super::resolve(tree, &instances::normalize_identifier(&name.spelling)) {
+                    Some(name) => {
+                        let name = specialize(tree, &name, arguments, context)?;
+                        Some(super::handle(&name))
+                    }
+                    None => None,
+                }
             }
             _ => None,
         },
@@ -625,8 +627,12 @@ fn type_argument(
             let class = match &native.expression(*expression).kind {
                 ExprKind::Name(scope) => {
                     let scope = instances::normalize_identifier(&scope.spelling);
-                    if super::is_visible(tree, &scope) {
-                        Some(specialize(tree, &scope, &[], context)?)
+                    if let Some(class) = super::resolve(tree, &scope) {
+                        if super::is_declared(tree, &class) {
+                            Some(specialize(tree, &class, &[], context)?)
+                        } else {
+                            Some(class)
+                        }
                     } else {
                         let qualified = scope::qualified_name(&tree.state, &scope, &member);
                         return finish(
@@ -640,17 +646,20 @@ fn type_argument(
                     expression,
                     arguments,
                 } => match &native.expression(*expression).kind {
-                    ExprKind::Name(scope) => Some(specialize(
-                        tree,
-                        &instances::normalize_identifier(&scope.spelling),
-                        arguments,
-                        context,
-                    )?),
+                    ExprKind::Name(scope) => {
+                        match super::resolve(
+                            tree,
+                            &instances::normalize_identifier(&scope.spelling),
+                        ) {
+                            Some(class) => Some(specialize(tree, &class, arguments, context)?),
+                            None => None,
+                        }
+                    }
                     _ => None,
                 },
                 _ => None,
             };
-            class.and_then(|class| member_type(tree, &class, &member))
+            class.and_then(|class: String| member_type(tree, &class, &member))
         }
         _ => None,
     };
@@ -768,45 +777,48 @@ fn spelling(ty: &Type) -> String {
 /// new specialization appears.
 pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimensions) {
     tree.state.class_specializations_frozen.set(false);
-    let Ok(unit) = tree.root_unit() else {
-        return;
-    };
     let native = tree.declarations();
     let within = |outer: celox_sv_syntax::TokenRange, inner: celox_sv_syntax::TokenRange| {
         outer.start <= inner.start && inner.end <= outer.end
     };
+    // The current scope: a module, interface, program or package, or the
+    // compilation unit outside them.
+    let unit = tree.root_unit().ok().map(|unit| unit.tokens);
+    let in_scope = |tokens: celox_sv_syntax::TokenRange| match unit {
+        Some(unit) => within(unit, tokens),
+        None => super::enclosing_unit(native, tokens).is_none(),
+    };
     let classes = native
         .classes
         .iter()
-        .filter(|class| within(unit.tokens, class.tokens))
+        .filter(|class| super::enclosing_unit(native, class.tokens).map(|unit| unit.tokens) == unit)
         .collect::<Vec<_>>();
     if classes.is_empty() {
         return;
     }
+    // The classes of the scope by the names its declarations use.
     let names = classes
         .iter()
-        .map(|class| instances::normalize_identifier(&class.name.spelling))
-        .collect::<HashSet<_>>();
+        .map(|class| {
+            (
+                instances::normalize_identifier(&class.name.spelling),
+                super::declared_name(tree, class),
+            )
+        })
+        .collect::<HashMap<_, _>>();
     // The class scopes: each class declaration, and each out-of-block
     // method definition, which is in the scope of its class (8.24).
     let mut scopes = classes
         .iter()
-        .map(|class| {
-            (
-                class.tokens,
-                instances::normalize_identifier(&class.name.spelling),
-            )
-        })
+        .map(|class| (class.tokens, super::declared_name(tree, class)))
         .collect::<Vec<_>>();
     for id in native.subroutine_ids() {
         let subroutine = native.subroutine(id);
         if let [scope] = subroutine.scope.as_slice()
-            && within(unit.tokens, subroutine.tokens)
+            && in_scope(subroutine.tokens)
+            && let Some(class) = names.get(&instances::normalize_identifier(&scope.name.spelling))
         {
-            let class = instances::normalize_identifier(&scope.name.spelling);
-            if names.contains(&class) {
-                scopes.push((subroutine.tokens, class));
-            }
+            scopes.push((subroutine.tokens, class.clone()));
         }
     }
     // The innermost class scope that contains `tokens`.
@@ -825,16 +837,11 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
     )> = Vec::new();
     for class in &classes {
         if class.parameter_ports.is_none() || class.interface {
-            references.push((
-                None,
-                instances::normalize_identifier(&class.name.spelling),
-                &[],
-                class.tokens,
-            ));
+            references.push((None, super::declared_name(tree, class), &[], class.tokens));
         }
     }
     for ty in &native.types {
-        if !within(unit.tokens, ty.tokens) {
+        if !in_scope(ty.tokens) {
             continue;
         }
         // A class, or the class scope of a type it declares, `C#(...)::T`.
@@ -842,7 +849,7 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
             && let [segment] | [segment, _] = path.as_slice()
         {
             let name = instances::normalize_identifier(&segment.name.spelling);
-            if names.contains(&name) {
+            if let Some(name) = names.get(&name).cloned() {
                 references.push((
                     enclosing(ty.tokens),
                     name,
@@ -853,7 +860,7 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
         }
     }
     for expression in &native.expressions {
-        if !within(unit.tokens, expression.tokens) {
+        if !in_scope(expression.tokens) {
             continue;
         }
         if let ExprKind::Parameterized {
@@ -863,7 +870,7 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
             && let ExprKind::Name(name) = &native.expression(*scope).kind
         {
             let name = instances::normalize_identifier(&name.spelling);
-            if names.contains(&name) {
+            if let Some(name) = names.get(&name).cloned() {
                 references.push((
                     enclosing(expression.tokens),
                     name,
@@ -897,7 +904,7 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
         tree.state
             .class_declaration_scopes
             .borrow_mut()
-            .insert(instances::normalize_identifier(&class.name.spelling), scope);
+            .insert(super::declared_name(tree, class), scope);
     }
     let module_scopes = |tokens: celox_sv_syntax::TokenRange| {
         let mut scopes = items
