@@ -2210,5 +2210,42 @@
         "timing::always_star_timed_task_calls_wait_on_folded_branch_reads"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_enum_randomization",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects class randomize, srandom and rand_mode calls in these enum randomization cases. IEEE 1800-2023 18.3, 18.6 and 18.8 define these operations. The original compile diagnostics are retained.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_enum_randomization_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::randomization_enum_alias",
+        "class::randomization_enum_domain",
+        "class::randomization_enum_fill_literals",
+        "class::randomization_enum_inheritance"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_enum_alias_randomization",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 randomizes an enum typedef alias as its underlying 8-bit integer, producing values outside the declared set {-7, 2, 91}. Generated __VBasicRand assigns a masked VL_RANDOM_RNG_I value instead of selecting from an enum table. IEEE 1800-2023 18.3 restricts enum randomization to declared values; the direct enum and inheritance cases pass unchanged.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_enum_randomization_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::randomization_enum_alias"
+      ]
+    }
   }
 ]

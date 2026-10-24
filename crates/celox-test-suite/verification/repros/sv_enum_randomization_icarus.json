@@ -1,0 +1,55 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:13: Error: randomize is not a method of class Sample.\n<case>/source_0.sv:13: error: Object celox_suite_tb.dut.object has no method \"randomize(...)\".\n<case>/source_0.sv:13: error: Unable to elaborate condition expression.\n3 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "class::randomization_enum_alias",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 24; see <case>/build.log\n<case>/source_0.sv:18: error: Can't find task srandom in class Base\n<case>/source_0.sv:18: error: Enable of unknown task ``a.srandom''.\n<case>/source_0.sv:18: error: Can't find task srandom in class Base\n<case>/source_0.sv:18: error: Enable of unknown task ``b.srandom''.\n<case>/source_0.sv:20: Error: randomize is not a method of class Base.\n<case>/source_0.sv:20: error: Object celox_suite_tb.dut.base has no method \"randomize(...)\".\n<case>/source_0.sv:20: Error: randomize is not a method of class Base.\n<case>/source_0.sv:20: error: Object celox_suite_tb.dut.b has no method \"randomize(...)\".\n<case>/source_0.sv:20: error: Unable to elaborate condition expression.\n<case>/source_0.sv:33: error: Can't find task rand_mode in class Base\n<case>/source_0.sv:33: error: Enable of unknown task ``a.value.rand_mode''.\n<case>/source_0.sv:35: Error: randomize is not a method of class Base.\n<case>/source_0.sv:35: error: Object celox_suite_tb.dut.a has no method \"randomize(...)\".\n<case>/source_0.sv:35: error: Unable to elaborate condition expression.\n<case>/source_0.sv:36: Error: randomize is not a method of class Base.\n<case>/source_0.sv:36: error: Object celox_suite_tb.dut.a has no method \"randomize(...)\".\n<case>/source_0.sv:36: error: Unable to elaborate condition expression.\n<case>/source_0.sv:38: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:38:      : method path: value.rand_mode\n<case>/source_0.sv:38: error: Object celox_suite_tb.dut.a has no method \"value.rand_mode(...)\".\n<case>/source_0.sv:38: error: Unable to elaborate condition expression.\n<case>/source_0.sv:39: Error: randomize is not a method of class Base.\n<case>/source_0.sv:39: error: Object celox_suite_tb.dut.base has no method \"randomize(...)\".\n<case>/source_0.sv:39: error: Unable to elaborate condition expression.\n<case>/source_0.sv:41: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:41:      : method path: value.rand_mode\n<case>/source_0.sv:41: error: Object celox_suite_tb.dut.a has no method \"value.rand_mode(...)\".\n<case>/source_0.sv:41: error: Unable to elaborate condition expression.\n24 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "class::randomization_enum_domain",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:17: Error: randomize is not a method of class Sample.\n<case>/source_0.sv:17: error: Object celox_suite_tb.dut.object has no method \"randomize(...)\".\n<case>/source_0.sv:17: error: Unable to elaborate condition expression.\n3 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "class::randomization_enum_fill_literals",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:15: Error: randomize is not a method of class Parent.\n<case>/source_0.sv:15: error: Object celox_suite_tb.dut.parent has no method \"randomize(...)\".\n<case>/source_0.sv:15: error: Unable to elaborate condition expression.\n<case>/source_0.sv:17: assert: dup_expr.cc:215: failed assertion 0\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "class::randomization_enum_inheritance",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)"
+}
