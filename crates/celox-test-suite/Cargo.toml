@@ -12,6 +12,8 @@ readme = "README.md"
 
 [features]
 default = []
+# Load the corpus from disk so editing a case does not rebuild Rust runners.
+runtime-cases = []
 # Emit the Veryl cases to SystemVerilog.
 emit = ["dep:veryl-analyzer", "dep:veryl-emitter", "dep:veryl-parser", "dep:veryl-metadata"]
 # The external-simulator runners shared by both suites. Port shapes of the
@@ -61,6 +63,9 @@ veryl-std.workspace = true
 [build-dependencies]
 serde_json = { workspace = true, optional = true }
 sha2 = { version = "0.11", optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -221,6 +221,9 @@ fn build_sv(design: &Design, sources: &[(&str, &std::path::Path)]) -> Result<Box
 }
 
 pub fn run_case(name: &str, backend: &str) {
+    if super::vtest_exec::dispatch("veryl", name, backend) {
+        return;
+    }
     let run = || {
         celox_test_suite::veryl::case(name)
             .unwrap_or_else(|| panic!("unknown Veryl test case: {name}"))

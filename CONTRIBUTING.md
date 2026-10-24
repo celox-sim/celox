@@ -40,6 +40,41 @@ Use the actual affected case or group as the filter. For SystemVerilog cases,
 use the `verify-sv-verilator` and `verify-sv-icarus` binaries. Missing tools,
 empty selections, compilation failures, and simulator errors are not passes.
 
+For repeated local vtest runs, use the optimized shared executor:
+
+```sh
+node scripts/run-vtest.mjs --test counter
+node scripts/run-vtest.mjs --test systemverilog -E 'test(operators::)'
+```
+
+This builds `vtest-exec` with the `vtest` Cargo profile (`opt-level = 1`,
+development assertions and overflow checks enabled), then runs the existing
+Celox test registrations with nextest. Both builds enable `systemverilog` and
+`celox-test-suite/runtime-cases`. Cases execute in the shared binary, while
+Rust API tests execute normally. Existing test names, filters, backend omissions,
+ignored cases and nextest's parallel scheduling/timeouts are preserved. Additional
+arguments are passed to `cargo nextest run`; use `--run-ignored all` to include
+ignored registrations deliberately.
+
+With `runtime-cases`, `.vtest` bodies are read from disk instead of embedded in
+Rust binaries, so edits to an existing case do not require recompilation. Adding
+a test registration or changing Rust still requires a build. The first run builds
+both the optimized executor and ordinary test binaries; the executor profile has
+its own Cargo cache. Ordinary Cargo test commands retain the embedded, in-process
+path, and CI continues to use that path.
+
+For debugging a single case after building, the executor also accepts
+`<veryl|sv> <group::case> <backend>` directly, for example:
+
+```sh
+target/vtest/examples/vtest-exec veryl counter::test_counter_n4_basic native
+```
+
+Direct invocations do not apply registration-level ignores. `CELOX_VTEST_ROOT`
+can point to an alternative corpus root containing `veryl/cases` and `sv/cases`;
+otherwise the executor uses the suite's source directory from its build checkout.
+The script sets that root and `CELOX_VTEST_RUNNER` for its test invocation only.
+
 External results are reused locally by default, including between worktrees,
 when the case, verifier and tool fingerprints match. New/changed cases and
 prior failures run again; `--fresh` forces execution. A Celox implementation
