@@ -1,1 +1,9 @@
 Review: watch the settle of dirty combinational logic that no step ran
+
+Revision history for #1876:
+
+rev 3 (rebase) 2026-10-24 12:11 UTC
+rev 2 (content) 2026-10-24 11:03 UTC — Review: watch each slot of host-write settling on its own, and count missed events as a failure
+rev 1 (initial) 2026-10-24 11:03 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1876,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"693f32a7e1501e7b1f1423c6f1780b298baae3f6","timestamp_iso":"2026-10-24T11:03:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"693f32a7e1501e7b1f1423c6f1780b298baae3f6","new_sha":"3df1b35b522df185027058b7d225dca8b3a44fc6","timestamp_iso":"2026-10-24T11:03:30Z","reason":"Review: watch each slot of host-write settling on its own, and count missed events as a failure","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/693f32a7e1501e7b1f1423c6f1780b298baae3f6...3df1b35b522df185027058b7d225dca8b3a44fc6"},{"number":3,"change_type":"rebase","old_sha":"3df1b35b522df185027058b7d225dca8b3a44fc6","new_sha":"7b255b94e32ce5c8915412a5b29efcc27323da98","timestamp_iso":"2026-10-24T12:11:39Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/3df1b35b522df185027058b7d225dca8b3a44fc6...7b255b94e32ce5c8915412a5b29efcc27323da98"}]} -->
