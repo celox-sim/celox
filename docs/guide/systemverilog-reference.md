@@ -704,9 +704,11 @@ severity, its message, the file and line of the call as `` `__FILE__ `` and
 action block of an immediate assertion also names that assertion: its
 statement label, `assert`, `assume` or `cover`, and whether the pass or the
 fail action issued it. Severity tasks in subroutines the action block calls
-are not attributed. `time` is the time the drain's context gives, as the VPI
-host does at each callback, or the time step of the report while
-`Simulation::set_fail_on` is set. `Report::render` formats a report as the VPI host
+are not attributed. `time` is the simulation time at which the report was
+issued, however late the host drains it, unless the drain's context gives a
+time, as the VPI host does at each callback; a `Simulator` has no time and
+uses only the context's.
+`Report::render` formats a report as the VPI host
 and the `celox` command print it. Only `$error` and `$fatal` fail a `celox`
 run; `$fatal` also ends the simulation with an error.
 
