@@ -312,6 +312,14 @@ impl<B: SimBackend> SimulationState<B> {
             } else {
                 None
             };
+            if compiled.is_some()
+                && next_time > self.scheduler.time
+                && let Err(error) = executor.try_leave_time(self.scheduler.time)
+            {
+                let _ = self.finish_timed_boundary(executor, self.scheduler.time);
+                let _ = executor.flush_output();
+                return Err(error);
+            }
             observer.before_step(self, executor);
             let result = match compiled {
                 Some(limit) => self.run_compiled(executor, limit),
@@ -325,6 +333,13 @@ impl<B: SimBackend> SimulationState<B> {
         }
         if self.finished {
             return Ok(false);
+        }
+        if end > self.scheduler.time
+            && let Err(error) = executor.try_leave_time(self.scheduler.time)
+        {
+            let _ = self.finish_timed_boundary(executor, self.scheduler.time);
+            let _ = executor.flush_output();
+            return Err(error);
         }
         self.advance_time(executor.backend_mut(), end);
         Ok(true)

@@ -211,6 +211,11 @@ pub struct RuntimeEventSite {
     /// deferred assertions.
     #[serde(default)]
     pub deferred: Option<DeferredSite>,
+    /// The last argument is the simulation time at which the site issued
+    /// the event, which a report carries (IEEE 1800-2023 20.10). It is not
+    /// formatted.
+    #[serde(default)]
+    pub timestamp_arg: bool,
     pub arg_widths: Vec<usize>,
     pub arg_signed: Vec<bool>,
     pub arg_is_string: Vec<bool>,
@@ -1994,6 +1999,7 @@ mod tests {
             location: None,
             assertion: None,
             deferred: None,
+            timestamp_arg: false,
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),
