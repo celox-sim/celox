@@ -194,3 +194,50 @@ endmodule
     sim.advance_to(3).unwrap();
     assert_eq!(sim.time(), 5);
 }
+
+/// Element-strided unpacked arrays cannot be dumped: an image compiled
+/// without VCD is rejected for a VCD run, as `Simulator` rejects it, and one
+/// compiled with VCD records the elements.
+#[test]
+fn a_vcd_run_needs_an_image_compiled_with_vcd() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic [2:0] values [4];
+    initial begin
+        values[2] = 3'd0;
+        #1 values[2] = 3'd5;
+    end
+endmodule
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("top.vcd");
+    let strided = builder(source)
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+    let Err(error) = Simulation::from_sv_sources(Vec::new(), "Top")
+        .vcd(&path)
+        .build_native_from_image(reloaded(&strided))
+    else {
+        panic!("a strided image cannot record VCD");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("compile this native image with VCD enabled"),
+        "{error}"
+    );
+    let packed = builder(source)
+        .vcd(&path)
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+    let mut sim = Simulation::from_sv_sources(Vec::new(), "Top")
+        .vcd(&path)
+        .build_native_from_image(reloaded(&packed))
+        .unwrap();
+    sim.run_until(2).unwrap();
+    drop(sim);
+    let vcd = std::fs::read_to_string(&path).unwrap();
+    assert!(vcd.contains("b101"), "{vcd}");
+}
