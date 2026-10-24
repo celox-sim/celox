@@ -26,7 +26,16 @@ pub(in crate::ast) fn query_context_for_operand(
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
 ) -> Converted<PackedDimensions> {
-    if context.scope_types_complete {
+    // Literals carry their type in their spelling and cannot reference lexical
+    // declarations. Pattern elements otherwise rediscover the whole scope for
+    // each literal while the surrounding declaration is still being bound.
+    let operand = expression_binding::ungroup(root, tree.declarations());
+    if context.scope_types_complete
+        || matches!(
+            tree.declarations().expression(operand).kind,
+            ExprKind::Literal(_)
+        )
+    {
         return Ok(query_context(context));
     }
     Ok(query_context(&query_operand_dimensions_id(
