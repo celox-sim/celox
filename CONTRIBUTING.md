@@ -58,17 +58,17 @@ ignored registrations deliberately.
 
 With `runtime-cases`, `.vtest` bodies are read from disk instead of embedded in
 Rust binaries, so edits to an existing case do not require recompilation. Adding
-a test registration or changing Rust still requires a build. The local command
-builds both the optimized executor and ordinary test binaries; the executor
-profile has its own Cargo cache. CI instead builds both with the `vtest` Cargo profile so
-shared dependencies and Celox libraries can be reused. Ordinary Cargo test
-commands retain the embedded, in-process path. CI's Rust Tests job prepares the
-executor once and uses it for both full workspace runs and scoped runs that
-include Celox. Scopes without Celox skip that
-build. The default-branch cache warmer builds both executor and test dependencies
-under the same cache key; vtest preparation failures fail the test job.
-CI documentation tests also use this Cargo profile. Cocotb runs through nextest
-with the exact packages, features and targets of its original build, selecting
+a test registration or changing Rust still requires a build. Both local commands
+and CI build the optimized executor separately from ordinary test binaries.
+CI keeps the normal test profile and existing dependency cache: sharing a Cargo
+profile alone does not share artifacts when the executor and workspace resolve
+different dependency features. Ordinary Cargo test commands retain the embedded,
+in-process path. CI's Rust Tests job prepares the executor once and uses it for
+full workspace runs and scoped runs that include Celox. Scopes without Celox
+skip that build. The default-branch cache warmer builds both executor and test
+dependencies under the same cache key; preparation failures fail the test job.
+Cocotb runs through nextest with the exact packages, features and targets of its
+original build, selecting
 only the ignored `cocotb_` cases; an empty selection fails. Its reports are kept
 separately and uploaded with the regular test results.
 

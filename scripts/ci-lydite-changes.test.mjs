@@ -234,7 +234,7 @@ test("workflows transfer Rust tests and gate each Lydite lane", () => {
   );
   assert.match(
     ci,
-    /cargo test --locked --profile vtest --workspace --exclude 'lydite\*' --doc/,
+    /cargo test --locked --workspace --exclude 'lydite\*' --doc/,
   );
   const workflow = readFileSync(`${root}.github/workflows/lydite-checks.yml`, "utf8");
   assert.match(

@@ -223,7 +223,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: vtest-v2
+          key: vtest-v1
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Initialize Rust test reports
@@ -258,7 +258,7 @@ jobs:
         id: workspace-tests
         if: needs.changes.outputs.rust_full != 'false'
         run: >-
-          cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci --cargo-profile vtest
+          cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci
           --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/runtime-cases
 
       - name: Run the tests this pull request can affect
@@ -304,7 +304,7 @@ jobs:
       - name: Run workspace documentation tests with CI features
         if: needs.changes.outputs.rust_full != 'false'
         run: >-
-          cargo test --locked --profile vtest --workspace --exclude 'lydite*' --doc
+          cargo test --locked --workspace --exclude 'lydite*' --doc
           --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/runtime-cases
 
       - name: Run the documentation tests of the changed libraries
@@ -316,7 +316,7 @@ jobs:
           args=()
           for package in $LIBRARIES; do args+=(-p "$package"); done
           if [ -n "$FEATURES" ]; then args+=(--features "$FEATURES"); fi
-          cargo test --locked --profile vtest --doc "${args[@]}"
+          cargo test --locked --doc "${args[@]}"
 
   rust-default-tests:
     name: Rust default-feature tests

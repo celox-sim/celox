@@ -388,14 +388,14 @@ test("cache warming shares the Rust Tests key and builds without running tests",
   );
   assert.match(warm, /steps.cache.outputs.cache-hit != 'true'/);
   for (const text of [warm, job("rust-tests")]) {
-    assert.match(text, /key: vtest-v2/);
+    assert.match(text, /key: vtest-v1/);
     assert.match(text, /run: node scripts\/run-vtest.mjs --prepare-ci/);
   }
   assert.match(warm, /name: Build the optimized vtest executor to populate dependencies\n        if: steps.cache.outputs.cache-hit != 'true'/);
   assert.match(warm, /"scripts\/run-vtest.mjs"/);
   assert.match(
     warm,
-    /cargo nextest list --locked --workspace --exclude 'lydite\*' --cargo-profile vtest --message-format json/,
+    /cargo nextest list --locked --workspace --exclude 'lydite\*' --message-format json/,
   );
   const features = job("rust-tests").match(/--features (\S+)/)[1];
   assert.ok(warm.includes(`--features ${features}`));
@@ -436,7 +436,7 @@ test("scoped Cargo commands build only the selected integration targets", () => 
     TARGETS: "flip_flop systemverilog", FILTER: "binary_id(celox::flip_flop) | binary_id(celox::systemverilog)",
   };
   assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", env), [
-    "nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest", "--no-tests=pass",
+    "nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass",
     "-p", "celox", "--features", "celox/systemverilog,celox-test-suite/runtime-cases",
     "--test", "flip_flop", "--test", "systemverilog", "-E", env.FILTER,
   ]);
@@ -463,7 +463,7 @@ test("CI prepares one executor for full runs and scopes containing Celox", () =>
   assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", {
     PACKAGES: "celox-heap", FEATURES: "", TARGETS: "", FILTER: "package(celox-heap)",
     CELOX_VTEST_RUNNER: "",
-  }), ["nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest", "--no-tests=pass",
+  }), ["nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass",
     "-p", "celox-heap", "-E", "package(celox-heap)"]);
 });
 
@@ -504,7 +504,7 @@ test("cocotb reuses the original scoped Cargo build", () => {
   const args = cargoArguments("rust-tests", "Run cocotb VPI end-to-end test", {
     RUST_FULL: "false", BUILDS: JSON.stringify(builds),
   });
-  assert.deepEqual(args, ["nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest",
+  assert.deepEqual(args, ["nextest", "run", "--locked", "--profile", "ci",
     "-p", "celox", "-p", "celox-vpi", "-p", "celox-test-suite", "--features",
     "celox/systemverilog,celox-test-suite/icarus,celox-test-suite/runtime-cases",
     "-E", 'binary_id(celox-vpi::cocotb_e2e) & test(/^cocotb_/)', "--run-ignored", "only"]);
@@ -536,10 +536,10 @@ test("default-feature validation is parallel and mandatory when selected", () =>
   assert.match(job("report-full-validation"), /rust-default-tests,/);
 });
 
-test("CI shares the executor profile and warms each platform's cache", () => {
+test("CI retains the normal test profile and warms each platform's cache", () => {
   const rust = job("rust-tests");
-  assert.match(rust, /cargo nextest run .*--cargo-profile vtest/);
-  assert.match(rust, /cargo test --locked --profile vtest --workspace/);
+  assert.doesNotMatch(rust, /--cargo-profile/);
+  assert.match(rust, /cargo test --locked --workspace/);
   const warm = readFileSync(new URL("../.github/workflows/rust-cache.yml", import.meta.url), "utf8");
   const windows = warm.split("  napi-windows:")[1];
   assert.match(windows, /runs-on: windows-latest/);

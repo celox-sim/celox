@@ -10,7 +10,7 @@ export const cocotbFilter = 'binary_id(celox-vpi::cocotb_e2e) & test(/^cocotb_/)
 export function cocotbCommands(full, builds) {
   if (full !== "false") return [[
     "nextest", "run", "--locked", "--workspace", "--exclude", "lydite*",
-    "--profile", "ci", "--cargo-profile", "vtest",
+    "--profile", "ci",
     "--features", "celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/runtime-cases",
     "--run-ignored", "only", "-E", cocotbFilter,
   ]];
