@@ -549,8 +549,8 @@ test("CI retains the normal test profile and warms each platform's cache", () =>
   assert.match(warm, /rust-default-tests:[\s\S]*cargo test --locked -p celox --lib --no-run/);
 });
 
-test("full Clippy validation covers every workspace crate", () => {
-  assert.match(job("lint"), /run: cargo clippy --locked --workspace --all-targets --features/);
+test("full Clippy validation excludes the disabled bridge", () => {
+  assert.match(job("lint"), /run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features/);
 });
 
 test("upstream SV TB runs on full CI and feeds failure reporting", () => {

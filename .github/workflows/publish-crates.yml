@@ -107,7 +107,7 @@ jobs:
       - name: Build Rust API documentation
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --locked --workspace --no-deps
+        run: cargo doc --locked --workspace --exclude lydite-celox --no-deps
 
   publish:
     name: Publish to crates.io
