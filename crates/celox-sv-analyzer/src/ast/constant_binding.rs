@@ -267,9 +267,20 @@ fn bind_in_context(
                             })
                         {
                             let value = indexed_expression(id, native, tree, query_dimensions)?;
-                            values.push(
+                            let value = if query_dimensions
+                                .array_parameter_values
+                                .contains_key(&name_key)
+                            {
+                                selects::indexed_expression_value(
+                                    &tree.state,
+                                    value,
+                                    query_dimensions,
+                                )
+                            } else {
                                 expr_to_index_const(&tree.state, value, query_dimensions)
-                                    .ok_or_else(|| unsupported("parameter selection shape"))?,
+                            };
+                            values.push(
+                                value.ok_or_else(|| unsupported("parameter selection shape"))?,
                             );
                             continue;
                         }

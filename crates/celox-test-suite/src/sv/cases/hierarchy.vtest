@@ -1246,3 +1246,147 @@
   (top Top)
   (assert_eq default_rows 0x34123412)
   (assert_eq explicit_rows 0xcdabcdab))
+
+
+; IEEE 1800-2023 6.20.2: an aggregate parameter member can be used in an expression.
+(case array_parameter_elements_forward_generated_values
+  (source "array_parameter_elements.sv" #"
+    module Number #(parameter logic [4:0] P=0)(output wire [4:0] y);
+      assign y=P;
+    endmodule
+    module Text #(parameter logic [63:0] P="MAC")(output wire [63:0] y);
+      assign y=P;
+    endmodule
+    module Relay #(parameter logic [4:0] N[6:7]='{0,0},
+        parameter logic [63:0] S[-2:-1]='{"D0","D1"})
+        (output wire [9:0] numbers, output wire [127:0] strings);
+      for(genvar i=6;i<=7;i++) begin:g
+        Number #(.P(N[i])) n(.y(numbers[(i-6)*5 +: 5]));
+        Text #(.P(S[i-8])) s(.y(strings[(i-6)*64 +: 64]));
+      end
+    endmodule
+    module Top(output wire [9:0] numbers, output wire [127:0] strings);
+      localparam logic [4:0] N[2]='{5'h12,5'h1b};
+      localparam logic [63:0] S[2]='{"A0","A1"};
+      Relay #(.N(N),.S(S)) relay(.numbers(numbers),.strings(strings));
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq numbers 0x372)
+  (assert_eq strings 0x00000000000041310000000000004130))
+
+(case array_parameter_elements_keep_signed_element_types
+  (source "signed_array_parameter_elements.sv" #"
+    module Sink #(parameter P=0, parameter logic signed [15:0] Q=0)
+        (output wire [31:0] value, width, output wire [15:0] sum, output wire negative);
+      assign value=P;
+      assign width=$bits(P);
+      assign sum=Q;
+      assign negative=P<0;
+    endmodule
+    module Top(output wire [31:0] value, width, output wire [15:0] sum,
+        output wire negative);
+      localparam logic signed [4:0] A[3:2]='{5'sd15,-5'sd2};
+      Sink #(.P(A[2]),.Q(A[3]-5'sd1)) sink(.value(value),.width(width),.sum(sum),.negative(negative));
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq value 0xfffffffe)
+  (assert_eq width 5)
+  (assert_eq negative 1)
+  (assert_eq sum 14))
+
+(case array_parameter_elements_select_package_multidimensional_values
+  (source "package_array_parameter_elements.sv" #"
+    package Values;
+      localparam logic [1:0][3:0] TABLE[3:2][-1:0]=
+          '{'{8'h12,8'h34},'{8'h56,8'h78}};
+    endpackage
+    module Sink #(parameter P=0)(output wire [7:0] y, output wire [31:0] width);
+      assign y=P;
+      assign width=$bits(P);
+    endmodule
+    module Top(output wire [7:0] whole, nibble, grouped,
+        output wire [31:0] whole_width, nibble_width, grouped_width);
+      import Values::*;
+      Sink #(.P(TABLE[2][0])) a(.y(whole),.width(whole_width));
+      Sink #(.P(TABLE[3][-1][1])) b(.y(nibble),.width(nibble_width));
+      Sink #(.P((Values::TABLE[3][-1]))) c(.y(grouped),.width(grouped_width));
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq whole 0x78) (assert_eq whole_width 8)
+  (assert_eq nibble 1) (assert_eq nibble_width 4)
+  (assert_eq grouped 0x12) (assert_eq grouped_width 8))
+
+(case array_parameter_elements_preserve_four_state_and_conversion
+  (four_state)
+  (source "state_array_parameter_elements.sv" #"
+    module Sink #(parameter logic [7:0] U=0, parameter logic signed [7:0] S=0,
+        parameter bit [7:0] B=0)(output wire [7:0] u,s,b);
+      assign u=U;
+      assign s=S;
+      assign b=B;
+    endmodule
+    module Top(output wire [15:0] unsigned_value, signed_value, two_state_value);
+      localparam logic [3:0] A[-1:0]='{4'b10xz,4'bz01x};
+      localparam logic signed [3:0] S[-1:0]='{4'b10xz,4'bz01x};
+      for(genvar i=-1;i<=0;i++) begin:g
+        Sink #(.U(A[i]),.S(S[i]),.B(A[i])) sink(
+          .u(unsigned_value[(0-i)*8 +: 8]),
+          .s(signed_value[(0-i)*8 +: 8]),
+          .b(two_state_value[(0-i)*8 +: 8]));
+      end
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq unsigned_value (fourstate 0x0a03 0x0309))
+  (assert_eq signed_value (fourstate 0xfa03 0x03f9))
+  (assert_eq two_state_value 0x0802))
+
+
+(case array_parameter_elements_preserve_wide_specializations
+  (source "wide_array_parameter_elements.sv" #"
+    module Sink #(parameter P=0)(output wire [128:0] value, output wire [31:0] width);
+      assign value=P;
+      assign width=$bits(P);
+    endmodule
+    module Parent #(parameter SELECT=0)
+        (output wire [128:0] value, output wire [31:0] width);
+      localparam logic [128:0] TABLE[-2:-1]='{129'h100000000000000000000000000000001,129'd2};
+      Sink #(.P(TABLE[SELECT-2])) sink(.value(value),.width(width));
+    endmodule
+    module Top(output wire [128:0] first, second, output wire [31:0] first_width, second_width);
+      Parent #(.SELECT(0)) a(.value(first),.width(first_width));
+      Parent #(.SELECT(1)) b(.value(second),.width(second_width));
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq first 0x100000000000000000000000000000001)
+  (assert_eq second 2)
+  (assert_eq first_width 129) (assert_eq second_width 129))
+
+
+(case array_parameter_elements_select_conditional_whole_arrays
+  (source "conditional_array_parameter_elements.sv" #"
+    module Sink #(parameter logic [63:0] P=0)(output wire [63:0] y);
+      assign y=P;
+    endmodule
+    module Relay #(parameter logic [63:0] A[3:2]='{0,0})(output wire [127:0] y);
+      for(genvar i=2;i<=3;i++) begin:g
+        Sink #(.P(A[i])) sink(.y(y[(3-i)*64 +: 64]));
+      end
+    endmodule
+    module Parent #(parameter SELECT=1)(output wire [127:0] y);
+      localparam logic [63:0] A[2]='{"A0","A1"};
+      localparam logic [63:0] B[2]='{"B0","B1"};
+      Relay #(.A(SELECT ? A : (SELECT==0 ? B : A))) relay(.y(y));
+    endmodule
+    module Top(output wire [127:0] first, second);
+      Parent #(.SELECT(1)) a(.y(first));
+      Parent #(.SELECT(0)) b(.y(second));
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq first 0x00000000000041310000000000004130)
+  (assert_eq second 0x00000000000042310000000000004230))

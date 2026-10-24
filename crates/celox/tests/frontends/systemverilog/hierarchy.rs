@@ -1,6 +1,25 @@
 use super::*;
 
 sv_backends! {
+    fn array_parameter_elements_select_conditional_whole_arrays(sim) {
+        @case "hierarchy::array_parameter_elements_select_conditional_whole_arrays";
+    }
+    fn array_parameter_elements_preserve_wide_specializations(sim) {
+        @case "hierarchy::array_parameter_elements_preserve_wide_specializations";
+    }
+    fn array_parameter_elements_forward_generated_values(sim) {
+        @case "hierarchy::array_parameter_elements_forward_generated_values";
+    }
+    fn array_parameter_elements_keep_signed_element_types(sim) {
+        @case "hierarchy::array_parameter_elements_keep_signed_element_types";
+    }
+    fn array_parameter_elements_select_package_multidimensional_values(sim) {
+        @case "hierarchy::array_parameter_elements_select_package_multidimensional_values";
+    }
+    fn array_parameter_elements_preserve_four_state_and_conversion(sim) {
+        @case "hierarchy::array_parameter_elements_preserve_four_state_and_conversion";
+    }
+
     fn port_pattern_constant_unpacked_defaults(sim) {
         @case "hierarchy::port_pattern_constant_unpacked_defaults";
     }
@@ -611,6 +630,60 @@ fn rejects_recursive_port_pattern_defaults_for_packed_unions() {
         assert!(
             error.to_string().contains("packed union"),
             "{connection}: {error}"
+        );
+    }
+}
+
+#[test]
+fn array_parameter_elements_reject_runtime_values() {
+    for (declaration, expression) in [
+        ("logic [4:0] A[2]='{5'd3,5'd4};", "A[0]"),
+        ("localparam logic [4:0] A[2]='{5'd3,5'd4};", "A[index]"),
+    ] {
+        let source = format!(
+            "module Child #(parameter P=0)(output wire[4:0] y);assign y=P;endmodule\n\
+             module Top(input int index,output wire[4:0] y);{declaration}\n\
+             Child #(.P({expression})) child(.y(y));endmodule"
+        );
+        let error = match Simulator::from_sv_sources(
+            vec![(&source, Path::new("runtime_array_parameter.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        {
+            Err(error) => error,
+            Ok(_) => panic!("runtime parameter argument {expression} must be rejected"),
+        };
+        assert!(
+            error.to_string().contains("parameter"),
+            "{expression}: {error}"
+        );
+    }
+}
+
+#[test]
+fn array_parameter_elements_check_unselected_conditional_branch_types() {
+    for declaration in [
+        "logic[4:0] B[2]='{1,2};",
+        "logic[3:0] B[3]='{1,2,3};",
+        "logic signed[3:0] B[2]='{1,2};",
+        "bit[3:0] B[2]='{1,2};",
+    ] {
+        let source = format!(
+            "module Child #(parameter logic[3:0] Q[2]='{{0,0}})(output wire[3:0] y);\n\
+             assign y=Q[0];endmodule\n\
+             module Top(output wire[3:0] y);localparam logic[3:0] A[2]='{{3,4}};\n\
+             localparam {declaration}\n\
+             Child #(.Q(1 ? A : B)) child(.y(y));endmodule"
+        );
+        assert!(
+            Simulator::from_sv_sources(
+                vec![(&source, Path::new("conditional_array_type.sv"))],
+                "Top"
+            )
+            .build_cranelift()
+            .is_err(),
+            "unselected conditional branch with {declaration} must be rejected"
         );
     }
 }
