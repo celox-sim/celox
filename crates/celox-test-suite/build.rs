@@ -1,7 +1,10 @@
 // Fingerprint the compiled verifier independently of the embedded case corpus.
 // Hashing the executable itself would invalidate every case after adding one.
 #[cfg(not(feature = "external"))]
-fn main() {}
+fn main() {
+    // Do not let Cargo's default package-wide scan track runtime-only cases.
+    println!("cargo:rerun-if-changed=build.rs");
+}
 
 #[cfg(feature = "external")]
 fn main() {

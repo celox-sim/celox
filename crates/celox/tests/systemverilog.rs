@@ -3,6 +3,9 @@ use std::path::Path;
 use celox::Simulator;
 use num_bigint::BigUint;
 
+#[path = "test_utils/vtest_exec.rs"]
+mod vtest_exec;
+
 // Each entry is either a suite case, `@case "group::name";`, or a test written
 // against the Celox API with `@setup` and `@build`. Either runs on every backend.
 macro_rules! sv_backends {
