@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "17 2 * * *"
   workflow_dispatch:
+    inputs:
+      runner_probe:
+        description: Check Macro Runner availability without building or benchmarking
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -16,9 +21,20 @@ env:
 permissions: {}
 
 jobs:
+  runner-probe:
+    name: Probe CodSpeed runner
+    if: github.event_name == 'workflow_dispatch' && inputs.runner_probe
+    runs-on: codspeed-macro-arm64-graviton-ubuntu-22-04
+    timeout-minutes: 2
+    steps:
+      - name: Verify the ARM64 runner is available
+        run: test "$(uname -m)" = aarch64
+
   codspeed:
     name: CodSpeed
-    runs-on: ubuntu-latest
+    if: inputs.runner_probe != true
+    timeout-minutes: 60
+    runs-on: codspeed-macro-arm64-graviton-ubuntu-22-04
     outputs:
       run-id: ${{ steps.benchmarks.outputs.run-id }}
     permissions:
@@ -39,19 +55,20 @@ jobs:
           tool: cargo-codspeed@5.0.1
 
       - name: Build compile-time benchmarks
-        run: cargo codspeed build --locked -p celox --bench compilation
+        run: cargo codspeed build --locked --measurement-mode walltime -p celox --bench compilation
 
       - name: Run compile-time benchmarks
         id: benchmarks
+        timeout-minutes: 15
         uses: CodSpeedHQ/action@v5
         with:
-          mode: simulation
-          run: cargo codspeed run -p celox
+          mode: walltime
+          run: cargo codspeed run --measurement-mode walltime -p celox --bench compilation
 
   report:
     name: Report CodSpeed
     needs: codspeed
-    if: always() && (github.ref_name == 'master' || github.ref_name == 'develop')
+    if: always() && inputs.runner_probe != true && (github.ref_name == 'master' || github.ref_name == 'develop')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
