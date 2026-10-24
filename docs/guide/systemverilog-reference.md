@@ -43,7 +43,7 @@ synthesis and is tested at the design level.
 | Combinational processes | `always_comb`, `always @*`, blocking `always_latch`, block-local variables, sequential and dependent blocking assignments, reads of a variable before the process writes it (its previous value) |
 | Sequential processes | `always_ff @(posedge clk)`, `always @(posedge clk or negedge rst_n)` and the like, blocking and nonblocking assignments, concatenated targets, four-state clock and reset signals, one asynchronous reset shared by several clock domains, processes at both edges of one clock or reset, and one signal as the clock of some processes and the asynchronous reset of others (a timed `Simulation` runs every edge; `Simulator::tick` is the rising edge of its event only) |
 | Initial blocks | `initial` blocks and variable declaration initializers (`logic [7:0] v = 8'h5a;`, also of interface members); initializers take effect before the `initial` blocks. One whose writes have constant values, with constant `if` / `for` and `$readmemh` / `$readmemb`, defines the initial state. Any other, such as one that reads design state or calls a system task, runs as a process from time zero in a timed `Simulation`; a `Simulator` does not run processes, so building one for such a design fails with `SimulatorErrorKind::ProcessRequiresSimulation` |
-| Statements | `if` / `else`, `case`, `casez`, `casex`, `case ... inside`, `unique` / `priority`, `for`, `while`, `do ... while`, `repeat`, `forever` and `foreach` (unrolled when the trip count is constant, otherwise executed at run time), `break` / `continue` / `return`, immediate assertions |
+| Statements | `if` / `else`, `case`, `casez`, `casex`, `case ... inside`, `unique` / `priority`, `for`, `while`, `do ... while`, `repeat`, `forever` and `foreach` (unrolled when the trip count is constant, otherwise executed at run time), `break` / `continue` / `return`, immediate and deferred immediate assertions |
 | Functions | `function` and `task` with `input`, `output` and `inout` arguments, `return` or assignment to the function name, local variables and `localparam`s, selected and composite assignments; calls are inlined. Calls with constant arguments in constant expressions (parameters, ranges) are evaluated during elaboration |
 
 ### Timing controls {#timing-controls}
@@ -601,12 +601,6 @@ ignored, as 24.7 specifies, with a compilation warning
 function of a module. Calls in function declarations are diagnosed even when the function
 is unused; the diagnostic does not depend on constant evaluation executing it.
 
-### Immediate cover
-
-Immediate cover executes its pass statement when the condition is true.
-Coverage counters and reports are not exposed. Deferred cover (`#0` / `final`)
-is rejected because its scheduling is not modeled.
-
 ### Severity tasks and reports
 
 `$info`, `$warning`, `$error` and `$fatal`, including the default `$error` of
@@ -625,22 +619,29 @@ run; `$fatal` also ends the simulation with an error.
 
 ### Deferred assertions
 
-In an `initial` or `always` process with a timing control, and in an
-edge-triggered `always` or `always_ff` process, the action of `assert #0`,
-`assume #0`, `assert final` and `assume final` waits in the process's
-deferred assertion report queue (IEEE 1800-2023 16.4). Its arguments are
-evaluated when the assertion executes. The process flushes the queue each
-time it resumes from an event control or a wait, and an edge-triggered
-process each time it runs; a resume after a delay is no flush point
-(16.4.2). When the time slot is over, the actions still waiting are
-executed: those of `#0` ones first, then those of `final` ones. A deferred
-`$fatal` ends the simulation then. An action is one display or severity
-task call; a user subroutine, or more than one statement, is rejected.
+The action of `assert #0`, `assume #0`, `cover #0` and their `final` forms
+waits in the deferred assertion report queue of its process (IEEE 1800-2023
+16.4). Its arguments are evaluated when the assertion executes. The process
+flushes the queue at its flush points (16.4.2):
+- a process with timing controls, each time it resumes from an event control
+  or a wait; a resume after a delay is no flush point;
+- an edge-triggered `always` or `always_ff` process, each time it runs;
+- `always_comb`, `always_latch` and an `always` lowered as combinational logic
+  (one whose only timing control is its leading event control), each time it
+  runs again.
 
-The same assertions in `always_comb`, `always_latch` or a process lowered as
-combinational logic (an `always` whose only timing control is its leading
-event control) still report at once, like simple immediate assertions.
-Deferred assertions as module items and deferred cover are rejected.
+When the time slot is over, the actions still waiting are executed: those of
+`#0` ones first, then those of `final` ones. A deferred `$fatal` ends the
+simulation then. A deferred assertion as a module item is the same assertion
+in an `always_comb` (16.4.3). An action is one display or severity task
+call; a user subroutine, or more than one statement, is rejected. A
+`Simulator` call is a time slot: there, actions mature when the call settles
+combinational logic or runs a domain.
+
+### Immediate cover
+
+Immediate cover executes its pass statement when the condition is true.
+Coverage counters and reports are not exposed.
 
 ### Constant functions
 

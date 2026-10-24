@@ -153,6 +153,13 @@ mod host {
         /// The design has deferred assertions, whose actions mature at the
         /// end of each time slot.
         pub(crate) deferred_assertions: bool,
+        /// The activation groups of combinational processes with deferred
+        /// assertions, with a site of each: running the process again
+        /// flushes its queue (IEEE 1800-2023 16.4.2).
+        comb_deferred_groups: Vec<(u32, usize)>,
+        /// A timed simulation owns this simulator: a time slot ends when its
+        /// scheduler says so, not when combinational logic settles.
+        pub(crate) timed: bool,
         /// Identity of the state layout, computed on first checkpoint use.
         pub(super) checkpoint_fingerprint: std::sync::OnceLock<u64>,
         /// State objects as state files name them, built on first use.
@@ -430,9 +437,7 @@ mod host {
             {
                 let site = *site_id as u32;
                 match *deferred {
-                    celox_design::DeferredSite::FlushPoint => {
-                        self.deferred.waiting.retain(|&(queue, ..)| queue != site);
-                    }
+                    celox_design::DeferredSite::FlushPoint => self.flush(site),
                     celox_design::DeferredSite::Action { queue, region } => {
                         self.deferred.waiting.push((queue, region, event));
                     }
@@ -450,6 +455,13 @@ mod host {
                 self.deferred.missed += count;
             }
             self.push_ready(event, capacity);
+        }
+
+        /// Discard the actions waiting in queue `queue`.
+        fn flush(&mut self, queue: u32) {
+            self.deferred
+                .waiting
+                .retain(|&(waiting, ..)| waiting != queue);
         }
 
         /// The time slot ends: queue the waiting actions, those of the
@@ -1017,6 +1029,19 @@ mod host {
             } else {
                 Vec::new()
             };
+            let mut comb_deferred_groups: Vec<(u32, usize)> = Vec::new();
+            for observer in &program.runtime_schema.comb_observers {
+                if matches!(
+                    sites[observer.site_id as usize].deferred,
+                    Some(celox_design::DeferredSite::Action { .. })
+                ) && !comb_deferred_groups
+                    .iter()
+                    .any(|&(group, _)| group == observer.activation_group)
+                {
+                    comb_deferred_groups
+                        .push((observer.activation_group, observer.site_id as usize));
+                }
+            }
             let mut sim = Self {
                 backend,
                 program,
@@ -1037,6 +1062,8 @@ mod host {
                     ..Default::default()
                 })),
                 deferred_assertions: !deferred_sites.is_empty(),
+                comb_deferred_groups,
+                timed: false,
                 components: Default::default(),
                 component_simulation: None,
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
@@ -1263,10 +1290,26 @@ mod host {
                 !self.runtime_event_drain_active.load(Ordering::Acquire),
                 "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
             );
+            self.settle_for_runtime_event_drain();
+            // A fatal action is drained as a fatal report.
+            let _ = self.end_untimed_slot();
+            self.collect_formatted_runtime_events(ctx)
+        }
+
+        /// Settle dirty combinational logic before its events are drained.
+        pub(crate) fn settle_for_runtime_event_drain(&mut self) {
             if self.dirty {
                 self.eval_comb_for_runtime_event_drain().unwrap();
             }
-            self.collect_formatted_runtime_events(ctx)
+        }
+
+        /// Without a scheduler, a host call is a time slot: mature the
+        /// deferred assertions it ran.
+        fn end_untimed_slot(&mut self) -> Result<(), RuntimeErrorCode> {
+            if self.timed {
+                return Ok(());
+            }
+            self.mature_deferred_assertions()
         }
 
         pub(crate) fn drain_runtime_events_deferred_with_context(
@@ -1735,6 +1778,7 @@ mod host {
             self.dirty = true;
             if self.runtime_event_drain_active.load(Ordering::Acquire) {
                 self.eval_comb_for_runtime_event_drain()?;
+                self.end_untimed_slot()?;
             }
             Ok(())
         }
@@ -1742,6 +1786,8 @@ mod host {
         pub(super) fn settle_dirty_for_runtime_event_drain(&mut self) {
             if self.runtime_event_drain_active.load(Ordering::Acquire) {
                 self.eval_comb_for_runtime_event_drain().unwrap();
+                // A fatal action is drained as a fatal report.
+                let _ = self.end_untimed_slot();
             }
         }
 
@@ -1798,8 +1844,14 @@ mod host {
                 &self.comb_observer_snapshots,
                 self.comb_observer_initial_eval,
             );
+            if !self.comb_deferred_groups.is_empty() {
+                self.flush_comb_deferred(&active_sites);
+            }
             self.backend.set_comb_capture_event_enabled(&active_sites);
             let eval_result = self.backend.eval_comb();
+            if !self.comb_deferred_groups.is_empty() {
+                self.flush_comb_rerun_deferred(&active_sites);
+            }
             self.comb_observer_reads
                 .snapshot(&self.backend, &mut snapshots);
             let runtime_events = self.peek_backend_runtime_events_from(runtime_event_start_seq);
@@ -1814,6 +1866,34 @@ mod host {
                 std::mem::replace(&mut self.comb_observer_snapshots, snapshots);
             self.comb_observer_initial_eval = false;
             (eval_result, runtime_events)
+        }
+
+        /// The combinational processes that run again flush the actions of
+        /// their deferred assertions, after the events issued before.
+        #[cold]
+        fn flush_comb_deferred(&mut self, active_sites: &[bool]) {
+            self.stash_runtime_events();
+            let mut pending = self.pending_host_events.lock().unwrap();
+            for &(group, site) in &self.comb_deferred_groups {
+                if active_sites[site] {
+                    pending.flush(group);
+                }
+            }
+        }
+
+        /// A combinational process that runs again because the evaluation
+        /// changed its inputs, which the backend enables it for, flushes the
+        /// actions waiting from before the evaluation. Its new actions are
+        /// still in the backend's buffer.
+        #[cold]
+        fn flush_comb_rerun_deferred(&mut self, active_sites: &[bool]) {
+            let enabled = self.backend.comb_capture_event_enabled();
+            let mut pending = self.pending_host_events.lock().unwrap();
+            for &(group, site) in &self.comb_deferred_groups {
+                if !active_sites[site] && enabled.get(site).copied().unwrap_or(false) {
+                    pending.flush(group);
+                }
+            }
         }
 
         pub(super) fn snapshot_all_comb_observers(
@@ -1832,7 +1912,8 @@ mod host {
                     .runtime_schema
                     .runtime_event_sites
                     .get(*site_id)?;
-                if !site.kind.is_fatal() {
+                // A deferred `$fatal` ends the simulation when it matures.
+                if !site.kind.is_fatal() || site.deferred.is_some() {
                     return None;
                 }
                 Some(RuntimeErrorCode::Runtime {
@@ -2586,7 +2667,7 @@ mod host {
         pub fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
             self.eval_comb_checked()?;
             self.dirty = false;
-            Ok(())
+            self.end_untimed_slot()
         }
 
         /// Returns a raw pointer to the backend memory and its total size in bytes.

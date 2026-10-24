@@ -3433,6 +3433,13 @@ impl super::super::SimBackend for NativeBackend {
         }
     }
 
+    fn comb_capture_event_enabled(&self) -> Vec<bool> {
+        self.comb_capture_enabled
+            .iter()
+            .map(|&enabled| enabled != 0)
+            .collect()
+    }
+
     fn stable_region_size(&self) -> usize {
         self.compiled.layout.total_size
     }
