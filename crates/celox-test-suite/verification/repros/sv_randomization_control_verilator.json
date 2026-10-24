@@ -1,0 +1,34 @@
+{
+  "schema_version": 3,
+  "suite": "sv",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "cases": [
+    {
+      "case_fingerprint": "0790ca7f7a064b5ada217c1bcb303cc08f64d22140af1e703f2687aa00b567f5",
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-WIDTHTRUNC: <case>/source_0.sv:25:13: Logical operator LOGNOT expects 1 bit on the LHS, but LHS's METHODCALL 'randomize' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   25 |         if (!c.randomize()) errors++;\n      |             ^\n                     ... For warning description see https://verilator.org/warn/WIDTHTRUNC?v=5.052\n                     ... Use \"/* verilator lint_off WIDTHTRUNC */\" and lint_on around source to disable this message.\n%Warning-WIDTHTRUNC: <case>/source_0.sv:28:13: Logical operator LOGNOT expects 1 bit on the LHS, but LHS's METHODCALL 'again' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   28 |         if (!b.again()) errors++;\n      |             ^\n%Warning-WIDTHTRUNC: <case>/source_0.sv:32:29: Logical operator LOGOR expects 1 bit on the LHS, but LHS's METHODCALL 'rand_mode' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   32 |         if (b.x.rand_mode() || c.x.rand_mode() || c.y.rand_mode()) errors++;\n      |                             ^~\n%Warning-WIDTHTRUNC: <case>/source_0.sv:32:29: Logical operator LOGOR expects 1 bit on the RHS, but RHS's METHODCALL 'rand_mode' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   32 |         if (b.x.rand_mode() || c.x.rand_mode() || c.y.rand_mode()) errors++;\n      |                             ^~\n%Warning-WIDTHTRUNC: <case>/source_0.sv:32:48: Logical operator LOGOR expects 1 bit on the RHS, but RHS's METHODCALL 'rand_mode' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   32 |         if (b.x.rand_mode() || c.x.rand_mode() || c.y.rand_mode()) errors++;\n      |                                                ^~\n%Warning-WIDTHTRUNC: <case>/source_0.sv:33:13: Logical operator LOGNOT expects 1 bit on the LHS, but LHS's METHODCALL 'randomize' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   33 |         if (!b.randomize() || b.x != bx || c.x != cx || c.y != cy) errors++;\n      |             ^\n%Warning-WIDTHTRUNC: <case>/source_0.sv:36:13: Logical operator LOGNOT expects 1 bit on the LHS, but LHS's METHODCALL 'randomize' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   36 |         if (!b.randomize(x) || b.x != bx || c.x != cx || c.y != cy) errors++;\n      |             ^\n%Error: <case>/source_0.sv:3:5: Duplicate declaration of member name: 'srandom'\n                              : ... note: In instance 'celox_suite_tb.dut'\n    3 |     class Base;\n      |     ^~~~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: <case>/source_0.sv:3:5: Duplicate declaration of function: 'srandom'\n                              : ... note: In instance 'celox_suite_tb.dut'\n    3 |     class Base;\n      |     ^~~~~\n        <case>/source_0.sv:3:5: ... Location of original declaration\n    3 |     class Base;\n      |     ^~~~~\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "Simulation",
+      "name": "class::randomization_inheritance",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1792717788
+    },
+    {
+      "case_fingerprint": "ca2c64e1d788293a78db1e56128c2d271ac015be7f14c463c9829778dc0a114f",
+      "category": "Types",
+      "detail": "class::randomization_mode_bit_argument at 746:46: assert_eq errors: expected 0x0, got 0x2",
+      "expectation": "Simulation",
+      "name": "class::randomization_mode_bit_argument",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1792717804
+    }
+  ]
+}

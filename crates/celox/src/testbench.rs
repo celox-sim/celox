@@ -1724,29 +1724,42 @@ struct ProcessClock<Event> {
 // Clock generators start low even when the design uses four-state storage.
 // Otherwise X's nonzero payload can make the first scheduled 1 look like a
 // steady high to the edge detector, losing the first clock/reset cycle.
+// Returns the clock events, declared generators first.
 fn initialize_process_clocks<B: SimBackend>(
     sim: &mut Simulator<B>,
-    statements: &[TestbenchStatement<B>],
-) {
-    for statement in statements {
-        match statement {
-            GenericTestbenchStatement::ClockNext { clock_event, .. }
-            | GenericTestbenchStatement::ResetAssert { clock_event, .. } => {
-                let signal = sim.backend.resolve_signal(&clock_event.addr());
-                sim_set_u64(sim, signal, 0);
+    testbench: &CompiledTestbench<B>,
+) -> Vec<B::Event> {
+    fn referenced<B: SimBackend>(statements: &[TestbenchStatement<B>], clocks: &mut Vec<B::Event>) {
+        for statement in statements {
+            match statement {
+                GenericTestbenchStatement::ClockNext { clock_event, .. }
+                | GenericTestbenchStatement::ResetAssert { clock_event, .. } => {
+                    clocks.push(*clock_event);
+                }
+                GenericTestbenchStatement::If {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    referenced::<B>(then_block, clocks);
+                    referenced::<B>(else_block, clocks);
+                }
+                GenericTestbenchStatement::For { body, .. } => referenced::<B>(body, clocks),
+                _ => {}
             }
-            GenericTestbenchStatement::If {
-                then_block,
-                else_block,
-                ..
-            } => {
-                initialize_process_clocks(sim, then_block);
-                initialize_process_clocks(sim, else_block);
-            }
-            GenericTestbenchStatement::For { body, .. } => initialize_process_clocks(sim, body),
-            _ => {}
         }
     }
+    let mut clocks: Vec<_> = testbench.clocks().iter().map(|clock| clock.event).collect();
+    referenced::<B>(testbench.statements(), &mut clocks);
+    let mut unique: Vec<B::Event> = Vec::with_capacity(clocks.len());
+    for event in clocks {
+        if unique.iter().all(|known| known.id() != event.id()) {
+            let signal = sim.backend.resolve_signal(&event.addr());
+            sim_set_u64(sim, signal, 0);
+            unique.push(event);
+        }
+    }
+    unique
 }
 
 fn exec_testbench<B: SimBackend>(
@@ -1758,7 +1771,10 @@ fn exec_testbench<B: SimBackend>(
         .processes()
         .filter(|block| !block.is_empty())
         .collect();
-    if blocks.len() <= 1 {
+    let clocks = initialize_process_clocks(sim, testbench);
+    // One process on one clock spends time only in that clock's periods, so
+    // stepping them in place is the whole schedule.
+    if blocks.is_empty() || (blocks.len() == 1 && clocks.len() <= 1) {
         return exec_detailed(sim, testbench.statements(), ctx);
     }
     // Suspended processes keep their temporaries outside state memory, so
@@ -1775,7 +1791,6 @@ fn exec_processes<B: SimBackend>(
     ctx: &mut DetailedExecContext,
     blocks: &[&[TestbenchStatement<B>]],
 ) -> ExecResult {
-    initialize_process_clocks(sim, testbench.statements());
     // The compiler's function slots are shared by inline call sites. Keep
     // only these temporaries private; design variables remain shared between
     // initial processes and all RTL. Capture masks as well as payloads.
@@ -1794,7 +1809,18 @@ fn exec_processes<B: SimBackend>(
         .zip(&waits)
         .map(|(block, wait)| Some(exec_process(&sim, &ctx, wait, &reset_edges, block)))
         .collect();
-    let mut clocks: Vec<ProcessClock<B::Event>> = Vec::new();
+    // Every clock generator runs from time 0, whether or not a process
+    // waits on it.
+    let mut clocks: Vec<ProcessClock<B::Event>> = testbench
+        .clocks()
+        .iter()
+        .map(|clock| ProcessClock {
+            event: clock.event,
+            period: clock.period.max(2),
+            next_edge: 0,
+            falling_edge: None,
+        })
+        .collect();
     // Capture the baseline before runnable processes drive reset. Reset
     // assertions are signal writes AND events at this timestamp, even if
     // their clock's next edge is still in the future. Rebasing after the
@@ -1907,16 +1933,9 @@ fn exec_processes<B: SimBackend>(
                 }
             }
         }
-        let active = |event: B::Event| {
-            waits.iter().any(|wait| {
-                wait.borrow()
-                    .as_ref()
-                    .is_some_and(|wait| wait.remaining != 0 && wait.clock.id() == event.id())
-            })
-        };
         let fired: Vec<_> = clocks
             .iter()
-            .filter(|clock| !draining && !stopped && clock.next_edge == now && active(clock.event))
+            .filter(|clock| !draining && !stopped && clock.next_edge == now)
             .map(|clock| clock.event)
             .collect();
         {
@@ -1977,7 +1996,7 @@ fn exec_processes<B: SimBackend>(
         }
         let next_edge = clocks
             .iter()
-            .filter(|clock| !ctx.borrow().at_tick_limit() && active(clock.event))
+            .filter(|_| !ctx.borrow().at_tick_limit())
             .map(|clock| clock.next_edge)
             .min();
         let next_falling = clocks.iter().filter_map(|clock| clock.falling_edge).min();
@@ -2117,7 +2136,7 @@ fn exec_one_detailed<B: SimBackend>(
                     let (completed, result) = if sim.components.has_scheduled_components() {
                         (1, tick_component_clock(sim, *clock_event, ctx.current_time))
                     } else {
-                        let (completed, result) = sim.tick_deferred_comb_many(*clock_event, batch);
+                        let (completed, result) = clock_periods(sim, *clock_event, batch);
                         (completed, result.map_err(|error| error.to_string()))
                     };
                     if completed == 0 || completed > batch {
@@ -2185,7 +2204,7 @@ fn exec_one_detailed<B: SimBackend>(
                             ),
                         )
                     } else {
-                        let (completed, result) = sim.tick_deferred_comb_many(*clock_event, batch);
+                        let (completed, result) = clock_periods(sim, *clock_event, batch);
                         (completed, result.map_err(|error| error.to_string()))
                     };
                     if completed == 0 || completed > batch {
@@ -2534,6 +2553,24 @@ fn exec_one_detailed<B: SimBackend>(
         GenericTestbenchStatement::Break => ExecResult::Break,
         GenericTestbenchStatement::Finish => ExecResult::Finished,
     }
+}
+
+/// Run up to `count` periods of a testbench clock generator's signal, each a
+/// rise followed by a fall, and return how many ran. A run that the event's
+/// own domain alone reacts to fires that domain once per period with the
+/// signal left low, which is all a period does then.
+fn clock_periods<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    event: B::Event,
+    count: u64,
+) -> (u64, Result<(), crate::RuntimeErrorCode>) {
+    if sim.period_runs_only_active_edge(event) {
+        return sim.tick_deferred_comb_many(event, count);
+    }
+    let result = sim
+        .edge(event, celox_runtime::Edge::Rising)
+        .and_then(|()| sim.edge(event, celox_runtime::Edge::Falling));
+    (1, result)
 }
 
 fn tick_component_reset<B: SimBackend>(

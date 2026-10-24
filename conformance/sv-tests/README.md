@@ -187,6 +187,17 @@ passing negative case: its return types conflict, which is rejected. Calls
 through interface class handles, `$cast`, parameterized classes and shallow
 copies stay unsupported.
 
+Interface class handles and `$cast` of class handles update two more rows: both
+state modes for `8.26.5--cast_between_interface_classes` change from fail to
+pass. The case was simulated with calls added after the cast, which reached the
+object through both interface class handles. Full official runs at the pinned
+revision report 544 passing cases in 2state and 546 in 4state, with no passing
+case regressing: an interface class whose methods use its own typedefs or type
+parameters, as in `8.26.3--type_access_extends` and
+`8.26.6.2--parameter_type_conflict`, is still elaborated without being lowered.
+`6.24.2--cast_fn`, `6.24.2--cast_task` and `8.16--cast_func` keep failing
+because they cast to integral and enum variables.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.

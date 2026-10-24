@@ -20,6 +20,10 @@ sv_backends! {
     fn class_abstract_classes_and_pure_virtual_methods(sim) { @case "class::abstract_classes_and_pure_virtual_methods"; }
     fn class_methods_of_handle_array_elements(sim) { @case "class::methods_of_handle_array_elements"; }
     fn class_classes_implementing_interface_classes(sim) { @case "class::classes_implementing_interface_classes"; }
+    fn class_methods_called_through_interface_class_handles(sim) { @case "class::methods_called_through_interface_class_handles"; }
+    fn class_inherited_methods_of_extended_interface_classes(sim) { @case "class::inherited_methods_of_extended_interface_classes"; }
+    fn class_casts_of_class_handles(sim) { @case "class::casts_of_class_handles"; }
+    fn class_casts_from_interface_class_handles(sim) { @case "class::casts_from_interface_class_handles"; }
 }
 
 sv_backends! {
@@ -156,5 +160,221 @@ fn misplaced_super_new_static_misuse_and_unimplemented_methods_are_rejected() {
         };
         let error = error.to_string();
         assert!(error.contains(want), "{error}");
+    }
+}
+
+#[test]
+fn incompatible_class_handle_assignments_are_rejected() {
+    for (statement, want) in [
+        ("d = b;", ["handle of class `B`", "class `D`"]),
+        ("d = u;", ["handle of class `U`", "class `D`"]),
+        ("i = b;", ["handle of class `B`", "class `I`"]),
+        ("b = U::new;", ["handle of class `U`", "class `B`"]),
+        ("d.next = b;", ["handle of class `B`", "class `D`"]),
+        ("$cast(d.next, b);", ["`$cast` to a class property", ""]),
+    ] {
+        let source = format!(
+            "module Top;
+                interface class I; endclass
+                class B; endclass
+                class D extends B implements I; D next; endclass
+                class U; endclass
+                B b; D d; U u; I i;
+                initial begin d = new; {statement} end
+            endmodule"
+        );
+        let Err(error) =
+            Simulator::from_sv_sources(vec![(source.as_str(), Path::new("class.sv"))], "Top")
+                .build_cranelift()
+        else {
+            panic!("`{statement}` is rejected");
+        };
+        let error = error.to_string();
+        assert!(want.iter().all(|want| error.contains(want)), "{error}");
+    }
+}
+
+sv_backends! {
+    fn class_unconstrained_randomize(sim) { @case "class::unconstrained_randomize"; }
+    fn class_randomize_without_rand_members(sim) { @case "class::randomize_without_rand_members"; }
+    fn class_randomize_null_receiver(sim) {
+        @setup {
+            let source = r#"module Top(output int hooks, result);
+                class Empty;
+                    static int calls;
+                    function void pre_randomize(); calls++; endfunction
+                    function void post_randomize(); calls++; endfunction
+                endclass
+                Empty object;
+                initial begin
+                    result = object.randomize();
+                    hooks = Empty::calls;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("null_randomize.sv"))], "Top");
+        let error = sim.run_until(0).unwrap_err().to_string();
+        assert!(error.contains("null object handle"), "{error}");
+        assert_eq!(sim.get(sim.signal("hooks")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("result")), 0u8.into());
+    }
+}
+
+sv_backends! {
+    fn class_randomize_rejects_dynamic_base_handle(sim) {
+        @setup {
+            let source = r#"module Top(output int value, hooks, result);
+                class Base;
+                    rand int x = 77;
+                    static int calls;
+                    function void pre_randomize(); calls++; endfunction
+                    function void post_randomize(); calls++; endfunction
+                endclass
+                class Derived extends Base;
+                    constraint c { x == 1; }
+                endclass
+                Base b;
+                Derived d;
+                initial begin
+                    d = new;
+                    b = d;
+                    result = b.randomize();
+                    value = b.x;
+                    hooks = Base::calls;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("base_randomize.sv"))], "Top");
+        let error = sim.run_until(0).unwrap_err().to_string();
+        assert!(error.contains("randomization through a base handle"), "{error}");
+        assert_eq!(sim.get(sim.signal("value")), 77u8.into());
+        assert_eq!(sim.get(sim.signal("hooks")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("result")), 0u8.into());
+    }
+}
+
+sv_backends! {
+    fn class_randomize_checkpoint_four_state(sim) {
+        @setup {
+            let source = r#"module Top(output bit [63:0] value);
+                timeunit 1ps / 1ps;
+                class C; rand bit [63:0] x; endclass
+                C c;
+                initial begin
+                    c = new;
+                    c.srandom(44);
+                    void'(c.randomize());
+                    value = c.x;
+                    #10;
+                    void'(c.randomize());
+                    value = c.x;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("random_checkpoint.sv"))], "Top").four_state(true);
+        sim.run_until(5).unwrap();
+        let checkpoint = sim.checkpoint().unwrap();
+        let value = sim.signal("value");
+        sim.run_until(15).unwrap();
+        let expected = sim.get_four_state(value);
+        sim.restore(&checkpoint).unwrap();
+        sim.run_until(15).unwrap();
+        assert_eq!(sim.get_four_state(value), expected);
+    }
+}
+
+sv_backends! {
+    fn class_constructor_checkpoint_restores_process_rng(sim) {
+        @setup { let source = r#"
+            module Top(input bit clk, output bit [63:0] value);
+                class C; rand bit [63:0] x; endclass
+                C c;
+                always @(posedge clk) begin
+                    c = new;
+                    void'(c.randomize());
+                    value = c.x;
+                end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("constructor_rng.sv"))], "Top").four_state(true);
+        let clk = sim.event("clk");
+        let value = sim.signal("value");
+        sim.tick(clk).unwrap();
+        let checkpoint = sim.checkpoint().unwrap();
+        let mut expected = Vec::new();
+        for _ in 0..4 {
+            sim.tick(clk).unwrap();
+            expected.push(sim.get_four_state(value));
+        }
+        assert!(expected.windows(2).any(|pair| pair[0] != pair[1]));
+        sim.restore(&checkpoint).unwrap();
+        for expected in expected {
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get_four_state(value), expected);
+        }
+    }
+}
+
+sv_backends! {
+    fn class_randomization_mode_bit_argument(sim) { @case "class::randomization_mode_bit_argument"; }
+    fn class_randomization_inheritance(sim) { @case "class::randomization_inheritance"; }
+    fn class_randomization_modes_and_selection(sim) { @case "class::randomization_modes_and_selection"; }
+    fn class_randomization_pre_hook_controls_modes(sim) { @case "class::randomization_pre_hook_controls_modes"; }
+}
+
+sv_backends! {
+    fn class_random_modes_checkpoint_four_state(sim) {
+        @setup { let source = r#"
+            module Top(input bit enable, output int mode, output bit [63:0] value);
+                timeunit 1ps / 1ps;
+                class C; rand bit [63:0] x = 17; endclass
+                C c;
+                initial begin
+                    c = new;
+                    c.x.rand_mode(0);
+                    #10 if (enable) c.x.rand_mode(1);
+                    #10;
+                    void'(c.randomize());
+                    value = c.x;
+                    mode = c.x.rand_mode();
+                end
+            endmodule
+        "#; }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("mode_checkpoint.sv"))], "Top").four_state(true);
+        sim.run_until(5).unwrap();
+        let saved = sim.checkpoint().unwrap();
+        let enable = sim.signal("enable");
+        sim.modify(|io| io.set(enable, 1u8)).unwrap();
+        sim.run_until(25).unwrap();
+        assert_eq!(sim.get(sim.signal("mode")), 1u8.into());
+        sim.restore(&saved).unwrap();
+        sim.run_until(25).unwrap();
+        assert_eq!(sim.get(sim.signal("mode")), 0u8.into());
+        assert_eq!(sim.get_four_state(sim.signal("value")), (17u8.into(), 0u8.into()));
+    }
+
+    fn class_random_selection_spans_multiple_words(sim) {
+        @setup {
+            let properties = (0..70).map(|i| format!("p{i}")).collect::<Vec<_>>().join(", ");
+            let source = format!(r#"
+                module Top(output bit done, output int errors);
+                    class C;
+                        bit [63:0] {properties};
+                    endclass
+                    C c, reference;
+                    initial begin
+                        c = new; reference = new;
+                        c.srandom(71); reference.srandom(71);
+                        if (!c.randomize(p69) || !reference.randomize(p0)) errors++;
+                        if (c.p69 != reference.p0 || c.p0 != 0 || c.p68 != 0) errors++;
+                        done = 1;
+                    end
+                endmodule
+            "#);
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("wide_selection.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("errors")), 0u8.into());
     }
 }

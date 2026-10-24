@@ -613,7 +613,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             .expect("source program identity exhausted").to_string())
     .entered();
     let SymbolicRtl {
-        modules,
+        mut modules,
         module_names,
         root_id,
         packages,
@@ -645,6 +645,11 @@ pub fn schedule_symbolic_rtl_reporting_loops(
 
     let (mut expanded, mut instance_modules, indexed_instances) =
         timed_sub!("expand_hierarchy", expand_hierarchy(&root_id, &modules));
+    let process_count = instance_modules
+        .values()
+        .map(|module| modules[module].processes.len())
+        .sum();
+    let scheduler_slots = declare_scheduler_slots(&mut modules, root_id, process_count);
     // Each package with variables is one instance outside the hierarchy,
     // named by a path segment no instance name can take.
     let mut package_instances = HashMap::default();
@@ -733,6 +738,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         })
         .collect();
     let declaration_probes;
+    let occurrence_probes: Vec<(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)>;
     let counted = {
         // Flip-flop event domains and the aliases that resolve to them.
         let event_addresses: HashSet<AbsoluteAddr> = eval_apply_ffs
@@ -766,6 +772,13 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     if !probes.contains(&(source, counter)) {
                         probes.push((source, counter));
                     }
+                }
+            }
+        }
+        for observer in &comb_observers {
+            for &(source, counter) in &observer.sensitivity_counters {
+                if !probes.contains(&(source, counter)) {
+                    probes.push((source, counter));
                 }
             }
         }
@@ -816,6 +829,13 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             }
         }
         declaration_probes = probes.clone();
+        occurrence_probes = probes.clone();
+        // Signals a flip-flop evaluation may store twice in its working
+        // state. Each store is an update event (IEEE 1800-2023 4.3, 10.4.2)
+        // that the commit of the final value alone would not show; the
+        // working state is seeded with the stable value first, so a store
+        // compares with the value its update replaces.
+        let ff_multi_stored = ff_multi_stored(&eval_apply_ffs, &eval_only_ffs, &parallel_ff_units);
         for (source, counter) in probes {
             let width = source.access.msb - source.access.lsb + 1;
             let four_state = four_state && variables[&source.id].1;
@@ -862,6 +882,27 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     crate::watch::instrument_unit(&mut part.apply, code);
                 }
             }
+            if ff_multi_stored.contains(&source.id) {
+                let working =
+                    |address| RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, address);
+                let code = |address: &RegionedAbsoluteAddr| {
+                    (address.region == WORKING_REGION && address.absolute_addr() == source.id).then(
+                        || crate::watch::WatchCode {
+                            signal: working(source.id),
+                            width,
+                            offset: offset.clone(),
+                            four_state,
+                            counters: vec![(CounterKind::Changes, stable(counter))],
+                        },
+                    )
+                };
+                for_each_ff_evaluation(
+                    &mut eval_apply_ffs,
+                    &mut eval_only_ffs,
+                    &mut parallel_ff_units,
+                    |unit| instrument_stores(unit, code),
+                );
+            }
             for path in &mut comb_blocks {
                 if let LogicPathTarget::Process { unit, .. } = &mut path.target {
                     crate::watch::instrument_unit(unit, |address| {
@@ -894,7 +935,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     .flatten()
                     .flat_map(|split| [&mut split.active, &mut split.nba]),
             );
-        instrument_counted_signals(
+        let counted = instrument_counted_signals(
             &timing,
             counted,
             &variables,
@@ -902,7 +943,43 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             &mut processes,
             &mut comb_blocks,
             ff_units,
-        )
+        );
+        // A counted signal without pending slots (a design without waits)
+        // is counted at its commit, which sees only the final value. Count
+        // each store of an evaluation that may store it twice as well.
+        let pending: HashSet<AbsoluteAddr> = timing
+            .pending_slots
+            .iter()
+            .map(|slots| slots.signal)
+            .collect();
+        for (signal, slots) in &counted {
+            if !ff_multi_stored.contains(signal) || pending.contains(signal) {
+                continue;
+            }
+            let (width, is_4state) = variables[signal];
+            let regioned = RegionedAbsoluteAddr::from_absolute_addr;
+            let code = |address: &RegionedAbsoluteAddr| {
+                (address.region == WORKING_REGION && address.absolute_addr() == *signal).then(
+                    || crate::watch::WatchCode {
+                        signal: regioned(WORKING_REGION, *signal),
+                        offset: celox_sir::SIROffset::Static(0),
+                        width,
+                        four_state: four_state && is_4state,
+                        counters: CounterKind::ALL
+                            .into_iter()
+                            .map(|kind| (kind, regioned(STABLE_REGION, slots.counter(kind))))
+                            .collect(),
+                    },
+                )
+            };
+            for_each_ff_evaluation(
+                &mut eval_apply_ffs,
+                &mut eval_only_ffs,
+                &mut parallel_ff_units,
+                |unit| instrument_stores(unit, code),
+            );
+        }
+        counted
     };
     // Combinational values and the variables they are computed from.
     let comb_sources = comb_sources(&comb_blocks, &global_arena);
@@ -951,6 +1028,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         combinational_derived,
         independent_derived,
         combinationally_read,
+        level_unread_by_domain,
     } = timed_sub!(
         "analyze_clock_dependencies",
         analyze_clock_dependencies(
@@ -1648,6 +1726,11 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             site_id: observer.site_id,
             activation_group: observer.activation_group,
             sensitivity: observer.sensitivity.clone(),
+            occurrence_counters: observer
+                .sensitivity_counters
+                .iter()
+                .map(|&(_, counter)| counter)
+                .collect(),
             written_inputs: observer.written_inputs.clone(),
         })
         .collect();
@@ -1797,6 +1880,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             .collect(),
         independent_derived: independent_derived.into_iter().map(project).collect(),
         combinationally_read: combinationally_read.into_iter().map(project).collect(),
+        level_unread_by_domain: level_unread_by_domain.into_iter().map(project).collect(),
         combinational_derived: combinational_derived
             .into_iter()
             .map(|(event, clocks)| {
@@ -1861,6 +1945,11 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     id: project(atom.id),
                     access: atom.access,
                 })
+                .collect(),
+            occurrence_counters: observer
+                .occurrence_counters
+                .into_iter()
+                .map(project)
                 .collect(),
             written_inputs: observer.written_inputs.into_iter().map(project).collect(),
         })
@@ -1971,6 +2060,19 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .collect();
     let active_commits: Vec<StateAddr> = active_commits.into_iter().map(project).collect();
     let time_slots: Vec<StateAddr> = time_slots.into_iter().map(project).collect();
+    let root_instance = expanded[&InstancePath(Vec::new())];
+    let scheduler = scheduler_slots.map(|slots| celox_design::SchedulerSchema {
+        slots: slots.map(|var_id| {
+            project(AbsoluteAddr {
+                instance_id: root_instance,
+                var_id,
+            })
+        }),
+        unit: None,
+        fallback: Vec::new(),
+        events: Vec::new(),
+        clocks: Vec::new(),
+    });
     // The runtime reads counters, the signals waits watch and staged
     // nonblocking values directly; no unit loads a wait's signal.
     let mut timing_read_roots: HashSet<StateAddr> = watches
@@ -1989,12 +2091,37 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .chain(
             nba_sites
                 .iter()
-                .flat_map(|site| [Some(site.value), site.offset, site.pending])
+                .flat_map(|site| {
+                    [
+                        Some(site.value),
+                        site.position.map(|position| position.offset),
+                        site.position.map(|position| position.width),
+                        site.pending,
+                    ]
+                })
                 .flatten(),
         )
         .chain(host_request_sites.iter().flat_map(|site| site.slots()))
         .collect();
     let declaration_startup = declaration_startup.map(|startup| startup.map(project));
+    let occurrence_probes: Vec<(VarAtomBase<StateAddr>, StateAddr)> = occurrence_probes
+        .into_iter()
+        .map(|(source, counter)| {
+            (
+                VarAtomBase {
+                    id: project(source.id),
+                    access: source.access,
+                },
+                project(counter),
+            )
+        })
+        .collect();
+    // The runtime counts the occurrences its own writes cause.
+    timing_read_roots.extend(
+        occurrence_probes
+            .iter()
+            .flat_map(|(source, counter)| [source.id, *counter]),
+    );
     if let Some(startup) = &declaration_startup {
         timing_read_roots.extend(
             startup
@@ -2067,11 +2194,13 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             processes: process_slots,
             process_origins,
             watches,
+            occurrence_probes,
             wait_sites,
             nba_sites,
             host_request_sites,
             active_commits,
             time_slots,
+            scheduler,
         },
     };
 
@@ -2086,6 +2215,73 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     Ok(ScheduledRtlOutput {
         scheduled,
         fused_optimization_hints: FusedSirOptimizationHints { direct_ff_writes },
+    })
+}
+
+/// Declare the hidden objects a compiled scheduler exchanges with the
+/// runtime (`RuntimeSchema::scheduler`) as variables of the top module, for
+/// a design with `process_count` process kernels. A design without kernels
+/// has them too: host clocks may run in a compiled scheduler.
+fn declare_scheduler_slots(
+    modules: &mut HashMap<ModuleId, SimModule>,
+    root: ModuleId,
+    process_count: usize,
+) -> Option<celox_design::SchedulerSlots<SourceVarId>> {
+    let variables = &mut modules.get_mut(&root)?.variables;
+    let mut next = variables.keys().map(|id| id.0 + 1).max().unwrap_or(0);
+    let mut declare = |name: String, width: usize| {
+        let id = SourceVarId(next);
+        next += 1;
+        variables.insert(
+            id,
+            crate::symbolic::artifact::SymbolicVariable {
+                path: vec!["$scheduler".to_string(), name],
+                kind: crate::VariableKind::Variable,
+                signed: false,
+                metadata: VariableMetadata {
+                    width,
+                    is_4state: false,
+                    kind: DomainKind::Other,
+                    type_kind: celox_design::PortTypeKind::Bit,
+                    array_dims: Vec::new(),
+                    value_kind: Default::default(),
+                },
+                packed_dims: vec![width],
+                unpacked_ranges: Vec::new(),
+                source: None,
+                module_affiliated: false,
+            },
+        );
+        id
+    };
+    use celox_design::{
+        SCHEDULER_CLOCKS as CLOCKS, SCHEDULER_FLAG_WIDTH as FLAG, SCHEDULER_TIME_WIDTH as TIME,
+    };
+    Some(celox_design::SchedulerSlots {
+        limit: declare("limit".into(), TIME),
+        now: declare("now".into(), TIME),
+        exit: declare("exit".into(), FLAG),
+        exit_arg: declare("exit_arg".into(), TIME),
+        finish: declare("finish".into(), FLAG),
+        cont: declare("cont".into(), FLAG),
+        dirty: declare("dirty".into(), FLAG),
+        count: declare("count".into(), TIME),
+        current: declare("current".into(), TIME),
+        levels: declare("levels".into(), TIME),
+        ready: declare("ready".into(), TIME),
+        wake: (0..process_count)
+            .map(|index| declare(format!("wake[{index}]"), TIME))
+            .collect(),
+        waiting: (0..process_count)
+            .map(|index| declare(format!("waiting[{index}]"), FLAG))
+            .collect(),
+        baseline: (0..process_count)
+            .map(|index| declare(format!("baseline[{index}]"), FLAG))
+            .collect(),
+        clock_next: declare("clock_next".into(), TIME * CLOCKS),
+        clock_period: declare("clock_period".into(), TIME * CLOCKS),
+        clock_value: declare("clock_value".into(), TIME),
+        clock_armed: declare("clock_armed".into(), TIME),
     })
 }
 
@@ -3466,6 +3662,7 @@ fn select_nba_paths(
         };
         if !staged.contains(&switch.switch) {
             site.value = switch.queued;
+            site.position = switch.queued_position;
             site.pending = None;
         }
     }
@@ -3616,6 +3813,65 @@ fn relocate_timing(
         );
     }
     metadata
+}
+
+type FfUnits = HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>;
+type FfParts = HashMap<AbsoluteAddr, Vec<(InstanceId, FfPart<RegionedAbsoluteAddr>)>>;
+
+/// The signals some flip-flop evaluation may store twice in its working
+/// state in one execution.
+fn ff_multi_stored(
+    eval_apply_ffs: &FfUnits,
+    eval_only_ffs: &FfUnits,
+    parallel_ff_units: &FfParts,
+) -> HashSet<AbsoluteAddr> {
+    let working = |address: &RegionedAbsoluteAddr| {
+        (address.region == WORKING_REGION).then(|| address.absolute_addr())
+    };
+    eval_apply_ffs
+        .values()
+        .chain(eval_only_ffs.values())
+        .flatten()
+        .chain(
+            parallel_ff_units
+                .values()
+                .flatten()
+                .map(|(_, part)| &part.evaluate),
+        )
+        .flat_map(|unit| crate::watch::multi_store_only_candidates(unit, working))
+        .collect()
+}
+
+/// [`crate::watch::instrument_unit`] for the stores alone: the commits that
+/// seed a flip-flop evaluation's working state are not writes of the
+/// process.
+fn instrument_stores(
+    unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    watch_for: impl Fn(&RegionedAbsoluteAddr) -> Option<crate::watch::WatchCode<RegionedAbsoluteAddr>>,
+) {
+    crate::watch::instrument_writes(unit, |instruction| match instruction {
+        SIRInstruction::Store(address, ..) => watch_for(address),
+        _ => None,
+    });
+}
+
+/// Run `f` on every flip-flop evaluation.
+fn for_each_ff_evaluation(
+    eval_apply_ffs: &mut FfUnits,
+    eval_only_ffs: &mut FfUnits,
+    parallel_ff_units: &mut FfParts,
+    mut f: impl FnMut(&mut ExecutionUnit<RegionedAbsoluteAddr>),
+) {
+    for unit in eval_apply_ffs
+        .values_mut()
+        .chain(eval_only_ffs.values_mut())
+        .flatten()
+    {
+        f(unit);
+    }
+    for (_, part) in parallel_ff_units.values_mut().flatten() {
+        f(&mut part.evaluate);
+    }
 }
 
 /// Counted signals: those a unit may store twice between two runtime checks
@@ -4553,6 +4809,8 @@ struct ClockAnalysis {
     independent_derived: BTreeSet<AbsoluteAddr>,
     /// Events whose signal combinational logic reads.
     combinationally_read: BTreeSet<AbsoluteAddr>,
+    /// Events whose own domain does not read their signal.
+    level_unread_by_domain: BTreeSet<AbsoluteAddr>,
 }
 
 fn analyze_clock_dependencies(
@@ -4947,6 +5205,27 @@ fn analyze_clock_dependencies(
         }
         Some((reads, writes))
     };
+    // A domain reads its own clock's level when a flip-flop samples it as
+    // data. An external call may read anything.
+    let canonical = |address: AbsoluteAddr| clock_domains.get(&address).copied().unwrap_or(address);
+    let level_unread_by_domain: BTreeSet<AbsoluteAddr> = eval_apply_ffs
+        .iter()
+        .filter(|(domain, units)| {
+            let domain = canonical(**domain);
+            !units
+                .iter()
+                .flat_map(|unit| unit.blocks.values())
+                .flat_map(|block| &block.instructions)
+                .any(|instruction| match instruction {
+                    SIRInstruction::Load(_, address, ..) | SIRInstruction::Commit(address, ..) => {
+                        canonical(address.absolute_addr()) == domain
+                    }
+                    SIRInstruction::ExternCall { .. } => true,
+                    _ => false,
+                })
+        })
+        .map(|(domain, _)| canonical(*domain))
+        .collect();
     let mut independent_derived = BTreeSet::new();
     let combinationally_read: BTreeSet<AbsoluteAddr> = comb_deps
         .values()
@@ -4994,6 +5273,7 @@ fn analyze_clock_dependencies(
         combinational_derived,
         independent_derived,
         combinationally_read,
+        level_unread_by_domain,
     }
 }
 

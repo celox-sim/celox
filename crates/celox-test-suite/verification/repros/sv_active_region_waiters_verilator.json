@@ -1,0 +1,52 @@
+{
+  "standard": "IEEE 1800-2023 4.5 and 9.4.2",
+  "expected": "A blocking write of an edge-triggered process is an update event of the active region; the process waiting on it is resumed in the active region, and the NBA region is entered only when the active and inactive regions are empty. The waiter therefore reads the values before the same edge's nonblocking updates, and waits again before those updates.",
+  "probes": [
+    {
+      "name": "active_waiter",
+      "note": "The suite case blocking_write_waiters_run_before_nonblocking_updates.",
+      "source": "module Top;\n  bit clk, y;\n  int q;\n  always @(posedge clk) begin y = ~y; q <= q + 1; end\n  initial forever begin @(y); $display(\"y=%0d q=%0d\", y, q); end\n  initial begin #1 clk = 1; #1 clk = 0; #1 clk = 1; #1 $finish; end\nendmodule\n",
+      "verilator_compile": {
+        "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "verilator_run": {
+        "command": "<repro>/obj/VTop",
+        "exit_code": 0,
+        "output": "y=1 q=1\ny=0 q=2\n- <repro>/probe.sv:6: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ps; walltime 0.000 s; speed 44.186 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+      },
+      "icarus_compile": {
+        "command": "iverilog -g2012 -s Top -o <repro>/probe.vvp <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "icarus_run": {
+        "command": "vvp <repro>/probe.vvp",
+        "exit_code": 0,
+        "output": "y=1 q=0\ny=0 q=1\n<repro>/probe.sv:6: $finish called at 4 (1s)\n"
+      }
+    },
+    {
+      "name": "rearm",
+      "note": "The suite case blocking_write_waiters_rearm_before_nonblocking_updates.",
+      "source": "module Top;\n  bit clk, y;\n  int n, r;\n  always @(posedge clk) begin y = 1; y <= 0; y <= 1; end\n  initial forever begin @(y); n++; end\n  initial forever begin @(posedge y); r++; end\n  initial begin #1 clk = 1; #1 clk = 0; #1 clk = 1; #1 $display(\"n=%0d r=%0d\", n, r); $finish; end\nendmodule\n",
+      "verilator_compile": {
+        "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "verilator_run": {
+        "command": "<repro>/obj/VTop",
+        "exit_code": 0,
+        "output": "n=1 r=1\n- <repro>/probe.sv:7: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ps; walltime 0.000 s; speed 143.266 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+      },
+      "icarus_compile": {
+        "command": "iverilog -g2012 -s Top -o <repro>/probe.vvp <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "icarus_run": {
+        "command": "vvp <repro>/probe.vvp",
+        "exit_code": 0,
+        "output": "n=3 r=3\n<repro>/probe.sv:7: $finish called at 4 (1s)\n"
+      }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "schema_version": 3,
+  "suite_version": "0.11.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n",
+      "expectation": "Simulation",
+      "name": "class::casts_from_interface_class_handles",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "passed": 0,
+    "mismatch": 0,
+    "compile_error": 0,
+    "emission_error": 0,
+    "ignored": 0,
+    "rejected": 0,
+    "runtime_error": 1,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "include_ignored": true,
+  "exclude_stronger_than_sv": false,
+  "standard": "IEEE 1800-2023 8.16 and 8.26.5: $cast from a handle of an interface class succeeds when the object it refers to is assignment compatible with the destination, including a variable of another interface class that the object's class implements.",
+  "adapter_free": {
+    "source": "verification/repros/interface_class_casts.sv",
+    "verilator_command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <build-dir> interface_class_casts.sv",
+    "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "verilator_output": "0 1",
+    "expected_output": "1 1"
+  }
+}

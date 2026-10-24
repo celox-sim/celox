@@ -8,7 +8,7 @@ use super::round::Round;
 use crate::{
     SignalRef,
     backend::SimBackend,
-    timing::{Halt, Value, read},
+    timing::{Halt, NbaSiteRefs, Value, read},
 };
 
 impl<B: SimBackend> SimulationState<B> {
@@ -20,7 +20,7 @@ impl<B: SimBackend> SimulationState<B> {
         process: usize,
         site: usize,
     ) -> Result<(), Halt> {
-        let refs = *self.model.processes[process]
+        let refs = self.model.processes[process]
             .nba_sites
             .get(site)
             .ok_or_else(|| Self::site_error(process, site))?;
@@ -29,13 +29,13 @@ impl<B: SimBackend> SimulationState<B> {
             // NBA region and returned before staging over the earlier value.
             backend.set(pending, 0u8);
         }
-        let offset = refs
-            .offset
-            .map_or(0, |offset| backend.get_as::<u64>(offset) as usize);
+        let Some((lsb, width)) = refs.range(backend) else {
+            return Ok(());
+        };
         self.process_state.nba_queue.push(NbaUpdate {
             target: refs.target,
-            lsb: refs.lsb + offset,
-            width: refs.width,
+            lsb,
+            width,
             value: read(backend, refs.value),
         });
         Ok(())
@@ -76,37 +76,40 @@ impl<B: SimBackend> SimulationState<B> {
             self.event_values(executor.backend(), &mut round.before);
             round.transitions.clear();
         }
-        for update in queued.drain(..) {
+        for update in &queued {
             let new = NbaValue::Queued(&update.value);
-            self.publish_update(executor.backend_mut(), &update, new);
+            self.publish_update(executor.backend_mut(), update, new);
             if several {
                 self.record_transitions(executor.backend(), round);
             }
         }
         // Keep the queue's storage for the next time slot.
+        queued.clear();
         self.process_state.nba_queue = queued;
         if flagged > 0 {
             for process in 0..self.model.processes.len() {
                 for site in 0..self.model.processes[process].nba_sites.len() {
-                    let site = self.model.processes[process].nba_sites[site];
                     let backend = executor.backend_mut();
-                    let Some(pending) = site.pending else {
+                    let Some(pending) = self.model.processes[process].nba_sites[site].pending
+                    else {
                         continue;
                     };
                     if backend.get_as::<u8>(pending) == 0 {
                         continue;
                     }
                     backend.set(pending, 0u8);
-                    let offset = site
-                        .offset
-                        .map_or(0, |offset| backend.get_as::<u64>(offset) as usize);
+                    let site = &self.model.processes[process].nba_sites[site];
+                    let Some((lsb, width)) = site.range(backend) else {
+                        continue;
+                    };
+                    let (target, value) = (site.target, site.value);
                     let update = NbaUpdate {
-                        target: site.target,
-                        lsb: site.lsb + offset,
-                        width: site.width,
+                        target,
+                        lsb,
+                        width,
                         value: Value::default(),
                     };
-                    self.publish_update(backend, &update, NbaValue::Staged(site.value));
+                    self.publish_update(backend, &update, NbaValue::Staged(value));
                     if several {
                         self.record_transitions(executor.backend(), round);
                     }
@@ -158,6 +161,19 @@ impl<B: SimBackend> SimulationState<B> {
                 });
             }
         }
+    }
+}
+
+impl NbaSiteRefs {
+    /// The bit position and the number of bits the site writes now, or
+    /// `None` when it writes nothing.
+    fn range<B: SimBackend>(&self, backend: &B) -> Option<(usize, usize)> {
+        let Some(position) = self.position else {
+            return Some((self.lsb, self.width));
+        };
+        let width = backend.get_as::<u64>(position.width) as usize;
+        let offset = backend.get_as::<u64>(position.offset) as usize;
+        (width != 0).then(|| (self.lsb + offset, width.min(self.width)))
     }
 }
 

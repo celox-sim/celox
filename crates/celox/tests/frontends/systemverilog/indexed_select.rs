@@ -331,3 +331,41 @@ fn rejects_unresolved_logical_parameter_type_queries() {
         .expect_err("unresolved operands must not acquire a logical result type");
     }
 }
+
+sv_backends! {
+    fn constant_part_selects_partly_outside_write_the_bits_inside(sim) {
+        @case "indexed_select::constant_part_selects_partly_outside_write_the_bits_inside";
+    }
+    fn ascending_part_selects_partly_outside_write_the_bits_inside(sim) {
+        @case "indexed_select::ascending_part_selects_partly_outside_write_the_bits_inside";
+    }
+    fn known_run_time_selects_stay_within_their_element(sim) {
+        @case "indexed_select::known_run_time_selects_stay_within_their_element";
+    }
+}
+
+/// A continuous assignment to a part-select partly outside its vector drives
+/// the bits inside, and one wholly outside drives nothing (IEEE 1800-2023
+/// 11.5.1). Icarus 13.0 aborts on the partial assignment, so this is no
+/// suite case.
+#[test]
+fn continuous_part_selects_partly_outside_drive_the_bits_inside() {
+    let source = r#"
+        module Top(input logic [3:0] v, output logic [7:0] q, r);
+            assign q[9:6] = v;
+            assign q[5:0] = 6'h01;
+            assign r[11:8] = v;
+            assign r[7:0] = 8'h5a;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("continuous_partly_outside.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let (v, q, r) = (sim.signal("v"), sim.signal("q"), sim.signal("r"));
+    sim.modify(|io| io.set(v, 0xfu8)).unwrap();
+    assert_eq!(sim.get(q), 0xc1u8.into());
+    assert_eq!(sim.get(r), 0x5au8.into());
+}

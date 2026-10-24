@@ -55,6 +55,10 @@ fn initialized(pattern: BoundPattern, declaration: &str) -> Vec<i128> {
     let mut values = Vec::new();
     while let Some(value) = pending.pop() {
         match value {
+            crate::ir::Expr::Unary {
+                op: crate::ir::UnaryOp::ToTwoState,
+                expr,
+            } => pending.push(expr),
             crate::ir::Expr::Concat(parts) => pending.extend(parts.iter().rev()),
             crate::ir::Expr::Resize { expr, .. } => pending.push(expr),
             crate::ir::Expr::Literal(text) => {

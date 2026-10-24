@@ -43,15 +43,16 @@ pub(super) fn instances_from_scope(
         for instance in &mut instances[start..] {
             instance.name = item.instance_name(&instance.name);
             for connection in &mut instance.port_connections {
-                if let Some(expr) = &mut connection.actual_expr {
-                    *expr = substitute_expr_constants_with_parameter_literals(
+                connection.map_expressions(|expr| {
+                    let mut expr = substitute_expr_constants_with_parameter_literals(
                         &syntax_tree.state,
-                        expr.clone(),
+                        expr,
                         &item.env,
                         &item.literals,
                     );
-                    item.expr(expr);
-                }
+                    item.expr(&mut expr);
+                    expr
+                });
             }
         }
     }
@@ -121,7 +122,7 @@ fn instances_from_native_declaration(
             interface,
         )?;
         for connection in &mut port_connections {
-            connection.actual_expr = connection.actual_expr.take().map(|expr| {
+            connection.map_expressions(|expr| {
                 substitute_expr_constants_with_parameter_literals(
                     &syntax_tree.state,
                     expr,

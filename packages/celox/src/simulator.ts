@@ -449,7 +449,13 @@ export class Simulator<P = Record<string, unknown>> {
 	}
 
 	/**
-	 * Trigger a clock edge.
+	 * Run clock periods of an event's signal.
+	 *
+	 * One tick is the event's active edge, then its inactive edge: every
+	 * domain sensitive to either runs, including domains of the opposite edge
+	 * and clocks derived from the signal, and the signal ends at its inactive
+	 * level. See the execution semantics guide for the SystemVerilog this is
+	 * equivalent to.
 	 *
 	 * A single numeric argument is the tick count for the default event. When a
 	 * second argument is not `undefined`, a numeric first argument is treated as
@@ -553,12 +559,6 @@ export class Simulator<P = Record<string, unknown>> {
 	inactiveEdge(event?: EventHandle | number): void {
 		const id = this.resolveEventId(event);
 		this.edges([[id, this.activeIsRising(id) ? "negedge" : "posedge"]]);
-	}
-
-	/** One clock cycle: `activeEdge()`, then `inactiveEdge()`. */
-	cycle(event?: EventHandle | number): void {
-		this.activeEdge(event);
-		this.inactiveEdge(event);
 	}
 
 	/**

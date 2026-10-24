@@ -2014,3 +2014,329 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (top Top)
   (run_to_finish)
   (expect_output "y=1001 n=3\np=10 q=01\n"))
+
+; A blocking write of an edge process is an update of the active region:
+; the process waiting on it runs there, before the NBA region applies the
+; same edge's nonblocking update (IEEE 1800-2023 4.5, 9.4.2).
+(case blocking_write_waiters_run_before_nonblocking_updates
+  (source "active.sv" #"
+                module Top;
+                    bit clk, y;
+                    int q;
+                    always @(posedge clk) begin y = ~y; q <= q + 1; end
+                    initial forever begin @(y); $display("y=%0d q=%0d", y, q); end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=1 q=0\ny=0 q=1\n"))
+
+; The waiter the blocking write wakes waits again before the nonblocking
+; updates, so they wake it once more.
+(case blocking_write_waiters_rearm_before_nonblocking_updates
+  (source "rearm.sv" #"
+                module Top;
+                    bit clk, y;
+                    int n, r;
+                    always @(posedge clk) begin y = 1; y <= 0; y <= 1; end
+                    initial forever begin @(y); n++; end
+                    initial forever begin @(posedge y); r++; end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("n=%0d r=%0d", n, r);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "n=3 r=3\n"))
+
+; Processes and edge processes woken by the blocking write read the
+; variables the same edge updates nonblocking before the update.
+(case blocking_write_edges_read_values_before_nonblocking_updates
+  (source "derived.sv" #"
+                module Top;
+                    bit clk, g;
+                    int q, r, s;
+                    always @(posedge clk) begin g = ~g; q <= q + 1; end
+                    always @(g) r <= q;
+                    initial forever begin @(g); s = q; end
+                    initial begin
+                        #1 clk = 1;
+                        #1 clk = 0;
+                        #1 clk = 1;
+                        #1 $display("q=%0d r=%0d s=%0d", q, r, s);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "q=2 r=1 s=1\n"))
+
+(case plain_always_expression_edges_run_as_processes
+  ; IEEE 1800-2023 9.2.2.4 restricts only always_ff to the flip-flop shape.
+  ; A plain always waits on its event control like any other process: an
+  ; edge of a select or an expression, or `edge` (9.4.2).
+  (source "always_expression_edges.sv" #"
+    module Top(output bit [7:0] selected, both, any);
+      bit [3:0] v;
+      bit a, b;
+      always @(posedge v[1]) selected = selected + 8'd1;
+      always @(posedge (a & b)) both = both + 8'd1;
+      always @(edge a) any = any + 8'd1;
+      initial begin
+        #1; v = 4'b0010; a = 1;
+        #1; b = 1;
+        #1; v = 4'b0000; a = 0;
+        #1; v = 4'b0010; a = 1;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq selected 1)
+  (assert_eq both 0)
+  (assert_eq any 1)
+  (run_until 2)
+  (assert_eq both 1 "a & b rose")
+  (run_until 4)
+  (assert_eq selected 2)
+  (assert_eq both 2)
+  (assert_eq any 3 "a rose, fell and rose"))
+
+(case plain_always_multi_bit_edges_follow_the_lsb
+  ; Table 9-2 judges the edge of a multi-bit expression on its least
+  ; significant bit.
+  (source "always_multi_bit_edge.sv" #"
+    module Top(output bit [7:0] count);
+      bit [3:0] bus;
+      always @(posedge bus) count = count + 8'd1;
+      initial begin
+        #1; bus = 4'b0010;
+        #1; bus = 4'b0011;
+        #1; bus = 4'b0000;
+        #1; bus = 4'b0001;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq count 0 "the least significant bit stayed 0")
+  (run_until 2)
+  (assert_eq count 1)
+  (run_until 4)
+  (assert_eq count 2))
+
+(case plain_always_edges_without_a_reset_run_as_processes
+  ; Neither edge is tested in the body, so neither is an asynchronous
+  ; reset: the process wakes on each of them.
+  (source "always_two_edges.sv" #"
+    module Top(output bit [7:0] count);
+      bit c, d;
+      always @(posedge c or posedge d) count <= count + 8'd1;
+      initial begin
+        #1; c = 1;
+        #1; d = 1;
+        #1; c = 0; d = 0;
+        #1; c = 1;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq count 1)
+  (run_until 2)
+  (assert_eq count 2)
+  (run_until 4)
+  (assert_eq count 3))
+
+; A nonblocking assignment in a process to an element of an unpacked array
+; or at a run-time position evaluates the position when it executes and
+; updates those bits in the NBA region (IEEE 1800-2023 10.4.2).
+(case process_nonblocking_assignments_to_array_elements
+  (source "process_nba_elements.sv" #"
+      module Top(output logic [7:0] m0, m1, m2, m3, e, d1, d2, output logic [3:0] lo, hi,
+                 output logic [7:0] early);
+        logic [7:0] m [0:3];
+        logic [7:0] grid [4][2];
+        logic [3:0] mem [3:0];
+        int i, j;
+        initial begin
+          for (i = 0; i < 4; i++) begin
+            m[i] = 8'd0;
+            mem[i] = 4'd0;
+            for (j = 0; j < 2; j++) grid[i][j] = 8'd0;
+          end
+          #1;
+          m[1] <= 8'h11;
+          i = 2;
+          m[i] <= 8'h22;
+          i = 3;
+          #0 early = m[2];
+          #1;
+          for (i = 0; i < 4; i++) m[i] <= m[i] + 8'h40;
+          i = 1;
+          m[i][3:0] <= 4'h9;
+          m[i][7:4] <= 4'hc;
+          i = 2;
+          j = 1;
+          grid[i][j] <= 8'hab;
+          grid[3][0] <= 8'hcd;
+          mem[i] <= 4'h5;
+          mem[0] <= 4'h7;
+          #1;
+          i = 0;
+          m[i] <= 8'h01;
+          m[i] <= 8'h02;
+          {m[3], mem[i]} <= 12'hfe3;
+        end
+        assign m0 = m[0];
+        assign m1 = m[1];
+        assign m2 = m[2];
+        assign m3 = m[3];
+        assign e = grid[2][1];
+        assign d1 = grid[3][0];
+        assign d2 = grid[2][0];
+        assign lo = mem[0];
+        assign hi = mem[2];
+      endmodule"#)
+  (top Top)
+  (run_until 1)
+  (assert_eq early 0 "the update lands after the inactive region")
+  (assert_eq m1 0x11)
+  (assert_eq m2 0x22 "the index is read when the assignment executes")
+  (assert_eq m3 0)
+  (run_until 2)
+  (assert_eq m0 0x40)
+  (assert_eq m1 0xc9 "a part of a run-time element keeps its other bits")
+  (assert_eq m2 0x62)
+  (assert_eq m3 0x40)
+  (assert_eq e 0xab)
+  (assert_eq d1 0xcd)
+  (assert_eq d2 0)
+  (assert_eq hi 5)
+  (assert_eq lo 7)
+  (run_until 3)
+  (assert_eq m0 0x02 "the last update of a time slot wins")
+  (assert_eq m3 0xfe)
+  (assert_eq lo 3))
+
+(case process_nonblocking_assignments_at_run_time_positions
+  (source "process_nba_positions.sv" #"
+      module Top(output logic [7:0] q, a, output logic [15:0] staged, output logic [14:0] packed_bits);
+        logic [0:7] up;
+        logic [7:0] r [0:3];
+        int i, n;
+        initial begin
+          q = 8'd0;
+          up = 8'd0;
+          #1;
+          i = 2;
+          q[i] <= 1'b1;
+          up[i] <= 1'b1;
+          i = 4;
+          q[i +: 3] <= 3'b101;
+          up[i -: 2] <= 2'b11;
+          i = 7;
+        end
+        // The only writer of `r` and `p`: their updates are staged.
+        logic [13:0] p = 14'd0;
+        int j;
+        initial begin
+          for (n = 0; n < 2; n++) begin
+            for (j = n; j < n + 6; j++) begin
+              r[j % 4] <= 8'h10 * n + j;
+              p[2 * j +: 3] <= j;
+            end
+            #1;
+          end
+        end
+        assign a = up;
+        assign staged = {r[3], r[0]};
+        // Extended, so that `p` does not become a port.
+        assign packed_bits = {1'b0, p};
+      endmodule"#)
+  (top Top)
+  (run_until 0)
+  (assert_eq staged 0x0304 "one site several times in a time slot: the last update wins")
+  (assert_eq packed_bits 0x14e4 "bits past the top are not written")
+  (run_until 1)
+  (assert_eq q 0x54)
+  (assert_eq a 0x38 "an ascending vector counts its bits from the left")
+  (assert_eq staged 0x1314)
+  (assert_eq packed_bits 0x24e4))
+
+; Bits outside the target are not written: a nonblocking assignment wholly
+; outside has no effect, and one partly outside writes the bits inside
+; (IEEE 1800-2023 7.4.6, 11.5.1).
+(case process_nonblocking_assignments_outside_their_target
+  (source "process_nba_outside.sv" #"
+      module Top(output logic [7:0] q, p, m0, m1, m2, m3);
+        logic [7:0] m [0:3];
+        int i, k;
+        initial begin
+          q = 8'd0;
+          p = 8'd0;
+          for (i = 0; i < 4; i++) m[i] = 8'd0;
+          #1;
+          q[8] <= 1'b1;
+          q[9:6] <= 4'b1111;
+          i = 4;
+          m[i] <= 8'hff;
+          i = -1;
+          m[i] <= 8'hee;
+          k = 6;
+          p[k +: 4] <= 4'b0101;
+          k = -2;
+          p[k +: 4] <= 4'b1010;
+        end
+        assign m0 = m[0];
+        assign m1 = m[1];
+        assign m2 = m[2];
+        assign m3 = m[3];
+      endmodule"#)
+  (top Top)
+  (run_until 1)
+  (assert_eq q 0xc0)
+  (assert_eq p 0x42)
+  (assert_eq m0 0)
+  (assert_eq m1 0)
+  (assert_eq m2 0)
+  (assert_eq m3 0))
+
+; A position with an unknown bit writes nothing (IEEE 1800-2023 7.4.6,
+; 11.5.1).
+(case process_nonblocking_assignments_at_unknown_positions
+  (source "process_nba_unknown.sv" #"
+      module Top(output logic [7:0] q, m0, m1);
+        logic [7:0] m [0:1];
+        logic [2:0] i = 3'bx;
+        initial begin
+          q = 8'd0;
+          m[0] = 8'd0;
+          m[1] = 8'd0;
+          #1;
+          m[i] <= 8'hff;
+          q[i] <= 1'b1;
+          q[i +: 2] <= 2'b11;
+          i = 3'd1;
+        end
+        assign m0 = m[0];
+        assign m1 = m[1];
+      endmodule"#)
+  (top Top)
+  (four_state)
+  (run_until 1)
+  (assert_eq q 0)
+  (assert_eq m0 0)
+  (assert_eq m1 0))

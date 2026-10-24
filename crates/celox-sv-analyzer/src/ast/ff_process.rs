@@ -66,8 +66,12 @@ fn ff_process_from_procedure(
     if always_kind(procedure, syntax_tree.declarations())? != AlwaysKind::Ff {
         return Ok(None);
     }
-    let root = procedure.body;
-    let (events, body) = ff_event_control_and_body(root, syntax_tree)?;
+    let Some((events, body)) = ff_event_control_and_body(procedure.body, syntax_tree)? else {
+        if procedure.kind == celox_sv_syntax::ProcedureKind::AlwaysFf {
+            return Err(unsupported("always_ff event expression"));
+        }
+        return Ok(None);
+    };
     let mut local_dimensions = packed_dimensions.clone();
     local_dimensions.const_env = const_env.clone().into();
     let mut builder = procedural::BodyBuilder::new(
@@ -93,12 +97,26 @@ fn ff_process_from_procedure(
     }))
 }
 
+/// A plain `always` sensitive to edges runs as a process when its events are
+/// not all `posedge` or `negedge` of a variable, such as `@(posedge v[0])`,
+/// `@(edge a)` or `@(posedge clk or a)`. Only `always_ff` must have this shape
+/// (IEEE 1800-2023 9.2.2.4).
+pub(super) fn always_falls_back_to_process(
+    procedure: &celox_sv_syntax::Procedure,
+    tree: &AnalysisContext<'_>,
+) -> Result<bool, AnalyzerError> {
+    Ok(procedure.kind == celox_sv_syntax::ProcedureKind::Always
+        && always_kind(procedure, tree.declarations())? == AlwaysKind::Ff
+        && ff_event_control_and_body(procedure.body, tree)?.is_none())
+}
+
+/// The events of a flip-flop shaped event control and the body it controls,
+/// or `None` when an event is not an edge of a variable.
 fn ff_event_control_and_body(
     root: celox_sv_syntax::StatementId,
     tree: &AnalysisContext<'_>,
-) -> Result<(Vec<FfEvent>, celox_sv_syntax::StatementId), AnalyzerError> {
+) -> Result<Option<(Vec<FfEvent>, celox_sv_syntax::StatementId)>, AnalyzerError> {
     use celox_sv_syntax::{EventControl, StatementKind, TimingControlKind, TimingEdge};
-    let unsupported_event = || unsupported("always_ff event expression");
     let native = tree.declarations();
     let StatementKind::Timing { control, body } = native.statement(root).kind else {
         return Err(timing::disagreement());
@@ -115,12 +133,14 @@ fn ff_event_control_and_body(
         let edge = match item.edge {
             TimingEdge::Pos => FfEdge::Pos,
             TimingEdge::Neg => FfEdge::Neg,
-            _ => return Err(unsupported_event()),
+            _ => return Ok(None),
         };
         let expression =
             expression_binding::value(item.expression, native, tree, &PackedDimensions::default())?;
-        let signal = expr_ident_name(&expression).ok_or_else(unsupported_event)?;
+        let Some(signal) = expr_ident_name(&expression) else {
+            return Ok(None);
+        };
         events.push(FfEvent::new(edge, signal));
     }
-    Ok((events, body))
+    Ok(Some((events, body)))
 }

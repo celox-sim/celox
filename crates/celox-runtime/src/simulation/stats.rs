@@ -5,15 +5,18 @@
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SchedulerMode {
     /// The runtime's loop runs every time slot.
-    #[default]
     Reference,
     /// The design's compiled scheduler runs the time slots it can, and the
     /// runtime's loop the others. A design without a compiled scheduler
     /// runs as in [`Self::Reference`].
+    #[default]
     Compiled,
     /// [`Self::Compiled`], checked after every time slot against a shadow
     /// simulation of the same design in [`Self::Reference`].
     Differential,
+    /// [`Self::Compiled`] with runs of any length, checked after each run
+    /// against a shadow that runs the same slots in [`Self::Reference`].
+    DifferentialRuns,
 }
 
 /// How one process kernel is scheduled.
@@ -23,7 +26,7 @@ pub enum KernelSchedule {
     /// The compiled scheduler runs it.
     Compiled,
     /// The runtime's loop runs it, for the reason given.
-    Reference(&'static str),
+    Reference(String),
 }
 
 /// The loop that runs time slots and how each process kernel is scheduled.

@@ -18,6 +18,10 @@ fn widths(root: &Expr) -> Vec<usize> {
     let mut widths = Vec::new();
     while let Some(value) = pending.pop() {
         match value {
+            Expr::Unary {
+                op: crate::ast::UnaryOp::ToTwoState,
+                expr,
+            } => pending.push(expr),
             Expr::Concat(parts) => pending.extend(parts.iter().rev()),
             Expr::Call { args, .. } => pending.extend(args.iter().rev().flatten()),
             Expr::Resize { expr, width, .. } => {

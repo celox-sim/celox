@@ -94,6 +94,10 @@ timed_cases! {
     fn blocking_ff_clock_edges_trigger_their_domains_before_inactive_work = "timing::blocking_ff_clock_edges_trigger_their_domains_before_inactive_work";
     fn nonblocking_assignments_in_processes_update_in_the_nba_region = "timing::nonblocking_assignments_in_processes_update_in_the_nba_region";
     fn staged_nonblocking_updates_keep_their_order = "timing::staged_nonblocking_updates_keep_their_order";
+    fn process_nonblocking_assignments_to_array_elements = "timing::process_nonblocking_assignments_to_array_elements";
+    fn process_nonblocking_assignments_at_run_time_positions = "timing::process_nonblocking_assignments_at_run_time_positions";
+    fn process_nonblocking_assignments_outside_their_target = "timing::process_nonblocking_assignments_outside_their_target";
+    fn process_nonblocking_assignments_at_unknown_positions = "timing::process_nonblocking_assignments_at_unknown_positions";
     fn narrow_nonblocking_updates_keep_the_other_bits = "timing::narrow_nonblocking_updates_keep_the_other_bits";
     fn four_state_nonblocking_updates_keep_unknown_bits = "timing::four_state_nonblocking_updates_keep_unknown_bits";
     fn nonblocking_ff_stores_remain_pending_during_inactive_work = "timing::nonblocking_ff_stores_remain_pending_during_inactive_work";
@@ -157,6 +161,12 @@ timed_cases! {
     fn staged_nonblocking_writes_follow_later_blocking_writes = "timing::staged_nonblocking_writes_follow_later_blocking_writes";
     fn intermediate_combinational_writes_replace_split_definitions = "timing::intermediate_combinational_writes_replace_split_definitions";
     fn intermediate_combinational_writes_reach_concatenated_ports = "timing::intermediate_combinational_writes_reach_concatenated_ports";
+    fn blocking_write_waiters_run_before_nonblocking_updates = "timing::blocking_write_waiters_run_before_nonblocking_updates";
+    fn blocking_write_waiters_rearm_before_nonblocking_updates = "timing::blocking_write_waiters_rearm_before_nonblocking_updates";
+    fn blocking_write_edges_read_values_before_nonblocking_updates = "timing::blocking_write_edges_read_values_before_nonblocking_updates";
+    fn plain_always_expression_edges_run_as_processes = "timing::plain_always_expression_edges_run_as_processes";
+    fn plain_always_multi_bit_edges_follow_the_lsb = "timing::plain_always_multi_bit_edges_follow_the_lsb";
+    fn plain_always_edges_without_a_reset_run_as_processes = "timing::plain_always_edges_without_a_reset_run_as_processes";
 }
 
 #[test]
@@ -422,12 +432,7 @@ fn unimplemented_timing_features_are_rejected() {
         ("bit a; initial @(a iff a);", "iff-qualified event", 1444),
         ("initial fork #1; join", "fork-join block", 88),
         ("initial fork #1; join_none", "fork-join block", 88),
-        // #1711 names the construct.
-        (
-            "event e; initial -> e;",
-            "unsupported internal data type",
-            88,
-        ),
+        ("event e; initial -> e;", "named event", 88),
         (
             "bit a, b; initial a = #1 b;",
             "intra-assignment timing control",
@@ -444,8 +449,7 @@ fn unimplemented_timing_features_are_rejected() {
             88,
         ),
         ("initial wait fork;", "wait fork statement", 88),
-        // #1711 names the construct.
-        ("initial disable fork;", "disable statement", 88),
+        ("initial disable fork;", "disable fork statement", 88),
         (
             "bit a; task t(input bit x); wait (a ^ x); endtask initial t(0);",
             "wait condition reading a static task argument",
@@ -471,36 +475,20 @@ fn unimplemented_timing_features_are_rejected() {
             "delayed continuous assignment",
             444,
         ),
-        // #1708: a plain `always` that is not a flip-flop runs as a process.
+        // A plain `always` of these forms runs as a process.
         (
-            "bit [3:0] v; int n; always @(posedge v[0]) n++;",
+            "bit [3:0] v; int n; always_ff @(posedge v[0]) n <= n + 1;",
             "always_ff event expression",
             464,
         ),
         (
-            "bit [3:0] v; int n; always @(posedge v) n++;",
+            "bit [3:0] v; int n; always_ff @(posedge v) n <= n + 1;",
             "multi-bit always_ff event signal",
             88,
         ),
         (
-            "bit a, b; int n; always @(posedge a or posedge b) n <= n + 1;",
+            "bit a, b; int n; always_ff @(posedge a or posedge b) n <= n + 1;",
             "always_ff event control",
-            88,
-        ),
-        // #1709
-        (
-            "bit [7:0] m[4]; initial #1 m[1] <= 5;",
-            "nonblocking assignment to an unpacked array in a process",
-            88,
-        ),
-        (
-            "bit [3:0] q; int i = 2; initial #1 q[i] <= 1;",
-            "nonblocking assignment with a run-time position in a process",
-            88,
-        ),
-        (
-            "bit [3:0] q; initial #1 q[5] <= 1;",
-            "nonblocking assignment outside its target",
             88,
         ),
         // #1710
@@ -533,6 +521,39 @@ fn unimplemented_timing_features_are_rejected() {
     }
 }
 
+/// A real has no least significant bit, so no edge event control applies to
+/// one (IEEE 1800-2023 6.12); a change of its value is an event.
+#[test]
+fn edge_events_of_reals_are_errors() {
+    for (body, edge) in [
+        ("real r; initial @(posedge r);", "posedge"),
+        ("real r; int n; always @(negedge r) n++;", "negedge"),
+        ("real r; initial @(edge (r * 2.0));", "edge"),
+        (
+            "shortreal r; bit c; int n; always @(posedge c or posedge r) n++;",
+            "posedge",
+        ),
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("real_edge.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("`{body}` must be rejected"))
+        .to_string();
+        assert!(
+            error.contains(&format!("`{edge}` of a real expression")),
+            "{body}: {error}"
+        );
+    }
+    let source = "module Top; real r; initial @(r); endmodule";
+    celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("real.sv"))], "Top")
+        .build()
+        .expect("a change of a real is an event");
+}
+
 /// Only `initial` and `always` processes may suspend (IEEE 1800-2023
 /// 9.2.2.2, 9.2.2.4 and 13.4); a timing control elsewhere is an error.
 #[test]
@@ -546,10 +567,9 @@ fn timing_controls_outside_suspendable_processes_are_rejected() {
             "bit clk, a, q; always_ff @(posedge clk) begin @(a); q <= a; end",
             "event control in an always_comb or always_ff body",
         ),
-        // #1711 reports this as illegal rather than unsupported.
         (
             "bit a; function automatic bit f(); #1; return a; endfunction",
-            "delay control in a subroutine",
+            "delay control in a function",
         ),
     ] {
         let source = format!("module Top; {body} endmodule");
@@ -744,4 +764,178 @@ fn runtime_error_before_a_commit_leaves_no_held_writes() {
             check!(builder.build_cranelift());
         }
     }
+}
+
+/// The baselines of waits on a counted variable survive a state file: a
+/// simulation loaded between two pulses of `y` wakes the waiters as the
+/// uninterrupted one does, and saves the same baselines again.
+#[test]
+fn counted_wait_baselines_survive_a_state_file() {
+    let source = r#"
+        module Top(output int n, r);
+            timeunit 1ns / 1ns;
+            bit a, b, c;
+            logic y;
+            always_comb begin y = 0; if (a) y = 1; c = b; end
+            initial #1 forever begin @(y); n++; end
+            initial #1 forever begin @(posedge y); r++; end
+            initial begin
+                #2 a = 1;
+                #1 b = 1;
+                #1 b = 0;
+                #1 b = 1;
+                #1 a = 0;
+            end
+        endmodule
+    "#;
+    let build = |four_state: bool| {
+        celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("counted_state.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap()
+    };
+    let through_bytes = |file: &celox::StateFile| {
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        celox::StateFile::read_from(bytes.as_slice()).unwrap()
+    };
+    for four_state in [false, true] {
+        let counts = |sim: &mut celox::Simulation| {
+            ["n", "r"].map(|name| {
+                let signal = sim.signal(name);
+                sim.get(signal)
+            })
+        };
+        let mut whole = build(four_state);
+        whole.run_until(10).unwrap();
+        let expected = counts(&mut whole);
+        assert_eq!(
+            expected,
+            [5u32.into(), 4u32.into()],
+            "four_state={four_state}"
+        );
+
+        let mut first = build(four_state);
+        first.run_until(3).unwrap();
+        let file = through_bytes(&first.save_state().unwrap());
+        assert!(
+            file.schedule
+                .as_ref()
+                .unwrap()
+                .processes
+                .waiters
+                .iter()
+                .flat_map(|waiter| &waiter.baselines)
+                .any(|baseline| matches!(baseline, celox::BaselineRecord::Counter { .. })),
+            "four_state={four_state}: `y` is counted"
+        );
+        let mut loaded = build(four_state);
+        loaded.load_state(&file).unwrap();
+        assert_eq!(
+            through_bytes(&loaded.save_state().unwrap()),
+            file,
+            "four_state={four_state}"
+        );
+        loaded.run_until(10).unwrap();
+        assert_eq!(counts(&mut loaded), expected, "four_state={four_state}");
+        // A baseline taken at a check in this run saves as the loaded one.
+        first.run_until(4).unwrap();
+        loaded = build(four_state);
+        let file = through_bytes(&first.save_state().unwrap());
+        loaded.load_state(&file).unwrap();
+        loaded.run_until(10).unwrap();
+        assert_eq!(counts(&mut loaded), expected, "four_state={four_state}");
+    }
+}
+
+/// The run-time position cases cover staged and queued sites alike.
+#[test]
+fn run_time_nonblocking_positions_cover_staged_and_queued_sites() {
+    for (case, staged, queued) in [
+        (
+            "timing::process_nonblocking_assignments_at_run_time_positions",
+            &["r", "p"][..],
+            &["q"][..],
+        ),
+        (
+            "timing::process_nonblocking_assignments_to_array_elements",
+            &[][..],
+            &["m", "grid", "mem"][..],
+        ),
+    ] {
+        let design = celox_test_suite::sv::cases()
+            .find(|candidate| candidate.name == case)
+            .unwrap()
+            .design();
+        let sources = design
+            .sources
+            .iter()
+            .map(|source| (source.text.as_str(), source.path.as_path()))
+            .collect::<Vec<_>>();
+        let simulation = celox::Simulation::from_sv_sources(sources, &design.top)
+            .build()
+            .unwrap();
+        let program = simulation.program();
+        let sites = |name: &str| {
+            let target = program.get_addr(&[], &[name]).unwrap();
+            let sites = program
+                .runtime_schema
+                .nba_sites
+                .iter()
+                .filter(|site| site.target == target)
+                .collect::<Vec<_>>();
+            assert!(
+                sites.iter().any(|site| site.position.is_some()),
+                "{name} has a run-time position"
+            );
+            sites
+        };
+        for name in staged {
+            assert!(
+                sites(name).iter().all(|site| site.pending.is_some()),
+                "{name} stages its updates"
+            );
+        }
+        for name in queued {
+            assert!(
+                sites(name).iter().all(|site| site.pending.is_none()),
+                "{name} queues its updates"
+            );
+        }
+    }
+}
+
+/// A nonblocking assignment to a slice of an unpacked array whose range
+/// runs against the array's takes the elements in reverse order, as a
+/// blocking one does (IEEE 1800-2023 7.6). Neither Icarus nor Verilator
+/// compiles the slice.
+#[test]
+fn nonblocking_assignments_to_reversed_array_slices_reverse_the_elements() {
+    let source = r#"
+        module Top(output logic [31:0] elements);
+            timeunit 1ps / 1ps;
+            logic [7:0] m [4];
+            logic [7:0] w [2];
+            assign elements = {m[3], m[2], m[1], m[0]};
+            initial begin
+                m[0] = 8'd1; m[1] = 8'd2; m[2] = 8'd3; m[3] = 8'd4;
+                w[0] = 8'haa; w[1] = 8'hbb;
+                #1;
+                m[1:0] <= w;
+                m[3:2] = w;
+            end
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("reversed_slice.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(2).unwrap();
+    // m[1:0] <= w writes w[0] to m[1], as m[3:2] = w writes w[0] to m[3].
+    assert_eq!(sim.get(sim.signal("elements")), 0xaabb_aabbu32.into());
 }

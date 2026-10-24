@@ -3,8 +3,9 @@ use celox_testbench::{
     AssertMessage as GenericAssertMessage, ClockCount as GenericClockCount, CompiledExpr,
     ExecutableArgument, ExecutableAssertMessage, ExecutableClockCount, ExecutableLoopBound,
     ExecutableStatement, ExecutableTestbench, ExprBytecode, LoopBound as GenericLoopBound,
-    SemanticArgument, SemanticComponentBinding, SemanticStatement, StateLocation, TestbenchProgram,
-    TestbenchSelection, TestbenchStatement as GenericTestbenchStatement, TestbenchTarget,
+    SemanticArgument, SemanticComponentBinding, SemanticStatement, StateLocation, TestbenchClock,
+    TestbenchProgram, TestbenchSelection, TestbenchStatement as GenericTestbenchStatement,
+    TestbenchTarget,
 };
 
 use crate::{SignalRef, backend::SimBackend};
@@ -419,6 +420,17 @@ pub fn bind_testbench_program<B: SimBackend>(
         }
     }
     let random_seed = program.configured_random_seed();
+    // A clock generator without an event drives no domain.
+    let clocks = program
+        .clocks()
+        .iter()
+        .filter_map(|clock| {
+            Some(TestbenchClock {
+                event: backend.resolve_event_opt(&clock.event)?,
+                period: clock.period,
+            })
+        })
+        .collect();
     let components = program.components().to_vec();
     let component_libraries = program.component_libraries().to_vec();
     let component_file_base = program.component_file_base().map(ToOwned::to_owned);
@@ -440,6 +452,7 @@ pub fn bind_testbench_program<B: SimBackend>(
         .collect();
     Some(
         ExecutableTestbench::from_processes(processes, random_seed)
+            .with_clocks(clocks)
             .with_private_signals(private_signals)
             .with_component_runtime(
                 components,

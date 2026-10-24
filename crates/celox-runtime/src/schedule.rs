@@ -6,7 +6,7 @@ use fxhash::{FxHashMap, FxHashSet};
 use crate::{
     AbsoluteAddr, EventDomain, EventInfo, HostWatch, SignalRef,
     backend::{EventHandle, SimBackend},
-    timing::{CountedDomainRefs, CountedRefs, NbaSiteRefs, ProcessRefs, TermRefs},
+    timing::{CountedDomainRefs, CountedRefs, NbaSiteRefs, ProbeRefs, ProcessRefs, TermRefs},
 };
 
 /// The facts a timed simulation keeps but never changes: event signals,
@@ -24,18 +24,83 @@ pub struct ResolvedSchedule<B: SimBackend> {
     /// Counted signals and the domains their counters trigger.
     pub(crate) counted: Vec<CountedDomainRefs>,
     pub(crate) counted_by_offset: FxHashMap<usize, usize>,
+    /// Each counter that triggers a domain: the counter, the event id, and
+    /// where its last seen value is kept ([`ProcessState::domain_counters`]).
+    pub(crate) counted_triggers: Vec<CountedTrigger>,
+    /// Occurrence probes by the offset of their signal.
+    pub(crate) probes_by_offset: FxHashMap<usize, Vec<ProbeRefs>>,
     /// Whether any process has a nonblocking site with a pending flag.
     pub(crate) has_pending_nba_sites: bool,
     /// Per event ID, the event IDs of clocks computed combinationally from
     /// the event's signal. Empty when the design has none.
     pub(crate) combinational_derived: Vec<Box<[usize]>>,
-    /// The design has process kernels or counted signals. Without either, a
-    /// round is exactly the batch step and skips every process check.
+    /// The design has process kernels. Without them, a round is the batch
+    /// step and skips every process check.
     pub(crate) timed: bool,
     /// Canonical event IDs whose evaluation commits their blocking results.
     pub(crate) active_commits: bit_set::BitSet,
     /// Signals the current time is stored into before each round.
     pub(crate) time_slots: Vec<SignalRef>,
+    /// The compiled scheduler, when one was generated.
+    pub(crate) scheduler: Option<SchedulerRefs>,
+    /// Per process kernel, why the compiled scheduler does not run it, or
+    /// `None` when it does. Empty when no scheduler was considered.
+    pub(crate) kernel_fallback: Vec<Option<String>>,
+}
+
+/// A design's compiled scheduler resolved against a backend: its process
+/// unit and the slots it exchanges a run with.
+pub(crate) struct SchedulerRefs {
+    pub(crate) unit: usize,
+    pub(crate) limit: SignalRef,
+    pub(crate) now: SignalRef,
+    pub(crate) exit: SignalRef,
+    pub(crate) exit_arg: SignalRef,
+    pub(crate) finish: SignalRef,
+    pub(crate) count: SignalRef,
+    pub(crate) current: SignalRef,
+    pub(crate) levels: SignalRef,
+    pub(crate) ready: SignalRef,
+    /// The wake and waiting slots of each kernel the scheduler runs that
+    /// only delays, by process index.
+    pub(crate) wake: Vec<Option<(SignalRef, SignalRef)>>,
+    /// The waiting and baseline slots of each kernel the scheduler runs that
+    /// waits for an edge, by process index.
+    pub(crate) waits: Vec<Option<(SignalRef, SignalRef)>>,
+    /// The number of such kernels.
+    pub(crate) wait_kernels: usize,
+    /// The bit of each kernel the scheduler runs in its ready mask: its
+    /// place among them in kernel order.
+    pub(crate) ordinals: Vec<Option<u32>>,
+    /// The event ids of the bits of `levels`.
+    pub(crate) events: Vec<usize>,
+    /// The event id and signal of each host clock the scheduler may run,
+    /// in the order of its clock slots.
+    pub(crate) clocks: Vec<(usize, SignalRef)>,
+    pub(crate) clock_next: SignalRef,
+    pub(crate) clock_period: SignalRef,
+    pub(crate) clock_value: SignalRef,
+    pub(crate) clock_armed: SignalRef,
+}
+
+impl SchedulerRefs {
+    /// Element `bit` of the per-clock slot `slots`.
+    pub(crate) fn clock_element(slots: SignalRef, bit: usize) -> SignalRef {
+        let width = celox_design::SCHEDULER_TIME_WIDTH;
+        SignalRef {
+            offset: slots.offset + bit * width / 8,
+            width,
+            is_4state: false,
+            array_layout: None,
+        }
+    }
+
+    /// The clock slot that runs a scheduled `event` of `signal`, if any.
+    pub(crate) fn clock_of(&self, event: usize, signal: SignalRef) -> Option<usize> {
+        self.clocks
+            .iter()
+            .position(|&(id, clock)| id == event && clock == signal)
+    }
 }
 
 impl<B: SimBackend> ResolvedSchedule<B> {
@@ -160,7 +225,9 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                         lsb: site.lsb,
                         width: site.width,
                         value: resolve(&site.value),
-                        offset: site.offset.as_ref().map(resolve),
+                        position: site
+                            .position
+                            .map(|position| position.map(|id| resolve(&id))),
                         pending: site.pending.as_ref().map(resolve),
                     })
                     .collect(),
@@ -198,6 +265,34 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             .enumerate()
             .map(|(index, counted)| (counted.refs.signal.offset, index))
             .collect();
+        let counted_triggers = counted
+            .iter()
+            .enumerate()
+            .flat_map(|(index, counted)| {
+                counted
+                    .domains
+                    .iter()
+                    .map(move |&(id, kind)| CountedTrigger {
+                        counter: counted.refs.counter(kind),
+                        id,
+                        seen: (index, crate::timing::kind_index(kind)),
+                    })
+            })
+            .collect();
+        let mut probes_by_offset: FxHashMap<usize, Vec<ProbeRefs>> = FxHashMap::default();
+        for (source, counter) in &model.probes {
+            let probe = ProbeRefs {
+                lsb: source.access.lsb,
+                msb: source.access.msb,
+                counter: resolve(counter),
+            };
+            let probes = probes_by_offset
+                .entry(resolve(&source.id).offset)
+                .or_default();
+            if !probes.contains(&probe) {
+                probes.push(probe);
+            }
+        }
         Self {
             topo_signals,
             domain_kinds,
@@ -207,13 +302,99 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             processes,
             counted,
             counted_by_offset,
+            counted_triggers,
+            probes_by_offset,
             has_pending_nba_sites: model.has_pending_nba_sites,
             combinational_derived,
             timed: model.timed,
             active_commits,
             time_slots: model.time_slots.iter().map(resolve).collect(),
+            scheduler: model.scheduler.as_ref().and_then(|scheduler| {
+                let slots = &scheduler.slots;
+                Some(SchedulerRefs {
+                    unit: scheduler.unit?,
+                    limit: resolve(&slots.limit),
+                    now: resolve(&slots.now),
+                    exit: resolve(&slots.exit),
+                    exit_arg: resolve(&slots.exit_arg),
+                    finish: resolve(&slots.finish),
+                    count: resolve(&slots.count),
+                    current: resolve(&slots.current),
+                    levels: resolve(&slots.levels),
+                    ready: resolve(&slots.ready),
+                    wake: (0..scheduler.fallback.len())
+                        .map(|index| {
+                            (scheduler.fallback[index].is_none()
+                                && model.processes[index].waits.is_empty())
+                            .then(|| (resolve(&slots.wake[index]), resolve(&slots.waiting[index])))
+                        })
+                        .collect(),
+                    waits: (0..scheduler.fallback.len())
+                        .map(|index| {
+                            (scheduler.fallback[index].is_none()
+                                && !model.processes[index].waits.is_empty())
+                            .then(|| {
+                                (
+                                    resolve(&slots.waiting[index]),
+                                    resolve(&slots.baseline[index]),
+                                )
+                            })
+                        })
+                        .collect(),
+                    ordinals: {
+                        let mut next = 0;
+                        scheduler
+                            .fallback
+                            .iter()
+                            .map(|fallback| {
+                                fallback.is_none().then(|| {
+                                    next += 1;
+                                    next - 1
+                                })
+                            })
+                            .collect()
+                    },
+                    wait_kernels: (0..scheduler.fallback.len())
+                        .filter(|&index| {
+                            scheduler.fallback[index].is_none()
+                                && !model.processes[index].waits.is_empty()
+                        })
+                        .count(),
+                    events: scheduler
+                        .events
+                        .iter()
+                        .map(|event| backend.resolve_event_opt(event).map(|event| event.id()))
+                        .collect::<Option<_>>()?,
+                    clocks: scheduler
+                        .clocks
+                        .iter()
+                        .map(|clock| {
+                            let event = backend.resolve_event_opt(clock)?;
+                            Some((event.id(), resolve(clock)))
+                        })
+                        .collect::<Option<_>>()?,
+                    clock_next: resolve(&slots.clock_next),
+                    clock_period: resolve(&slots.clock_period),
+                    clock_value: resolve(&slots.clock_value),
+                    clock_armed: resolve(&slots.clock_armed),
+                })
+            }),
+            kernel_fallback: model
+                .scheduler
+                .as_ref()
+                .map(|scheduler| scheduler.fallback.clone())
+                .unwrap_or_default(),
         }
     }
+}
+
+/// A counter that triggers a domain.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CountedTrigger {
+    pub counter: SignalRef,
+    pub id: usize,
+    /// The index of the counted signal and of the counter kind.
+    pub seen: (usize, usize),
 }
 
 fn counted_refs<B: SimBackend>(

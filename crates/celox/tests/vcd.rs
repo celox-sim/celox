@@ -195,6 +195,63 @@ mod tests {
         }
         out
     }
+
+    /// A tick whose two level stores nothing observes skips them; a VCD of
+    /// ticks is the same as one of periods whose levels are stored.
+    #[test]
+    fn test_vcd_of_ticks_matches_stored_periods() {
+        let code = r#"
+        module Top (
+            clk: input clock,
+            rst: input reset,
+            cnt: output logic<8>,
+        ) {
+            always_ff (clk, rst) {
+                if_reset {
+                    cnt = 0;
+                } else {
+                    cnt += 1;
+                }
+            }
+        }
+        "#;
+        for four_state in [false, true] {
+            let ticked_path = format!("test_vcd_ticks_{four_state}.vcd");
+            let stored_path = format!("test_vcd_stored_periods_{four_state}.vcd");
+            let run = |path: &str, stored: bool| {
+                let mut sim = SimulatorBuilder::new(code, "Top")
+                    .four_state(four_state)
+                    .vcd(path)
+                    .build()
+                    .unwrap();
+                let clk = sim.event("clk");
+                assert!(
+                    !sim.event_edges()[celox::EventHandle::id(&clk)].level_read,
+                    "nothing reads the level of clk"
+                );
+                let rst = sim.signal("rst");
+                sim.modify(|io| io.set(rst, 0u8)).unwrap();
+                for period in 0..6u64 {
+                    if period == 2 {
+                        sim.modify(|io| io.set(rst, 1u8)).unwrap();
+                    }
+                    if stored {
+                        sim.active_edge(clk).unwrap();
+                        sim.inactive_edge(clk).unwrap();
+                    } else {
+                        sim.tick(clk).unwrap();
+                    }
+                    sim.dump(10 * period);
+                }
+                sim.flush_vcd().unwrap();
+            };
+            run(&ticked_path, false);
+            run(&stored_path, true);
+            assert_eq!(without_date(&ticked_path), without_date(&stored_path));
+            fs::remove_file(ticked_path).unwrap();
+            fs::remove_file(stored_path).unwrap();
+        }
+    }
 }
 
 mod activity {

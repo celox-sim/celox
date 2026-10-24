@@ -394,6 +394,19 @@ fails its startup assertion in Verilator and passes in Icarus 13.0, which also
 passes the unchanged shared assertions. The [retained observation](verification/repros/event_list_declaration_startup_verilator.json)
 records both failures; `--include-ignored` retains their assertions.
 
+Verilator 5.052 keeps only the last of the nonblocking updates that an inner
+loop issues to overlapping part-selects at run-time positions when an outer loop
+delays between iterations, in
+`timing::process_nonblocking_assignments_at_run_time_positions`, and writes a
+nonblocking update of `q[8]` of `logic [7:0] q` into bit 0, in
+`timing::process_nonblocking_assignments_outside_their_target`. Each
+nonblocking assignment is its own update in issue order (IEEE 1800-2023 10.4.2),
+and bits outside the target are not written (11.5.1, 7.4.6). The
+[adapter-free reproduction](verification/repros/process_nba_positions.sv) fails
+both checks in Verilator and passes in Icarus 13.0, which also passes the
+unchanged shared assertions. The [retained observation](verification/repros/process_nba_positions_verilator.json)
+records both failures; `--include-ignored` retains their assertions.
+
 Verilator 5.052 repeats activation of the self-reading latch in
 `latch::guarded_activation`, producing 3 where one `seed`/`en` change should
 produce 1. The [adapter-free reproduction](verification/repros/latch_activation.sv)
@@ -494,7 +507,10 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_nested_class_members` | execute | icarus | 1 | Icarus 13.0 reads an empty string through a nested property path (kept.inner.text) after reporting "sorry: Nested member path not yet supported for class properties" for its assignment. IEEE 1800-2023 8.5 permits accessing a property of an object referred to by a property. Verilator passes the case. |
 | `sv_icarus_class_scope_resolution` | compile | icarus | 1 | Icarus 13.0 rejects class scope resolution with a syntax error: reading a static property (Counter::created), calling a static method (Counter::next()) and assigning a static property (Counter::last = "set"). IEEE 1800-2023 8.9, 8.10 and 8.23 define these accesses. Verilator passes the case. |
 | `sv_icarus_virtual_dispatch` | execute | icarus | 1 | Icarus 13.0 binds a virtual function called through a base-class handle to the handle's class instead of the object's: the shared case prints area=0 for every shape, and the adapter-free source prints 1 1 1 3 where IEEE 1800-2023 8.20 requires 2 3 4 4. Verilator and Celox print 2 3 4 4 and pass the case. |
-| `sv_icarus_abstract_and_interface_classes` | compile | icarus | 3 | Icarus 13.0 rejects pure virtual method declarations and interface classes with syntax errors ("Invalid class item", "Invalid module item") and fails code generation without a diagnostic ("Code generation had 2 error(s)") for a method called on an element of an array of class handles. IEEE 1800-2023 8.21 and 8.26 define pure virtual methods and interface classes, and 7.4 and 8.4 permit arrays of class handles. Verilator passes all three cases. |
+| `sv_icarus_abstract_and_interface_classes` | compile | icarus | 6 | Icarus 13.0 rejects pure virtual method declarations and interface classes with syntax errors ("Invalid class item", "Invalid module item") and fails code generation without a diagnostic ("Code generation had 2 error(s)") for a method called on an element of an array of class handles. IEEE 1800-2023 8.21 and 8.26 define pure virtual methods and interface classes, and 7.4 and 8.4 permit arrays of class handles. Verilator passes the first three cases; see sv_verilator_interface_class_casts and sv_verilator_extended_interface_class_methods for the others. |
+| `sv_verilator_interface_class_casts` | execute | verilator | 1 | Verilator 5.052 returns 0 from $cast of a handle of one interface class to a variable of another interface class that the object's class also implements, so the case dereferences the unassigned null handle; the adapter-free source prints 0 1 where IEEE 1800-2023 8.16 and 8.26.5 require 1 1. Celox prints 1 1. Icarus rejects interface classes, see sv_icarus_abstract_and_interface_classes. |
+| `sv_verilator_extended_interface_class_methods` | compile | verilator | 1 | Verilator 5.052 does not find a method that an interface class inherits from an interface class it extends when the method is called through a handle of the extending class ("Class method 'sides' not found in class 'NamedShape'"). IEEE 1800-2023 8.26.3 makes the methods of the extended interface classes members of the extending one. Icarus rejects interface classes, see sv_icarus_abstract_and_interface_classes. |
+| `sv_icarus_cast` | execute | icarus | 1 | Icarus 13.0 does not implement $cast ("System task/function $cast() is not defined by any module"), which IEEE 1800-2023 6.24.2 and 8.16 define. Verilator passes the case. |
 | `sv_verilator_class_property_string_methods` | compile | verilator | 1 | Verilator 5.052 stops with an internal error ("AstNode is not of expected type, but instead has type 'MEMBERSEL'") on a string method called on a class property, n.name.itoa(42), which IEEE 1800-2023 6.16 and 8.5 permit. Icarus rejects the case too, see sv_icarus_classes. |
 | `sv_icarus_unpacked_array_patterns` | compile | icarus | 1 | Icarus 13.0 reports that an assignment pattern with unpacked array items assigned to a multidimensional unpacked array is not yet supported ("Procedural assignment of array or array slice"), so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 7.6, 10.8). |
 | `sv_icarus_display_field_width` | execute | icarus | 1 | Icarus 13.0 zero-pads a value wider than an explicit field width of %h or %o to the argument's full width (%3h of 32'h1234 prints 00001234); IEEE 1800-2023 21.2.1.2 expands the field to the value without leading zeros (1234). Verilator agrees with the expected value. |
@@ -504,7 +520,7 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_verilator_short_circuit_calls` | execute | verilator | 1 | Verilator 5.052 runs a function call in the right operand of && in a select index when the left operand is false, so its output argument is written; IEEE 1800-2023 11.4.7 does not evaluate that operand. Icarus cannot compile the design (sv_icarus_function_outputs). |
 | `sv_verilator_function_outputs` | compile | verilator | 1 | Verilator 5.052 fails with an internal error (V3DfgSynthesize: Non-ReadOnly reference) on output and inout function arguments. |
 | `sv_verilator_generate_name_collision` | compile | verilator | 1 | Verilator 5.052 rejects a generate block named like a port with an "Unsupported" diagnostic instead of a duplicate-name error, so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 5.6.1, 23.9) and Icarus rejects it as a duplicate declaration. |
-| `sv_verilator_part_select_write_overhang` | execute | verilator | 1 | Verilator 5.052 writes the out-of-range bit of a partially out-of-range indexed part-select (minus_write[i -: 2] with i = 0) into bit 7 instead of discarding it; IEEE 1800-2023 11.5.1 ignores writes to out-of-range bits. Icarus agrees with the expected value. |
+| `sv_verilator_part_select_write_overhang` | execute | verilator | 4 | Verilator 5.052 writes bits that IEEE 1800-2023 11.5.1 discards: the out-of-range bit of a partially out-of-range indexed part-select (minus_write[i -: 2] with i = 0) lands in bit 7, a constant part-select wholly outside the vector (comb_out[11:8]) writes its low bits, a partly outside one of an ascending vector (comb_up[6:9]) takes the wrong end of the value, and run-time selects within one array element whose positions are known at compile time reach past it. Icarus agrees with the expected values. |
 | `sv_verilator_unpacked_array_extension` | compile | verilator | 2 | Verilator 5.052 rejects an unpacked array argument or assignment pattern item with a narrower element type through "EXTEND unexpected in assignment to unpacked array" (EXTENDS for a signed element), a diagnostic about its own width extension rather than the element types, so the run cannot count it as a language rejection. The designs are invalid (IEEE 1800-2023 7.6, 10.8). |
 | `sv_icarus_dimensions_type_queries` | compile | icarus | 2 | Icarus 13.0 rejects data type arguments to `$dimensions`, with syntax/type-name errors and an assertion for a multidimensional cast. IEEE 1800-2023 20.7 permits these queries. Verilator passes the integral/string/real type case. |
 | `sv_verilator_chandle_dimensions` | execute | verilator | 1 | Verilator 5.052 returns 1 for `$dimensions(chandle)`; IEEE 1800-2023 6.14 and 20.7 require 0 for this nonarray pointer type. |
@@ -544,6 +560,7 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_verilator_time_in_combinational_logic` | execute | verilator | 1 | Verilator 5.052 evaluates an always_comb that reads $time again when the clocking event of the suite testbench fires, although no variable it reads has changed: at 3 ns y is 3 instead of 0. IEEE 1800-2023 9.2.2.2.1 makes always_comb sensitive to the variables it reads, and $time (20.3.1) is none. A standalone probe prints y=0 in Icarus 13.0 and Verilator without a clocking block, and y=3 in Verilator with one. |
 | `sv_verilator_intermediate_writes` | execute | verilator | 6 | Verilator 5.052 wakes a process waiting on a variable only for the value an evaluation leaves: an always_comb or edge-triggered body that rewrites a variable 1 -> 0 -> 1, and nonblocking updates `y <= 0; y <= 1;` from 1, wake no waiter, nor does a pulse that one always_ff writes to some bits of a variable while other processes write its other bits, or a nonblocking update that rises from the final blocking value. IEEE 1800-2023 4.3 and 9.4.2 make every store an update event that triggers the waiter, and 10.4.2 applies nonblocking updates in issue order, each its own update. [Standalone probes](verification/repros/sv_intermediate_writes_verilator.json) print the spec counts in Icarus 13.0 and 1 or 0 in Verilator. |
 | `sv_icarus_port_pulses` | execute | icarus | 1 | Icarus 13.0 collapses a child's output port with the parent's net, so a waiter in the parent sees each value the child's always_comb writes inside one evaluation and counts 3 instead of 1. Both are conforming: the port is a continuous assignment (IEEE 1800-2023 23.3.3), evaluated after the child's process yields, and 4.7 leaves that order open. The case asserts the settled count, which Verilator 5.052 and Celox give. The [standalone probe](verification/repros/sv_port_pulses_icarus.json) retains both outputs. |
+| `sv_verilator_active_region_waiters` | execute | verilator | 2 | Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). [Standalone probes](verification/repros/sv_active_region_waiters_verilator.json) print the spec values in Icarus 13.0 and the post-NBA values in Verilator. |
 
 The [system-function edge-case evidence](verification/repros/system_function_edge_cases.json)
 retains the failed Icarus runs and minimal sources. Cover comparisons enable
@@ -559,6 +576,12 @@ Icarus 13.0 reports `Module instantiations are not allowed in interfaces` for
 interface. Verilator 5.052 executes the same emitted Veryl design successfully.
 The [retained diagnostic](verification/repros/interface_nested_icarus.json)
 records this compile limitation.
+
+Class randomization (`sv_icarus_class_randomize`) excludes the two cases
+`class::unconstrained_randomize` and `class::randomize_without_rand_members`
+from Icarus 13.0. It rejects the built-in `randomize` and `srandom` methods
+during elaboration; [the original diagnostics](verification/repros/sv_class_randomize_icarus.json)
+remain available. Both cases pass Verilator and Celox.
 
 ## Veryl analyzer floating-point constant expressions
 
@@ -628,6 +651,24 @@ an unknown display format code. It prints a lowercase `e` for the uppercase
 `%E` conversion in `real_display_negative_zero`; the negative-zero value is
 otherwise correct. Its `real_file_display_formats` case passes. The shared
 assertions remain enabled, and these external differences are not exclusions.
+
+Randomization control (`sv_icarus_randomization_control`) excludes four new
+`class::randomization_*` cases from Icarus 13.0: it rejects `randomize`, `srandom`
+and property/object `rand_mode` calls. [Retained diagnostics](verification/repros/sv_randomization_control_icarus.json)
+record the failures; they are not passing simulation results.
+
+Verilator 5.052 has two narrower exclusions, recorded in the
+[randomization control evidence](verification/repros/sv_randomization_control_verilator.json):
+
+- `sv_verilator_inherited_srandom`: `class::randomization_inheritance` fails
+  compilation with duplicate `srandom` declarations when the same derived
+  object is seeded through derived and base handles (IEEE 1800-2023 18.6.2,
+  18.13.3). Assertions for hidden inherited members and hook dispatch remain.
+- `sv_verilator_rand_mode_bit_argument`: `class::randomization_mode_bit_argument`
+  reports two errors because both forms of `rand_mode(2)` enable the variable.
+  The setter's formal is `bit` (18.8), so the required conversion truncates 2 to
+  0. Generated C++ confirms that Verilator uses 1. The normal 0/1 mode control,
+  inline member selection and pre-hook control cases pass Verilator.
 
 ## veryl-native-queue-components
 

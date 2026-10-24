@@ -88,6 +88,17 @@ pub(in crate::ast) fn query_value(
     let argument = arguments[0].value.unwrap();
     let context = query_context_for_operand(argument, tree, context)?;
     reject_unbounded(argument, function, tree, &context)?;
+    if function == SystemFunction::Size
+        && let Some(value) = interface_array_size(
+            root,
+            argument,
+            arguments.get(1).and_then(|a| a.value),
+            tree,
+            &context,
+        )?
+    {
+        return Ok(Some(value));
+    }
     let shape = shape(argument, tree, &context)?;
     let dimension = if let Some(argument) = arguments.get(1) {
         Some(expression_binding::bind(
@@ -214,6 +225,83 @@ pub(in crate::ast) fn query_value(
     value
         .map(Some)
         .ok_or_else(|| unsupported(format!("operand of `{}`", name.spelling)))
+}
+
+/// Query interface array metadata without admitting interface handles as data
+/// expressions. This extension supports `$size` only; it adds no packed rank.
+fn interface_array_size(
+    call: ExprId,
+    mut argument: ExprId,
+    dimension: Option<ExprId>,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+) -> Converted<Option<Expr>> {
+    let native = tree.declarations();
+    let mut selected = Vec::new();
+    loop {
+        argument = expression_binding::ungroup(argument, native);
+        match &native.expression(argument).kind {
+            ExprKind::Select {
+                expression,
+                dimension,
+            } => {
+                let DimensionKind::Index(index) = dimension.kind else {
+                    return Ok(None);
+                };
+                selected.push(index);
+                argument = *expression;
+            }
+            _ => break,
+        }
+    }
+    let Ok(handle) = interface_binding::actual_handle_key(
+        argument,
+        tree,
+        &context.const_env,
+        &context.type_aliases,
+    ) else {
+        return Ok(None);
+    };
+    let receiver = handle.split(['.', '[']).next().unwrap_or(&handle);
+    if context.get(receiver).is_some()
+        || context.const_env.contains_key(receiver)
+        || context.parameter_values.contains_key(receiver)
+    {
+        return Ok(None);
+    }
+    let imported = scope::imported(&tree.state);
+    let Some(array) = imported.interface_arrays.get(&handle) else {
+        return Ok(None);
+    };
+    let Some(shape) = array
+        .shape
+        .get(selected.len()..)
+        .filter(|shape| !shape.is_empty())
+    else {
+        return Ok(None);
+    };
+    for index in selected {
+        validate_index(index, tree, context)?;
+    }
+    let dimension = match dimension {
+        Some(id) => constant_binding::bind(id, tree, context)?
+            .and_then(|value| eval_ast_const_expr(&tree.state, &value, &context.const_env))
+            .ok_or_else(|| unsupported("nonconstant interface array query dimension"))?,
+        None => 1,
+    };
+    let value = usize::try_from(dimension)
+        .ok()
+        .and_then(|d| d.checked_sub(1))
+        .and_then(|index| shape.get(index))
+        .map(|size| integer(*size as i128))
+        .unwrap_or_else(|| Expr::Literal("32'sbx".into()));
+    warnings::append(
+        &mut tree.state.diagnostics.borrow_mut(),
+        [warnings::AnalyzerWarning::InterfaceArrayQuery {
+            site: procedural::source_span(native.expression(call).tokens, tree),
+        }],
+    );
+    Ok(Some(value))
 }
 
 fn parameter_dimension_count(
@@ -865,6 +953,7 @@ mod tests {
                 signed: false,
                 is_2state: false,
                 string: false,
+                pattern_type: None,
             },
         );
         for declaration in &tree.declarations().data_declarations {

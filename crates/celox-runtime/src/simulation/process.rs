@@ -294,6 +294,16 @@ impl<B: SimBackend> SimulationState<B> {
                 continue;
             }
             if self.process_state.inactive.is_empty() {
+                // A domain whose blocking results are observed commits them
+                // in the active region: the processes they wake run before
+                // the NBA region publishes its nonblocking results (IEEE
+                // 1800-2023 4.5).
+                if self.active_commit_triggered(executor.backend(), round)
+                    && self.evaluate_before_inactive(executor, current_time, round)?
+                {
+                    self.observe_driven(executor.backend());
+                    continue;
+                }
                 return Ok(());
             }
             // The active region is empty: the domains it triggered evaluate

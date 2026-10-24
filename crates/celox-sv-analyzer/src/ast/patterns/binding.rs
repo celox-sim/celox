@@ -76,7 +76,7 @@ fn indexed_items(
                         *slot = Some((value, false));
                     }
                     Key::Default => default = Some((value, true)),
-                    Key::Member(_) => {
+                    Key::Member(_) | Key::Name { .. } => {
                         return Err(unsupported("member key in an array assignment pattern"));
                     }
                 }
@@ -131,6 +131,45 @@ fn select<'a>(
             false,
         ));
     }
+    if let Some((dim, rest)) = shape.packed.split_first()
+        && !rest.is_empty()
+    {
+        let (left, right, count) = dimension_bounds(state, &dim.left, &dim.right, dims)?;
+        let sub = Shape::Owned(Rc::new(VariableDimensions {
+            randomizable: true,
+            real: false,
+            string: false,
+            class: None,
+            packed: rest.to_vec(),
+            unpacked: Vec::new(),
+            signed: shape.signed_element_depth == Some(1),
+            is_2state: shape.is_2state,
+            members: shape.members.clone(),
+            signed_element_depth: shape
+                .signed_element_depth
+                .and_then(|depth| depth.checked_sub(1))
+                .filter(|depth| *depth > 0),
+        }));
+        let items = indexed_items(kind, bindings, count, |index| {
+            (left.min(right)..=left.max(right))
+                .contains(&index)
+                .then(|| usize::try_from(index.abs_diff(left)).ok())
+                .flatten()
+        })?;
+        return Ok((
+            items
+                .into_iter()
+                .map(|(value, default)| Selected {
+                    value,
+                    shape: sub.clone(),
+                    default,
+                    check: false,
+                })
+                .collect(),
+            false,
+            true,
+        ));
+    }
     if !shape.members.is_empty() {
         let members = &shape.members;
         if members.len() > 1 && members.iter().all(|member| member.offset() == 0) {
@@ -145,7 +184,7 @@ fn select<'a>(
                         members.len()
                     )));
                 }
-                bindings
+                bindings.into_iter().map(|value| (value, false)).collect()
             }
             NativeKind::Keyed(keys) => {
                 let mut named = Vec::new();
@@ -154,7 +193,7 @@ fn select<'a>(
                     match key {
                         Key::Member(name) => named.push((name, value)),
                         Key::Default => default = Some(value),
-                        Key::Index(_) => {
+                        Key::Index(_) | Key::Name { .. } => {
                             return Err(unsupported("structure assignment pattern form"));
                         }
                     }
@@ -173,8 +212,8 @@ fn select<'a>(
                         named
                             .iter()
                             .find(|(name, _)| name == member.name())
-                            .map(|(_, value)| *value)
-                            .or(default)
+                            .map(|(_, value)| (*value, false))
+                            .or(default.map(|value| (value, true)))
                             .ok_or_else(|| {
                                 unsupported(format!(
                                     "assignment pattern without a value for member `{}`",
@@ -190,54 +229,15 @@ fn select<'a>(
             members
                 .iter()
                 .zip(values)
-                .map(|(member, value)| Selected {
+                .map(|(member, (value, default))| Selected {
                     value,
                     shape: Shape::Owned(Rc::new(procedural::dimensions_from_type(member.r#type()))),
-                    default: false,
+                    default,
                     check: false,
                 })
                 .collect(),
             false,
             false,
-        ));
-    }
-    if let Some((dim, rest)) = shape.packed.split_first()
-        && !rest.is_empty()
-    {
-        let (left, right, count) = dimension_bounds(state, &dim.left, &dim.right, dims)?;
-        let sub = Shape::Owned(Rc::new(VariableDimensions {
-            randomizable: true,
-            real: false,
-            string: false,
-            class: None,
-            packed: rest.to_vec(),
-            unpacked: Vec::new(),
-            signed: shape.signed_element_depth == Some(1),
-            is_2state: shape.is_2state,
-            members: Vec::new(),
-            signed_element_depth: shape
-                .signed_element_depth
-                .and_then(|depth| depth.checked_sub(1))
-                .filter(|depth| *depth > 0),
-        }));
-        let items = indexed_items(kind, bindings, count, |index| {
-            (left.min(right)..=left.max(right))
-                .contains(&index)
-                .then(|| usize::try_from(index.abs_diff(left)).ok())
-                .flatten()
-        })?;
-        return Ok((
-            items
-                .into_iter()
-                .map(|(value, _)| Selected {
-                    value,
-                    shape: sub.clone(),
-                    default: false,
-                    check: false,
-                })
-                .collect(),
-            false,
-            true,
         ));
     }
     let width = shape_width(state, &shape, dims)
@@ -415,16 +415,23 @@ pub(in crate::ast) fn bind_native(
                     ));
                 } else {
                     let value = expression_binding::bind_value(id, native, tree, dims, None)?;
-                    let width = shape_width(&tree.state, &shape, dims)
-                        .ok_or_else(|| unsupported("assignment pattern element width"))?;
+                    let type_dims = dimensions::query_context_for_operand(id, tree, dims)?;
                     let signed =
-                        expr_signedness(&value, &dims.expression_signedness, &dims.functions)
-                            .unwrap_or(false);
-                    values.push(Expr::Resize {
-                        expr: Box::new(value),
-                        width,
+                        dimensions::expression_signedness(&value, &type_dims, &type_dims.const_env)
+                            .ok_or_else(|| unsupported("assignment pattern operand signedness"))?;
+                    let descend_default = default
+                        && (shape.unpacked.is_empty()
+                            || native_rank(id, native, dims) < shape.unpacked.len());
+                    let value_type = bound_patterns::native_value_type(id, tree, &type_dims)?;
+                    values.push(assignment_value(
+                        &tree.state,
+                        &value,
                         signed,
-                    });
+                        value_type.as_ref(),
+                        &shape,
+                        dims,
+                        descend_default,
+                    )?);
                 }
             }
             Job::Finish {

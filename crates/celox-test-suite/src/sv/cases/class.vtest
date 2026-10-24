@@ -526,3 +526,406 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "3 6\n100 200\n"))
+
+(case methods_called_through_interface_class_handles
+  (source "class.sv" #"
+module Top(output bit done);
+    interface class Shape;
+        pure virtual function int area(int scale);
+    endclass
+    interface class Named;
+        pure virtual function int id();
+    endclass
+    interface class Polygon extends Shape;
+        pure virtual function int sides();
+    endclass
+    class Rectangle;
+        int w = 2;
+        virtual function int area(int scale);
+            return w * scale;
+        endfunction
+    endclass
+    class Square extends Rectangle implements Polygon, Named;
+        virtual function int area(int scale);
+            return w * w * scale;
+        endfunction
+        virtual function int sides();
+            return 4;
+        endfunction
+        virtual function int id();
+            return 7;
+        endfunction
+    endclass
+    class Label implements Named;
+        virtual function int id();
+            return 9;
+        endfunction
+    endclass
+    Square square;
+    Label label;
+    Shape shape;
+    Named names[2];
+    Polygon polygon;
+    initial begin
+        square = new;
+        label = new;
+        shape = square;
+        polygon = square;
+        names[0] = square;
+        names[1] = label;
+        $display("%0d %0d", shape.area(3), polygon.sides());
+        $display("%0d %0d", names[0].id(), names[1].id());
+        shape = polygon;
+        $display("%0d %0d", shape.area(1), shape == null);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "12 4\n7 9\n4 0\n"))
+
+(case inherited_methods_of_extended_interface_classes
+  (source "class.sv" #"
+module Top(output bit done);
+    interface class Named;
+        pure virtual function int id();
+    endclass
+    interface class Shape;
+        pure virtual function int sides();
+    endclass
+    interface class NamedShape extends Named, Shape;
+        pure virtual function int area();
+    endclass
+    class Triangle implements NamedShape;
+        virtual function int id();
+            return 3;
+        endfunction
+        virtual function int sides();
+            return 3;
+        endfunction
+        virtual function int area();
+            return 6;
+        endfunction
+    endclass
+    Triangle triangle;
+    NamedShape shape;
+    initial begin
+        triangle = new;
+        shape = triangle;
+        $display("%0d %0d %0d", shape.id(), shape.sides(), shape.area());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "3 3 6\n"))
+
+(case casts_of_class_handles
+  (source "class.sv" #"
+module Top(output bit done);
+    class Animal;
+        virtual function int legs();
+            return 0;
+        endfunction
+    endclass
+    class Dog extends Animal;
+        virtual function int legs();
+            return 4;
+        endfunction
+    endclass
+    class Puppy extends Dog;
+    endclass
+    class Rock;
+    endclass
+    Animal animal;
+    Dog dog;
+    Rock rock;
+    int ok;
+    initial begin
+        animal = Puppy::new;
+        ok = $cast(dog, animal);
+        $display("%0d %0d", ok, dog.legs());
+        animal = new;
+        ok = $cast(dog, animal);
+        $display("%0d %0d", ok, dog.legs());
+        animal = null;
+        ok = $cast(dog, animal);
+        $display("%0d %0d", ok, dog == null);
+        dog = new;
+        ok = $cast(animal, dog);
+        $display("%0d %0d", ok, animal.legs());
+        if (!$cast(rock, dog))
+            $display("rock");
+        ok = $cast(dog, null);
+        $display("%0d %0d", ok, dog == null);
+        animal = Dog::new;
+        $cast(dog, animal);
+        $display("%0d", dog.legs());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 4\n0 4\n1 1\n1 4\nrock\n1 1\n4\n"))
+
+(case casts_from_interface_class_handles
+  (source "class.sv" #"
+module Top(output bit done);
+    interface class Named;
+        pure virtual function int id();
+    endclass
+    interface class Sized;
+        pure virtual function int size();
+    endclass
+    class Box implements Named, Sized;
+        virtual function int id();
+            return 1;
+        endfunction
+        virtual function int size();
+            return 8;
+        endfunction
+    endclass
+    class Tag implements Named;
+        virtual function int id();
+            return 2;
+        endfunction
+    endclass
+    Box box;
+    Named named;
+    Sized sized;
+    int ok;
+    initial begin
+        box = new;
+        named = box;
+        ok = $cast(sized, named);
+        $display("%0d %0d", ok, sized.size());
+        box = null;
+        ok = $cast(box, named);
+        $display("%0d %0d", ok, box.id());
+        named = Tag::new;
+        ok = $cast(sized, named);
+        $display("%0d %0d", ok, sized.size());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 8\n1 1\n0 8\n"))
+
+(case unconstrained_randomize
+  (source "randomize.sv" #"
+module Top(output bit done, output int errors);
+    class Sample;
+        rand bit flag;
+        rand bit signed [6:0] narrow;
+        rand bit [63:0] wide;
+        int untouched = 42;
+        int phase;
+        bit [63:0] observed;
+        function void pre_randomize();
+            if (phase != 0) untouched = -1;
+            phase = 1;
+        endfunction
+        function void post_randomize();
+            if (phase != 1) untouched = -2;
+            observed = wide;
+            phase = 0;
+        endfunction
+        function int again();
+            return randomize();
+        endfunction
+    endclass
+    Sample a, b, alias_a;
+    bit [63:0] saved, changed;
+    bit saved_flag;
+    bit signed [6:0] saved_small;
+    int ignored;
+    initial begin
+        a = new;
+        b = new;
+        alias_a = a;
+        a.srandom(0);
+        if (a.randomize() != 1) errors++;
+        saved = a.wide;
+        saved_flag = a.flag;
+        saved_small = a.narrow;
+        if (a.observed != saved || a.untouched != 42 || a.phase != 0) errors++;
+        changed = 0;
+        repeat (12) begin
+            if (a.again() != 1) errors++;
+            changed |= saved ^ a.wide;
+        end
+        if (changed[63:32] == 0 || changed[31:0] == 0) errors++;
+        alias_a.srandom(0);
+        repeat (5) begin
+            ignored = $urandom;
+            ignored = b.randomize();
+        end
+        if (a.randomize() != 1) errors++;
+        if (a.wide != saved || a.flag != saved_flag || a.narrow != saved_small) errors++;
+        if (a.observed != saved || a.untouched != 42 || a.phase != 0) errors++;
+        b.srandom(0);
+        if (b.randomize() != 1 || b.wide != saved) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomize_without_rand_members
+  (source "randomize_empty.sv" #"
+module Top(output bit done, output int errors);
+    class Empty;
+        int value = 5;
+        function void pre_randomize(); value += 1; endfunction
+        function void post_randomize(); value *= 2; endfunction
+    endclass
+    Empty object;
+    initial begin
+        object = new;
+        if (object.randomize() != 1 || object.value != 12) errors++;
+        if (object.randomize() != 1 || object.value != 26) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomization_inheritance
+  (source "randomization_inheritance.sv" #"
+module Top(output bit done, output int errors);
+    class Base;
+        rand bit [63:0] x;
+        int pre, post;
+        function void pre_randomize(); pre += 1; endfunction
+        function void post_randomize(); post += 1; endfunction
+        function bit [63:0] base_x(); return x; endfunction
+        function int again(); return randomize(); endfunction
+    endclass
+    class Child extends Base;
+        rand bit [63:0] x;
+        rand bit [63:0] y;
+        function void pre_randomize(); super.pre_randomize(); pre += 10; endfunction
+        function void post_randomize(); super.post_randomize(); post += 10; endfunction
+    endclass
+    class Grandchild extends Child; endclass
+    Base b;
+    Grandchild c;
+    bit [63:0] bx, cx, cy;
+    initial begin
+        c = new;
+        b = c;
+        c.srandom(31);
+        if (!c.randomize()) errors++;
+        bx = c.base_x(); cx = c.x; cy = c.y;
+        b.srandom(31);
+        if (!b.again()) errors++;
+        if (b.x != bx || c.x != cx || c.y != cy) errors++;
+        if (b.pre != 22 || b.post != 22) errors++;
+        b.rand_mode(0);
+        if (b.x.rand_mode() || c.x.rand_mode() || c.y.rand_mode()) errors++;
+        if (!b.randomize() || b.x != bx || c.x != cx || c.y != cy) errors++;
+        // Inline selection is resolved in the static receiver class.
+        b.srandom(31);
+        if (!b.randomize(x) || b.x != bx || c.x != cx || c.y != cy) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomization_modes_and_selection
+  (source "randomization_modes.sv" #"
+module Top(output bit done, output int errors);
+    class C;
+        rand bit [63:0] x, y;
+        bit [63:0] plain = 19;
+        int hooks;
+        function void pre_randomize(); hooks++; endfunction
+        function void post_randomize(); hooks++; endfunction
+        function int select_plain(); return randomize(plain); endfunction
+        function void disable_x(); x.rand_mode(0); endfunction
+    endclass
+    C c, alias_c, reference;
+    int plain = 99;
+    bit [63:0] x, y, p;
+    initial begin
+        c = new; reference = new; alias_c = c;
+        if (c.x.rand_mode() != 1 || c.y.rand_mode() != 1) errors |= 1;
+        c.disable_x();
+        c.srandom(42); reference.srandom(42);
+        if (!c.randomize() || !reference.randomize(y)) errors |= 2;
+        if (c.x != 0 || c.y != reference.y || c.plain != 19) errors |= 4;
+        c.rand_mode(0);
+        x = c.x; y = c.y;
+        if (!c.randomize() || c.x != x || c.y != y) errors |= 8;
+        alias_c.x.rand_mode(1);
+        if (c.x.rand_mode() != 1 || c.y.rand_mode() != 0) errors |= 16;
+        c.x.rand_mode(0);
+        if (c.x.rand_mode() != 0) errors |= 32;
+        c.srandom(9); reference.srandom(9);
+        if (!c.randomize(plain) || !reference.randomize(plain)) errors |= 64;
+        if (plain != 99 || c.plain != reference.plain || c.x != x || c.y != y) errors |= 128;
+        if (c.x.rand_mode() || c.y.rand_mode()) errors |= 256;
+        p = c.plain;
+        if (!c.randomize(null) || c.x != x || c.y != y || c.plain != p) errors |= 512;
+        if (c.hooks != 8) errors |= 1024;
+        c.srandom(7); reference.srandom(7);
+        if (!c.select_plain() || !reference.randomize(plain)) errors |= 2048;
+        if (c.plain != reference.plain) errors |= 4096;
+        c.rand_mode(1);
+        if (!c.x.rand_mode() || !c.y.rand_mode()) errors |= 8192;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomization_pre_hook_controls_modes
+  (source "randomization_hook.sv" #"
+module Top(output bit done, output int errors);
+    class C;
+        rand bit [63:0] x;
+        bit disable_randomization;
+        int seen;
+        function void pre_randomize();
+            seen = x.rand_mode();
+            if (disable_randomization) rand_mode(0);
+        endfunction
+    endclass
+    C c, reference;
+    initial begin
+        c = new; reference = new;
+        c.disable_randomization = 1;
+        if (!c.randomize() || c.x != 0 || c.x.rand_mode()) errors++;
+        c.srandom(8); reference.srandom(8);
+        if (!c.randomize(x) || !reference.randomize()) errors++;
+        if (c.x != 0 || c.x.rand_mode() || c.seen != 1) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+
+(case randomization_mode_bit_argument
+  (source "mode_bit_argument.sv" #"
+module Top(output bit done, output int errors);
+    class C; rand int x; endclass
+    C c;
+    initial begin
+        c = new;
+        c.x.rand_mode(2);
+        if (c.x.rand_mode() != 0) errors++;
+        c.x.rand_mode(3);
+        if (c.x.rand_mode() != 1) errors++;
+        c.rand_mode(2);
+        if (c.x.rand_mode() != 0) errors++;
+        c.rand_mode(3);
+        if (c.x.rand_mode() != 1) errors++;
+        if (c.x.rand_mode() < -1) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))

@@ -13,7 +13,7 @@
 //! so the inactive edge of a clock that only clocks flip-flops costs no
 //! settle on the next active edge.
 
-use celox_design::{DomainKind, EventTopology, edges::LEVEL_UNKNOWN};
+use celox_design::{DomainKind, EventTopology, GateOp, edges::LEVEL_UNKNOWN};
 
 use crate::{
     AbsoluteAddr, SignalRef,
@@ -42,6 +42,14 @@ impl Edge {
             Edge::Falling => 0,
         }
     }
+
+    /// The other transition.
+    pub fn opposite(self) -> Edge {
+        match self {
+            Edge::Rising => Edge::Falling,
+            Edge::Falling => Edge::Rising,
+        }
+    }
 }
 
 /// What an edge needs to know about one event.
@@ -52,6 +60,15 @@ pub struct EventEdge {
     pub kind: Option<DomainKind>,
     /// Combinational logic reads the signal.
     pub comb_read: bool,
+    /// A run of the event's own domain can observe the signal's level:
+    /// combinational logic or one of the domain's flip-flops reads it.
+    pub level_read: bool,
+    /// The edge opposite to [`Self::active_edge`] can run a domain: the
+    /// event's own, or that of a clock computed combinationally from the
+    /// signal that this edge can move to its active edge. When it cannot,
+    /// nothing commits on that edge, so no domain clocked from state runs
+    /// either, and a host only needs to store the level.
+    pub inactive_runs: bool,
 }
 
 impl EventEdge {
@@ -100,13 +117,128 @@ pub fn build_event_edges<B: SimBackend>(
         .iter()
         .map(|address| {
             let canonical = events.canonical(*address);
-            EventEdge {
+            let kind = kinds.get(&canonical).copied();
+            let comb_read = events.combinationally_read.contains(&canonical);
+            let mut info = EventEdge {
                 signal: backend.resolve_signal(&canonical),
-                kind: kinds.get(&canonical).copied(),
-                comb_read: events.combinationally_read.contains(&canonical),
-            }
+                kind,
+                comb_read,
+                level_read: comb_read || !events.level_unread_by_domain.contains(&canonical),
+                inactive_runs: false,
+            };
+            let inactive = info.active_edge().opposite();
+            info.inactive_runs = info.can_fire(inactive)
+                || events
+                    .combinational_derived
+                    .get(&canonical)
+                    .into_iter()
+                    .flatten()
+                    // A clock without a domain of its own runs nothing.
+                    .filter(|clock| backend.resolve_event_opt(&clock.clock).is_some())
+                    .any(|clock| {
+                        let moves = clock
+                            .gate
+                            .as_deref()
+                            .and_then(dependence)
+                            .unwrap_or(Dependence::Mixed);
+                        moves.can_reach(inactive, kinds.get(&clock.clock).copied())
+                    });
+            info
         })
         .collect()
+}
+
+/// How a gate program's value depends on its source's level, bitwise:
+/// whether raising the source can only raise each bit, only lower it, or
+/// either. The operations it treats as monotone also are over the order
+/// 0 < x < 1 of four-state values, so it holds for four-state designs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dependence {
+    Independent,
+    Positive,
+    Negative,
+    Mixed,
+}
+
+impl Dependence {
+    fn invert(self) -> Self {
+        match self {
+            Dependence::Positive => Dependence::Negative,
+            Dependence::Negative => Dependence::Positive,
+            other => other,
+        }
+    }
+
+    /// A monotone function of both operands, such as `&` or `|`.
+    fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Dependence::Independent, other) | (other, Dependence::Independent) => other,
+            (lhs, rhs) if lhs == rhs => lhs,
+            _ => Dependence::Mixed,
+        }
+    }
+
+    /// A function of the operands that is not monotone, such as `^`.
+    fn scramble(self, other: Self) -> Self {
+        if self == Dependence::Independent && other == Dependence::Independent {
+            Dependence::Independent
+        } else {
+            Dependence::Mixed
+        }
+    }
+
+    /// Whether `edge` of the source can be an edge of a clock of `kind`
+    /// computed with this dependence.
+    fn can_reach(self, edge: Edge, kind: Option<DomainKind>) -> bool {
+        let moves = match self {
+            Dependence::Independent => return false,
+            Dependence::Mixed => return true,
+            Dependence::Positive => edge,
+            Dependence::Negative => edge.opposite(),
+        };
+        match kind {
+            Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => moves == Edge::Rising,
+            Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => moves == Edge::Falling,
+            _ => true,
+        }
+    }
+}
+
+/// The [`Dependence`] of a gate program's value on its source, or `None`
+/// for a malformed program.
+fn dependence<A>(ops: &[GateOp<A>]) -> Option<Dependence> {
+    let mut stack: Vec<Dependence> = Vec::new();
+    for op in ops {
+        let value = match op {
+            GateOp::Source => Dependence::Positive,
+            GateOp::Load { .. } | GateOp::Const(_) => Dependence::Independent,
+            GateOp::Not { .. } | GateOp::LogicNot => stack.pop()?.invert(),
+            GateOp::ReduceAnd { .. } | GateOp::ReduceOr | GateOp::Slice { .. } => stack.pop()?,
+            GateOp::ReduceXor => stack.pop()?.scramble(Dependence::Independent),
+            GateOp::And | GateOp::Or | GateOp::LogicAnd | GateOp::LogicOr => {
+                let rhs = stack.pop()?;
+                stack.pop()?.join(rhs)
+            }
+            GateOp::Xor | GateOp::Eq | GateOp::Ne => {
+                let rhs = stack.pop()?;
+                stack.pop()?.scramble(rhs)
+            }
+            GateOp::Mux => {
+                let otherwise = stack.pop()?;
+                let then = stack.pop()?;
+                match stack.pop()? {
+                    // A fixed condition selects one of two monotone values.
+                    Dependence::Independent => then.join(otherwise),
+                    _ => Dependence::Mixed,
+                }
+            }
+        };
+        stack.push(value);
+    }
+    match stack.as_slice() {
+        [value] => Some(*value),
+        _ => None,
+    }
 }
 
 /// What an edge did.
@@ -164,6 +296,12 @@ impl<B, F: FnMut(&mut B, SignalRef, u8)> SignalWrite<B> for F {
 /// A plain write of the level, for hosts that observe nothing.
 pub fn set_level<B: SimBackend>(backend: &mut B, signal: SignalRef, level: u8) {
     backend.set(signal, level);
+}
+
+/// Whether `info`'s signal is at the known level `edge` leaves it at.
+#[inline]
+pub fn at_level<B: SimBackend>(backend: &B, info: &EventEdge, edge: Edge) -> bool {
+    level(backend, info.signal) == edge.level()
 }
 
 /// Move `info`'s signal to the level of `edge` through `write`. Returns the
@@ -345,4 +483,114 @@ where
     } else {
         moved_only(comb_read)
     })
+}
+
+/// One tick of `event`: a clock period of its signal, defined as the
+/// SystemVerilog statements
+///
+/// ```systemverilog
+/// s <= A; #H;
+/// s <= I; #L;
+/// ```
+///
+/// where `A` and `I` are the event's active and inactive levels: the active
+/// edge, then the inactive edge, each running every domain sensitive to it.
+/// Combinational logic is settled afterwards. `dirty` says whether it has
+/// pending changes; `write` moves the signal.
+#[allow(clippy::too_many_arguments)]
+pub fn run_tick<X, E>(
+    executor: &mut X,
+    plan: Option<&DerivedTickPlan<E>>,
+    info: EventEdge,
+    scratch: &mut DerivedTickScratch,
+    event: E,
+    dirty: bool,
+    mut write: impl FnMut(&mut X::Backend, SignalRef, u8),
+) -> Result<(), Halt>
+where
+    X: TickExecutor,
+    X::Backend: SimBackend<Event = E>,
+    E: EventHandle,
+{
+    let active = info.active_edge();
+    let mut dirty = dirty;
+    for edge in [active, active.opposite()] {
+        dirty = match run_edge(
+            executor, plan, info, scratch, event, edge, dirty, &mut write,
+        )? {
+            EdgeOutcome::Unchanged | EdgeOutcome::Stored => dirty,
+            EdgeOutcome::Moved => true,
+            EdgeOutcome::Settled => false,
+        };
+    }
+    if dirty {
+        executor.eval_comb()?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Op = GateOp<()>;
+
+    const LOAD: Op = GateOp::Load {
+        address: (),
+        lsb: 0,
+        width: 1,
+    };
+
+    #[test]
+    fn gates_follow_their_source_through_monotone_operations() {
+        use Dependence::*;
+        let cases: [(&[Op], Dependence); 8] = [
+            (&[GateOp::Source, LOAD, GateOp::And], Positive),
+            (&[GateOp::Source, GateOp::Not { width: 1 }], Negative),
+            (
+                &[GateOp::Source, GateOp::LogicNot, LOAD, GateOp::LogicOr],
+                Negative,
+            ),
+            (&[LOAD, GateOp::Const(1), GateOp::Or], Independent),
+            (&[GateOp::Source, LOAD, GateOp::Xor], Mixed),
+            (
+                &[
+                    GateOp::Source,
+                    GateOp::Source,
+                    GateOp::Not { width: 1 },
+                    GateOp::Or,
+                ],
+                Mixed,
+            ),
+            (
+                &[LOAD, GateOp::Source, GateOp::Const(0), GateOp::Mux],
+                Positive,
+            ),
+            (
+                &[GateOp::Source, LOAD, GateOp::Const(0), GateOp::Mux],
+                Mixed,
+            ),
+        ];
+        for (ops, expected) in cases {
+            assert_eq!(dependence(ops), Some(expected), "{ops:?}");
+        }
+        assert_eq!(dependence::<()>(&[GateOp::And]), None);
+        assert_eq!(dependence::<()>(&[GateOp::Source, GateOp::Source]), None);
+    }
+
+    #[test]
+    fn a_clock_is_reached_by_the_edges_its_dependence_allows() {
+        use DomainKind::*;
+        let posedge = Some(ClockPosedge);
+        let negedge = Some(ClockNegedge);
+        // The falling edge of a positive-edge clock's source.
+        let edge = Edge::Falling;
+        assert!(!Dependence::Positive.can_reach(edge, posedge));
+        assert!(Dependence::Positive.can_reach(edge, negedge));
+        assert!(Dependence::Negative.can_reach(edge, posedge));
+        assert!(!Dependence::Negative.can_reach(edge, Some(ResetAsyncLow)));
+        assert!(Dependence::Positive.can_reach(edge, None));
+        assert!(!Dependence::Independent.can_reach(edge, None));
+        assert!(Dependence::Mixed.can_reach(edge, posedge));
+    }
 }

@@ -9,6 +9,8 @@ mod backend;
 #[cfg(all(feature = "arm64-codegen", feature = "x86_64-codegen"))]
 compile_error!("arm64-codegen and x86_64-codegen cannot be enabled together");
 #[cfg(feature = "host-runtime")]
+mod comb_activation;
+#[cfg(feature = "host-runtime")]
 mod component;
 #[cfg(feature = "host-runtime")]
 pub use component::{
@@ -30,6 +32,9 @@ mod ir;
 mod optimizer;
 mod parser;
 pub(crate) mod portable;
+// Builds without the host runtime run every slot in the reference loop.
+#[cfg(feature = "host-runtime")]
+mod scheduler;
 #[cfg(feature = "host-runtime")]
 mod simulation;
 mod simulator;
@@ -119,7 +124,7 @@ mod host_api {
     pub use celox_runtime::{
         BackendExecutor, DerivedTickPlan, DerivedTickPlans, DerivedTickScratch, Edge, EdgeOutcome,
         EventEdge, EventEdges, Halt, SignalWrite, VcdSignalDesc, VcdStatistics, VcdWriter,
-        move_signal, run_edge, run_edges, set_level,
+        move_signal, run_edge, run_edges, run_tick, set_level,
     };
 
     pub struct IOContext<'a, B: SimBackend = DefaultBackend> {

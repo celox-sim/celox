@@ -216,6 +216,7 @@ pub(super) fn signature(
     module.instances.clear();
     let ir = crate::analyze::analyze_source(Source {
         modules: vec![module],
+        diagnostics: Vec::new(),
     })?;
     ir.modules()
         .first()

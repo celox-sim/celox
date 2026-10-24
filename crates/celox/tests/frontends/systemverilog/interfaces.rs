@@ -1,6 +1,16 @@
 use super::*;
 
 sv_backends! {
+    fn connects_interface_array_slices_in_declaration_order(sim) {
+        @case "interfaces::connects_interface_array_slices_in_declaration_order";
+    }
+    fn drives_interface_array_slices_through_generated_relays(sim) {
+        @case "interfaces::drives_interface_array_slices_through_generated_relays";
+    }
+    fn connects_multidimensional_interface_array_slices(sim) {
+        @case "interfaces::connects_multidimensional_interface_array_slices";
+    }
+
     fn distributes_multidimensional_connections_to_interface_arrays(sim) {
         @case "interfaces::distributes_multidimensional_connections_to_interface_arrays";
     }
@@ -140,4 +150,130 @@ sv_backends! {
             assert_eq!(u64::try_from(sim.get(y)).unwrap(), u64::from(value));
         }
     }
+}
+
+// Interface objects are not IEEE 20.7 data arrays. This opt-in compatibility
+// behavior belongs to Celox's harness rather than the portable language suite.
+sv_backends! {
+    fn queries_interface_array_sizes_as_an_explicit_extension(sim) {
+        @setup {
+            let source = r#"
+                interface Lane; logic value; endinterface
+                module Child #(parameter N=1)(output wire [7:0] y); assign y=N; endmodule
+                module Reader(Lane ports[3:2], output wire [7:0] y);
+                    assign y=$size(ports);
+                endmodule
+                module Top(output wire [7:0] local_count, param_count, formal_count,
+                    first_count, second_count, selected_count, generated_count, shadow_count, member_shadow_count,
+                    output wire [1:0] generated);
+                    Lane lanes[3:2]();
+                    Lane matrix[1:0][4:2]();
+                    localparam N=$size(lanes);
+                    assign local_count=N;
+                    Child #(.N($size(lanes))) c(.y(param_count));
+                    Reader r(.ports(lanes), .y(formal_count));
+                    assign first_count=$size(matrix,1);
+                    assign second_count=$size(matrix,2);
+                    assign selected_count=$size(matrix[0]);
+                    for(genvar i=0;i<$size(lanes);i=i+1) begin: bits_out
+                        assign generated[i]=1'b1;
+                    end
+                    if(1) begin: bank
+                        Lane local_lanes[5:7]();
+                        assign generated_count=$size(local_lanes);
+                    end
+                    function automatic int shadow();
+                        int lanes[5];
+                        return $size(lanes);
+                    endfunction
+                    assign shadow_count=shadow();
+                    function automatic int shadow_member();
+                        struct packed {logic [4:0] local_lanes;} bank;
+                        return $size(bank.local_lanes);
+                    endfunction
+                    assign member_shadow_count=shadow_member();
+                endmodule
+            "#;
+            let mut policy=celox::DiagnosticPolicy::default();
+            policy.set("interface_array_query",celox::DiagnosticLevel::Warn);
+        }
+        @build Simulator::from_sv_sources(vec![(source,Path::new("interface_array_size.sv"))],"Top")
+            .diagnostic_policy(policy);
+        for (name,expected) in [("local_count",2u8),("param_count",2),("formal_count",2),
+            ("first_count",2),("second_count",3),("selected_count",3),
+            ("generated_count",3),("shadow_count",5),("member_shadow_count",5),("generated",3)] {
+            assert_eq!(sim.get(sim.signal(name)),BigUint::from(expected),"{name}");
+        }
+        assert!(!sim.warnings().is_empty());
+    }
+}
+
+#[test]
+fn rejects_invalid_interface_array_selections() {
+    for (selection, expected) in [
+        ("lanes[4:3]", "outside its declared range"),
+        ("lanes[0:1]", "reversed interface array selection"),
+        (
+            "lanes[1 +: 0]",
+            "nonpositive interface array selection width",
+        ),
+        ("lanes[index +: 2]", "nonconstant interface array selection"),
+        ("lanes[0][0]", "too many interface array selections"),
+        ("lanes[3:1]", "interface array dimension mismatch"),
+        (
+            "lanes[128'h7fffffffffffffffffffffffffffffff +: 2]",
+            "selection bound overflow",
+        ),
+    ] {
+        let source = format!(
+            r#"
+            interface Lane;
+                logic value;
+                modport reader(input value);
+            endinterface
+            module Reader(Lane.reader ports[2], output wire y);
+                assign y=ports[0].value ^ ports[1].value;
+            endmodule
+            module Top(input int index, output wire y);
+                Lane lanes[3:0]();
+                for(genvar n=0;n<4;n++) begin: g
+                    assign lanes[n].value=1'b0;
+                end
+                Reader r(.ports({selection}),.y(y));
+            endmodule
+        "#
+        );
+        let error = Simulator::from_sv_sources(
+            vec![(source.as_str(), Path::new("invalid_interface_slice.sv"))],
+            "Top",
+        )
+        .build_interpreter()
+        .expect_err(selection)
+        .to_string();
+        assert!(error.contains(expected), "{selection}: {error}");
+    }
+}
+
+#[test]
+fn rejects_interface_array_slices_in_multiple_dimensions() {
+    let source = r#"
+        interface Lane; logic value; endinterface
+        module Reader(Lane lanes[1][1], output wire y);
+            assign y=lanes[0][0].value;
+        endmodule
+        module Top(output wire y);
+            Lane lanes[2][2]();
+            Reader r(.lanes(lanes[0:0][0:0]),.y(y));
+        endmodule
+    "#;
+    let error =
+        Simulator::from_sv_sources(vec![(source, Path::new("invalid_matrix_slice.sv"))], "Top")
+            .build_interpreter()
+            .err()
+            .unwrap()
+            .to_string();
+    assert!(
+        error.contains("interface array slices in multiple dimensions"),
+        "{error}"
+    );
 }

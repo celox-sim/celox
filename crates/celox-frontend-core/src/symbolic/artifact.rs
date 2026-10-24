@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, fmt};
 
 use celox_design::{
-    CounterSlots, ExternFunction, InitialStateValue, ModuleId, NbaSite, ProcessSlots,
+    CounterSlots, ExternFunction, InitialStateValue, ModuleId, NbaPosition, NbaSite, ProcessSlots,
     RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, TriggerSet,
     VarAtomBase, VariableMetadata, WaitSite,
 };
@@ -162,7 +162,8 @@ pub struct SimModule {
 /// queued path leaves the value in `queued` and returns to the runtime.
 /// Assembly keeps one path: the staged one only if nothing else writes the
 /// site's target and nothing can observe when the target is updated. For the
-/// queued path it makes `queued` the site's value and drops the flag.
+/// queued path it makes `queued` the site's value and `queued_position` its
+/// position, and drops the flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NbaSwitch<A> {
     /// The site's `value` object, which identifies the site.
@@ -172,14 +173,20 @@ pub struct NbaSwitch<A> {
     pub switch: A,
     /// The value object of the queued path.
     pub queued: A,
+    /// The position objects of the queued path, for a site with a run-time
+    /// position.
+    pub queued_position: Option<NbaPosition<A>>,
 }
 
-impl<A> NbaSwitch<A> {
+impl<A: Copy> NbaSwitch<A> {
     pub fn map<B>(&self, mut map: impl FnMut(&A) -> B) -> NbaSwitch<B> {
         NbaSwitch {
             value: map(&self.value),
             switch: map(&self.switch),
             queued: map(&self.queued),
+            queued_position: self
+                .queued_position
+                .map(|position| position.map(|var| map(&var))),
         }
     }
 }

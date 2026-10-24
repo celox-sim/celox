@@ -143,28 +143,28 @@ test("the WASM bridge ticks and moves clocks as the native simulator does", () =
 	sharedMemory[EN] = 1;
 	handle.evalComb();
 
-	// A tick is the active edge only: the gate passes it, `~clk` does not
-	// rise, and `clk` stays low.
+	// A tick is a clock period: the gate passes its rising edge, `~clk`
+	// rises on its falling edge, and `clk` ends low.
 	handle.tick(0);
-	expect(counters()).toEqual([1, 1, 0]);
+	expect(counters()).toEqual([1, 1, 1]);
 	expect(sharedMemory[CLK]).toBe(0);
 
 	expect(handle.activeEdgeIsRising?.(0)).toBe(true);
 	expect(handle.edges?.([0], [true])).toBe(true);
-	expect(counters()).toEqual([2, 2, 0]);
+	expect(counters()).toEqual([2, 2, 1]);
 	expect(sharedMemory[CLK]).toBe(1);
 	// Already high: no edge.
 	handle.edges?.([0], [true]);
-	expect(counters()).toEqual([2, 2, 0]);
-	handle.edges?.([0], [false]);
 	expect(counters()).toEqual([2, 2, 1]);
+	handle.edges?.([0], [false]);
+	expect(counters()).toEqual([2, 2, 2]);
 
 	// A closed gate passes no edge.
 	sharedMemory[EN] = 0;
 	handle.evalComb();
 	handle.edges?.([0], [true]);
 	handle.edges?.([0], [false]);
-	expect(counters()).toEqual([3, 2, 2]);
+	expect(counters()).toEqual([3, 2, 3]);
 });
 
 test("a bridge without edge plans keeps the plain tick", () => {

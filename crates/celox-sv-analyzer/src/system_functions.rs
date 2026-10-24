@@ -786,12 +786,35 @@ pub enum ObjectOp {
     Store(ObjectField),
     /// The run-time class of the object in the argument, 0 for `null`.
     ClassOf,
+    /// Advance the object's independent RNG, returning 64 random bits.
+    Random,
+    /// Seed the object's RNG from the second argument.
+    Seed,
+    /// Validate a receiver; a nonzero class also rejects unsupported dynamic
+    /// dispatch through a base handle before randomizing its properties.
+    Check(u32),
+    /// Query or set the random mode of a property at its byte offset.
+    ModeGet(u32, bool),
+    ModeSet(u32),
+    ModePush,
+    ModePop,
+    ModeSelect(u32, bool),
+    ModeSelected(u32),
 }
 
 impl ObjectOp {
     /// The width and signedness of the result.
     pub fn result_type(&self) -> (usize, bool) {
         match self {
+            Self::Random => (64, false),
+            Self::Seed
+            | Self::Check(_)
+            | Self::ModeSet(_)
+            | Self::ModePush
+            | Self::ModePop
+            | Self::ModeSelect(..)
+            | Self::ModeSelected(_) => (32, false),
+            Self::ModeGet(..) => (32, true),
             Self::Load(field) => (field.width as usize, field.signed),
             Self::New { .. } | Self::ClassOf | Self::Store(_) => (32, false),
         }
@@ -805,6 +828,15 @@ impl fmt::Display for ObjectOp {
             Self::Load(_) => "property read",
             Self::Store(_) => "property write",
             Self::ClassOf => "class query",
+            Self::Random => "object random bits",
+            Self::Seed => "object random seed",
+            Self::Check(_) => "object receiver check",
+            Self::ModeGet(..) => "random mode query",
+            Self::ModeSet(_) => "random mode update",
+            Self::ModePush => "save random modes",
+            Self::ModePop => "restore random modes",
+            Self::ModeSelect(..) => "select random property",
+            Self::ModeSelected(_) => "selected random property query",
         })
     }
 }

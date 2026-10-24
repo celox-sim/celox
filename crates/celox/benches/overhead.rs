@@ -46,16 +46,6 @@ fn benchmark_simulation_overhead(c: &mut Criterion) {
                 }
             })
         });
-
-        // Explicit edges of the same clock: one cycle is a domain-running
-        // rising edge and a falling edge that only moves the signal.
-        c.bench_function("simulator_cycle_x10000", |b| {
-            b.iter(|| {
-                for _ in 0..10000 {
-                    sim.cycle(clk).unwrap();
-                }
-            })
-        });
     }
 
     // Benchmark 1b/1c: Simulator::tick with a derived clock domain: a gated
@@ -90,13 +80,6 @@ fn benchmark_simulation_overhead(c: &mut Criterion) {
                 b.iter(|| {
                     for _ in 0..10000 {
                         sim.tick(clk).unwrap();
-                    }
-                })
-            });
-            c.bench_function(&format!("simulator_cycle_{name}{suffix}_x10000"), |b| {
-                b.iter(|| {
-                    for _ in 0..10000 {
-                        sim.cycle(clk).unwrap();
                     }
                 })
             });

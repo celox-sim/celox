@@ -61,6 +61,24 @@ pub const OBJECT_LOAD: u64 = 50;
 pub const OBJECT_STORE: u64 = 51;
 /// `class_of(object)`: its class, or 0 for `null`.
 pub const OBJECT_CLASS: u64 = 52;
+/// `random(object)`: 64 random bits from the object's RNG.
+pub const OBJECT_RANDOM: u64 = 53;
+/// `seed(object, seed)`: reset the object's RNG using the low 32 bits.
+pub const OBJECT_SEED: u64 = 54;
+/// `check(object)`: record a fault for an invalid receiver or, when the
+/// parameter is nonzero, a different runtime class. Return 1 on success, 0 on failure.
+pub const OBJECT_CHECK: u64 = 55;
+/// Query the random mode of the property at the parameter's byte offset.
+pub const OBJECT_MODE_GET: u64 = 56;
+/// Set the random mode at the parameter's byte offset from the low bit of b.
+pub const OBJECT_MODE_SET: u64 = 57;
+/// Save/restore random modes around an inline member selection.
+pub const OBJECT_MODE_PUSH: u64 = 58;
+pub const OBJECT_MODE_POP: u64 = 59;
+/// Install a selected mode; parameter bit 32 records a declared rand property.
+pub const OBJECT_MODE_SELECT: u64 = 60;
+/// Whether a non-rand property is temporarily random in the active scope.
+pub const OBJECT_MODE_SELECTED: u64 = 61;
 
 /// The opcode word of `op` with parameter `parameter`.
 pub const fn encode(op: u64, parameter: u64) -> u64 {
@@ -168,6 +186,39 @@ impl Heap {
                 0
             }
             OBJECT_CLASS => self.class_of(a as Handle).into(),
+            OBJECT_RANDOM => self.random_object(a as Handle),
+            OBJECT_SEED => {
+                self.seed_object(a as Handle, b as u32);
+                0
+            }
+            OBJECT_CHECK => u64::from(self.check_object(a as Handle, parameter as u32)),
+            OBJECT_MODE_GET => {
+                u64::from(self.random_mode(a as Handle, parameter as u32, parameter >> 32 != 0))
+            }
+            OBJECT_MODE_SET => {
+                self.set_random_mode(a as Handle, parameter as u32, b & 1 != 0);
+                0
+            }
+            OBJECT_MODE_PUSH => {
+                self.push_random_modes(a as Handle);
+                0
+            }
+            OBJECT_MODE_POP => {
+                self.pop_random_modes(a as Handle);
+                0
+            }
+            OBJECT_MODE_SELECT => {
+                self.select_random_mode(
+                    a as Handle,
+                    parameter as u32,
+                    parameter >> 32 != 0,
+                    b & 1 != 0,
+                );
+                0
+            }
+            OBJECT_MODE_SELECTED => {
+                u64::from(self.selected_random_mode(a as Handle, parameter as u32))
+            }
             other => panic!("unknown heap operation {other}"),
         }
     }

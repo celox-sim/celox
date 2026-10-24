@@ -1533,6 +1533,12 @@ impl InterpBackend {
 }
 
 impl SimBackend for InterpBackend {
+    /// Interpreting the scheduler unit costs more than the runtime's loop
+    /// (sched_bench (d): about 9% more per cycle).
+    fn runs_compiled_scheduler(&self) -> bool {
+        false
+    }
+
     type Event = InterpEventRef;
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {

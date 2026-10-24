@@ -13,8 +13,8 @@
  * - After the commit, every domain whose clock then moved to its active edge
  *   runs, in rounds, until no further edge appears: domains clocked from
  *   state, and gates the commit moved.
- * - `tick` is the event's active edge without moving its signal. An edge
- *   moves the signal and leaves it at its new level.
+ * - An edge moves the signal and leaves it at its new level. `tick` is a
+ *   clock period: the active edge, then the inactive edge.
  *
  * Gates are judged by settling the design with the signal at each level.
  *
@@ -180,31 +180,22 @@ export class WasmEdgeRunner {
 		return this.plan(eventId)?.edge !== "negedge";
 	}
 
-	/** The event's active edge without moving its signal, as `tick`. */
+	/** A clock period of the event's signal, as `tick`. */
 	tick(eventId: number): void {
 		const name = this.name(eventId);
 		const plan = this.plan(eventId);
-		if (!plan || !this.hasDerived(eventId)) {
+		if (!plan) {
 			this.evalComb();
 			this.kernels(name)?.evalApply();
 			this.evalComb();
 			return;
 		}
-		const active = plan.edge === "negedge" ? 0 : 1;
-		const levers: Lever[] =
-			plan.gated.length > 0
-				? [{ signal: plan.signal, from: active ^ 1, to: active }]
-				: [];
-		this.run(
-			[name],
-			plan.domains,
-			plan.gated.map((g) => [g, 0]),
-			levers,
-			{
-				settle: true,
-				persist: false,
-			},
-		);
+		const rising = plan.edge !== "negedge";
+		let settled = this.edges([eventId], [rising]);
+		settled = this.edges([eventId], [!rising], !settled);
+		if (!settled) {
+			this.evalComb();
+		}
 	}
 
 	/**
