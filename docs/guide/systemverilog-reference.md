@@ -585,6 +585,21 @@ Immediate cover executes its pass statement when the condition is true.
 Coverage counters and reports are not exposed. Deferred cover (`#0` / `final`)
 is rejected because its scheduling is not modeled.
 
+### Severity tasks and reports
+
+`$info`, `$warning`, `$error` and `$fatal`, including the default `$error` of
+an `assert` or `assume` without a fail action, are reported as
+`RuntimeEvent::Report` (IEEE 1800-2023 20.10). A `Report` carries its
+severity, its message, the file and line of the call as `` `__FILE__ `` and
+`` `__LINE__ `` give them, and the scope that issued it. A report from an
+action block of an immediate assertion also names that assertion: its
+statement label, `assert`, `assume` or `cover`, and whether the pass or the
+fail action issued it. Severity tasks in subroutines the action block calls
+are not attributed. `time` is the time the drain's context gives, as the VPI
+host does at each callback. `Report::render` formats a report as the VPI host
+and the `celox` command print it. Only `$error` and `$fatal` fail a `celox`
+run; `$fatal` also ends the simulation with an error.
+
 ### Constant functions
 
 Constant functions ignore the display and severity tasks they call.

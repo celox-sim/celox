@@ -15,6 +15,7 @@ use crate::backend::memory_layout::{
 use crate::backend::traits::{EventHandle, SimBackend};
 use crate::ir::SignalRef;
 use crate::simulator::{RuntimeEvent, RuntimeFormatContext, Simulator, message_diagnostic};
+use celox_design::Severity;
 pub use celox_testbench::SourceLocation;
 use celox_testbench::{
     DisplayFormatArg, ExecutableArgument, ExecutableAssertMessage, ExecutableClockCount,
@@ -1499,17 +1500,14 @@ fn drain_runtime_assertions<B: SimBackend>(
     };
     for event in sim.drain_runtime_events_deferred_with_context(format_ctx) {
         match event {
-            RuntimeEvent::AssertContinue { message } => {
-                last_message = Some(message.clone());
-                ctx.assertions.push(AssertionResult {
-                    passed: false,
-                    message: Some(message),
-                    location: location.cloned(),
-                });
+            // Only errors fail a test (IEEE 1800-2023 20.10).
+            RuntimeEvent::Report(report) if report.severity < Severity::Error => {
+                forward_display(&report.message, true)
             }
-            RuntimeEvent::AssertFatal { message } => {
+            RuntimeEvent::Report(report) => {
+                let message = report.message;
                 last_message = Some(message.clone());
-                if fatal_message.is_none() {
+                if report.severity == Severity::Fatal && fatal_message.is_none() {
                     fatal_message = Some(message.clone());
                 }
                 ctx.assertions.push(AssertionResult {

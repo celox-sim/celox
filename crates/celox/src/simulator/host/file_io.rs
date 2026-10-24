@@ -101,6 +101,8 @@ impl<B: SimBackend> Simulator<B> {
                     template: site.strings.first().cloned(),
                     sizing: DisplaySizing::Ieee,
                     scope,
+                    location: None,
+                    assertion: None,
                     arg_widths: Vec::new(),
                     arg_signed: Vec::new(),
                     arg_is_string: Vec::new(),

@@ -21,7 +21,7 @@ use std::{
 
 use celox::{
     BigUint, DomainKind, NativeProgramInstance, NativeSignalIdentity, ReflectionScopeId,
-    ReflectionSignalId, RuntimeEvent, RuntimeFormatContext, SignalDirection, SimBackend,
+    ReflectionSignalId, RuntimeEvent, RuntimeFormatContext, Severity, SignalDirection, SimBackend,
 };
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
@@ -1851,18 +1851,13 @@ fn process_runtime_events() {
             RuntimeEvent::Write { message } => {
                 let _ = std::io::stdout().lock().write_all(&message);
             }
-            RuntimeEvent::AssertContinue { message } => {
+            RuntimeEvent::Report(report) => {
                 let mut output = std::io::stderr().lock();
-                let _ = output.write_all(b"assertion failed: ");
-                let _ = output.write_all(&message);
+                let _ = output.write_all(&report.render());
                 let _ = output.write_all(b"\n");
-            }
-            RuntimeEvent::AssertFatal { message } => {
-                let mut output = std::io::stderr().lock();
-                let _ = output.write_all(b"fatal assertion failed: ");
-                let _ = output.write_all(&message);
-                let _ = output.write_all(b"\n");
-                callbacks::fail(celox_message_diagnostic(&message));
+                if report.severity == Severity::Fatal {
+                    callbacks::fail(celox_message_diagnostic(&report.message));
+                }
             }
             // Like `vpiStop` in `vpi_control`, `$stop` ends a run that has
             // no interactive mode.

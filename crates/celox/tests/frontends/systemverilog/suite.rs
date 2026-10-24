@@ -48,14 +48,13 @@ impl<B: SimBackend> TimedBackend<B> {
     fn capture_events(&mut self) -> Result<()> {
         let events = self.sim.drain_runtime_events();
         let error = events.iter().find_map(|event| match event {
-            RuntimeEvent::AssertFatal { message } => Some(format!(
-                "fatal assertion: {}",
-                String::from_utf8_lossy(message)
-            )),
-            RuntimeEvent::AssertContinue { message } => Some(format!(
-                "failed assertion: {}",
-                String::from_utf8_lossy(message)
-            )),
+            RuntimeEvent::Report(report) if report.severity >= celox::Severity::Error => {
+                Some(format!(
+                    "{:?}: {}",
+                    report.severity,
+                    String::from_utf8_lossy(&report.message)
+                ))
+            }
             RuntimeEvent::Missed { count } => Some(format!("{count} runtime events were missed")),
             _ => None,
         });

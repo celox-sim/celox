@@ -1085,7 +1085,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &unpacked_element_widths,
     )?;
     for (site_id, site) in runtime_event_sites.iter().enumerate() {
-        if !matches!(site.kind, RuntimeEventKind::AssertFatal) {
+        if !site.kind.is_fatal() {
             continue;
         }
         runtime_errors
@@ -4225,11 +4225,10 @@ fn build_comb_observer_capture_paths(
                 | RuntimeEventKind::Finish
                 | RuntimeEventKind::Stop
         );
-        let fatal_error_code = matches!(
-            sites[observer.site_id as usize].kind,
-            RuntimeEventKind::AssertFatal
-        )
-        .then_some(observer.site_id as i64);
+        let fatal_error_code = sites[observer.site_id as usize]
+            .kind
+            .is_fatal()
+            .then_some(observer.site_id as i64);
         let pre_lower_nodes = observer_pre_lower_nodes(observer, arena);
         for idx in &order_after {
             comb_blocks[idx.0]
@@ -4282,11 +4281,10 @@ fn build_comb_observer_capture_paths(
                         | RuntimeEventKind::Finish
                         | RuntimeEventKind::Stop
                 );
-                let member_fatal_error_code = matches!(
-                    sites[member.site_id as usize].kind,
-                    RuntimeEventKind::AssertFatal
-                )
-                .then_some(member.site_id as i64);
+                let member_fatal_error_code = sites[member.site_id as usize]
+                    .kind
+                    .is_fatal()
+                    .then_some(member.site_id as i64);
                 let member_expr = match member
                     .loop_runner
                     .or(member.guard)
