@@ -75,17 +75,19 @@ impl<B: SimBackend> SimulationState<B> {
             || !pending.ready.is_empty()
             || !pending.inactive.is_empty()
             || !pending.nba_queue.is_empty()
-            || pending
-                .waiters
-                .iter()
-                .any(|(process, _)| scheduler.waits.get(process).is_none_or(Option::is_none))
+            || pending.waiters.iter().any(|(process, _)| {
+                scheduler.waits.get(process).is_none_or(Option::is_none)
+                    || self.writes_observed(scheduler, process)
+            })
         {
             return None;
         }
         let mut first = u64::MAX;
         let mut other = u64::MAX;
         for &Reverse((time, process)) in self.process_wakeups.iter() {
-            if scheduler.wake.get(process).is_some_and(Option::is_some) {
+            if scheduler.wake.get(process).is_some_and(Option::is_some)
+                && !self.writes_observed(scheduler, process)
+            {
                 first = first.min(time);
             } else {
                 other = other.min(time);
@@ -100,8 +102,10 @@ impl<B: SimBackend> SimulationState<B> {
             let clocks = &self.scheduler.clocks;
             let compiled = compiled_clocks(scheduler, queue, clocks);
             for event in queue {
-                if clock_slot(scheduler, event, clocks).is_some_and(|bit| compiled >> bit & 1 != 0)
-                {
+                if clock_slot(scheduler, event, clocks).is_some_and(|bit| {
+                    compiled >> bit & 1 != 0
+                        && scheduler.clock_events[bit] & self.observed_events == 0
+                }) {
                     first = first.min(event.time);
                 } else {
                     other = other.min(event.time);
@@ -124,6 +128,15 @@ impl<B: SimBackend> SimulationState<B> {
         } else {
             end.min(reference - 1)
         })
+    }
+
+    /// Whether `process` may change an event the host observes, so that
+    /// its slots run in the reference loop.
+    fn writes_observed(&self, scheduler: &SchedulerRefs, process: usize) -> bool {
+        scheduler
+            .kernel_events
+            .get(process)
+            .is_some_and(|&events| events & self.observed_events != 0)
     }
 
     /// Run the compiled scheduler for the slots up to `limit`. Returns, like
@@ -393,6 +406,10 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         executor.try_finish_timed_step(now)?;
+        // What the host writes after the slot is an update of its time.
+        if executor.take_slot_writes() {
+            self.host_pending = true;
+        }
         Ok(now)
     }
 }

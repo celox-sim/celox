@@ -27,7 +27,7 @@ pub use wait::{Baseline, Waiter, Waiters};
 
 use self::round::Round;
 use crate::{
-    SimulatorErrorCode,
+    SignalRef, SimulatorErrorCode,
     backend::SimBackend,
     schedule::ResolvedSchedule,
     scheduler::{Scheduler, SimEvent},
@@ -161,6 +161,10 @@ pub struct SimulationState<B: SimBackend> {
     slot_passes: u64,
     /// The loop that runs time slots, and the slots each loop ran.
     stats: SchedulerStats,
+    /// The bits of the compiled scheduler's events whose changes the host
+    /// observes inside a slot: the kernels and host clocks that write them
+    /// run in the reference loop.
+    observed_events: u64,
 }
 
 impl<B: SimBackend> SimulationState<B> {
@@ -213,6 +217,7 @@ impl<B: SimBackend> SimulationState<B> {
             return_budget: SLOT_RETURN_BUDGET,
             slot_passes: 0,
             stats: SchedulerStats::default(),
+            observed_events: 0,
         };
         state.stats.kernels = (0..state.model.processes.len())
             .map(|index| match state.model.kernel_fallback.get(index) {
@@ -339,6 +344,22 @@ impl<B: SimBackend> SimulationState<B> {
     /// kernel is scheduled.
     pub fn scheduler_stats(&self) -> &SchedulerStats {
         &self.stats
+    }
+
+    /// The signals whose changes the host observes inside a time slot (see
+    /// [`HostBoundary::before_domains`]). The slots in which a kernel or
+    /// host clock of the compiled scheduler may change an observed event
+    /// signal run in the reference loop, where the host sees the change
+    /// before any domain commits; the other kernels' slots stay compiled.
+    pub fn set_observed_signals(&mut self, signals: impl IntoIterator<Item = SignalRef>) {
+        let Some(scheduler) = &self.model.scheduler else {
+            return;
+        };
+        self.observed_events = signals
+            .into_iter()
+            .filter_map(|signal| self.model.signal_to_id.get(&signal))
+            .filter_map(|event| scheduler.events.iter().position(|id| id == event))
+            .fold(0, |mask, bit| mask | 1 << bit);
     }
 
     /// [`Self::step_until`], showing the step to `observer`. An error of
