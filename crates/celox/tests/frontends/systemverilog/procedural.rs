@@ -93,6 +93,10 @@ sv_backends! {
         @case "procedural::runtime_bits_stay_within_their_element";
     }
 
+    fn nonblocking_runtime_element_writes_apply_in_order(sim) {
+        @case "procedural::nonblocking_runtime_element_writes_apply_in_order";
+    }
+
     fn declaration_initializers_define_the_initial_state(sim) {
         @case "procedural::declaration_initializers_define_the_initial_state";
     }
