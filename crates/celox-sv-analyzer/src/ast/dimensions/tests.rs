@@ -517,3 +517,59 @@ fn recursive_generate_dimension_discovery_uses_explicit_specialization() {
         );
     }
 }
+
+#[test]
+fn preliminary_literal_queries_do_not_discover_scope_declarations() {
+    let tree = crate::source_tree::parse_scope_fixture(
+        r#"module Top;
+            logic [7:0] unrelated [0:31];
+            localparam A = $bits(123);
+            localparam B = $bits((8'shff));
+            localparam C = $bits(4'bx);
+            localparam D = $bits("ab");
+            localparam E = $bits('1);
+        endmodule"#,
+        Path::new("literal_query.sv"),
+    )
+    .unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let input = PackedDimensions::default();
+    let calls = native_calls(&tree);
+    assert_eq!(calls.len(), 5);
+    // Keep the discovery path as an independent reference for the result.
+    let discovered = calls
+        .iter()
+        .map(|call| {
+            let celox_sv_syntax::ExprKind::Call { arguments, .. } =
+                &tree.declarations().expression(*call).kind
+            else {
+                unreachable!()
+            };
+            let context =
+                query_operand_dimensions_id(arguments[0].value.unwrap(), &tree, &input).unwrap();
+            query_number(
+                *call,
+                &tree,
+                &HashMap::default(),
+                &HashMap::default(),
+                Some(&context),
+            )
+        })
+        .collect::<Vec<_>>();
+    SYNTAX_TYPE_DISCOVERIES.with(|count| count.set(0));
+    let direct = calls
+        .iter()
+        .map(|call| {
+            query_number(
+                *call,
+                &tree,
+                &HashMap::default(),
+                &HashMap::default(),
+                Some(&input),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(&direct[..4], &[Some(32), Some(8), Some(4), Some(16)]);
+    assert_eq!(direct, discovered);
+    assert_eq!(SYNTAX_TYPE_DISCOVERIES.with(|count| count.get()), 0);
+}
