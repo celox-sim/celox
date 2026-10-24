@@ -58,7 +58,7 @@ fn benchmark_scaling(c: &mut Criterion) {
     // Warm analyzer state before any measured span, including filtered runs.
     compile_default(COUNTER, "Top", Some(("N", 1)));
     // Each large design runs once: no five-run warmup or adaptive resampling.
-    // CodSpeed simulation measures one iteration; walltime uses the same schedule.
+    // Walltime uses this fixed schedule even for the largest graphs.
     for n in [4, 8, 16, 32] {
         c.bench_function(&format!("compile/sorter_tree/n{n}"), |b| {
             b.iter_manual_unstable(IterManualOptions::new(), || {
