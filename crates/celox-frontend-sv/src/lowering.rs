@@ -9288,12 +9288,13 @@ mod tests {
             .count()
     }
 
-    /// The `always_comb` alternatives the modules of `source` lowered.
-    fn comb_alternatives(source: &str) -> usize {
+    /// The targets of the `always_comb` alternatives the modules of `source`
+    /// lowered, by name.
+    fn comb_alternatives(source: &str) -> BTreeSet<String> {
         try_comb_alternatives(source).unwrap_or_else(|error| panic!("{error}"))
     }
 
-    fn try_comb_alternatives(source: &str) -> Result<usize, FrontendError> {
+    fn try_comb_alternatives(source: &str) -> Result<BTreeSet<String>, FrontendError> {
         let mut trace = FrontendTrace::default();
         schedule_sources(
             &[(source, Path::new("top.sv"))],
@@ -9314,8 +9315,15 @@ mod tests {
             .sim_modules
             .expect("traced modules")
             .values()
-            .map(|module| module.comb_alternatives.len())
-            .sum())
+            .flat_map(|module| {
+                module.comb_alternatives.iter().flat_map(|alternative| {
+                    alternative
+                        .targets
+                        .iter()
+                        .map(|target| module.variables[&target.id].path.join("."))
+                })
+            })
+            .collect())
     }
 
     /// An `always_comb` that stores a variable twice gets its imperative
@@ -9324,35 +9332,60 @@ mod tests {
     #[test]
     fn comb_alternatives_only_for_watchable_targets() {
         let multi_store = "always_comb begin y = 0; if (s[0]) y = s; end";
-        for (case, body, alternatives) in [
-            ("unwatched", "bit u; initial forever @(u) ;", 0),
-            ("source waited", "initial forever @(s) ;", 1),
-            ("waited", "initial forever @(y) ;", 1),
+        for (case, body, keeps) in [
+            ("unwatched", "bit u; initial forever @(u) ;", false),
+            ("source waited", "initial forever @(s) ;", true),
+            ("waited", "initial forever @(y) ;", true),
             (
                 "part-select",
                 "bit [3:0] w; assign w = y[3:0]; initial forever @(w) ;",
-                1,
+                true,
             ),
             (
                 "concatenation",
                 "bit [15:0] w; assign w = {y, s}; initial forever @(w) ;",
-                1,
+                true,
             ),
             (
                 "arithmetic",
                 "bit [8:0] w; assign w = y + 9'd1; initial forever @(w) ;",
-                1,
+                true,
             ),
             (
                 "aliased clock",
                 "bit c; assign c = y[0]; bit q; always_ff @(posedge c) q <= ~q;
                  bit u; initial forever @(u) ;",
-                1,
+                true,
+            ),
+            (
+                "output argument of an expression call",
+                "function automatic bit copy(input bit v, output bit o);
+                   o = v; return 1;
+                 endfunction
+                 bit w; always_comb if (copy(y[0], w)) begin end
+                 bit q; always_ff @(posedge w) q <= ~q;
+                 bit t; initial forever @(t) ;",
+                true,
+            ),
+            (
+                "output argument of a nested call",
+                "function automatic bit draw(output int o);
+                   return $random(o) == 0;
+                 endfunction
+                 int w; always @* if (draw(w) && y[0]) begin end
+                 initial forever @(w) ;",
+                true,
+            ),
+            (
+                "argument a system function writes",
+                "int w; always @* if ($random(w) == 0 && y[0]) begin end
+                 initial forever @(w) ;",
+                true,
             ),
             (
                 "nonblocking switch",
                 "bit [7:0] t; bit u; initial forever @(u) t <= u;",
-                1,
+                true,
             ),
         ] {
             let source = format!(
@@ -9362,7 +9395,7 @@ mod tests {
                    {body}
                  endmodule"
             );
-            assert_eq!(comb_alternatives(&source), alternatives, "{case}");
+            assert_eq!(comb_alternatives(&source).contains("y"), keeps, "{case}");
         }
         let child = "module Child(input bit [7:0] s, output bit [7:0] y);
                always_comb begin y = 0; if (s[0]) y = s; end
@@ -9372,9 +9405,8 @@ mod tests {
                Child child(.s(s), .y(y));
                initial forever @(y) ;
              endmodule";
-        assert_eq!(
-            comb_alternatives(&format!("{child}\n{port}")),
-            1,
+        assert!(
+            comb_alternatives(&format!("{child}\n{port}")).contains("y"),
             "child output port"
         );
         // Only ports reach the variables of another module: a hierarchical
