@@ -3274,3 +3274,86 @@ fn unpacked_array_handles_preserve_declared_indices_and_neighbor_values() {
         clear_runtime();
     }
 }
+
+#[cfg(feature = "systemverilog")]
+static TIMED_EDGES: std::sync::Mutex<Vec<(u64, i32)>> = std::sync::Mutex::new(Vec::new());
+
+/// Records the count at every rise of the DUT's clock.
+#[cfg(feature = "systemverilog")]
+unsafe extern "C" fn record_timed_edge(data: *mut VpiCbData) -> i32 {
+    // Safety: the callback runtime passes back the registration storage, and
+    // its value is an integer.
+    if unsafe { (*(*data).value).value.integer } == 1 {
+        let mut count = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        // Safety: VPI calls from a callback on the session's thread.
+        unsafe {
+            let handle = vpi_handle_by_name(c"Top.count".as_ptr(), ptr::null_mut());
+            vpi_get_value(handle, &mut count);
+            vpi_free_object(handle);
+        }
+        // Safety: `count` holds the integer just read.
+        let count = unsafe { count.value.integer };
+        TIMED_EDGES
+            .lock()
+            .unwrap()
+            .push((celox_vpi_current_time(), count));
+    }
+    0
+}
+
+/// A timed runtime runs the DUT's processes between the callbacks: its own
+/// clock, whose rises a value-change callback sees before the register
+/// updates, and its `$finish`, which ends the run.
+#[cfg(feature = "systemverilog")]
+#[test]
+fn a_timed_runtime_runs_the_dut_processes_between_callbacks() {
+    let _serial = lock_vpi();
+    let source = "`timescale 1ns/1ns
+        module Top(output logic [7:0] count);
+            logic clk = 0;
+            always #5 clk = ~clk;
+            initial count = 0;
+            always_ff @(posedge clk) count <= count + 1;
+            initial #23 $finish;
+        endmodule";
+    let sources = || vec![(source, std::path::Path::new("timed.sv"))];
+    let image = celox::Simulation::from_sv_sources(sources(), "Top")
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+    let simulation = celox::Simulation::from_sv_sources(Vec::new(), "")
+        .build_native_from_image(image.clone())
+        .unwrap();
+    let _session = install_timed_runtime(image, simulation).unwrap();
+    TIMED_EDGES.lock().unwrap().clear();
+    let mut time = VpiTime {
+        type_: VPI_SIM_TIME,
+        ..VpiTime::default()
+    };
+    let mut value = VpiValue {
+        format: VPI_INT_VAL,
+        value: VpiValueData { integer: 0 },
+    };
+    // Safety: VPI calls on the session's thread with live callback storage.
+    unsafe {
+        let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
+        assert!(!clk.is_null());
+        let change = VpiCbData {
+            reason: CB_VALUE_CHANGE,
+            cb_rtn: Some(record_timed_edge),
+            obj: clk,
+            time: &mut time,
+            value: &mut value,
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        assert!(!vpi_register_cb(&change).is_null());
+    }
+    assert!(run_callbacks_result().unwrap());
+    assert_eq!(celox_vpi_current_time(), 23);
+    assert_eq!(*TIMED_EDGES.lock().unwrap(), vec![(5, 0), (15, 1)]);
+    clear_runtime();
+}

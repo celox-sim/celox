@@ -57,6 +57,33 @@ impl<B: SimBackend> std::fmt::Debug for SimulationCheckpoint<B> {
 
 /// A timed simulation wrapper around the core logic engine.
 ///
+/// What a host observes inside the time slots of a [`Simulation`], in
+/// addition to the state between steps: changes of its signals before the
+/// flip-flop domains commit, and the settled slot.
+///
+/// A slot observer is how a host such as a VPI driver keeps the regions of
+/// IEEE 1800-2023 4.4 inside one time slot. Its writes are blocking writes
+/// of the host at the slot's time, like [`Simulation::modify`].
+pub trait SlotObserver<B: SimBackend> {
+    /// A round of the slot has run its processes and scheduled values and
+    /// is about to evaluate its flip-flop domains: the round's edges are in
+    /// state and no nonblocking update has been made. Writes are in state
+    /// before the domains evaluate.
+    fn before_domains(&mut self, io: &mut crate::SlotIo<'_, B>, time: u64);
+
+    /// The slot has settled: every region is empty. Writes are updates of
+    /// `time`, which the simulation settles there before it advances.
+    ///
+    /// This is where an observer finds the changes of signals that are not
+    /// among the event signals it watches: after the nonblocking updates of
+    /// the slot and the combinational settle that follows them. That is an
+    /// implementation choice, not an order the standard fixes: the observer's
+    /// callback and the updates the settle makes are active events of the
+    /// same region, which a simulator may process in any order (IEEE
+    /// 1800-2023 4.7).
+    fn end_of_slot(&mut self, io: &mut crate::SlotIo<'_, B>, time: u64);
+}
+
 /// Manages simulation time, periodic clocks, and an event queue.
 ///
 /// The default type parameter uses the host's [`crate::DefaultBackend`].
@@ -218,14 +245,27 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         Ok(())
     }
 
+    fn before_domains(&mut self, timestamp: u64) -> Result<bool, Halt> {
+        Ok(!self.frozen
+            && self.show_slot(timestamp, |observer, io, time| {
+                observer.before_domains(io, time)
+            }))
+    }
+
+    fn take_slot_writes(&mut self) -> bool {
+        std::mem::take(&mut self.slot_writes)
+    }
+
     fn compiled_slots(&self) -> celox_runtime::CompiledSlots {
         use celox_runtime::CompiledSlots;
         if self.frozen || !self.components.is_empty() || !self.backend.runs_compiled_scheduler() {
             return CompiledSlots::None;
         }
-        // Waveforms record, and the heap collects, at every slot boundary.
+        // Waveforms record, the heap collects and a slot observer looks at
+        // every slot boundary.
         let vcd = &self.sv_vcd;
-        if self.vcd_writer.is_some()
+        if self.slot_observer.is_some()
+            || self.vcd_writer.is_some()
             || vcd.path.is_some()
             || vcd.started.is_some()
             || vcd.pending
@@ -254,7 +294,35 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         })?;
         self.dirty = false;
         self.try_dump_unless_rewound(timestamp)
-            .map_err(|error| Halt::Error(vcd_dump_runtime_error(error)))
+            .map_err(|error| Halt::Error(vcd_dump_runtime_error(error)))?;
+        if !self.frozen {
+            self.slot_writes |= self.show_slot(timestamp, |observer, io, time| {
+                observer.end_of_slot(io, time)
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<B: SimBackend> Simulator<B> {
+    /// Show the slot observer, if any, the state at `time`. Returns whether
+    /// it wrote.
+    fn show_slot(
+        &mut self,
+        time: u64,
+        show: impl FnOnce(&mut dyn SlotObserver<B>, &mut crate::SlotIo<'_, B>, u64),
+    ) -> bool {
+        let Some(observer) = self.slot_observer.as_deref_mut() else {
+            return false;
+        };
+        let mut io = crate::SlotIo::new(crate::IOContext {
+            backend: &mut self.backend,
+            watch: &mut self.host_watch,
+        });
+        show(observer, &mut io, time);
+        let wrote = io.wrote();
+        self.dirty |= wrote;
+        wrote
     }
 }
 
@@ -509,6 +577,12 @@ impl<B: SimBackend> Simulation<B> {
         value
     }
 
+    /// The stored four-state `(value, mask)` of `signal`, without settling
+    /// combinational logic first: what host writes and the last settle left.
+    pub fn peek_four_state(&self, signal: SignalRef) -> (num_bigint::BigUint, num_bigint::BigUint) {
+        self.simulator.backend.get_four_state(signal)
+    }
+
     /// Modifies internal state via a callback and re-stabilizes combinational logic.
     ///
     /// A write that changes an event signal, and any write while a process
@@ -526,6 +600,36 @@ impl<B: SimBackend> Simulation<B> {
         let logged = self.simulator.host_watch.has_log();
         self.state.note_host_writes(&self.simulator.backend, logged);
         Ok(())
+    }
+
+    /// Show every time slot to `observer`, which watches `signals`.
+    ///
+    /// The slots in which a compiled process kernel or host clock may change
+    /// an event signal among `signals` run in the reference loop, where
+    /// [`SlotObserver::before_domains`] sees the change before any domain
+    /// commits; the other kernels' slots stay compiled, one slot per run so
+    /// that [`SlotObserver::end_of_slot`] sees each of them. Changes of other
+    /// signals are the observer's to find, at either point. A differential
+    /// simulation stops checking: the shadow does not see the observer's
+    /// writes.
+    pub fn observe_slots(&mut self, observer: Box<dyn SlotObserver<B>>, signals: &[SignalRef]) {
+        self.simulator.slot_observer = Some(observer);
+        self.state.set_observed_signals(signals.iter().copied());
+        if self.shadow.take().is_some() {
+            self.unchecked = Some("a slot observer writes state the shadow does not see");
+        }
+    }
+
+    /// Replace the signals the observer of [`Self::observe_slots`] watches.
+    pub fn set_observed_signals(&mut self, signals: &[SignalRef]) {
+        self.state.set_observed_signals(signals.iter().copied());
+    }
+
+    /// Stop showing the time slots to the observer of
+    /// [`Self::observe_slots`], and return it.
+    pub fn stop_observing_slots(&mut self) -> Option<Box<dyn SlotObserver<B>>> {
+        self.state.set_observed_signals([]);
+        self.simulator.slot_observer.take()
     }
 
     /// Register a clock signal and its period, enqueuing the first edge.
@@ -604,6 +708,28 @@ impl<B: SimBackend> Simulation<B> {
                 self.flush_error_output();
             }
             return Err(vcd_dump_runtime_error(error));
+        }
+        Ok(())
+    }
+
+    /// Run every time slot before `time`, then move to `time` without
+    /// running its slot: the next [`Self::step`] or [`Self::run_until`]
+    /// runs it, together with the host writes made in between. A target not
+    /// after the current time changes nothing. Like [`Self::run_until`], it
+    /// returns early, before `time`, at a `$stop` or `$finish`.
+    pub fn advance_to(&mut self, time: u64) -> Result<(), RuntimeErrorCode> {
+        let Some(last) = time.checked_sub(1).filter(|&last| last >= self.time()) else {
+            return Ok(());
+        };
+        self.run_until(last)?;
+        if self.time() != last || self.is_finished() || self.is_stopped() {
+            return Ok(());
+        }
+        self.state.advance_time(&mut self.simulator.backend, time);
+        if let Some(shadow) = &mut self.shadow {
+            shadow
+                .state
+                .advance_time(&mut shadow.simulator.backend, time);
         }
         Ok(())
     }
