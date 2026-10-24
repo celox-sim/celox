@@ -881,6 +881,7 @@ impl<'a> ProcModule<'a> {
                 hidden: true,
                 force_control: None,
                 sampled_from: None,
+                history_of: None,
             },
         );
         self.name_to_id.insert(name, id);
@@ -904,6 +905,17 @@ impl<'a> ProcModule<'a> {
             .get_mut(&copy)
             .expect("a new copy")
             .sampled_from = Some(id);
+        name
+    }
+
+    /// A new hidden register of `$past` history for variable `id`, which
+    /// starts with the variable's value.
+    pub fn history_copy(&mut self, id: SourceVarId) -> String {
+        let (copy, name) = self.shadow(id, "past", false);
+        self.variables
+            .get_mut(&copy)
+            .expect("a new copy")
+            .history_of = Some(id);
         name
     }
 
@@ -966,6 +978,7 @@ impl<'a> ProcModule<'a> {
             hidden: true,
             force_control: None,
             sampled_from: None,
+            history_of: None,
         };
         let id = next_var_id(&mut self.next_id);
         self.variables.insert(id, variable);
@@ -997,6 +1010,7 @@ impl<'a> ProcModule<'a> {
                 hidden: true,
                 force_control: None,
                 sampled_from: None,
+                history_of: None,
                 ..variable
             },
         );
@@ -1525,6 +1539,7 @@ pub(super) fn register_locals(
                 hidden: true,
                 force_control: None,
                 sampled_from: None,
+                history_of: None,
             },
         );
         name_to_id.insert(local.name.clone(), id);
@@ -2239,7 +2254,7 @@ pub(super) struct CanonicalLoop {
     pub decreasing: bool,
 }
 
-fn literal_usize(expr: &sv::ir::Expr) -> Option<usize> {
+pub(super) fn literal_usize(expr: &sv::ir::Expr) -> Option<usize> {
     let sv::ir::Expr::Literal(text) = expr else {
         return None;
     };
