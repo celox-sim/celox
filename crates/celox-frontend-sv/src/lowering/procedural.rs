@@ -319,6 +319,34 @@ impl<'a> ProcModule<'a> {
         false
     }
 
+    /// The variables `body` may write, directly or in the bodies of its
+    /// callees. Names a callee declares itself may resolve to a variable of
+    /// the module too, so the set may be larger than the writes.
+    pub fn written_variables(&self, body: &[sv::ir::Stmt]) -> HashSet<SourceVarId> {
+        let mut names = HashSet::default();
+        let mut calls = Vec::new();
+        written_names(body, &mut names);
+        for stmt in body {
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+        }
+        let mut visited = HashSet::default();
+        while let Some((callee, args)) = calls.pop() {
+            let sv::ir::Callee::Subroutine(name) = callee else {
+                continue;
+            };
+            if let Some(subroutine) = self.subroutine(&name) {
+                default_calls(subroutine, &args, &mut calls);
+                if visited.insert(name) {
+                    written_names(&subroutine.body, &mut names);
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+                    }
+                }
+            }
+        }
+        names.iter().filter_map(|name| self.id(name)).collect()
+    }
+
     /// Whether `always @(items) body` is `always @* body`: no item has an edge
     /// or a select, the items name exactly the variables the implicit event
     /// expression of `body` has (IEEE 1800-2023 9.4.2.2), and the body neither
