@@ -2747,14 +2747,20 @@ fn specparam_retains_its_body_item_boundary() {
 }
 
 #[test]
-fn module_deferred_assertions_do_not_become_final_procedures() {
+/// A deferred assertion as a module item is an `always_comb` procedure
+/// (IEEE 1800-2023 16.4.3), never a `final` one.
+fn module_deferred_assertions_become_always_comb_procedures() {
     for keyword in ["assert", "assume", "cover"] {
         for deferral in ["#0", "final"] {
             let native = parse(&format!("module M; {keyword} {deferral} (1); endmodule"));
-            assert!(native.procedures.is_empty());
-            assert!(
-                matches!(&native.body_item(native.units[0].items[0]).kind, BodyItemKind::Unconverted { category, .. } if category == keyword)
-            );
+            let [procedure] = &native.procedures[..] else {
+                panic!("{:?}", native.procedures)
+            };
+            assert_eq!(procedure.kind, ProcedureKind::AlwaysComb);
+            assert!(matches!(
+                &native.statement(procedure.body).kind,
+                StatementKind::Assertion { keyword: k, .. } if k == keyword
+            ));
         }
     }
 }

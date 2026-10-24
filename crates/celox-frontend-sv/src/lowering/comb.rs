@@ -3581,6 +3581,15 @@ impl<'p, 'a> Comb<'p, 'a> {
         }
         self.effect_sensitivity.extend(observed.iter().copied());
         let site_id = self.site_base + self.sites.len() as u32;
+        // The action of a deferred assertion waits in the queue of its
+        // process, which lowering names by the process's activation group
+        // (IEEE 1800-2023 16.4). A deferred `$fatal` ends the simulation
+        // when it matures, not while combinational logic settles.
+        let deferred = assertion_site
+            .map(|assertion| assertion.deferral)
+            .filter(|&region| region != celox_design::AssertionDeferral::None)
+            .map(|region| celox_design::DeferredSite::Action { queue: 0, region });
+        let fatal = kind.is_fatal() && deferred.is_none();
         // Inside a run-time loop the event is emitted once per iteration by
         // the loop's runner (see `fold_loop`).
         let captured_in_loop = if let Some(effects) = &mut self.loop_effects {
@@ -3592,7 +3601,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                     SystemTaskKind::Print(..) | SystemTaskKind::Control(_)
                 ),
                 args: captured.clone(),
-                fatal_error_code: kind.is_fatal().then_some(i64::from(site_id)),
+                fatal_error_code: fatal.then_some(i64::from(site_id)),
             });
             true
         } else {
@@ -3605,7 +3614,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             scope: None,
             location: report_location(site),
             assertion: assertion_site.cloned(),
-            deferred: None,
+            deferred,
             arg_widths,
             arg_signed,
             arg_is_string,

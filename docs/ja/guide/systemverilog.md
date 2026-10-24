@@ -80,7 +80,7 @@ X/Z を扱う場合は builder に `.four_state(true)` を指定します。
 | RTL のプロセス | `assign`、`always_comb`、`always @*`、ブロッキング代入の `always_latch`、エッジで起動する `always` と `always_ff` |
 | 時間を持つプロセス | `#delay`（`#5ns` などの時間リテラルを含む）、変数・エッジ・選択・式・`@*` に対する `@(...)`、`wait (...)`、ノンブロッキング代入、タイミング制御を持つ task 呼び出しを使う `initial` と `always` |
 | 演算と制御 | 算術、部分選択、assignment pattern、分岐、ループ、関数 |
-| シミュレーション補助 | 即時アサーション、表示タスク、`$readmemh` / `$readmemb`、時刻の取得、乱数 |
+| シミュレーション補助 | 即時アサーションと遅延付き即時アサーション、表示タスク、`$readmemh` / `$readmemb`、時刻の取得、乱数 |
 
 各領域には制約があります。デザインを移植する際は、
 [詳しい対応一覧](./systemverilog-reference#what-is-supported)でポート、型、文、システム関数を確認してください。
