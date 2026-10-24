@@ -53,6 +53,9 @@ pub(super) struct ProcModule<'a> {
     /// Number of extern calls lowered so far.
     pub extern_calls: usize,
     pub four_state: bool,
+    /// The module is a program (IEEE 1800-2023 24.3): its kernels honour
+    /// `$exit` (24.7).
+    pub program: bool,
     pub forceable: HashMap<SourceVarId, (SourceVarId, SourceVarId)>,
     /// Hidden variables created while lowering, for the caller to publish.
     pub created: Vec<SourceVarId>,
@@ -244,6 +247,7 @@ impl<'a> ProcModule<'a> {
             extern_functions: Vec::new(),
             extern_calls: 0,
             four_state,
+            program: module.is_program(),
             created: Vec::new(),
             temp_counter: 0,
             capture_counter: 0,
