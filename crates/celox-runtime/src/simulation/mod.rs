@@ -521,6 +521,16 @@ impl<B: SimBackend> SimulationState<B> {
         self.set_time(backend, time);
     }
 
+    /// Copy each sampled variable into its copy, which then holds the value
+    /// the variable has in the Preponed region of the next time slot (IEEE
+    /// 1800-2023 4.4.2.1, 16.5.1). A timed simulation does it when a slot is
+    /// over and once before the first.
+    pub fn sample_values(&self, backend: &mut B) {
+        for &(variable, copy) in &self.model.sample_shadows {
+            crate::copy_signal(backend, variable, copy);
+        }
+    }
+
     /// Store `time` where design code reads the simulation time (`$time`).
     fn publish_time(&self, backend: &mut B, time: u64) {
         for &slot in &self.model.time_slots {

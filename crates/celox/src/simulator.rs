@@ -160,6 +160,12 @@ mod host {
         /// A timed simulation owns this simulator: a time slot ends when its
         /// scheduler says so, not when combinational logic settles.
         pub(crate) timed: bool,
+        /// Sampled variables and their copies
+        /// (`RuntimeSchema::sample_shadows`).
+        sample_shadows: Vec<(SignalRef, SignalRef)>,
+        /// Deferred assertions or sampled copies have work when a host
+        /// call's time slot is over.
+        host_slot_work: bool,
         /// Identity of the state layout, computed on first checkpoint use.
         pub(super) checkpoint_fingerprint: std::sync::OnceLock<u64>,
         /// State objects as state files name them, built on first use.
@@ -1023,6 +1029,17 @@ mod host {
             } else {
                 Vec::new()
             };
+            let sample_shadows: Vec<(SignalRef, SignalRef)> = program
+                .runtime_schema
+                .sample_shadows
+                .iter()
+                .map(|(variable, copy)| {
+                    (
+                        backend.resolve_signal(variable),
+                        backend.resolve_signal(copy),
+                    )
+                })
+                .collect();
             let mut comb_deferred_groups: Vec<(u32, usize)> = Vec::new();
             for observer in &program.runtime_schema.comb_observers {
                 if matches!(
@@ -1058,6 +1075,8 @@ mod host {
                 deferred_assertions: !deferred_sites.is_empty(),
                 comb_deferred_groups,
                 timed: false,
+                host_slot_work: !deferred_sites.is_empty() || !sample_shadows.is_empty(),
+                sample_shadows,
                 components: Default::default(),
                 component_simulation: None,
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
@@ -1295,13 +1314,12 @@ mod host {
             }
         }
 
-        /// Without a scheduler, a host call is a time slot: mature the
-        /// deferred assertions it ran.
+        /// Without a scheduler, a host call is a time slot: end it.
         fn end_untimed_slot(&mut self) -> Result<(), RuntimeErrorCode> {
             if self.timed {
                 return Ok(());
             }
-            self.mature_deferred_assertions()
+            self.end_host_slot()
         }
 
         pub(crate) fn drain_runtime_events_deferred_with_context(
@@ -1441,6 +1459,32 @@ mod host {
                 .clone_from(&other.comb_observer_snapshots);
             self.comb_observer_initial_eval = other.comb_observer_initial_eval;
             self.host_watch.set_log(other.host_watch.log().to_vec());
+        }
+
+        /// A host call without a scheduler is a time slot, which is over:
+        /// deferred assertions mature, then the sampled copies are made.
+        #[inline]
+        fn end_host_slot(&mut self) -> Result<(), RuntimeErrorCode> {
+            if !self.host_slot_work {
+                return Ok(());
+            }
+            self.finish_host_slot()
+        }
+
+        #[cold]
+        #[inline(never)]
+        fn finish_host_slot(&mut self) -> Result<(), RuntimeErrorCode> {
+            self.mature_deferred_assertions()?;
+            self.sample_values();
+            Ok(())
+        }
+
+        /// Copy each sampled variable into its copy (IEEE 1800-2023
+        /// 16.5.1).
+        pub(crate) fn sample_values(&mut self) {
+            for &(variable, copy) in &self.sample_shadows {
+                celox_runtime::copy_signal(&mut self.backend, variable, copy);
+            }
         }
 
         /// The time slot ends: the actions of deferred assertions that their
@@ -1804,6 +1848,13 @@ mod host {
                     signals: Vec::new(),
                 });
             }
+            // Without a scheduler, a domain samples the values the logic
+            // settled to before it, as at the end of the previous call.
+            // Deferred actions mature only when the call ends, so that a
+            // later settle in the call can still flush them.
+            if !self.timed && self.host_slot_work {
+                self.sample_values();
+            }
             Ok(())
         }
 
@@ -2029,7 +2080,7 @@ mod host {
             let result = self.fire_unit(event);
             self.heap_safepoint();
             result.and(self.take_heap_fault())?;
-            self.mature_deferred_assertions()
+            self.end_host_slot()
         }
 
         fn fire_unit(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
@@ -2191,8 +2242,7 @@ mod host {
         }
 
         /// Settle the outcome of [`celox_runtime::run_edge`] or
-        /// [`celox_runtime::run_edges`], and mature the deferred assertions
-        /// they ran.
+        /// [`celox_runtime::run_edges`], and end the time slot they ran.
         fn note_edge(
             &mut self,
             outcome: Result<celox_runtime::EdgeOutcome, celox_runtime::Halt>,
@@ -2215,7 +2265,7 @@ mod host {
                 Err(celox_runtime::Halt::Error(error)) => return Err(error),
             }
             // The edges are a time slot, as a tick is.
-            self.mature_deferred_assertions()
+            self.end_host_slot()
         }
 
         /// A rising edge of `event`'s signal; see [`Self::edge`].
@@ -2419,7 +2469,7 @@ mod host {
             let result = self.tick_events_unit(&fired);
             self.heap_safepoint();
             result.and(self.take_heap_fault())?;
-            self.mature_deferred_assertions()?;
+            self.end_host_slot()?;
             for &event in events {
                 let info = self.event_edges[event.id()];
                 self.backend

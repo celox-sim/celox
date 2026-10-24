@@ -117,7 +117,7 @@ impl<B: SimBackend> SimulationState<B> {
         let one_slot = match executor.compiled_slots() {
             CompiledSlots::None => return None,
             CompiledSlots::One => true,
-            CompiledSlots::Any => one_slot,
+            CompiledSlots::Any => one_slot || self.one_slot_runs(),
         };
         Some(if one_slot {
             first
@@ -393,6 +393,18 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         executor.try_finish_timed_step(now)?;
+        // A run of one slot ends it unless the reference loop has work left.
+        if (self.one_slot_runs() || executor.compiled_slots() == CompiledSlots::One)
+            && self.next_work_time() != Some(now)
+        {
+            self.end_time_slot(executor, now)?;
+        }
         Ok(now)
+    }
+
+    /// Whether every run of the compiled scheduler takes one slot: the
+    /// sampled copies are made when each slot is over.
+    fn one_slot_runs(&self) -> bool {
+        !self.model.sample_shadows.is_empty()
     }
 }

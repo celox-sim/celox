@@ -86,6 +86,9 @@ struct SvVariable {
     hidden: bool,
     /// Compiler-generated external override slot: (target, is_enable).
     force_control: Option<(SourceVarId, bool)>,
+    /// The variable whose sampled value this hidden copy holds
+    /// (`SimModule::sample_shadows`).
+    sampled_from: Option<SourceVarId>,
 }
 
 /// Whether `expr` reads a string variable: after its calls are hoisted, a
@@ -125,13 +128,14 @@ impl SvVariable {
     }
 
     /// A hidden variable other than the time slot, whose value the lowered
-    /// code computes. The time slot is state the scheduler writes, and an
-    /// event expression's variables are state its process and its
-    /// continuous assignment share.
+    /// code computes. The time slot and the sampled copies are state the
+    /// scheduler writes, and an event expression's variables are state its
+    /// process and its continuous assignment share.
     fn is_scratch(&self) -> bool {
         self.hidden
             && self.path != [TIME_SLOT]
             && self.force_control.is_none()
+            && self.sampled_from.is_none()
             && !self.path[0].starts_with(EVENT_PREFIX)
     }
 }
@@ -1778,6 +1782,7 @@ fn prepare_external_hierarchy_collecting(
                         source: variable.source.clone(),
                         hidden: !variable.module_affiliated,
                         force_control: None,
+                        sampled_from: None,
                     },
                 )
             })
@@ -3011,6 +3016,7 @@ fn lower_module_with_overrides(
             source: None,
             hidden: false,
             force_control: None,
+            sampled_from: None,
         };
         name_to_id.insert(port.name().to_string(), id);
         port_order.push(id);
@@ -3095,6 +3101,7 @@ fn lower_module_with_overrides(
             source: None,
             hidden: false,
             force_control: None,
+            sampled_from: None,
         };
         name_to_id.insert(signal.name().to_string(), id);
         // The package's object has its own default value.
@@ -3171,6 +3178,7 @@ fn lower_module_with_overrides(
                 source: None,
                 hidden: false,
                 force_control: None,
+                sampled_from: None,
             },
         );
     }
@@ -3442,6 +3450,7 @@ fn lower_module_with_overrides(
             nba_switches,
             host_request_sites,
             time_slot: name_to_id.get(TIME_SLOT).copied(),
+            sample_shadows: Vec::new(),
         },
         variables,
         port_order,
@@ -4148,6 +4157,12 @@ pub(crate) fn attach_instance_glue(
     }
     // Combinational processes may read the time too.
     module.time_slot = signal_names.get(TIME_SLOT).copied();
+    let mut sample_shadows: Vec<_> = parent_variables
+        .iter()
+        .filter_map(|(&copy, variable)| variable.sampled_from.map(|variable| (variable, copy)))
+        .collect();
+    sample_shadows.sort_by_key(|&(variable, copy)| (variable.0, copy.0));
+    module.sample_shadows = sample_shadows;
     for (instance, child_id, child, connections) in resolved_instances {
         let glue = build_instance_glue(
             &parent_variables,
@@ -4536,6 +4551,7 @@ fn lower_initial_processes(
                         // Control slots are not signals of the design.
                         hidden: true,
                         force_control: None,
+                        sampled_from: None,
                     },
                 );
                 id
@@ -5127,6 +5143,7 @@ fn ensure_parent_output_signals(
             source: None,
             hidden: false,
             force_control: None,
+            sampled_from: None,
         };
         parent
             .variables
@@ -6924,6 +6941,7 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         | SystemFunction::Isunbounded
         | SystemFunction::Signed
         | SystemFunction::Unsigned
+        | SystemFunction::Sampled
         | SystemFunction::Bits
         | SystemFunction::Size
         | SystemFunction::Dimensions

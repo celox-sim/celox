@@ -165,6 +165,7 @@ waits zero.
 | System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | Random numbers | `$urandom`, `$urandom_range`, `$random` and `$dist_uniform` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
 | Simulation time | `$time`, `$stime` and `$realtime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
+| Sampled values | `$sampled` in edge-triggered processes, processes with timing controls, `initial` blocks and the subroutines they call; see [Sampled values](#sampled-values) |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop`, `$exit` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | Runtime I/O | `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb`, and [VCD controls](./vcd#systemverilog-source-controls) in timed processes |
 | State | two-state and four-state simulation |
@@ -562,6 +563,20 @@ host does at each callback, or the time step of the report while
 `Simulation::set_fail_on` is set. `Report::render` formats a report as the VPI host
 and the `celox` command print it. Only `$error` and `$fatal` fail a `celox`
 run; `$fatal` also ends the simulation with an error.
+
+### Sampled values {#sampled-values}
+
+`$sampled(e)` is the value `e` has in the Preponed region of the time slot:
+the value at the end of the previous slot, and in the first slot the declared
+or default value (IEEE 1800-2023 4.4.2.1, 16.5.1). Each static variable the
+operand reads, the indices of its selects and the arguments of its calls
+included, is read from a copy that the simulation updates when a time slot is
+over. Automatic variables keep their current value. A `Simulator` call is a
+time slot. `$sampled` in combinational logic (`always_comb`, `always_latch`,
+an `always` lowered as combinational logic, a continuous assignment) is
+rejected: such a process reruns when its inputs change, not when their sampled
+values do. A design that uses `$sampled` runs the compiled scheduler one slot
+at a time.
 
 ### Deferred assertions
 
