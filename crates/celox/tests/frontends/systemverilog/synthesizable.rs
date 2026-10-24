@@ -171,7 +171,11 @@ fn task_timing_control_is_rejected() {
         .build_cranelift()
         .expect_err("a task with a delay must be rejected")
         .to_string();
-    assert!(error.contains("Unsupported"), "{error}");
+    // IEEE 1800-2023 9.2.2.2: always_comb may not suspend.
+    assert!(
+        error.contains("timed task call in an always_comb body"),
+        "{error}"
+    );
 }
 
 #[test]

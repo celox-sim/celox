@@ -7,7 +7,7 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 0,
-    "mismatch": 24,
+    "mismatch": 28,
     "emission_error": 0,
     "compile_error": 18,
     "runtime_error": 2,
@@ -448,6 +448,38 @@
       "detail": "indexed_select::known_run_time_selects_stay_within_their_element at 1957:20: assert_eq a1: expected 0x42, got 0x80",
       "expectation": "Simulation",
       "name": "indexed_select::known_run_time_selects_stay_within_their_element",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Sequential",
+      "detail": "timing::always_star_timed_task_calls_run_as_processes at 1244:17: assert_eq y: expected 0x5, got 0x0 (the task resumes two units after a changed)",
+      "expectation": "Simulation",
+      "name": "timing::always_star_timed_task_calls_run_as_processes",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Sequential",
+      "detail": "timing::always_star_timed_task_calls_assign_nonblocking at 1265:17: assert_eq q: expected 0x0, got 0x5",
+      "expectation": "Simulation",
+      "name": "timing::always_star_timed_task_calls_assign_nonblocking",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Sequential",
+      "detail": "timing::always_star_timed_task_calls_wait_on_nested_call_defaults at 1288:17: assert_eq y: expected 0x5, got 0x0 (a change of what pick's default reads wakes the process)",
+      "expectation": "Simulation",
+      "name": "timing::always_star_timed_task_calls_wait_on_nested_call_defaults",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Sequential",
+      "detail": "timing::always_star_timed_task_calls_wait_on_folded_branch_reads at 1308:17: assert_eq y: expected 0x0, got 0x1",
+      "expectation": "Simulation",
+      "name": "timing::always_star_timed_task_calls_wait_on_folded_branch_reads",
       "phase": "execute",
       "status": "mismatch"
     }

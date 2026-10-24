@@ -114,6 +114,12 @@ pub enum StmtBase<E, L> {
     /// `@(items)`: suspend the process until one of the events occurs
     /// (9.4.2).
     WaitEvent(Vec<EventItemBase<E>>),
+    /// `@*` (9.4.2.2): suspend the process until a variable that the
+    /// statements read changes. They are the statements the control covers,
+    /// branches that constant folding removed included, and only describe
+    /// the reads: they do not execute here, and [`StmtBase::walk`] does not
+    /// visit them.
+    WaitImplicit(Vec<StmtBase<E, L>>),
     /// `wait (condition)`: suspend the process until the condition is true
     /// (9.4.3).
     Wait(E),
@@ -343,6 +349,7 @@ impl<E, L> StmtBase<E, L> {
                     .collect(),
             ),
             StmtBase::Wait(condition) => StmtBase::Wait(fe(condition)),
+            StmtBase::WaitImplicit(reads) => StmtBase::WaitImplicit(body(reads, fe, fl)),
         }
     }
 
@@ -455,6 +462,7 @@ impl<E, L> StmtBase<E, L> {
                 }
             }
             StmtBase::Wait(condition) => fe(condition),
+            StmtBase::WaitImplicit(reads) => body(reads, fe, fl, fname),
         }
     }
 

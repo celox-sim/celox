@@ -50,7 +50,7 @@ In a timed `Simulation`, `initial` and plain `always` processes can suspend:
 
 | Control | Supported |
 | --- | --- |
-| `#delay` | integral and real delays, `#(min:typ:max)` (the typical value) and [time literals](#time-literal-delays); an X or Z delay counts as zero |
+| `#delay` | integral and real delays, `#(min:typ:max)` (the typical value), package-scoped values such as `#pkg::D`, and [time literals](#time-literal-delays); an X or Z delay counts as zero |
 | `@(...)` | variables, `posedge` / `negedge` / `edge`, items joined by `or` or `,`, bit, part and run-time index selects, any expression including calls of pure functions, and `@*` / `@(*)`, which waits on the variables its statement reads |
 | `wait (condition)` | any condition; an X or Z condition counts as false |
 | Assignments | blocking and nonblocking, to any target a blocking assignment takes, including unpacked array elements and run-time positions; nonblocking updates take effect in the NBA region of the time slot, at the position evaluated when the assignment executes, and bits outside the target or at a position with an X or Z bit are not written |
@@ -78,8 +78,11 @@ An `initial` or ordinary `always` process can call tasks containing `#delay`,
 `@(event)` and `wait (condition)`, including through nested tasks. Calls are
 inlined into the caller's resumable state machine. A normal edge-sensitive
 `always` that calls a timed task waits for that task to return before rearming
-its event control. Functions, `always_comb` and `always_ff` cannot call a timed
-task, and `always @*` cannot yet ([#1710](https://github.com/celox-sim/celox/issues/1710)).
+its event control. An `always @*` that calls a timed task runs as a process
+too: it waits for a change of a variable its statement reads, the task's
+arguments among them but not what the task body reads, and misses changes
+while the task is suspended. Functions, `always_comb`, `always_latch` and
+`always_ff` cannot call a timed task.
 
 Automatic task arguments and locals have separate storage for each activation
 and survive suspension. Module-local static task arguments remain shared. Inputs and inouts
@@ -173,8 +176,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events and `->`, `fork` / `join`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
 - Timing controls in processes: `iff` qualifiers ([#1444](https://github.com/celox-sim/celox/issues/1444)),
-  package-scoped delay values
-  ([#1710](https://github.com/celox-sim/celox/issues/1710)), impure function calls in event expressions, and
+  impure function calls in event expressions, and
   `wait` or event expressions reading a static task argument.
 - Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset.
 - Inferred latches inside `always_comb` are rejected by default. Set `inferred_latch = "warn"` or `"allow"` in `celox.toml` under `[diagnostics]` to permit retained blocking assignments. Ordinary `always @*` and explicit `always_latch` do not require this option.

@@ -349,6 +349,7 @@ impl<'a> ProcModule<'a> {
                 stmt,
                 sv::ir::Stmt::Delay { .. }
                     | sv::ir::Stmt::WaitEvent(_)
+                    | sv::ir::Stmt::WaitImplicit(_)
                     | sv::ir::Stmt::Wait(_)
                     | sv::ir::Stmt::Assign {
                         nonblocking: true,

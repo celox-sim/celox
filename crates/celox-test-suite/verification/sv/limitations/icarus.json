@@ -7,9 +7,9 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 1,
-    "mismatch": 16,
+    "mismatch": 17,
     "emission_error": 0,
-    "compile_error": 119,
+    "compile_error": 120,
     "runtime_error": 8,
     "unsupported": 0,
     "ignored": 0
@@ -1343,6 +1343,22 @@
       "name": "class::methods_called_through_interface_class_handles",
       "phase": "compile",
       "status": "compile_error"
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "timing::package_scoped_delay_values_wait_their_value",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Sequential",
+      "detail": "timing::always_star_timed_task_calls_wait_on_folded_branch_reads at 1309:17: assert_eq y: expected 0x1, got 0x0 (a change of what a folded call's default reads wakes the process)",
+      "expectation": "Simulation",
+      "name": "timing::always_star_timed_task_calls_wait_on_folded_branch_reads",
+      "phase": "execute",
+      "status": "mismatch"
     }
   ]
 }

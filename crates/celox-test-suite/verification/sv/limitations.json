@@ -2140,5 +2140,75 @@
         "class::randomization_mode_bit_argument"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_always_star_timed_task",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+    "reason": "Verilator 5.052 schedules an always @* that calls a timed task differently from its event control: the task called for a = 5 at 3 ns writes y at 6 ns instead of 5 ns, a nonblocking update after the task's 1 ns delay lands at 2 ns instead of 3 ns, and a standalone probe shows it rerunning the call for a change made while the task was suspended and for variables only the task body reads. IEEE 1800-2023 9.4.2.2 makes the implicit event list the variables the statement reads, the task's arguments but not its body, and 9.4.2 waits only for changes after the event control is reached. Icarus passes the unchanged shared assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::always_star_timed_task_calls_run_as_processes",
+        "timing::always_star_timed_task_calls_assign_nonblocking"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_package_delay_value",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 reports a syntax error for an unparenthesized package-scoped delay value such as #delays::D. IEEE 1800-2023 A.6.5 permits a ps_identifier as a delay_value. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::package_scoped_delay_values_wait_their_value"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_always_star_folded_branches",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 leaves the reads of a branch that constant folding removes out of the event list of an always @*: a change of a, which the default of the call in `if (0) delayed();` reads, does not wake the process. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, so a constant-false branch still contributes. Celox's combinational and process always @* both count it.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::always_star_timed_task_calls_wait_on_folded_branch_reads"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_always_star_implicit_reads",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 builds the event list of an always @* that calls a timed task without the reads of the defaults of omitted arguments of nested calls, so a change of a does not wake `always @* delayed(pick())` with `pick(input v = a)`, and without the reads of a branch that constant folding removes; it also runs the process at time zero. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, a constant-false branch included, and 9.4.2 waits for a change. Icarus passes the nested-default case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::always_star_timed_task_calls_wait_on_nested_call_defaults",
+        "timing::always_star_timed_task_calls_wait_on_folded_branch_reads"
+      ]
+    }
   }
 ]

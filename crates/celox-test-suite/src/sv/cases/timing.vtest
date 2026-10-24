@@ -1211,6 +1211,128 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (run_until 7) (assert_eq count 1)
   (run_until 8) (assert_eq count 2))
 
+; A plain `always @*` that calls a timed task runs as a process (IEEE
+; 1800-2023 9.2.2.2.2): its event list is the variables its statement
+; reads, including the task's arguments but not what the task body reads
+; (9.4.2.2), and it waits for one of them to change before each run.
+(case always_star_timed_task_calls_run_as_processes
+  (source "star_tasks.sv" #"
+    module Top(output logic [7:0] y, z, w);
+      logic [7:0] a = 8'd0, b = 8'd0;
+      logic [7:0] y_r = 8'd0, z_r = 8'd0, w_r = 8'd0;
+      task automatic delayed(input logic [7:0] v);
+        #2 y_r = v;
+      endtask
+      task automatic mark(input logic [7:0] v);
+        #1 w_r = v;
+      endtask
+      always @* delayed(a);
+      always @* begin z_r = b; mark(b); end
+      initial begin
+        #3 a = 8'd5;
+        b = 8'd1;
+        #3 a = 8'd7;
+      end
+      assign y = y_r;
+      assign z = z_r;
+      assign w = w_r;
+    endmodule
+  "#)
+  (top Top)
+  (run_until 3) (assert_eq y 0) (assert_eq z 1) (assert_eq w 0)
+  (run_until 4) (assert_eq w 1) (assert_eq y 0)
+  (run_until 5) (assert_eq y 5 "the task resumes two units after a changed")
+  (run_until 7) (assert_eq y 5)
+  (run_until 8) (assert_eq y 7))
+
+; Such a process may assign nonblocking, as any `always` process may.
+(case always_star_timed_task_calls_assign_nonblocking
+  (source "star_task_nba.sv" #"
+    module Top(output logic [7:0] q);
+      logic [7:0] d = 8'd0, q_r = 8'd0;
+      task automatic pause();
+        #1;
+      endtask
+      always @* begin
+        pause();
+        q_r <= d;
+      end
+      initial #2 d = 8'd5;
+      assign q = q_r;
+    endmodule
+  "#)
+  (top Top)
+  (run_until 2) (assert_eq q 0)
+  (run_until 3) (assert_eq q 5 "the update follows the task's delay"))
+
+; The event list of such a process comes from the analysis that gives a
+; combinational `always @*` its sensitivity: it counts what the defaults of
+; omitted arguments read, of calls nested in arguments too.
+(case always_star_timed_task_calls_wait_on_nested_call_defaults
+  (source "star_nested_default.sv" #"
+    module Top(output logic [7:0] y);
+      logic [7:0] a = 8'd0, y_r = 8'd0;
+      function automatic logic [7:0] pick(input logic [7:0] v = a);
+        return v;
+      endfunction
+      task automatic delayed(input logic [7:0] v);
+        #1 y_r = v;
+      endtask
+      always @* delayed(pick());
+      initial #2 a = 8'd5;
+      assign y = y_r;
+    endmodule
+  "#)
+  (top Top)
+  (run_until 2) (assert_eq y 0)
+  (run_until 3) (assert_eq y 5 "a change of what pick's default reads wakes the process"))
+
+; It counts the reads of branches that constant folding removed, as the
+; syntactic event list does (IEEE 1800-2023 9.4.2.2).
+(case always_star_timed_task_calls_wait_on_folded_branch_reads
+  (source "star_folded_default.sv" #"
+    module Top(output logic [7:0] y);
+      logic [7:0] a = 8'd0, b = 8'd1, y_r = 8'd0;
+      task automatic delayed(input logic [7:0] v = a);
+        #1 y_r = v;
+      endtask
+      always @* begin
+        if (0) delayed();
+        delayed(b);
+      end
+      initial #2 a = 8'd5;
+      assign y = y_r;
+    endmodule
+  "#)
+  (top Top)
+  (run_until 2) (assert_eq y 0)
+  (run_until 3) (assert_eq y 1 "a change of what a folded call's default reads wakes the process"))
+
+; A package-scoped identifier is a delay value (IEEE 1800-2023 A.6.5,
+; ps_identifier), with or without parentheses.
+(case package_scoped_delay_values_wait_their_value
+  (source "package_delays.sv" #"
+    package delays;
+      parameter int D = 3;
+      localparam int E = 2;
+    endpackage
+    module Top(output int at_d, at_e, at_paren);
+      initial begin
+        at_d = 0; at_e = 0; at_paren = 0;
+        #delays::D;
+        at_d = 1;
+        #delays::E;
+        at_e = 1;
+        #(delays::D) at_paren = 1;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 2) (assert_eq at_d 0)
+  (run_until 3) (assert_eq at_d 1) (assert_eq at_e 0)
+  (run_until 5) (assert_eq at_e 1) (assert_eq at_paren 0)
+  (run_until 8) (assert_eq at_paren 1))
+
 
 (case timed_task_four_state_storage_survives_suspension
   (four_state)
