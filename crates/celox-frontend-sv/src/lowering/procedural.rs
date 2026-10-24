@@ -1251,6 +1251,79 @@ fn template_arguments(template: &str) -> usize {
     count
 }
 
+/// Prepare each value that a `%t` of `template` converts. A system task
+/// argument is self-determined (IEEE 1800-2023 11.6.1, 21.2.1), so the
+/// operand of the analyzer's scaling `value * factor` keeps its own width
+/// and signedness. A `string` value has no time value, and Celox would print
+/// its storage handle: it is rejected, as Verilator rejects it, while Icarus
+/// prints the conversion unformatted.
+pub(super) fn prepare_time_operands(
+    module: &ProcModule<'_>,
+    template: Option<&str>,
+    values: &mut [sv::ir::SystemTaskArg<sv::ir::Expr>],
+) -> Result<(), sv::AnalyzerError> {
+    let Some(template) = template else {
+        return Ok(());
+    };
+    let mut chars = template.chars().peekable();
+    let mut index = 0;
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            continue;
+        }
+        while chars
+            .next_if(|ch| matches!(ch, '-' | '+' | ' ' | '#' | '0'))
+            .is_some()
+        {}
+        while chars.next_if(char::is_ascii_digit).is_some() {}
+        if chars.next_if_eq(&'.').is_some() {
+            while chars.next_if(char::is_ascii_digit).is_some() {}
+        }
+        let Some(spec) = chars.next() else {
+            break;
+        };
+        if !"bBoOhHxXdDiIcCsStTeEfFgG".contains(spec) {
+            continue;
+        }
+        if matches!(spec, 't' | 'T')
+            && let Some(sv::ir::SystemTaskArg::Expr(expr)) = values.get_mut(index)
+        {
+            if module.expr_is_string(expr) {
+                return Err(unsupported("string operand of a %t conversion"));
+            }
+            // The analyzer scales a %t value as `value * factor`.
+            if let sv::ir::Expr::Binary {
+                left,
+                op: sv::ir::BinaryOp::Mul,
+                ..
+            } = expr
+            {
+                if module.expr_is_string(left) {
+                    return Err(unsupported("string operand of a %t conversion"));
+                }
+                if module.expr_float_precision(left).is_none()
+                    && let Some(width) = sv_expr_natural_width(
+                        &module.typed_calls(left),
+                        module.variables,
+                        module.name_to_id,
+                        module.constants,
+                        module.parameter_types,
+                    )
+                {
+                    let signed = module.expr_signed(left);
+                    **left = sv::ir::Expr::Resize {
+                        expr: left.clone(),
+                        width,
+                        signed,
+                    };
+                }
+            }
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
 /// The message template and value arguments of a system task: a leading
 /// string literal is the template. `$fatal` first takes a finish number.
 /// A `$display` or `$write` argument without a conversion of its own is

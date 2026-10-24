@@ -186,7 +186,8 @@ impl Ff<'_, '_> {
             SystemTask::Fdisplay(radix) | SystemTask::Fwrite(radix) => {
                 let descriptor = self.file_io_arg(&args[0])?;
                 let kind = SystemTaskKind::Print(RuntimeEventKind::Write, radix.letter());
-                let (template, args) = system_task_template(self.m, &kind, &args[1..]);
+                let (template, mut args) = system_task_template(self.m, &kind, &args[1..]);
+                prepare_time_operands(self.m, template.as_deref(), &mut args)?;
                 let mut values = vec![descriptor];
                 for arg in &args {
                     values.push(self.file_io_arg(arg)?);

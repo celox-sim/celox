@@ -1327,6 +1327,24 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 Ok(SystemTaskArg::Expr(value))
             })
             .collect::<Result<Vec<_>, AnalyzerError>>()?;
+        let mut args = args;
+        // A string literal that %t converts is bound as a value: the binder
+        // handles every literal form, triple quotes and escapes included.
+        let mut bind = |index: usize| -> Result<Option<Expr>, AnalyzerError> {
+            let Some(id) = arguments.get(index).and_then(|arg| arg.value) else {
+                return Ok(None);
+            };
+            let mut value =
+                expression_binding::bind_value(id, declarations, self.tree, &self.dims, None)?;
+            self.rename_expr(&mut value);
+            Ok(Some(value))
+        };
+        scale_time_conversions(
+            task,
+            &mut args,
+            timescales::time_divisor(root, self.tree)?,
+            &mut bind,
+        )?;
         // Keep Veryl's assertion calls as calls: their message arguments
         // execute even on success, unlike an SV assertion's fail action.
         Ok(vec![Stmt::SystemTask {
@@ -2864,6 +2882,78 @@ pub(super) fn process_site(
         line,
         column,
     })
+}
+
+/// `%t` reports a time value in the units of `$timeformat`, by default the
+/// smallest time precision of the design (IEEE 1800-2023 20.4.3, Table 20-3),
+/// in which the simulation counts its time. The value is in the time unit of
+/// the calling scope, of which `ticks_per_unit` simulation time units make
+/// one, so each value a `%t` of the template converts is scaled by it.
+fn scale_time_conversions(
+    task: SystemTask,
+    args: &mut [SystemTaskArg<Expr>],
+    ticks_per_unit: u64,
+    bind: &mut impl FnMut(usize) -> Result<Option<Expr>, AnalyzerError>,
+) -> Result<(), AnalyzerError> {
+    if ticks_per_unit == 1 {
+        return Ok(());
+    }
+    let template = match task {
+        SystemTask::Display(_) | SystemTask::Write(_) | SystemTask::Severity(_) => 0,
+        SystemTask::Fatal => usize::from(matches!(args.first(), Some(SystemTaskArg::Expr(_)))),
+        SystemTask::Fdisplay(_)
+        | SystemTask::Fwrite(_)
+        | SystemTask::Assert
+        | SystemTask::AssertContinue => 1,
+        _ => return Ok(()),
+    };
+    let Some(SystemTaskArg::Str(text)) = args.get(template) else {
+        return Ok(());
+    };
+    // The conversions of the template, in the order they take arguments
+    // (21.2.1.2): flags, a width and a precision may precede each.
+    let mut conversions = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            continue;
+        }
+        while chars
+            .next_if(|ch| matches!(ch, '-' | '+' | ' ' | '#' | '0'))
+            .is_some()
+        {}
+        while chars.next_if(char::is_ascii_digit).is_some() {}
+        if chars.next_if_eq(&'.').is_some() {
+            while chars.next_if(char::is_ascii_digit).is_some() {}
+        }
+        if let Some(spec) = chars.next()
+            && "bBoOhHxXdDiIcCsStTeEfFgG".contains(spec)
+        {
+            conversions.push(spec);
+        }
+    }
+    for (offset, spec) in conversions.into_iter().enumerate() {
+        if !matches!(spec, 't' | 'T') {
+            continue;
+        }
+        let index = template + 1 + offset;
+        // A string literal converts as its packed bytes (5.9). The factor is
+        // signed, so the product keeps the signedness of the value (11.8.1).
+        let value = match args.get(index) {
+            Some(SystemTaskArg::Expr(value)) => value.clone(),
+            Some(SystemTaskArg::Str(_)) => match bind(index)? {
+                Some(value) => value,
+                None => continue,
+            },
+            Some(SystemTaskArg::Empty) | None => continue,
+        };
+        args[index] = SystemTaskArg::Expr(Expr::Binary {
+            left: Box::new(value),
+            op: BinaryOp::Mul,
+            right: Box::new(Expr::Literal(format!("64'sd{ticks_per_unit}"))),
+        });
+    }
+    Ok(())
 }
 
 /// Original invocation span of a native token range, when it belongs to one file.
