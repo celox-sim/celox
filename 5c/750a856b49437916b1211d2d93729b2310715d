@@ -1,0 +1,1 @@
+Review: capture the gate before the body, fold constant tick counts, reject nested and unpacked-array operands, copy arrays by layout; container version 37
