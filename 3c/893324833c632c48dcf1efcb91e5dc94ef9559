@@ -1,0 +1,1 @@
+Folded the sv-tests expected.tsv update (formerly #1898) and the retained Icarus/Verilator program reports into this commit so the PR passes CI on its own.
