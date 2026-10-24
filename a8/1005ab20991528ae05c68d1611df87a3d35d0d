@@ -1,0 +1,6 @@
+Revision history for #1877:
+
+rev 2 (content) 2026-10-24 11:03 UTC — Review: a missed deferred $fatal ends the run, scan argument defaults for deferred assertions, mature on the derived edge paths; container version 35
+rev 1 (initial) 2026-10-24 11:03 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1877,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"713d3a65ed610542ff364a944e572ba2970ae6e3","timestamp_iso":"2026-10-24T11:03:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"713d3a65ed610542ff364a944e572ba2970ae6e3","new_sha":"4e949181a06213b6f63eb142324a9bc8c3a3327e","timestamp_iso":"2026-10-24T11:03:30Z","reason":"Review: a missed deferred $fatal ends the run, scan argument defaults for deferred assertions, mature on the derived edge paths; container version 35","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/713d3a65ed610542ff364a944e572ba2970ae6e3...4e949181a06213b6f63eb142324a9bc8c3a3327e"}]} -->

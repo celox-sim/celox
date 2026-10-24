@@ -1,0 +1,6 @@
+Revision history for #1879:
+
+rev 2 (content) 2026-10-24 11:03 UTC — Rebase over the review fixes of #1878: a settle inside a host call samples but no longer matures; container version 36
+rev 1 (initial) 2026-10-24 11:03 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1879,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"7baa69ab7fbe51c60a8340377a906436d3f0873f","timestamp_iso":"2026-10-24T11:03:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"7baa69ab7fbe51c60a8340377a906436d3f0873f","new_sha":"1113dbb3724a953dabde3fab2f8c7667967a54ea","timestamp_iso":"2026-10-24T11:03:30Z","reason":"Rebase over the review fixes of #1878: a settle inside a host call samples but no longer matures; container version 36","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/7baa69ab7fbe51c60a8340377a906436d3f0873f...1113dbb3724a953dabde3fab2f8c7667967a54ea"}]} -->

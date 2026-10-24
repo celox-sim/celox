@@ -1,0 +1,6 @@
+Revision history for #1882:
+
+rev 2 (content) 2026-10-24 11:03 UTC — Review: scan argument defaults for $past; document the level-based tick of async-reset processes
+rev 1 (initial) 2026-10-24 11:03 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1882,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"93f7dd4b03216dcab005777be5f5b9ad4906e02f","timestamp_iso":"2026-10-24T11:03:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"93f7dd4b03216dcab005777be5f5b9ad4906e02f","new_sha":"461009bf3fdf9d2017d959c3fc87fd01fd711619","timestamp_iso":"2026-10-24T11:03:30Z","reason":"Review: scan argument defaults for $past; document the level-based tick of async-reset processes","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/93f7dd4b03216dcab005777be5f5b9ad4906e02f...461009bf3fdf9d2017d959c3fc87fd01fd711619"}]} -->

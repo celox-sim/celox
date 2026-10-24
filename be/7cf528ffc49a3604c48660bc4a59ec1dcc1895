@@ -1,0 +1,6 @@
+Revision history for #1880:
+
+rev 2 (content) 2026-10-24 11:03 UTC — Review: capture the gate before the body, fold constant tick counts, reject nested and unpacked-array operands, copy arrays by layout; container version 37
+rev 1 (initial) 2026-10-24 11:03 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1880,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"21159a7c460a33781bd6e821f15e429f800055dd","timestamp_iso":"2026-10-24T11:03:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"21159a7c460a33781bd6e821f15e429f800055dd","new_sha":"166ae724d6be341a3844fa41e204f0934dfecc30","timestamp_iso":"2026-10-24T11:03:30Z","reason":"Review: capture the gate before the body, fold constant tick counts, reject nested and unpacked-array operands, copy arrays by layout; container version 37","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/21159a7c460a33781bd6e821f15e429f800055dd...166ae724d6be341a3844fa41e204f0934dfecc30"}]} -->
