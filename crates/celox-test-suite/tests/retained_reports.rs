@@ -122,7 +122,7 @@ fn retained_reports_are_valid_historical_evidence_for_the_live_catalogue() {
 }
 
 #[test]
-fn systemverilog_retained_reports_explain_every_recorded_exclusion() {
+fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
     let catalogue: BTreeSet<_> = celox_test_suite::sv::cases()
         .map(|case| case.name)
         .collect();
@@ -159,8 +159,8 @@ fn systemverilog_retained_reports_explain_every_recorded_exclusion() {
             let name = row["name"].as_str().unwrap();
             let case = celox_test_suite::sv::case(name).unwrap();
             let status = row["status"].as_str().unwrap();
-            // Every case passes, is rejected as expected, needs four-state
-            // simulation the tool lacks, or has a reviewed exclusion.
+            // Reviewed failures stay executable and retain their diagnostics;
+            // they are distinct from exclusions and passing cases.
             match status {
                 "passed" => {
                     assert_eq!(case.expectation, celox_test_suite::Expectation::Simulation)
@@ -185,6 +185,31 @@ fn systemverilog_retained_reports_explain_every_recorded_exclusion() {
                                 .is_file()
                         );
                     }
+                }
+                "compile_error" | "mismatch" => {
+                    assert_eq!(tool, "icarus", "{name}");
+                    let (expected_status, phase, diagnostic) = match name {
+                        "unions::packed_mixed_state" => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq two: expected 0xa0, got 0xaX",
+                        ),
+                        "unions::soft_overlay"
+                        | "unions::soft_signed_ports"
+                        | "unions::soft_wide_four_state" => {
+                            ("compile_error", "compile", "syntax error")
+                        }
+                        _ => panic!("unreviewed failure: {tool} {name}: {status}"),
+                    };
+                    assert_eq!(status, expected_status, "{name}");
+                    assert_eq!(row["phase"], phase, "{name}");
+                    assert!(
+                        row["detail"].as_str().unwrap().contains(diagnostic),
+                        "{name}"
+                    );
+                    assert_eq!(case.expectation, celox_test_suite::Expectation::Simulation);
+                    assert!(row.get("known_issue").is_none(), "{name}");
+                    assert!(celox_test_suite::sv::verification::known_issue(tool, name).is_none());
                 }
                 _ => panic!("{tool} {name}: {status}"),
             }

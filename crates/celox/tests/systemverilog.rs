@@ -237,3 +237,6 @@ mod floating_point;
 
 #[path = "frontends/systemverilog/real_extensions.rs"]
 mod real_extensions;
+
+#[path = "frontends/systemverilog/unions.rs"]
+mod unions;

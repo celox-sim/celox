@@ -22,6 +22,7 @@ pub(in crate::ast) fn bind_in(
         Aggregate {
             owner: Arc<str>,
             union: bool,
+            soft: bool,
             signed: bool,
             names: Vec<String>,
             ranges: Vec<PackedRange>,
@@ -89,11 +90,12 @@ pub(in crate::ast) fn bind_in(
                     }
                     DataTypeKind::Struct {
                         union,
+                        soft,
                         tagged,
                         packed,
                         fields,
                     } => {
-                        if !packed || *tagged {
+                        if (!packed && !soft) || *tagged {
                             return Ok(None);
                         }
                         let mut names = Vec::new();
@@ -125,6 +127,7 @@ pub(in crate::ast) fn bind_in(
                         jobs.push(Job::Aggregate {
                             owner,
                             union: *union,
+                            soft: *soft,
                             signed: data.signed.unwrap_or(false),
                             names,
                             ranges,
@@ -169,6 +172,7 @@ pub(in crate::ast) fn bind_in(
             Job::Aggregate {
                 owner,
                 union,
+                soft,
                 signed,
                 names,
                 ranges,
@@ -180,7 +184,13 @@ pub(in crate::ast) fn bind_in(
                 let fields = names.into_iter().zip(values.split_off(start)).collect();
                 let Some(ty) = packed_structs::native_type(
                     &tree.state,
-                    union,
+                    if soft {
+                        packed_structs::AggregateKind::SoftUnion
+                    } else if union {
+                        packed_structs::AggregateKind::HardUnion
+                    } else {
+                        packed_structs::AggregateKind::Struct
+                    },
                     signed,
                     owner,
                     fields,

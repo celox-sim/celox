@@ -2,6 +2,13 @@
 
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(in crate::ast) enum AggregateKind {
+    Struct,
+    HardUnion,
+    SoftUnion,
+}
+
 /// Freeze member bounds in the declaration environment before generated scopes
 /// can shadow their parameter names. Shared by both syntax owners.
 pub(in crate::ast) fn capture_member_type(
@@ -30,7 +37,7 @@ pub(in crate::ast) fn capture_member_type(
 /// Syntax-independent IEEE7.2.1/7.3.1 layout kernel.
 pub(in crate::ast) fn native_type(
     state: &AnalysisState,
-    union: bool,
+    kind: AggregateKind,
     signed: bool,
     owner: Arc<str>,
     fields: Vec<(String, Type)>,
@@ -52,11 +59,11 @@ pub(in crate::ast) fn native_type(
             })
         })
         .collect::<Option<Vec<_>>>()?;
-    finish_type(state, union, signed, members, ranges, env)
+    finish_type(state, kind, signed, members, ranges, env)
 }
 fn finish_type(
     state: &AnalysisState,
-    union: bool,
+    kind: AggregateKind,
     signed: bool,
     mut members: Vec<PackedMember>,
     ranges: Vec<PackedRange>,
@@ -66,13 +73,14 @@ fn finish_type(
     // The first declared member occupies the most significant bits.
     for member in members.iter_mut().rev() {
         let member_width = expr_type_from_type(state, &member.r#type, const_env)?.width;
-        if union {
+        if !matches!(kind, AggregateKind::Struct) {
             // IEEE 1800-2023 7.3.1: hard packed members share all bits
             // and must have the same width.
-            if width != 0 && width != member_width {
+            if matches!(kind, AggregateKind::HardUnion) && width != 0 && width != member_width {
                 return None;
             }
-            width = member_width;
+            // Soft members are right-justified in the largest member width.
+            width = width.max(member_width);
         } else {
             member.offset = width;
             width = width.checked_add(member_width)?;
