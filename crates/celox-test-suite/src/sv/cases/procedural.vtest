@@ -808,6 +808,47 @@
   (eval)
   (assert_eq y 2))
 
+(case static_function_unpacked_scratch_bits_at_element_boundaries
+  (source "scratch_bits.sv" #"
+    module Top(input logic [5:0] index, output logic [57:0] y);
+      function [58:0] identity(input logic [5:0] selected);
+        logic [57:0] words[57:0];
+        for (integer i=0; i<58; i=i+1) begin
+          words[i]='0;
+          words[i][i]=1'b1;
+        end
+        // The high result bit retains its value, so the function executes
+        // through the procedural path rather than symbolic substitution.
+        identity[57:0]=words[selected];
+      endfunction
+      assign y=identity(index);
+    endmodule
+  "#)
+  (top Top)
+  (for bit (range 0 58)
+    (modify (set index bit))
+    (assert_eq y (<< 1 bit))))
+
+(case static_function_partial_writes_preserve_last_write
+  (source "partial_writes.sv" #"
+    module Top(input logic d, output wire [2:0] y);
+      function [4:0] update(input logic value);
+        update[3:2]='0;
+        update[3]=value;
+        update[1]=1'b1;
+      endfunction
+      wire [4:0] result=update(d);
+      assign y=result[3:1];
+    endmodule
+  "#)
+  (top Top)
+  (modify (set d 1))
+  (assert_eq y 5)
+  (modify (set d 0))
+  (assert_eq y 1)
+  (modify (set d 1))
+  (assert_eq y 5))
+
 (case constant_functions_preserve_concat_operand_widths
   (source "constant_concat.sv" #"
     module Top(output logic [15:0] a,b, output logic [7:0] zero_part);
