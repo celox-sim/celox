@@ -133,7 +133,7 @@ pub(super) fn lower(
                 for property in &class.properties {
                     if property.constant
                         || property.field.handle.is_some()
-                        || property.r#type.is_enum
+                        || (property.r#type.is_enum && property.r#type.enum_values.is_none())
                     {
                         continue;
                     }
@@ -150,16 +150,7 @@ pub(super) fn lower(
                                 vec![Expr::Ident(this.clone())],
                             )),
                         },
-                        then_body: vec![Stmt::Eval(classes::object_call(
-                            ObjectOp::Store(property.field),
-                            vec![
-                                Expr::Ident(this.clone()),
-                                classes::object_call(
-                                    ObjectOp::Random,
-                                    vec![Expr::Ident(this.clone())],
-                                ),
-                            ],
-                        ))],
+                        then_body: random_property(&mut builder, property, &this),
                         else_body: Vec::new(),
                     });
                 }
@@ -263,4 +254,72 @@ pub(super) fn lower(
         });
     }
     Ok(result)
+}
+
+/// Select a declared enum value with rejection sampling, so non-power-of-two
+/// domains are uniform (IEEE 1800-2023 18.3, 18.4.1). Keep the draws inside the
+/// mode guard: a disabled property must not consume its object's random stream.
+fn random_property(
+    builder: &mut BodyBuilder<'_, '_, '_>,
+    property: &classes::Property,
+    this: &str,
+) -> Vec<Stmt> {
+    let random = || classes::object_call(ObjectOp::Random, vec![Expr::Ident(this.into())]);
+    let mut body = Vec::new();
+    let value = if let Some(values) = &property.r#type.enum_values {
+        let count = values.len() as u64;
+        let threshold = count.wrapping_neg() % count;
+        let draw = builder.declare("$enum_draw", classes::unsigned_type(64));
+        body.push(Stmt::Loop {
+            kind: LoopKind::DoWhile,
+            init: Vec::new(),
+            condition: Some(Expr::Binary {
+                left: Box::new(Expr::Ident(draw.clone())),
+                op: BinaryOp::Lt,
+                right: Box::new(Expr::Literal(format!("64'd{threshold}"))),
+            }),
+            step: Vec::new(),
+            body: vec![Stmt::Assign {
+                lhs: LValue::Ident(draw.clone()),
+                rhs: random(),
+                nonblocking: false,
+            }],
+        });
+        body.push(Stmt::Assign {
+            lhs: LValue::Ident(draw.clone()),
+            rhs: Expr::Binary {
+                left: Box::new(Expr::Ident(draw.clone())),
+                op: BinaryOp::Mod,
+                right: Box::new(Expr::Literal(format!("64'd{count}"))),
+            },
+            nonblocking: false,
+        });
+        let literal = |value| {
+            Expr::Literal(format_typed_parameter_literal(
+                value,
+                property.field.width as usize,
+                property.field.signed,
+            ))
+        };
+        let mut value = literal(*values.last().unwrap());
+        for (index, &member) in values.iter().enumerate().rev().skip(1) {
+            value = Expr::Mux {
+                condition: Box::new(Expr::Binary {
+                    left: Box::new(Expr::Ident(draw.clone())),
+                    op: BinaryOp::Eq,
+                    right: Box::new(Expr::Literal(format!("64'd{index}"))),
+                }),
+                then_expr: Box::new(literal(member)),
+                else_expr: Box::new(value),
+            };
+        }
+        value
+    } else {
+        random()
+    };
+    body.push(Stmt::Eval(classes::object_call(
+        ObjectOp::Store(property.field),
+        vec![Expr::Ident(this.into()), value],
+    )));
+    body
 }
