@@ -162,6 +162,30 @@ pub enum AnalyzerError {
     /// least significant bit to judge the edge on (IEEE 1800-2023 6.12).
     #[error("`{edge}` of a real expression: edge event controls do not apply to reals")]
     RealEdgeEvent { edge: &'static str },
+    /// An interface class that inherits parameters or typedefs named `name`
+    /// from two different interface classes or specializations without
+    /// declaring its own `name` (IEEE 1800-2023 8.26.6.2, 8.26.6.3).
+    #[error(
+        "interface class `{class}` inherits `{name}` from both `{first}` and `{second}` and must declare its own `{name}`"
+    )]
+    ConflictingInterfaceClassDeclaration {
+        class: String,
+        name: String,
+        first: String,
+        second: String,
+    },
+    /// The unadorned name of a parameterized class as the prefix of `::`
+    /// outside the class and its out-of-block methods, where a
+    /// specialization such as `C#()` is required (IEEE 1800-2023 8.25.1).
+    #[error(
+        "`{class}::` outside class `{class}`: a parameterized class needs a specialization such as `{class}#()::`"
+    )]
+    UnspecializedClassScope { class: String },
+    /// A parameter value assignment of a class names a parameter that the
+    /// parameter port list of the class does not declare, or declares local
+    /// (IEEE 1800-2023 8.25).
+    #[error("class `{class}` has no parameter `{name}` that a specialization may assign")]
+    UnknownClassParameter { class: String, name: String },
 }
 
 impl miette::Diagnostic for AnalyzerError {}

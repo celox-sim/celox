@@ -30,6 +30,25 @@ pub(super) struct AnalysisState {
     diagnostics: RefCell<Vec<warnings::AnalyzerWarning>>,
     /// Classes laid out so far, by name.
     classes: std::cell::RefCell<HashMap<String, std::rc::Rc<classes::Class>>>,
+    /// The constants and types of the scope that declares each class, which
+    /// its parameter defaults and body see (IEEE 1800-2023 8.25).
+    class_declaration_scopes:
+        std::cell::RefCell<HashMap<String, (HashMap<String, i128>, HashMap<String, Type>)>>,
+    /// Set once the class methods of the scope being analyzed have their
+    /// signatures, after which a new specialization would have none.
+    class_specializations_frozen: std::cell::Cell<bool>,
+    /// The class specializations being made, which their own declarations
+    /// may name before they are complete.
+    class_specializations_building: std::cell::RefCell<Vec<String>>,
+    /// How many class specializations are being made, one inside another.
+    class_specialization_depth: std::cell::Cell<usize>,
+    /// The specializations of classes made so far, in order.
+    class_specializations: std::cell::RefCell<
+        Vec<(
+            String,
+            std::rc::Rc<classes::specializations::Specialization>,
+        )>,
+    >,
 }
 
 /// Syntax and specialization bindings for one scope within an analysis session.
@@ -623,6 +642,9 @@ impl Module {
         export_symbols: bool,
         header_ports: Option<&port_owners::Selection<'_>>,
     ) -> Result<Self, AnalyzerError> {
+        // The scope makes its class specializations until its class methods
+        // have signatures.
+        syntax_tree.state.class_specializations_frozen.set(false);
         let unit = syntax_tree.scope_handle().unit(syntax_tree.declarations());
         let is_package = unit.is_none_or(|unit| unit.kind == celox_sv_syntax::UnitKind::Package);
         let name = unit.map_or_else(
@@ -726,6 +748,8 @@ impl Module {
             .iter()
             .map(|parameter| parameter.name().to_string())
             .collect();
+        // Class parameter defaults are bound where the class is declared.
+        classes::specializations::declare_scopes(syntax_tree, &const_env, &type_aliases);
         let declaration_subroutines =
             with_imported(const_functions::symbolic_module_constant_functions(
                 syntax_tree,
@@ -857,6 +881,12 @@ impl Module {
         {
             return Err(AnalyzerError::Unsupported("ref port direction".to_string()));
         }
+        // The static properties of each class specialization are variables
+        // of the module (IEEE 1800-2023 8.9, 8.25).
+        classes::specializations::collect(
+            syntax_tree,
+            &PackedDimensions::new(HashMap::default(), &const_env, &type_aliases),
+        );
         let mut signals = signals_from_scope(syntax_tree, &const_env, &type_aliases)?;
         signals.extend(
             array_parameters

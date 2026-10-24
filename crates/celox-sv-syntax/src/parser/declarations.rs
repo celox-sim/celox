@@ -92,6 +92,9 @@ impl UnitFrame {
             checker.raw = None;
             checker.builder.complete(parser, start, kind)?;
         } else if let Some(class) = self.classes.last_mut() {
+            if self.scopes.last() == Some(&"endclass") {
+                parser.class_item(&kind);
+            }
             class
                 .items
                 .push(super::generate::Builder::node(parser, start, kind)?);
@@ -270,6 +273,9 @@ impl Parser<'_> {
                 None
             };
             if let Some(kind) = kind {
+                if scopes.last() == Some(&"endclass") && delimiters.is_empty() {
+                    self.class_item(&kind);
+                }
                 if root {
                     self.source_declaration(start, kind)?;
                     pending = None;
