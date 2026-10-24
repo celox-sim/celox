@@ -78,7 +78,7 @@ mod icarus {
             assert!(!is_source_rejection(Some(code), log, &["other.sv".into()]));
             checked += 1;
         }
-        assert_eq!(checked, 6);
+        assert_eq!(checked, 8);
     }
 
     #[test]

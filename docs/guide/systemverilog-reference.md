@@ -17,6 +17,7 @@ synthesis and is tested at the design level.
 | Area | Supported |
 | --- | --- |
 | Modules | ANSI ports, `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them) |
+| Programs | `program` declarations with ports and parameters, instantiated from modules like a module; their `initial` procedures run in the reactive region set (see [Programs](#programs)) |
 | Generate | `for` (with `genvar`), `if`, `case`; constant expressions including `**` |
 | Packages | types, parameters, enums and functions, through `import p::*;`, `import p::x;` and `p::x` |
 | Interfaces | interfaces with value and type parameters, header package imports, `localparam`s, `typedef`s, variables and nets, logic (`assign`, `always_comb`, `always_ff`, generate) and functions; interface instances and instance arrays, also inside generate blocks and other interfaces; interface ports with or without a modport, generic `interface` and `interface.mp` ports, and arrays of interface ports; explicit and implicit named interface connections (`.bus(bus)` and `.bus`); modport `input` / `output` members and imported functions; access to members, parameters and functions through an instance or port (`h[i].m`, `h.P`, `h.f(...)`, `h[i].f(...)` with a constant element index) |
@@ -538,13 +539,44 @@ simulation is suspended (`CheckpointError::Stopped`). In an `always` process, `$
 Its diagnostic level argument prints nothing. Batch hosts without an
 interactive mode, such as the VPI host, end the run at `$stop`.
 
+### Programs {#programs}
+
+A `program` (IEEE 1800-2023 Clause 24) is declared and instantiated like a
+leaf module. Its `initial` procedures run in the reactive region set: they
+start, resume after `#` delays and wake on event controls in the Reactive
+region, `#0` resumes them in the Re-Inactive region, and their nonblocking
+assignments update in the Re-NBA region (4.4.2.6–4.4.2.8, 24.3.1). The
+reactive region set runs once the active region set of a time slot is empty,
+and the design activity it creates runs in the active region set again
+(4.5), so a program reads the design after its nonblocking updates and the
+logic they feed have settled. Subroutines a program procedure calls run in
+its region (24.5). Design processes keep the compiled scheduler; program
+procedures run in the reference scheduler.
+
+When every `initial` procedure of every program has ended, the simulation
+ends with an implicit `$finish` (24.3). A program shall not contain `always`
+procedures or instances or declarations of modules, interfaces and programs;
+Celox rejects them by name.
+
+Not supported: continuous assignments in a program are evaluated with the
+design's combinational logic rather than in the Reactive region; the design's
+continuous assignments and combinational logic that a program writes drive
+settle while the reactive region set runs, as in Icarus, Verilator and xezim,
+so a program that resumes after `#0` reads their new values, whereas 4.5
+evaluates them only once the reactive region set is empty; programs
+nested in modules and anonymous programs are rejected; a program that no
+module instantiates is not an implicit top level next to the design's top
+module; `final` procedures and clocking blocks are unsupported in programs as
+everywhere.
+
 ### `$exit`
 
-`$exit` ends the initial procedures of the program block that calls it
-(24.7). Celox has no program blocks, and a call from anywhere else is
+`$exit` in a thread of a program's `initial` procedure ends every `initial`
+procedure of that program instance (24.7), and with them the simulation once
+no program procedure is left. A call from anywhere else is
 ignored, as 24.7 specifies, with a compilation warning
 (`Simulator::warnings()`) at the call. This includes a call in a constant
-function. Calls in function declarations are diagnosed even when the function
+function of a module. Calls in function declarations are diagnosed even when the function
 is unused; the diagnostic does not depend on constant evaluation executing it.
 
 ### Immediate cover

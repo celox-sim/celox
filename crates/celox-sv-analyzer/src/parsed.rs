@@ -53,7 +53,9 @@ impl ParsedSource {
             .filter(|unit| {
                 matches!(
                     unit.kind,
-                    celox_sv_syntax::UnitKind::Module | celox_sv_syntax::UnitKind::Interface
+                    celox_sv_syntax::UnitKind::Module
+                        | celox_sv_syntax::UnitKind::Program
+                        | celox_sv_syntax::UnitKind::Interface
                 ) && !unit.external
                     && unit.port_style != celox_sv_syntax::PortStyle::Wildcard
             })
@@ -118,7 +120,9 @@ impl ParsedSource {
                     };
                     if !matches!(
                         unit.kind,
-                        celox_sv_syntax::UnitKind::Module | celox_sv_syntax::UnitKind::Interface
+                        celox_sv_syntax::UnitKind::Module
+                            | celox_sv_syntax::UnitKind::Program
+                            | celox_sv_syntax::UnitKind::Interface
                     ) {
                         continue;
                     }
