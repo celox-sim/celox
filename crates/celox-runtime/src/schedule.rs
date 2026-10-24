@@ -79,6 +79,10 @@ pub(crate) struct SchedulerRefs {
     /// The event id and signal of each host clock the scheduler may run,
     /// in the order of its clock slots.
     pub(crate) clocks: Vec<(usize, SignalRef)>,
+    /// Per process kernel, the bits of `levels` of the events it writes.
+    pub(crate) kernel_events: Vec<u64>,
+    /// Per clock slot, the bit of `levels` of its event.
+    pub(crate) clock_events: Vec<u64>,
     pub(crate) clock_next: SignalRef,
     pub(crate) clock_period: SignalRef,
     pub(crate) clock_value: SignalRef,
@@ -373,6 +377,24 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                         .events
                         .iter()
                         .map(|event| backend.resolve_event_opt(event).map(|event| event.id()))
+                        .collect::<Option<_>>()?,
+                    kernel_events: (0..scheduler.fallback.len())
+                        .map(|index| {
+                            scheduler
+                                .kernel_events
+                                .get(index)
+                                .into_iter()
+                                .flatten()
+                                .fold(0, |mask, &bit| mask | 1 << bit)
+                        })
+                        .collect(),
+                    clock_events: scheduler
+                        .clocks
+                        .iter()
+                        .map(|clock| {
+                            let bit = scheduler.events.iter().position(|event| event == clock)?;
+                            Some(1 << bit)
+                        })
                         .collect::<Option<_>>()?,
                     clocks: scheduler
                         .clocks

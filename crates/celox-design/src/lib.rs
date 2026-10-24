@@ -1070,6 +1070,9 @@ pub struct SchedulerSchema<A> {
     /// The event signals a host periodic clock may drive inside the
     /// scheduler's slots, in the order of its clock slots.
     pub clocks: Vec<A>,
+    /// Per process kernel, the event signals it writes, as indices into
+    /// [`Self::events`]; empty for a kernel the scheduler does not run.
+    pub kernel_events: Vec<Vec<usize>>,
 }
 
 impl<A> SchedulerSchema<A> {
@@ -1081,6 +1084,7 @@ impl<A> SchedulerSchema<A> {
             fallback: self.fallback,
             events: self.events.into_iter().map(&mut map).collect(),
             clocks: self.clocks.into_iter().map(map).collect(),
+            kernel_events: self.kernel_events,
         }
     }
 }
