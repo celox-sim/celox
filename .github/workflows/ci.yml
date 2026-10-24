@@ -149,7 +149,7 @@ jobs:
 
       - name: cargo clippy
         if: (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') && needs.changes.outputs.rust_full != 'false'
-        run: cargo clippy --locked --workspace --all-targets --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus --no-deps
+        run: cargo clippy --locked --workspace --all-targets --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim --no-deps
 
       - name: Lint the crates this pull request can affect
         if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_lint_packages != ''
@@ -259,7 +259,7 @@ jobs:
         if: needs.changes.outputs.rust_full != 'false'
         run: >-
           cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci
-          --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/runtime-cases
+          --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the tests this pull request can affect
         id: scoped-tests
@@ -305,7 +305,7 @@ jobs:
         if: needs.changes.outputs.rust_full != 'false'
         run: >-
           cargo test --locked --workspace --exclude 'lydite*' --doc
-          --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/runtime-cases
+          --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the documentation tests of the changed libraries
         if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_libraries != ''
@@ -348,9 +348,11 @@ jobs:
       fail-fast: false
       matrix:
         suite: [veryl, sv]
-        tool: [verilator, icarus]
+        tool: [verilator, icarus, xezim]
     env:
       VERIFY_TOOL: ${{ matrix.tool }}
+      # xezim builds from source, so only its jobs enter the shell with it.
+      VERIFY_SHELL: ${{ matrix.tool == 'xezim' && '.#xezim' || '.' }}
       VERIFY_SUITE: ${{ matrix.suite }}
       VERIFY_BIN: ${{ matrix.suite == 'sv' && format('verify-sv-{0}', matrix.tool) || format('verify-{0}', matrix.tool) }}
       VERIFY_BASELINE: ${{ matrix.suite == 'sv' && format('crates/celox-test-suite/verification/sv/{0}.json', matrix.tool) || format('crates/celox-test-suite/verification/{0}.json', matrix.tool) }}
@@ -366,7 +368,7 @@ jobs:
       - name: Test live simulator adapters
         if: matrix.suite == 'veryl'
         run: >-
-          nix develop --no-update-lock-file --command
+          nix develop "$VERIFY_SHELL" --no-update-lock-file --command
           cargo test --locked -p celox-test-suite --features "$VERIFY_TOOL"
           --test oracles -- --ignored
 
@@ -374,7 +376,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           mkdir -p "$RUNNER_TEMP/external-suite"
-          nix develop --no-update-lock-file --command \
+          nix develop "$VERIFY_SHELL" --no-update-lock-file --command \
             cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
             --bin "$VERIFY_BIN" -- --list > "$RUNNER_TEMP/external-suite/catalogue.json"
 
@@ -385,7 +387,7 @@ jobs:
           # The runner returns 1 for retained failures as well as regressions.
           # The next step checks the complete fresh report and the exit status.
           rm -f "$RUNNER_TEMP/external-suite/logs/results.json"
-          if nix develop --no-update-lock-file --command \
+          if nix develop "$VERIFY_SHELL" --no-update-lock-file --command \
             cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
             --bin "$VERIFY_BIN" -- --fresh --jobs 2 \
             --output "$RUNNER_TEMP/external-suite/logs"; then
@@ -400,7 +402,7 @@ jobs:
         env:
           VERIFY_EXIT_STATUS: ${{ steps.verify.outputs.exit_status }}
         run: >-
-          nix develop --no-update-lock-file --command
+          nix develop "$VERIFY_SHELL" --no-update-lock-file --command
           node scripts/check-external-suite-report.mjs
           "$RUNNER_TEMP/external-suite/logs/results.json" "$VERIFY_BASELINE"
           "$RUNNER_TEMP/external-suite/catalogue.json" "$VERIFY_EXIT_STATUS" "$VERIFY_SUITE"

@@ -1,0 +1,48 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "concatenation::test_lhs_concatenation_execution",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "concatenation::test_replication_concatenation_execution",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "concatenation::test_rhs_concatenation_execution",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "concatenation::test_rhs_mixed_concatenation_execution",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

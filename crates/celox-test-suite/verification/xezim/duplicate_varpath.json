@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "duplicate_varpath::test_duplicate_scoped_var_in_always_comb",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "duplicate_varpath::test_duplicate_scoped_var_with_generate_for",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

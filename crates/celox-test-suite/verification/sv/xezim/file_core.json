@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "file_core::flush_preserves_stdout_order_and_integral_return_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

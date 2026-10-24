@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "std_gray_codec::test_gray_roundtrip_8bit",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "std_gray_codec::test_gray_single_bit_change",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "signed_divrem::signed_divrem_always_ff at 201:3: assert_eq q: expected 0xfd, got 0x7c",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_always_ff",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_four_state_unknown",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "signed_divrem::signed_divrem_four_state_zero_divisor at 335:13: assert_eq sq8: expected 0xf2, got 0x16 (sq8)",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_four_state_zero_divisor",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "signed_divrem::signed_divrem_i128 at 152:3: assert_eq q: expected 0xfffffffffffffffffffffffffffffff2, got 0x24924924924924924924924924924916",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_i128",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "two_state_zero_division": "Requires the suite's totalized two-state division/remainder result of zero, including logic destinations; SV arithmetic produces X before any two-state destination conversion (IEEE 1800-2023 11.3.4, 11.4.3)."
+      },
+      "tags": [
+        "two_state_zero_division"
+      ]
+    },
+    {
+      "category": "Operators",
+      "detail": "signed_divrem::signed_divrem_i64 at 117:3: assert_eq q: expected 0xfffffffffffffffe, got 0x3ffffffffffffffd",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_i64",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "signed_divrem::signed_divrem_i8 at 47:3: assert_eq q: expected 0xfd, got 0x7c",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_i8",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

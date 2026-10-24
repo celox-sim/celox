@@ -1,0 +1,180 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "types::constant_functions_in_unpacked_dimensions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "types::constant_functions_in_unpacked_port_dimensions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "types::inherited_parameter_aliases_materialize_replication_masks at 384:5: assert_eq procedural: expected 0x3ffffffffffffff, got 0xffffffff",
+      "expectation": "Simulation",
+      "name": "types::inherited_parameter_aliases_materialize_replication_masks",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "types::inherited_parameter_aliases_preserve_types_and_unknowns",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "types::packed_arrays_of_signed_named_types_have_signed_elements at 98:5: assert_eq y0: expected 0xfffa, got 0x1",
+      "expectation": "Simulation",
+      "name": "types::packed_arrays_of_signed_named_types_have_signed_elements",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "types::packed_parameters_of_signed_named_types_have_signed_elements at 136:5: assert_eq y0: expected 0xfffa, got 0x1 (y0)",
+      "expectation": "Simulation",
+      "name": "types::packed_parameters_of_signed_named_types_have_signed_elements",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "types::passes_unpacked_arguments_of_equivalent_element_types reads left with unknown bits in a two-state run",
+      "expectation": "Simulation",
+      "name": "types::passes_unpacked_arguments_of_equivalent_element_types",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "types::passes_unpacked_arrays_of_equivalent_element_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "types::preserves_integer_atom_state_kinds at 44:3: assert_eq two_state: expected 0x0, got 0xX",
+      "expectation": "Simulation",
+      "name": "types::preserves_integer_atom_state_kinds",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "invalid design was accepted: types::rejects_assignment_pattern_item_of_a_narrower_array_type",
+      "expectation": "CompilationError",
+      "name": "types::rejects_assignment_pattern_item_of_a_narrower_array_type",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\nParsed 1 file(s): 1 descriptions, 0 errors, 0 warnings\nerror: <case>/source_0.sv:10:34: cannot assign logic signed [3:0] $[2] to argument 'x' of 'pick' of type logic signed [7:0] $[2]: element types logic signed [7:0] and logic signed [3:0] are not equivalent (IEEE 1800-2017 §6.22.2, §7.6)\n",
+      "expectation": "CompilationError",
+      "name": "types::rejects_unpacked_argument_of_a_wider_element_type",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\nParsed 1 file(s): 1 descriptions, 0 errors, 0 warnings\nerror: <case>/source_0.sv:8:34: cannot assign logic [7:0] $[3] to 'two' of type logic [7:0] $[2]: the arrays have 2 and 3 elements (IEEE 1800-2017 §7.6)\n",
+      "expectation": "CompilationError",
+      "name": "types::rejects_unpacked_assignment_of_a_different_element_count",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\nParsed 1 file(s): 1 descriptions, 0 errors, 0 warnings\nerror: <case>/source_0.sv:7:35: cannot assign bit [7:0] $[2] to 'four' of type logic [7:0] $[2]: element types logic [7:0] and bit [7:0] are not equivalent (IEEE 1800-2017 §6.22.2, §7.6)\n",
+      "expectation": "CompilationError",
+      "name": "types::rejects_unpacked_assignment_of_a_different_state_count",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "invalid design was accepted: types::rejects_unpacked_port_connection_of_a_narrower_element_type",
+      "expectation": "CompilationError",
+      "name": "types::rejects_unpacked_port_connection_of_a_narrower_element_type",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "types::simulates_systemverilog_bit_ports_as_two_state at 29:3: assert_eq y: expected 0x8, got 0xX",
+      "expectation": "Simulation",
+      "name": "types::simulates_systemverilog_bit_ports_as_two_state",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "types::simulates_systemverilog_parameterized_port_widths",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}
