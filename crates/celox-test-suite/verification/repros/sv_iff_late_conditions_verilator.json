@@ -1,6 +1,6 @@
 {
   "standard": "IEEE 1800-2023 9.4.2.3 and 10.4.2",
-  "expected": "An item `expr iff condition` triggers only if the condition is true when the event occurs. With `clk = 1; en = 0;` from en = 1 the edge occurs while en is still 1, so it is an event; with `en = 0; clk = 1;` it is none. Nonblocking updates apply in issue order, so `en <= 1; clk <= 1;` is an event and `clk <= 1; en <= 0;` from en = 1 is one too, while `en <= 0; clk <= 1;` is none.",
+  "expected": "An item `expr iff condition` triggers only if the condition is true when the event occurs. With `clk = 1; en = 0;` from en = 1 the edge occurs while en is still 1, so it is an event; with `en = 0; clk = 1;` it is none. Nonblocking updates apply in issue order, so `en <= 1; clk <= 1;` is an event and `clk <= 1; en <= 0;` from en = 1 is one too, while `en <= 0; clk <= 1;` is none. An always_comb executes its statements in order, so `en = a; clk = a; en = 0;` writes clk while en is 1, which is an event.",
   "probes": [
     {
       "name": "write_order",
@@ -13,7 +13,7 @@
       "verilator_run": {
         "command": "<repro>/obj/VTop",
         "exit_code": 0,
-        "output": "n=0\n- <repro>/probe.sv:13: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 7ps; walltime 0.000 s; speed 326.340 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+        "output": "n=0\n- <repro>/probe.sv:13: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 7ps; walltime 0.000 s; speed 168.387 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
       }
     },
     {
@@ -27,7 +27,21 @@
       "verilator_run": {
         "command": "<repro>/obj/VTop",
         "exit_code": 0,
-        "output": "n=1\n- <repro>/probe.sv:12: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 6ps; walltime 0.000 s; speed 224.786 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+        "output": "n=1\n- <repro>/probe.sv:12: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 6ps; walltime 0.000 s; speed 156.242 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+      }
+    },
+    {
+      "name": "combinational_order",
+      "note": "The suite case iff_conditions_follow_combinational_process_order.",
+      "source": "module Top;\n  bit a, clk, en;\n  int n;\n  always_comb begin en = a; clk = a; en = 0; end\n  initial forever begin @(posedge clk iff en); n++; end\n  initial begin\n    #1 a = 1;\n    #1 $display(\"n=%0d\", n);\n    $finish;\n  end\nendmodule\n",
+      "verilator_compile": {
+        "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "verilator_run": {
+        "command": "<repro>/obj/VTop",
+        "exit_code": 0,
+        "output": "n=0\n- <repro>/probe.sv:9: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 2ps; walltime 0.000 s; speed 47.414 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
       }
     }
   ]

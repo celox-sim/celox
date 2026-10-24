@@ -187,6 +187,7 @@ timed_cases! {
     fn iff_conditions_are_judged_at_the_write = "timing::iff_conditions_are_judged_at_the_write";
     fn iff_conditions_follow_nonblocking_update_order = "timing::iff_conditions_follow_nonblocking_update_order";
     fn iff_conditions_consume_occurrences_while_false = "timing::iff_conditions_consume_occurrences_while_false";
+    fn iff_conditions_follow_combinational_process_order = "timing::iff_conditions_follow_combinational_process_order";
 }
 
 #[test]
@@ -1261,4 +1262,68 @@ fn host_pulses_of_iff_gated_clocks_wake_once() {
             check!(builder.build_cranelift());
         }
     }
+}
+
+const IFF_HOST_GATE: &str = r#"
+    module Top(input bit clk, input bit en, output int n);
+        timeunit 1ns / 1ns;
+        initial forever begin @(posedge clk iff en); n++; end
+    endmodule
+"#;
+
+fn iff_host_gate() -> celox::Simulation {
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(IFF_HOST_GATE, std::path::Path::new("iff_host_gate.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(1).unwrap();
+    sim
+}
+
+/// A state file saved between host writes keeps what the writes already
+/// counted: `clk = 1` while `en` is 0 is no event, and `en = 1` after it
+/// does not turn it into one, in the loaded simulation as in the saved one.
+#[test]
+fn state_files_keep_occurrences_an_iff_gate_rejected() {
+    let mut whole = iff_host_gate();
+    let [clk, en, n] = ["clk", "en", "n"].map(|name| whole.signal(name));
+    whole.modify(|io| io.set(clk, 1u8)).unwrap();
+    whole.modify(|io| io.set(en, 1u8)).unwrap();
+    let file = whole.save_state().unwrap();
+    whole.run_until(2).unwrap();
+    assert_eq!(whole.get(n), 0u32.into());
+
+    let mut bytes = Vec::new();
+    file.write_to(&mut bytes).unwrap();
+    let file = celox::StateFile::read_from(bytes.as_slice()).unwrap();
+    let mut loaded = iff_host_gate();
+    loaded.load_state(&file).unwrap();
+    loaded.run_until(2).unwrap();
+    assert_eq!(loaded.get(n), 0u32.into());
+}
+
+/// A raw write after tracked host writes is judged from where they left
+/// the signal: a rejected pulse `clk = 1; clk = 0;` while `en` is 0, then
+/// raw writes of `en = 1` and `clk = 1`, wake the wait once.
+#[test]
+fn raw_edges_after_rejected_host_pulses_wake_iff_waits() {
+    let mut sim = iff_host_gate();
+    let [clk, en, n] = ["clk", "en", "n"].map(|name| sim.signal(name));
+    sim.modify(|io| {
+        io.set(clk, 1u8);
+        io.set(clk, 0u8);
+    })
+    .unwrap();
+    let (memory, size) = sim.memory_as_mut_ptr();
+    assert!(clk.offset < size && en.offset < size);
+    // Safety: clk and en are live one-bit inputs within the allocation.
+    unsafe {
+        memory.add(en.offset).write(1);
+        memory.add(clk.offset).write(1);
+    }
+    sim.note_raw_writes();
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(n), 1u32.into());
 }

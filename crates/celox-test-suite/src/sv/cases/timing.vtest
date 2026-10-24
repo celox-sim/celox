@@ -2834,3 +2834,24 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (top Top)
   (run_to_finish)
   (expect_output "n=0 k=0\n"))
+
+; A combinational process writes in procedural order: `en` is 1 when it
+; writes `clk`, so the edge is an event although the process leaves `en`
+; at 0 (IEEE 1800-2023 9.4.2.3).
+(case iff_conditions_follow_combinational_process_order
+  (source "iff_comb_order.sv" #"
+                module Top;
+                  bit a, clk, en;
+                  int n;
+                  always_comb begin en = a; clk = a; en = 0; end
+                  initial forever begin @(posedge clk iff en); n++; end
+                  initial begin
+                    #1 a = 1;
+                    #1 $display("n=%0d", n);
+                    $finish;
+                  end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "n=1\n"))
