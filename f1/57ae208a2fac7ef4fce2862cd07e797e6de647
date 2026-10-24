@@ -1,1 +1,6 @@
-Fix P1: preserve destination assignment sizing before checked tagged-member write temporaries; add width, part-select and signed regression coverage.
+Revision history for #1883:
+
+rev 2 (content) 2026-10-24 09:17 UTC — Fix P1: preserve destination assignment sizing before checked tagged-member write temporaries; add width, part-select and signed regression coverage.
+rev 1 (initial) 2026-10-24 09:17 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1883,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"63c6fe0185d0d218edc847a970f0a72b802c812f","timestamp_iso":"2026-10-24T09:17:56Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"63c6fe0185d0d218edc847a970f0a72b802c812f","new_sha":"f157ae208a2fac7ef4fce2862cd07e797e6de647","timestamp_iso":"2026-10-24T09:17:56Z","reason":"Fix P1: preserve destination assignment sizing before checked tagged-member write temporaries; add width, part-select and signed regression coverage.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/63c6fe0185d0d218edc847a970f0a72b802c812f...f157ae208a2fac7ef4fce2862cd07e797e6de647"}]} -->
