@@ -242,6 +242,17 @@ impl<B: SimBackend> SimulationState<B> {
     ) {
         for &(id, is) in transitions {
             let was = round.previous(id, is, || self.last_level(id));
+            // Clocks computed from the signal are judged at the settle that
+            // follows, as for the processes' writes (`mark_scheduled_edges`).
+            if was != is
+                && self
+                    .model
+                    .combinational_derived
+                    .get(id)
+                    .is_some_and(|derived| !derived.is_empty())
+            {
+                round.gating_sources.push(id);
+            }
             let kind = self.model.domain_kinds[id];
             let triggered = if self.four_state {
                 settled_edge::<true>(kind, was, is)
