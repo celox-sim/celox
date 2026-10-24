@@ -49,7 +49,7 @@ outline: [2, 3]
 
 | 制御 | 対応範囲 |
 | --- | --- |
-| `#delay` | 整数と実数の遅延、`#(min:typ:max)`（typ の値）、[時間リテラル](#time-literal-delays)。X / Z の遅延は 0 として扱う |
+| `#delay` | 整数と実数の遅延、`#(min:typ:max)`（typ の値）、`#pkg::D` のような package スコープの値、[時間リテラル](#time-literal-delays)。X / Z の遅延は 0 として扱う |
 | `@(...)` | 変数、`posedge` / `negedge` / `edge`、`or` または `,` で並べた項目、ビット選択・部分選択・実行時添字の選択、pure な関数呼び出しを含む任意の式、文が読む変数を待つ `@*` / `@(*)` |
 | `wait (condition)` | 任意の条件。X / Z の条件は偽として扱う |
 | 代入 | ブロッキング代入とノンブロッキング代入。代入先はブロッキング代入と同じで、unpacked 配列の要素や実行時に決まる位置も使えます。ノンブロッキング代入は代入を実行した時点で評価した位置に、そのタイムスロットの NBA 領域で反映します。代入先の範囲外のビットと、X や Z のビットを含む位置には書き込みません |
@@ -73,8 +73,9 @@ outline: [2, 3]
 `initial` と通常の `always` から、`#delay`・`@(event)`・`wait (condition)` を
 含む task を呼び出せます。task のネストも可能です。呼び出しは呼び出し元の状態機械に
 インライン展開されます。エッジ待ちの `always` は task の完了後に次のエッジを待ちます。
-function・`always_comb`・`always_ff` からの時間待ち task 呼び出しは拒否します。
-`always @*` からの呼び出しも現在は拒否します（[#1710](https://github.com/celox-sim/celox/issues/1710)）。
+時間待ち task を呼ぶ `always @*` もプロセスとして実行します。文が読む変数（task の引数を含み、
+task 本体が読む変数は含まない）の変化を待ち、task の実行中に起きた変化は見送ります。
+function・`always_comb`・`always_latch`・`always_ff` からの時間待ち task 呼び出しは拒否します。
 
 automatic な引数とローカル変数は呼び出しごとに独立し、中断中も保持されます。
 module 内の static task の引数は共有されます。input／inout は呼び出し時にコピーされ、output／inout は
@@ -157,8 +158,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 - 振る舞い記述・検証向けの構文：`final`、代入内のタイミング制御（`a = #1 b`）、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
   named event と `->`、`fork` / `join`、`wait fork` / `disable fork`、並行アサーション、`force` / `release`。
 - プロセス内のタイミング制御：`iff` 修飾（[#1444](https://github.com/celox-sim/celox/issues/1444)）、
-  package スコープの遅延値
-  （[#1710](https://github.com/celox-sim/celox/issues/1710)）、イベント式内の impure な関数呼び出し、
+  イベント式内の impure な関数呼び出し、
   static task 引数を読む `wait` 条件とイベント式。
 - `always_latch` 内のノンブロッキング代入（[#431](https://github.com/celox-sim/celox/issues/431)）。対応するラッチではブロッキング代入を使用してください。
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。

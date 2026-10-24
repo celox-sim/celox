@@ -55,6 +55,11 @@ timed_cases! {
     fn timed_task_nested_copyback_wait_and_return = "timing::timed_task_nested_copyback_wait_and_return";
     fn timed_task_static_formals_remain_shared = "timing::timed_task_static_formals_remain_shared";
     fn timed_task_in_edge_always_rearms_after_return = "timing::timed_task_in_edge_always_rearms_after_return";
+    fn always_star_timed_task_calls_run_as_processes = "timing::always_star_timed_task_calls_run_as_processes";
+    fn always_star_timed_task_calls_assign_nonblocking = "timing::always_star_timed_task_calls_assign_nonblocking";
+    fn always_star_timed_task_calls_wait_on_nested_call_defaults = "timing::always_star_timed_task_calls_wait_on_nested_call_defaults";
+    fn always_star_timed_task_calls_wait_on_folded_branch_reads = "timing::always_star_timed_task_calls_wait_on_folded_branch_reads";
+    fn package_scoped_delay_values_wait_their_value = "timing::package_scoped_delay_values_wait_their_value";
     fn time_calls_in_child_port_subroutines = "timing::time_calls_in_child_port_subroutines";
     fn time_calls_in_child_port_actuals = "timing::time_calls_in_child_port_actuals";
     fn time_literal_delays_accept_all_units = "timing::time_literal_delays_accept_all_units";
@@ -491,12 +496,6 @@ fn unimplemented_timing_features_are_rejected() {
             "always_ff event control",
             88,
         ),
-        // #1710
-        (
-            "bit q; task t(); #1 q = 1; endtask always @* t();",
-            "timed task call in a combinational process",
-            88,
-        ),
     ] {
         let source = format!("module Top; {body} endmodule");
         let error = celox::Simulation::from_sv_sources(
@@ -571,6 +570,14 @@ fn timing_controls_outside_suspendable_processes_are_rejected() {
             "bit a; function automatic bit f(); #1; return a; endfunction",
             "delay control in a function",
         ),
+        (
+            "bit q; task t(); #1 q = 1; endtask always_comb t();",
+            "timed task call in an always_comb body",
+        ),
+        (
+            "bit q, e; task t(); #1 q = 1; endtask always_latch if (e) t();",
+            "timed task call in an always_latch body",
+        ),
     ] {
         let source = format!("module Top; {body} endmodule");
         let error = celox::Simulation::from_sv_sources(
@@ -583,6 +590,76 @@ fn timing_controls_outside_suspendable_processes_are_rejected() {
         .to_string();
         assert!(error.contains(construct), "{body}: {error}");
     }
+}
+
+/// The default of an omitted task argument is read by the call, so an
+/// `always @*` that calls the task waits on what the default reads, as for a
+/// combinational `always @*`. Icarus 13.0 agrees; Verilator 5.052 does not
+/// wake the process.
+#[test]
+fn always_star_timed_task_calls_wait_on_omitted_argument_defaults() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            timeunit 1ns / 1ns;
+            logic [7:0] a = 8'd0;
+            logic [7:0] y_r = 8'd0;
+            task automatic delayed(input logic [7:0] v = a);
+                #1 y_r = v;
+            endtask
+            always @* delayed();
+            initial #2 a = 8'd5;
+            assign y = y_r;
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("star_default.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
+    sim.run_until(4).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 5u8.into());
+}
+
+/// An `always @*` that is still in a timed task when a variable of its event
+/// list changes misses the change: its event control waits only for changes
+/// after it is reached again (IEEE 1800-2023 9.4.2). Icarus 13.0 agrees;
+/// Verilator 5.052 reruns the call for the missed change.
+#[test]
+fn always_star_timed_task_calls_miss_changes_while_suspended() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            timeunit 1ns / 1ns;
+            logic [7:0] a = 8'd0;
+            logic [7:0] y_r = 8'd0;
+            task automatic delayed(input logic [7:0] v);
+                #2 y_r = v + 8'd1;
+            endtask
+            always @* delayed(a);
+            initial begin
+                #1 a = 8'd5;
+                #1 a = 8'd6;
+                #5 a = 8'd7;
+            end
+            assign y = y_r;
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("star_missed.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(6).unwrap();
+    assert_eq!(
+        sim.get(sim.signal("y")),
+        6u8.into(),
+        "a = 6 came while suspended"
+    );
+    sim.run_until(10).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 8u8.into());
 }
 
 /// A nonblocking site stages its value (`NbaSite::pending`) only if its

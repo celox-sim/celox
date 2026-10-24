@@ -1300,7 +1300,7 @@ impl Module {
         }
         procedural::timed_tasks::classify(
             subroutines.iter().chain(imported.subroutines.iter()),
-            &comb_processes,
+            &mut comb_processes,
             &mut ff_processes,
             &mut initial_processes,
         )?;
@@ -2254,6 +2254,9 @@ impl LValue {
 pub struct CombProcess {
     creation_order: usize,
     site: Option<crate::procedural::SourceSpan>,
+    /// Where the procedure is written, for an `always @*` that becomes a
+    /// process when it calls a timed task.
+    process_site: Option<crate::procedural::ProcessSite>,
     kind: CombProcessKind,
     condition: Option<ConstExpr>,
     assignments: Vec<Assignment>,
@@ -2292,6 +2295,7 @@ impl CombProcess {
         Self {
             creation_order: 0,
             site: None,
+            process_site: None,
             sensitivity_body: Vec::new(),
             kind,
             condition,
@@ -2304,6 +2308,7 @@ impl CombProcess {
         Self {
             creation_order: 0,
             site: None,
+            process_site: None,
             sensitivity_body: Vec::new(),
             kind,
             condition,

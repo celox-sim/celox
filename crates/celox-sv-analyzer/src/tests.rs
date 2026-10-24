@@ -3591,25 +3591,30 @@ fn implicit_event_controls_wait_on_the_reads_of_their_statement() {
                 initial forever @* begin if (c > 0) y = a; else y = b; z[i] = 1; @(d); #(d); end\n\
                 endmodule";
     let ir = analyze_source(code, Path::new("implicit.sv")).expect("`@*` in a process");
-    let mut waits = Vec::new();
+    // The frontend reads the statements of an `@*` with the analysis that
+    // gives a combinational `always @*` its sensitivity; the analyzer keeps
+    // the statements the control covers.
+    let mut implicit = Vec::new();
+    let mut explicit = Vec::new();
     for process in ir.modules()[0].initial_processes() {
         for stmt in process.body() {
-            stmt.walk(&mut |stmt| {
-                if let ir::Stmt::WaitEvent(items) = stmt {
-                    waits.push(
-                        items
-                            .iter()
-                            .map(|item| match &item.expr {
-                                ir::Expr::Ident(name) => name.clone(),
-                                expr => panic!("unexpected event expression {expr:?}"),
-                            })
-                            .collect::<Vec<_>>(),
-                    );
-                }
+            stmt.walk(&mut |stmt| match stmt {
+                ir::Stmt::WaitImplicit(reads) => implicit.push(!reads.is_empty()),
+                ir::Stmt::WaitEvent(items) => explicit.push(
+                    items
+                        .iter()
+                        .map(|item| match &item.expr {
+                            ir::Expr::Ident(name) => name.clone(),
+                            expr => panic!("unexpected event expression {expr:?}"),
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => {}
             });
         }
     }
-    assert_eq!(waits, [vec!["c", "a", "b", "i"], vec!["d"]]);
+    assert_eq!(implicit, [true], "one @* over the statements of the block");
+    assert_eq!(explicit, [vec!["d"]]);
 }
 
 #[test]
@@ -6070,7 +6075,6 @@ fn native_system_task_arguments_preserve_strings_omissions_and_query_operands() 
 fn timed_task_calls_require_a_suspendable_context() {
     for caller in [
         "always_comb outer();",
-        "always @* outer();",
         "always_ff @(posedge clk) outer();",
         "function void f(); outer(); endfunction initial f();",
     ] {
@@ -6084,6 +6088,15 @@ fn timed_task_calls_require_a_suspendable_context() {
             "{caller}: {error}"
         );
     }
+    // A plain `always @*` is an ordinary always procedure: the call makes it
+    // a process (IEEE 1800-2023 9.2.2.2.2).
+    let ir = analyze_source(
+        "module Top; task automatic pause(); #1; endtask task automatic outer(); pause(); endtask always @* outer(); endmodule",
+        Path::new("timed_task_star.sv"),
+    )
+    .unwrap();
+    assert!(ir.modules()[0].comb_processes().is_empty());
+    assert_eq!(ir.modules()[0].initial_processes().len(), 1);
 }
 
 #[test]
