@@ -1058,6 +1058,9 @@ fn substitute_indexed_parameter_values(
     expression: Expr,
     dimensions: &PackedDimensions,
 ) -> Expr {
+    // Unpacked parameter values use the declared array layout, while selections
+    // have already been translated to bit offsets in that layout.
+    let expression = substitute_expr_idents(expression, &dimensions.array_parameter_values);
     // Known values come from the current environment, which may include a
     // generate index shadowing a parameter. Supply expressions only for values
     // absent from that numeric environment, including X/Z parameters.
