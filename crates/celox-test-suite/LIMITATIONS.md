@@ -669,3 +669,18 @@ Verilator 5.052 has two narrower exclusions, recorded in the
   The setter's formal is `bit` (18.8), so the required conversion truncates 2 to
   0. Generated C++ confirms that Verilator uses 1. The normal 0/1 mode control,
   inline member selection and pre-hook control cases pass Verilator.
+
+## veryl-native-queue-components
+
+The `tb_queue` cases exercise Veryl HEAD's native `$tb::queue` component
+(introduced in Veryl PR #3558, revision `1cd88389745b`). The shared SV adapter
+cannot emit these handles: emission panics with `internal error: entered
+unreachable code` before invoking either external simulator. Verilator also
+cannot run the four-state case, which its adapter reports as unsupported.
+
+The focused [Verilator report](verification/repros/tb_queue_verilator.json) and
+[Icarus report](verification/repros/tb_queue_icarus.json) retain the attempted
+cases. Reproduce with `--include-ignored --filter tb_queue::` on the respective
+verification runner. These exclusions apply only to external emission; Celox
+runs every case on all four backends, including native and Cranelift parallel
+configurations.

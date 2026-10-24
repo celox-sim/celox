@@ -66,6 +66,147 @@ o_data: top_out[i],
         @case "hierarchy::test_instance_unpacked_array_slice_input";
     }
 
+    fn test_instance_unpacked_array_slice_input_minus_colon(sim) {
+        @setup { let code = r#"
+module Child (
+i_data: input  logic<8>[2],
+o_data: output logic<16>
+) {
+assign o_data = {i_data[1], i_data[0]};
+}
+module Top (
+o_data: output logic<16>
+) {
+var data: logic<8>[4];
+assign data[0] = 8'h01;
+assign data[1] = 8'h12;
+assign data[2] = 8'h34;
+assign data[3] = 8'h80;
+inst child: Child (
+i_data: data[2-:2],
+o_data,
+);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let o_data = sim.signal("o_data");
+
+    assert_eq!(sim.get(o_data), 0x3412u16.into());
+
+    }
+
+    fn test_instance_unpacked_array_slice_input_colon(sim) {
+        @setup { let code = r#"
+module Child (
+i_data: input  logic<8>[2],
+o_data: output logic<16>
+) {
+assign o_data = {i_data[1], i_data[0]};
+}
+module Top (
+o_data: output logic<16>
+) {
+var data: logic<8>[4];
+assign data[0] = 8'h01;
+assign data[1] = 8'h12;
+assign data[2] = 8'h34;
+assign data[3] = 8'h80;
+inst child: Child (
+i_data: data[1:2],
+o_data,
+);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let o_data = sim.signal("o_data");
+
+    assert_eq!(sim.get(o_data), 0x3412u16.into());
+
+    }
+
+    fn test_instance_unpacked_array_slice_input_step(sim) {
+        @setup { let code = r#"
+module Child (
+i_data: input  logic<8>[2],
+o_data: output logic<16>
+) {
+assign o_data = {i_data[1], i_data[0]};
+}
+module Top (
+o_data: output logic<16>
+) {
+var data: logic<8>[4];
+assign data[0] = 8'h01;
+assign data[1] = 8'h12;
+assign data[2] = 8'h34;
+assign data[3] = 8'h80;
+inst child: Child (
+i_data: data[1 step 2],
+o_data,
+);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let o_data = sim.signal("o_data");
+
+    assert_eq!(sim.get(o_data), 0x8034u16.into());
+
+    }
+
+    fn test_instance_unpacked_array_slice_input_inner_dimension(sim) {
+        @setup { let code = r#"
+module Child (
+i_data: input  logic<8>[2],
+o_data: output logic<16>
+) {
+assign o_data = {i_data[1], i_data[0]};
+}
+module Top (
+o_data: output logic<16>
+) {
+var data: logic<8>[2, 4];
+always_comb {
+for i in 0..2 {
+for j in 0..4 {
+data[i][j] = (i * 16 + j) as 8;
+}
+}
+}
+inst child: Child (
+i_data: data[1][1+:2],
+o_data,
+);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let o_data = sim.signal("o_data");
+
+    assert_eq!(sim.get(o_data), 0x1211u16.into());
+
+    }
+
+    fn test_unpacked_array_slice_assignment(sim) {
+        @setup { let code = r#"
+module Top (
+o_data: output logic<16>
+) {
+var data: logic<8>[4];
+assign data[0] = 8'h01;
+assign data[1] = 8'h12;
+assign data[2] = 8'h34;
+assign data[3] = 8'h80;
+var part: logic<8>[2];
+assign part = data[2-:2];
+assign o_data = {part[1], part[0]};
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let o_data = sim.signal("o_data");
+
+    assert_eq!(sim.get(o_data), 0x3412u16.into());
+
+    }
+
     fn test_instance_unpacked_array_slice_output(sim) {
         @case "hierarchy::test_instance_unpacked_array_slice_output";
     }

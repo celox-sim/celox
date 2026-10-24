@@ -148,6 +148,7 @@ pub fn schedule_symbolic_rtl(
                 .collect();
             if blocks.iter().any(|block| !block.is_empty()) {
                 child_sources.push(VerylTestbenchSource {
+                    reset_type: config.reset_type,
                     file_dependencies: config.file_dependencies.clone(),
                     constant_strings: constant_strings.clone(),
                     id_map: VerylIdMap {
@@ -185,6 +186,7 @@ pub fn schedule_symbolic_rtl(
         component_bindings.append(&mut instance_bindings);
     }
     let testbench_source = VerylTestbenchSource {
+        reset_type: config.reset_type,
         file_dependencies: config.file_dependencies.clone(),
         constant_strings,
         id_map: VerylIdMap {

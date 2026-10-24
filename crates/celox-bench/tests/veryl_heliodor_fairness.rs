@@ -18,7 +18,6 @@ fn run_fixture(source: &str, args: &[&str]) -> Output {
         .args(["--test", "t"])
         .args(args)
         .env("VERYL_AOT_CACHE_DIR", project.path().join("aot-cache"))
-        .env("VERYL_SETTLE_FILTER_DIAG", "1")
         .output()
         .unwrap()
 }
@@ -30,6 +29,21 @@ fn metric(output: &str, key: &str) -> u128 {
         .unwrap_or_else(|| panic!("missing {key}: {output}"))
         .parse()
         .unwrap()
+}
+
+fn settle_count(stderr: &str) -> u128 {
+    // Veryl's profile feature reports this from the standard testbench runner.
+    // The former VERYL_SETTLE_FILTER_DIAG counters were removed when Veryl
+    // switched to dataflow settling.
+    let count = stderr
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("settle_comb_count:"))
+        .unwrap_or_else(|| panic!("missing settle_comb_count: {stderr}"))
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(count > 0, "expected design evaluations: {stderr}");
+    count
 }
 
 #[test]
@@ -81,7 +95,7 @@ fn private_testbench_writes_do_not_add_design_evaluations() {
                 compile + execute <= metric(&stdout, "elapsed_ns"),
                 "{stdout}"
             );
-            evaluations.push(metric(&stderr, "settles_run"));
+            evaluations.push(settle_count(&stderr));
         }
         assert_eq!(
             evaluations[0], evaluations[1],

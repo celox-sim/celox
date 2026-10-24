@@ -774,5 +774,33 @@
         "concurrent_initial::simultaneous_edges"
       ]
     }
+  },
+  {
+    "id": "veryl_native_queue_components",
+    "category": "emitter_panic",
+    "phase": "emission",
+    "observed_version": "Veryl 1cd88389745b; Verilator 5.052 / Icarus 13.0",
+    "reason": "Veryl native $tb::queue components cannot be emitted by the shared SystemVerilog adapter. Emission panics before either simulator runs; Celox native testbench execution remains enabled.",
+    "upstream": [
+      "https://github.com/veryl-lang/veryl/pull/3558"
+    ],
+    "evidence": [
+      "verification/repros/tb_queue_verilator.json",
+      "verification/repros/tb_queue_icarus.json",
+      "LIMITATIONS.md#veryl-native-queue-components"
+    ],
+    "cases": {
+      "verilator": [
+        "tb_queue::aggregate_and_selected_returns",
+        "tb_queue::operations",
+        "tb_queue::shared_processes"
+      ],
+      "icarus": [
+        "tb_queue::aggregate_and_selected_returns",
+        "tb_queue::four_state_values",
+        "tb_queue::operations",
+        "tb_queue::shared_processes"
+      ]
+    }
   }
 ]
