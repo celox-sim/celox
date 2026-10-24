@@ -9732,6 +9732,7 @@ fn lower_ff_processes(
         }
         let sites_before = pm.runtime_event_sites.len();
         let extern_calls_before = pm.extern_calls;
+        let clock = inferred_clock(pm, process);
         let ff::FfProcessUnits {
             eval: eval_only,
             apply,
@@ -9744,7 +9745,7 @@ fn lower_ff_processes(
             .with_shared_variables(shared_variables)
             .with_sparse_candidates(&edge_memories)
             .with_window_writes(&window_writes)
-            .with_inferred_clock(trigger_set.resets.is_empty())
+            .with_inferred_clock(clock)
             .lower_process(process.body())?;
         repeated_writes.extend(repeated_ff_writes(&eval_only, &staged));
         // A process without writes still runs for its runtime events and
@@ -10460,6 +10461,37 @@ pub(crate) fn unsupported_sv_inout(path: String) -> ParserError {
         path,
         None,
     )
+}
+
+/// The clock that the sampled value functions of an edge-triggered process
+/// infer (IEEE 1800-2023 16.14.6): its event expression of the clock, when
+/// it is the only one whose signal the body reads nowhere else. With an
+/// asynchronous reset the body reads the reset, so the clock remains.
+fn inferred_clock(
+    pm: &procedural::ProcModule<'_>,
+    process: &sv::ir::FfProcess,
+) -> Option<ff::Clock> {
+    let clock = clock_event_from_ff_process(process)?;
+    let reads: HashSet<SourceVarId> = pm
+        .implicit_reads(process.body(), true)
+        .into_iter()
+        .map(|atom| atom.id)
+        .collect();
+    let unread: Vec<_> = process
+        .events()
+        .iter()
+        .filter(|event| pm.id(event.signal()).is_none_or(|id| !reads.contains(&id)))
+        .collect();
+    match unread.as_slice() {
+        [only] if only.signal() == clock.signal() && only.edge() == clock.edge() => {
+            Some(ff::Clock {
+                signal: clock.signal().to_owned(),
+                rising: clock.edge() == sv::ir::FfEdge::Pos,
+                alone: process.events().len() == 1,
+            })
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
