@@ -263,7 +263,12 @@ impl BoundPattern {
                 })
                 .collect();
         } else if !shape.members.is_empty() {
-            if shape.members.len() > 1 && shape.members.iter().all(|m| m.offset() == 0) {
+            if shape
+                .members
+                .iter()
+                .any(packed_structs::PackedMember::is_tagged)
+                || (shape.members.len() > 1 && shape.members.iter().all(|m| m.offset() == 0))
+            {
                 return Err(unsupported("assignment pattern for a packed union"));
             }
             keys = shape

@@ -124,6 +124,10 @@ pub(super) fn expr_signedness_with_return_types(
             ..
         } => Some(op.result_type().1),
         Expr::Call {
+            callee: Callee::Checked { signed, .. },
+            ..
+        } => Some(*signed),
+        Expr::Call {
             callee: Callee::Object(op),
             ..
         } => Some(op.result_type().1),
@@ -146,7 +150,8 @@ pub(super) fn calls_subroutine(expr: &Expr) -> bool {
     fn constant(expr: &ConstExpr) -> bool {
         match expr {
             ConstExpr::Function { callee, args, .. } => {
-                callee.subroutine().is_some() || args.iter().any(constant)
+                (callee.subroutine().is_some() || matches!(callee, Callee::Checked { .. }))
+                    || args.iter().any(constant)
             }
             ConstExpr::SelectRange { expr, msb, lsb, .. } => {
                 constant(expr) || constant(msb) || constant(lsb)
@@ -164,7 +169,9 @@ pub(super) fn calls_subroutine(expr: &Expr) -> bool {
     }
     match expr {
         Expr::Call { callee, args, .. } => {
-            callee.subroutine().is_some() || args.iter().flatten().any(calls_subroutine)
+            callee.subroutine().is_some()
+                || matches!(callee, Callee::Checked { .. })
+                || args.iter().flatten().any(calls_subroutine)
         }
         Expr::Ident(_) | Expr::Literal(_) => false,
         Expr::Select { expr, msb, lsb, .. } => {

@@ -251,7 +251,19 @@ impl BodyBuilder<'_, '_, '_> {
                     StatementKind::Break => output.push(Stmt::Break),
                     StatementKind::Continue => output.push(Stmt::Continue),
                     StatementKind::Return(value) => {
-                        let value = value.map(|id| self.native_value(id)).transpose()?;
+                        let value = value
+                            .map(|id| {
+                                let mut value = expression_binding::bind_value(
+                                    id,
+                                    native,
+                                    self.tree,
+                                    &self.dims,
+                                    self.return_shape.as_ref(),
+                                )?;
+                                self.rename_expr(&mut value);
+                                Ok(value)
+                            })
+                            .transpose()?;
                         output.push(Stmt::Return(value));
                     }
                     _ => output.extend(self.native_statement_leaf(&native.statement(id).kind)?),

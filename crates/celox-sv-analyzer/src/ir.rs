@@ -661,6 +661,7 @@ impl From<ast::PortDirection> for PortDirection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Type {
+    tagged_identity: Option<String>,
     kind: TypeKind,
     is_signed: bool,
     packed_ranges: Vec<PackedRange>,
@@ -670,6 +671,11 @@ pub struct Type {
 }
 
 impl Type {
+    /// Nominal identity of a tagged union, retained for port type checking.
+    pub fn tagged_identity(&self) -> Option<&str> {
+        self.tagged_identity.as_deref()
+    }
+
     pub fn kind(&self) -> TypeKind {
         self.kind
     }
@@ -749,11 +755,13 @@ impl Type {
         r#type: ast::Type,
         constants: &dyn typecheck::ConstantEnvironment,
     ) -> Self {
+        let tagged_identity = r#type.tagged_identity().map(str::to_owned);
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
         let class = r#type.class().map(str::to_owned);
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
+            tagged_identity,
             kind,
             is_signed,
             packed_ranges,

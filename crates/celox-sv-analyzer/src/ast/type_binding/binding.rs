@@ -18,11 +18,14 @@ pub(in crate::ast) fn bind_in(
 ) -> Converted<Option<Type>> {
     enum Job {
         Enter(TypeId),
+        Void,
         Enum(TypeId, Vec<PackedRange>),
         Aggregate {
             owner: Arc<str>,
             union: bool,
             soft: bool,
+            tagged: bool,
+            voids: Vec<bool>,
             signed: bool,
             names: Vec<String>,
             ranges: Vec<PackedRange>,
@@ -32,6 +35,7 @@ pub(in crate::ast) fn bind_in(
     let mut values = Vec::<Type>::new();
     while let Some(job) = jobs.pop() {
         match job {
+            Job::Void => values.push(Type::new(TypeKind::Bit)),
             Job::Enter(id) => {
                 let data = native.data_type(id);
                 let ranges = if matches!(data.kind, DataTypeKind::Struct { .. }) {
@@ -96,10 +100,11 @@ pub(in crate::ast) fn bind_in(
                         packed,
                         fields,
                     } => {
-                        if (!packed && !soft) || *tagged {
+                        if !packed && !soft {
                             return Ok(None);
                         }
                         let mut names = Vec::new();
+                        let mut voids = Vec::new();
                         let mut seen = HashSet::default();
                         for field in fields {
                             if field.random.is_some()
@@ -114,6 +119,11 @@ pub(in crate::ast) fn bind_in(
                                     "duplicate aggregate field `{name}`"
                                 )));
                             }
+                            let is_void = matches!(&native.data_type(field.data_type).kind, DataTypeKind::Builtin(name) if name == "void");
+                            if is_void && !tagged {
+                                return Ok(None);
+                            }
+                            voids.push(is_void);
                             names.push(name);
                         }
                         let token = &native.tokens[data.tokens.start];
@@ -129,11 +139,19 @@ pub(in crate::ast) fn bind_in(
                             owner,
                             union: *union,
                             soft: *soft,
+                            tagged: *tagged,
+                            voids: voids.clone(),
                             signed: data.signed.unwrap_or(false),
                             names,
                             ranges,
                         });
-                        jobs.extend(fields.iter().rev().map(|field| Job::Enter(field.data_type)));
+                        jobs.extend(fields.iter().zip(voids).rev().map(|(field, is_void)| {
+                            if is_void {
+                                Job::Void
+                            } else {
+                                Job::Enter(field.data_type)
+                            }
+                        }));
                     }
                     DataTypeKind::TypeOf(expression) => {
                         // The existing query kernel recognizes an explicit
@@ -175,6 +193,8 @@ pub(in crate::ast) fn bind_in(
                 owner,
                 union,
                 soft,
+                tagged,
+                voids,
                 signed,
                 names,
                 ranges,
@@ -183,10 +203,17 @@ pub(in crate::ast) fn bind_in(
                     .len()
                     .checked_sub(names.len())
                     .ok_or_else(|| unsupported("aggregate fields"))?;
-                let fields = names.into_iter().zip(values.split_off(start)).collect();
+                let fields = names
+                    .into_iter()
+                    .zip(values.split_off(start))
+                    .zip(voids)
+                    .map(|((name, ty), is_void)| (name, ty, is_void))
+                    .collect();
                 let Some(ty) = packed_structs::native_type(
                     &tree.state,
-                    if soft {
+                    if tagged {
+                        packed_structs::AggregateKind::TaggedUnion
+                    } else if soft {
                         packed_structs::AggregateKind::SoftUnion
                     } else if union {
                         packed_structs::AggregateKind::HardUnion

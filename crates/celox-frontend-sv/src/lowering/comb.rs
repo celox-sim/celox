@@ -3192,6 +3192,13 @@ impl<'p, 'a> Comb<'p, 'a> {
             .subroutine(name)
             .cloned()
             .ok_or_else(|| unsupported(format!("call of `{name}`")))?;
+        if args
+            .iter()
+            .flatten()
+            .any(|arg| !tagged_actual_guards(arg).is_empty())
+        {
+            return Err(unsupported("checked tagged union argument"));
+        }
         // Symbolic execution cannot represent state shared by invocations.
         // Fall back to Ff, including for runtime declaration initializers.
         if !subroutine.persistent_locals.is_empty() {

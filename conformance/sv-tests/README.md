@@ -198,6 +198,14 @@ parameters, as in `8.26.3--type_access_extends` and
 `6.24.2--cast_fn`, `6.24.2--cast_task` and `8.16--cast_func` keep failing
 because they cast to integral and enum variables.
 
+Tagged packed union support changes `chapter-7/unions/tagged/packed.sv` from
+fail to pass in both state modes. The official runner selects simulation: the
+probe switches the active member with two tagged constructors and checks the
+packed value with its `:assert:` output. Both executions return zero and pass
+the assertion. The [reviewed full CI run](https://github.com/celox-sim/celox/actions/runs/40084353934)
+contains 2054 case/mode verdicts; these are the only two changed rows, and all
+verdicts match the updated expectations.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.

@@ -273,7 +273,9 @@ impl<'a> ProcModule<'a> {
                     continue;
                 }
                 // String operations use the simulator's heap.
-                sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => return true,
+                sv::ir::Callee::String(_)
+                | sv::ir::Callee::Object(_)
+                | sv::ir::Callee::Checked { .. } => return true,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             if let Some(subroutine) = self.subroutine(&name) {
@@ -1001,7 +1003,9 @@ impl<'a> ProcModule<'a> {
     pub fn is_callee(&self, callee: &sv::ir::Callee) -> bool {
         match callee {
             sv::ir::Callee::System(function) => function.reads_simulation_state(),
-            sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => true,
+            sv::ir::Callee::String(_)
+            | sv::ir::Callee::Object(_)
+            | sv::ir::Callee::Checked { .. } => true,
             sv::ir::Callee::Subroutine(name) => {
                 self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
             }
@@ -2587,6 +2591,32 @@ pub(super) fn written_system_arguments(
         .collect()
 }
 
+/// Keep checked member references writable while carrying their live tag checks
+/// separately. Callers that perform stores must execute these checks.
+pub(super) fn tagged_actual_guards(expr: &sv::ir::Expr) -> Vec<sv::ir::Expr> {
+    use sv::ir::{Callee, Expr};
+    let mut guards = Vec::new();
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        match expr {
+            Expr::Call {
+                callee: Callee::Checked { .. },
+                args,
+                ..
+            } => {
+                if let [Some(guard), Some(value)] = args.as_slice() {
+                    guards.push(guard.clone());
+                    pending.push(value);
+                }
+            }
+            Expr::Resize { expr, .. } | Expr::Select { expr, .. } => pending.push(expr),
+            Expr::Concat(parts) => pending.extend(parts.iter().rev()),
+            _ => {}
+        }
+    }
+    guards
+}
+
 pub(super) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<sv::ir::LValue>> {
     match expr {
         sv::ir::Expr::Ident(name) => Some(vec![sv::ir::LValue::Ident(name.clone())]),
@@ -2608,6 +2638,14 @@ pub(super) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<sv::ir::LValue
             Some(lvalues)
         }
         sv::ir::Expr::Resize { expr, .. } => lvalue_from_expr(expr),
+        sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Checked { .. },
+            args,
+            ..
+        } => match args.as_slice() {
+            [Some(_), Some(value)] => lvalue_from_expr(value),
+            _ => None,
+        },
         _ => None,
     }
 }

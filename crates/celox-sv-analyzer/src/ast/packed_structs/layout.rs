@@ -7,6 +7,7 @@ pub(in crate::ast) enum AggregateKind {
     Struct,
     HardUnion,
     SoftUnion,
+    TaggedUnion,
 }
 
 /// Freeze member bounds in the declaration environment before generated scopes
@@ -40,14 +41,14 @@ pub(in crate::ast) fn native_type(
     kind: AggregateKind,
     signed: bool,
     owner: Arc<str>,
-    fields: Vec<(String, Type)>,
+    fields: Vec<(String, Type, bool)>,
     ranges: Vec<PackedRange>,
     env: &HashMap<String, i128>,
 ) -> Option<Type> {
     let mut names = HashSet::default();
     let members = fields
         .into_iter()
-        .map(|(name, ty)| {
+        .map(|(name, ty, is_void)| {
             if !names.insert(name.clone()) {
                 return None;
             }
@@ -55,6 +56,8 @@ pub(in crate::ast) fn native_type(
                 owner: owner.clone(),
                 name,
                 offset: 0,
+                tag: None,
+                is_void,
                 r#type: capture_member_type(state, ty, env)?,
             })
         })
@@ -72,7 +75,11 @@ fn finish_type(
     let mut width = 0usize;
     // The first declared member occupies the most significant bits.
     for member in members.iter_mut().rev() {
-        let member_width = expr_type_from_type(state, &member.r#type, const_env)?.width;
+        let member_width = if member.is_void {
+            0
+        } else {
+            expr_type_from_type(state, &member.r#type, const_env)?.width
+        };
         if !matches!(kind, AggregateKind::Struct) {
             // IEEE 1800-2023 7.3.1: hard packed members share all bits
             // and must have the same width.
@@ -86,9 +93,22 @@ fn finish_type(
             width = width.checked_add(member_width)?;
         }
     }
-    let kind = if members
-        .iter()
-        .all(|member| member.r#type.kind == TypeKind::Bit)
+    let tagged = matches!(kind, AggregateKind::TaggedUnion);
+    if tagged {
+        let tag_width = (usize::BITS - members.len().checked_sub(1)?.leading_zeros()) as usize;
+        for (index, member) in members.iter_mut().enumerate() {
+            member.tag = Some(TaggedMember {
+                index,
+                tag_width,
+                payload_width: width,
+            });
+        }
+        width = width.checked_add(tag_width)?;
+    }
+    let kind = if !tagged
+        && members
+            .iter()
+            .all(|member| member.r#type.kind == TypeKind::Bit)
     {
         TypeKind::Bit
     } else {

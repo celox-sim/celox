@@ -173,7 +173,9 @@ fn select<'a>(
     }
     if !shape.members.is_empty() {
         let members = &shape.members;
-        if members.len() > 1 && members.iter().all(|member| member.offset() == 0) {
+        if members.iter().any(packed_structs::PackedMember::is_tagged)
+            || (members.len() > 1 && members.iter().all(|member| member.offset() == 0))
+        {
             return Err(unsupported("assignment pattern for a packed union"));
         }
         let values = match kind {

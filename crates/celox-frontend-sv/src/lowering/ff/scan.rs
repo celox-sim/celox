@@ -55,7 +55,7 @@ impl Ff<'_, '_> {
             let argument = argument
                 .as_ref()
                 .ok_or_else(|| unsupported("omitted scan destination"))?;
-            let (lvalues, _) = self.capture_system_actual(argument)?;
+            let (lvalues, _, guards) = self.capture_system_actual(argument)?;
             let precision = match lvalues.as_slice() {
                 [one] => self.m.id(one.name()).and_then(|id| self.m.var(id).float),
                 _ => None,
@@ -76,7 +76,7 @@ impl Ff<'_, '_> {
                 signed: false,
                 is_string: false,
             });
-            destinations.push((lvalues, Expr::Ident(name)));
+            destinations.push((lvalues, Expr::Ident(name), guards));
         }
         let site = self
             .host_request_sites
@@ -95,7 +95,7 @@ impl Ff<'_, '_> {
             .map_err(kernel_error)?;
         // A failed or ignored output must not overwrite a previously assigned
         // alias. Scan assignments are contiguous even with suppressed fields.
-        for (index, (lvalues, value)) in destinations.into_iter().enumerate() {
+        for (index, (lvalues, value, guards)) in destinations.into_iter().enumerate() {
             let condition = Expr::Binary {
                 left: Box::new(Expr::Ident(result_name.clone())),
                 op: sv::ir::BinaryOp::Gt,
@@ -110,6 +110,7 @@ impl Ff<'_, '_> {
                 false_block: (join, Vec::new()),
             });
             self.b.switch_to_block(write);
+            self.check_tagged_guards(&guards)?;
             match lvalues.as_slice() {
                 [one] => self.assign(one, &value)?,
                 parts => self.assign_concat(parts, &value)?,

@@ -66,6 +66,10 @@ pub(super) fn expr_is_two_state(
         } => !matches!(op, crate::system_functions::StringOp::Atoi(_)),
         // Properties are 2-state.
         Expr::Call {
+            callee: Callee::Checked { .. },
+            ..
+        } => false,
+        Expr::Call {
             callee: Callee::Object(_),
             ..
         } => true,

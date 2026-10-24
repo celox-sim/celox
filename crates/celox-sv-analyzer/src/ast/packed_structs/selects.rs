@@ -4,7 +4,7 @@ use super::*;
 
 /// Collapse an interface handle/member prefix using its bound symbols. Any
 /// remaining path selects a packed-structure member of the interface signal.
-fn bind_interface_path(
+pub(super) fn bind_interface_path(
     state: &AnalysisState,
     path: &mut Vec<String>,
     dimensions: &PackedDimensions,
@@ -40,6 +40,9 @@ fn selected_member<'a>(
     let mut selected = None;
     for name in &path[1..] {
         let member = members.iter().find(|member| &member.name == name)?;
+        if member.is_void {
+            return None;
+        }
         offset = offset.checked_add(member.offset)?;
         selected = Some(&member.r#type);
         members = if member.r#type.packed_ranges.len() == 1 {

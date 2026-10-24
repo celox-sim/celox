@@ -14,6 +14,11 @@ pub(in crate::ast) fn net_lvalue(
     tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
+    if direct::member_context(root, native, tree, dimensions)?
+        .is_some_and(|(guards, _)| !guards.is_empty())
+    {
+        return Err(unsupported("continuous driver of a tagged union member"));
+    }
     direct::selected_lvalue(root, native, tree, dimensions, true)
 }
 #[cfg(test)]

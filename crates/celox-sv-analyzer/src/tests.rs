@@ -6697,3 +6697,105 @@ fn class_randomize_rejects_unresolved_enum_domains() {
         );
     }
 }
+
+#[test]
+fn tagged_targets_reject_time_values_before_fast_paths() {
+    for value in [
+        "$time",
+        "$stime",
+        "$realtime",
+        "$time()",
+        "$stime()",
+        "$realtime()",
+        "($time)",
+        "$timeunit",
+        "$timeprecision",
+    ] {
+        for declaration in [
+            format!("item_t item; initial item = {value};"),
+            format!("item_t item = {value};"),
+            format!("task consume(input item_t item); endtask initial consume({value});"),
+            format!("function automatic item_t get(); return {value}; endfunction"),
+            format!(
+                "function automatic int get(input item_t item = {value}); return 0; endfunction"
+            ),
+        ] {
+            let source = format!(
+                "module Top; typedef union tagged packed {{ void Empty; logic [7:0] Full; }} item_t; {declaration} endmodule"
+            );
+            assert!(
+                analyze_source(&source, Path::new("tagged_time.sv")).is_err(),
+                "{declaration}"
+            );
+        }
+    }
+}
+
+#[test]
+fn tagged_constant_function_member_sets_packed_bound() {
+    let source = r#"
+module Top(output logic [N-1:0] data);
+    typedef union tagged packed { void Empty; logic [7:0] Full; } item_t;
+    function automatic int size();
+        item_t item;
+        item = tagged Full 8'd4;
+        return item.Full;
+    endfunction
+    localparam int N = size();
+    assign data = '1;
+endmodule
+"#;
+    let ir = analyze_source(source, Path::new("tagged_constant.sv")).unwrap();
+    assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(4));
+    assert_eq!(
+        ir.modules()[0].ports()[0].r#type().resolved_width(),
+        Some(4)
+    );
+}
+
+#[test]
+fn tagged_constant_checks_preserve_guard_width_and_sign() {
+    use ir::{Callee, ConstExpr};
+    let constants = HashMap::default();
+    for (guard, payload, width, signed, expected) in [
+        ("1'b1", "16'h1ff", 8, false, Some(255)),
+        ("1'b1", "8'hfe", 8, true, Some(-2)),
+        ("1'b0", "8'd4", 8, false, None),
+        ("1'bx", "8'd4", 8, false, None),
+        ("1'bz", "8'd4", 8, false, None),
+    ] {
+        let expr = ConstExpr::Function {
+            callee: Callee::Checked { width, signed },
+            args: vec![
+                ConstExpr::Literal(guard.into()),
+                ConstExpr::Literal(payload.into()),
+            ],
+            site: None,
+        };
+        assert_eq!(
+            typecheck::eval_const_expr(&expr, &constants),
+            expected,
+            "{guard}, {payload}"
+        );
+    }
+}
+
+#[test]
+fn tagged_inactive_constant_member_cannot_supply_bound() {
+    let source = r#"
+module Top;
+    typedef union tagged packed { logic [7:0] Empty; logic [7:0] Full; } item_t;
+    function automatic int size();
+        item_t item;
+        item = tagged Empty 8'd4;
+        return item.Full;
+    endfunction
+    localparam int N = size();
+    logic [N-1:0] data;
+endmodule
+"#;
+    // The analyzer may retain unresolved constants for the frontend to reject.
+    if let Ok(ir) = analyze_source(source, Path::new("tagged_inactive_constant.sv")) {
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), None);
+    }
+}
