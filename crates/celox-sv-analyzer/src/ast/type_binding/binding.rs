@@ -18,7 +18,7 @@ pub(in crate::ast) fn bind_in(
 ) -> Converted<Option<Type>> {
     enum Job {
         Enter(TypeId),
-        Enum(Vec<PackedRange>),
+        Enum(TypeId, Vec<PackedRange>),
         Aggregate {
             owner: Arc<str>,
             union: bool,
@@ -78,11 +78,12 @@ pub(in crate::ast) fn bind_in(
                     }
                     DataTypeKind::Enum { base, .. } => {
                         if let Some(base) = base {
-                            jobs.push(Job::Enum(ranges));
+                            jobs.push(Job::Enum(id, ranges));
                             jobs.push(Job::Enter(*base));
                         } else {
                             let mut ty = builtin_type("int", None).unwrap();
                             ty.is_enum = true;
+                            ty.enum_values = enum_values(id, native, tree, context, &ty);
                             ty.packed_ranges = ranges.into_iter().chain(ty.packed_ranges).collect();
                             values.push(ty);
                         }
@@ -156,7 +157,7 @@ pub(in crate::ast) fn bind_in(
                     }
                 }
             }
-            Job::Enum(ranges) => {
+            Job::Enum(id, ranges) => {
                 let Some(mut ty) = values.pop() else {
                     return Err(unsupported("enum base type"));
                 };
@@ -164,6 +165,7 @@ pub(in crate::ast) fn bind_in(
                 outer.extend(ty.packed_ranges);
                 ty.packed_ranges = outer;
                 ty.is_enum = true;
+                ty.enum_values = enum_values(id, native, tree, context, &ty);
                 values.push(ty);
             }
             Job::Aggregate {
@@ -271,4 +273,69 @@ pub(in crate::ast) fn expression_type(
     query.functions = Arc::default();
     let value = expression_binding::bind(root, tree, &query)?;
     Ok(dimensions::bound_bits_type(&tree.state, &value, &query))
+}
+
+/// Domain metadata is best-effort during signature discovery. Only a caller
+/// requesting randomization requires a resolved domain; unused types must not
+/// start reporting new errors merely because this metadata is collected.
+fn enum_values(
+    id: TypeId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+    ty: &Type,
+) -> Option<Vec<i128>> {
+    let data = native.data_type(id);
+    if !data.packed_dimensions.is_empty() {
+        return None;
+    }
+    let DataTypeKind::Enum { items, .. } = &data.kind else {
+        return None;
+    };
+    let shape = casts::expr_type_from_type(&tree.state, ty, &context.const_env)?;
+    if shape.width > 64 {
+        return None;
+    }
+    let mut env = context.const_env.clone();
+    let mut next = 0i128;
+    let mut values = Vec::new();
+    for item in items {
+        if !item.dimensions.is_empty() {
+            return None;
+        }
+        let value = if let Some(id) = item.value {
+            let expr = constant_binding::expression(id, native, tree, &env, &context.type_aliases)
+                .ok()??;
+            // Unbased fills take the enum base's width and signedness, just
+            // as they do when resolving the declared enum constants (5.7.1).
+            let expr = match expr {
+                ConstExpr::Literal(literal) => ConstExpr::Literal(
+                    resize_unbased_fill_literal_for_cast(&literal, shape.width, shape.signed)
+                        .unwrap_or(literal),
+                ),
+                expr => expr,
+            };
+            let value = eval_ast_const_expr(&tree.state, &expr, &env)?;
+            let value_type = infer_const_expr_type(&expr, &parameter_types_from_const_env(&env))?;
+            if !parameters::enum_initializer_fits_base_type(value, value_type, shape) {
+                return None;
+            }
+            value
+        } else {
+            if parameters::coerce_const_parameter_value(next, shape.width, shape.signed) != next {
+                return None;
+            }
+            next
+        };
+        let value = parameters::coerce_const_parameter_value(value, shape.width, shape.signed);
+        if values.contains(&value) {
+            return None;
+        }
+        values.push(value);
+        let name = normalize_identifier(&item.name.spelling);
+        env.insert(name.clone(), value);
+        dimensions::insert_parameter_type_markers(&mut env, &name, shape);
+        next = value.checked_add(1)?;
+    }
+    (!values.is_empty()).then_some(values)
 }

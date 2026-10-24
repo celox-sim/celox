@@ -115,6 +115,7 @@ pub(super) fn scoped_type(mut r#type: Type, const_env: &HashMap<String, i128>) -
 pub(super) fn int_type() -> Type {
     Type {
         is_enum: false,
+        enum_values: None,
         kind: TypeKind::Bit,
         is_signed: true,
         packed_ranges: vec![PackedRange::new(
