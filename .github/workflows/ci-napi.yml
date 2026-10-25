@@ -211,17 +211,17 @@ jobs:
         working-directory: crates/celox-napi
         env:
           CARGO_BUILD_TARGET: ${{ matrix.target }}
-        run: npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi --target ${{ matrix.target }} --use-napi-cross
+        run: npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi --features wasm-component --target ${{ matrix.target }} --use-napi-cross
 
       - name: Build (zigbuild)
         if: matrix.zigbuild
         working-directory: crates/celox-napi
-        run: npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi --target ${{ matrix.target }} -x
+        run: npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi --features wasm-component --target ${{ matrix.target }} -x
 
       - name: Build (native)
         if: ${{ !matrix.napi-cross && !matrix.zigbuild }}
         working-directory: crates/celox-napi
-        run: npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi --target ${{ matrix.target }}
+        run: npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi --features wasm-component --target ${{ matrix.target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

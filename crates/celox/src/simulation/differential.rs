@@ -802,10 +802,12 @@ mod tests {
                 &expected,
                 &format!("{mode:?}"),
             );
+            #[cfg(feature = "cranelift")]
             let cranelift = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
                 .scheduler_mode(mode)
                 .build_cranelift()
                 .unwrap();
+            #[cfg(feature = "cranelift")]
             check(cranelift, runs, &expected, &format!("cranelift {mode:?}"));
         }
     }
