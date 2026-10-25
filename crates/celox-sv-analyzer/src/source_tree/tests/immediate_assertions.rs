@@ -199,7 +199,7 @@ fn native_assertion_action_scopes_and_unsupported_classes_keep_existing_behavior
     };
     assert_ne!(pass, fail);
     for (statement, diagnostic) in [
-        ("cover #0(a);", "deferred immediate cover"),
+        ("cover #0(a) y=1;", "deferred assertion action"),
         ("assert property(a);", "concurrent assertion"),
     ] {
         let tree = parsed(statement);

@@ -4561,7 +4561,14 @@ pub(crate) fn attach_instance_glue(
         observer.activation_group += site_base;
         module.comb_observers.push(observer);
     }
-    module.runtime_event_sites.extend(comb_sites);
+    module
+        .runtime_event_sites
+        .extend(comb_sites.into_iter().map(|mut site| {
+            if let Some(celox_design::DeferredSite::Action { queue, .. }) = &mut site.deferred {
+                *queue += site_base;
+            }
+            site
+        }));
     for id in created {
         module
             .variables
@@ -5276,6 +5283,12 @@ fn lower_comb_processes(
                         .expect("a counter for every sensitivity atom")
                 })
                 .collect();
+            // A deferred action waits in the queue of its process.
+            if let Some(celox_design::DeferredSite::Action { queue, .. }) =
+                &mut comb.sites[(observer.site_id - base) as usize].deferred
+            {
+                *queue = base;
+            }
             observers.push(observer);
         }
         sites.append(&mut comb.sites);
