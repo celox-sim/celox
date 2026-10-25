@@ -2320,6 +2320,36 @@ pub(super) fn canonical_for_loop(
     })
 }
 
+/// The counted loop a `while` or `do`-`while` loop is when its condition
+/// compares a variable with a bound and its last statement steps that
+/// variable, as the step of a [`canonical_for_loop`] would; the loop starts
+/// from the variable's current value. Also returns the statements before
+/// the step, which must not write the variable or the bound.
+pub(super) fn counted_while_loop<'s>(
+    condition: Option<&sv::ir::Expr>,
+    body: &'s [sv::ir::Stmt],
+) -> Option<(CanonicalLoop, &'s [sv::ir::Stmt])> {
+    let (step, rest) = body.split_last()?;
+    let sv::ir::Stmt::Assign {
+        lhs: sv::ir::LValue::Ident(var),
+        ..
+    } = step
+    else {
+        return None;
+    };
+    let init = [sv::ir::Stmt::Assign {
+        lhs: sv::ir::LValue::Ident(var.clone()),
+        rhs: sv::ir::Expr::Ident(var.clone()),
+        nonblocking: false,
+    }];
+    let canonical = canonical_for_loop(&init, condition, std::slice::from_ref(step))?;
+    let mut written = HashSet::default();
+    written_names(rest, &mut written);
+    let mut bound = HashSet::default();
+    expr_idents(&canonical.end, &mut bound);
+    (!written.contains(&canonical.var) && written.is_disjoint(&bound)).then_some((canonical, rest))
+}
+
 /// The identifiers an expression reads.
 pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
     fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>) {

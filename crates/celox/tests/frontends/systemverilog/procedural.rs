@@ -253,3 +253,12 @@ sv_backends! {
         @case "procedural::static_function_wide_packed_storage_keeps_all_bits";
     }
 }
+
+sv_backends! {
+    fn initial_loops_without_a_static_trip_count_run_as_a_process(sim) {
+        @case "procedural::initial_loops_without_a_static_trip_count_run_as_a_process";
+    }
+    fn initial_while_loops_define_the_state(sim) {
+        @case "procedural::initial_while_loops_define_the_state";
+    }
+}
