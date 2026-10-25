@@ -200,15 +200,15 @@ fn optimize_bit_extracts(
                 | SIRInstruction::Load(dst, _, _, _) => *dst,
                 _ => continue,
             };
-            if use_count.get(&def_reg).copied().unwrap_or(0) == 0 {
-                // Also decrement use counts for operands of this dead instruction
+            if use_count.get(&def_reg).copied().unwrap_or(0) == 0 && dead_set.insert(dead_idx) {
+                // Multiple replacements may share this definition. Removing
+                // it consumes its operands once, not once per replacement.
                 if let SIRInstruction::Binary(_, lhs, _, rhs) = &instructions[dead_idx] {
                     *use_count.entry(*lhs).or_default() =
                         use_count.get(lhs).copied().unwrap_or(0).saturating_sub(1);
                     *use_count.entry(*rhs).or_default() =
                         use_count.get(rhs).copied().unwrap_or(0).saturating_sub(1);
                 }
-                dead_set.insert(dead_idx);
             }
         }
     }
@@ -397,6 +397,69 @@ mod tests {
             instance_id: InstanceId(0),
             var_id: VarId::default(),
         }
+    }
+
+    #[test]
+    fn preserves_ssa_when_replacements_share_a_shift() {
+        let addr = test_addr();
+        let other = RegionedAbsoluteAddr {
+            instance_id: InstanceId(1),
+            ..addr
+        };
+        let mut unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Load(RegisterId(0), addr, SIROffset::Static(0), 8),
+                        SIRInstruction::Load(RegisterId(8), other, SIROffset::Static(0), 8),
+                        SIRInstruction::Imm(RegisterId(1), SIRValue::new(2u64)),
+                        SIRInstruction::Binary(
+                            RegisterId(2),
+                            RegisterId(0),
+                            BinaryOp::Shr,
+                            RegisterId(1),
+                        ),
+                        SIRInstruction::Imm(RegisterId(3), SIRValue::new(3u64)),
+                        SIRInstruction::Binary(
+                            RegisterId(4),
+                            RegisterId(2),
+                            BinaryOp::And,
+                            RegisterId(3),
+                        ),
+                        SIRInstruction::Imm(RegisterId(5), SIRValue::new(15u64)),
+                        SIRInstruction::Binary(
+                            RegisterId(6),
+                            RegisterId(2),
+                            BinaryOp::And,
+                            RegisterId(5),
+                        ),
+                        SIRInstruction::Binary(
+                            RegisterId(7),
+                            RegisterId(8),
+                            BinaryOp::Shr,
+                            RegisterId(1),
+                        ),
+                        SIRInstruction::RuntimeEvent {
+                            site_id: 0,
+                            args: vec![RegisterId(4), RegisterId(6), RegisterId(7)],
+                        },
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: (0..9)
+                .map(|id| (RegisterId(id), RegisterType::Logic { width: 8 }))
+                .collect(),
+        };
+        unit.verify_result().unwrap();
+        BitExtractPeepholePass.run(&mut unit, &PassOptions::default());
+        unit.verify_result().unwrap();
     }
 
     #[test]
