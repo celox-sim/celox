@@ -18,7 +18,9 @@ macro_rules! on_every_backend {
     ($builder:expr, |$sim:ident| $body:block) => {{
         fn run<B: SimBackend>(mut $sim: Simulation<B>) $body
         run($builder.build_interpreter().unwrap());
+        #[cfg(feature = "cranelift")]
         run($builder.build_cranelift().unwrap());
+        #[cfg(feature = "wasm-runtime")]
         run($builder.build_wasm().unwrap());
         run($builder.build_tiered().unwrap());
         #[cfg(any(

@@ -396,6 +396,7 @@ dependencies = [
  "bit-set",
  "celox-analysis",
  "celox-backend-arm64",
+ "celox-backend-common",
  "celox-backend-cranelift",
  "celox-backend-wasm",
  "celox-backend-x86",
@@ -483,6 +484,7 @@ dependencies = [
 name = "celox-backend-cranelift"
 version = "0.11.0"
 dependencies = [
+ "celox-backend-common",
  "celox-design",
  "celox-sir",
  "celox-state-layout",

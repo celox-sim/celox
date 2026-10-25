@@ -1636,6 +1636,7 @@ fn compile_hdl_to_sir_with_layout_mode(
 mod host {
     use super::super::Simulator;
     use super::*;
+    #[cfg(feature = "cranelift")]
     use crate::backend::JitBackend;
     use crate::ir::LaidOutProgram;
 
@@ -1680,7 +1681,7 @@ mod host {
         /// edge-based event discovery. Only needed by [`crate::Simulation`].
         pub emit_triggers: bool,
         /// Generated derived-edge units the tests run, recorded here.
-        #[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+        #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
         pub(crate) derived_edge_units: Option<crate::derived_edge::TestEdgeUnits>,
         /// Emit the additional combinational entries needed to reapply foreign
         /// force overrides between procedural store boundaries.
@@ -1988,7 +1989,7 @@ mod host {
                 diagnostic_policy: Default::default(),
                 sv_timescale: None,
                 emit_triggers: false,
-                #[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+                #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
                 derived_edge_units: None,
                 native_force_support: false,
                 signal_access: crate::SignalAccessOptions::default(),
@@ -2148,7 +2149,7 @@ mod host {
 
         /// Append the generated derived-edge units of every event and record
         /// them in `sink`.
-        #[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+        #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
         pub(crate) fn derived_edge_units(
             mut self,
             sink: crate::derived_edge::TestEdgeUnits,
@@ -2917,7 +2918,7 @@ mod host {
             {
                 crate::derived_edge::attach(&mut laid_out);
             }
-            #[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+            #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
             if let Some(sink) = &self.options.derived_edge_units {
                 crate::derived_edge::attach_test_units(&mut laid_out, sink);
             }
@@ -2963,6 +2964,7 @@ mod host {
         }
 
         /// Compiles using the Cranelift JIT backend.
+        #[cfg(feature = "cranelift")]
         pub fn build_cranelift(self) -> Result<Simulator<JitBackend>, SimulatorError> {
             let phase_timing = self.options.diagnostics.phase_timing;
             let phase_start = phase_timing.then(crate::timing::now);
@@ -3383,6 +3385,7 @@ mod host {
         }
 
         /// Compiles using the Wasmtime WASM backend.
+        #[cfg(feature = "wasm-runtime")]
         pub fn build_wasm(
             self,
         ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
@@ -3422,6 +3425,7 @@ mod host {
         }
 
         /// Compiles and runs a testbench using the Cranelift JIT backend.
+        #[cfg(feature = "cranelift")]
         pub fn run_test_cranelift(self) -> Result<crate::testbench::TestResult, SimulatorError> {
             run_test_with_sim(self.build_cranelift()?)
         }
@@ -3746,6 +3750,7 @@ mod host {
         }
 
         /// Compiles a timed simulation using the Cranelift JIT backend.
+        #[cfg(feature = "cranelift")]
         pub fn build_cranelift(self) -> Result<crate::Simulation<JitBackend>, SimulatorError> {
             self.build_with_backend(
                 crate::backend::memory_layout::MemoryLayoutMode::Packed,
@@ -3842,6 +3847,7 @@ mod host {
         }
 
         /// Compiles a timed simulation using the Wasmtime WASM backend.
+        #[cfg(feature = "wasm-runtime")]
         pub fn build_wasm(
             self,
         ) -> Result<crate::Simulation<crate::backend::wasm_runtime::WasmBackend>, SimulatorError>

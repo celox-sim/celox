@@ -1272,8 +1272,11 @@ mod process_tests {
     fn check_all_backends(four_state: bool, steps: usize) {
         let timed = || Simulation::from_frontend(design(four_state, steps)).four_state(four_state);
         check(timed().build_interpreter().unwrap(), steps as u64);
+        #[cfg(feature = "cranelift")]
         check(timed().build_cranelift().unwrap(), steps as u64);
+        #[cfg(feature = "wasm-runtime")]
         check(timed().build_wasm().unwrap(), steps as u64);
+        #[cfg(feature = "cranelift")]
         check(
             timed()
                 .threads(4)
@@ -1425,7 +1428,9 @@ mod process_tests {
                     .emit_triggers()
             };
             check(build().build_interpreter().unwrap());
+            #[cfg(feature = "cranelift")]
             check(build().build_cranelift().unwrap());
+            #[cfg(feature = "wasm-runtime")]
             check(build().build_wasm().unwrap());
             check(build().build_tiered().unwrap());
             #[cfg(any(
@@ -1482,7 +1487,9 @@ mod process_tests {
                         .emit_triggers()
                 };
                 check(build().build_interpreter().unwrap(), step, bit);
+                #[cfg(feature = "cranelift")]
                 check(build().build_cranelift().unwrap(), step, bit);
+                #[cfg(feature = "wasm-runtime")]
                 check(build().build_wasm().unwrap(), step, bit);
                 check(build().build_tiered().unwrap(), step, bit);
                 #[cfg(any(
@@ -1610,24 +1617,28 @@ mod process_tests {
                 "{}",
                 context("interp tick")
             );
+            #[cfg(feature = "cranelift")]
             assert_eq!(
                 timed(build().build_cranelift().unwrap()),
                 want,
                 "{}",
                 context("cranelift timed")
             );
+            #[cfg(feature = "cranelift")]
             assert_eq!(
                 ticked(build().build_cranelift().unwrap()),
                 want,
                 "{}",
                 context("cranelift tick")
             );
+            #[cfg(feature = "wasm-runtime")]
             assert_eq!(
                 timed(build().build_wasm().unwrap()),
                 want,
                 "{}",
                 context("wasm timed")
             );
+            #[cfg(feature = "wasm-runtime")]
             assert_eq!(
                 ticked(build().build_wasm().unwrap()),
                 want,
@@ -1728,7 +1739,9 @@ endmodule
                 .emit_triggers()
             };
             check(build().build_interpreter().unwrap());
+            #[cfg(feature = "cranelift")]
             check(build().build_cranelift().unwrap());
+            #[cfg(feature = "wasm-runtime")]
             check(build().build_wasm().unwrap());
             check(build().build_tiered().unwrap());
             #[cfg(any(
@@ -1845,7 +1858,9 @@ mod four_state_edge_tests {
         ($builder:expr, $check:ident) => {{
             let builder = || $builder.four_state(true).emit_triggers();
             $check(builder().build_interpreter().unwrap());
+            #[cfg(feature = "cranelift")]
             $check(builder().build_cranelift().unwrap());
+            #[cfg(feature = "wasm-runtime")]
             $check(builder().build_wasm().unwrap());
             $check(builder().build_tiered().unwrap());
             #[cfg(any(

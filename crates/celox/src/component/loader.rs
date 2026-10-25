@@ -38,12 +38,12 @@ pub enum ComponentError {
     #[cfg(target_family = "wasm")]
     #[error("dynamic component libraries are not supported on this platform")]
     Unsupported,
-    #[cfg(target_family = "wasm")]
+    #[cfg(not(all(feature = "wasm-component", not(target_family = "wasm"))))]
     #[error(
-        "component library {path} is a wasm binary, but this veryl build targets a wasm platform and cannot host wasm components; use a native veryl build instead"
+        "component library {path} is a wasm binary, but WASM component hosting is unavailable; enable the wasm-component feature on a native host"
     )]
     WasmHostUnsupported { path: PathBuf },
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
     #[error(
         "component `{name}` declares `requires(native)` and cannot run as a prebuilt wasm binary; build it from source instead"
     )]
@@ -53,7 +53,7 @@ pub enum ComponentError {
 /// A resolved component implementation behind one of the transports.
 pub enum ComponentBackend {
     Native(&'static sys::VrlComponentVTable),
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
     Wasm {
         library: std::sync::Arc<crate::component::wasm::WasmLibrary>,
         type_name: String,
@@ -67,7 +67,7 @@ impl ComponentBackend {
     pub fn kind(&self) -> u32 {
         match self {
             ComponentBackend::Native(vtable) => vtable.kind,
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
             ComponentBackend::Wasm { kind, .. } => *kind,
         }
     }
@@ -77,7 +77,7 @@ impl std::fmt::Debug for ComponentBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ComponentBackend::Native(_) => write!(f, "ComponentBackend::Native"),
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
             ComponentBackend::Wasm {
                 type_name, kind, ..
             } => f
@@ -107,11 +107,11 @@ pub fn lookup_component_backend(
 ) -> Result<ComponentBackend, ComponentError> {
     match library {
         Some(path) if is_wasm_library(path) => {
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
             {
                 crate::component::wasm::lookup_wasm_component(path, type_name)
             }
-            #[cfg(target_family = "wasm")]
+            #[cfg(not(all(feature = "wasm-component", not(target_family = "wasm"))))]
             {
                 let _ = type_name;
                 Err(ComponentError::WasmHostUnsupported {
@@ -331,6 +331,19 @@ fn lookup_in_library(
 #[cfg(test)]
 mod tests {
     use super::parse_library_manifest_json;
+
+    #[cfg(not(feature = "wasm-component"))]
+    #[test]
+    fn disabled_wasm_host_reports_required_feature() {
+        let error =
+            super::lookup_component_backend(Some(std::path::Path::new("missing.wasm")), "Counter")
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            super::ComponentError::WasmHostUnsupported { .. }
+        ));
+        assert!(error.to_string().contains("wasm-component"));
+    }
 
     #[test]
     fn strict_library_manifest_parser_rejects_malformed_documents() {
