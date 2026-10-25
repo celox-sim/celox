@@ -365,6 +365,25 @@ fn veryl_backends_share_cli_execution_and_opt_in_reports() {
     assert!(output.stdout.is_empty(), "{output:?}");
 }
 
+#[cfg(not(any(
+    all(target_arch = "x86_64", feature = "arm64-codegen"),
+    all(target_arch = "aarch64", feature = "x86_64-codegen")
+)))]
+#[test]
+fn backend_defaults_to_tiered_unless_native_code_is_requested() {
+    let source =
+        "#[test(Top)] module Top { inst clk: $tb::clock_gen; initial { clk.next(4); $finish(); } }";
+    let output = run(&[("top.veryl", source)], &["--report"]);
+    assert!(output.status.success(), "{output:?}");
+    let report = String::from_utf8(output.stdout).unwrap();
+    assert!(report.contains("backend=tiered "), "{report}");
+
+    let output = run(&[("top.veryl", source)], &["--report", "--compile-only"]);
+    assert!(output.status.success(), "{output:?}");
+    let report = String::from_utf8(output.stdout).unwrap();
+    assert!(report.contains("backend=native "), "{report}");
+}
+
 #[cfg(feature = "systemverilog")]
 #[test]
 fn sv_defaults_to_two_state_and_four_state_is_explicit() {

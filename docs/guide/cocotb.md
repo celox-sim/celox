@@ -64,7 +64,8 @@ clock limit is needed. `--unlimited` removes the step/tick limit. Source languag
 
 `celox run` accepts `--threads N` (1–64, default 1) and `--four-state` for both
 languages. Both languages support `--backend native|tiered|interpreter|cranelift|wasm`
-(default: native). Tiered starts interpreted and adopts compiled code at a scheduler
+(default: tiered; native when `--compile-only`, a native image, `--build-cache-dir` or an
+IR dump is requested). Tiered starts interpreted and adopts compiled code at a scheduler
 safe point while preserving pending events. For example:
 
 ```sh
