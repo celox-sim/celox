@@ -72,6 +72,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             eval_comb_apply_ffs: crate::HashMap::default(),
+            merge_comb_apply: true,
             eval_only_ffs: crate::HashMap::default(),
             apply_ffs: crate::HashMap::default(),
             parallel: None,

@@ -233,3 +233,45 @@ fn scalar_float_arithmetic_stays_explicit_in_mir() {
         }
     }
 }
+
+/// Above a handful of clocks, the combined comb-then-FF ticks share the one
+/// combinational function instead of each compiling a copy of it.
+#[test]
+fn many_clocks_compile_the_comb_program_once() {
+    let functions = |clocks: usize| {
+        let mut ports = String::new();
+        let mut ffs = String::new();
+        for i in 0..clocks {
+            let d = (b'a' + i as u8) as char;
+            ports.push_str(&format!(
+                "clk{i}: input '{d} clock, q{i}: output '{d} logic<8>,\n"
+            ));
+            ffs.push_str(&format!("always_ff (clk{i}) {{ q{i} = x + {i}; }}\n"));
+        }
+        let code = format!(
+            "module Top ({ports} din: input 'a logic<8>) {{
+                var x: 'a logic<8>;
+                assign x = din ^ q0;
+                unsafe (cdc) {{ {ffs} }}
+            }}"
+        );
+        let result = SimulatorBuilder::new(&code, "Top")
+            .optimize(true)
+            .trace_mir()
+            .build_with_trace();
+        result.res.expect("traced native build should succeed");
+        let native_sir = result
+            .trace
+            .native_optimized_sir
+            .expect("native optimized SIR should be captured");
+        let count = |name: &str| {
+            native_sir
+                .matches(&format!("=== Native function {name}"))
+                .count()
+        };
+        (count("eval_comb ==="), count("eval_comb_apply_ff["))
+    };
+    // A handful of clocks keeps one merged comb+FF function per clock.
+    assert_eq!(functions(2), (1, 2));
+    assert_eq!(functions(12), (1, 0));
+}

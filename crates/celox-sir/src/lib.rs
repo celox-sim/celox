@@ -39,6 +39,12 @@ pub struct SirProgram<EventAddr, StateAddr> {
     /// Native fast path in which required comb values and one FF event were
     /// scheduled and lowered through the same SIR builder.
     pub eval_comb_apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
+    /// Whether an event's combined comb-then-FF tick may be built as one
+    /// program from `eval_comb` and the event's `eval_apply_ffs`. Otherwise
+    /// the tick runs the one shared `eval_comb` program and then the event's
+    /// FF program, so the combinational program exists once however many
+    /// events there are. See [`SirProgram::comb_apply`].
+    pub merge_comb_apply: bool,
     pub eval_only_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
     pub apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
     /// Lane-partitioned alternatives of the hot phases, present only when
@@ -131,6 +137,37 @@ impl<EventAddr, StateAddr> ParallelSirProgram<EventAddr, StateAddr> {
     }
 }
 
+/// The units of an event's combined comb-then-FF tick.
+#[derive(Debug, Clone, Copy)]
+pub enum CombApply<'a, StateAddr> {
+    /// Comb and FF units scheduled together as one program.
+    Fused(&'a [ExecutionUnit<StateAddr>]),
+    /// `eval_comb` followed by the event's FF units, built as one program.
+    Merged {
+        comb: &'a [ExecutionUnit<StateAddr>],
+        ff: &'a [ExecutionUnit<StateAddr>],
+    },
+    /// The shared `eval_comb` program, then the event's own FF program.
+    Shared,
+}
+
+impl<EventAddr: Eq + std::hash::Hash, StateAddr> SirProgram<EventAddr, StateAddr> {
+    /// The combined comb-then-FF tick of an event of `eval_apply_ffs`.
+    pub fn comb_apply(&self, event: &EventAddr) -> Option<CombApply<'_, StateAddr>> {
+        let ff = self.eval_apply_ffs.get(event)?;
+        Some(if let Some(fused) = self.eval_comb_apply_ffs.get(event) {
+            CombApply::Fused(fused)
+        } else if self.merge_comb_apply {
+            CombApply::Merged {
+                comb: &self.eval_comb,
+                ff,
+            }
+        } else {
+            CombApply::Shared
+        })
+    }
+}
+
 impl<A> ExecutionUnit<A> {
     /// Consume the unit while replacing its address identities.
     pub fn into_map_addr<B>(self, map: &mut impl FnMut(A) -> B) -> ExecutionUnit<B> {
@@ -214,6 +251,7 @@ impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
                 &mut map_event,
                 &mut map_state,
             ),
+            merge_comb_apply: self.merge_comb_apply,
             eval_only_ffs: map_groups(self.eval_only_ffs, &mut map_event, &mut map_state),
             apply_ffs: map_groups(self.apply_ffs, &mut map_event, &mut map_state),
             processes: self
@@ -1103,6 +1141,7 @@ mod program_mapping_tests {
             eval_comb: vec![unit.clone()],
             eval_apply_ffs: [(1u32, vec![unit])].into_iter().collect(),
             eval_comb_apply_ffs: HashMap::default(),
+            merge_comb_apply: true,
             eval_only_ffs: HashMap::default(),
             apply_ffs: HashMap::default(),
             parallel: None,
