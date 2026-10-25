@@ -1,0 +1,6 @@
+Revision history for #2075:
+
+rev 2 (content) 2026-10-25 20:53 UTC — Separate enum range-overflow and explicit-width regression inputs after earlier width validation changed diagnostic precedence
+rev 1 (initial) 2026-10-25 20:53 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2075,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"bbd167c07b00633d46dfe1e9486fcb374e9e093f","timestamp_iso":"2026-10-25T20:53:15Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"bbd167c07b00633d46dfe1e9486fcb374e9e093f","new_sha":"4082ff4f6fbf4aae86c57d21c35e2535b5283cd3","timestamp_iso":"2026-10-25T20:53:15Z","reason":"Separate enum range-overflow and explicit-width regression inputs after earlier width validation changed diagnostic precedence","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/bbd167c07b00633d46dfe1e9486fcb374e9e093f...4082ff4f6fbf4aae86c57d21c35e2535b5283cd3"}]} -->
