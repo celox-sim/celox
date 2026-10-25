@@ -11,8 +11,8 @@ use std::fmt;
 
 use celox_analysis::memory::{MemoryEffect, MemoryLocation, effects_may_alias};
 use celox_analysis::memory_ssa::{
-    self, ClobberWalker, MemoryAccess, MemoryAccessEvent, MemoryAccessGraph, MemoryAccessId,
-    MemoryClobber, MemoryPointMap,
+    self, ClobberMemo, ClobberWalker, MemoryAccess, MemoryAccessEvent, MemoryAccessGraph,
+    MemoryAccessId, MemoryClobber, MemoryPointMap,
 };
 
 use crate::HashMap;
@@ -1221,6 +1221,9 @@ struct ReloadMemorySsa {
     block_ids: Vec<BlockId>,
     walker: ClobberWalker,
     clobber_cache: HashMap<(StateLoad, MemoryAccessId), MemoryAccessId>,
+    /// Clobbers already walked for each queried byte range, so queries from
+    /// different starts do not walk the same definitions again.
+    clobber_memos: HashMap<(i64, usize), ClobberMemo>,
 }
 
 impl ReloadMemorySsa {
@@ -1273,6 +1276,10 @@ impl ReloadMemorySsa {
         let writes = &self.writes;
         let block_ids = &self.block_ids;
         let clobber_cache = &mut self.clobber_cache;
+        let memo = self
+            .clobber_memos
+            .entry((bytes.start, byte_len))
+            .or_default();
         let oracle = |definition: &MemoryDefinition, query: &MemoryEffect<MemoryObject>| {
             writes
                 .get(definition.write_index..definition.write_end)
@@ -1283,7 +1290,7 @@ impl ReloadMemorySsa {
                         .any(|write| effects_may_alias(write, *query))
                 })
         };
-        let mut clobber_query = self.walker.query(graph, &query, &oracle);
+        let mut clobber_query = self.walker.query_memoized(graph, &query, &oracle, memo);
         let mut clobber_access = |start| {
             if let Some(&access) = clobber_cache.get(&(load, start)) {
                 return Ok(access);
@@ -2228,6 +2235,7 @@ fn build_reload_memory_ssa(
         writes,
         block_ids: func.blocks.iter().map(|block| block.id).collect(),
         walker: ClobberWalker::new(),
+        clobber_memos: HashMap::default(),
         clobber_cache: HashMap::default(),
     })
 }
