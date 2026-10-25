@@ -1227,6 +1227,66 @@ mod tests {
         }
     }
 
+    /// A host clock input the host set once and no clock drives keeps its
+    /// level through compiled slots: a gate on it judges from that level,
+    /// not from an unrecorded one.
+    #[test]
+    fn derived_clocks_of_an_unclocked_host_input_keep_its_level() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(input logic clk, output logic [7:0] y);
+                logic en = 1'b0;
+                logic dclk;
+                logic [7:0] a = 8'd0;
+                logic [7:0] b = 8'd0;
+                initial forever #17 en = ~en;
+                assign dclk = clk & en;
+                always_ff @(posedge clk) a <= a + 8'd1;
+                always_ff @(posedge dclk) b <= b + 8'd1;
+                assign y = a ^ b;
+            endmodule
+        "#;
+        host_driven_agrees(source, &[(100, &[Host::Set("clk", 1)]), (200, &[])]);
+    }
+
+    /// A gate a waiting kernel writes changes after the pass that judged
+    /// its clock: the reference judges it again only after the commit, so
+    /// the design keeps the reference loop.
+    #[test]
+    fn gates_written_by_waiting_kernels_keep_the_reference_loop() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [7:0] y);
+                logic clk = 1'b0;
+                logic en = 1'b0;
+                logic gclk;
+                logic [7:0] a = 8'd0;
+                logic [7:0] b = 8'd0;
+                always #5 clk = ~clk;
+                initial forever @(posedge clk) en = ~en;
+                assign gclk = clk & en;
+                always_ff @(posedge clk) a <= a + 8'd1;
+                always_ff @(posedge gclk) b <= a;
+                assign y = a ^ b;
+            endmodule
+        "#;
+        let mut reference = build_in(source, SchedulerMode::Reference);
+        reference.run_until(200).unwrap();
+        let expected = reference.save_state().unwrap();
+        for mode in MODES {
+            let mut sim = build_in(source, mode);
+            sim.run_until(200).unwrap();
+            assert_eq!(sim.save_state().unwrap(), expected, "{mode:?}");
+        }
+        let gate = crate::KernelSchedule::Reference(
+            "a waiting kernel writes what combinational logic of a gated clock reads".into(),
+        );
+        let kernels = build_in(source, SchedulerMode::Compiled)
+            .scheduler_stats()
+            .kernels;
+        assert!(kernels.iter().all(|kernel| *kernel == gate), "{kernels:?}");
+    }
+
     /// A domain whose next state combinational logic computes runs its
     /// fused units with a settle pending: they compute what it reads.
     #[test]

@@ -796,6 +796,26 @@ impl Plan {
             if tracked.iter().any(|event| active_commits.contains(event)) {
                 return Err(ACTIVE_COMMIT.into());
             }
+            // A gated clock is judged at the settle after its source changes,
+            // before a kernel the change wakes runs in another pass; what that
+            // kernel writes moves the clock only for the waves after the
+            // commit. The waves judge once, after every pass.
+            if !plan.gating.is_empty() {
+                let comb_reads: HashSet<AbsoluteAddr> =
+                    sir.eval_comb.iter().flat_map(loads).map(storage).collect();
+                let feeds_gates = plan.kernels.iter().enumerate().any(|(index, kernel)| {
+                    kernel.as_ref().is_some_and(|kernel| kernel.wait.is_some())
+                        && kernel_stores[index]
+                            .iter()
+                            .any(|store| comb_reads.contains(store))
+                });
+                if feeds_gates {
+                    return Err(
+                        "a waiting kernel writes what combinational logic of a gated clock reads"
+                            .into(),
+                    );
+                }
+            }
             let ends = |unit: &Unit| fails(unit) || emits_finish(unit, &plan.finish_sites);
             if tracked.iter().any(|&event| {
                 let event = &plan.events[event];
@@ -1026,10 +1046,11 @@ impl Plan {
         }
         // The levels the slot starts from, the baseline of its edges, for an
         // exit in the middle of the slot; those of the clocks' events below,
-        // when the run has clocks.
+        // when the run has clocks, unless the slot's waves compare against
+        // them: a host clock no clock drives keeps the level the host set.
         let mut levels = g.constant(0, MAX_EVENTS);
         for (bit, &event) in tracked.iter().enumerate() {
-            if self.clocks.contains(&event) {
+            if self.clocks.contains(&event) && self.derived.is_empty() {
                 continue;
             }
             let level = g.level(&self.events[event]);
