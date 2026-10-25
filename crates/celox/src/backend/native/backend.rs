@@ -1320,42 +1320,101 @@ struct NativeCompileTask<'a> {
 
 type NativeTaskBindings = HashMap<(&'static str, AbsoluteAddr), usize>;
 
+type NativeUnit = crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>;
+
+/// Classes of structurally equal execution units. Each distinct unit is
+/// hashed once and compared only against the units of its hash, so tasks
+/// whose unit lists share whole programs, such as every unfused comb-apply
+/// task starting with all of `eval_comb`, are told apart by their class
+/// lists instead of by comparing the programs again for each trigger.
+#[derive(Default)]
+struct NativeUnitClasses<'a> {
+    by_unit: HashMap<*const NativeUnit, usize>,
+    by_hash: HashMap<u64, Vec<(&'a NativeUnit, usize)>>,
+    count: usize,
+}
+
+impl<'a> NativeUnitClasses<'a> {
+    fn class(&mut self, unit: &'a NativeUnit) -> usize {
+        if let Some(class) = self.by_unit.get(&std::ptr::from_ref(unit)) {
+            return *class;
+        }
+        let bucket = self.by_hash.entry(native_unit_hash(unit)).or_default();
+        let class = match bucket.iter().find(|(other, _)| *other == unit) {
+            Some((_, class)) => *class,
+            None => {
+                let class = self.count;
+                self.count += 1;
+                bucket.push((unit, class));
+                class
+            }
+        };
+        self.by_unit.insert(std::ptr::from_ref(unit), class);
+        class
+    }
+
+    fn classes(&mut self, units: &[&'a NativeUnit]) -> Vec<usize> {
+        units.iter().map(|unit| self.class(unit)).collect()
+    }
+}
+
+/// A hash of `unit` that equal units share, independent of the iteration
+/// order of its maps.
+fn native_unit_hash(unit: &NativeUnit) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = fxhash::FxHasher::default();
+    unit.entry_block_id.hash(&mut hasher);
+    let mut blocks = unit.blocks.iter().collect::<Vec<_>>();
+    blocks.sort_unstable_by_key(|(id, _)| **id);
+    for (id, block) in blocks {
+        id.hash(&mut hasher);
+        block.id.hash(&mut hasher);
+        block.params.hash(&mut hasher);
+        block.instructions.hash(&mut hasher);
+        block.terminator.hash(&mut hasher);
+    }
+    let mut registers = unit.register_map.iter().collect::<Vec<_>>();
+    registers.sort_unstable_by_key(|(id, _)| **id);
+    registers.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn collect_ff_compile_tasks(
     sir: &LaidOutProgram,
 ) -> (Vec<NativeCompileTask<'_>>, NativeTaskBindings) {
     let mut tasks = Vec::new();
     let mut task_bindings = HashMap::default();
-    collect_ff_compile_tasks_from(
-        sir,
-        &sir.sir.eval_apply_ffs,
-        "eval_apply_ff",
-        &mut tasks,
-        &mut task_bindings,
-    );
-    collect_ff_compile_tasks_from(
-        sir,
-        &sir.sir.eval_only_ffs,
-        "eval_only_ff",
-        &mut tasks,
-        &mut task_bindings,
-    );
-    collect_ff_compile_tasks_from(
-        sir,
-        &sir.sir.apply_ffs,
-        "apply_ff",
-        &mut tasks,
-        &mut task_bindings,
-    );
-    collect_comb_apply_compile_tasks(sir, &mut tasks, &mut task_bindings);
+    let mut classes = NativeUnitClasses::default();
+    // Edge tasks of every label share one index: a task is reused for any
+    // edge trigger with equal units.
+    let mut ff_tasks = HashMap::default();
+    for (ff_map, label) in [
+        (&sir.sir.eval_apply_ffs, "eval_apply_ff"),
+        (&sir.sir.eval_only_ffs, "eval_only_ff"),
+        (&sir.sir.apply_ffs, "apply_ff"),
+    ] {
+        collect_ff_compile_tasks_from(
+            sir,
+            ff_map,
+            label,
+            &mut classes,
+            &mut ff_tasks,
+            &mut tasks,
+            &mut task_bindings,
+        );
+    }
+    collect_comb_apply_compile_tasks(sir, &mut classes, &mut tasks, &mut task_bindings);
     (tasks, task_bindings)
 }
 
 fn collect_comb_apply_compile_tasks<'a>(
     sir: &'a LaidOutProgram,
+    classes: &mut NativeUnitClasses<'a>,
     tasks: &mut Vec<NativeCompileTask<'a>>,
     task_bindings: &mut NativeTaskBindings,
 ) {
     const LABEL: &str = "eval_comb_apply_ff";
+    let mut comb_tasks = HashMap::<(Option<usize>, Vec<usize>), usize>::default();
     for (addr, ff_units) in &sir.sir.eval_apply_ffs {
         let fused_units = sir.sir.eval_comb_apply_ffs.get(addr);
         let (unit_refs, first_ff_unit) = if let Some(fused_units) = fused_units {
@@ -1368,11 +1427,8 @@ fn collect_comb_apply_compile_tasks<'a>(
             (unit_refs, first_ff_unit)
         };
         let binding = format!("{LABEL} trigger={}", sir.get_path(addr));
-        let index = if let Some(index) = tasks.iter().position(|task| {
-            task.merge_kind == NativeMergeKind::FusedCombAndFf
-                && task.first_ff_unit == first_ff_unit
-                && task.units == unit_refs
-        }) {
+        let key = (first_ff_unit, classes.classes(&unit_refs));
+        let index = if let Some(&index) = comb_tasks.get(&key) {
             tasks[index].bindings.push(binding);
             index
         } else {
@@ -1384,6 +1440,7 @@ fn collect_comb_apply_compile_tasks<'a>(
                 first_ff_unit,
                 bindings: vec![binding],
             });
+            comb_tasks.insert(key, index);
             index
         };
         task_bindings.insert((LABEL, *addr), index);
@@ -1397,13 +1454,16 @@ fn collect_ff_compile_tasks_from<'a>(
         Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
     >,
     label: &'static str,
+    classes: &mut NativeUnitClasses<'a>,
+    ff_tasks: &mut HashMap<Vec<usize>, usize>,
     tasks: &mut Vec<NativeCompileTask<'a>>,
     task_bindings: &mut NativeTaskBindings,
 ) {
     for (addr, units) in ff_map {
         let unit_refs = units.iter().collect::<Vec<_>>();
         let binding = format!("{label} trigger={}", sir.get_path(addr));
-        let index = if let Some(index) = tasks.iter().position(|task| task.units == unit_refs) {
+        let key = classes.classes(&unit_refs);
+        let index = if let Some(&index) = ff_tasks.get(&key) {
             tasks[index].bindings.push(binding);
             index
         } else {
@@ -1415,6 +1475,7 @@ fn collect_ff_compile_tasks_from<'a>(
                 first_ff_unit: None,
                 bindings: vec![binding],
             });
+            ff_tasks.insert(key, index);
             index
         };
         task_bindings.insert((label, *addr), index);
@@ -3520,5 +3581,86 @@ impl super::super::SimBackend for NativeBackend {
         let offset = self.compiled.layout.triggered_bits_offset;
         let size = self.compiled.layout.triggered_bits_total_size;
         celox_runtime::backend::triggered_bits_from_bytes(&self.mem_bytes()[offset..offset + size])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{
+        BasicBlock, BlockId, RegisterId, RegisterType, SIRInstruction, SIRTerminator, SIRValue,
+    };
+
+    /// A unit of `blocks` blocks loading `value`, with its maps filled in
+    /// forward or reverse order.
+    fn unit(blocks: usize, value: u8, width: usize, reverse: bool) -> NativeUnit {
+        let mut ids = (0..blocks).collect::<Vec<_>>();
+        if reverse {
+            ids.reverse();
+        }
+        NativeUnit {
+            entry_block_id: BlockId(0),
+            blocks: ids
+                .iter()
+                .map(|&id| {
+                    let terminator = if id + 1 < blocks {
+                        SIRTerminator::Jump(BlockId(id + 1), vec![])
+                    } else {
+                        SIRTerminator::Return
+                    };
+                    let block = BasicBlock {
+                        id: BlockId(id),
+                        params: vec![],
+                        instructions: vec![SIRInstruction::Imm(
+                            RegisterId(id),
+                            SIRValue::new(value),
+                        )],
+                        terminator,
+                    };
+                    (BlockId(id), block)
+                })
+                .collect(),
+            register_map: ids
+                .iter()
+                .map(|&id| (RegisterId(id), RegisterType::Logic { width }))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn unit_classes_match_deep_comparison() {
+        let mut pool = Vec::new();
+        for blocks in 1..4 {
+            for value in 0..2 {
+                for width in [1, 8] {
+                    for reverse in [false, true] {
+                        pool.push(unit(blocks, value, width, reverse));
+                    }
+                }
+            }
+        }
+        let units = pool.iter().collect::<Vec<_>>();
+        // Lists of up to two units, repeating the same references as the
+        // shared prefix of comb-apply tasks does.
+        let lists = std::iter::once(Vec::new())
+            .chain(units.iter().map(|unit| vec![*unit]))
+            .chain(
+                units
+                    .iter()
+                    .flat_map(|a| units.iter().map(move |b| vec![*a, *b])),
+            )
+            .collect::<Vec<_>>();
+        let mut classes = NativeUnitClasses::default();
+        let keys = lists
+            .iter()
+            .map(|list| classes.classes(list))
+            .collect::<Vec<_>>();
+        for (a, key_a) in lists.iter().zip(&keys) {
+            for (b, key_b) in lists.iter().zip(&keys) {
+                assert_eq!(a == b, key_a == key_b, "{a:?} {b:?}");
+            }
+        }
+        // The pool has equal units with differently ordered maps.
+        assert!(classes.count < pool.len());
     }
 }
