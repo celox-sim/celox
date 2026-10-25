@@ -1,1 +1,3 @@
 Update the diagnostic-mask regression that still expected constant invalid unpacked writes to be rejected; verify successful elaboration without inferred-latch diagnostics under error and warn policies.
+
+The updated regression also exposed a spurious inferred-latch warning: record_target conflated an empty constant write with a dynamic whole-variable write. Exclude empty writes before recording publication and coverage targets.
