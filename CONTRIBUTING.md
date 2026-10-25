@@ -4,6 +4,31 @@ Use the locked environment described in [docs/development.md](docs/development.m
 Cargo builds use the workspace's default `target/`, managed by mbx. Do not set an
 ad-hoc `CARGO_TARGET_DIR` or `--target-dir`.
 
+## Optional execution backends
+
+Ordinary workspace commands select Celox, NAPI and the CLI. Their default native
+and tiered runtimes do not compile Cranelift or Wasmtime. Use `--workspace`
+explicitly to include backend development and comparison crates.
+
+Enable only the backend needed for the task:
+
+- `--features celox/veryl-reference`: upstream Veryl simulator comparisons (its WASM host also depends on Wasmtime).
+- `--features celox/cranelift`: Cranelift JIT and its comparison tests.
+- `--features celox/wasm-runtime`: execute generated WASM with Wasmtime.
+- `--features celox/wasm-component`: load Veryl `.wasm` component libraries.
+
+The CLI forwards all three features; NAPI forwards `cranelift` and
+`wasm-component`. Native component libraries and browser WASM generation do
+not require Wasmtime. Published native NAPI bindings explicitly enable
+`wasm-component`; local debug builds leave it disabled. A disabled WASM component host reports the required
+feature when a `.wasm` library is requested.
+
+Common test matrices use the enabled backends. Binaries that directly compare
+optional backends declare required features. To run the complete Celox suite,
+use `cargo test -p celox --features systemverilog,cranelift,wasm-runtime,wasm-component,veryl-reference`.
+CI explicitly enables these features to retain backend coverage.
+Host cross-codegen features also enable Cranelift for their fallback runtime.
+
 ## Select checks from the change
 
 Before running checks, identify the behavior that changed and the code that
@@ -44,7 +69,7 @@ For repeated local vtest runs, use the optimized shared executor:
 
 ```sh
 node scripts/run-vtest.mjs --test counter
-node scripts/run-vtest.mjs --test systemverilog -E 'test(operators::)'
+CELOX_TEST_FEATURES=cranelift,wasm-runtime node scripts/run-vtest.mjs --test systemverilog -E 'test(operators::)'
 ```
 
 This builds `vtest-exec` with the `vtest` Cargo profile (`opt-level = 1`,

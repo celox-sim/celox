@@ -2,7 +2,7 @@
 //!
 //! Compiles SIRT → WASM bytecode via [`wasm_codegen`], then instantiates and
 //! executes the generated modules with Wasmtime. Provides the same interface
-//! as [`JitBackend`] so that [`Simulator`] can use either backend.
+//! as `JitBackend` so that [`crate::Simulator`] can use either backend.
 
 use num_bigint::BigUint;
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
