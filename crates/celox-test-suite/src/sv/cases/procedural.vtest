@@ -280,6 +280,65 @@
     (assert_eq y (+ (* i 3) 1))
     (assert_eq z 0x5a)))
 
+; An initial block whose loops have no static trip count (a condition on
+; another variable than the one the step assigns, `while`, `do`-`while`) runs
+; as a process instead of being unrolled into initial state (#1992).
+(case initial_loops_without_a_static_trip_count_run_as_a_process
+  (source "initial_loops.sv" #"
+                module Ram;
+                    logic [7:0] mem [16];
+                endmodule
+                module Top;
+                    Ram r0(), r1();
+                    logic [31:0] src [32];
+                    logic [7:0] w [8];
+                    integer i, j, n;
+                    initial begin
+                        for (n = 0; n < 32; n = n + 1) src[n] = 32'h01010101 * n;
+                        i = 0;
+                        for (j = 0; i < 16; i = j / 2) begin
+                            r0.mem[i] = src[j][15:8];
+                            j = j + 1;
+                            r1.mem[i] = src[j][31:24];
+                            j = j + 1;
+                        end
+                        n = 0;
+                        while (n < 8) begin
+                            w[n] = 8'(n * 5);
+                            n = n + 1;
+                        end
+                        do n = n - 3; while (n > 0);
+                        #1 $display("%0d %0d %h %h %h %h %h %0d", i, j, r0.mem[0], r0.mem[15],
+                                 r1.mem[0], r1.mem[15], w[7], n);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "16 32 00 1e 01 1f 23 -1\n"))
+
+; The state such an initial block writes is visible like folded initial state.
+(case initial_while_loops_define_the_state
+  (source "initial_while.sv" #"
+                module Top(input logic [1:0] index, output logic [7:0] y);
+                    logic [7:0] mem [4];
+                    int n;
+                    initial begin
+                        n = 0;
+                        while (n < 4) begin
+                            mem[n] = 8'(n * 3 + 1);
+                            n++;
+                        end
+                    end
+                    assign y = mem[index];
+                endmodule
+            "#)
+  (top Top)
+  (for i (range 0 4)
+    (modify (set index i))
+    (assert_eq y (+ (* i 3) 1))))
+
 (case loop_initializer_widens_by_its_own_signedness
   (source "loop_start.sv" #"
                 module Top(input logic [7:0] value, output logic [7:0] count, output logic [7:0] registered,
