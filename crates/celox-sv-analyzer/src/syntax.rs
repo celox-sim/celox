@@ -190,6 +190,15 @@ mod tests {
     }
 
     #[test]
+    fn public_preprocessing_and_parsing_reject_nameless_pragmas() {
+        let code = "`pragma\nmodule M; endmodule";
+        let path = Path::new("pragma.sv");
+        assert!(preprocess_source(code, path, &[], &[]).is_err());
+        assert!(parse_source(code, path).is_err());
+        assert!(crate::ParsedSource::parse(code, path).is_err());
+    }
+
+    #[test]
     fn command_macros_have_values_without_leaking_source_definitions() {
         let path = Path::new("macros.sv");
         let macros = [("WIDTH".into(), Some("7".into())), ("FLAG".into(), None)];
