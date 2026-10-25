@@ -1462,3 +1462,57 @@
   (top Top) (eval)
   (assert_eq y (+ (<< 1 128) (+ (<< 2 43) 1)))
   (assert_eq width 129))
+
+; A child's output port depends only on the bits of its input port that
+; the child reads, so a parent may feed other bits of that output back into
+; the port without a combinational loop (#1955).
+(case child_ports_keep_the_bit_ranges_they_read
+  (source "port_bit_ranges.sv" #"
+        module Btb(input logic [7:0] ifpc_in, output logic [7:0] tar);
+            logic [3:0] tgt = 4'h9;
+            assign tar = {ifpc_in[7:4], tgt};
+        endmodule
+        module Top;
+            logic clk = 0;
+            logic [7:0] tar, ifpc_out, fetch;
+            logic [7:0] ifpc = 8'h50;
+            assign fetch = tar;
+            always @(posedge clk) ifpc <= fetch;
+            assign ifpc_out = {ifpc[7:4], fetch[3:0]};
+            Btb b(.ifpc_in(ifpc_out), .tar(tar));
+            initial begin
+                #1 $display("%h", fetch);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "59\n"))
+
+; The same through a part-select of a wider parent variable connected to the
+; input port: the bits the child reads map onto the selected range.
+(case child_ports_keep_the_bit_ranges_of_selected_connections
+  (source "port_select_ranges.sv" #"
+        module Btb(input logic [7:0] ifpc_in, output logic [7:0] tar);
+            logic [3:0] tgt = 4'h9;
+            assign tar = {ifpc_in[7:4], tgt};
+        endmodule
+        module Top;
+            logic clk = 0;
+            logic [7:0] tar, fetch;
+            logic [11:0] ifpc_out;
+            logic [7:0] ifpc = 8'h50;
+            assign fetch = tar;
+            always @(posedge clk) ifpc <= fetch;
+            assign ifpc_out = {ifpc[7:4], fetch[3:0], 4'h3};
+            Btb b(.ifpc_in(ifpc_out[11:4]), .tar(tar));
+            initial begin
+                #1 $display("%h %h", fetch, ifpc_out);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "59 593\n"))
