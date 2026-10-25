@@ -27,6 +27,21 @@ pub(super) fn bind_interface_path(
     false
 }
 
+/// A path that starts at no variable or interface of the scope is a
+/// hierarchical name of another scope (IEEE 1800-2023 23.6).
+fn unknown_member(
+    path: &[String],
+    bound_interface: bool,
+    dimensions: &PackedDimensions,
+) -> AnalyzerError {
+    if !bound_interface && dimensions.get(&path[0]).is_none() {
+        return AnalyzerError::HierarchicalReference {
+            path: path.join("."),
+        };
+    }
+    unsupported(format!("structure member `{}`", path.join(".")))
+}
+
 fn selected_member<'a>(
     path: &[String],
     dimensions: &'a PackedDimensions,
@@ -125,7 +140,7 @@ pub(in crate::ast) fn whole_member(
         return Ok(LValue::Ident(path[0].clone()));
     }
     let (offset, ty) = selected_member(&path, dimensions)
-        .ok_or_else(|| unsupported(format!("structure member `{}`", path.join("."))))?;
+        .ok_or_else(|| unknown_member(&path, bound_interface, dimensions))?;
     finish_lvalue(
         state,
         &path,
@@ -159,7 +174,7 @@ pub(in crate::ast) fn select_member(
         return select(path[0].clone(), dimensions, false);
     }
     let (offset, ty) = selected_member(&path, dimensions)
-        .ok_or_else(|| unsupported(format!("structure member `{}`", path.join("."))))?;
+        .ok_or_else(|| unknown_member(&path, bound_interface, dimensions))?;
     let relative = select(
         path[0].clone(),
         &member_dimensions(&path[0], ty, dimensions),

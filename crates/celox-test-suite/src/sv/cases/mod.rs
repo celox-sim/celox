@@ -80,6 +80,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("generate.vtest"),
     },
     Group {
+        file: "src/sv/cases/hierarchical_references.vtest",
+        text: include_str!("hierarchical_references.vtest"),
+    },
+    Group {
         file: "src/sv/cases/hierarchy.vtest",
         text: include_str!("hierarchy.vtest"),
     },

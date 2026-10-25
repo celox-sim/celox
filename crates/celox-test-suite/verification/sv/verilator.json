@@ -3,6 +3,7 @@
     "verilator/always_comb.json",
     "verilator/class.json",
     "verilator/generate.json",
+    "verilator/hierarchical_references.json",
     "verilator/hierarchy.json",
     "verilator/indexed_select.json",
     "verilator/interfaces.json",

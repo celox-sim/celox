@@ -146,6 +146,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     signal.is_net(),
                 )
                 .with_package_variable(signal.package_variable())
+                .with_hierarchical(signal.hierarchical())
             })
             .collect();
         let instances = module

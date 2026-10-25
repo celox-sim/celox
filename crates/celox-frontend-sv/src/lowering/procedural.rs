@@ -2599,6 +2599,22 @@ pub(super) fn written_names(stmts: &[sv::ir::Stmt], names: &mut HashSet<String>)
     }
 }
 
+/// The names a statement list of `module` writes, also through the
+/// subroutines it calls and their written arguments.
+pub(super) fn written_names_with_calls(
+    module: &sv::ir::Module,
+    stmts: &[sv::ir::Stmt],
+    names: &mut HashSet<String>,
+) {
+    super::kernel_written_names(
+        module.subroutines(),
+        stmts,
+        names,
+        &mut HashSet::default(),
+        0,
+    );
+}
+
 /// The lvalue an output argument writes back to.
 /// The variables a call of `function` writes through its arguments, such as
 /// the seed of `$random(seed)`.

@@ -396,6 +396,7 @@ pub struct Signal {
     r#type: Type,
     is_net: bool,
     package_variable: Option<(String, String)>,
+    hierarchical: Option<String>,
 }
 
 impl Signal {
@@ -405,7 +406,21 @@ impl Signal {
             r#type,
             is_net,
             package_variable: None,
+            hierarchical: None,
         }
+    }
+
+    pub(crate) fn with_hierarchical(mut self, hierarchical: Option<&str>) -> Self {
+        self.hierarchical = hierarchical.map(str::to_string);
+        self
+    }
+
+    /// The hierarchical name (IEEE 1800-2023 23.6) of the signal of another
+    /// instance the signal denotes: the module reads and writes that object,
+    /// bound by the caller that resolved the name (see
+    /// [`crate::ast::HierarchicalSignal`]).
+    pub fn hierarchical(&self) -> Option<&str> {
+        self.hierarchical.as_deref()
     }
 
     pub(crate) fn with_package_variable(mut self, package_variable: Option<(&str, &str)>) -> Self {
@@ -680,10 +695,17 @@ pub struct Type {
     packed_ranges: Vec<PackedRange>,
     unpacked_ranges: Vec<UnpackedRange>,
     resolved_width: Option<usize>,
+    signed_element_depth: Option<usize>,
     class: Option<String>,
 }
 
 impl Type {
+    /// How many leading packed dimensions select an element of a signed
+    /// named type (IEEE 1800-2023 7.4.1).
+    pub fn signed_element_depth(&self) -> Option<usize> {
+        self.signed_element_depth
+    }
+
     /// Nominal identity of a tagged union, retained for port type checking.
     pub fn tagged_identity(&self) -> Option<&str> {
         self.tagged_identity.as_deref()
@@ -772,6 +794,7 @@ impl Type {
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
         let class = r#type.class().map(str::to_owned);
+        let signed_element_depth = r#type.signed_element_depth();
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
             tagged_identity,
@@ -780,6 +803,7 @@ impl Type {
             packed_ranges,
             unpacked_ranges,
             resolved_width,
+            signed_element_depth,
             class,
         }
     }
