@@ -25,6 +25,20 @@ pub(super) struct PackedMember {
     r#type: Type,
 }
 
+impl generate::CallSites for PackedMember {
+    fn call_sites(&self, visit: &mut dyn FnMut(usize)) {
+        let PackedMember {
+            owner: _,
+            name: _,
+            offset: _,
+            tag: _,
+            is_void: _,
+            r#type,
+        } = self;
+        r#type.call_sites(visit);
+    }
+}
+
 impl PackedMember {
     pub(in crate::ast) fn is_tagged(&self) -> bool {
         self.tag.is_some()
