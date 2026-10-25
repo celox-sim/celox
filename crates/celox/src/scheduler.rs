@@ -20,6 +20,11 @@
 //! any kernel, and re-arm at its end. A design without kernels gets the
 //! unit for its host clocks alone.
 //!
+//! Clocks derived from the events the slots change (gated, inverted or
+//! divided clocks, which RTL logic drives) run in the same slots: their
+//! domains evaluate in the reference loop's waves, which judge each clock
+//! against its level at the slot's start (see `Plan::batch`).
+//!
 //! The runtime runs the unit only for slots that touch nothing else (see
 //! `celox_runtime::SimulationState::run_until_observed`): every other slot,
 //! and every design or kernel this module does not qualify, runs in the
@@ -31,6 +36,7 @@ use celox_design::{
     TIME_SLOT_WIDTH, schedule::ScheduleModel,
 };
 use celox_sir::{BinaryOp, SIRBuilder, SIRSwitchCase, SIRValue};
+use std::collections::BTreeSet;
 
 use crate::{
     HashMap, HashSet,
@@ -88,7 +94,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram) {
             // Without kernels, slots of host clocks alone.
             let unit = (plan.kernels.iter().any(Option::is_some) || !plan.clocks.is_empty())
                 .then(|| plan.generate(program, &schema.slots));
-            let edged = plan.edged();
+            let tracked = plan.tracked();
             let kernel_events = plan
                 .kernels
                 .iter()
@@ -97,14 +103,14 @@ pub(crate) fn attach(program: &mut LaidOutProgram) {
                         .iter()
                         .flat_map(|kernel| &kernel.writes)
                         .map(|event| {
-                            edged
+                            tracked
                                 .binary_search(event)
-                                .expect("the scheduler's kernels write edged events")
+                                .expect("the scheduler's kernels write tracked events")
                         })
                         .collect()
                 })
                 .collect();
-            let events = edged
+            let events = tracked
                 .into_iter()
                 .map(|event| plan.events[event].signal)
                 .collect();
@@ -195,6 +201,14 @@ struct Plan {
     /// Where the settles run when they wait until their results are read;
     /// `None` when every settle runs where the reference loop's does.
     lazy: Option<Lazy>,
+    /// The clocks derived from the events the slots change, in event order,
+    /// as indices into [`Self::events`]: their domains run in the waves of
+    /// a slot (see `Generator::batch`).
+    derived: Vec<usize>,
+    /// The events the slots change that gate clocks computed
+    /// combinationally from them, with those clocks: their edges are judged
+    /// when the source changes.
+    gating: Vec<(usize, Vec<usize>)>,
 }
 
 /// Deferred settles. The reference loop settles after every pass of the
@@ -245,12 +259,6 @@ impl Plan {
             return Err("the design counts event occurrences".into());
         }
         let topology = &model.events;
-        if !topology.cascaded_events.is_empty()
-            || !topology.derived_events.is_empty()
-            || !topology.combinational_derived.is_empty()
-        {
-            return Err("the design has derived clocks".into());
-        }
         if !schema.comb_observers.is_empty() {
             return Err("the design observes combinational processes".into());
         }
@@ -343,11 +351,9 @@ impl Plan {
                 .chain(sir.eval_only_ffs.values().flatten())
                 .chain(sir.apply_ffs.values().flatten())
         };
-        for unit in rtl_units() {
-            if !written(unit).is_empty() {
-                return Err("RTL logic drives an event signal".into());
-            }
-        }
+        // The events RTL logic drives: clocks derived from the events the
+        // scheduler's slots change, and only those (checked below).
+        let rtl_written: BTreeSet<usize> = rtl_units().flat_map(written).collect();
         // A domain that commits its blocking results in the active region
         // evaluates before the NBA region when it triggers; a kernel that
         // may trigger it keeps the reference loop.
@@ -704,7 +710,7 @@ impl Plan {
                     latest: u64::MAX - longest,
                 }
             });
-        let plan = Self {
+        let mut plan = Self {
             events,
             kernels,
             clocks,
@@ -712,16 +718,135 @@ impl Plan {
             finish_sites,
             settle_reads,
             lazy,
+            derived: Vec::new(),
+            gating: Vec::new(),
         };
         let edged = plan.edged();
-        if edged.len() > 1
-            && edged.iter().any(|&event| {
+        // The clocks derived from the events the slots change, transitively:
+        // their levels change only through those events' domains and
+        // combinational logic.
+        let index_of: HashMap<AbsoluteAddr, usize> = plan
+            .events
+            .iter()
+            .enumerate()
+            .map(|(index, event)| (event.signal, index))
+            .collect();
+        let derived_from = |event: usize| -> Vec<usize> {
+            let signal = plan.events[event].signal;
+            topology
+                .derived_events
+                .get(&signal)
+                .into_iter()
+                .flatten()
+                .copied()
+                .chain(
+                    topology
+                        .combinational_derived
+                        .get(&signal)
+                        .into_iter()
+                        .flatten()
+                        .map(|clock| clock.clock),
+                )
+                .filter_map(|address| index_of.get(&topology.canonical(address)).copied())
+                .collect()
+        };
+        let mut derived = BTreeSet::new();
+        let mut pending = edged.clone();
+        while let Some(event) = pending.pop() {
+            for next in derived_from(event) {
+                if !edged.contains(&next) && derived.insert(next) {
+                    pending.push(next);
+                }
+            }
+        }
+        if !rtl_written.is_subset(&derived) {
+            return Err("RTL logic drives an event signal".into());
+        }
+        let gating: Vec<(usize, Vec<usize>)> = edged
+            .iter()
+            .filter_map(|&source| {
+                let signal = plan.events[source].signal;
+                let gated: Vec<usize> = topology
+                    .combinational_derived
+                    .get(&signal)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|clock| index_of.get(&topology.canonical(clock.clock)).copied())
+                    .filter(|gated| derived.contains(gated))
+                    .collect();
+                (!gated.is_empty()).then_some((source, gated))
+            })
+            .collect();
+        plan.derived = derived.into_iter().collect();
+        plan.gating = gating;
+        let tracked = plan.tracked();
+        if !plan.derived.is_empty() {
+            // The domains of a slot evaluate in waves until none triggers
+            // (see `Generator::batch`), which these the reference loop
+            // runs otherwise keep out of.
+            if plan
+                .kernels
+                .iter()
+                .flatten()
+                .filter_map(|kernel| kernel.wait.as_ref())
+                .any(|wait| !wait.sites.is_empty())
+            {
+                return Err("a design with derived clocks stages nonblocking assignments".into());
+            }
+            if tracked.iter().any(|event| active_commits.contains(event)) {
+                return Err(ACTIVE_COMMIT.into());
+            }
+            // A gated clock is judged at the settle after its source changes,
+            // before a kernel the change wakes runs in another pass; what that
+            // kernel writes moves the clock only for the waves after the
+            // commit. The waves judge once, after every pass.
+            if !plan.gating.is_empty() {
+                let comb_reads: HashSet<AbsoluteAddr> =
+                    sir.eval_comb.iter().flat_map(loads).map(storage).collect();
+                let feeds_gates = plan.kernels.iter().enumerate().any(|(index, kernel)| {
+                    kernel.as_ref().is_some_and(|kernel| kernel.wait.is_some())
+                        && kernel_stores[index]
+                            .iter()
+                            .any(|store| comb_reads.contains(store))
+                });
+                if feeds_gates {
+                    return Err(
+                        "a waiting kernel writes what combinational logic of a gated clock reads"
+                            .into(),
+                    );
+                }
+            }
+            let ends = |unit: &Unit| fails(unit) || emits_finish(unit, &plan.finish_sites);
+            if tracked.iter().any(|&event| {
+                let event = &plan.events[event];
+                event
+                    .eval_apply
+                    .iter()
+                    .chain(event.eval_only.iter().flatten())
+                    .chain(event.apply.iter().flatten())
+                    .any(ends)
+            }) {
+                return Err("a domain of a design with derived clocks may end the run".into());
+            }
+        }
+        if tracked.len() > 1
+            && tracked.iter().any(|&event| {
                 plan.events[event].eval_only.is_none() || plan.events[event].apply.is_none()
             })
         {
             return Err("an event domain has no separate units".into());
         }
         Ok(plan)
+    }
+
+    /// The events whose levels the slots record and compare: those that
+    /// can have edges in them and the clocks derived from those, in event
+    /// order: the bits of [`SchedulerSlots::levels`].
+    fn tracked(&self) -> Vec<usize> {
+        let mut tracked = self.edged();
+        tracked.extend(&self.derived);
+        tracked.sort_unstable();
+        tracked
     }
 
     /// The events the scheduler's kernels write, in event order: the only
@@ -751,6 +876,7 @@ impl Plan {
     fn generate(&self, program: &LaidOutProgram, slots: &SchedulerSlots<AbsoluteAddr>) -> Unit {
         let schema = &program.runtime.runtime_schema;
         let edged = self.edged();
+        let tracked = self.tracked();
         let mut b = Builder::new();
         let comb = b.new_block();
         let mut g = Generator {
@@ -920,10 +1046,11 @@ impl Plan {
         }
         // The levels the slot starts from, the baseline of its edges, for an
         // exit in the middle of the slot; those of the clocks' events below,
-        // when the run has clocks.
+        // when the run has clocks, unless the slot's waves compare against
+        // them: a host clock no clock drives keeps the level the host set.
         let mut levels = g.constant(0, MAX_EVENTS);
-        for (bit, &event) in edged.iter().enumerate() {
-            if self.clocks.contains(&event) {
+        for (bit, &event) in tracked.iter().enumerate() {
+            if self.clocks.contains(&event) && self.derived.is_empty() {
                 continue;
             }
             let level = g.level(&self.events[event]);
@@ -963,10 +1090,10 @@ impl Plan {
                 let due = g.binary(1, due, BinaryOp::And, on);
                 let value = g.mask_bit(values, bit);
                 let was = g.level(event);
-                let position = edged
+                let position = tracked
                     .iter()
-                    .position(|&edged| edged == index)
-                    .expect("clocks are edged");
+                    .position(|&tracked| tracked == index)
+                    .expect("clocks are tracked");
                 let level = g.bit(was, position);
                 levels = g.binary(MAX_EVENTS, levels, BinaryOp::Or, level);
                 let is = g.b.alloc_bit(1, false);
@@ -1214,148 +1341,152 @@ impl Plan {
 
         // The domains the edges trigger, then the NBA region.
         g.b.switch_to_block(domains);
-        let staged: Vec<&Staged> = waits.iter().flat_map(|(_, wait)| &wait.sites).collect();
-        let mask = g.load(slots.exit_arg, MAX_EVENTS);
-        let zero = g.constant(0, MAX_EVENTS);
-        let quiet = g.binary(1, mask, BinaryOp::Eq, zero);
-        let triggered = g.b.new_block();
-        let untriggered = g.b.new_block();
-        g.b.seal_block(SIRTerminator::Branch {
-            cond: quiet,
-            true_block: (untriggered, Vec::new()),
-            false_block: (triggered, Vec::new()),
-        });
-
-        // Without a domain, published nonblocking values settle once more.
-        g.b.switch_to_block(untriggered);
-        if self.lazy.is_some() {
-            g.publish(&staged);
-            g.b.seal_block(SIRTerminator::Jump(slot_end, Vec::new()));
-        } else if staged.is_empty() {
-            g.b.seal_block(SIRTerminator::Jump(slot_end, Vec::new()));
+        if !self.derived.is_empty() {
+            self.batch(&mut g, &tracked, slot_end, finish_exit);
         } else {
-            let mut any = g.constant(0, 1);
-            for site in &staged {
-                let pending = g.load(site.pending, 1);
-                any = g.binary(1, any, BinaryOp::Or, pending);
-            }
-            g.publish(&staged);
-            let publish_settle = g.b.new_block();
+            let staged: Vec<&Staged> = waits.iter().flat_map(|(_, wait)| &wait.sites).collect();
+            let mask = g.load(slots.exit_arg, MAX_EVENTS);
+            let zero = g.constant(0, MAX_EVENTS);
+            let quiet = g.binary(1, mask, BinaryOp::Eq, zero);
+            let triggered = g.b.new_block();
+            let untriggered = g.b.new_block();
             g.b.seal_block(SIRTerminator::Branch {
-                cond: any,
-                true_block: (publish_settle, Vec::new()),
-                false_block: (slot_end, Vec::new()),
-            });
-            g.b.switch_to_block(publish_settle);
-            g.settle_then(slot_end);
-        }
-
-        g.b.switch_to_block(triggered);
-        let evaluated = g.b.new_block();
-        if edged.is_empty() {
-            // No event can have an edge; the mask stays empty.
-            g.b.seal_block(SIRTerminator::Jump(evaluated, Vec::new()));
-        } else {
-            let one = g.constant(1, MAX_EVENTS);
-            let lower = g.binary(MAX_EVENTS, mask, BinaryOp::Sub, one);
-            let others = g.binary(MAX_EVENTS, mask, BinaryOp::And, lower);
-            let single = g.binary(1, others, BinaryOp::Eq, zero);
-            let one_domain = g.b.new_block();
-            let domains = g.b.new_block();
-            g.b.seal_block(SIRTerminator::Branch {
-                cond: single,
-                true_block: (one_domain, Vec::new()),
-                false_block: (domains, Vec::new()),
+                cond: quiet,
+                true_block: (untriggered, Vec::new()),
+                false_block: (triggered, Vec::new()),
             });
 
-            // One triggered domain evaluates and applies at once. The events
-            // kernels write are tested first: a run without clocks reaches
-            // their domains as soon as without clock events.
-            g.b.switch_to_block(one_domain);
-            let written = self.written();
-            for &index in written.iter().chain(&self.clocks) {
-                let event = &self.events[index];
-                let bit = g.constant(1 << index, MAX_EVENTS);
-                let this = g.binary(1, mask, BinaryOp::Eq, bit);
-                let unit = g.b.new_block();
-                let next = g.b.new_block();
+            // Without a domain, published nonblocking values settle once more.
+            g.b.switch_to_block(untriggered);
+            if self.lazy.is_some() {
+                g.publish(&staged);
+                g.b.seal_block(SIRTerminator::Jump(slot_end, Vec::new()));
+            } else if staged.is_empty() {
+                g.b.seal_block(SIRTerminator::Jump(slot_end, Vec::new()));
+            } else {
+                let mut any = g.constant(0, 1);
+                for site in &staged {
+                    let pending = g.load(site.pending, 1);
+                    any = g.binary(1, any, BinaryOp::Or, pending);
+                }
+                g.publish(&staged);
+                let publish_settle = g.b.new_block();
                 g.b.seal_block(SIRTerminator::Branch {
-                    cond: this,
-                    true_block: (unit, Vec::new()),
-                    false_block: (next, Vec::new()),
+                    cond: any,
+                    true_block: (publish_settle, Vec::new()),
+                    false_block: (slot_end, Vec::new()),
                 });
-                g.b.switch_to_block(unit);
-                let units = match self.lazy.as_ref().map(|lazy| &lazy.domains[index]) {
-                    None | Some(DomainSettle::Pending) => &event.eval_apply,
-                    Some(DomainSettle::Fused(units)) => units,
-                    Some(DomainSettle::Settled) => {
+                g.b.switch_to_block(publish_settle);
+                g.settle_then(slot_end);
+            }
+
+            g.b.switch_to_block(triggered);
+            let evaluated = g.b.new_block();
+            if edged.is_empty() {
+                // No event can have an edge; the mask stays empty.
+                g.b.seal_block(SIRTerminator::Jump(evaluated, Vec::new()));
+            } else {
+                let one = g.constant(1, MAX_EVENTS);
+                let lower = g.binary(MAX_EVENTS, mask, BinaryOp::Sub, one);
+                let others = g.binary(MAX_EVENTS, mask, BinaryOp::And, lower);
+                let single = g.binary(1, others, BinaryOp::Eq, zero);
+                let one_domain = g.b.new_block();
+                let domains = g.b.new_block();
+                g.b.seal_block(SIRTerminator::Branch {
+                    cond: single,
+                    true_block: (one_domain, Vec::new()),
+                    false_block: (domains, Vec::new()),
+                });
+
+                // One triggered domain evaluates and applies at once. The events
+                // kernels write are tested first: a run without clocks reaches
+                // their domains as soon as without clock events.
+                g.b.switch_to_block(one_domain);
+                let written = self.written();
+                for &index in written.iter().chain(&self.clocks) {
+                    let event = &self.events[index];
+                    let bit = g.constant(1 << index, MAX_EVENTS);
+                    let this = g.binary(1, mask, BinaryOp::Eq, bit);
+                    let unit = g.b.new_block();
+                    let next = g.b.new_block();
+                    g.b.seal_block(SIRTerminator::Branch {
+                        cond: this,
+                        true_block: (unit, Vec::new()),
+                        false_block: (next, Vec::new()),
+                    });
+                    g.b.switch_to_block(unit);
+                    let units = match self.lazy.as_ref().map(|lazy| &lazy.domains[index]) {
+                        None | Some(DomainSettle::Pending) => &event.eval_apply,
+                        Some(DomainSettle::Fused(units)) => units,
+                        Some(DomainSettle::Settled) => {
+                            let evaluate = g.b.new_block();
+                            g.settle_then(evaluate);
+                            g.b.switch_to_block(evaluate);
+                            &event.eval_apply
+                        }
+                    };
+                    for unit in units {
+                        g.inline_writer(unit, finish_exit);
+                    }
+                    g.b.seal_block(SIRTerminator::Jump(evaluated, Vec::new()));
+                    g.b.switch_to_block(next);
+                }
+                g.b.seal_block(SIRTerminator::Jump(internal_exit, Vec::new()));
+
+                // Several evaluate, then apply, each in event order.
+                g.b.switch_to_block(domains);
+                if edged.len() < 2 {
+                    g.b.seal_block(SIRTerminator::Jump(internal_exit, Vec::new()));
+                } else {
+                    let mut mask = mask;
+                    let mut zero = zero;
+                    if self.lazy.as_ref().is_some_and(|lazy| lazy.several) {
                         let evaluate = g.b.new_block();
                         g.settle_then(evaluate);
                         g.b.switch_to_block(evaluate);
-                        &event.eval_apply
+                        mask = g.load(slots.exit_arg, MAX_EVENTS);
+                        zero = g.constant(0, MAX_EVENTS);
                     }
-                };
-                for unit in units {
-                    g.inline_writer(unit, finish_exit);
-                }
-                g.b.seal_block(SIRTerminator::Jump(evaluated, Vec::new()));
-                g.b.switch_to_block(next);
-            }
-            g.b.seal_block(SIRTerminator::Jump(internal_exit, Vec::new()));
-
-            // Several evaluate, then apply, each in event order.
-            g.b.switch_to_block(domains);
-            if edged.len() < 2 {
-                g.b.seal_block(SIRTerminator::Jump(internal_exit, Vec::new()));
-            } else {
-                let mut mask = mask;
-                let mut zero = zero;
-                if self.lazy.as_ref().is_some_and(|lazy| lazy.several) {
-                    let evaluate = g.b.new_block();
-                    g.settle_then(evaluate);
-                    g.b.switch_to_block(evaluate);
-                    mask = g.load(slots.exit_arg, MAX_EVENTS);
-                    zero = g.constant(0, MAX_EVENTS);
-                }
-                for phase in [Phase::Evaluate, Phase::Apply] {
-                    for &index in &edged {
-                        let event = &self.events[index];
-                        let bit = g.constant(1 << index, MAX_EVENTS);
-                        let selected = g.binary(MAX_EVENTS, mask, BinaryOp::And, bit);
-                        let this = g.binary(1, selected, BinaryOp::Ne, zero);
-                        let unit = g.b.new_block();
-                        let next = g.b.new_block();
-                        g.b.seal_block(SIRTerminator::Branch {
-                            cond: this,
-                            true_block: (unit, Vec::new()),
-                            false_block: (next, Vec::new()),
-                        });
-                        g.b.switch_to_block(unit);
-                        let units = match phase {
-                            Phase::Evaluate => event.eval_only.as_ref(),
-                            Phase::Apply => event.apply.as_ref(),
+                    for phase in [Phase::Evaluate, Phase::Apply] {
+                        for &index in &edged {
+                            let event = &self.events[index];
+                            let bit = g.constant(1 << index, MAX_EVENTS);
+                            let selected = g.binary(MAX_EVENTS, mask, BinaryOp::And, bit);
+                            let this = g.binary(1, selected, BinaryOp::Ne, zero);
+                            let unit = g.b.new_block();
+                            let next = g.b.new_block();
+                            g.b.seal_block(SIRTerminator::Branch {
+                                cond: this,
+                                true_block: (unit, Vec::new()),
+                                false_block: (next, Vec::new()),
+                            });
+                            g.b.switch_to_block(unit);
+                            let units = match phase {
+                                Phase::Evaluate => event.eval_only.as_ref(),
+                                Phase::Apply => event.apply.as_ref(),
+                            }
+                            .expect("several edged events have their units (`Plan::new`)");
+                            for unit in units {
+                                g.inline_writer(unit, finish_exit);
+                            }
+                            g.b.seal_block(SIRTerminator::Jump(next, Vec::new()));
+                            g.b.switch_to_block(next);
                         }
-                        .expect("several edged events have their units (`Plan::new`)");
-                        for unit in units {
-                            g.inline_writer(unit, finish_exit);
-                        }
-                        g.b.seal_block(SIRTerminator::Jump(next, Vec::new()));
-                        g.b.switch_to_block(next);
                     }
+                    g.b.seal_block(SIRTerminator::Jump(evaluated, Vec::new()));
                 }
-                g.b.seal_block(SIRTerminator::Jump(evaluated, Vec::new()));
             }
-        }
 
-        // The domains' results and the nonblocking values publish before
-        // combinational logic settles.
-        g.b.switch_to_block(evaluated);
-        g.publish(&staged);
-        match &self.lazy {
-            Some(_) => {
-                g.b.seal_block(SIRTerminator::Jump(slot_end, Vec::new()));
+            // The domains' results and the nonblocking values publish before
+            // combinational logic settles.
+            g.b.switch_to_block(evaluated);
+            g.publish(&staged);
+            match &self.lazy {
+                Some(_) => {
+                    g.b.seal_block(SIRTerminator::Jump(slot_end, Vec::new()));
+                }
+                None => g.settle_then(slot_end),
             }
-            None => g.settle_then(slot_end),
         }
 
         // At the end of the slot each clock whose edge applied waits for the
@@ -1446,6 +1577,177 @@ impl Plan {
         g.emit_settle(&program.sir.eval_comb, finish_exit, internal_exit);
         g.finish()
     }
+}
+
+impl Plan {
+    /// The domains of a slot of a design with derived clocks, as the
+    /// reference loop's waves run them: combinational logic settles; the
+    /// domains of the events with an active edge evaluate together with
+    /// those of the clocks computed combinationally from a changed source
+    /// whose level moved to their active edge, judged now, whose levels
+    /// become their baseline; without an active edge, every tracked event
+    /// whose level moved to its active edge since the slot started. After
+    /// each wave commits and logic settles, the domains not run yet whose
+    /// clocks moved to their active edge run in another, until none does.
+    /// The domains run in the slot collect in `exit_arg`.
+    fn batch(
+        &self,
+        g: &mut Generator<'_>,
+        tracked: &[usize],
+        slot_end: celox_sir::BlockId,
+        finish_exit: celox_sir::BlockId,
+    ) {
+        let slots = g.slots;
+        let wave = g.b.new_block();
+        let mask = g.b.alloc_bit(MAX_EVENTS, false);
+        let fire = g.b.new_block_with(vec![mask]);
+        let judge = g.b.new_block();
+        // A pass of the process phase settles before the domains; a
+        // deferred one runs now.
+        match &self.lazy {
+            Some(_) => g.settle_then(judge),
+            None => {
+                g.b.seal_block(SIRTerminator::Jump(judge, Vec::new()));
+            }
+        }
+
+        g.b.switch_to_block(judge);
+        let active = g.load(slots.exit_arg, MAX_EVENTS);
+        let levels = g.load(slots.levels, MAX_EVENTS);
+        let stable = self.stable_edges(g, tracked, levels);
+        let mut gated_edges = g.constant(0, MAX_EVENTS);
+        let mut judged = levels;
+        for (source, gated) in &self.gating {
+            let source_bit = position(tracked, *source);
+            let was = g.mask_bit(levels, source_bit);
+            let is = g.level(&self.events[*source]);
+            let changed = g.binary(1, was, BinaryOp::Ne, is);
+            for &clock in gated {
+                let clock_bit = position(tracked, clock);
+                let was = g.mask_bit(levels, clock_bit);
+                let is = g.level(&self.events[clock]);
+                let edge = g.edge(&self.events[clock], was, is);
+                let edge = g.binary(1, edge, BinaryOp::And, changed);
+                let bit = g.bit(edge, clock);
+                gated_edges = g.binary(MAX_EVENTS, gated_edges, BinaryOp::Or, bit);
+                // The judged level is the clock's baseline from now on.
+                let level = g.b.alloc_bit(1, false);
+                g.b.emit(SIRInstruction::Mux(level, changed, is, was));
+                let keep = g.constant(!(1u64 << clock_bit), MAX_EVENTS);
+                let kept = g.binary(MAX_EVENTS, judged, BinaryOp::And, keep);
+                let bit = g.bit(level, clock_bit);
+                judged = g.binary(MAX_EVENTS, kept, BinaryOp::Or, bit);
+            }
+        }
+        g.store(slots.levels, SCHEDULER_TIME_WIDTH, judged);
+        let zero = g.constant(0, MAX_EVENTS);
+        let edged = g.binary(1, active, BinaryOp::Ne, zero);
+        let sources = g.binary(MAX_EVENTS, active, BinaryOp::Or, gated_edges);
+        let triggers = g.b.alloc_bit(MAX_EVENTS, false);
+        g.b.emit(SIRInstruction::Mux(triggers, edged, sources, stable));
+        g.store(slots.exit_arg, SCHEDULER_TIME_WIDTH, triggers);
+        let quiet = g.binary(1, triggers, BinaryOp::Eq, zero);
+        let first = g.b.new_block();
+        g.b.seal_block(SIRTerminator::Branch {
+            cond: quiet,
+            true_block: (slot_end, Vec::new()),
+            false_block: (first, Vec::new()),
+        });
+        g.b.switch_to_block(first);
+        g.b.seal_block(SIRTerminator::Jump(fire, vec![triggers]));
+
+        // A wave after a commit: the domains not run yet whose clocks moved.
+        g.b.switch_to_block(wave);
+        let fired = g.load(slots.exit_arg, MAX_EVENTS);
+        let levels = g.load(slots.levels, MAX_EVENTS);
+        let stable = self.stable_edges(g, tracked, levels);
+        let all = g.constant(u64::MAX, MAX_EVENTS);
+        let unfired = g.binary(MAX_EVENTS, fired, BinaryOp::Xor, all);
+        let ready = g.binary(MAX_EVENTS, stable, BinaryOp::And, unfired);
+        let zero = g.constant(0, MAX_EVENTS);
+        let quiet = g.binary(1, ready, BinaryOp::Eq, zero);
+        let next = g.b.new_block();
+        g.b.seal_block(SIRTerminator::Branch {
+            cond: quiet,
+            true_block: (slot_end, Vec::new()),
+            false_block: (next, Vec::new()),
+        });
+        g.b.switch_to_block(next);
+        let fired = g.binary(MAX_EVENTS, fired, BinaryOp::Or, ready);
+        g.store(slots.exit_arg, SCHEDULER_TIME_WIDTH, fired);
+        g.b.seal_block(SIRTerminator::Jump(fire, vec![ready]));
+
+        // A wave: one domain evaluates and commits at once, several
+        // evaluate, then commit, in event order; then logic settles.
+        g.b.switch_to_block(fire);
+        let zero = g.constant(0, MAX_EVENTS);
+        let one = g.constant(1, MAX_EVENTS);
+        let lower = g.binary(MAX_EVENTS, mask, BinaryOp::Sub, one);
+        let others = g.binary(MAX_EVENTS, mask, BinaryOp::And, lower);
+        let single = g.binary(1, others, BinaryOp::Eq, zero);
+        let alone = g.b.new_block();
+        let together = g.b.new_block();
+        let committed = g.b.new_block();
+        g.b.seal_block(SIRTerminator::Branch {
+            cond: single,
+            true_block: (alone, Vec::new()),
+            false_block: (together, Vec::new()),
+        });
+        g.b.switch_to_block(alone);
+        for &index in tracked {
+            g.if_bit(mask, index, |g| {
+                for unit in &self.events[index].eval_apply {
+                    g.inline_writer(unit, finish_exit);
+                }
+            });
+        }
+        g.b.seal_block(SIRTerminator::Jump(committed, Vec::new()));
+        g.b.switch_to_block(together);
+        if tracked.len() > 1 {
+            for phase in [Phase::Evaluate, Phase::Apply] {
+                for &index in tracked {
+                    let event = &self.events[index];
+                    let units = match phase {
+                        Phase::Evaluate => event.eval_only.as_ref(),
+                        Phase::Apply => event.apply.as_ref(),
+                    }
+                    .expect("tracked events have their units (`Plan::new`)");
+                    g.if_bit(mask, index, |g| {
+                        for unit in units {
+                            g.inline_writer(unit, finish_exit);
+                        }
+                    });
+                }
+            }
+        }
+        g.b.seal_block(SIRTerminator::Jump(committed, Vec::new()));
+        g.b.switch_to_block(committed);
+        g.settle_then(wave);
+    }
+
+    /// The tracked events whose levels moved to their active edge against
+    /// `levels`, their baselines, as bits by event index.
+    fn stable_edges(
+        &self,
+        g: &mut Generator<'_>,
+        tracked: &[usize],
+        levels: RegisterId,
+    ) -> RegisterId {
+        let mut edges = g.constant(0, MAX_EVENTS);
+        for (position, &index) in tracked.iter().enumerate() {
+            let was = g.mask_bit(levels, position);
+            let is = g.level(&self.events[index]);
+            let edge = g.edge(&self.events[index], was, is);
+            let bit = g.bit(edge, index);
+            edges = g.binary(MAX_EVENTS, edges, BinaryOp::Or, bit);
+        }
+        edges
+    }
+}
+
+/// The place of event `index` among `tracked`, the bit of its level.
+fn position(tracked: &[usize], index: usize) -> usize {
+    tracked.binary_search(&index).expect("the event is tracked")
 }
 
 enum Phase {
@@ -1557,6 +1859,30 @@ impl Generator<'_> {
         let value = self.load(event.signal, width);
         let zero = self.constant(0, width);
         self.binary(1, value, BinaryOp::Ne, zero)
+    }
+
+    /// Whether a change of `event`'s level from `was` to `is` is its active
+    /// edge.
+    fn edge(&mut self, event: &Event, was: RegisterId, is: RegisterId) -> RegisterId {
+        let changed = self.binary(1, was, BinaryOp::Ne, is);
+        let active = self.equals(is, u64::from(event.active));
+        self.binary(1, changed, BinaryOp::And, active)
+    }
+
+    /// Run `body` when bit `index` of the 64-bit `mask` is set.
+    fn if_bit(&mut self, mask: RegisterId, index: usize, body: impl FnOnce(&mut Self)) {
+        let set = self.mask_bit(mask, index);
+        let run = self.b.new_block();
+        let next = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: set,
+            true_block: (run, Vec::new()),
+            false_block: (next, Vec::new()),
+        });
+        self.b.switch_to_block(run);
+        body(self);
+        self.b.seal_block(SIRTerminator::Jump(next, Vec::new()));
+        self.b.switch_to_block(next);
     }
 
     /// A block that ends the run with `exit`, emitted by
