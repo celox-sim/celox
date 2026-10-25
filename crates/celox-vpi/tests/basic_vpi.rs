@@ -3634,3 +3634,199 @@ fn a_timed_read_only_region_rejects_writes_and_stays_closed() {
     );
     clear_runtime();
 }
+
+#[cfg(feature = "systemverilog")]
+static ZERO_DELAY_EVENTS: std::sync::Mutex<Vec<(&'static str, u64, i32)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(feature = "systemverilog")]
+unsafe fn read_int(name: &CStr) -> i32 {
+    // Safety: VPI calls on the session's thread.
+    unsafe {
+        let handle = vpi_handle_by_name(name.as_ptr(), ptr::null_mut());
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        vpi_get_value(handle, &mut value);
+        vpi_free_object(handle);
+        value.value.integer
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+fn zero_delay_event(name: &'static str) {
+    // Safety: VPI calls from a callback on the session's thread.
+    let y = unsafe { read_int(c"Top.y") };
+    ZERO_DELAY_EVENTS
+        .lock()
+        .unwrap()
+        .push((name, celox_vpi_current_time(), y));
+}
+
+/// The timer at 5 registers a zero-delay timer.
+#[cfg(feature = "systemverilog")]
+unsafe extern "C" fn timer_at_five(_data: *mut VpiCbData) -> i32 {
+    zero_delay_event("timer");
+    // Safety: VPI registration from a callback on the session's thread.
+    unsafe { register_read_only_probe(CB_AFTER_DELAY, first_zero_delay) };
+    0
+}
+
+/// Writes `x` and registers a ReadWrite callback.
+#[cfg(feature = "systemverilog")]
+unsafe extern "C" fn first_zero_delay(_data: *mut VpiCbData) -> i32 {
+    zero_delay_event("first zero delay");
+    // Safety: VPI calls from a callback on the session's thread.
+    unsafe {
+        assert!(try_write_x());
+        register_read_only_probe(CB_READ_WRITE_SYNCH, read_write_registers_a_timer);
+    }
+    0
+}
+
+#[cfg(feature = "systemverilog")]
+unsafe extern "C" fn read_write_registers_a_timer(_data: *mut VpiCbData) -> i32 {
+    zero_delay_event("read-write");
+    // Safety: VPI registration from a callback on the session's thread.
+    unsafe { register_read_only_probe(CB_AFTER_DELAY, second_zero_delay) };
+    0
+}
+
+#[cfg(feature = "systemverilog")]
+unsafe extern "C" fn second_zero_delay(_data: *mut VpiCbData) -> i32 {
+    zero_delay_event("second zero delay");
+    // Safety: VPI registration from a callback on the session's thread.
+    unsafe { register_read_only_probe(CB_READ_ONLY_SYNCH, read_only_after_timers) };
+    0
+}
+
+#[cfg(feature = "systemverilog")]
+unsafe extern "C" fn read_only_after_timers(_data: *mut VpiCbData) -> i32 {
+    zero_delay_event("read-only");
+    0
+}
+
+/// Zero-delay timers that timer and ReadWrite callbacks register run in the
+/// same time step, before its ReadOnly region closes it.
+#[cfg(feature = "systemverilog")]
+#[test]
+fn zero_delay_timers_run_before_a_timed_step_closes() {
+    let _serial = lock_vpi();
+    let source = "`timescale 1ns/1ns
+        module Top(input logic x, output logic y);
+            assign y = x;
+            initial #20 $display(\"later\");
+        endmodule";
+    let image = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("zero_delay.sv"))],
+        "Top",
+    )
+    .compile_native()
+    .unwrap()
+    .into_program_image();
+    let simulation = celox::Simulation::from_sv_sources(Vec::new(), "")
+        .build_native_from_image(image.clone())
+        .unwrap();
+    let _session = install_timed_runtime(image, simulation).unwrap();
+    ZERO_DELAY_EVENTS.lock().unwrap().clear();
+    let mut delay = VpiTime {
+        type_: VPI_SIM_TIME,
+        low: 5,
+        ..VpiTime::default()
+    };
+    let timer = VpiCbData {
+        reason: CB_AFTER_DELAY,
+        cb_rtn: Some(timer_at_five),
+        obj: ptr::null_mut(),
+        time: &mut delay,
+        value: ptr::null_mut(),
+        index: 0,
+        user_data: ptr::null_mut(),
+    };
+    // Safety: VPI registration on the session's thread.
+    assert!(!unsafe { vpi_register_cb(&timer) }.is_null());
+    assert!(!run_callbacks_result().unwrap());
+    assert_eq!(
+        *ZERO_DELAY_EVENTS.lock().unwrap(),
+        vec![
+            ("timer", 5, 0),
+            ("first zero delay", 5, 0),
+            ("read-write", 5, 1),
+            ("second zero delay", 5, 1),
+            ("read-only", 5, 1),
+        ]
+    );
+    clear_runtime();
+}
+
+#[cfg(feature = "systemverilog")]
+static FLAG_AT_END: AtomicI32 = AtomicI32::new(-1);
+
+#[cfg(feature = "systemverilog")]
+unsafe extern "C" fn finish_from_a_timer(_data: *mut VpiCbData) -> i32 {
+    assert_eq!(vpi_control(VPI_FINISH), 1);
+    0
+}
+
+#[cfg(feature = "systemverilog")]
+unsafe extern "C" fn record_flag_at_end(_data: *mut VpiCbData) -> i32 {
+    // Safety: VPI calls from a callback on the session's thread.
+    FLAG_AT_END.store(unsafe { read_int(c"Top.flag") }, Ordering::SeqCst);
+    0
+}
+
+/// `vpiFinish` from a due timer ends a timed run before the design's slot
+/// at that time runs.
+#[cfg(feature = "systemverilog")]
+#[test]
+fn a_finish_from_a_timer_stops_before_the_designs_slot() {
+    let _serial = lock_vpi();
+    let source = "`timescale 1ns/1ns
+        module Top(output logic flag);
+            initial begin
+                flag = 0;
+                #5 flag = 1;
+            end
+        endmodule";
+    let image = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("timer_finish.sv"))],
+        "Top",
+    )
+    .compile_native()
+    .unwrap()
+    .into_program_image();
+    let simulation = celox::Simulation::from_sv_sources(Vec::new(), "")
+        .build_native_from_image(image.clone())
+        .unwrap();
+    let _session = install_timed_runtime(image, simulation).unwrap();
+    FLAG_AT_END.store(-1, Ordering::SeqCst);
+    let mut delay = VpiTime {
+        type_: VPI_SIM_TIME,
+        low: 5,
+        ..VpiTime::default()
+    };
+    let timer = VpiCbData {
+        reason: CB_AFTER_DELAY,
+        cb_rtn: Some(finish_from_a_timer),
+        obj: ptr::null_mut(),
+        time: &mut delay,
+        value: ptr::null_mut(),
+        index: 0,
+        user_data: ptr::null_mut(),
+    };
+    let end = VpiCbData {
+        reason: CB_END_OF_SIMULATION,
+        cb_rtn: Some(record_flag_at_end),
+        ..timer
+    };
+    // Safety: VPI registration on the session's thread.
+    unsafe {
+        assert!(!vpi_register_cb(&timer).is_null());
+        assert!(!vpi_register_cb(&end).is_null());
+    }
+    assert!(run_callbacks_result().unwrap());
+    assert_eq!(celox_vpi_current_time(), 5);
+    assert_eq!(FLAG_AT_END.load(Ordering::SeqCst), 0);
+    clear_runtime();
+}

@@ -468,6 +468,27 @@ fn current_time() -> u64 {
     with_host(|host| borrow_cell(&host.callbacks, |state| state.time))
 }
 
+/// Fire the timers due now, including the zero-delay ones they register,
+/// until none is due. Returns whether any fired.
+fn fire_due_timers() -> bool {
+    let mut fired = false;
+    loop {
+        let due = due_ids();
+        if due.is_empty() || finish_requested() {
+            return fired;
+        }
+        for id in due {
+            fired |= fire(id);
+            if finish_requested() {
+                return fired;
+            }
+        }
+        if !charge_round() {
+            return fired;
+        }
+    }
+}
+
 /// Whether a VPI write changed the timed simulation since the last call.
 fn take_timed_writes() -> bool {
     super::with_timed_mut(super::TimedRuntime::take_wrote).unwrap_or(false)
@@ -491,6 +512,14 @@ fn settled_regions() -> Regions {
             return Regions::Done;
         }
         if dispatch_value_changes() {
+            if take_timed_writes() {
+                return Regions::Wrote;
+            }
+            continue;
+        }
+        // A zero-delay timer that a callback of this time step registered
+        // runs before the step closes.
+        if fire_due_timers() {
             if take_timed_writes() {
                 return Regions::Wrote;
             }
@@ -622,11 +651,10 @@ pub(super) fn run_timed() -> bool {
             with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.read_only = false));
             continue;
         }
-        for id in due_ids() {
-            fire(id);
-            if finish_requested() {
-                break;
-            }
+        fire_due_timers();
+        // A finish from a timer ends the run before the design's slot.
+        if finish_requested() {
+            break;
         }
         with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.read_only_at = None));
         timed_step(|simulation| simulation.run_until(time));
