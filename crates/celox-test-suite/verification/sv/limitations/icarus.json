@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 17,
     "emission_error": 0,
-    "compile_error": 133,
+    "compile_error": 134,
     "runtime_error": 8,
     "unsupported": 0,
     "ignored": 0
@@ -1461,6 +1461,14 @@
       "detail": "Icarus build exit status: 65; see <case>/build.log\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: I give up on this function definition.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:15: error: Invalid module item.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Syntax error in typedef clause.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Syntax error in parameter value assignment list.\n<case>/source_0.sv:17: error: Invalid module instantiation\n<case>/source_0.sv:18: error: I give up on this function definition.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:22: error: Invalid module item.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:24: error: Invalid module item.\n<case>/source_0.sv:26: syntax error\n<case>/source_0.sv:27: error: Invalid module item.\n<case>/source_0.sv:28: error: 'made' has already been declared in this scope.\n<case>/source_0.sv:10:      : It was declared here as a variable.\n<case>/source_0.sv:29: syntax error\n<case>/source_0.sv:29: error: I give up on this function definition.\n<case>/source_0.sv:32: syntax error\n<case>/source_0.sv:33: error: Invalid module item.\n<case>/source_0.sv:35: syntax error\n<case>/source_0.sv:36: error: Invalid module item.\n<case>/source_0.sv:37: syntax error\n<case>/source_0.sv:37: error: Invalid module item.\n<case>/source_0.sv:39: syntax error\n<case>/source_0.sv:39: error: Invalid module item.\n<case>/source_0.sv:40: syntax error\n<case>/source_0.sv:41: error: Invalid module item.\n<case>/source_0.sv:42: syntax error\n<case>/source_0.sv:43: error: Invalid module item.\n<case>/source_0.sv:44: syntax error\n<case>/source_0.sv:44: error: Invalid module item.\n<case>/source_0.sv:45: syntax error\n<case>/source_0.sv:45: error: Invalid module item.\n<case>/source_0.sv:46: syntax error\n<case>/source_0.sv:48: error: Invalid module item.\n<case>/source_0.sv:50: syntax error\n<case>/source_0.sv:50: error: Invalid module instantiation\n<case>/source_0.sv:53: syntax error\n<case>/source_0.sv:53: error: Malformed statement\n<case>/source_0.sv:54: syntax error\n<case>/source_0.sv:54: error: Malformed statement\n<case>/source_0.sv:55: syntax error\n<case>/source_0.sv:55: error: Malformed statement\n<case>/source_0.sv:56: syntax error\n<case>/source_0.sv:56: error: Malformed statement\n<case>/source_0.sv:57: syntax error\n<case>/source_0.sv:57: error: Malformed statement\n<case>/source_0.sv:58: syntax error\n<case>/source_0.sv:58: error: Malformed statement\n<case>/source_0.sv:59: syntax error\n<case>/source_0.sv:59: error: Malformed statement\n<case>/source_0.sv:60: syntax error\n<case>/source_0.sv:60: error: Malformed statement\n<case>/source_0.sv:61: syntax error\n<case>/source_0.sv:61: error: Malformed statement\n<case>/source_0.sv:62: syntax error\n<case>/source_0.sv:62: error: Malformed statement\n<case>/source_0.sv:68: syntax error\n<case>/source_0.sv:68: error: Malformed statement\n<case>/source_0.sv:71: syntax error\n<case>/source_0.sv:71: error: Malformed statement\n",
       "expectation": "Simulation",
       "name": "class::specialization_keys_follow_the_bound_parameters",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 13; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:12: error: Invalid module item.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Invalid module instantiation\n<case>/testbench.sv:11: error: Invalid module item.\n<case>/testbench.sv:12: error: Repeat timeunit found and the initial timeunit for this scope is missing.\n<case>/testbench.sv:13: error: Repeat timeprecision found and the initial timeprecision for this scope is missing.\n",
+      "expectation": "Simulation",
+      "name": "class::derived_classes_keep_their_declaration_scopes",
       "phase": "compile",
       "status": "compile_error"
     }

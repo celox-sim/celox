@@ -1713,3 +1713,25 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "2 1 1\n1 1\n3.0 3.0\n2\n7\n"))
+
+(case derived_classes_keep_their_declaration_scopes
+  (source "class.sv" #"
+module Top(output bit done);
+    localparam int K = 2;
+    class Base #(int N = 0);
+    endclass
+    if (1) begin : g
+        localparam int K = 3;
+        class Derived #(int M = 0) extends Base;
+            typedef bit [K-1:0] T;
+        endclass
+        initial begin
+            Derived#()::T t;
+            $display("%0d", $bits(t));
+            done = 1;
+        end
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "3\n"))

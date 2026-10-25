@@ -23,6 +23,10 @@ pub(in crate::ast) struct Specialization {
     /// The constants the value parameters hide without a value of their
     /// own, as a string or four-state value does.
     pub hidden: Vec<String>,
+    /// The constants and types the class declares itself, which a class
+    /// extending it inherits without the scope around the declaration.
+    pub declared_env: HashMap<String, Option<i128>>,
+    pub declared_aliases: HashMap<String, Type>,
     /// The literals that replace the value parameters.
     pub literals: HashMap<String, Expr>,
     /// The type parameters and typedefs, and the class name itself.
@@ -166,6 +170,35 @@ pub(in crate::ast) fn scope(
     (env, aliases)
 }
 
+/// `env` and `aliases` with what class `name` and its bases declare added,
+/// which class `own` extending it inherits (IEEE 1800-2023 8.13): not the
+/// scope around their declarations.
+fn inherit(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    own: &str,
+    env: &mut HashMap<String, i128>,
+    aliases: &mut HashMap<String, Type>,
+) {
+    for specialization in lineage(tree, name) {
+        for (key, value) in &specialization.declared_env {
+            match value {
+                Some(value) => env.insert(key.clone(), *value),
+                None => env.remove(key),
+            };
+        }
+        aliases.extend(
+            specialization
+                .declared_aliases
+                .iter()
+                .filter(|(key, _)| {
+                    **key != scope_key(&specialization.generic) || specialization.generic == own
+                })
+                .map(|(key, ty)| (key.clone(), ty.clone())),
+        );
+    }
+}
+
 /// `dimensions` and `literals` with the parameters of class `name` added,
 /// for binding the bodies of its methods.
 pub(in crate::ast) fn body_scope(
@@ -237,6 +270,16 @@ pub(in crate::ast) fn specialize(
     let native = tree.declarations();
     let declaration = super::declaration(tree, generic)
         .ok_or_else(|| unsupported(format!("class `{generic}`")))?;
+    if tree
+        .state
+        .class_declarations_repeated
+        .borrow()
+        .contains(generic)
+    {
+        return Err(unsupported(format!(
+            "class `{generic}` declared in a loop generate block"
+        )));
+    }
     // The parameters an assignment may set: those of the parameter port
     // list that are not local, in order.
     let ports = declaration
@@ -367,7 +410,7 @@ pub(in crate::ast) fn specialize(
     // The body sees the parameters and types of the bases, hidden by the
     // class's own, and the scope of the specialization (8.25.1).
     for base in &bases {
-        (env, aliases) = scope(tree, base, &env, &aliases);
+        inherit(tree, base, generic, &mut env, &mut aliases);
     }
     for (key, value) in &parameters.own_env {
         match value {
@@ -424,7 +467,9 @@ pub(in crate::ast) fn specialize(
                         )
                     });
                 if let Some(ty) = ty {
-                    aliases.insert(instances::normalize_identifier(&alias.name.spelling), ty);
+                    let name = instances::normalize_identifier(&alias.name.spelling);
+                    parameters.own_aliases.insert(name.clone(), ty.clone());
+                    aliases.insert(name, ty);
                 }
             }
         }
@@ -439,6 +484,8 @@ pub(in crate::ast) fn specialize(
                 .filter(|(key, value)| value.is_none() && !env.contains_key(*key))
                 .map(|(key, _)| key.clone())
                 .collect(),
+            declared_env: parameters.own_env,
+            declared_aliases: parameters.own_aliases,
             env,
             literals: parameters.literals,
             aliases,
@@ -949,10 +996,17 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
             ),
             None => ((*context.const_env).clone(), context.type_aliases.clone()),
         };
+        let name = instances::normalize_identifier(&class.name.spelling);
+        if item.is_some_and(|item| items.iter().filter(|other| other.id == item.id).count() > 1) {
+            tree.state
+                .class_declarations_repeated
+                .borrow_mut()
+                .insert(name.clone());
+        }
         tree.state
             .class_declaration_scopes
             .borrow_mut()
-            .insert(instances::normalize_identifier(&class.name.spelling), scope);
+            .insert(name, scope);
     }
     // Whether `tokens` is in a block of a generate construct.
     let generated = |tokens: celox_sv_syntax::TokenRange| {

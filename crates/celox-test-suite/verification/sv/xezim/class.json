@@ -79,6 +79,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::derived_classes_keep_their_declaration_scopes at 1737:3: expect_output: expected [51, 10], got [49, 10]",
+      "expectation": "Simulation",
+      "name": "class::derived_classes_keep_their_declaration_scopes",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::derived_properties_hide_base_properties",
