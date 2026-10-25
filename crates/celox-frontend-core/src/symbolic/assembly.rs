@@ -3300,11 +3300,17 @@ fn relocate_units(
         }
         let mut runtime_event_site_map = HashMap::default();
         let scope = elaborated_scope_name(root_name, path, expanded, indexed_instances);
+        let site_base = runtime_event_sites.len() as u32;
         for (local_site, site) in sim_module.runtime_event_sites.iter().enumerate() {
             let global_site = runtime_event_sites.len() as u32;
             runtime_event_site_map.insert(local_site as u32, global_site);
             let mut site = site.clone();
             site.scope = Some(scope.clone());
+            // A deferred action names the flush point of its process in the
+            // same instance.
+            if let Some(celox_design::DeferredSite::Action { queue, .. }) = &mut site.deferred {
+                *queue += site_base;
+            }
             runtime_event_sites.push(site);
         }
 

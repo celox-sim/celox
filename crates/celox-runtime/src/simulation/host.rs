@@ -134,6 +134,15 @@ pub trait HostBoundary: UnitExecutor {
         self.finish_timed_step(timestamp);
         Ok(())
     }
+
+    /// Called after [`Self::try_finish_timed_step`] when the time slot
+    /// `timestamp` is over: no more work is due at that time. A step ends
+    /// before its slot does when a process waits for zero time. The
+    /// runtime's loop calls it; a host that has work here returns
+    /// [`CompiledSlots::None`] from [`Self::compiled_slots`].
+    fn try_end_time_slot(&mut self, _timestamp: u64) -> Result<(), Halt> {
+        Ok(())
+    }
 }
 
 /// How many time slots a compiled scheduler may run at once (see

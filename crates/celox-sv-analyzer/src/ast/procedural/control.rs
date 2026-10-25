@@ -241,6 +241,10 @@ impl BodyBuilder<'_, '_, '_> {
                         failure,
                     } => {
                         let condition = self.native_assertion_condition(keyword, header)?;
+                        let celox_sv_syntax::AssertionHeader::Immediate { deferred, .. } = header
+                        else {
+                            unreachable!("matched an immediate header");
+                        };
                         let statement = native.statement(id);
                         jobs.push(Job::AssertionThen {
                             condition,
@@ -255,7 +259,15 @@ impl BodyBuilder<'_, '_, '_> {
                                     "cover" => celox_design::AssertionDirective::Cover,
                                     _ => celox_design::AssertionDirective::Assert,
                                 },
-                                deferral: celox_design::AssertionDeferral::None,
+                                deferral: match deferred {
+                                    None => celox_design::AssertionDeferral::None,
+                                    Some(celox_sv_syntax::AssertionDeferral::Zero) => {
+                                        celox_design::AssertionDeferral::Observed
+                                    }
+                                    Some(celox_sv_syntax::AssertionDeferral::Final) => {
+                                        celox_design::AssertionDeferral::Final
+                                    }
+                                },
                                 outcome: celox_design::AssertionOutcome::Fail,
                             },
                             span: super::source_span(statement.tokens, self.tree),
@@ -328,6 +340,10 @@ impl BodyBuilder<'_, '_, '_> {
                     let mut else_body = output.split_off(start);
                     if let Some((keyword, span)) = default_failure {
                         else_body = assertion_failure(&keyword, span);
+                    }
+                    if assertion.deferral != celox_design::AssertionDeferral::None {
+                        deferred_action(&then_body)?;
+                        deferred_action(&else_body)?;
                     }
                     attribute_reports(
                         &mut then_body,
