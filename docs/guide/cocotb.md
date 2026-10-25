@@ -228,16 +228,30 @@ Within one time step, the VPI callbacks cocotb waits on run at these points:
 | cocotb trigger (VPI callback) | Runs |
 |---|---|
 | `Timer` (`cbAfterDelay`), `NextTimeStep` (`cbNextSimTime`) | at the start of the time step, before the design's processes |
-| `RisingEdge`, `FallingEdge`, `Edge` of a clock or reset (`cbValueChange`) | after the edge, before the flip-flops it triggers make their nonblocking updates |
-| `Edge` of another signal (`cbValueChange`) | when the time step has settled: after the nonblocking updates and the combinational logic that follows them |
+| `RisingEdge`, `FallingEdge`, `Edge` (`cbValueChange`) | at the next boundary after the change: when a round's processes have run, before its flip-flops make their nonblocking updates; after each wave of nonblocking updates and the combinational logic that follows it; or when the time step has settled |
 | `ReadWrite` (`cbReadWriteSynch`) | when the time step has settled; writes there settle again at the same time |
-| `ReadOnly` (`cbReadOnlySynch`) | at the end of the time step |
+| `ReadOnly` (`cbReadOnlySynch`) | at the end of the time step; writes there are rejected |
 
-A write from cocotb is a blocking assignment at the current time. Reporting a
-change of a signal other than a clock or reset only once the time step has
-settled is a choice of this implementation: IEEE 1800-2023 4.7 lets a simulator
-process those events in any order, and Icarus Verilog, for example, reports a
-register's change before its combinational readers follow it.
+So the edge of a clock or reset is reported before the flip-flops it triggers
+commit, whether cocotb or the design drives it. A change is reported at the
+boundary of the wave that made it: after that wave's combinational settle, so
+a register's combinational readers already show its new value, and before the
+processes the change wakes have run. Where a callback runs relative to the
+design's own events within the time step is a choice of this implementation:
+IEEE 1800-2023 4.7 lets a simulator process those events in any order, and
+Icarus Verilog, for example, reports a register's change before its
+combinational readers follow it. For the same reason, a pulse within one wave,
+such as `x = 1; x = 0;` in one process, is not reported: a callback sees the
+value at a boundary.
+
+A write from cocotb is a blocking assignment at the current time. Outside the
+regions of a time step, in a `Timer` callback for example, a read returns the
+stored value: what combinational logic derives from a write in the same
+callback reads as before until the time step settles.
+
+Only `celox vpi build` supports designs with processes; `celox-vpi-compile`
+and its `celox-vpi-runtime` still reject them
+([#1983](https://github.com/celox-sim/celox/issues/1983)).
 
 `$stop` ends the run, as `vpiStop` does, because the executable has no
 interactive mode. Pausing instead is tracked in

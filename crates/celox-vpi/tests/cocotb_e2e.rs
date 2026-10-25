@@ -105,7 +105,28 @@ fn cocotb_observes_edges_before_nonblocking_updates() {
 #[test]
 #[ignore = "requires a cocotb installation; CI runs this test explicitly"]
 fn cocotb_runs_dut_processes_in_step() {
-    check_cocotb_native_design(&["processes.sv"], "test_processes", ".");
+    let output = check_cocotb_native_design(&["processes.sv"], "test_processes", ".");
+    // `%0t` formats in the time precision, 1 ps.
+    assert!(output.contains("at 12000 count=1\n"), "{output}");
+}
+
+#[test]
+#[ignore = "requires a cocotb installation; CI runs this test explicitly"]
+fn cocotb_forces_and_releases_a_register_of_a_timed_design() {
+    check_cocotb_native_design_with_options(
+        &["force_timed.sv"],
+        "test_force_timed",
+        ".",
+        &["--force-signal", "Top.x"],
+    );
+}
+
+#[test]
+#[ignore = "requires a cocotb installation; CI runs this test explicitly"]
+fn cocotb_ends_at_the_designs_finish() {
+    let output = check_cocotb_native_design(&["finish.sv"], "test_finish", ".");
+    assert!(output.contains("finishing at 30\n"), "{output}");
+    assert!(!output.contains("late"), "{output}");
 }
 
 /// The `TRACE` lines a cocotb run of `test_processes` logged.
@@ -194,16 +215,18 @@ fn cocotb_accepts_femtosecond_clock_periods() {
     );
 }
 
-fn check_cocotb_native_design(source: &[&str], module: &str, filter: &str) {
-    check_cocotb_native_design_with_options(source, module, filter, &[]);
+fn check_cocotb_native_design(source: &[&str], module: &str, filter: &str) -> String {
+    check_cocotb_native_design_with_options(source, module, filter, &[])
 }
 
+/// Build `source`, run `module`'s tests matching `filter` on it, and check
+/// that bad selections fail. Returns the standard output of the run.
 fn check_cocotb_native_design_with_options(
     source: &[&str],
     module: &str,
     filter: &str,
     options: &[&str],
-) {
+) -> String {
     let python = env::var_os("CELOX_COCOTB_PYTHON")
         .expect("CELOX_COCOTB_PYTHON must name the cocotb Python interpreter");
     let python = python.to_string_lossy().into_owned();
@@ -299,6 +322,7 @@ fn check_cocotb_native_design_with_options(
         !results.exists(),
         "failed cocotb startup left stale results in place"
     );
+    String::from_utf8_lossy(&runtime.stdout).into_owned()
 }
 
 #[test]

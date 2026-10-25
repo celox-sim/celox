@@ -87,6 +87,12 @@ pub(super) struct CallbackState {
     pub(super) running: bool,
     /// The time whose ReadOnly region a timed simulation ran last.
     read_only_at: Option<u64>,
+    /// ReadOnly callbacks are running: VPI writes are rejected.
+    pub(super) read_only: bool,
+    /// Rounds a timed simulation spent at the current time: settles, region
+    /// passes and due timers. Bounded, so that callbacks that never let the
+    /// time step end report it instead of hanging.
+    rounds_at_time: usize,
     pub(super) detach_on_stop: bool,
     error: Option<String>,
 }
@@ -346,7 +352,7 @@ pub(super) fn run() -> bool {
             }
             break;
         }
-        progressed |= fire_all(CB_READ_ONLY_SYNCH);
+        progressed |= fire_read_only();
 
         if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
             break;
@@ -412,7 +418,50 @@ fn watched_signals() -> Vec<celox::SignalRef> {
 }
 
 fn set_time(time: u64) {
-    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.time = time));
+    with_host(|host| {
+        borrow_cell_mut(&host.callbacks, |state| {
+            if state.time != time {
+                state.rounds_at_time = 0;
+            }
+            state.time = time;
+        })
+    });
+}
+
+/// The rounds a timed simulation may spend at one time.
+const ROUNDS_AT_TIME: usize = 1_000_000;
+
+/// Count a round at the current time; `false`, with the run failed, once a
+/// time step has spent [`ROUNDS_AT_TIME`] of them.
+fn charge_round() -> bool {
+    let exceeded = with_host(|host| {
+        borrow_cell_mut(&host.callbacks, |state| {
+            state.rounds_at_time += 1;
+            (state.rounds_at_time > ROUNDS_AT_TIME).then_some(state.time)
+        })
+    });
+    if let Some(time) = exceeded {
+        fail(format!(
+            "simulation does not advance at time {time}: callbacks and the settles of their \
+             writes repeated {ROUNDS_AT_TIME} times"
+        ));
+        return false;
+    }
+    true
+}
+
+/// Fire the ReadOnly callbacks, with VPI writes rejected (IEEE 1800-2023
+/// 38.36.2).
+fn fire_read_only() -> bool {
+    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.read_only = true));
+    let progressed = fire_all(CB_READ_ONLY_SYNCH);
+    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.read_only = false));
+    progressed
+}
+
+/// Whether ReadOnly callbacks are running.
+pub(super) fn in_read_only() -> bool {
+    with_host(|host| borrow_cell(&host.callbacks, |state| state.read_only))
 }
 
 fn current_time() -> u64 {
@@ -438,7 +487,7 @@ enum Regions {
 fn settled_regions() -> Regions {
     take_timed_writes();
     loop {
-        if finish_requested() {
+        if finish_requested() || !charge_round() {
             return Regions::Done;
         }
         if dispatch_value_changes() {
@@ -461,7 +510,7 @@ fn settled_regions() -> Regions {
             return Regions::Wrote;
         }
     }
-    fire_all(CB_READ_ONLY_SYNCH);
+    fire_read_only();
     with_host(|host| {
         borrow_cell_mut(&host.callbacks, |state| {
             state.read_only_at = Some(state.time)
@@ -470,8 +519,9 @@ fn settled_regions() -> Regions {
     Regions::Done
 }
 
-/// Shows a timed simulation's slots to the VPI callbacks: value changes of
-/// clocks before the domains commit, and the regions of each settled slot.
+/// Shows a timed simulation's slots to the VPI callbacks: value changes at
+/// every wave boundary, so that an edge is seen before the domains it
+/// triggers commit, and the regions of each settled slot.
 struct TimedObserver;
 
 impl celox::SlotObserver<celox::NativeBackend> for TimedObserver {
@@ -538,16 +588,7 @@ pub(super) fn run_timed() -> bool {
         super::with_timed_mut(|timed| timed.simulation = Some(simulation));
     }
     fire_all(CB_START_OF_SIMULATION);
-    let mut iterations = 0usize;
-    while !finish_requested() {
-        iterations += 1;
-        if iterations > 1_000_000 {
-            fail(
-                "VPI callback scheduler exceeded 1000000 iterations without advancing time"
-                    .to_string(),
-            );
-            break;
-        }
+    while !finish_requested() && charge_round() {
         let due = with_host(|host| {
             borrow_cell(&host.callbacks, |state| {
                 state
@@ -567,8 +608,19 @@ pub(super) fn run_timed() -> bool {
                 break;
             }
             set_time(time);
-            iterations = 0;
             fire_all(CB_NEXT_SIM_TIME);
+        } else if with_host(|host| borrow_cell(&host.callbacks, |state| state.read_only_at))
+            == Some(time)
+            && event != Some(time)
+        {
+            // A zero-delay timer that a ReadOnly callback registered runs,
+            // still read-only: the time step's regions do not open again.
+            with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.read_only = true));
+            for id in due_ids() {
+                fire(id);
+            }
+            with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.read_only = false));
+            continue;
         }
         for id in due_ids() {
             fire(id);
@@ -590,14 +642,6 @@ pub(super) fn run_timed() -> bool {
                 break;
             }
             timed_step(|simulation| simulation.run_until(time));
-            iterations += 1;
-            if iterations > 1_000_000 {
-                fail(
-                    "VPI callback scheduler exceeded 1000000 iterations without advancing time"
-                        .to_string(),
-                );
-                break;
-            }
         }
     }
     let finished = finish_requested();

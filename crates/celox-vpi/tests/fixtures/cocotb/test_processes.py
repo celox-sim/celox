@@ -59,3 +59,16 @@ async def data_changes_are_seen_settled(dut):
         dut._log.info("settled at value change: %s", settled)
         if cocotb.SIM_NAME == "Celox":
             assert settled
+
+
+@cocotb.test()
+async def changes_are_seen_before_their_waiters_run(dut):
+    """A change is reported at the boundary of the wave that made it, before
+    the processes it wakes have run."""
+    for _ in range(3):
+        await Edge(dut.count)
+        seen = (int(dut.count.value) - int(dut.mirror.value)) % 256
+        await ReadOnly()
+        settled = (int(dut.count.value) - int(dut.mirror.value)) % 256
+        trace(dut, f"mirror behind by {seen} at the change, {settled} at ReadOnly")
+        assert (seen, settled) == (1, 0)

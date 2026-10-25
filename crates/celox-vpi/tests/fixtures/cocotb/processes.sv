@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 module Top(input logic tick, input logic go, output logic [7:0] count, output logic ack,
-           output logic [7:0] twice, output logic [7:0] delayed);
+           output logic [7:0] twice, output logic [7:0] delayed, output logic [7:0] mirror);
     logic clk = 0;
     always #5 clk = ~clk;
     initial count = 0;
@@ -11,6 +11,11 @@ module Top(input logic tick, input logic go, output logic [7:0] count, output lo
         ack = 0;
         @(posedge go);
         #3 ack = 1;
+    end
+    initial mirror = 0;
+    initial forever begin
+        @(count);
+        mirror = count;
     end
     initial delayed = 0;
     always @(posedge tick) #1 delayed = count;

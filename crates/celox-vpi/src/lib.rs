@@ -1525,6 +1525,10 @@ pub unsafe extern "C" fn vpi_put_value(
     when: *const c_void,
     flags: i32,
 ) -> VpiHandle {
+    // A ReadOnly callback may not write (IEEE 1800-2023 38.36.2, Table 38-6).
+    if callbacks::in_read_only() {
+        return ptr::null_mut();
+    }
     let inertial_is_immediate = flags == VPI_INERTIAL_DELAY
         && (when.is_null() || {
             // Safety: a non-null VPI delay pointer addresses `s_vpi_time`.
