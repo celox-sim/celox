@@ -98,6 +98,18 @@ sv_backends! {
         @case "procedural::mixed_blocking_and_nonblocking_writes_keep_their_regions";
     }
 
+    fn edge_processes_share_a_blocking_loop_variable(sim) {
+        @case "procedural::edge_processes_share_a_blocking_loop_variable";
+    }
+
+    fn edge_processes_of_two_clocks_share_a_blocking_variable(sim) {
+        @case "procedural::edge_processes_of_two_clocks_share_a_blocking_variable";
+    }
+
+    fn reset_processes_share_a_loop_index(sim) {
+        @case "procedural::reset_processes_share_a_loop_index";
+    }
+
     fn constant_functions_size_parameters_and_ports(sim) {
         @case "procedural::constant_functions_size_parameters_and_ports";
     }

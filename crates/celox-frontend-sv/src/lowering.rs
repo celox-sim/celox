@@ -1117,6 +1117,60 @@ fn shared_edge_memories(
     memories
 }
 
+/// Variables, other than unpacked arrays, that several plain edge-triggered
+/// `always` processes write only by blocking assignments, such as a loop
+/// index they share. A variable may have several procedural writers, and the
+/// last write determines its value (IEEE 1800-2023 6.5); only always_comb,
+/// always_latch and always_ff restrict it to one process (9.2.2.2, 9.2.2.4).
+/// The processes read and write the variable's stable state directly (see
+/// `Ff::with_shared_variables`).
+fn shared_edge_variables(
+    module: &sv::ir::Module,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> HashSet<String> {
+    let first_ff = module.comb_processes().len();
+    let end_ff = first_ff + module.ff_processes().len();
+    let mut nonblocking = HashSet::default();
+    for process in module.ff_processes() {
+        for stmt in process.body() {
+            stmt.walk(&mut |stmt| match stmt {
+                sv::ir::Stmt::Assign {
+                    lhs,
+                    nonblocking: true,
+                    ..
+                } => {
+                    nonblocking.insert(lhs.name());
+                }
+                sv::ir::Stmt::AssignConcat {
+                    parts,
+                    nonblocking: true,
+                    ..
+                } => nonblocking.extend(parts.iter().map(sv::ir::LValue::name)),
+                _ => {}
+            });
+        }
+    }
+    module
+        .signals()
+        .iter()
+        .filter(|signal| {
+            !signal.is_net()
+                && signal.r#type().unpacked_ranges().is_empty()
+                && !nonblocking.contains(signal.name())
+        })
+        .filter(|signal| {
+            let drivers = local_driver_ranges(module, signal.name(), constants, parameter_types);
+            drivers.iter().any(|(id, _)| drivers[0].0 != *id)
+                && drivers.iter().all(|(id, _)| {
+                    (first_ff..end_ff).contains(id)
+                        && !module.ff_processes()[id - first_ff].is_always_ff()
+                })
+        })
+        .map(|signal| signal.name().to_string())
+        .collect()
+}
+
 /// The unpacked arrays that only edge-triggered processes of `module` drive.
 /// A process that writes one of them only by nonblocking assignments, at
 /// least one of them at a run-time element, publishes just the elements it
@@ -1399,7 +1453,7 @@ fn validate_variable_driver_ranges(
     module: &sv::ir::Module,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
-    shared_memories: &HashSet<String>,
+    shared: &HashSet<String>,
 ) -> Result<(), sv::AnalyzerError> {
     for port in module
         .ports()
@@ -1448,7 +1502,7 @@ fn validate_variable_driver_ranges(
                     && net_driver_ranges_overlap(left.1, right.1)
             })
         });
-        if overlapping_continuous || (has_overlap && !shared_memories.contains(signal_name)) {
+        if overlapping_continuous || (has_overlap && !shared.contains(signal_name)) {
             return Err(sv::AnalyzerError::Unsupported(format!(
                 "multiple variable drivers for `{signal_name}`"
             )));
@@ -3303,7 +3357,9 @@ fn lower_module_with_overrides(
         foreign_writes,
         warnings,
     );
-    validate_variable_driver_ranges(module, &constants, &parameter_types, &shared_memories)?;
+    let shared_variables = shared_edge_variables(module, &constants, &parameter_types);
+    let shared_all = shared_memories.union(&shared_variables).cloned().collect();
+    validate_variable_driver_ranges(module, &constants, &parameter_types, &shared_all)?;
     validate_foreign_drivers(
         module,
         &constants,
@@ -3651,6 +3707,7 @@ fn lower_module_with_overrides(
             &ff_event_roles,
             &shared_memories,
             foreign_writes,
+            &shared_variables,
             &mut repeated_ff_writes,
         )?;
         (
@@ -9141,6 +9198,7 @@ fn lower_ff_processes(
     ff_event_roles: &[FfEventRole],
     shared_memories: &HashSet<String>,
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
+    shared_variables: &HashSet<String>,
     repeated_writes: &mut Vec<FfWriteStream>,
 ) -> Result<SvFfBlocks, sv::AnalyzerError> {
     let mut parallel_ff_parts = HashMap::<_, Vec<_>>::default();
@@ -9269,6 +9327,7 @@ fn lower_ff_processes(
             staged,
         } = ff::Ff::new(pm, random_seeds[&(0, index)])
             .with_sparse_memories(shared_memories)
+            .with_shared_variables(shared_variables)
             .with_sparse_candidates(&edge_memories)
             .with_window_writes(&window_writes)
             .lower_process(process.body())?;
