@@ -4185,13 +4185,30 @@ fn rejects_enum_initializers_that_do_not_fit_the_base_type() {
     let error = cranelift_build_error(
         r#"
         module Top(output logic [1:0] y);
-            typedef enum logic [1:0] { A = 3'd4 } E;
+            typedef enum logic [1:0] { A = 4 } E;
             assign y = A;
         endmodule
         "#,
     );
     assert!(
         error.contains("enum member `A` value does not fit its base type"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_enum_literals_with_mismatched_explicit_widths() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(output logic [1:0] y);
+            typedef enum logic [1:0] { A = 3'd1 } E;
+            assign y = A;
+        endmodule
+        "#,
+    );
+    // The value fits, but an explicitly sized literal must match the enum base.
+    assert!(
+        error.contains("enum member `A` sized literal width 3 differs from base width 2"),
         "unexpected error: {error}"
     );
 }
