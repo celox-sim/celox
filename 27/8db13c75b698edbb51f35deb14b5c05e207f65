@@ -1,1 +1,1 @@
-Review: one-shot initial blocks count as writers that conflict with always_ff/always_comb/always_latch/continuous writers of other instances.
+Local review: assembly rejects an always_ff/always_comb/always_latch run as a process that overlaps another process's write (mixed-language tops); nonblocking process writes tracked in #1969.
