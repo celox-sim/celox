@@ -1,0 +1,1 @@
+Rebased onto master: OBJECT_COPY moved to opcode 63 after randc took 62. Local review: a static class-handle property is accepted as a shallow-copy source. sv-tests totals 557/559.
