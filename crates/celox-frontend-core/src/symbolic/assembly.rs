@@ -59,6 +59,11 @@ pub struct FusedFfAction {
 /// Adapter hook for source-aware FF lowering used by shared-clock scheduling,
 /// with or without a preceding comb phase. The scheduler and all identities
 /// crossing this trait remain source neutral.
+/// The most events whose combined comb-then-FF ticks each get their own
+/// program with a copy of the combinational program
+/// ([`SirProgram::merge_comb_apply`]).
+pub const MERGED_COMB_APPLY_EVENTS: usize = 4;
+
 pub trait FusedFfLoweringFactory {
     fn create(
         &self,
@@ -1590,6 +1595,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    // Every event's combined comb-then-FF tick gets its own program, with
+    // the combinational program in it, only while there are a handful of
+    // events; that copy lets the FF part use comb values in registers.
+    // Beyond that the copies would multiply the design by its event count,
+    // so the ticks share the one `eval_comb` program instead.
+    let merge_comb_apply = eval_apply_ffs.len() <= MERGED_COMB_APPLY_EVENTS;
     let mut eval_comb_apply_ffs = HashMap::default();
     let mut fused_direct_ff_writes = HashMap::default();
     if let (
@@ -1609,8 +1620,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             Vec<usize>,
             (
                 Option<Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-                Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
-                Vec<VarAtomBase<RegionedAbsoluteAddr>>,
+                Option<(
+                    Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+                    Vec<VarAtomBase<RegionedAbsoluteAddr>>,
+                )>,
             ),
         >::default();
         let schedule = |paths, actions| {
@@ -1638,13 +1651,14 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         };
         for (trigger, actions) in actions {
             let action_ids = actions.iter().map(|action| action.id).collect::<Vec<_>>();
-            if let Some((ff_only, units, direct_ff_writes)) = fused_schedule_cache.get(&action_ids)
-            {
+            if let Some((ff_only, fused)) = fused_schedule_cache.get(&action_ids) {
                 if let Some(ff_only) = ff_only {
                     eval_apply_ffs.insert(trigger, ff_only.clone());
                 }
-                eval_comb_apply_ffs.insert(trigger, units.clone());
-                fused_direct_ff_writes.insert(trigger, direct_ff_writes.clone());
+                if let Some((units, direct_ff_writes)) = fused {
+                    eval_comb_apply_ffs.insert(trigger, units.clone());
+                    fused_direct_ff_writes.insert(trigger, direct_ff_writes.clone());
+                }
                 continue;
             }
             let fused_start = flatten_timing.then(std::time::Instant::now);
@@ -1658,21 +1672,23 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             } else {
                 None
             };
-            let fused = schedule(clock_comb_blocks.clone(), actions)?;
+            let fused = if merge_comb_apply {
+                let fused = schedule(clock_comb_blocks.clone(), actions)?;
+                Some((fused.execution_units, fused.direct_ff_writes))
+            } else {
+                None
+            };
             if let Some(start) = fused_start {
                 tracing::debug!("[flatten] scheduler::sort_clock: {:?}", start.elapsed());
             }
-            let direct_ff_writes = fused.direct_ff_writes;
-            let units = fused.execution_units;
-            fused_schedule_cache.insert(
-                action_ids,
-                (ff_only.clone(), units.clone(), direct_ff_writes.clone()),
-            );
+            fused_schedule_cache.insert(action_ids, (ff_only.clone(), fused.clone()));
             if let Some(ff_only) = ff_only {
                 eval_apply_ffs.insert(trigger, ff_only);
             }
-            eval_comb_apply_ffs.insert(trigger, units);
-            fused_direct_ff_writes.insert(trigger, direct_ff_writes);
+            if let Some((units, direct_ff_writes)) = fused {
+                eval_comb_apply_ffs.insert(trigger, units);
+                fused_direct_ff_writes.insert(trigger, direct_ff_writes);
+            }
         }
     }
 
@@ -1990,6 +2006,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     let source_sir = SirProgram {
         eval_apply_ffs,
         eval_comb_apply_ffs,
+        merge_comb_apply,
         eval_only_ffs,
         apply_ffs,
         eval_comb,
