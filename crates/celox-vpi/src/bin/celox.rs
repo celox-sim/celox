@@ -32,6 +32,8 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// Parsed once per process; boxing would only complicate the matches.
+#[allow(clippy::large_enum_variant)]
 enum CliCommand {
     /// Run a SystemVerilog or Veryl native testbench.
     Run(RunArgs),
@@ -53,6 +55,41 @@ struct RunArgs {
     /// Does not bound compilation or work within a single step/tick.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     max_steps: Option<u64>,
+
+    #[command(flatten)]
+    save_state: SaveStateArgs,
+}
+
+/// When `celox run` saves state files for `celox state dump/diff`.
+#[derive(Args, Clone, Default)]
+struct SaveStateArgs {
+    /// Count the cycles of this signal for --save-state-at, such as
+    /// `tb.clk`: a cycle is a change of the signal to 1.
+    #[arg(long, value_name = "SIGNAL", requires = "save_state_at")]
+    save_state_on: Option<String>,
+    /// Save the state after these cycles of --save-state-on, counted from 1.
+    #[arg(
+        long,
+        value_name = "N",
+        value_delimiter = ',',
+        requires = "save_state_on",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    save_state_at: Vec<u64>,
+    /// Save the state at these simulation times (SystemVerilog), in units of
+    /// the design's global time precision.
+    #[arg(long, value_name = "T", value_delimiter = ',')]
+    save_state_at_time: Vec<u64>,
+    /// The directory of the saved files, `<signal>-<N>.state` and
+    /// `time-<T>.state` (default: the current directory).
+    #[arg(long, value_name = "DIR")]
+    save_state_dir: Option<PathBuf>,
+}
+
+impl SaveStateArgs {
+    fn is_empty(&self) -> bool {
+        self.save_state_on.is_none() && self.save_state_at_time.is_empty()
+    }
 }
 
 struct RunConfig {
@@ -60,6 +97,7 @@ struct RunConfig {
     design: Design,
     opt_level: celox::OptLevel,
     max_steps: u64,
+    save_state: SaveStateArgs,
 }
 
 fn resolve_design(arguments: DesignArgs) -> Design {
@@ -114,6 +152,7 @@ fn resolve_run_config(arguments: RunArgs) -> RunConfig {
             .or(design.max_steps)
             .unwrap_or(1_000_000),
         design,
+        save_state: arguments.save_state,
     }
 }
 
@@ -136,6 +175,12 @@ fn run_testbench(arguments: RunArgs) -> Result<(), String> {
         })
     {
         return Err("pass .sv/.v sources, or Veryl project sources".into());
+    }
+    if !arguments.save_state.is_empty() {
+        return Err(
+            "--save-state-on and --save-state-at-time currently require a SystemVerilog testbench"
+                .into(),
+        );
     }
     runner::run(arguments.execution, arguments.design, arguments.max_steps).map_err(|error| {
         if let runner::RunError::InvalidConfiguration { .. } = &error {
@@ -174,7 +219,8 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
                 .$build()
                 .map_err(|error| format!("compilation failed:\n{error}"))?;
             report_warnings(simulation.warnings())?;
-            simulate_sv(simulation, max_steps, &mut std::io::stdout().lock())
+            let saves = StateSaves::new(&simulation, &arguments.design.top, &arguments.save_state)?;
+            simulate_sv(simulation, max_steps, saves, &mut std::io::stdout().lock())
         }};
     }
     match arguments.execution.backend() {
@@ -192,28 +238,204 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
 fn simulate_sv<B: celox::SimBackend>(
     mut simulation: celox::Simulation<B>,
     max_steps: u64,
+    mut saves: StateSaves,
     output: &mut impl Write,
 ) -> Result<(), String> {
     let mut failed = false;
     let initial = simulation.eval_comb();
     drain_sv_output(&mut simulation, output, &mut failed)?;
     initial.map_err(|error| error.to_string())?;
+    saves.start(&mut simulation);
     let mut steps = 0;
-    while !simulation.is_finished() && simulation.next_event_time().is_some() {
+    while !simulation.is_finished()
+        && let Some(next) = simulation.next_event_time()
+    {
         if steps == max_steps {
             return Err(format!("simulation exceeded --max-steps {}", max_steps));
         }
+        saves.before(&mut simulation, next)?;
         let step = simulation.step();
         drain_sv_output(&mut simulation, output, &mut failed)?;
         if step.map_err(|error| error.to_string())?.is_none() {
             break;
         }
+        saves.after_step(&mut simulation)?;
         steps += 1;
     }
+    saves.finish(&mut simulation)?;
     if failed {
         return Err("SystemVerilog testbench reported an assertion failure or $error".to_string());
     }
     Ok(())
+}
+
+/// The state files a SystemVerilog run saves (`--save-state-*`).
+///
+/// A cycle of the counted signal is a time step at whose end the signal is
+/// 1 while it was not at the end of the previous one (or after the initial
+/// settle). Its file is saved right after that time step, with every region
+/// of the time done. A file for time `T` holds the state after everything
+/// due at times up to `T`, saved before the run advances past `T`.
+#[cfg(feature = "systemverilog")]
+#[derive(Default)]
+struct StateSaves {
+    counted: Option<(String, celox::SignalRef)>,
+    /// The cycles still to save, in descending order.
+    cycles: Vec<u64>,
+    count: u64,
+    high: bool,
+    /// The times still to save, in descending order.
+    times: Vec<u64>,
+    directory: PathBuf,
+}
+
+#[cfg(feature = "systemverilog")]
+impl StateSaves {
+    fn new<B: celox::SimBackend>(
+        simulation: &celox::Simulation<B>,
+        top: &str,
+        arguments: &SaveStateArgs,
+    ) -> Result<Self, String> {
+        let counted = match &arguments.save_state_on {
+            Some(path) => Some((path.clone(), resolve_signal_path(simulation, top, path)?)),
+            None => None,
+        };
+        let descending = |values: &[u64]| {
+            let mut values = values.to_vec();
+            values.sort_unstable_by(|a, b| b.cmp(a));
+            values.dedup();
+            values
+        };
+        let directory = arguments
+            .save_state_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."));
+        if !arguments.is_empty() {
+            std::fs::create_dir_all(&directory)
+                .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
+        }
+        Ok(Self {
+            counted,
+            cycles: descending(&arguments.save_state_at),
+            count: 0,
+            high: false,
+            times: descending(&arguments.save_state_at_time),
+            directory,
+        })
+    }
+
+    fn level<B: celox::SimBackend>(
+        simulation: &mut celox::Simulation<B>,
+        signal: celox::SignalRef,
+    ) -> bool {
+        let (value, mask) = simulation.get_four_state(signal);
+        value == 1u8.into() && mask == 0u8.into()
+    }
+
+    fn start<B: celox::SimBackend>(&mut self, simulation: &mut celox::Simulation<B>) {
+        if let Some((_, signal)) = self.counted {
+            self.high = Self::level(simulation, signal);
+        }
+    }
+
+    /// Save the times before `next`, the time the next step runs.
+    fn before<B: celox::SimBackend>(
+        &mut self,
+        simulation: &mut celox::Simulation<B>,
+        next: u64,
+    ) -> Result<(), String> {
+        while let Some(&time) = self.times.last()
+            && time < next
+        {
+            self.times.pop();
+            self.save(simulation, format!("time-{time}.state"))?;
+        }
+        Ok(())
+    }
+
+    fn after_step<B: celox::SimBackend>(
+        &mut self,
+        simulation: &mut celox::Simulation<B>,
+    ) -> Result<(), String> {
+        let Some((name, signal)) = &self.counted else {
+            return Ok(());
+        };
+        let (name, signal) = (name.clone(), *signal);
+        let high = Self::level(simulation, signal);
+        let rose = high && !self.high;
+        self.high = high;
+        if rose {
+            self.count += 1;
+            if self.cycles.last() == Some(&self.count) {
+                self.cycles.pop();
+                self.save(simulation, format!("{name}-{}.state", self.count))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// After the run: nothing changes any more, so the state at a later
+    /// time is the final one; a cycle not reached is an error.
+    fn finish<B: celox::SimBackend>(
+        &mut self,
+        simulation: &mut celox::Simulation<B>,
+    ) -> Result<(), String> {
+        self.before(simulation, u64::MAX)?;
+        if let Some(cycle) = self.cycles.last() {
+            let (name, _) = self.counted.as_ref().expect("cycles count a signal");
+            return Err(format!(
+                "the run ended after {} cycles of {name}, before cycle {cycle} of --save-state-at",
+                self.count
+            ));
+        }
+        Ok(())
+    }
+
+    fn save<B: celox::SimBackend>(
+        &self,
+        simulation: &mut celox::Simulation<B>,
+        name: String,
+    ) -> Result<(), String> {
+        let path = self.directory.join(name);
+        let state = simulation
+            .save_state()
+            .map_err(|error| format!("cannot save {}: {error}", path.display()))?;
+        let mut bytes = Vec::new();
+        state
+            .write_to(&mut bytes)
+            .and_then(|()| std::fs::write(&path, bytes))
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))
+    }
+}
+
+/// Resolve `path`, a hierarchical signal name such as `tb.cpu.clk` or
+/// `cpu[1].clk`, which may start with the top module's name.
+#[cfg(feature = "systemverilog")]
+fn resolve_signal_path<B: celox::SimBackend>(
+    simulation: &celox::Simulation<B>,
+    top: &str,
+    path: &str,
+) -> Result<celox::SignalRef, String> {
+    let mut segments: Vec<&str> = path.split('.').collect();
+    if segments.len() > 1 && segments[0] == top {
+        segments.remove(0);
+    }
+    let var = segments.pop().unwrap_or_default();
+    let instances = segments
+        .iter()
+        .map(
+            |segment| match segment.strip_suffix(']').and_then(|s| s.split_once('[')) {
+                Some((name, index)) => index
+                    .parse()
+                    .map(|index| (name, index))
+                    .map_err(|_| format!("invalid instance index in `{path}`")),
+                None => Ok((*segment, 0)),
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    simulation
+        .try_child_signal(&instances, var)
+        .map_err(|error| format!("--save-state-on {path}: {error}"))
 }
 
 #[cfg(feature = "systemverilog")]
@@ -924,7 +1146,7 @@ mod tests {
                 .unwrap();
         simulation.add_clock("clk", 2, 1);
         let mut output = Vec::new();
-        let error = simulate_sv(simulation, 3, &mut output).unwrap_err();
+        let error = simulate_sv(simulation, 3, StateSaves::default(), &mut output).unwrap_err();
         assert!(error.contains("exceeded --max-steps 3"));
         assert!(String::from_utf8(output).unwrap().contains("tick"));
     }
@@ -943,7 +1165,7 @@ mod tests {
             .build()
             .unwrap();
             let mut output = Vec::new();
-            let result = simulate_sv(simulation, 10, &mut output);
+            let result = simulate_sv(simulation, 10, StateSaves::default(), &mut output);
             (result, String::from_utf8(output).unwrap())
         };
         let (result, output) = run("$info");

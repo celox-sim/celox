@@ -1103,6 +1103,16 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.child_signal(instance_path, var)
     }
 
+    /// Like [`Self::child_signal`], returning an error for a path that does
+    /// not resolve.
+    pub fn try_child_signal(
+        &self,
+        instance_path: &[(&str, usize)],
+        var: &str,
+    ) -> Result<SignalRef, crate::ir::AddrLookupError> {
+        self.simulator.try_child_signal(instance_path, var)
+    }
+
     /// Registers a clock signal by event ID.
     ///
     /// Invalid IDs and IDs that do not resolve to events are ignored for
