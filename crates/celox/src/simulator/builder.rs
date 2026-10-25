@@ -3949,32 +3949,21 @@ mod host {
         /// of `program`, its runtime metadata. A differential simulation
         /// loads a second copy of the image for its shadow.
         #[cfg(any(
-            target_arch = "x86_64",
-            feature = "arm64-codegen",
-            target_arch = "aarch64"
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
         ))]
-        #[allow(unreachable_code)]
         fn start_native_image(
             image: crate::backend::native::NativeProgramImage,
             program: crate::ir::RuntimeProgram,
-            mut warnings: Vec<CompilationWarning>,
+            warnings: Vec<CompilationWarning>,
             options: SimulatorOptions,
             vcd_path: Option<std::path::PathBuf>,
             injected_components: crate::InjectedComponents,
         ) -> Result<crate::Simulation<crate::backend::native::NativeBackend>, SimulatorError>
         {
-            #[cfg(any(
-                all(feature = "arm64-codegen", not(target_arch = "aarch64")),
-                all(feature = "x86_64-codegen", not(target_arch = "x86_64"))
-            ))]
-            {
-                let _ = (image, program, options, vcd_path, injected_components);
-                return Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError)
-                    .with_warnings(warnings));
+            if let Err(error) = validate_native_vcd_layout(image.layout(), &program, &vcd_path) {
+                return Err(error.with_warnings(warnings));
             }
-
-            validate_native_vcd_layout(image.layout(), &program, &vcd_path)
-                .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             let load = |image, options: &SimulatorOptions| {
                 // Safety: callers either produced the image in this process
                 // or loaded it from an explicitly trusted native-image
@@ -3983,15 +3972,19 @@ mod host {
                     crate::backend::native::NativeBackend::from_image_with_dpi(image, &options.dpi)
                 }
             };
-            let shadow = Self::start_shadow(
+            let shadow = match Self::start_shadow(
                 |shadow_options| load(image.clone(), shadow_options),
                 &program,
                 &options,
                 &injected_components,
-            )
-            .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
-            let backend = load(image, &options)
-                .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
+            ) {
+                Ok(shadow) => shadow,
+                Err(error) => return Err(error.with_warnings(warnings)),
+            };
+            let backend = match load(image, &options) {
+                Ok(backend) => backend,
+                Err(error) => return Err(error.with_warnings(warnings)),
+            };
             let mut simulation = Self::start_simulation(
                 backend,
                 program,
@@ -4004,6 +3997,25 @@ mod host {
                 simulation.set_shadow(shadow);
             }
             Ok(simulation)
+        }
+
+        /// A cross-compiling build cannot execute the code of a native image.
+        #[cfg(any(
+            all(feature = "arm64-codegen", not(target_arch = "aarch64")),
+            all(feature = "x86_64-codegen", not(target_arch = "x86_64"))
+        ))]
+        fn start_native_image(
+            image: crate::backend::native::NativeProgramImage,
+            program: crate::ir::RuntimeProgram,
+            warnings: Vec<CompilationWarning>,
+            options: SimulatorOptions,
+            vcd_path: Option<std::path::PathBuf>,
+            injected_components: crate::InjectedComponents,
+        ) -> Result<crate::Simulation<crate::backend::native::NativeBackend>, SimulatorError>
+        {
+            let _ = (image, program, options, vcd_path, injected_components);
+            Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                .with_warnings(warnings))
         }
 
         /// Initialize a timed simulation of `program` compiled into
