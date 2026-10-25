@@ -303,6 +303,52 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 emits duplicate srandom declarations for the inherited randc control case using both base and derived handles. The shared assertions retain cyclic state and random-mode coverage under IEEE 1800-2023 18.4.2, 18.6.2 and 18.8.",
+      "expectation": "Simulation",
+      "name": "class::randomization_cyclic_controls",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_randc_inheritance",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 emits duplicate srandom declarations for the inherited randc control case using both base and derived handles. The shared assertions retain cyclic state and random-mode coverage under IEEE 1800-2023 18.4.2, 18.6.2 and 18.8.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_randc_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 treats the randc enum typedef alias as its underlying integer. Generated __VBasicRand assigns the cyclic integer draw directly without an enum value table, producing undeclared values. IEEE 1800-2023 18.3 and 18.4.2 require a permutation of declared values. The direct enum and integer cycle case passes unchanged.",
+      "expectation": "Simulation",
+      "name": "class::randomization_cyclic_enum_alias",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_randc_enum_alias",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 treats the randc enum typedef alias as its underlying integer. Generated __VBasicRand assigns the cyclic integer draw directly without an enum value table, producing undeclared values. IEEE 1800-2023 18.3 and 18.4.2 require a permutation of declared values. The direct enum and integer cycle case passes unchanged.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_randc_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
     }
   ]
 }

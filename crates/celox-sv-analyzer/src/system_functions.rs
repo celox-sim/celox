@@ -793,6 +793,11 @@ pub enum ObjectOp {
     ClassOf,
     /// Advance the object's independent RNG, returning 64 random bits.
     Random,
+    /// Draw a domain index without replacement for the property at `offset`.
+    RandomCyclic {
+        offset: u32,
+        count: u16,
+    },
     /// Seed the object's RNG from the second argument.
     Seed,
     /// Validate a receiver; a nonzero class also rejects unsupported dynamic
@@ -811,7 +816,7 @@ impl ObjectOp {
     /// The width and signedness of the result.
     pub fn result_type(&self) -> (usize, bool) {
         match self {
-            Self::Random => (64, false),
+            Self::Random | Self::RandomCyclic { .. } => (64, false),
             Self::Seed
             | Self::Check(_)
             | Self::ModeSet(_)
@@ -834,6 +839,7 @@ impl fmt::Display for ObjectOp {
             Self::Store(_) => "property write",
             Self::ClassOf => "class query",
             Self::Random => "object random bits",
+            Self::RandomCyclic { .. } => "object random cyclic index",
             Self::Seed => "object random seed",
             Self::Check(_) => "object receiver check",
             Self::ModeGet(..) => "random mode query",
