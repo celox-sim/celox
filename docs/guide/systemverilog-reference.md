@@ -16,7 +16,7 @@ synthesis and is tested at the design level.
 
 | Area | Supported |
 | --- | --- |
-| Modules | ANSI ports, non-ANSI ports (a header of port names and body `input` / `output` / `inout` declarations, optionally completed by a net or variable declaration of the same name), `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, implicit nets of output port connections and continuous assignment targets (`default_nettype none` disables them), hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them) |
+| Modules | ANSI ports, non-ANSI ports (a header of port names and body `input` / `output` / `inout` declarations, optionally completed by a net or variable declaration of the same name), `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, implicit nets of output port connections and continuous assignment targets (`default_nettype none` disables them), hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them), `inout` ports below the top module whose net has one continuous driver on either side, such as a tristate `assign io = oe ? d : 'z;` (both sides read the driven value, or `z`) |
 | Programs | `program` declarations with ports and parameters, instantiated from modules like a module; their `initial` procedures run in the reactive region set (see [Programs](#programs)) |
 | Generate | `for` (with `genvar`), `if`, `case`; constant expressions including `**` |
 | Hierarchical references | reads of nets and variables of other instances, and procedural writes of their variables, including selects of unpacked array elements (`u.mem[i][7:0] = v`), through names that start at an instance of the module (also of a generate block or an instance array element), at the module's own name, at an enclosing module's name (upward) or at `$root`; see [Hierarchical references](#hierarchical-references) |
@@ -221,7 +221,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   function, a call with the wrong number of arguments, an omitted argument
   without a declared default, and a task used as a value are errors.
 - DPI-C beyond the subset described in [DPI-C imports](#dpi-c-imports), DPI
-  exports, tri-state buses and multiple drivers.
+  exports, nets with several drivers (including tri-state buses) and `inout`
+  ports of the top module.
 
 ### Interface restrictions {#interface-restrictions}
 

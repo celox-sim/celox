@@ -709,6 +709,18 @@ sv_backends! {
     fn child_ports_keep_the_bit_ranges_of_selected_connections(sim) {
         @case "hierarchy::child_ports_keep_the_bit_ranges_of_selected_connections";
     }
+    fn inout_tristate_driver_in_child_reaches_parent(sim) {
+        @case "hierarchy::inout_tristate_driver_in_child_reaches_parent";
+    }
+    fn inout_tristate_nets_read_zero_in_two_state(sim) {
+        @case "hierarchy::inout_tristate_nets_read_zero_in_two_state";
+    }
+    fn inout_tristate_driver_in_parent_reaches_child(sim) {
+        @case "hierarchy::inout_tristate_driver_in_parent_reaches_child";
+    }
+    fn inout_tristate_drivers_reach_implicit_nets(sim) {
+        @case "hierarchy::inout_tristate_drivers_reach_implicit_nets";
+    }
 }
 
 #[test]
