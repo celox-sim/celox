@@ -335,6 +335,71 @@ pub enum InitialStateData {
     Writes(Vec<InitialStateWriteRun>),
 }
 
+impl InitialStateData {
+    /// The written bits below `width` of `Packed` data as write runs, so a
+    /// target such as an unpacked array is written run by run instead of
+    /// being read and written back whole. A target without a mask plane
+    /// (`four_state` false) receives unknown bits as 0, as a two-state write
+    /// of the packed value does.
+    pub fn packed_write_runs(
+        value: &BigUint,
+        mask: &BigUint,
+        written_mask: &BigUint,
+        width: usize,
+        four_state: bool,
+    ) -> Vec<InitialStateWriteRun> {
+        let (value, mask, written) = (
+            value.to_u64_digits(),
+            mask.to_u64_digits(),
+            written_mask.to_u64_digits(),
+        );
+        let bit = |digits: &[u64], index: usize| {
+            digits
+                .get(index / 64)
+                .is_some_and(|digit| digit >> (index % 64) & 1 == 1)
+        };
+        let mut runs = Vec::new();
+        let mut index = 0;
+        while index < width {
+            if written
+                .get(index / 64)
+                .is_none_or(|&digit| digit >> (index % 64) == 0)
+            {
+                // No written bit in the rest of this digit.
+                index = (index / 64 + 1) * 64;
+                continue;
+            }
+            if !bit(&written, index) {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            while index < width && bit(&written, index) {
+                index += 1;
+            }
+            let bit_width = index - start;
+            let mut value_bytes = vec![0u8; bit_width.div_ceil(8)];
+            let mut mask_bytes = vec![0u8; bit_width.div_ceil(8)];
+            for offset in 0..bit_width {
+                let unknown = bit(&mask, start + offset);
+                if bit(&value, start + offset) && (four_state || !unknown) {
+                    value_bytes[offset / 8] |= 1 << (offset % 8);
+                }
+                if four_state && unknown {
+                    mask_bytes[offset / 8] |= 1 << (offset % 8);
+                }
+            }
+            runs.push(InitialStateWriteRun {
+                bit_offset: start,
+                bit_width,
+                value_bytes,
+                mask_bytes,
+            });
+        }
+        runs
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialStateValue<A> {
     pub address: A,
@@ -1876,6 +1941,67 @@ impl<V: fmt::Display> fmt::Display for RegionedAbsoluteAddrBase<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Applying the runs to a target equals the packed merge: written bits
+    /// take the value, unwritten bits keep the target's.
+    #[test]
+    fn packed_write_runs_match_the_packed_merge() {
+        let width = 203;
+        let all: BigUint = (BigUint::from(1u8) << width) - 1u8;
+        let pattern = |seed: u64| {
+            (0..width).fold(BigUint::default(), |acc, bit| {
+                let set = (seed.wrapping_mul(bit as u64 + 1) >> 7).is_multiple_of(3);
+                if set {
+                    acc | (BigUint::from(1u8) << bit)
+                } else {
+                    acc
+                }
+            })
+        };
+        let (value, mask, current) = (pattern(0x9e37), pattern(0x51ed), pattern(0x2545));
+        let written_masks = [
+            BigUint::default(),
+            all.clone(),
+            pattern(0x7f4a) | (BigUint::from(1u8) << (width + 3)),
+            (BigUint::from(1u8) << 64) - 1u8,
+        ];
+        for written in &written_masks {
+            for four_state in [false, true] {
+                let runs =
+                    InitialStateData::packed_write_runs(&value, &mask, written, width, four_state);
+                let (mut got_value, mut got_mask) = (current.clone(), BigUint::default());
+                for run in &runs {
+                    let run_mask = ((BigUint::from(1u8) << run.bit_width) - 1u8) << run.bit_offset;
+                    let keep = &all ^ &run_mask;
+                    got_value = (got_value & &keep)
+                        | (BigUint::from_bytes_le(&run.value_bytes) << run.bit_offset);
+                    got_mask = (got_mask & &keep)
+                        | (BigUint::from_bytes_le(&run.mask_bytes) << run.bit_offset);
+                }
+                let written = written & &all;
+                let keep = &all ^ &written;
+                let (want_value, want_mask) = if four_state {
+                    ((&current & &keep) | (&value & &written), &mask & &written)
+                } else {
+                    let known = &all ^ (&mask & &all);
+                    (
+                        (&current & &keep) | (&value & &written & known),
+                        BigUint::default(),
+                    )
+                };
+                assert_eq!(
+                    (got_value, got_mask),
+                    (want_value, want_mask),
+                    "{four_state}"
+                );
+                assert!(
+                    runs.windows(2).all(|pair| {
+                        pair[0].bit_offset + pair[0].bit_width < pair[1].bit_offset
+                    })
+                );
+            }
+        }
+    }
 
     #[test]
     fn host_request_encoding_keeps_families_and_full_site_indices_distinct() {
