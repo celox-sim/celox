@@ -66,6 +66,20 @@ celox run test/Top.veryl --top Top --four-state
 celox run --project /path/to/veryl-project --top smoke --report --unlimited
 ```
 
+SVのtestbenchでは、実行中に[状態ファイル](checkpoints.md#状態ファイル)を保存して
+`celox state dump`/`celox state diff`で2つの実行やシミュレーターを比較できます（全バックエンド対応）。
+`--save-state-on SIGNAL`で数える信号（`tb.clk`のような階層パス、トップモジュール名は省略可）を指定し、
+`--save-state-at N[,M...]`で保存するサイクル（1から数える）を指定します。
+サイクルは、終了時に信号が1で、直前のタイムステップの終了時には1でなかったタイムステップです。
+ファイル`<SIGNAL>-<N>.state`はそのタイムステップの全リージョンが終わった直後に書くので、ノンブロッキング代入の更新も含みます。
+`--save-state-at-time T[,U...]`は時刻T以前の処理をすべて終え、Tを越えて進む前の状態を`time-<T>.state`に保存します（単位はデザインのグローバル時間精度）。
+`--save-state-dir DIR`で出力先を指定します（既定はカレントディレクトリ）。
+実行が指定のサイクルに達しなかった場合はエラーです。
+
+```sh
+celox run c906.v --top tb --save-state-on tb.clk --save-state-at 1000,2000 --save-state-dir states
+```
+
 Veryl用の`--report`は設定・コンパイル時間・実行時間・tiered昇格統計・結果を
 機械可読な`CELOX_*`レコードとして標準出力に出します。通常実行では出しません。
 Heliodorベンチも専用Celoxバイナリではなく、このCLIを呼びます。

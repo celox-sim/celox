@@ -125,6 +125,8 @@ celox state dump before_failure.state
 celox state diff native.state interpreter.state
 ```
 
+SystemVerilog の実行中に、指定したサイクルや時刻で状態ファイルを保存するには `celox run` の `--save-state-on`、`--save-state-at`、`--save-state-at-time` を使います（[コマンドライン](cocotb.md)を参照）。
+
 `diff` は、ファイルに差があると終了コード 1 で終わります。
 どちらのコマンドも、`--comb` を付けない限り組み合わせ回路の信号を表示しません。
 `O2` の dead store elimination は、どこからも読まれない組み合わせ回路の信号を書かないので、その信号の保存値は古いままになっているためです。
