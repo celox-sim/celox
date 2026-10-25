@@ -288,8 +288,9 @@ impl<B: SimBackend> SimulationState<B> {
         Ok(())
     }
 
-    /// The next time with scheduled events or processes to run.
-    pub(super) fn next_work_time(&self) -> Option<u64> {
+    /// The next time with scheduled events or processes to run, apart
+    /// from host writes to settle.
+    pub fn next_work_time(&self) -> Option<u64> {
         if self.finished {
             return None;
         }

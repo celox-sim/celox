@@ -1188,6 +1188,19 @@ mod host {
             self.collect_formatted_runtime_events(ctx)
         }
 
+        /// Drain runtime events while combinational logic is settled, as
+        /// after a step of a timed simulation.
+        pub(crate) fn drain_settled_runtime_events_with_context(
+            &mut self,
+            ctx: RuntimeFormatContext<'_>,
+        ) -> Vec<RuntimeEvent> {
+            assert!(
+                !self.runtime_event_drain_active.load(Ordering::Acquire),
+                "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
+            );
+            self.collect_formatted_runtime_events(ctx)
+        }
+
         fn eval_comb_for_runtime_event_drain(&mut self) -> Result<(), RuntimeErrorCode> {
             let (result, _) = self.eval_comb_capturing_events();
             self.check_comb_backend_result(result)?;
