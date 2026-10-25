@@ -6959,3 +6959,75 @@ fn class_visibility_checks_constructors() {
         }
     }
 }
+
+#[test]
+fn rejects_invalid_enum_declaration_initializers() {
+    for (declaration, diagnostic) in [
+        (
+            "enum logic [2:0] { Global = 4'h2, Local = 4'h3 } value;",
+            "sized literal width 4 differs from base width 3",
+        ),
+        (
+            "typedef enum logic [2:0] { A = 2'b01 } E;",
+            "sized literal width 2 differs from base width 3",
+        ),
+        (
+            "enum bit [1:0] { a=0, b=2'bxx, c=1 } value;",
+            "X/Z value requires an explicit four-state base type",
+        ),
+        (
+            "enum { a='z } value;",
+            "X/Z value requires an explicit four-state base type",
+        ),
+        (
+            "typedef bit [1:0] B; enum B { a=2'b0z } value;",
+            "X/Z value requires an explicit four-state base type",
+        ),
+        (
+            "enum integer { a=0, b={32{1'bx}}, c } value;",
+            "cannot implicitly increment an X/Z value",
+        ),
+        (
+            "enum logic [1:0] { a='z, b } value;",
+            "cannot implicitly increment an X/Z value",
+        ),
+        (
+            "enum logic [1:0] { a=2'bxx, b=a, c } value;",
+            "cannot implicitly increment an X/Z value",
+        ),
+        (
+            "enum logic [1:0] { a='x, b=a | 2'b00, c } value;",
+            "cannot implicitly increment an X/Z value",
+        ),
+    ] {
+        let source = format!("module Top; {declaration} endmodule");
+        let error =
+            analyze_source(&source, Path::new("invalid_enum_initializers.sv")).expect_err(&source);
+        assert!(error.to_string().contains(diagnostic), "{source}: {error}");
+    }
+}
+
+#[test]
+fn preserves_legal_enum_declaration_initializers() {
+    for declaration in [
+        "enum logic [2:0] { A=3'h2, B=3'h3 } value;",
+        "enum bit [3:0] { bronze='h3, silver, gold='h5 } value;",
+        "enum logic [3:0] { A='1 } value;",
+        "enum integer { a=0, b={32{1'bx}}, c=1, d } value;",
+        "enum logic [1:0] { a=2'bxx, b=2'bzz, c=0 } value;",
+        "enum bit [1:0] { a=(2'bxx & 2'b00), b } value;",
+        "enum logic [1:0] { a=2'bxx, b=2'b01, c } value;",
+        "enum logic [1:0] { a=2'bxx, b=a & 2'b00, c } value;",
+        "localparam P=4'h2; enum logic [2:0] { A=P, B=4'h1+1 } value;",
+        "enum logic [2:0] { A=3'(4'h2) } value;",
+        "enum logic [2:0] { A=3'h2 } value [2];",
+        "typedef enum int { W=3 } E; typedef logic [W'(2):0] B; enum B { A=3'b101 } value;",
+        "localparam W=3; enum logic [W-1:0] { A=3'b101 } value;",
+        "enum logic [2:0] { A=3'h2 } [1:0] value;",
+        "typedef enum logic signed [1:0] { A=2'b10, B } E;",
+    ] {
+        let source = format!("module Top; {declaration} endmodule");
+        analyze_source(&source, Path::new("valid_enum_initializers.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+}

@@ -16,6 +16,27 @@ pub(in crate::ast) fn bind_in(
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
 ) -> Converted<Option<Type>> {
+    bind_in_with_validation(root, native, tree, context, true)
+}
+
+/// Typedef discovery precedes enum constant resolution, so dependent aliases
+/// may still have provisional widths. Validate them when collecting members.
+pub(in crate::ast) fn bind_alias_in(
+    root: TypeId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+) -> Converted<Option<Type>> {
+    bind_in_with_validation(root, native, tree, context, false)
+}
+
+fn bind_in_with_validation(
+    root: TypeId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+    validate_enums: bool,
+) -> Converted<Option<Type>> {
     enum Job {
         Enter(TypeId),
         Void,
@@ -88,6 +109,9 @@ pub(in crate::ast) fn bind_in(
                         } else {
                             let mut ty = builtin_type("int", None).unwrap();
                             ty.is_enum = true;
+                            if validate_enums {
+                                validate_enum_initializers(id, native, tree, context, &ty)?;
+                            }
                             ty.enum_values = enum_values(id, native, tree, context, &ty);
                             ty.packed_ranges = ranges.into_iter().chain(ty.packed_ranges).collect();
                             values.push(ty);
@@ -182,6 +206,9 @@ pub(in crate::ast) fn bind_in(
                 let Some(mut ty) = values.pop() else {
                     return Err(unsupported("enum base type"));
                 };
+                if validate_enums {
+                    validate_enum_initializers(id, native, tree, context, &ty)?;
+                }
                 let mut outer = ranges;
                 outer.extend(ty.packed_ranges);
                 ty.packed_ranges = outer;
@@ -315,6 +342,134 @@ pub(in crate::ast) fn expression_type(
     query.functions = Arc::default();
     let value = expression_binding::bind(root, tree, &query)?;
     Ok(dimensions::bound_bits_type(&tree.state, &value, &query))
+}
+
+/// IEEE 1800-2023 6.19 imposes declaration rules even when no enum member
+/// is used. Keep these checks separate from best-effort randomization metadata.
+pub(in crate::ast) fn validate_enum_initializers(
+    id: TypeId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+    ty: &Type,
+) -> Converted<()> {
+    let DataTypeKind::Enum { base, items } = &native.data_type(id).kind else {
+        return Ok(());
+    };
+    let Some(shape) = casts::expr_type_from_type(&tree.state, ty, &context.const_env) else {
+        return Ok(());
+    };
+    let mut env = context.const_env.clone();
+    let mut unknown_literals = HashMap::default();
+    let mut previous_unknown = false;
+    let mut next = Some(0i128);
+    for item in items {
+        let name = normalize_identifier(&item.name.spelling);
+        let Some(value) = item.value else {
+            if previous_unknown {
+                return Err(unsupported(format!(
+                    "enum member `{name}` cannot implicitly increment an X/Z value"
+                )));
+            }
+            if !item.dimensions.is_empty() {
+                next = None;
+                continue;
+            }
+            if let Some(value) = next {
+                env.insert(name.clone(), value);
+                dimensions::insert_parameter_type_markers(&mut env, &name, shape);
+                next = value.checked_add(1);
+            }
+            continue;
+        };
+        // Check authored syntax, not a folded expression: a parameter, cast,
+        // or arithmetic expression is not a sized literal constant.
+        let mut literal_id = value;
+        while let ExprKind::Group(inner) = native.expression(literal_id).kind {
+            literal_id = inner;
+        }
+        if let ExprKind::Literal(text) = &native.expression(literal_id).kind
+            && let Some((size, _)) = text.split_once('\'')
+            && !size.is_empty()
+            && let Ok(width) = size.replace('_', "").parse::<usize>()
+            && width != shape.width
+        {
+            return Err(unsupported(format!(
+                "enum member `{name}` sized literal width {width} differs from base width {}",
+                shape.width
+            )));
+        }
+        // During signature discovery some constants are still unresolved.
+        // Leave their resolution to the ordinary constant-binding pass.
+        let expr = constant_binding::expression(value, native, tree, &env, &context.type_aliases)
+            .ok()
+            .flatten()
+            .and_then(|expr| {
+                expr_to_const(
+                    &tree.state,
+                    constants::substitute_expr_constants_with_parameter_literals(
+                        &tree.state,
+                        const_expr_to_expr(expr),
+                        &env,
+                        &unknown_literals,
+                    ),
+                )
+            });
+        let expr = expr.map(|expr| match expr {
+            ConstExpr::Literal(text) => ConstExpr::Literal(
+                resize_unbased_fill_literal_for_cast(&text, shape.width, shape.signed)
+                    .unwrap_or(text),
+            ),
+            expr => expr,
+        });
+        let literal = expr.as_ref().and_then(|expr| {
+            typecheck::eval_const_integral_literal_with_lookup(
+                &expr.clone().into(),
+                &env,
+                &|name| {
+                    dimensions::parameter_type_from_const_env(&env, name)
+                        .map(|ty| (ty.width, ty.signed))
+                },
+            )
+        });
+        previous_unknown = literal
+            .as_ref()
+            .is_some_and(|value| value.mask != Default::default());
+        if previous_unknown && (base.is_none() || ty.kind == TypeKind::Bit) {
+            return Err(unsupported(format!(
+                "enum member `{name}` X/Z value requires an explicit four-state base type"
+            )));
+        }
+        if !item.dimensions.is_empty() {
+            next = None;
+            continue;
+        }
+        if previous_unknown {
+            // Preserve masks when a later enumerator refers to this member.
+            // Numeric constant environments cannot represent X/Z values.
+            unknown_literals.insert(
+                name.clone(),
+                Expr::Literal(resize_integral_literal_for_cast(
+                    literal.unwrap(),
+                    shape.width,
+                    shape.signed,
+                )),
+            );
+            env.remove(&name);
+        }
+        next = expr
+            .as_ref()
+            .and_then(|expr| eval_ast_const_expr(&tree.state, expr, &env))
+            .map(|value| {
+                parameters::coerce_const_parameter_value(value, shape.width, shape.signed)
+            });
+        if let Some(value) = next {
+            env.insert(name.clone(), value);
+            dimensions::insert_parameter_type_markers(&mut env, &name, shape);
+            next = value.checked_add(1);
+        }
+    }
+    Ok(())
 }
 
 /// Domain metadata is best-effort during signature discovery. Only a caller
