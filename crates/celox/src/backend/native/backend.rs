@@ -127,7 +127,9 @@ impl NativeExecutionTiming {
 #[derive(Clone, Copy)]
 pub struct NativeEventRef {
     pub func: NativeSimFunc,
-    pub comb_apply_func: NativeSimFunc,
+    /// The event's combined comb-then-FF function, or `None` when the tick
+    /// runs the shared comb function and then `func`.
+    pub comb_apply_func: Option<NativeSimFunc>,
     pub addr: AbsoluteAddr,
     pub id: usize,
 }
@@ -136,7 +138,10 @@ impl std::fmt::Debug for NativeEventRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeEventRef")
             .field("func", &(self.func as usize))
-            .field("comb_apply_func", &(self.comb_apply_func as usize))
+            .field(
+                "comb_apply_func",
+                &self.comb_apply_func.map(|func| func as usize),
+            )
             .field("addr", &self.addr)
             .field("id", &self.id)
             .finish()
@@ -247,7 +252,10 @@ impl SharedNativeCode {
         let materialize = |event: NativeEventImageRef| -> Result<NativeEventRef, SimulatorError> {
             Ok(NativeEventRef {
                 func: native_function_at(&jit_image, event.func_offset)?,
-                comb_apply_func: native_function_at(&jit_image, event.comb_apply_offset)?,
+                comb_apply_func: event
+                    .comb_apply_offset
+                    .map(|offset| native_function_at(&jit_image, offset))
+                    .transpose()?,
                 addr: event.addr,
                 id: event.id,
             })
@@ -355,7 +363,7 @@ pub struct NativeCodeEntry {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct NativeEventImageRef {
     func_offset: usize,
-    comb_apply_offset: usize,
+    comb_apply_offset: Option<usize>,
     addr: AbsoluteAddr,
     id: usize,
 }
@@ -665,7 +673,9 @@ impl NativeProgramImage {
             .chain(self.id_to_event.iter())
         {
             if !entry_offsets.contains(&event.func_offset)
-                || !entry_offsets.contains(&event.comb_apply_offset)
+                || event
+                    .comb_apply_offset
+                    .is_some_and(|offset| !entry_offsets.contains(&offset))
             {
                 return Err(format!(
                     "event {} references a missing image entry",
@@ -1415,16 +1425,20 @@ fn collect_comb_apply_compile_tasks<'a>(
 ) {
     const LABEL: &str = "eval_comb_apply_ff";
     let mut comb_tasks = HashMap::<(Option<usize>, Vec<usize>), usize>::default();
-    for (addr, ff_units) in &sir.sir.eval_apply_ffs {
-        let fused_units = sir.sir.eval_comb_apply_ffs.get(addr);
-        let (unit_refs, first_ff_unit) = if let Some(fused_units) = fused_units {
-            (fused_units.iter().collect::<Vec<_>>(), None)
-        } else {
-            let mut unit_refs = sir.sir.eval_comb.iter().collect::<Vec<_>>();
-            let first_ff_unit =
-                (!unit_refs.is_empty() && !ff_units.is_empty()).then_some(unit_refs.len());
-            unit_refs.extend(ff_units);
-            (unit_refs, first_ff_unit)
+    for addr in sir.sir.eval_apply_ffs.keys() {
+        // A shared tick calls the comb and FF functions compiled anyway.
+        let (unit_refs, first_ff_unit) = match sir.sir.comb_apply(addr) {
+            Some(celox_sir::CombApply::Fused(fused_units)) => {
+                (fused_units.iter().collect::<Vec<_>>(), None)
+            }
+            Some(celox_sir::CombApply::Merged { comb, ff }) => {
+                let mut unit_refs = comb.iter().collect::<Vec<_>>();
+                let first_ff_unit =
+                    (!unit_refs.is_empty() && !ff.is_empty()).then_some(unit_refs.len());
+                unit_refs.extend(ff);
+                (unit_refs, first_ff_unit)
+            }
+            Some(celox_sir::CombApply::Shared) | None => continue,
         };
         let binding = format!("{LABEL} trigger={}", sir.get_path(addr));
         let key = (first_ff_unit, classes.classes(&unit_refs));
@@ -2398,12 +2412,10 @@ fn compile_program(
 
             let task_id = task_bindings[&(label, *addr)];
             let func_offset = compiled_ff_cache[&task_id];
-            let comb_apply_offset = comb_apply_label
-                .map(|label| {
-                    let task_id = task_bindings[&(label, *addr)];
-                    compiled_ff_cache[&task_id]
-                })
-                .unwrap_or(func_offset);
+            let comb_apply_offset = comb_apply_label.and_then(|label| {
+                let task_id = task_bindings.get(&(label, *addr))?;
+                Some(compiled_ff_cache[task_id])
+            });
 
             let (id, is_new_id) = if let Some(&id) = addr_to_id.get(&canonical) {
                 (id, false)
@@ -3243,6 +3255,10 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn eval_comb_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
+        let Some(comb_apply_func) = event.comb_apply_func else {
+            self.eval_comb()?;
+            return self.eval_apply_ff_at(event);
+        };
         // Partitioned phases compete with the fused sequential function,
         // which shares state between its combinational and FF parts.
         if self.lane_fused_kernel(event) {
@@ -3261,7 +3277,7 @@ impl super::super::SimBackend for NativeBackend {
                 super::super::lanes::LaneKernelSlot::Fused(event.id),
                 selection,
                 |backend| backend.run_lane_kernel(kernels.lanes, kernel),
-                |backend| backend.call_func_timed(event.comb_apply_func),
+                |backend| backend.call_func_timed(comb_apply_func),
             );
         }
         if self.lane_comb_kernel() || self.lane_event_kernel(event) {
@@ -3275,10 +3291,10 @@ impl super::super::SimBackend for NativeBackend {
                     backend.eval_comb()?;
                     backend.eval_apply_ff_at(event)
                 },
-                |backend| backend.call_func_timed(event.comb_apply_func),
+                |backend| backend.call_func_timed(comb_apply_func),
             );
         }
-        self.call_func_timed(event.comb_apply_func)
+        self.call_func_timed(comb_apply_func)
     }
 
     fn eval_comb_apply_ff_many_at(
@@ -3290,14 +3306,22 @@ impl super::super::SimBackend for NativeBackend {
             .lane_selectors
             .decided(super::super::lanes::LaneKernelSlot::Fused(event.id))
             == Some(celox_runtime::parallel::KernelChoice::Sequential);
-        if (self.lane_comb_kernel() || self.lane_event_kernel(event)) && !fused_sequential {
-            if count == 0 {
-                return (0, Ok(()));
+        let comb_apply_func = match event.comb_apply_func {
+            Some(func)
+                if !(self.lane_comb_kernel() || self.lane_event_kernel(event))
+                    || fused_sequential =>
+            {
+                func
             }
-            return (1, self.eval_comb_apply_ff_at(event));
-        }
+            _ => {
+                if count == 0 {
+                    return (0, Ok(()));
+                }
+                return (1, self.eval_comb_apply_ff_at(event));
+            }
+        };
         if self.compiled.options.native_tick_loop {
-            let (executed, result) = self.call_func_many_timed(event.comb_apply_func, count);
+            let (executed, result) = self.call_func_many_timed(comb_apply_func, count);
             if fused_sequential {
                 self.lane_selectors.advance(
                     super::super::lanes::LaneKernelSlot::Fused(event.id),
@@ -3312,7 +3336,7 @@ impl super::super::SimBackend for NativeBackend {
                 self.lane_selectors
                     .advance(super::super::lanes::LaneKernelSlot::Fused(event.id), 1);
             }
-            (1, self.call_func_timed(event.comb_apply_func))
+            (1, self.call_func_timed(comb_apply_func))
         }
     }
 

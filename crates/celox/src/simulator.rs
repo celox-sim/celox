@@ -3258,6 +3258,81 @@ mod host {
             always_ff (clk) { plain += 1; }
         }";
 
+        /// A design with `clocks` clock domains whose flip-flops all read
+        /// one combinational value.
+        #[cfg(feature = "cranelift")]
+        fn many_clock_design(clocks: usize) -> String {
+            let names = |i: usize| (b'a' + i as u8) as char;
+            let mut ports = String::new();
+            let mut ffs = String::new();
+            for i in 0..clocks {
+                let d = names(i);
+                ports.push_str(&format!(
+                    "clk{i}: input '{d} clock, q{i}: output '{d} logic<8>,\n"
+                ));
+                let next = if i == 0 {
+                    "x + 1".to_string()
+                } else {
+                    format!("q{} + x", i - 1)
+                };
+                ffs.push_str(&format!("always_ff (clk{i}) {{ q{i} = {next}; }}\n"));
+            }
+            format!(
+                "module Top ({ports} din: input 'a logic<8>) {{
+                    var x: 'a logic<8>;
+                    assign x = din ^ q0;
+                    unsafe (cdc) {{ {ffs} }}
+                }}"
+            )
+        }
+
+        /// Combined comb-then-FF ticks give the same results whether each
+        /// clock has its own merged program (few clocks) or all share the
+        /// one combinational program (many clocks).
+        #[cfg(feature = "cranelift")]
+        #[test]
+        fn combined_ticks_match_across_backends_with_shared_comb() {
+            fn run<B: SimBackend>(mut sim: Simulator<B>, clocks: usize) -> Vec<BigUint> {
+                let events: Vec<_> = (0..clocks).map(|i| sim.event(&format!("clk{i}"))).collect();
+                let outputs: Vec<_> = (0..clocks).map(|i| sim.signal(&format!("q{i}"))).collect();
+                let din = sim.signal("din");
+                let mut seen = Vec::new();
+                for step in 0..80u64 {
+                    let value = (step * 37 + 11) as u8;
+                    sim.modify(|io| io.set(din, value)).unwrap();
+                    let event = events[(step * 7 % clocks as u64) as usize];
+                    sim.tick_deferred_comb(event).unwrap();
+                    if step % 3 == 0 {
+                        sim.tick_deferred_comb(events[((step + 1) % clocks as u64) as usize])
+                            .unwrap();
+                    }
+                    for &output in &outputs {
+                        seen.push(sim.get(output));
+                    }
+                }
+                seen
+            }
+            use celox_frontend_core::symbolic::assembly::MERGED_COMB_APPLY_EVENTS;
+            for clocks in [2, MERGED_COMB_APPLY_EVENTS + 2] {
+                let code = many_clock_design(clocks);
+                let builder = || Simulator::builder(&code, "Top");
+                let reference = run(builder().build_interpreter().unwrap(), clocks);
+                let cranelift = builder().build_cranelift().unwrap();
+                let shared = cranelift
+                    .backend
+                    .id_to_event_slice()
+                    .iter()
+                    .all(|event| event.comb_apply_func.is_none());
+                assert_eq!(shared, clocks > MERGED_COMB_APPLY_EVENTS, "{clocks} clocks");
+                assert_eq!(run(cranelift, clocks), reference, "{clocks} clocks");
+                assert_eq!(
+                    run(builder().build().unwrap(), clocks),
+                    reference,
+                    "{clocks} clocks"
+                );
+            }
+        }
+
         #[test]
         fn edges_leave_a_finished_simulation_unchanged() {
             let mut sim = Simulator::builder(GATED_COUNTER, "Top").build().unwrap();
