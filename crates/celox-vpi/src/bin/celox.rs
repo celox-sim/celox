@@ -58,6 +58,15 @@ struct RunArgs {
 
     #[command(flatten)]
     save_state: SaveStateArgs,
+
+    /// Pass a plusarg such as `+iterations=9` to a SystemVerilog testbench
+    /// (repeatable); a positional argument starting with `+` does the same.
+    /// They reach `$test$plusargs` and `$value$plusargs` in command-line
+    /// order.
+    #[arg(long = "plusarg", value_name = "+ARG", allow_hyphen_values = true)]
+    plusarg: Vec<String>,
+    #[arg(skip)]
+    plusargs: Vec<String>,
 }
 
 /// When `celox run` saves state files for `celox state dump/diff`.
@@ -98,6 +107,7 @@ struct RunConfig {
     opt_level: celox::OptLevel,
     max_steps: u64,
     save_state: SaveStateArgs,
+    plusargs: Vec<String>,
 }
 
 fn resolve_design(arguments: DesignArgs) -> Design {
@@ -111,11 +121,22 @@ fn resolve_design(arguments: DesignArgs) -> Design {
 fn cli_from_matches(matches: &clap::ArgMatches) -> Result<Cli, clap::Error> {
     let mut cli = Cli::from_arg_matches(matches)?;
     match &mut cli.command {
-        CliCommand::Run(arguments) => arguments.design.capture_input_order(
-            matches
+        CliCommand::Run(arguments) => {
+            let matches = matches
                 .subcommand_matches("run")
-                .expect("parsed run command"),
-        ),
+                .expect("parsed run command");
+            let mut plusargs = arguments.design.take_plusargs(matches);
+            plusargs.extend(
+                matches
+                    .indices_of("plusarg")
+                    .into_iter()
+                    .flatten()
+                    .zip(std::mem::take(&mut arguments.plusarg)),
+            );
+            plusargs.sort_by_key(|&(position, _)| position);
+            arguments.plusargs = plusargs.into_iter().map(|(_, plusarg)| plusarg).collect();
+            arguments.design.capture_input_order(matches);
+        }
         CliCommand::Vpi(VpiArgs {
             command: VpiCommand::Build(arguments),
         }) => {
@@ -153,6 +174,7 @@ fn resolve_run_config(arguments: RunArgs) -> RunConfig {
             .unwrap_or(1_000_000),
         design,
         save_state: arguments.save_state,
+        plusargs: arguments.plusargs,
     }
 }
 
@@ -175,6 +197,9 @@ fn run_testbench(arguments: RunArgs) -> Result<(), String> {
         })
     {
         return Err("pass .sv/.v sources, or Veryl project sources".into());
+    }
+    if !arguments.plusargs.is_empty() {
+        return Err("plusargs currently require a SystemVerilog testbench".into());
     }
     if !arguments.save_state.is_empty() {
         return Err(
@@ -206,7 +231,8 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .opt_level(arguments.opt_level)
         .diagnostic_policy(arguments.design.diagnostics.clone())
         .sv_timescale(arguments.design.timescale)
-        .signal_access(arguments.design.signal_access.clone());
+        .signal_access(arguments.design.signal_access.clone())
+        .plusargs(arguments.plusargs.iter().cloned());
     let builder = arguments.design.apply_parameters(builder);
     let max_steps = if arguments.execution.unlimited {
         u64::MAX
