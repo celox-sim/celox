@@ -16,7 +16,7 @@ synthesis and is tested at the design level.
 
 | Area | Supported |
 | --- | --- |
-| Modules | ANSI ports, `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, implicit nets of output port connections and continuous assignment targets (`default_nettype none` disables them), hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them) |
+| Modules | ANSI ports, non-ANSI ports (a header of port names and body `input` / `output` / `inout` declarations, optionally completed by a net or variable declaration of the same name), `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, implicit nets of output port connections and continuous assignment targets (`default_nettype none` disables them), hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them) |
 | Programs | `program` declarations with ports and parameters, instantiated from modules like a module; their `initial` procedures run in the reactive region set (see [Programs](#programs)) |
 | Generate | `for` (with `genvar`), `if`, `case`; constant expressions including `**` |
 | Hierarchical references | reads of nets and variables of other instances, and procedural writes of their variables, including selects of unpacked array elements (`u.mem[i][7:0] = v`), through names that start at an instance of the module (also of a generate block or an instance array element), at the module's own name, at an enclosing module's name (upward) or at `$root`; see [Hierarchical references](#hierarchical-references) |
@@ -196,7 +196,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   `wait` or event expressions reading a static task argument.
 - Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset.
 - Inferred latches inside `always_comb` are rejected by default. Set `inferred_latch = "warn"` or `"allow"` in `celox.toml` under `[diagnostics]` to permit retained blocking assignments. Ordinary `always @*` and explicit `always_latch` do not require this option.
-- Ports and instances: non-ANSI port declarations ([#426](https://github.com/celox-sim/celox/issues/426)), `ref` ports
+- Ports and instances: non-ANSI port expressions such as `module m({a, b}, c[3:0], .p(d))` ([#1953](https://github.com/celox-sim/celox/issues/1953)), `ref` ports
   ([#427](https://github.com/celox-sim/celox/issues/427)), wildcard `.*` connections ([#442](https://github.com/celox-sim/celox/issues/442)), gate primitives ([#457](https://github.com/celox-sim/celox/issues/457)),
   `bind`.
 - Declarations: variable declaration initializers of members of an interface

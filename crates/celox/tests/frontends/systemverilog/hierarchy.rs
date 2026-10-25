@@ -700,10 +700,61 @@ fn array_parameter_elements_check_unselected_conditional_branch_types() {
 }
 
 sv_backends! {
+    fn non_ansi_ports_take_body_declarations(sim) {
+        @case "hierarchy::non_ansi_ports_take_body_declarations";
+    }
     fn child_ports_keep_the_bit_ranges_they_read(sim) {
         @case "hierarchy::child_ports_keep_the_bit_ranges_they_read";
     }
     fn child_ports_keep_the_bit_ranges_of_selected_connections(sim) {
         @case "hierarchy::child_ports_keep_the_bit_ranges_of_selected_connections";
+    }
+}
+
+#[test]
+fn rejects_malformed_non_ansi_port_declarations() {
+    for (source, message) in [
+        (
+            "module Top(a, y); input a; endmodule",
+            "port `y` has no port declaration",
+        ),
+        (
+            "module Top(a); input a; input a; endmodule",
+            "port `a` is declared more than once",
+        ),
+        (
+            "module Top(a); input a; output b; endmodule",
+            "port declaration `b` names no port",
+        ),
+        (
+            "module Top(a); input [3:0] a; wire [7:0] a; endmodule",
+            "its net or variable declaration differ",
+        ),
+        (
+            "module Top(a); input a; wire [3:0] a; endmodule",
+            "its net or variable declaration differ",
+        ),
+        (
+            "module Top(q); output reg q; reg q; endmodule",
+            "port `q` with a net or variable type is declared again",
+        ),
+        (
+            "module Top(q); output q; reg q = 1'b1; endmodule",
+            "variable declaration of non-ANSI port `q` with an initializer",
+        ),
+        (
+            "module Top({y, z}); output y, z; assign y = 1'b1; assign z = 1'b0; endmodule",
+            "non-ANSI port expressions",
+        ),
+    ] {
+        let error = Simulator::from_sv_sources(vec![(source, Path::new("ports.sv"))], "Top")
+            .build_cranelift()
+            .expect_err(source)
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(error.contains(message), "{source}: {error}");
     }
 }

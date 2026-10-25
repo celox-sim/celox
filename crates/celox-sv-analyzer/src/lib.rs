@@ -183,7 +183,7 @@ pub const SV_FRONTEND_TRACKING_ISSUE: u32 = 88;
 /// Dedicated tracking issues, keyed by the leading text of the construct name
 /// carried by [`AnalyzerError::Unsupported`].
 const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
-    ("non-ANSI module port declarations", 426),
+    ("non-ANSI port expressions", 1953),
     ("ref port direction", 427),
     ("nonblocking assignment inside always_latch", 431),
     (
