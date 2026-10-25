@@ -1,0 +1,6 @@
+Revision history for #1989:
+
+rev 2 (content) 2026-10-25 12:09 UTC — Gate the tiered capture-event getter JIT arm after syncing master; fixes merge queue #2005 compile failures. Default and Cranelift tests, Clippy, formatting, and ARM64 cross-check passed.
+rev 1 (initial) 2026-10-25 12:09 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1989,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"49acad611a90a8b9fd1ccb916d29927c3bd32c71","timestamp_iso":"2026-10-25T12:09:10Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"49acad611a90a8b9fd1ccb916d29927c3bd32c71","new_sha":"b1a4c70c33ba8ae0e8a2a343dc04d8ba3513e842","timestamp_iso":"2026-10-25T12:09:10Z","reason":"Gate the tiered capture-event getter JIT arm after syncing master; fixes merge queue #2005 compile failures. Default and Cranelift tests, Clippy, formatting, and ARM64 cross-check passed.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/49acad611a90a8b9fd1ccb916d29927c3bd32c71...b1a4c70c33ba8ae0e8a2a343dc04d8ba3513e842"}]} -->
