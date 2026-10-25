@@ -197,6 +197,34 @@ sim.runUntil(10000);
 sim.runUntil(10000, { maxSteps: 500 });
 ```
 
+### Runtime Events and Reports
+
+`drainRuntimeEvents()` returns what the design emitted since the last call, in
+emission order: `$display` and `$write` output, `report` events of severity
+tasks and failed assertions, `$finish` and `$stop`. A report has its
+`severity` (`"info"`, `"warning"`, `"error"` or `"fatal"`), its `message` bytes,
+and the `scope`, `file` and `line` that issued it.
+
+`setFailOn(severity)` makes `runUntil()`, `step()` and the waits throw after the
+time step of the first report of at least that severity. While it is set, each
+report keeps the `time` it was issued at. Events lost to a full event buffer
+(a `missed` event) count as a failure, since they may have held one. A later
+call continues the simulation.
+
+```typescript
+sim.setFailOn("error");
+try {
+  sim.runUntil(10000);
+} catch (error) {
+  // "failOn: Error: ..." at the time of the first $error
+}
+for (const event of sim.drainRuntimeEvents()) {
+  if (event.kind === "report") {
+    console.log(event.severity, event.time, new TextDecoder().decode(event.message));
+  }
+}
+```
+
 ## Simulator Options
 
 Both `Simulator` and `Simulation` accept the following options:
