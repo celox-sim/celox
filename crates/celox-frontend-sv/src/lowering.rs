@@ -160,6 +160,9 @@ pub(crate) struct LoweredSvModule {
     level_lists_lowered: Vec<usize>,
     /// The write streams one flip-flop evaluation may write twice.
     repeated_ff_writes: Vec<FfWriteStream>,
+    /// The `inout` ports whose net has its driver in this module or below it,
+    /// filled in by [`resolve_inout_drivers`].
+    inout_driven_inside: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -570,6 +573,49 @@ fn analyze_sources_with_requests(
     Ok((modules, root_names))
 }
 
+/// Record the `inout` ports whose net has its driver in their module or
+/// below it. Both sides of an inout port connection form one net (IEEE
+/// 1800-2023 23.3.3), so the connection carries the value away from the side
+/// that drives it. A net driven on both sides is then reported by
+/// [`validate_specialized_instance_net_drivers`].
+fn resolve_inout_drivers(
+    module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
+    modules: &mut HashMap<ModuleId, LoweredSvModule>,
+) {
+    loop {
+        let mut driven = Vec::new();
+        for (&module_id, module) in modules.iter() {
+            for port in module.source.ports() {
+                if port.direction() != sv::ir::PortDirection::Inout
+                    || module.inout_driven_inside.contains(port.name())
+                {
+                    continue;
+                }
+                if !local_driver_ranges(
+                    &module.source,
+                    port.name(),
+                    &module.constants,
+                    &module.parameter_types,
+                )
+                .is_empty()
+                    || !child_output_driver_ranges(module, port.name(), module_ids, modules)
+                        .is_empty()
+                {
+                    driven.push((module_id, port.name().to_string()));
+                }
+            }
+        }
+        if driven.is_empty() {
+            return;
+        }
+        for (module_id, port) in driven {
+            if let Some(module) = modules.get_mut(&module_id) {
+                module.inout_driven_inside.insert(port);
+            }
+        }
+    }
+}
+
 fn validate_specialized_instance_net_drivers(
     module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
     modules: &HashMap<ModuleId, LoweredSvModule>,
@@ -769,10 +815,13 @@ fn child_output_driver_ranges(
         for connection in connections {
             if !child.source.ports().iter().any(|port| {
                 port.name() == connection.formal
-                    && matches!(
-                        port.direction(),
-                        sv::ir::PortDirection::Output | sv::ir::PortDirection::Inout
-                    )
+                    && match port.direction() {
+                        sv::ir::PortDirection::Output => true,
+                        sv::ir::PortDirection::Inout => {
+                            child.inout_driven_inside.contains(port.name())
+                        }
+                        _ => false,
+                    }
             }) {
                 continue;
             }
@@ -1998,6 +2047,7 @@ fn prepare_external_hierarchy_collecting(
             event_assignments: Vec::new(),
             level_lists_lowered: Vec::new(),
             repeated_ff_writes: Vec::new(),
+            inout_driven_inside: HashSet::default(),
         }
     };
     let foreign_modules: HashMap<_, _> = foreign
@@ -2167,7 +2217,7 @@ fn prepare_external_hierarchy_collecting(
         }
     }
 
-    let lowered_modules = module_ids
+    let mut lowered_modules = module_ids
         .iter()
         .map(|(key, &module_id)| {
             if let Some(module) = foreign_specializations.get(key) {
@@ -2193,6 +2243,7 @@ fn prepare_external_hierarchy_collecting(
             ))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
+    resolve_inout_drivers(&module_ids, &mut lowered_modules);
     validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
     let mut modules = HashMap::default();
     for (key, &module_id) in &module_ids {
@@ -2776,10 +2827,11 @@ fn schedule_sources_collecting(
                 },
             )?)
         };
-        let lowered_modules = module_ids
+        let mut lowered_modules = module_ids
             .iter()
             .map(|(key, &module_id)| Ok((module_id, specialize(key, module_id)?)))
             .collect::<Result<HashMap<_, _>, FrontendError>>()?;
+        resolve_inout_drivers(&module_ids, &mut lowered_modules);
         validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
         let root = &lowered_modules[&root_id];
         if let Some(port) = root
@@ -3801,6 +3853,7 @@ fn lower_module_with_overrides(
         event_assignments,
         level_lists_lowered,
         repeated_ff_writes,
+        inout_driven_inside: HashSet::default(),
     })
 }
 
@@ -5482,9 +5535,6 @@ fn ensure_parent_output_signals(
 ) -> Result<(), ParserError> {
     for child_port_id in &child.port_order {
         let child_var = &child.variables[child_port_id];
-        if child_var.kind != VariableKind::Output {
-            continue;
-        }
         let formal = child_var.path.join(".");
         let Some(connection) = connections
             .iter()
@@ -5492,6 +5542,20 @@ fn ensure_parent_output_signals(
         else {
             continue;
         };
+        if child_var.kind == VariableKind::Inout {
+            check_inout_port_actual(
+                connection,
+                parent_variables,
+                parent_signal_names,
+                implicit_output_signals,
+                parent_source,
+                parent_constants,
+                parent_parameter_types,
+            )?;
+        }
+        if child_port_direction(child, child_var) != Some(VariableKind::Output) {
+            continue;
+        }
         let Some(actual) = connection
             .actual_expr
             .as_ref()
@@ -5565,6 +5629,68 @@ fn ensure_parent_output_signals(
             .variables
             .insert(next_id, variable.to_symbolic_variable());
         parent_variables.insert(next_id, variable);
+    }
+    Ok(())
+}
+
+/// Rejects a variable or an expression connected to an `inout` port: only
+/// nets may be on either side of one (IEEE 1800-2023 23.3.3.2). An
+/// undeclared identifier is an implicit net.
+fn check_inout_port_actual(
+    connection: &LoweredSvPortConnection,
+    parent_variables: &HashMap<SourceVarId, SvVariable>,
+    parent_signal_names: &HashMap<String, SourceVarId>,
+    implicit_nets: &HashSet<String>,
+    parent_source: &sv::ir::Module,
+    parent_constants: &HashMap<String, i128>,
+    parent_parameter_types: &HashMap<String, (usize, bool)>,
+) -> Result<(), ParserError> {
+    let Some(actual) = connection.actual_expr.as_ref() else {
+        return Ok(());
+    };
+    let is_net = |name: &str| {
+        implicit_nets.contains(name)
+            || parent_source
+                .signals()
+                .iter()
+                .any(|signal| signal.name() == name && signal.is_net())
+            || parent_source
+                .ports()
+                .iter()
+                .any(|port| port.name() == name && port.is_net())
+    };
+    let error = |detail: String| {
+        Err(ParserError::illegal_context(
+            "systemverilog inout port connection",
+            detail,
+            None,
+        ))
+    };
+    let Some(accesses) = output_lvalue_accesses(
+        actual,
+        parent_variables,
+        parent_signal_names,
+        parent_constants,
+        parent_parameter_types,
+    ) else {
+        if simple_output_lvalue_ident(actual)
+            .is_some_and(|name| !parent_signal_names.contains_key(name))
+        {
+            return Ok(());
+        }
+        return error(format!(
+            "inout port `{}` must connect to a net, not `{}`",
+            connection.formal, connection.actual
+        ));
+    };
+    for OutputLvalueAccess { signal, .. } in accesses {
+        let name = parent_variables[&signal].path.join(".");
+        if !is_net(&name) {
+            return error(format!(
+                "inout port `{}` must connect to a net, not variable `{name}`",
+                connection.formal
+            ));
+        }
     }
     Ok(())
 }
@@ -5670,7 +5796,10 @@ fn build_instance_glue(
             .iter()
             .find(|connection| connection.formal == formal);
         let width = child_var.width;
-        match child_var.kind {
+        let Some(direction) = child_port_direction(child, child_var) else {
+            return Err(unsupported_sv_inout(formal));
+        };
+        match direction {
             VariableKind::Input => {
                 let collapse_unknown_literal = !four_state
                     && connection
@@ -5967,14 +6096,34 @@ fn build_instance_glue(
                     ));
                 }
             }
-            VariableKind::Inout => {
-                return Err(unsupported_sv_inout(child_var.path.join(".")));
-            }
             _ => {}
         }
     }
 
     Ok((input_ports, output_ports, arena))
+}
+
+/// The direction in which the connection of `port` carries its value. An
+/// `inout` port carries the value of its net out of the child when the child
+/// drives the net, and into it otherwise. `None` is an inout port that the
+/// child's frontend does not describe.
+fn child_port_direction(child: &LoweredSvModule, port: &SvVariable) -> Option<VariableKind> {
+    if port.kind != VariableKind::Inout {
+        return Some(port.kind);
+    }
+    let name = port.path.join(".");
+    child
+        .source
+        .ports()
+        .iter()
+        .any(|source| source.name() == name && source.direction() == sv::ir::PortDirection::Inout)
+        .then(|| {
+            if child.inout_driven_inside.contains(&name) {
+                VariableKind::Output
+            } else {
+                VariableKind::Input
+            }
+        })
 }
 
 fn simple_output_lvalue_ident(expr: &sv::ir::Expr) -> Option<&str> {
