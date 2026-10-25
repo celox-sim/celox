@@ -335,7 +335,15 @@ fn sv_stop_is_not_reported_as_successful_completion() {
 fn veryl_backends_share_cli_execution_and_opt_in_reports() {
     let source =
         "#[test(Top)] module Top { inst clk: $tb::clock_gen; initial { clk.next(4); $finish(); } }";
-    for backend in ["native", "tiered", "interpreter", "cranelift", "wasm"] {
+    for backend in [
+        "native",
+        "tiered",
+        "interpreter",
+        #[cfg(feature = "cranelift")]
+        "cranelift",
+        #[cfg(feature = "wasm-runtime")]
+        "wasm",
+    ] {
         for four_state in [false, true] {
             let mut args = vec!["--backend", backend, "--threads", "2", "--report"];
             if four_state {
@@ -473,7 +481,15 @@ fn sv_backends_preserve_timed_nba_execution_and_failures() {
             end
         endmodule
     "#;
-    for backend in ["native", "cranelift", "interpreter", "wasm", "tiered"] {
+    for backend in [
+        "native",
+        #[cfg(feature = "cranelift")]
+        "cranelift",
+        "interpreter",
+        #[cfg(feature = "wasm-runtime")]
+        "wasm",
+        "tiered",
+    ] {
         for four_state in [false, true] {
             let mut args = vec!["--backend", backend, "--threads", "2"];
             if four_state {

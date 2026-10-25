@@ -103,11 +103,16 @@ pub const MAX_SIMULATION_THREADS: u32 = 64;
 mod host_api {
     use crate::SimBackend;
     pub use crate::backend::tiered::TieredEventRef;
+    #[cfg(feature = "wasm-runtime")]
     pub use crate::backend::wasm_runtime::WasmBackend;
     pub use crate::backend::{
-        CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, EventRef, InterpBackend,
-        JitBackend, RegallocAlgorithm, SharedJitCode, TieredBackend, TieredExecutionStats,
-        TieredExecutionTier, TieredExecutionTiming, TieredPromotionStatus,
+        CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm,
+    };
+    #[cfg(feature = "cranelift")]
+    pub use crate::backend::{EventRef, JitBackend, SharedJitCode};
+    pub use crate::backend::{
+        InterpBackend, TieredBackend, TieredExecutionStats, TieredExecutionTier,
+        TieredExecutionTiming, TieredPromotionStatus,
     };
     pub use crate::debug::CompilationTraceResult;
     pub use crate::diagnostics::DiagnosticsOptions;
