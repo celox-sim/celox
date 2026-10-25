@@ -725,6 +725,14 @@ without the enum domain, and draws undeclared values (`sv_verilator_scope_enum_r
 IEEE 1800-2023 18.3 and 18.12 require the declared enum domain. The shared
 assertions remain unchanged, including the direct-enum case without an alias.
 
+Cyclic randomization (IEEE 1800-2023 18.4.2) retains narrow external
+exclusions: Icarus 13.0 cannot elaborate the three `randomization_cyclic_*`
+cases ([diagnostics](verification/repros/sv_randc_icarus.json)). Verilator
+5.052 passes the integer and direct-enum domain case, but emits duplicate
+`srandom` declarations for the inheritance/control case and draws undeclared
+values for an enum typedef alias ([evidence](verification/repros/sv_randc_verilator.json)).
+The original cycle, mode and domain assertions remain unchanged.
+
 ## SystemVerilog packed unions
 
 The `unions` shared group covers hard and soft packed untagged unions. With

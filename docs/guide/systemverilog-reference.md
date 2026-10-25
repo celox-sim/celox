@@ -145,7 +145,13 @@ not supported even for this checker form.
 Each object has an independent random stream, seeded from its creating process.
 `object.srandom(seed)` resets it using a 32-bit seed; checkpoints preserve both
 RNG and mode state (18.13.3, 18.14.3). Random sequences are implementation-specific.
-`randc` randomization, constraints, `with`, static random properties, and random
+`randc` supports 1–8-bit two-state integers and scalar enums with up to 256
+members. Each property visits every value once before starting another cycle
+(18.4.2), including inherited properties and explicit member selection.
+Disabled properties retain their cycle; checkpoints restore it. `srandom`
+reseeds the RNG without making already consumed values eligible again.
+
+Constraints, `with`, larger `randc` domains, static random properties, and random
 array/object/string properties remain unsupported. A constrained dynamic
 subclass is rejected rather than silently randomizing only its base properties.
 A call through `null` is a runtime error.

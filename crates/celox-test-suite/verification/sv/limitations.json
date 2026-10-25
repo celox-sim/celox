@@ -2386,5 +2386,58 @@
         "program::programs_reject_instances"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_randc",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 cannot elaborate class randomize, srandom and rand_mode calls in the randc cases. IEEE 1800-2023 18.4.2, 18.6 and 18.8 define these operations. The unchanged assertions cover full cycles, signed and enum domains, modes and inheritance.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_randc_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::randomization_cyclic_controls",
+        "class::randomization_cyclic_domains",
+        "class::randomization_cyclic_enum_alias"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_randc_inheritance",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 emits duplicate srandom declarations for the inherited randc control case using both base and derived handles. The shared assertions retain cyclic state and random-mode coverage under IEEE 1800-2023 18.4.2, 18.6.2 and 18.8.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_randc_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::randomization_cyclic_controls"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_randc_enum_alias",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 treats the randc enum typedef alias as its underlying integer. Generated __VBasicRand assigns the cyclic integer draw directly without an enum value table, producing undeclared values. IEEE 1800-2023 18.3 and 18.4.2 require a permutation of declared values. The direct enum and integer cycle case passes unchanged.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_randc_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::randomization_cyclic_enum_alias"
+      ]
+    }
   }
 ]
