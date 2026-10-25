@@ -9,7 +9,7 @@
     };
     rust-overlay = {
       # Pin the revision explicitly so Renovate can group overlay and Rust updates.
-      url = "github:oxalica/rust-overlay/5b9f1198b59bcb31c5c3250b332e7d77590e6306";
+      url = "github:oxalica/rust-overlay/fad80eb74614f7dc37c1c83df8caae64361eda22";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     # The xezim reference simulator for the shared test suite, pinned by
