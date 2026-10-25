@@ -37,11 +37,11 @@ command-line defines apply to each file.
 | `skip` | the official runner skipped an incompatible test or unsupported mode |
 
 All 90 preprocessing cases at the pinned revision now execute in both state
-modes, leaving no skipped expectation rows. Each mode reports 89 passes and
-one failure: `chapter-22/22.11--pragma-invalid.sv` expects a bare `` `pragma ``
-to be rejected, but the preprocessor currently accepts it. This failure remains
-visible in the baseline. Upstream preprocessing verdicts check process success
-and expected failure; they do not compare the emitted text against a golden file.
+modes, leaving no skipped expectation rows. Each mode reports 90 passes,
+including `chapter-22/22.11--pragma-invalid.sv`: a bare `` `pragma `` is rejected
+because its name is required by IEEE 1800-2023 22.11. Upstream preprocessing
+verdicts check process success and expected failure; they do not compare the
+emitted text against a golden file.
 
 The official runner’s process exit code is separate from the case verdict.
 The wrapper reads its `PASS`/`FAIL` log messages; it does not reconstruct their
