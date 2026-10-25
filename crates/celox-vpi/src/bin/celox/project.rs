@@ -10,7 +10,8 @@ use serde::Deserialize;
 
 #[derive(Args, Default)]
 pub(super) struct DesignArgs {
-    /// Ordered SV sources, or one Veryl project entry file.
+    /// Ordered SV sources, or one Veryl project entry file. For `run`, an
+    /// argument starting with `+` is a plusarg instead.
     pub sources: Vec<PathBuf>,
     /// Select a Veryl source relative to --project (repeatable).
     #[arg(long = "source-file")]
@@ -78,6 +79,10 @@ pub(super) struct DesignArgs {
     top: Option<String>,
     #[arg(skip)]
     input_order: Vec<Input>,
+    /// The command-line positions of `sources`, once plusargs are taken out
+    /// of them.
+    #[arg(skip)]
+    source_positions: Option<Vec<usize>>,
 }
 
 enum Input {
@@ -163,21 +168,52 @@ pub(super) struct Design {
 }
 
 impl DesignArgs {
+    /// Take the positional arguments starting with `+` out of the sources,
+    /// with their command-line positions.
+    pub fn take_plusargs(&mut self, matches: &clap::ArgMatches) -> Vec<(usize, String)> {
+        let positions = matches
+            .indices_of("sources")
+            .map(Iterator::collect::<Vec<_>>)
+            .unwrap_or_default();
+        let mut plusargs = Vec::new();
+        let mut sources = Vec::new();
+        let mut source_positions = Vec::new();
+        for (source, position) in std::mem::take(&mut self.sources).into_iter().zip(positions) {
+            match source.to_str() {
+                Some(argument) if argument.starts_with('+') => {
+                    plusargs.push((position, argument.to_string()))
+                }
+                _ => {
+                    sources.push(source);
+                    source_positions.push(position);
+                }
+            }
+        }
+        self.sources = sources;
+        self.source_positions = Some(source_positions);
+        plusargs
+    }
+
     pub fn capture_input_order(&mut self, matches: &clap::ArgMatches) {
         let mut inputs = Vec::new();
         for (id, is_list) in [("sources", false), ("filelists", true)] {
-            if let Some(indices) = matches.indices_of(id) {
-                inputs.extend(indices.enumerate().map(|(offset, position)| {
-                    (
-                        position,
-                        if is_list {
-                            Input::Filelist(offset)
-                        } else {
-                            Input::Source(offset)
-                        },
-                    )
-                }));
-            }
+            let indices: Vec<usize> = match (id, &self.source_positions) {
+                ("sources", Some(positions)) => positions.clone(),
+                _ => matches
+                    .indices_of(id)
+                    .map(Iterator::collect)
+                    .unwrap_or_default(),
+            };
+            inputs.extend(indices.into_iter().enumerate().map(|(offset, position)| {
+                (
+                    position,
+                    if is_list {
+                        Input::Filelist(offset)
+                    } else {
+                        Input::Source(offset)
+                    },
+                )
+            }));
         }
         inputs.sort_by_key(|(position, _)| *position);
         self.input_order = inputs.into_iter().map(|(_, input)| input).collect();
