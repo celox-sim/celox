@@ -36,9 +36,12 @@ fn functions(tree: &SyntaxTree, range: celox_sv_syntax::TokenRange) -> Vec<Analy
         .filter(|unit| unit.kind == UnitKind::Program)
         .map(|unit| unit.tokens)
         .collect();
-    let functions: Vec<_> = native
+    let spans = tree.spans();
+    let functions: Vec<_> = spans
         .subroutines
-        .iter()
+        .within(&[range])
+        .into_iter()
+        .map(|index| &native.subroutines[index])
         .filter(|function| {
             function.kind == SubroutineKind::Function
                 && range.start <= function.tokens.start
@@ -46,19 +49,10 @@ fn functions(tree: &SyntaxTree, range: celox_sv_syntax::TokenRange) -> Vec<Analy
         })
         .map(|function| function.tokens)
         .collect();
-    let called_names = native
-        .expressions
-        .iter()
-        .filter_map(|expression| {
-            if let ExprKind::Call { expression, .. } = &expression.kind {
-                Some(native.expression(*expression).tokens)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
+    let called_names = &validation::Facts::of(tree).callee_spans;
     let mut warnings = Vec::new();
-    for expression in &native.expressions {
+    for id in spans.expressions.within(&functions) {
+        let expression = native.expression(id);
         let tokens = expression.tokens;
         if !functions
             .iter()
@@ -78,7 +72,7 @@ fn functions(tree: &SyntaxTree, range: celox_sv_syntax::TokenRange) -> Vec<Analy
                 };
                 name
             }
-            ExprKind::Name(name) if !called_names.contains(&tokens) => name,
+            ExprKind::Name(name) if !called_names.contains(&(tokens.start, tokens.end)) => name,
             _ => continue,
         };
         if name.spelling == "$exit" {
