@@ -115,6 +115,11 @@ pub(super) struct Timescales {
 pub(super) struct State {
     design: RefCell<QueryContext>,
     interface_instance: RefCell<Option<String>>,
+    revision: generate::Revision,
+}
+
+pub(super) fn revision(state: &State) -> &generate::Revision {
+    &state.revision
 }
 
 pub(super) fn with_interface_instance<T>(
@@ -125,10 +130,12 @@ pub(super) fn with_interface_instance<T>(
     struct Restore<'a> {
         state: &'a State,
         previous: Option<String>,
+        revision: u64,
     }
     impl Drop for Restore<'_> {
         fn drop(&mut self) {
             *self.state.interface_instance.borrow_mut() = self.previous.take();
+            self.state.revision.restore(self.revision);
         }
     }
     let previous = {
@@ -138,7 +145,11 @@ pub(super) fn with_interface_instance<T>(
             .map_or_else(|| name.to_string(), |parent| format!("{parent}.{name}"));
         current.replace(nested)
     };
-    let _restore = Restore { state, previous };
+    let _restore = Restore {
+        state,
+        previous,
+        revision: state.revision.change(),
+    };
     analyze()
 }
 
@@ -162,6 +173,7 @@ struct PreparedTree {
 
 pub(super) struct Installed<'a> {
     previous: QueryContext,
+    revision: u64,
     state: &'a State,
     // A prepared tree's address is used only while this guard borrows it.
     _tree: Option<&'a SyntaxTree>,
@@ -169,6 +181,7 @@ pub(super) struct Installed<'a> {
 impl Drop for Installed<'_> {
     fn drop(&mut self) {
         *self.state.design.borrow_mut() = std::mem::take(&mut self.previous);
+        self.state.revision.restore(self.revision);
     }
 }
 pub(super) fn install_for_tree<'a>(
@@ -205,6 +218,7 @@ fn install_context<'a>(
 ) -> Installed<'a> {
     Installed {
         previous: state.design.replace(context),
+        revision: state.revision.change(),
         state,
         _tree: tree,
     }

@@ -44,6 +44,7 @@ pub(super) struct FunctionErrors {
 #[derive(Default)]
 pub(crate) struct State {
     functions: RefCell<ConstantFunctions>,
+    revision: generate::Revision,
     depth: Cell<usize>,
     argument_names: RefCell<(
         Arc<ConstantFunctionTable>,
@@ -53,15 +54,15 @@ pub(crate) struct State {
 
 pub(super) struct Installed {
     previous: ConstantFunctions,
+    revision: u64,
     state: std::rc::Rc<AnalysisState>,
 }
 
 impl Drop for Installed {
     fn drop(&mut self) {
-        replace(
-            &self.state.const_functions,
-            std::mem::take(&mut self.previous),
-        );
+        let functions = &self.state.const_functions;
+        replace(functions, std::mem::take(&mut self.previous));
+        functions.revision.restore(self.revision);
     }
 }
 
@@ -96,15 +97,22 @@ pub(super) fn install(
     functions: ConstantFunctions,
 ) -> Installed {
     let previous = installed(&state.const_functions);
+    let revision = state.const_functions.revision.get();
     replace(&state.const_functions, functions);
     Installed {
         previous,
+        revision,
         state: state.clone(),
     }
 }
 
 pub(super) fn replace(state: &State, functions: ConstantFunctions) {
     *state.functions.borrow_mut() = functions;
+    state.revision.change();
+}
+
+pub(super) fn revision(state: &State) -> &generate::Revision {
+    &state.revision
 }
 
 /// Why an installed function could not be converted for constant evaluation.
