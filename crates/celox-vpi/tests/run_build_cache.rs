@@ -482,6 +482,7 @@ fn rebuilds_corrupt_entries_and_tolerates_unwritable_cache() {
 fn rejects_incompatible_modes() {
     let project = project(SOURCE);
     for args in [
+        #[cfg(feature = "cranelift")]
         vec!["--backend", "cranelift"],
         vec!["--dump-ir-dir", "trace"],
         vec!["--native-image-input", "image"],

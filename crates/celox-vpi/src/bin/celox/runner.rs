@@ -153,8 +153,10 @@ pub(super) enum RunError {
 pub(super) enum Backend {
     #[default]
     Native,
+    #[cfg(feature = "cranelift")]
     Cranelift,
     Interpreter,
+    #[cfg(feature = "wasm-runtime")]
     Wasm,
     Tiered,
 }
@@ -169,8 +171,10 @@ impl Backend {
     fn as_str(self) -> &'static str {
         match self {
             Backend::Native => "native",
+            #[cfg(feature = "cranelift")]
             Backend::Cranelift => "cranelift",
             Backend::Interpreter => "interpreter",
+            #[cfg(feature = "wasm-runtime")]
             Backend::Wasm => "wasm",
             Backend::Tiered => "tiered",
         }
@@ -757,9 +761,11 @@ pub(super) fn run(
                 target_arch = "aarch64"
             )))]
             Backend::Native => unreachable!("native backend availability checked above"),
+            #[cfg(feature = "wasm-runtime")]
             Backend::Wasm => {
                 builder.build_wasm()?;
             }
+            #[cfg(feature = "cranelift")]
             Backend::Cranelift => {
                 let _sim = builder.build_cranelift()?;
             }
@@ -865,6 +871,7 @@ pub(super) fn run(
             all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
         )))]
         Backend::Native => unreachable!("native backend availability checked above"),
+        #[cfg(feature = "cranelift")]
         Backend::Cranelift => {
             let mut sim = builder.build_cranelift()?;
             super::report_warnings(sim.warnings())
@@ -923,6 +930,7 @@ pub(super) fn run(
                 None,
             )
         }
+        #[cfg(feature = "wasm-runtime")]
         Backend::Wasm => {
             let mut sim = builder.build_wasm()?;
             super::report_warnings(sim.warnings())

@@ -805,7 +805,7 @@ enum InstanceInner {
         state: *mut c_void,
         vtable: &'static sys::VrlComponentVTable,
     },
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
     Wasm(Box<crate::component::wasm::WasmInstance>),
     Injected {
         instance: String,
@@ -886,7 +886,7 @@ impl ExternalInstance {
                     inner: InstanceInner::Native { state, vtable },
                 })
             }
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
             crate::component::loader::ComponentBackend::Wasm {
                 library,
                 type_name,
@@ -912,7 +912,7 @@ impl ExternalInstance {
     pub fn kind(&self) -> u32 {
         match &self.inner {
             InstanceInner::Native { vtable, .. } => vtable.kind,
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
             InstanceInner::Wasm(instance) => instance.kind(),
             InstanceInner::Injected { definition, .. } => definition.kind,
         }
@@ -923,7 +923,7 @@ impl ExternalInstance {
             InstanceInner::Native { state, vtable } => unsafe {
                 (vtable.on_init)(*state, host.as_ctx())
             },
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
             InstanceInner::Wasm(instance) => instance.on_init(host),
             InstanceInner::Injected {
                 instance,
@@ -939,7 +939,7 @@ impl ExternalInstance {
             InstanceInner::Native { state, vtable } => unsafe {
                 (vtable.on_reset)(*state, host.as_ctx())
             },
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
             InstanceInner::Wasm(instance) => instance.on_reset(host),
             InstanceInner::Injected {
                 instance,
@@ -955,7 +955,7 @@ impl ExternalInstance {
             InstanceInner::Native { state, vtable } => unsafe {
                 (vtable.on_clock)(*state, host.as_ctx())
             },
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
             InstanceInner::Wasm(instance) => instance.on_clock(host),
             InstanceInner::Injected {
                 instance,
@@ -971,7 +971,7 @@ impl ExternalInstance {
             InstanceInner::Native { state, vtable } => unsafe {
                 (vtable.on_finish)(*state, host.as_ctx())
             },
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
             InstanceInner::Wasm(instance) => instance.on_finish(host),
             InstanceInner::Injected {
                 instance,
@@ -1029,7 +1029,7 @@ impl ExternalInstance {
                     _ => HostValue::Unit,
                 })
             }
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
             InstanceInner::Wasm(instance) => instance.call_method(host, name, args),
             InstanceInner::Injected {
                 instance,
@@ -1052,7 +1052,7 @@ impl Drop for ExternalInstance {
         match &mut self.inner {
             InstanceInner::Native { state, vtable } => unsafe { (vtable.destroy)(*state) },
             // The wasm instance's own Drop calls the guest destructor.
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
             InstanceInner::Wasm(_) => {}
             InstanceInner::Injected { .. } => {}
         }
@@ -1063,7 +1063,7 @@ impl std::fmt::Debug for ExternalInstance {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let transport = match &self.inner {
             InstanceInner::Native { .. } => "native",
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
             InstanceInner::Wasm(_) => "wasm",
             InstanceInner::Injected { .. } => "injected",
         };

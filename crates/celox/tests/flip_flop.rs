@@ -3837,8 +3837,7 @@ fn test_ff_runtime_for_dynamic_zero_start_mul_reports_true_loop(sim) {
     .unwrap();
     let error = sim.tick(clk).unwrap_err();
     // Only the Veryl reference adapter lacks Celox's detailed loop diagnostic.
-    let expected = if (&sim as &dyn std::any::Any)
-        .is::<test_utils::veryl_sim::VerylSimAdapter>()
+    let expected = if test_utils::is_veryl_reference(&sim)
     {
         celox::RuntimeErrorCode::DetectedTrueLoop
     } else {
@@ -3876,8 +3875,7 @@ fn test_ff_runtime_for_terminal_inclusive_mul_loop_reports_true_loop(sim) {
     sim.modify(|io| io.set(count, 0u8)).unwrap();
     let error = sim.tick(clk).unwrap_err();
     // Only the Veryl reference adapter lacks Celox's detailed loop diagnostic.
-    let expected = if (&sim as &dyn std::any::Any)
-        .is::<test_utils::veryl_sim::VerylSimAdapter>()
+    let expected = if test_utils::is_veryl_reference(&sim)
     {
         celox::RuntimeErrorCode::DetectedTrueLoop
     } else {

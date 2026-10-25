@@ -1,4 +1,6 @@
 [workspace]
+# Keep optional backend and comparison crates out of ordinary local builds.
+default-members = ["crates/celox", "crates/celox-napi", "crates/celox-vpi"]
 members = [
     "crates/celox",
     "crates/celox-analysis",
