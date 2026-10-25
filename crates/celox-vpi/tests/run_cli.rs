@@ -636,3 +636,77 @@ fn interface_array_query_policy_flows_through_manifest_and_cli_overrides() {
         }
     }
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn sv_saves_state_files_at_cycles_and_times() {
+    let source = "`timescale 1ns/1ns
+module Top;
+  logic clk = 0;
+  logic [7:0] count = 0;
+  always #5 clk = ~clk;
+  always_ff @(posedge clk) count <= count + 8'd1;
+  initial #100 $finish;
+endmodule
+";
+    let states = tempfile::tempdir().unwrap();
+    let directory = states.path().to_str().unwrap();
+    for backend in ["tiered", "interpreter", "native"] {
+        let output = run(
+            &[("top.sv", source)],
+            &[
+                "--backend",
+                backend,
+                "--save-state-on",
+                "Top.clk",
+                "--save-state-at",
+                "2,5",
+                "--save-state-at-time",
+                "32",
+                "--save-state-dir",
+                directory,
+            ],
+        );
+        assert!(output.status.success(), "{backend}: {output:?}");
+        // Cycle N is the N-th rising edge of clk, at 10N - 5; the file holds
+        // the state after that time step, its nonblocking updates included.
+        for (file, time, count) in [
+            ("Top.clk-2.state", 15, 2),
+            ("Top.clk-5.state", 45, 5),
+            // Time 32 has no activity; the state is that after time 30.
+            ("time-32.state", 30, 3),
+        ] {
+            let dump = std::process::Command::new(env!("CARGO_BIN_EXE_celox"))
+                .args(["state", "dump"])
+                .arg(states.path().join(file))
+                .output()
+                .unwrap();
+            assert!(dump.status.success(), "{backend} {file}: {dump:?}");
+            let text = String::from_utf8_lossy(&dump.stdout);
+            assert!(
+                text.contains(&format!("count[8] = {count:02x}\n")),
+                "{backend} {file}:\n{text}"
+            );
+            assert!(
+                text.contains(&format!("time: {time}\n")),
+                "{backend} {file}:\n{text}"
+            );
+        }
+    }
+    let output = run(
+        &[("top.sv", source)],
+        &[
+            "--save-state-on",
+            "clk",
+            "--save-state-at",
+            "50",
+            "--save-state-dir",
+            directory,
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("before cycle 50"),
+        "{output:?}"
+    );
+}
