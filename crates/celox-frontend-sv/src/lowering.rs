@@ -1043,11 +1043,25 @@ fn validate_package_variable_drivers<'a>(
     for root in roots {
         count(root, 1, module_ids, modules, &mut instances);
     }
-    // A driver is one process or child output of one instance; a process may
-    // assign the variable several times.
-    type Driver = (ModuleId, usize, bool, usize);
-    let mut drivers: HashMap<(String, String), Vec<(Driver, Option<(i128, i128)>)>> =
-        HashMap::default();
+    // A driver is one process, child output or initial block of one
+    // instance; a process may assign the variable several times.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Source {
+        Process,
+        Child,
+        Initial,
+    }
+    type Driver = (ModuleId, usize, Source, usize);
+    struct Writer {
+        driver: Driver,
+        range: Option<(i128, i128)>,
+        /// Treated as the only writer of what it writes.
+        exclusive: bool,
+        /// The only writer the standard allows, which an initial block
+        /// must not write either.
+        restricted: bool,
+    }
+    let mut drivers: HashMap<(String, String), Vec<Writer>> = HashMap::default();
     for (&module_id, module) in modules {
         let multiplicity = instances.get(&module_id).copied().unwrap_or(0);
         if module.package_variables.is_empty() {
@@ -1060,24 +1074,62 @@ fn validate_package_variable_drivers<'a>(
             let name = &module.variables[var_id].path[0];
             let local = module_drivers.local(name);
             let children = child_output_driver_ranges(module, &child_drivers, name);
+            // One-shot initial blocks; repeating ones are among `local`.
+            let initial = module_drivers
+                .initial(name)
+                .into_iter()
+                .filter(|(driver, _)| !module.source.initial_processes()[*driver].repeats())
+                .collect::<Vec<_>>();
             let entry = drivers
                 .entry((package.clone(), variable.clone()))
                 .or_default();
             for copy in 0..multiplicity {
                 for &(driver, range) in &local {
-                    entry.push(((module_id, copy, false, driver), range));
+                    entry.push(Writer {
+                        driver: (module_id, copy, Source::Process, driver),
+                        range,
+                        exclusive: exclusive_driver(&module.source, driver),
+                        restricted: restricted_driver(&module.source, driver),
+                    });
                 }
                 for &(driver, range) in &children {
-                    entry.push(((module_id, copy, true, driver), range));
+                    entry.push(Writer {
+                        driver: (module_id, copy, Source::Child, driver),
+                        range,
+                        exclusive: true,
+                        restricted: true,
+                    });
+                }
+                for &(driver, range) in &initial {
+                    entry.push(Writer {
+                        driver: (module_id, copy, Source::Initial, driver),
+                        range,
+                        exclusive: false,
+                        restricted: false,
+                    });
                 }
             }
         }
     }
-    for ((package, variable), ranges) in drivers {
-        let overlap = ranges.iter().enumerate().any(|(index, (driver, range))| {
-            ranges[index + 1..].iter().any(|(other, other_range)| {
-                other != driver && net_driver_ranges_overlap(*range, *other_range)
-            })
+    // Processes of several instances may write a package variable, as any
+    // processes may write a variable, unless one of them must be its only
+    // writer (IEEE 1800-2023 6.5, 9.2.2); an initial block conflicts only
+    // with a writer the standard restricts.
+    for ((package, variable), writers) in drivers {
+        let conflict = |left: &Writer, right: &Writer| {
+            let initial = left.driver.2 == Source::Initial || right.driver.2 == Source::Initial;
+            left.driver != right.driver
+                && if initial {
+                    left.restricted || right.restricted
+                } else {
+                    left.exclusive || right.exclusive
+                }
+                && net_driver_ranges_overlap(left.range, right.range)
+        };
+        let overlap = writers.iter().enumerate().any(|(index, left)| {
+            writers[index + 1..]
+                .iter()
+                .any(|right| conflict(left, right))
         });
         if overlap {
             return Err(sv::AnalyzerError::Unsupported(format!(
@@ -1801,6 +1853,49 @@ impl ModuleDrivers {
     fn initial(&self, signal_name: &str) -> Vec<(usize, Option<(i128, i128)>)> {
         self.drivers(signal_name, |write| Some((write.initial?, write.range)))
     }
+}
+
+/// Whether process `driver` of [`ModuleDrivers::local`] must be the only writer of
+/// the variables it writes: an `always_comb` or continuous assignment, an
+/// edge procedure, or an `always_ff` run as a process, but not another
+/// ordinary `always` process (IEEE 1800-2023 6.5, 9.2.2).
+fn exclusive_driver(module: &sv::ir::Module, driver: usize) -> bool {
+    let edge = module.comb_processes().len() + module.ff_processes().len();
+    driver < edge || {
+        let process = module
+            .initial_processes()
+            .iter()
+            .filter(|process| process.repeats())
+            .nth(driver - edge);
+        process.is_some_and(|process| {
+            process.is_scheduled_edge()
+                || process
+                    .site()
+                    .is_some_and(|site| site.construct == "always_ff")
+        })
+    }
+}
+
+/// Whether process `driver` of [`ModuleDrivers::local`] is one the standard lets
+/// no other process write to the variables it writes: `always_comb`,
+/// `always_latch`, `always_ff` or a continuous assignment (IEEE 1800-2023
+/// 6.5, 9.2.2).
+fn restricted_driver(module: &sv::ir::Module, driver: usize) -> bool {
+    let combinational = module.comb_processes().len();
+    let edge = combinational + module.ff_processes().len();
+    if let Some(process) = module.comb_processes().get(driver) {
+        return process.kind() != sv::ir::CombProcessKind::AlwaysStar;
+    }
+    if driver < edge {
+        return module.ff_processes()[driver - combinational].is_always_ff();
+    }
+    module
+        .initial_processes()
+        .iter()
+        .filter(|process| process.repeats())
+        .nth(driver - edge)
+        .and_then(|process| process.site())
+        .is_some_and(|site| matches!(site.construct, "always_ff" | "always_comb" | "always_latch"))
 }
 
 fn net_lvalue_range(
