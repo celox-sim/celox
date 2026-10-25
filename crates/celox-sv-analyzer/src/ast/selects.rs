@@ -88,7 +88,7 @@ pub(super) fn lvalue_from_indices(
     packed_dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
     if let Some((array_offset, packed_indices)) =
-        flatten_variable_select(state, &name, &indices, packed_dimensions)
+        flatten_variable_select(&name, &indices, packed_dimensions)
     {
         if !packed_indices.is_empty() {
             if let Some((msb, lsb)) =
@@ -184,6 +184,43 @@ pub(super) fn lvalue_from_indices(
     }
 
     Ok(LValue::Ident(name))
+}
+
+/// Fold the invalid-element sentinel emitted by `flatten_variable_select`.
+/// Keep the selected integral type even in an unselected conditional arm:
+/// both operands determine the conditional width and signedness (11.4.11).
+pub(super) fn invalid_unpacked_read(
+    state: &AnalysisState,
+    lhs: &LValue,
+    dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    let LValue::Select {
+        name,
+        msb,
+        lsb,
+        signed,
+        ..
+    } = lhs
+    else {
+        return None;
+    };
+    let variable = dimensions.get(name)?;
+    if variable.unpacked.is_empty() || variable.real || variable.string || variable.class.is_some()
+    {
+        return None;
+    }
+    let full_width = lvalue_expr_type(state, &LValue::Ident(name.clone()), dimensions)?.width;
+    let msb = eval_ast_const_expr(state, msb, &dimensions.const_env)?;
+    let lsb = eval_ast_const_expr(state, lsb, &dimensions.const_env)?;
+    if msb < lsb || lsb < i128::try_from(full_width).ok()? {
+        return None;
+    }
+    let width = usize::try_from(msb.checked_sub(lsb)?)
+        .ok()?
+        .checked_add(1)?;
+    let signing = if *signed { "s" } else { "" };
+    let digit = if variable.is_2state { "0" } else { "x" };
+    Some(Expr::Literal(format!("{width}'{signing}b{digit}")))
 }
 
 /// Shared syntax-independent assignment range flattening and array metadata.
@@ -348,7 +385,6 @@ pub(super) fn indexed_range_values(
 }
 
 fn flatten_variable_select(
-    state: &AnalysisState,
     name: &str,
     indices: &[ConstExpr],
     packed_dimensions: &PackedDimensions,
@@ -360,15 +396,9 @@ fn flatten_variable_select(
     let mut offset = ConstExpr::Literal("0".to_string());
     let mut valid = None;
     for (index, value) in indices[..selected_unpacked_count].iter().enumerate() {
-        if const_expr_is_out_of_range(
-            state,
-            value,
-            &dimensions.unpacked[index].left,
-            &dimensions.unpacked[index].right,
-            &packed_dimensions.const_env,
-        ) {
-            return None;
-        }
+        // Constant and runtime invalid indices have the same semantics:
+        // read the element type's default value and ignore writes (7.4.5).
+        // Route both through the guard below instead of rejecting constants.
         let dimension = &dimensions.unpacked[index];
         let descending = ConstExpr::Binary {
             left: Box::new(dimension.left.clone()),
@@ -483,7 +513,7 @@ fn unpacked_select_range_metadata(
     ) {
         return None;
     }
-    let (_, packed_indices) = flatten_variable_select(state, name, indices, packed_dimensions)?;
+    let (_, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
     if !packed_indices.is_empty() {
         return None;
     }
@@ -554,8 +584,7 @@ fn flatten_unpacked_select_range(
     ) {
         return None;
     }
-    let (array_offset, packed_indices) =
-        flatten_variable_select(state, name, indices, packed_dimensions)?;
+    let (array_offset, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
     if !packed_indices.is_empty() {
         return None;
     }
@@ -642,8 +671,7 @@ fn flatten_select_range(
             packed_dimensions,
         );
     }
-    let (array_offset, packed_indices) =
-        flatten_variable_select(state, name, indices, packed_dimensions)?;
+    let (array_offset, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
     let dimension = dimensions.packed.get(packed_indices.len())?;
     if const_expr_is_out_of_range(
         state,

@@ -604,14 +604,15 @@ mod inferred_latch {
     #[test]
     fn out_of_bounds_state_writes_do_not_expand_diagnostic_masks() {
         let source = "module Top(output logic [7:0] q); logic [7:0] a[2]; always_comb begin q=$time; a[-1]=$time; a[2147483647]=$time; end endmodule";
-        let error = Simulator::from_sv_sources(vec![(source, Path::new("oob_state.sv"))], "Top")
-            .diagnostic_policy(policy("inferred_latch", DiagnosticLevel::Warn))
-            .build_interpreter()
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("outside its declared range"),
-            "{error}"
-        );
+        // Invalid unpacked writes are ignored (IEEE 1800-2023 7.4.5).
+        // Their offsets must not enlarge coverage masks or create a latch.
+        for level in [DiagnosticLevel::Error, DiagnosticLevel::Warn] {
+            let sim = Simulator::from_sv_sources(vec![(source, Path::new("oob_state.sv"))], "Top")
+                .diagnostic_policy(policy("inferred_latch", level))
+                .build_interpreter()
+                .unwrap();
+            assert!(sim.warnings().is_empty(), "{:?}", sim.warnings());
+        }
     }
 }
 
