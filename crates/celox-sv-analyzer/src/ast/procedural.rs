@@ -283,6 +283,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 .push(entry);
         }
         for property in &class.statics {
+            // A base's local static is not visible in the derived class (8.18).
+            // Keep it out of the alias table so binding can diagnose its use.
+            if property.local && property.owner != class.name {
+                continue;
+            }
             let entry = self.take_binding(
                 &property.name,
                 Some(property.variable.clone()),
@@ -2468,6 +2473,16 @@ impl BodyBuilder<'_, '_, '_> {
                 &self.dims.const_env,
                 &self.dims.type_aliases,
             )?;
+            if let Some(method) = base.method("new") {
+                expression_binding::check_member_access(
+                    self.tree,
+                    &self.dims,
+                    &method.owner,
+                    &method.name,
+                    method.qualifiers.local,
+                    method.qualifiers.protected,
+                )?;
+            }
             let formals = base.constructor_formals(native);
             if arguments.len() > formals {
                 return Err(unsupported(format!(
