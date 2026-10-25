@@ -1422,6 +1422,13 @@ impl super::SimBackend for JitBackend {
         self.set_comb_capture_event_enabled(active_sites);
     }
 
+    fn comb_capture_event_enabled(&self) -> Vec<bool> {
+        self.comb_capture_enabled
+            .iter()
+            .map(|&enabled| enabled != 0)
+            .collect()
+    }
+
     fn stable_region_size(&self) -> usize {
         self.stable_region_size()
     }
