@@ -570,3 +570,11 @@ test("upstream SV TB runs on full CI and feeds failure reporting", () => {
   assert.match(upstream, /retention-days: 14/);
   assert.match(job("report-full-validation"), /common-cells,/);
 });
+
+
+test("sv-tests generates the pinned main corpus before running and retains its summary", () => {
+  const sv = job("sv-tests");
+  assert.match(sv, /third_party\/tests\/easyUVM third_party\/tests\/uvm-examples/);
+  assert.ok(sv.indexOf("conformance/sv-tests/prepare.py") < sv.indexOf("conformance/sv-tests/run.py"));
+  assert.match(sv, /sv-tests-report\.summary\.json/);
+});
