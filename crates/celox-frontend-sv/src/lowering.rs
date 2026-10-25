@@ -5092,11 +5092,36 @@ fn lower_initial_processes(
         .zip(slots)
         .enumerate()
         .map(|(index, ((process, random_seed), slots))| {
-            let kernel = ff::Ff::new(&mut pm, random_seed).lower_initial_kernel(
-                process.body(),
-                slots,
-                index,
-            )?;
+            // `always @(list) statement` waits for a change (IEEE 1800-2023
+            // 9.4.2). In two-state mode its outputs would then start as a
+            // real 0, so it runs once at time zero, after the time-zero
+            // statements of the initial blocks, before it waits, as
+            // Verilator settles it: `#0; forever begin statement; @(list); end`.
+            let settled;
+            let body = match process.level_sensitive().filter(|_| !four_state) {
+                Some((items, statements)) => {
+                    let mut looped = statements.to_vec();
+                    looped.push(sv::ir::Stmt::WaitEvent(items.to_vec()));
+                    settled = [
+                        sv::ir::Stmt::Delay {
+                            amount: sv::ir::Expr::Literal("0".to_string()),
+                            ticks_per_unit: 1,
+                            ticks_per_precision: 1,
+                        },
+                        sv::ir::Stmt::Loop {
+                            kind: sv::ir::LoopKind::Forever,
+                            init: Vec::new(),
+                            condition: None,
+                            step: Vec::new(),
+                            body: looped,
+                        },
+                    ];
+                    &settled[..]
+                }
+                None => process.body(),
+            };
+            let kernel =
+                ff::Ff::new(&mut pm, random_seed).lower_initial_kernel(body, slots, index)?;
             wait_sites.extend(kernel.wait_sites);
             nba_sites.extend(kernel.nba_sites);
             nba_switches.extend(kernel.nba_switches);

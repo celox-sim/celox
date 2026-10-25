@@ -384,6 +384,7 @@ fn tag(name: &str, pos: Pos) -> Result<TestTag, ScriptError> {
         "eager_assertion_messages" => TestTag::EagerAssertionMessages,
         "two_state_zero_division" => TestTag::TwoStateZeroDivision,
         "two_state_initialization" => TestTag::TwoStateInitialization,
+        "two_state_time_zero_settle" => TestTag::TwoStateTimeZeroSettle,
         _ => return error(pos, format!("unknown tag `{name}`")),
     })
 }
