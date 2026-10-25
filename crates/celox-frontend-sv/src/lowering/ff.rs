@@ -53,6 +53,9 @@ pub(super) struct Ff<'p, 'a> {
     /// Variables a process kernel may write between the evaluation of this
     /// process and the NBA region (see `kernel_window_writes`).
     window_writes: HashSet<SourceVarId>,
+    /// Variables several edge processes write by blocking assignments (see
+    /// `with_shared_variables`).
+    shared: HashSet<SourceVarId>,
     b: SIRBuilder<Addr>,
     /// Variables read from the working region.
     working: HashSet<SourceVarId>,
@@ -129,6 +132,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             element_writes: HashSet::default(),
             other_writes: HashSet::default(),
             window_writes: HashSet::default(),
+            shared: HashSet::default(),
             b: SIRBuilder::new(),
             working: HashSet::default(),
             nonblocking: HashSet::default(),
@@ -255,10 +259,23 @@ impl<'p, 'a> Ff<'p, 'a> {
         self
     }
 
+    /// Variables other edge processes also write by blocking assignments.
+    /// The process reads and writes their stable state directly, as a
+    /// blocking assignment updates the variable at once (IEEE 1800-2023
+    /// 10.4.1): its reads see its own preceding writes, and the last write of
+    /// any process stays, even when a later process does not write it. A
+    /// working value seeded by each process would instead be committed by
+    /// every one of them.
+    pub fn with_shared_variables(mut self, names: &HashSet<String>) -> Self {
+        self.shared = names.iter().filter_map(|name| self.m.id(name)).collect();
+        self
+    }
+
     /// Where a write of `id`, and a read of a value the process wrote, go:
-    /// the working region, or stable state in a process kernel.
+    /// the working region, or stable state in a process kernel and for a
+    /// shared variable.
     fn target(&self, id: SourceVarId) -> Addr {
-        if self.kernel.is_some() || self.direct {
+        if self.kernel.is_some() || self.direct || self.shared.contains(&id) {
             stable(id)
         } else {
             working(id)
@@ -475,9 +492,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         let working_set = &self.working;
         let variables = &*self.m.variables;
         let direct = self.kernel.is_some() || self.direct;
+        let shared = &self.shared;
         let map = |id: &SourceVarId| -> Addr {
-            if direct {
-                stable(*aliases.get(id).unwrap_or(id))
+            let var = aliases.get(id).unwrap_or(id);
+            if direct || shared.contains(var) {
+                stable(*var)
             } else if let Some(var) = aliases.get(id) {
                 working(*var)
             } else if working_set.contains(id)
@@ -4268,6 +4287,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             })
             .collect();
         self.sparse_memories.extend(sparse);
+        if self.nonblocking.iter().any(|id| self.shared.contains(id)) {
+            return Err(unsupported(
+                "nonblocking writes to a variable several edge processes write",
+            ));
+        }
         if self
             .working
             .iter()
@@ -4333,11 +4357,12 @@ impl<'p, 'a> Ff<'p, 'a> {
             stage_nonblocking(body, &staged, self.m)
         };
         // A variable staged for an exact publication has no next state of
-        // its own: only its merge publishes it.
+        // its own: only its merge publishes it. A shared variable is written
+        // in stable state.
         let published: Vec<_> = targets
             .iter()
             .copied()
-            .filter(|target| !exact.contains(&target.id))
+            .filter(|target| !exact.contains(&target.id) && !self.shared.contains(&target.id))
             .collect();
         let ordinary_targets: Vec<_> = published
             .iter()
