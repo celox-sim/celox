@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792897434873,
+  "lastUpdate": 1792899729809,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -406188,6 +406188,42 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-celox-jit/heliodor_suite_smp_linux_boot_4hart_execution",
             "unit": "ms",
             "value": 2527756.606254
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "35e2e249592d124845fa8fb61a4970df8cce3f6b",
+          "message": "fix(sv): lex a colon before a comment as a colon (#1851)",
+          "timestamp": "2026-10-24T07:31:19Z",
+          "url": "https://github.com/celox-sim/celox/commit/35e2e249592d124845fa8fb61a4970df8cce3f6b"
+        },
+        "date": 1792899729809,
+        "cpu": "AMD EPYC 7763",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_smp_linux_boot_4hart_startup",
+            "unit": "ms",
+            "value": 142186.220085
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_smp_linux_boot_4hart_execution",
+            "unit": "ms",
+            "value": 2141947.631891
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_smp_linux_boot_4hart_end_to_end",
+            "unit": "ms",
+            "value": 2284305.787893
           }
         ]
       }
