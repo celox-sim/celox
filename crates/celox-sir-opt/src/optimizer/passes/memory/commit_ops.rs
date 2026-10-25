@@ -234,10 +234,35 @@ struct PendingSegments {
 
 impl PendingSegments {
     fn build(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Self {
+        Self::build_with_working_inputs(eu, false)
+    }
+
+    fn build_with_working_inputs(eu: &ExecutionUnit<RegionedAbsoluteAddr>, inputs: bool) -> Self {
         let mut endpoints: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
         for block in eu.blocks.values() {
             for instruction in &block.instructions {
                 match instruction {
+                    SIRInstruction::Load(_, addr, offset, bits)
+                        if inputs && addr.region == WORKING_REGION =>
+                    {
+                        let (start, end) = instruction_range(&eu.register_map, offset, *bits);
+                        endpoints
+                            .entry(addr.absolute_addr())
+                            .or_default()
+                            .extend([start, end]);
+                    }
+                    SIRInstruction::Commit(src, dst, offset, bits, _)
+                        if inputs
+                            && src.region == STABLE_REGION
+                            && dst.region == WORKING_REGION
+                            && src.absolute_addr() == dst.absolute_addr() =>
+                    {
+                        let (start, end) = instruction_range(&eu.register_map, offset, *bits);
+                        endpoints
+                            .entry(dst.absolute_addr())
+                            .or_default()
+                            .extend([start, end]);
+                    }
                     SIRInstruction::Store(addr, offset, bits, _, _, _)
                         if addr.region == WORKING_REGION
                             || addr.region == SPARSE_WORKING_REGION =>
@@ -346,6 +371,90 @@ fn update_segments(bits: &mut [u64], range: std::ops::Range<usize>, set: bool) {
             bits[bit / 64] &= !mask;
         }
     }
+}
+
+/// A partial event can read pending values produced by another task. Such
+/// values cannot be redirected to STABLE or have their publication removed.
+/// Track possibly uninitialized access fragments, rather than bits of the
+/// declared object, so large arrays with sparse accesses remain sparse.
+pub(crate) fn uninitialized_working_observations(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> DirectStableStoreHazards {
+    use std::collections::VecDeque;
+    let segments = PendingSegments::build_with_working_inputs(eu, true);
+    let mut hazards = DirectStableStoreHazards::default();
+    if segments.count == 0 {
+        return hazards;
+    }
+    let words = segments.count.div_ceil(64);
+    let mut incoming = HashMap::default();
+    incoming.insert(eu.entry_block_id, vec![u64::MAX; words]);
+    let mut queue = VecDeque::from([eu.entry_block_id]);
+    while let Some(id) = queue.pop_front() {
+        let block = &eu.blocks[&id];
+        let mut undefined = incoming[&id].clone();
+        for instruction in &block.instructions {
+            let observed = match instruction {
+                SIRInstruction::Load(_, address, offset, width)
+                    if address.region == WORKING_REGION =>
+                {
+                    Some((*address, offset, *width))
+                }
+                SIRInstruction::Commit(source, _, offset, width, _)
+                    if source.region == WORKING_REGION =>
+                {
+                    Some((*source, offset, *width))
+                }
+                _ => None,
+            };
+            if let Some((address, offset, width)) = observed {
+                let (start, end) = instruction_range(&eu.register_map, offset, width);
+                segments.record_observation(
+                    &mut hazards,
+                    &undefined,
+                    address.absolute_addr(),
+                    start,
+                    end,
+                );
+            }
+            let defined = match instruction {
+                SIRInstruction::Store(address, offset, width, ..)
+                    if address.region == WORKING_REGION =>
+                {
+                    Some((*address, offset, *width))
+                }
+                SIRInstruction::Commit(source, destination, offset, width, _)
+                    if source.region == STABLE_REGION
+                        && destination.region == WORKING_REGION
+                        && source.absolute_addr() == destination.absolute_addr() =>
+                {
+                    Some((*destination, offset, *width))
+                }
+                _ => None,
+            };
+            if let Some((address, offset, width)) = defined
+                && let Some(start) = offset.constant_bit_offset()
+                && let Some(end) = start.checked_add(width)
+                && let Some(range) = segments.segment_range(address.absolute_addr(), start, end)
+            {
+                update_segments(&mut undefined, range, false);
+            }
+        }
+        for successor in crate::ir::cfg::terminator_successors(&block.terminator) {
+            let is_new = !incoming.contains_key(&successor);
+            let entry = incoming.entry(successor).or_insert_with(|| vec![0; words]);
+            let mut changed = is_new;
+            for (destination, source) in entry.iter_mut().zip(&undefined) {
+                let merged = *destination | *source;
+                changed |= merged != *destination;
+                *destination = merged;
+            }
+            if changed {
+                queue.push_back(successor);
+            }
+        }
+    }
+    hazards
 }
 
 /// Bit ranges for which replacing a WORKING/SPARSE write with an immediate

@@ -1958,3 +1958,59 @@
   (assert_eq l0 0) (assert_eq l1 0x40) (assert_eq l2 0)
   (run_until 1)
   (assert_eq s0 0) (assert_eq s1 0x42) (assert_eq s2 0))
+
+(case generated_pipeline_with_explicit_generate_branches
+  ; Separate FF producers may share one array. Removing a task's staging
+  ; must preserve publication of elements computed by other tasks (10.4.2).
+  (source "generated_pipeline.sv" #"
+    module Asc #(parameter N=0)(input logic clk, rst, input logic [7:0] d,
+                                output logic [7:0] q);
+      if (N>0) begin : pipe
+        logic [7:0] r[3:N+2];
+        for(genvar n=0;n<N;n++) begin : stage
+          if (n==0) begin
+            always_ff @(posedge clk) if(rst) r[n+3]<='0; else r[n+3]<=d;
+          end else begin
+            always_ff @(posedge clk) if(rst) r[n+3]<='0; else r[n+3]<=r[n+2];
+          end
+        end
+        assign q=r[N+2];
+      end else assign q=d;
+    endmodule
+    module Desc #(parameter N=0)(input logic clk, rst, input logic [7:0] d,
+                                 output logic [7:0] q);
+      if (N>0) begin : pipe
+        logic [7:0] r[N+2:3];
+        for(genvar n=0;n<N;n++) begin : stage
+          if (n==0) begin
+            always_ff @(posedge clk) if(rst) r[n+3]<='0; else r[n+3]<=d;
+          end else begin
+            always_ff @(posedge clk) if(rst) r[n+3]<='0; else r[n+3]<=r[n+2];
+          end
+        end
+        assign q=r[N+2];
+      end else assign q=d;
+    endmodule
+    module Top(input logic clk, rst, input logic [7:0] d,
+               output logic [7:0] a1,a2,a4,b1,b2,b4);
+      Asc #(.N(1)) u1(clk,rst,d,a1);
+      Asc #(.N(2)) u2(clk,rst,d,a2);
+      Asc #(.N(4)) u4(clk,rst,d,a4);
+      Desc #(.N(1)) v1(clk,rst,d,b1);
+      Desc #(.N(2)) v2(clk,rst,d,b2);
+      Desc #(.N(4)) v4(clk,rst,d,b4);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set rst 1))
+  (tick clk)
+  (modify (set rst 0))
+  (for cycle (range 1 8)
+    (modify (set d (* cycle 17)))
+    (tick clk)
+    (assert_eq a1 (* cycle 17))
+    (assert_eq b1 (* cycle 17))
+    (assert_eq a2 (? (> cycle 1) (* (- cycle 1) 17) 0))
+    (assert_eq b2 (? (> cycle 1) (* (- cycle 1) 17) 0))
+    (assert_eq a4 (? (> cycle 3) (* (- cycle 3) 17) 0))
+    (assert_eq b4 (? (> cycle 3) (* (- cycle 3) 17) 0))))
