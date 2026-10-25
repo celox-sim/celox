@@ -177,7 +177,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
             simulate_sv(simulation, max_steps, &mut std::io::stdout().lock())
         }};
     }
-    match arguments.execution.backend {
+    match arguments.execution.backend() {
         runner::Backend::Native => execute!(build),
         #[cfg(feature = "cranelift")]
         runner::Backend::Cranelift => execute!(build_cranelift),

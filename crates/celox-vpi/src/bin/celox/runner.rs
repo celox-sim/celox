@@ -30,8 +30,11 @@ macro_rules! report {
 
 #[derive(Args, Default)]
 pub(super) struct ExecutionArgs {
-    #[arg(long, value_enum, default_value = "native")]
-    pub backend: Backend,
+    /// Defaults to `tiered`, or to `native` when an option needs native code
+    /// (compile-only, native images, the build cache or IR dumps) and in
+    /// cross-codegen builds.
+    #[arg(long, value_enum)]
+    backend: Option<Backend>,
     #[arg(long)]
     compile_only: bool,
     /// Write a pointer-free native image during compile-only mode.
@@ -74,6 +77,26 @@ pub(super) struct ExecutionArgs {
 }
 
 impl ExecutionArgs {
+    pub(super) fn backend(&self) -> Backend {
+        self.backend.unwrap_or(
+            // A cross-codegen build only exports foreign native images.
+            if cfg!(any(
+                all(target_arch = "x86_64", feature = "arm64-codegen"),
+                all(target_arch = "aarch64", feature = "x86_64-codegen")
+            )) || self.compile_only
+                || self.native_image_output.is_some()
+                || self.native_image_input.is_some()
+                || self.build_cache_dir.is_some()
+                || self.dump_ir_dir.is_some()
+                || self.dump_ir_and_run
+            {
+                Backend::Native
+            } else {
+                Backend::Tiered
+            },
+        )
+    }
+
     #[cfg(feature = "systemverilog")]
     pub(super) fn validate_sv(&self) -> Result<(), String> {
         if self.compile_only
@@ -149,9 +172,8 @@ pub(super) enum RunError {
     TestFailed { message: String },
 }
 
-#[derive(Clone, Copy, Default, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
 pub(super) enum Backend {
-    #[default]
     Native,
     #[cfg(feature = "cranelift")]
     Cranelift,
@@ -186,6 +208,7 @@ pub(super) fn run(
     design: super::project::Design,
     max_steps: u64,
 ) -> Result<(), RunError> {
+    let backend = cli.backend();
     let mut opts = Options {
         report: cli.report,
         require_compiled: cli.require_compiled,
@@ -198,7 +221,7 @@ pub(super) fn run(
         }),
         test: design.top.clone(),
         opt_level: design.opt_level.unwrap_or(OptLevel::O2),
-        backend: cli.backend,
+        backend,
         four_state: design.four_state.unwrap_or(false),
         compile_only: cli.compile_only,
         native_image_output: cli.native_image_output,
