@@ -3979,6 +3979,14 @@
       "classification": "xezim_bug",
       "bug": "sv_class-X11",
       "note": "As top xezim prints the expected three lines. As non-top dut, `third = new Item::last` (shallow copy of the static handle, 8.12) leaves third null, so third.a is a fatal null dereference. Copying from a local handle (`tmp = Item::last; third = new tmp`) works, and Item::last itself reads non-null. Repro: work/review5/xezim/r/c9_static.sv (+ .wrap.sv)."
+    },
+    {
+      "suite": "sv",
+      "name": "class::package_classes_by_their_qualified_names",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X2",
+      "note": "p::make() constructs with the typed constructor call `h = p::C::new`; xezim leaves the handle unusable (h == null is x), so h.v is a fatal null dereference and the run ends before the script (as top too). Replacing it with `h = new` prints the expected 5. Repro: work/review5/xezim/r/c4_typed.sv, work/review5/xezim/r/c4_new.sv."
     }
   ]
 }

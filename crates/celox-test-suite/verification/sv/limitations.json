@@ -1890,7 +1890,7 @@
     "category": "simulator_compile_limitation",
     "phase": "compile",
     "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
-    "reason": "Icarus 13.0 rejects class scope resolution with a syntax error: reading a static property (Counter::created), calling a static method (Counter::next()) and assigning a static property (Counter::last = \"set\"). IEEE 1800-2023 8.9, 8.10 and 8.23 define these accesses. Verilator passes the case.",
+    "reason": "Icarus 13.0 rejects class scope resolution with a syntax error: reading a static property (Counter::created), calling a static method (Counter::next()) and assigning a static property (Counter::last = \"set\"). IEEE 1800-2023 8.9, 8.10 and 8.23 define these accesses. Verilator passes both cases.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
@@ -1898,7 +1898,9 @@
     ],
     "cases": {
       "icarus": [
-        "class::static_properties_and_methods"
+        "class::static_properties_and_methods",
+        "class::classes_of_the_compilation_unit",
+        "class::package_classes_by_their_qualified_names"
       ]
     }
   },
@@ -1939,7 +1941,8 @@
         "class::methods_called_through_interface_class_handles",
         "class::inherited_methods_of_extended_interface_classes",
         "class::casts_from_interface_class_handles",
-        "class::typedefs_of_interface_classes"
+        "class::typedefs_of_interface_classes",
+        "class::classes_of_packages"
       ]
     }
   },

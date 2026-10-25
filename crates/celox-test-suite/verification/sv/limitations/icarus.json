@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 17,
     "emission_error": 0,
-    "compile_error": 135,
+    "compile_error": 138,
     "runtime_error": 8,
     "unsupported": 0,
     "ignored": 0
@@ -1477,6 +1477,30 @@
       "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:34: syntax error\n<case>/source_0.sv:34: error: Malformed statement\n",
       "expectation": "Simulation",
       "name": "class::shallow_copies",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Invalid class item.\n<case>/source_0.sv:27: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::classes_of_packages",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::classes_of_the_compilation_unit",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n<case>/testbench.sv:50: syntax error\n<case>/testbench.sv:50: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:51: syntax error\n<case>/testbench.sv:51: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::package_classes_by_their_qualified_names",
       "phase": "compile",
       "status": "compile_error"
     }

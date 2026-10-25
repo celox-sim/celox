@@ -1401,13 +1401,19 @@ impl Module {
             .collect();
         // A package keeps its symbols for the scopes that use it.
         let symbols = (is_package || export_symbols).then(|| scope::ScopeSymbols {
+            classes: classes::scope_classes(syntax_tree, &const_env),
             declarations_only: imported.declarations_only,
             type_parameter_bindings: HashMap::default(),
             pattern_parameter_bindings: HashMap::default(),
             const_env: const_env.clone(),
             parameter_values: parameter_values.clone(),
             parameters: parameters.clone(),
-            type_aliases: type_aliases.clone(),
+            // A class of the scope is a type of it (IEEE 1800-2023 8.3).
+            type_aliases: type_aliases
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.clone()))
+                .chain(classes::scope_class_types(syntax_tree))
+                .collect(),
             enum_constants: enum_constants.clone(),
             functions: functions.clone(),
             function_return_types: packed_dimensions.function_return_types.clone(),
