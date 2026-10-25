@@ -12,6 +12,7 @@ mod declarations;
 mod dpi;
 mod expressions;
 mod generate;
+mod implicit_nets;
 mod instances;
 mod keywords;
 mod modports;
@@ -131,6 +132,7 @@ impl Declarations {
             subroutines: Vec::new(),
             class_stack: Vec::new(),
             classes: Vec::new(),
+            default_nettype: Some("wire".to_string()),
         };
         let units = parser.units()?;
         let source_items = parser.source_items;
@@ -347,6 +349,9 @@ struct Parser<'a> {
     /// Classes whose `endclass` is still ahead, innermost last.
     class_stack: Vec<ClassDeclaration>,
     classes: Vec<ClassDeclaration>,
+    /// The net type of implicit nets (IEEE 1800-2023 22.8), `None` after
+    /// `default_nettype none`.
+    default_nettype: Option<String>,
 }
 
 impl Parser<'_> {
