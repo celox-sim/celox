@@ -332,7 +332,7 @@ impl Source {
                 }
                 celox_sv_syntax::PortStyle::NonAnsi => {
                     return Err(AnalyzerError::Unsupported(
-                        "non-ANSI module port declarations".to_string(),
+                        "non-ANSI port expressions".to_string(),
                     ));
                 }
                 _ => {}
@@ -495,7 +495,7 @@ impl Source {
                 }
                 celox_sv_syntax::PortStyle::NonAnsi if syntax_tree.root_name()? == module_name => {
                     return Err(AnalyzerError::Unsupported(
-                        "non-ANSI module port declarations".to_string(),
+                        "non-ANSI port expressions".to_string(),
                     ));
                 }
                 _ => {}
