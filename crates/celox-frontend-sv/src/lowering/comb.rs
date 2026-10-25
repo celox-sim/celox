@@ -2678,8 +2678,38 @@ impl<'p, 'a> Comb<'p, 'a> {
             continue_flag,
         });
 
-        if let sv::ir::LoopKind::For = kind
-            && let Some(canonical) = canonical_for_loop(init, condition, step)
+        let canonical = match kind {
+            sv::ir::LoopKind::For => canonical_for_loop(init, condition, step),
+            _ => None,
+        };
+        // An `initial` block runs as a process when it cannot be folded into
+        // initial state, so a loop whose trip count is not known before it
+        // runs goes there instead of being unrolled until the limit.
+        if self.initial {
+            let counted = match kind {
+                sv::ir::LoopKind::Repeat(_) => true,
+                sv::ir::LoopKind::For => canonical.as_ref().is_some_and(|canonical| {
+                    let mut written = HashSet::default();
+                    written_names(body, &mut written);
+                    !written.contains(&canonical.var)
+                }),
+                sv::ir::LoopKind::While | sv::ir::LoopKind::DoWhile => {
+                    match counted_while_loop(condition, body) {
+                        Some((counted, rest)) => {
+                            !self.loop_needs_fold(&store, frames, &counted, rest)?
+                        }
+                        None => false,
+                    }
+                }
+                sv::ir::LoopKind::Forever => false,
+            };
+            if !counted {
+                return Err(unsupported(
+                    "initial block loop without a static trip count",
+                ));
+            }
+        }
+        if let Some(canonical) = canonical
             && self.loop_needs_fold(&store, frames, &canonical, body)?
         {
             self.folding += 1;
