@@ -1,0 +1,1 @@
+Fix PR 2075 regression coverage: distinguish sized enum width errors from out-of-range values
