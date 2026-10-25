@@ -1,11 +1,33 @@
 # sv-tests conformance
 
-CI runs the unmodified [sv-tests `tools/runner`](https://github.com/chipsalliance/sv-tests/blob/c4229f3bd5220e6d3ba8f390e5d09c87e462e9c7/tools/runner)
+CI runs the unmodified [sv-tests `tools/runner`](https://github.com/chipsalliance/sv-tests/blob/db159ad8e9cbbd62036569d240153f753258f640/tools/runner)
 at the commit in [`revision`](revision), using the Celox
 [`BaseRunner` adapter](runners/celox.py). [`run.py`](run.py) launches that official
 runner in a subprocess for every `.sv` file, as the upstream Makefile does.
 It compares the official verdicts with [`expected.tsv`](expected.tsv).
 Each test has separate `2state` and `4state` rows (`test`, `state_mode`, `result`).
+
+The corpus matches the public dashboard's **main tests** at
+[build 40150201340](https://github.com/chipsalliance/sv-tests/actions/runs/40150201340)
+(2026-10-25, revision `db159ad8e9cbbd62036569d240153f753258f640`): **1,650 cases
+per state mode**, comprising 1,028 checked-in cases and 622 generated cases.
+[`prepare.py`](prepare.py) runs upstream's unmodified `template_generator`,
+`easyUVM`, and `uvm-examples` generators. It verifies the pinned checkout and
+library submodules, generates into a fresh temporary tree, checks the reviewed
+counts in [`corpus.json`](corpus.json), and rejects stale or foreign generated
+cases. CI prepares this corpus before collecting results. The dashboard's
+`cores` and `imported` groups are separate corpora and are not included here.
+
+The TSV report has a companion `.summary.json` containing the tested revision,
+per-group/per-state pass totals, per-tag results, fully passing tag totals, and execution-mode
+counts. As in the upstream dashboard, skipped cases are excluded from the
+executed-case denominator, and a tag passes only when all its executed cases
+pass. Aggregate tags (including `uvm-req`) are expanded using upstream
+`conf/meta-tags.conf`, in the same order as `tools/sv-report`. Each case counts once in the overall total even when it has multiple tags.
+States and groups are never combined into one percentage. A tool that only
+parses a case is not demonstrating the same behavior as one that simulates it;
+compare the corpus revision, selected cases, and execution modes alongside
+percentages. This measures test outcomes, not a percentage of the language spec.
 
 The official runner owns metadata parsing, compatible-runner filtering, mode
 priority, library injection, timeouts, expected failures and simulation
@@ -49,25 +71,40 @@ rules from tool exit codes or `should_fail` metadata. A negative test may pass
 because of an unsupported language construct rather than its intended error.
 Crashes and timeouts retain the official runner’s verdict and tool return code.
 
-A runner infrastructure error, missing driver or missing source/library/include
-directory aborts collection with exit code 2 and cannot update expectations.
+A runner infrastructure error, missing driver or unreviewed missing
+source/library/include directory aborts collection with exit code 2 and cannot
+update expectations. One upstream input defect is retained explicitly in
+[`input-issues.json`](input-issues.json): `uvm_alu_config_analysis` has a string
+instead of a source-file list and a combined include-directory entry. For that
+case, exact missing include path, and pinned revision only, the adapter forwards
+the original input to the driver, which reports the missing include and fails.
+It remains in the dashboard-compatible denominator, with an `input_issue` report
+column and `upstream_input_issues` summary count; this is not a language-support
+failure. No generated source or metadata is repaired, and negative tests cannot
+use this exception to gain a false pass.
 The UVM submodules named by upstream `conf/runners/libs.json` must be available
-before any test runs. Nonempty `simvariants` currently cause an explicit adapter
-preparation error because the Celox driver has no runtime plusarg support;
-variants are never silently ignored.
+before any test runs. For simulation cases, each `simvariants` entry is forwarded
+as one plusarg
+to a fresh simulation, in upstream order. A failed run stops the driver; logs
+from successful runs still reach the official assertion evaluator. The official
+runner timeout covers the complete invocation, including all variants.
+Elaboration/parsing cases do not execute variants.
 
 ## Running locally
 
-Use the locked development shell, which provides Python with `psutil`, or install
-the pinned [`requirements.txt`](requirements.txt) in a Python environment.
+Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.
 
 ```bash
+python3 -m venv work/sv-tests-venv
+work/sv-tests-venv/bin/pip install -r conformance/sv-tests/requirements.txt
 git clone https://github.com/chipsalliance/sv-tests.git ../sv-tests
 git -C ../sv-tests checkout "$(cat conformance/sv-tests/revision)"
 git -C ../sv-tests submodule update --init --depth 1 \
-    third_party/tests/uvm third_party/tests/uvm-1.2
+    third_party/tests/uvm third_party/tests/uvm-1.2 \
+    third_party/tests/easyUVM third_party/tests/uvm-examples
+work/sv-tests-venv/bin/python conformance/sv-tests/prepare.py ../sv-tests
 cargo build --locked --release -p celox --features systemverilog --example sv_tests
-PYTHONDONTWRITEBYTECODE=1 python3 conformance/sv-tests/run.py ../sv-tests \
+PYTHONDONTWRITEBYTECODE=1 work/sv-tests-venv/bin/python conformance/sv-tests/run.py ../sv-tests \
     --driver target/release/examples/sv_tests --out-dir work/sv-tests --jobs 4 \
     --expected conformance/sv-tests/expected.tsv --report work/sv-tests-report.tsv
 ```
@@ -88,7 +125,15 @@ Both state modes run by default. Use `--state-mode 2state` or
 selects the default. After reviewing changed verdicts, add `--update` to rewrite
 expectations. A single-mode update preserves the other mode’s rows. Missing
 cases and changed results are checked independently for each selected mode.
-Update `revision` and the measured expectations together when upgrading upstream.
+Update `revision`, the reviewed counts/provenance in `corpus.json`, and the
+measured expectations together when upgrading upstream.
+
+## Historical baseline reviews
+
+The notes below describe earlier changes to the 1,027-case, checked-in-only
+corpus at `c4229f3bd5220e6d3ba8f390e5d09c87e462e9c7`. Counts and support
+boundaries are snapshots from those changes, not the current generated-corpus
+totals. Use `expected.tsv` and the current run summary for present results.
 
 The native-parser transition reviews twenty expectation rows separately from grammar
 repairs. The six module-level deferred `assert`, `assume`, and `cover` probes
@@ -224,6 +269,8 @@ high-impedance values are checked by the shared undriven-net simulation cases.
 The [reviewed CI run](https://github.com/celox-sim/celox/actions/runs/40112270471)
 changes only these two verdicts across 2,054 mode runs.
 
+## Reports and contract tests
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.
@@ -232,7 +279,7 @@ Run the adapter contract fixtures against the same upstream checkout:
 
 ```bash
 SV_TESTS_ROOT=../sv-tests PYTHONDONTWRITEBYTECODE=1 \
-    python3 -m unittest discover -s conformance/sv-tests -p 'test_*.py' -v
+    work/sv-tests-venv/bin/python -m unittest discover -s conformance/sv-tests -p 'test_*.py' -v
 ```
 
 These fixtures exercise the actual upstream runner with a controlled driver,
