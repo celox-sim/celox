@@ -1146,6 +1146,30 @@ mod tests {
         }
     }
 
+    /// An edge reaching 60 gated domains.
+    #[test]
+    fn an_edge_reaching_60_gated_domains_runs_as_the_plan_walk() {
+        const GATED_CLOCKS: usize = 60;
+        let mut source = String::from(
+            "module Top(input logic clk, input logic en, output logic [7:0] q);\n  \
+             logic [6:0] count = 0;\n  logic [7:0] sum;\n  \
+             always_ff @(posedge clk) count <= count + 7'd1;\n",
+        );
+        let mut terms = Vec::new();
+        for index in 0..GATED_CLOCKS {
+            source += &format!(
+                "  logic g{index};\n  logic [7:0] n{index} = 0;\n  \
+                 assign g{index} = clk & (en ^ (count[2:0] == 3'd{bits}) ^ (count[6:3] == 4'd{high}));\n  \
+                 always_ff @(posedge g{index}) n{index} <= n{index} + 8'd1;\n",
+                bits = index % 8,
+                high = index / 8,
+            );
+            terms.push(format!("n{index}"));
+        }
+        source += &format!("  assign q = {};\nendmodule\n", terms.join(" ^ "));
+        ticks_agree(&source);
+    }
+
     #[test]
     fn gated_clocks_run_as_the_plan_walk() {
         agrees(GATED);
