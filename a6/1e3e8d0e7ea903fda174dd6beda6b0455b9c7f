@@ -1,0 +1,6 @@
+Revision history for #1976:
+
+rev 2 (content) 2026-10-25 09:14 UTC — Replace diagnostic-label comparisons with an explicit typed native merge kind; keep labels exclusively for diagnostics and symbols.
+rev 1 (initial) 2026-10-25 09:14 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1976,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"d12d7f25fc645b68994597bb7cc8d1f1c76e7377","timestamp_iso":"2026-10-25T09:14:16Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"d12d7f25fc645b68994597bb7cc8d1f1c76e7377","new_sha":"58b7e660d192c85f06cc21b6cb278205fc75e386","timestamp_iso":"2026-10-25T09:14:16Z","reason":"Replace diagnostic-label comparisons with an explicit typed native merge kind; keep labels exclusively for diagnostics and symbols.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/d12d7f25fc645b68994597bb7cc8d1f1c76e7377...58b7e660d192c85f06cc21b6cb278205fc75e386"}]} -->
