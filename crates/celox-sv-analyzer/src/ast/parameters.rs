@@ -382,10 +382,14 @@ pub(super) fn parameters_from_native_with_environment(
     let parameter_is_2state = native_prefix.is_2state();
     for &native in authored {
         // An unpacked array parameter is a constant variable, not a value.
-        if array_parameters::is_array_parameter(native, syntax_tree.declarations())
-            || scope::imported(&syntax_tree.state)
-                .pattern_parameter_bindings
-                .contains_key(&native.id)
+        if array_parameters::uses_signal_representation(
+            native,
+            syntax_tree,
+            &environment.constants,
+            type_aliases,
+        )? || scope::imported(&syntax_tree.state)
+            .pattern_parameter_bindings
+            .contains_key(&native.id)
         {
             let name = instances::normalize_identifier(&native.name.spelling);
             let marker = unbounded_parameter_marker(&name);
@@ -402,7 +406,12 @@ pub(super) fn parameters_from_native_with_environment(
         }
         environment.literals.remove(&name);
         let const_env = &environment.constants;
-        let mut value = if ownership::default(native).is_some() {
+        let replaced_pattern = !is_local
+            && parameter_overrides.contains_key(&name)
+            && array_parameters::is_array_parameter(native, syntax_tree.declarations());
+        let mut value = if replaced_pattern {
+            parameter_overrides.get(&name).cloned()
+        } else if ownership::default(native).is_some() {
             let imported = scope::imported(&syntax_tree.state);
             let mut proof_context = PackedDimensions::new(
                 parameter_packed_dimensions_with_imported(parameters, &imported),
