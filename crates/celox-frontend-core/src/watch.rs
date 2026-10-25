@@ -641,6 +641,113 @@ pub fn instrument_writes<A: Clone>(
     }
 }
 
+/// The result of [`instrument_writes`] once per pass, in pass order, in one
+/// walk over `unit`. `watch_for(instruction, after)` gives the first pass
+/// from `after` on that watches `instruction`, and its code.
+///
+/// A later pass also sees the code an earlier one added, and wraps the write
+/// inside it, so a write watched by several passes is surrounded by their
+/// code from the first pass outward in. The new registers are numbered as
+/// the passes one after another would number them.
+pub fn instrument_writes_in_passes<A: Clone>(
+    unit: &mut ExecutionUnit<A>,
+    watch_for: impl Fn(&SIRInstruction<A>, usize) -> Option<(usize, WatchCode<A>)>,
+) {
+    let ExecutionUnit {
+        blocks,
+        register_map,
+        ..
+    } = unit;
+    let first_new = register_map.keys().map(|id| id.0 + 1).max().unwrap_or(0);
+    let mut next_register = first_new;
+    // The pass, block and first register of every piece of code added, in
+    // the order the walk adds them.
+    let mut added: Vec<(usize, usize, usize)> = Vec::new();
+    let mut instrumented = Vec::new();
+    for (order, block) in blocks.values_mut().enumerate() {
+        if !block
+            .instructions
+            .iter()
+            .any(|instruction| watch_for(instruction, 0).is_some())
+        {
+            continue;
+        }
+        let mut instructions = Vec::with_capacity(block.instructions.len());
+        let mut work: Vec<(SIRInstruction<A>, usize)> = Vec::new();
+        for instruction in std::mem::take(&mut block.instructions) {
+            work.push((instruction, 0));
+            while let Some((instruction, after)) = work.pop() {
+                let Some((pass, watch)) = watch_for(&instruction, after) else {
+                    instructions.push(instruction);
+                    continue;
+                };
+                let value_type = match &instruction {
+                    SIRInstruction::Store(_, _, _, value, ..) => register_map.get(value).cloned(),
+                    _ => None,
+                };
+                let mut b = SIRBuilder::new_with(next_register);
+                emit_watched(&mut b, &watch, instruction, value_type.as_ref());
+                b.seal_block(SIRTerminator::Return);
+                let (mut emitted, registers, next) = b.drain();
+                added.push((pass, order, next_register));
+                next_register = next;
+                register_map.extend(registers);
+                let emitted = emitted
+                    .remove(&celox_sir::BlockId(0))
+                    .expect("the emitted block")
+                    .instructions;
+                work.extend(emitted.into_iter().rev().map(|emitted| (emitted, pass + 1)));
+            }
+        }
+        block.instructions = instructions;
+        instrumented.push(block.id);
+    }
+    if added.is_empty() {
+        return;
+    }
+
+    // Renumber the new registers pass by pass, then block by block in the
+    // order a pass visits them; within a block the walk already added each
+    // pass's code in order.
+    let mut ends: Vec<usize> = added.iter().skip(1).map(|&(.., first)| first).collect();
+    ends.push(next_register);
+    let mut pieces: Vec<(usize, usize, usize, usize)> = added
+        .iter()
+        .zip(ends)
+        .map(|(&(pass, order, first), end)| (pass, order, first, end))
+        .collect();
+    pieces.sort_by_key(|&(pass, order, ..)| (pass, order));
+    let mut renumbered = vec![0; next_register - first_new];
+    let mut next = first_new;
+    for (.., first, end) in pieces {
+        for register in first..end {
+            renumbered[register - first_new] = next;
+            next += 1;
+        }
+    }
+    let renumber = |register: &mut RegisterId| {
+        if register.0 >= first_new {
+            register.0 = renumbered[register.0 - first_new];
+        }
+    };
+    for id in instrumented {
+        let block = blocks.get_mut(&id).expect("an instrumented block");
+        for instruction in &mut block.instructions {
+            if let Some(register) = instruction.defined_register_mut() {
+                renumber(register);
+            }
+            instruction.for_each_use_mut(renumber);
+        }
+    }
+    let new_registers: Vec<_> = (first_new..next_register)
+        .filter_map(|id| register_map.remove_entry(&RegisterId(id)))
+        .collect();
+    register_map.extend(new_registers.into_iter().map(|(mut id, ty)| {
+        renumber(&mut id);
+        (id, ty)
+    }));
+}
+
 /// Objects that hold back the occurrences of one flip-flop evaluation's
 /// writes to a signal until the commit that publishes them.
 ///
@@ -1281,7 +1388,10 @@ pub fn declare_pending_slots(
 mod tests {
     use celox_sir::{SIRBuilder, SIRInstruction, SIROffset, SIRTerminator, SIRValue};
 
-    use super::{multi_store_candidates, multi_write_candidates, successors, write_destination};
+    use super::{
+        WatchCode, instrument_writes, instrument_writes_in_passes, multi_store_candidates,
+        multi_write_candidates, successors, write_destination,
+    };
 
     /// Store a constant to `address` at the open block.
     fn store(b: &mut SIRBuilder<u32>, address: u32) {
@@ -1555,5 +1665,119 @@ mod tests {
         };
         let found = multi_store_candidates(&unit, |address| Some(*address));
         assert_eq!(found, (0..10000).step_by(2).collect::<Vec<u32>>());
+    }
+
+    /// One pass of the equivalence test: the writes it watches and the
+    /// code it adds.
+    struct Pass {
+        address: u32,
+        stores_only: bool,
+        code: WatchCode<u32>,
+    }
+
+    impl Pass {
+        fn watches(&self, instruction: &SIRInstruction<u32>) -> bool {
+            match instruction {
+                SIRInstruction::Store(address, ..) => *address == self.address,
+                _ => !self.stores_only && write_destination(instruction) == Some(&self.address),
+            }
+        }
+    }
+
+    /// A random unit of a few blocks writing a few addresses, and random
+    /// passes over the same addresses; a pass's counters may be written
+    /// by another pass's code.
+    fn random_instrumentation(seed: u64) -> (celox_sir::ExecutionUnit<u32>, Vec<Pass>) {
+        use celox_design::CounterKind;
+        let state = std::cell::Cell::new(seed);
+        let next = |bound: u64| {
+            state.set(
+                state
+                    .get()
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407),
+            );
+            (state.get() >> 33) % bound
+        };
+        let addresses = 1 + next(6) as u32;
+        let widths = [1, 4, 8];
+        let mut b = SIRBuilder::new();
+        let blocks = 1 + next(4);
+        for block in 0..blocks {
+            for _ in 0..next(6) {
+                let width = widths[next(3) as usize];
+                let value = if next(2) == 0 {
+                    b.alloc_logic(width)
+                } else {
+                    b.alloc_bit(width, false)
+                };
+                b.emit(SIRInstruction::Imm(value, SIRValue::new(next(256) as u8)));
+                let address = next(addresses as u64) as u32;
+                b.emit(match next(3) {
+                    0 => SIRInstruction::Commit(
+                        address,
+                        address,
+                        SIROffset::Static(0),
+                        width,
+                        Vec::new(),
+                    ),
+                    _ => SIRInstruction::Store(
+                        address,
+                        SIROffset::Static(next(2) as usize * 2),
+                        width,
+                        value,
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                });
+            }
+            if block + 1 < blocks {
+                let following = b.new_block();
+                b.seal_block(SIRTerminator::Jump(following, Vec::new()));
+                b.switch_to_block(following);
+            }
+        }
+        let value = b.alloc_bit(1, false);
+        b.emit(SIRInstruction::Imm(value, SIRValue::new(0u8)));
+        let unit = b.flush_eu().unwrap();
+        let passes = (0..1 + next(8))
+            .map(|_| Pass {
+                address: next(addresses as u64) as u32,
+                stores_only: next(2) == 0,
+                code: WatchCode {
+                    signal: next(addresses as u64) as u32,
+                    width: widths[next(3) as usize],
+                    offset: SIROffset::Static(next(2) as usize * 2),
+                    four_state: next(2) == 0,
+                    counters: CounterKind::ALL
+                        .into_iter()
+                        .filter(|_| next(2) == 0)
+                        .map(|kind| (kind, next(addresses as u64 + 2) as u32))
+                        .collect(),
+                },
+            })
+            .collect();
+        (unit, passes)
+    }
+
+    #[test]
+    fn instrumenting_in_passes_matches_one_pass_after_another() {
+        for seed in 0..3000 {
+            let (unit, passes) = random_instrumentation(seed);
+            let mut one_by_one = unit.clone();
+            for pass in &passes {
+                instrument_writes(&mut one_by_one, |instruction| {
+                    pass.watches(instruction).then(|| pass.code.clone())
+                });
+            }
+            let mut at_once = unit;
+            instrument_writes_in_passes(&mut at_once, |instruction, after| {
+                let found = passes[after.min(passes.len())..]
+                    .iter()
+                    .position(|pass| pass.watches(instruction))?;
+                Some((after + found, passes[after + found].code.clone()))
+            });
+            assert_eq!(at_once, one_by_one, "seed {seed}");
+        }
     }
 }
