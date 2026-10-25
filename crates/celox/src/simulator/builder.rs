@@ -4326,7 +4326,7 @@ mod host {
             let mut deferred = base;
             crate::derived_edge::attach_deferred(&mut deferred);
             crate::settle::instrument_processes_from(&mut deferred, first, false);
-            assert!(deferred.deferred_derived_edges.len() >= 4);
+            assert!(deferred.deferred_derived_edges.len() >= 2);
             assert_eq!(expanded.sir.processes.len(), deferred.sir.processes.len());
             assert_eq!(
                 expanded.runtime().runtime_schema.derived_edges,
@@ -4405,6 +4405,16 @@ mod host {
                         let clk = sim.event("clk");
                         if step % 5 == 0 {
                             sim.edge(clk, crate::Edge::Falling).unwrap();
+                        } else if step % 5 == 3 {
+                            // Periods in the unit's tick loop, which calls
+                            // the outlined settle.
+                            let mut left = 3;
+                            while left > 0 {
+                                let (ran, result) =
+                                    sim.derived_periods(clk, left).expect("a derived-edge unit");
+                                result.unwrap();
+                                left -= ran;
+                            }
                         } else {
                             sim.tick(clk).unwrap();
                         }

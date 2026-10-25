@@ -1875,14 +1875,18 @@ fn exec_one_detailed<B: SimBackend>(
 }
 
 /// Run up to `count` periods of a testbench clock generator's signal, each a
-/// rise followed by a fall, and return how many ran. A run that the event's
-/// own domain alone reacts to fires that domain once per period with the
-/// signal left low, which is all a period does then.
+/// rise followed by a fall, and return how many ran. An event with derived
+/// clock domains runs its periods in its generated edge unit. A run that the
+/// event's own domain alone reacts to fires that domain once per period with
+/// the signal left low, which is all a period does then.
 fn clock_periods<B: SimBackend>(
     sim: &mut Simulator<B>,
     event: B::Event,
     count: u64,
 ) -> (u64, Result<(), crate::RuntimeErrorCode>) {
+    if let Some(periods) = sim.derived_periods(event, count) {
+        return periods;
+    }
     if sim.period_runs_only_active_edge(event) {
         return sim.tick_deferred_comb_many(event, count);
     }

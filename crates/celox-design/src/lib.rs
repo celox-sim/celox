@@ -1390,18 +1390,27 @@ pub struct SettlePartitions<A> {
     pub marks: Vec<(A, Vec<u32>)>,
 }
 
-/// The process units that run the edges of one event together with its
-/// derived clock domains, the signal having already moved. Each reads
-/// [`SchedulerSlots::dirty`] to know whether combinational logic must
-/// settle before the domains evaluate.
+/// The process unit that runs edges of one event together with its derived
+/// clock domains. It runs the edges [`SchedulerSlots::cont`] selects
+/// ([`DERIVED_EDGE_RISING`], [`DERIVED_EDGE_FALLING`], or both, a period, in
+/// that order), moving the signal itself unless [`DERIVED_EDGE_MOVED`] says
+/// the host moved it for a single edge. [`SchedulerSlots::dirty`] says
+/// whether combinational logic has pending changes, before and after.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DerivedEdgeUnits<A> {
     /// The canonical event.
     pub event: A,
-    /// Indices among the process units of the rising and the falling edge.
-    pub rising: usize,
-    pub falling: usize,
+    /// The unit's index among the process units.
+    pub unit: usize,
 }
+
+/// A [`DerivedEdgeUnits`] mode bit: run the rising edge.
+pub const DERIVED_EDGE_RISING: u8 = 1;
+/// A [`DerivedEdgeUnits`] mode bit: run the falling edge.
+pub const DERIVED_EDGE_FALLING: u8 = 2;
+/// A [`DerivedEdgeUnits`] mode bit: the host already moved the signal
+/// through the one edge selected.
+pub const DERIVED_EDGE_MOVED: u8 = 4;
 
 /// Width of [`SchedulerSlots::limit`], [`SchedulerSlots::now`],
 /// [`SchedulerSlots::exit_arg`], [`SchedulerSlots::count`],
