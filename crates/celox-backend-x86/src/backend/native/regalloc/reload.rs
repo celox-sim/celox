@@ -1224,7 +1224,18 @@ struct ReloadMemorySsa {
     /// Clobbers already walked for each queried byte range, so queries from
     /// different starts do not walk the same definitions again.
     clobber_memos: HashMap<(i64, usize), ClobberMemo>,
+    /// The accesses `clobber_memos` holds in all, which stay within
+    /// `clobber_memo_budget`: past it they are dropped, and later queries
+    /// walk again, with the same results.
+    clobber_memo_entries: usize,
+    clobber_memo_budget: usize,
 }
+
+/// Memoized clobbers kept per access of the graph, over all byte ranges.
+const CLOBBER_MEMO_ENTRIES_PER_ACCESS: usize = 4;
+
+/// The fewest memoized clobbers kept, for small graphs.
+const MIN_CLOBBER_MEMO_ENTRIES: usize = 1 << 16;
 
 impl ReloadMemorySsa {
     fn snapshot_at_block_entry(
@@ -1245,6 +1256,28 @@ impl ReloadMemorySsa {
     }
 
     fn snapshot_at(
+        &mut self,
+        start: MemoryAccessId,
+        load: StateLoad,
+    ) -> Result<MemorySnapshot, ReloadRecipeError> {
+        if self.clobber_memo_entries > self.clobber_memo_budget {
+            self.clobber_memos.clear();
+            self.clobber_memo_entries = 0;
+        }
+        let key = load
+            .bytes()
+            .and_then(|bytes| Some((bytes.start, usize::try_from(bytes.end - bytes.start).ok()?)));
+        let held = |memos: &HashMap<(i64, usize), ClobberMemo>| {
+            key.and_then(|key| memos.get(&key))
+                .map_or(0, ClobberMemo::len)
+        };
+        let before = held(&self.clobber_memos);
+        let snapshot = self.snapshot_with_memo(start, load);
+        self.clobber_memo_entries += held(&self.clobber_memos) - before;
+        snapshot
+    }
+
+    fn snapshot_with_memo(
         &mut self,
         start: MemoryAccessId,
         load: StateLoad,
@@ -2229,6 +2262,8 @@ fn build_reload_memory_ssa(
             error.message,
         )
     })?;
+    let clobber_memo_budget =
+        (graph.access_count() * CLOBBER_MEMO_ENTRIES_PER_ACCESS).max(MIN_CLOBBER_MEMO_ENTRIES);
     Ok(ReloadMemorySsa {
         graph,
         points,
@@ -2236,6 +2271,8 @@ fn build_reload_memory_ssa(
         block_ids: func.blocks.iter().map(|block| block.id).collect(),
         walker: ClobberWalker::new(),
         clobber_memos: HashMap::default(),
+        clobber_memo_entries: 0,
+        clobber_memo_budget,
         clobber_cache: HashMap::default(),
     })
 }
