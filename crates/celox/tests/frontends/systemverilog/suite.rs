@@ -300,6 +300,18 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         );
         return Ok(match backend {
             "native" => Box::new(TimedBackend::new(builder.build_native()?)),
+            // The image goes through its container bytes, as an attached
+            // image does, and the simulation takes its metadata from it.
+            "native-image" => {
+                let image = builder.compile_native()?.into_program_image();
+                let image =
+                    celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes()?)?;
+                Box::new(TimedBackend::new(
+                    Simulation::from_sv_sources(Vec::new(), &design.top)
+                        .scheduler_mode(scheduler_mode())
+                        .build_native_from_image(image)?,
+                ))
+            }
             "cranelift" => Box::new(TimedBackend::new(builder.build_cranelift()?)),
             "native-parallel" => Box::new(TimedBackend::new(
                 builder
@@ -340,6 +352,19 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
     };
     Ok(match backend {
         "native" => Box::new(CeloxBackend(builder.build_native().map_err(rejected)?)),
+        "native-image" => {
+            let image = builder
+                .compile_native()
+                .map_err(rejected)?
+                .into_program_image();
+            let image =
+                celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes()?)?;
+            Box::new(CeloxBackend(
+                Simulator::from_sv_sources(Vec::new(), &design.top)
+                    .build_native_from_image(image)
+                    .map_err(rejected)?,
+            ))
+        }
         "cranelift" => Box::new(CeloxBackend(builder.build_cranelift().map_err(rejected)?)),
         "native-parallel" => Box::new(CeloxBackend(
             builder
