@@ -1151,6 +1151,82 @@ mod tests {
         }
     }
 
+    /// Clocks derived from the clock a kernel drives run in compiled slots:
+    /// gated by a kernel's enable, gated by an enable the clock's own domain
+    /// raises, inverted, moved back by the commit after the clock's edge
+    /// moved it, divided by a register, a divided clock gated by a kernel's
+    /// enable that changes with the clock's edge (it runs after the commit),
+    /// and divided twice.
+    #[test]
+    fn derived_clocks_run_in_compiled_slots() {
+        for derived in [
+            "assign dclk = clk & en;",
+            "assign dclk = clk & ren;",
+            "assign dclk = ~clk;",
+            "logic tog = 1'b1; always_ff @(posedge clk) tog <= ~tog; assign dclk = clk ^ tog;",
+            "always_ff @(posedge clk) dclk <= ~dclk;",
+            "logic div = 1'b0; always_ff @(posedge clk) div <= ~div; assign dclk = div & en;",
+            "logic half = 1'b0; always_ff @(posedge clk) half <= ~half; \
+             always_ff @(posedge half) dclk <= ~dclk;",
+        ] {
+            let source = format!(
+                "`timescale 1ns/1ns
+                module Top(output logic [7:0] y);
+                    logic clk = 1'b0;
+                    logic en = 1'b0;
+                    logic ren = 1'b0;
+                    logic dclk;
+                    logic [7:0] a = 8'd0;
+                    logic [7:0] b = 8'd0;
+                    always #5 clk = ~clk;
+                    initial forever begin #17 en = ~en; end
+                    always_ff @(posedge clk) begin a <= a + 8'd1; ren <= a[1]; end
+                    {derived}
+                    always_ff @(posedge dclk) b <= b + a;
+                    assign y = a ^ b;
+                endmodule"
+            );
+            host_driven_agrees(&source, &[(100, &[]), (333, &[])]);
+        }
+    }
+
+    /// A host clock gated by a kernel's enable, or divided, in a design
+    /// with and without kernels.
+    #[test]
+    fn derived_host_clocks_run_in_compiled_slots() {
+        for (kernel, derived) in [
+            (
+                "initial forever begin #17 en = ~en; end",
+                "assign dclk = clk & en;",
+            ),
+            ("", "always_ff @(posedge clk) dclk <= ~dclk;"),
+            ("", "assign dclk = clk & k[0];"),
+        ] {
+            let source = format!(
+                "`timescale 1ns/1ns
+                module Top(input logic clk, input logic [7:0] k, output logic [7:0] y);
+                    logic en = 1'b0;
+                    logic dclk;
+                    logic [7:0] a = 8'd0;
+                    logic [7:0] b = 8'd0;
+                    {kernel}
+                    always_ff @(posedge clk) a <= a + k;
+                    {derived}
+                    always_ff @(posedge dclk) b <= b + a;
+                    assign y = a ^ b;
+                endmodule"
+            );
+            host_driven_agrees(
+                &source,
+                &[
+                    (100, &[Host::Set("k", 3), Host::Clock("clk", 10, 5)]),
+                    (200, &[Host::Set("k", 2)]),
+                    (300, &[]),
+                ],
+            );
+        }
+    }
+
     /// A domain whose next state combinational logic computes runs its
     /// fused units with a settle pending: they compute what it reads.
     #[test]
