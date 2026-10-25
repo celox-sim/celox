@@ -1,1 +1,1 @@
-Drop merged class visibility PR and fix required retained exclusion rows in PR 2076 before adding final procedures
+Fix PR 2076 CI: retain the reviewed dynamic scan-format exclusions required by retained_reports
