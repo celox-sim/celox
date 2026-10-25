@@ -7031,3 +7031,213 @@ fn preserves_legal_enum_declaration_initializers() {
             .unwrap_or_else(|error| panic!("{source}: {error}"));
     }
 }
+
+#[test]
+fn final_procedures_preserve_phase_and_active_generate_order() {
+    let ir = analyze_source(
+        r#"module Top;
+            int value = 3;
+            function int read_value(); return value; endfunction
+            initial value = 5;
+            final begin value = read_value(); $display("final %d", value); end
+            if (0) begin: inactive final #1; end
+            for (genvar i = 0; i < 2; i++) begin: active
+                final $display("generated %d", i);
+            end
+        endmodule"#,
+        Path::new("final_procedures.sv"),
+    )
+    .unwrap();
+    assert!(ir.modules()[0].comb_processes().is_empty());
+    assert!(ir.modules()[0].ff_processes().is_empty());
+    let processes = ir.modules()[0].initial_processes();
+    assert_eq!(
+        processes
+            .iter()
+            .filter(|process| process.is_initializer())
+            .count(),
+        1
+    );
+    assert_eq!(
+        processes
+            .iter()
+            .filter(|process| process.is_final())
+            .count(),
+        3
+    );
+    let finals: Vec<_> = processes
+        .iter()
+        .filter(|process| process.is_final())
+        .collect();
+    assert!(
+        finals
+            .windows(2)
+            .all(|pair| pair[0].creation_order() < pair[1].creation_order())
+    );
+    assert!(
+        finals.iter().all(|process| !process.repeats()
+            && !process.is_initializer()
+            && !process.is_synthetic())
+    );
+    assert!(
+        finals
+            .iter()
+            .all(|process| process.kind() == celox_design::ProcessKind::Final)
+    );
+}
+
+#[test]
+fn final_procedures_reject_timing_before_folding() {
+    for statement in [
+        "#1 value = 1;",
+        "@(value) value = 1;",
+        "wait(value) value = 1;",
+        "wait fork;",
+        "fork value = 1; join",
+        "value = #1 2;",
+    ] {
+        for body in [
+            statement.to_string(),
+            format!("if (0) begin {statement} end"),
+        ] {
+            let source = format!("module Top; int value; final begin {body} end endmodule");
+            let error = analyze_source(&source, Path::new("illegal_final.sv")).unwrap_err();
+            assert!(
+                error.to_string().contains("final procedure"),
+                "{source}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn final_procedures_reject_task_and_nba_through_function_calls() {
+    for declarations in [
+        "task work(); endtask",
+        "task work(); #1; endtask",
+        "task t(); endtask function void work(); t(); endfunction",
+        "function void work(); value <= 1; endfunction",
+        "function void bad(); value <= 1; endfunction function void work(); bad(); endfunction",
+    ] {
+        for body in ["work();", "if (0) work();"] {
+            if declarations.contains("<=") && body.starts_with("if (0)") {
+                continue;
+            }
+            let source =
+                format!("module Top; int value; {declarations} final begin {body} end endmodule");
+            let error = analyze_source(&source, Path::new("illegal_final_call.sv")).unwrap_err();
+            if declarations.contains("<=") {
+                assert!(error.to_string().contains("13.4.4"), "{source}: {error}");
+            }
+            assert!(
+                error.to_string().contains("final procedure"),
+                "{source}: {error}"
+            );
+        }
+    }
+    let source = "module Top; int value; function int bad(); value <= 1; return value; endfunction final value = bad(); endmodule";
+    let error = analyze_source(source, Path::new("illegal_final_expression.sv")).unwrap_err();
+    assert!(error.to_string().contains("final procedure"), "{error}");
+    let source = "package p; task work(); endtask endpackage module Top; import p::*; final work(); endmodule";
+    let error = analyze_source(source, Path::new("illegal_imported_final_call.sv")).unwrap_err();
+    assert!(error.to_string().contains("final procedure"), "{error}");
+}
+
+#[test]
+fn final_procedures_preserve_legal_functions_and_finish() {
+    for body in [
+        "value = compute();",
+        "report();",
+        "$finish;",
+        "$stop;",
+        "$fatal;",
+        "$fclose(value);",
+        "$sscanf(\"1\", \"%d\", value);",
+        "begin int local_value; local_value = value; $display(local_value); end",
+    ] {
+        let source = format!(
+            "module Top; int value; function int compute(); return value + 1; endfunction function void report(); $display(value); endfunction final {body} endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("legal_final.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+        assert_eq!(
+            ir.modules()[0]
+                .initial_processes()
+                .iter()
+                .filter(|process| process.is_final())
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn final_procedures_allow_direct_nba_and_unexecuted_scheduling_calls() {
+    for body in ["value <= 1;", "if (0) schedule();", "no_schedule();"] {
+        let source = format!(
+            "module Top; int value; function void schedule(); value <= 1; endfunction function void no_schedule(); if (0) value <= 1; endfunction final {body} endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("final_nba.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+        let process = ir.modules()[0]
+            .initial_processes()
+            .iter()
+            .find(|process| process.is_final())
+            .unwrap();
+        if body == "value <= 1;" {
+            assert!(matches!(
+                process.body(),
+                [ir::Stmt::Assign {
+                    nonblocking: true,
+                    ..
+                }]
+            ));
+        }
+    }
+}
+
+#[test]
+fn final_join_none_is_unsupported_rather_than_a_function_statement_violation() {
+    let error = analyze_source(
+        "module Top; final fork #1; join_none endmodule",
+        Path::new("final_join_none.sv"),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Unsupported SystemVerilog construct: fork-join block"
+    );
+}
+
+#[test]
+fn final_procedures_only_follow_defaults_for_omitted_arguments() {
+    let declarations = r#"
+        int value;
+        function int schedule(); value <= 1; return 0; endfunction
+        function int take(input int a = schedule(), input int b = 0); return a + b; endfunction
+        function int nested(input int a = take()); return a; endfunction
+        function void explicit_wrapper(); value = take(0); endfunction
+        function void omitted_wrapper(); value = take(); endfunction
+    "#;
+    for (body, rejected) in [
+        ("value = take();", true),
+        ("value = take(, 1);", true),
+        ("value = take(.b(1));", true),
+        ("value = nested();", true),
+        ("omitted_wrapper();", true),
+        ("value = take(0);", false),
+        ("value = take(.a(0));", false),
+        ("value = nested(0);", false),
+        ("explicit_wrapper();", false),
+        ("if (0) value = take();", false),
+    ] {
+        let source = format!("module Top; {declarations} final {body} endmodule");
+        let result = analyze_source(&source, Path::new("final_default_arguments.sv"));
+        if rejected {
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("13.4.4"), "{body}: {error}");
+        } else {
+            result.unwrap_or_else(|error| panic!("{body}: {error}"));
+        }
+    }
+}

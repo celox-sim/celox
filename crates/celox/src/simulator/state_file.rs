@@ -303,6 +303,13 @@ impl<B: SimBackend> Simulator<B> {
     /// Combinational values are settled first, so the file shows the values
     /// a read would return.
     pub fn save_state(&mut self) -> Result<StateFile, StateError> {
+        self.prepare_save_state()?;
+        self.state_schema().capture(&self.backend)
+    }
+
+    /// Validate support and settle before a timed owner synchronizes termination.
+    /// Capture must follow that synchronization, since final procedures can write state.
+    pub(crate) fn prepare_save_state(&mut self) -> Result<(), StateError> {
         self.check_host_checkpoint_support()?;
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents.into());
@@ -311,7 +318,7 @@ impl<B: SimBackend> Simulator<B> {
             self.eval_comb_checked().map_err(StateError::Runtime)?;
             self.dirty = false;
         }
-        self.state_schema().capture(&self.backend)
+        Ok(())
     }
 
     /// Load the state saved in `file`, matching objects by path.

@@ -1331,7 +1331,7 @@ impl Module {
             // Declaration initializers run before the other initial blocks.
             let first_block = initial_processes
                 .iter()
-                .position(|process| !process.initializer)
+                .position(|process| !process.is_initializer())
                 .unwrap_or(initial_processes.len());
             initial_processes.insert(
                 first_block,
@@ -1340,7 +1340,8 @@ impl Module {
                     site: None,
                     condition: None,
                     body: static_initializers,
-                    initializer: true,
+                    kind: celox_design::ProcessKind::Initializer,
+                    validation_body: Vec::new(),
                     synthetic: false,
                     repeats: false,
                 },
@@ -1379,6 +1380,7 @@ impl Module {
             }
             for process in &mut initial_processes {
                 process.body = body(std::mem::take(&mut process.body));
+                process.validation_body = body(std::mem::take(&mut process.validation_body));
             }
             for subroutine in &mut subroutines {
                 *subroutine = rename.subroutine(subroutine.clone());
@@ -2535,14 +2537,16 @@ impl FfProcess {
     }
 }
 
-/// An `initial` process.
+/// A scheduled procedure, including initial/always processes and final procedures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialProcess {
     creation_order: usize,
     site: Option<crate::procedural::ProcessSite>,
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
-    initializer: bool,
+    kind: celox_design::ProcessKind,
+    /// Folded-away statements retained only for final-procedure legality checks.
+    validation_body: Vec<Stmt>,
     synthetic: bool,
     /// An `always` process: its body runs forever.
     repeats: bool,
@@ -2562,6 +2566,16 @@ impl InitialProcess {
         self.condition.as_ref()
     }
 
+    /// The procedure's simulation phase.
+    pub fn kind(&self) -> celox_design::ProcessKind {
+        self.kind
+    }
+
+    /// A final procedure runs once when the simulation finishes (9.2.3).
+    pub fn is_final(&self) -> bool {
+        self.kind == celox_design::ProcessKind::Final
+    }
+
     /// Compiler-generated storage initialization, without a user static process.
     pub fn is_synthetic(&self) -> bool {
         self.synthetic
@@ -2569,7 +2583,7 @@ impl InitialProcess {
 
     /// Whether this process holds variable declaration initializers.
     pub fn is_initializer(&self) -> bool {
-        self.initializer
+        self.kind == celox_design::ProcessKind::Initializer
     }
 
     /// Whether this is an `always` process, which runs its body forever and

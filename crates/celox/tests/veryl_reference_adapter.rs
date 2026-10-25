@@ -87,7 +87,7 @@ fn empty_modify_still_reports_initial_fatal_diagnostics() {
     let mut sim = build_veryl_adapter(&[(code, Path::new("test.veryl"))], "Top", false);
     assert_eq!(
         sim.modify(|_| {}).unwrap_err(),
-        celox::RuntimeErrorCode::Runtime {
+        celox::RuntimeErrorCode::Fatal {
             message: "initial fatal from empty modify".to_string(),
             signals: Vec::new(),
         },

@@ -158,9 +158,7 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
     }
 
     fn run_process(&mut self, index: usize) -> Result<(), Halt> {
-        self.backend
-            .run_process(index)
-            .map_err(|e| self.decorate_runtime_error(e))?;
+        self.run_process_checked(index)?;
         self.runtime_finish()
     }
 
@@ -474,9 +472,22 @@ impl<B: SimBackend> Simulation<B> {
         if self.state.is_suspended() {
             return Err(CheckpointError::Stopped.into());
         }
-        let mut file = self.simulator.save_state()?;
+        if let Err(error) = self.simulator.prepare_save_state() {
+            if let StateError::Runtime(error) = &error {
+                self.finalize_fatal(error);
+            }
+            return Err(error);
+        }
         // Settling for the file may have executed a `$finish`.
         self.sync_finish_checked().map_err(StateError::Runtime)?;
+        // A final procedure can write state or suspend with `$stop`.
+        if self.state.is_suspended() {
+            return Err(CheckpointError::Stopped.into());
+        }
+        let mut file = self
+            .simulator
+            .state_schema()
+            .capture(&self.simulator.backend)?;
         let parts = self.state.export_schedule(&self.simulator.backend);
         let mut record = self.simulator.name_schedule(parts);
         record.processes.host_writes = self.simulator.name_host_writes();
@@ -537,9 +548,17 @@ impl<B: SimBackend> Simulation<B> {
     /// step, during a direct settle, read or dump, ends the simulation too.
     fn sync_finish_checked(&mut self) -> Result<(), RuntimeErrorCode> {
         if !self.state.is_finished() && self.simulator.take_runtime_finish() {
-            self.state.finalize_terminal(&mut self.simulator)?;
+            self.finish()?;
         }
         Ok(())
+    }
+
+    /// A fatal report implicitly calls `$finish`; retain the original diagnostic
+    /// even if a final procedure or output flush fails during termination.
+    fn finalize_fatal(&mut self, error: &RuntimeErrorCode) {
+        if matches!(error, RuntimeErrorCode::Fatal { .. }) {
+            let _ = self.finish();
+        }
     }
 
     /// Publish diagnostic state without replacing a primary evaluation error
@@ -556,13 +575,17 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Captures the current state of all signals and writes them to the VCD file.
     pub fn dump(&mut self, timestamp: u64) {
-        self.simulator.dump(timestamp);
-        self.sync_finish();
+        if let Err(error) = self.try_dump(timestamp) {
+            panic!("VCD dump at {timestamp} failed: {error}");
+        }
     }
 
     /// See [`Simulator::try_dump`].
     pub fn try_dump(&mut self, timestamp: u64) -> Result<(), crate::simulator::DumpError> {
         let result = self.simulator.try_dump(timestamp);
+        if let Err(crate::simulator::DumpError::Runtime(error)) = &result {
+            self.finalize_fatal(error);
+        }
         let finished = self.sync_finish_checked();
         if matches!(&result, Err(crate::simulator::DumpError::Runtime(_))) {
             self.flush_error_output();
@@ -615,6 +638,9 @@ impl<B: SimBackend> Simulation<B> {
         F: FnOnce(&mut crate::IOContext<B>),
     {
         let result = self.simulator.modify(f);
+        if let Err(error) = &result {
+            self.finalize_fatal(error);
+        }
         let finished = self.sync_finish_checked();
         result?;
         finished?;
@@ -716,6 +742,7 @@ impl<B: SimBackend> Simulation<B> {
             Ok(())
         };
         if let Err(error) = result.and_then(|()| self.simulator.mature_deferred_assertions()) {
+            self.finalize_fatal(&error);
             self.flush_error_output();
             return Err(error);
         }
@@ -801,6 +828,9 @@ impl<B: SimBackend> Simulation<B> {
     /// that wake no process, at the current time, and watch its reports. A
     /// watched run does this before it moves to a later time.
     fn watch_settle(&mut self) -> Result<(), RuntimeErrorCode> {
+        if self.state.is_finished() {
+            return Ok(());
+        }
         // The run leaves the time or ends at it: the slot is over, and the
         // deferred actions waiting from any settle at that time mature
         // before the reports are watched.
@@ -811,6 +841,7 @@ impl<B: SimBackend> Simulation<B> {
         }
         if self.simulator.dirty {
             if let Err(error) = self.simulator.eval_comb_checked() {
+                self.finalize_fatal(&error);
                 self.flush_error_output();
                 return Err(error);
             }
@@ -821,6 +852,9 @@ impl<B: SimBackend> Simulation<B> {
         } else {
             Ok(())
         };
+        if let Err(error) = &matured {
+            self.finalize_fatal(error);
+        }
         self.watch_reports();
         if let Err(error) = matured {
             self.flush_error_output();
@@ -906,7 +940,8 @@ impl<B: SimBackend> Simulation<B> {
             return Ok(());
         }
         if let Err(error) = self.simulator.try_dump_unless_rewound(end_time) {
-            if matches!(&error, crate::simulator::DumpError::Runtime(_)) {
+            if let crate::simulator::DumpError::Runtime(runtime_error) = &error {
+                self.finalize_fatal(runtime_error);
                 self.flush_error_output();
             }
             return Err(vcd_dump_runtime_error(error));
@@ -984,9 +1019,28 @@ impl<B: SimBackend> Simulation<B> {
         Ok(!self.state.is_stopped())
     }
 
-    /// Whether a process of the design requested the end of the simulation.
-    /// Once it has, [`Self::step`] returns `None` and [`Self::run_until`]
-    /// stops at the time of the request.
+    /// End simulation at its current time, running final procedures once.
+    /// Idle steps and bounded runs remain resumable until this is requested.
+    /// If a final procedure executes `$stop`, a later step resumes finalization.
+    pub fn finish(&mut self) -> Result<(), RuntimeErrorCode> {
+        use celox_runtime::StepObserver;
+        let Some(mut shadow) = self.shadow.take() else {
+            return self.state.finish(&mut self.simulator);
+        };
+        let mut check = differential::ShadowCheck::new(&mut shadow, self.mode());
+        check.before_step(&self.state, &mut self.simulator);
+        let result = self.state.finish(&mut self.simulator);
+        let comparison = check.after_finish(&self.state, &mut self.simulator, &result);
+        self.checked_steps += check.checked;
+        self.shadow = Some(shadow);
+        comparison?;
+        result
+    }
+
+    /// Whether simulation has terminated and its final procedures have completed.
+    /// Termination can be requested by the design or by [`Self::finish`].
+    /// Once complete, [`Self::step`] returns `None` and [`Self::run_until`]
+    /// stops at the termination time.
     pub fn is_finished(&self) -> bool {
         self.state.is_finished()
     }
@@ -1014,18 +1068,32 @@ impl<B: SimBackend> Simulation<B> {
     /// Takes the runtime events (`$display`, messages, `$finish`, ...) the
     /// design emitted since the last call, in emission order.
     pub fn drain_runtime_events(&mut self) -> Vec<crate::RuntimeEvent> {
+        // Keep termination visible to the timed owner before collecting reports.
+        // The untimed drain intentionally turns immediate fatals into reports.
+        if self.simulator.dirty {
+            let settled = self.simulator.eval_comb_checked();
+            self.simulator.dirty = false;
+            match settled.and_then(|()| self.sync_finish_checked()) {
+                Err(error @ RuntimeErrorCode::Fatal { .. }) => self.finalize_fatal(&error),
+                result => result.unwrap(),
+            }
+        }
         // A slot with nothing more due is over, also before the first step:
         // the initial settle of combinational logic belongs to time zero.
         // A fatal action is drained as a fatal report.
-        if self.simulator.deferred_assertions
+        if !self.state.is_finished()
+            && self.simulator.deferred_assertions
             && self.state.next_event_time() != Some(self.state.time())
         {
-            // Lazily settled logic runs in the slot too.
-            self.simulator.settle_for_runtime_event_drain();
-            let _ = self.simulator.mature_deferred_assertions();
+            if let Err(error) = self.simulator.mature_deferred_assertions() {
+                self.finalize_fatal(&error);
+            }
         }
         let mut events = std::mem::take(&mut self.reports.events);
-        events.extend(self.simulator.drain_runtime_events());
+        events.extend(
+            self.simulator
+                .drain_settled_runtime_events_with_context(crate::RuntimeFormatContext::default()),
+        );
         events
     }
 
@@ -1037,6 +1105,9 @@ impl<B: SimBackend> Simulation<B> {
     /// Directly execute combinational logic evaluation.
     pub fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
         let result = self.simulator.eval_comb();
+        if let Err(error) = &result {
+            self.finalize_fatal(error);
+        }
         let finished = self.sync_finish_checked();
         if result.is_err() {
             self.flush_error_output();

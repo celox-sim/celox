@@ -4061,7 +4061,7 @@ mod host {
                 .runtime_schema
                 .processes
                 .iter()
-                .any(|slots| slots.is_initializer)
+                .any(|slots| slots.kind == celox_design::ProcessKind::Initializer)
             {
                 sim.modify(|_| {}).map_err(|error| {
                     SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))

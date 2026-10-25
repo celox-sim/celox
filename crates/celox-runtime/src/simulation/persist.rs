@@ -26,6 +26,7 @@ impl<B: SimBackend> SimulationState<B> {
             declarations_pending: self.declarations_pending,
             host_pending: self.host_pending,
             finished: self.finished,
+            finalizing: self.finalizing,
         }
     }
 
@@ -63,6 +64,7 @@ impl<B: SimBackend> SimulationState<B> {
         self.declarations_pending = snapshot.declarations_pending;
         self.host_pending = snapshot.host_pending;
         self.finished = snapshot.finished;
+        self.finalizing = snapshot.finalizing;
         self.stopped = false;
         self.suspended = None;
         Ok(())
@@ -190,17 +192,14 @@ impl<B: SimBackend> SimulationState<B> {
             .map(|(process, time)| Reverse((time, process)))
             .collect();
         self.process_state = parts.process_state;
-        self.declarations_pending = self
-            .process_wakeups
-            .iter()
-            .any(|Reverse((_, index))| self.model.processes[*index].is_initializer)
-            || self
-                .process_state
-                .ready
-                .iter()
-                .any(|&index| self.model.processes[index].is_initializer);
+        self.declarations_pending = self.process_wakeups.iter().any(|Reverse((_, index))| {
+            self.model.processes[*index].kind == celox_design::ProcessKind::Initializer
+        }) || self.process_state.ready.iter().any(|&index| {
+            self.model.processes[index].kind == celox_design::ProcessKind::Initializer
+        });
         self.host_pending = parts.host_pending;
         self.finished = parts.finished;
+        self.finalizing = None;
         self.stopped = false;
         self.suspended = None;
     }
@@ -218,6 +217,7 @@ pub struct SimulationSnapshot<B: SimBackend> {
     declarations_pending: bool,
     host_pending: bool,
     finished: bool,
+    finalizing: Option<usize>,
 }
 
 impl<B: SimBackend> Clone for SimulationSnapshot<B> {
@@ -233,6 +233,7 @@ impl<B: SimBackend> Clone for SimulationSnapshot<B> {
             declarations_pending: self.declarations_pending,
             host_pending: self.host_pending,
             finished: self.finished,
+            finalizing: self.finalizing,
         }
     }
 }
@@ -300,6 +301,7 @@ impl<B: SimBackend> SimulationState<B> {
             declarations_pending: self.declarations_pending,
             host_pending: self.host_pending,
             finished: self.finished,
+            finalizing: self.finalizing,
             stopped: self.stopped,
             suspended: self.suspended.is_some(),
         }
@@ -329,6 +331,7 @@ pub struct ScheduleKey {
     pub declarations_pending: bool,
     pub host_pending: bool,
     pub finished: bool,
+    pub finalizing: Option<usize>,
     pub stopped: bool,
     pub suspended: bool,
 }

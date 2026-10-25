@@ -69,6 +69,28 @@ impl<'a, B: SimBackend> ShadowCheck<'a, B> {
     }
 }
 
+impl<B: SimBackend> ShadowCheck<'_, B> {
+    pub(super) fn after_finish(
+        &mut self,
+        state: &SimulationState<B>,
+        primary: &mut Simulator<B>,
+        result: &Result<(), RuntimeErrorCode>,
+    ) -> Result<(), RuntimeErrorCode> {
+        let shadow = &mut *self.shadow;
+        let reference = shadow.state.finish(&mut shadow.simulator);
+        self.checked += 1;
+        let result = result.clone().map(|()| Some(state.time()));
+        let reference = reference.map(|()| Some(shadow.state.time()));
+        match difference(state, primary, shadow, &result, &reference) {
+            None => Ok(()),
+            Some(message) => Err(RuntimeErrorCode::Runtime {
+                message: format!("finalization diverged from the reference: {message}"),
+                signals: Vec::new(),
+            }),
+        }
+    }
+}
+
 impl<B: SimBackend> StepObserver<Simulator<B>> for ShadowCheck<'_, B> {
     fn one_slot(&self) -> bool {
         self.one_slot

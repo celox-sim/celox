@@ -188,7 +188,7 @@ it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
 - Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, enumeration constants declared in a class, enumeration, struct and union types and named four-state or string constants as class parameter values, specializations of a parameterized class outside the package or compilation unit that declares it, and properties that are 4-state, `real`, arrays or wider than 64 bits. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
-- Behavioral and verification constructs: `final`, intra-assignment timing controls (`a = #1 b`),
+- Behavioral and verification constructs: intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events and `->`, `fork` / `join`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
 - Timing controls in processes: `iff` qualifiers ([#1444](https://github.com/celox-sim/celox/issues/1444)),
@@ -594,6 +594,28 @@ simulation is suspended (`CheckpointError::Stopped`). In an `always` process, `$
 Its diagnostic level argument prints nothing. Batch hosts without an
 interactive mode, such as the VPI host, end the run at `$stop`.
 
+### Final procedures {#final-procedures}
+
+`final` procedures require `Simulation`. They run once, sequentially at the
+termination time, on `$finish`, `$fatal` or an explicit `Simulation::finish()`
+call (IEEE 1800-2023 9.2.3, 20.10). Their relative order is deterministic but
+unspecified. The CLI and sv-tests batch driver finish when scheduled work runs
+out. An idle `step()` or the end of `run_until()` does not terminate the reusable
+Rust simulation; a host can supply more inputs or call `finish()`.
+
+Ordinary `$stop` does not run final procedures. A `$stop` inside a final
+procedure suspends finalization, and a later step or `finish()` resumes it.
+`$finish` inside a final procedure immediately ends that procedure and skips
+all remaining finals. The original `$fatal` error is preserved when it starts
+termination.
+
+No scheduled HDL events run after final procedures. In particular, a
+nonblocking assignment made directly in a final procedure never applies its
+queued update. Timing controls and calls to user tasks are rejected, including
+through functions. Calls to functions that schedule events after returning
+require an initial/always process context and are rejected from final
+procedures (13.4.4). `fork` / `join_none` remains unsupported.
+
 ### Programs {#programs}
 
 A `program` (IEEE 1800-2023 Clause 24) is declared and instantiated like a
@@ -621,8 +643,8 @@ so a program that resumes after `#0` reads their new values, whereas 4.5
 evaluates them only once the reactive region set is empty; programs
 nested in modules and anonymous programs are rejected; a program that no
 module instantiates is not an implicit top level next to the design's top
-module; `final` procedures and clocking blocks are unsupported in programs as
-everywhere.
+module; clocking blocks are unsupported. Program `final` procedures run during
+termination, including the implicit `$finish` after the last initial procedure.
 
 ### `$exit`
 

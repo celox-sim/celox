@@ -237,6 +237,7 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
     use std::io::Write as _;
     let mut stdout = std::io::stdout().lock();
     let mut output = |sim: &mut celox::Simulation| -> Result<(), String> {
+        let mut fatal = None;
         for event in sim.drain_runtime_events() {
             match event {
                 celox::RuntimeEvent::Report(celox::Report {
@@ -246,7 +247,7 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
                 }) => {
                     stdout.write_all(&message).unwrap();
                     stdout.write_all(b"\n").unwrap();
-                    return Err(format!(
+                    fatal = Some(format!(
                         "$fatal: {}",
                         std::str::from_utf8(&message)
                             .map(str::to_owned)
@@ -265,7 +266,7 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
                 }
             }
         }
-        Ok(())
+        fatal.map_or(Ok(()), Err)
     };
     let initial = sim.eval_comb().map_err(|error| error.to_string());
     output(&mut sim)?;
@@ -278,6 +279,13 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
         if step?.is_none() || sim.is_stopped() {
             break;
         }
+    }
+    if !sim.is_stopped() {
+        // Quiescence ends this batch run, but is not itself terminal for the
+        // reusable Simulation API (a host can still supply new inputs).
+        let finished = sim.finish().map_err(|error| error.to_string());
+        output(&mut sim)?;
+        finished?;
     }
     Ok(())
 }
@@ -419,6 +427,19 @@ mod tests {
                 .unwrap_err()
                 .contains("include directory is unavailable")
         );
+    }
+
+    #[test]
+    fn simulation_runs_final_on_quiescence_but_elaboration_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture(
+            dir.path(),
+            "final.sv",
+            "module Top; initial #2; final $fatal(1, \"from final\"); endmodule",
+        );
+        run(&fixture_options(vec![path.clone()], Mode::Elaboration)).unwrap();
+        let error = run(&fixture_options(vec![path], Mode::Simulation)).unwrap_err();
+        assert!(error.contains("from final"), "{error}");
     }
 
     #[test]

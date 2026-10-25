@@ -1348,7 +1348,7 @@ fn kernel_window_writes(
     for process in module
         .initial_processes()
         .iter()
-        .filter(|process| !process.is_initializer())
+        .filter(|process| !process.is_initializer() && !process.is_final())
     {
         let body = process.body();
         let first = if process.repeats() {
@@ -4978,6 +4978,7 @@ fn process_origin(process: &sv::ir::InitialProcess) -> celox_design::ProcessOrig
     let construct = match process.site() {
         Some(site) => site.construct,
         None if process.is_initializer() => "declaration initializer",
+        None if process.is_final() => "final",
         None if process.repeats() => "always",
         None => "initial",
     };
@@ -4988,9 +4989,9 @@ fn process_origin(process: &sv::ir::InitialProcess) -> celox_design::ProcessOrig
     }
 }
 
-/// The `initial` blocks and declaration initializers (IEEE 1800-2023 9.2.1,
-/// 10.5): the initial state they define, and the processes that run the
-/// others from time zero.
+/// Lower declaration initializers and procedural kernels. Final procedures
+/// retain kernels but execute only at simulation termination (9.2.3); they
+/// must never contribute folded initial state.
 ///
 /// A block whose writes have constant values defines initial state, with
 /// the hidden variables used while executing it discarded. Declaration
@@ -5062,7 +5063,10 @@ fn lower_initial_processes(
         // initial state. A program's `initial` procedure runs in the reactive
         // region set (IEEE 1800-2023 24.3.1), after the design's processes of
         // time zero, so it is not folded either.
-        if process.repeats() || (module.is_program() && !process.is_initializer()) {
+        if process.is_final()
+            || process.repeats()
+            || (module.is_program() && !process.is_initializer())
+        {
             runtime.push((process, random_seed));
             continue;
         }
@@ -5138,8 +5142,8 @@ fn lower_initial_processes(
                 id
             };
             ProcessSlots {
-                is_initializer: process.is_initializer(),
-                requires_timed_simulation: process.is_scheduled_edge(),
+                kind: process.kind(),
+                requires_timed_simulation: process.is_scheduled_edge() || process.is_final(),
                 const_delays: false,
                 program: None,
                 resume: declare("resume", PROCESS_RESUME_WIDTH),
@@ -5155,10 +5159,10 @@ fn lower_initial_processes(
         let program = slots
             .iter()
             .zip(&runtime)
-            .find(|(_, (process, _))| !process.is_initializer())
+            .find(|(_, (process, _))| !process.is_initializer() && !process.is_final())
             .map(|(slots, _)| slots.status);
         for (slots, (process, _)) in slots.iter_mut().zip(&runtime) {
-            if !process.is_initializer() {
+            if !process.is_initializer() && !process.is_final() {
                 slots.program = program;
             }
         }
@@ -10725,7 +10729,7 @@ endmodule
             .runtime_schema
             .processes
             .iter()
-            .filter(|process| !process.is_initializer)
+            .filter(|process| process.kind != celox_design::ProcessKind::Initializer)
             .count()
     }
 
