@@ -741,7 +741,8 @@ edge-triggered `always` / `always_ff` processes, including their subroutines.
 These calls are unsupported in combinational procedures. A bare `Simulator`
 rejects edge procedures that need this timed execution.
 
-Supply ordered command-line arguments with `.plusargs(["+COUNT=12", "+TRACE"])`.
+Supply ordered command-line arguments with `.plusargs(["+COUNT=12", "+TRACE"])`,
+or as `+` arguments of [`celox run`](./cocotb.md).
 `$test$plusargs` matches a prefix; `$value$plusargs` supports integer conversions
 and `%s` into packed integral variables. The first matching argument wins, and
 an unmatched value query preserves its destination. Real conversions and dynamic

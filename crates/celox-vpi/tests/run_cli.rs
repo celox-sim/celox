@@ -710,3 +710,50 @@ endmodule
         "{output:?}"
     );
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn sv_plusargs_reach_the_testbench_in_order() {
+    let source = r#"module Top;
+  int iterations;
+  logic [8*8-1:0] mode;
+  int verbose;
+  initial begin
+    if (!$value$plusargs("iterations=%d", iterations)) $fatal(1, "no iterations");
+    if (!$value$plusargs("mode=%s", mode)) $fatal(1, "no mode");
+    verbose = $test$plusargs("verbose");
+    $display("iterations=%0d mode=%0s verbose=%0d", iterations, mode, verbose);
+  end
+endmodule
+"#;
+    for backend in ["tiered", "interpreter", "native"] {
+        // The first match wins, so the order of the two kinds matters.
+        let output = run(
+            &[("top.sv", source)],
+            &[
+                "+iterations=9",
+                "--plusarg",
+                "+mode=fast",
+                "+iterations=7000",
+                "--plusarg=+verbose",
+                "--backend",
+                backend,
+            ],
+        );
+        assert!(output.status.success(), "{backend}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "iterations=9 mode=fast verbose=1\n",
+            "{backend}"
+        );
+    }
+    let output = run(
+        &[("top.sv", source)],
+        &["--plusarg", "+mode=slow", "+iterations=7000"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "iterations=7000 mode=slow verbose=0\n"
+    );
+}
