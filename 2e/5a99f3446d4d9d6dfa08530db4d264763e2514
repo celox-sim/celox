@@ -1,0 +1,1 @@
+Review: one-shot initial blocks count as writers that conflict with always_ff/always_comb/always_latch/continuous writers of other instances.
