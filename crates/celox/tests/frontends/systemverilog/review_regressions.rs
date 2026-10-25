@@ -5358,9 +5358,9 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "non-ANSI module port declarations",
+            "non-ANSI port expressions",
             r#"
-            module Top(y); output y; assign y = 1'b1; endmodule
+            module Top({y, z}); output y, z; assign y = 1'b1; assign z = 1'b0; endmodule
         "#,
         ),
         (

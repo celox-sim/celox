@@ -17,6 +17,7 @@ mod instances;
 mod keywords;
 mod modports;
 mod nets;
+mod non_ansi;
 mod numbers;
 mod packages;
 mod procedures;

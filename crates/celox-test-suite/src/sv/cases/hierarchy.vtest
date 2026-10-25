@@ -1463,6 +1463,51 @@
   (assert_eq y (+ (<< 1 128) (+ (<< 2 43) 1)))
   (assert_eq width 129))
 
+; Non-ANSI module ports (IEEE 1800-2023 23.2.2.1): a header of port names,
+; port declarations in the body, and net or variable declarations that
+; complete them (`reg [7:0] q;`, `wire signed [3:0] a;`), including a net
+; declaration assignment, connected by position and by name.
+(case non_ansi_ports_take_body_declarations
+  (source "non_ansi.sv" #"
+        module Reg(clk, rst, d, q, qn);
+            input clk, rst;
+            input [7:0] d;
+            output [7:0] q;
+            output reg [7:0] qn;
+            reg [7:0] q;
+            always @(posedge clk or posedge rst)
+                if (rst) begin q <= 8'd0; qn <= 8'hff; end
+                else begin q <= d; qn <= ~d; end
+        endmodule
+        module Add(a, b, s, neg);
+            input signed [3:0] a;
+            input [3:0] b;
+            output [4:0] s;
+            output neg;
+            wire signed [3:0] a;
+            wire [4:0] s = a + b;
+            assign neg = a < 0;
+        endmodule
+        module Top;
+            reg clk = 0, rst = 1;
+            reg [7:0] d = 8'h5a;
+            wire [7:0] q, qn;
+            wire [4:0] s;
+            wire neg;
+            Reg r(clk, rst, d, q, qn);
+            Add x(.a(4'hd), .b(4'd4), .s(s), .neg(neg));
+            always #5 clk = ~clk;
+            initial begin
+                #2 rst = 0;
+                #10 $display("%h %h %0d %b", q, qn, s, neg);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "5a a5 17 1\n"))
+
 ; A child's output port depends only on the bits of its input port that
 ; the child reads, so a parent may feed other bits of that output back into
 ; the port without a combinational loop (#1955).

@@ -2873,3 +2873,30 @@ fn class_random_qualifiers_and_constraints_are_preserved() {
     assert!(class.properties[1].qualifiers.randc);
     assert!(!class.properties[1].qualifiers.rand);
 }
+
+#[test]
+fn non_ansi_port_declarations_fold_into_the_header() {
+    let syntax = parse(
+        "module M(a, b, q);\n input [7:0] a;\n input wire b;\n output reg [7:0] q;\n \
+         wire [7:0] a;\n always @(posedge b) q <= a;\nendmodule\n",
+    );
+    let unit = &syntax.units[0];
+    assert_eq!(unit.port_style, PortStyle::Ansi);
+    let ports: Vec<_> = unit
+        .ports
+        .iter()
+        .map(|port| (port.direction, port.net_type.as_deref(), port.variable))
+        .collect();
+    assert_eq!(
+        ports,
+        [
+            (Some(Direction::Input), Some("wire"), false),
+            (Some(Direction::Input), Some("wire"), false),
+            (Some(Direction::Output), None, false),
+        ]
+    );
+    // The port declarations and the completing net declaration are gone
+    // from the body.
+    assert!(unit.net_declarations.is_empty());
+    assert_eq!(unit.items.len(), 1);
+}
