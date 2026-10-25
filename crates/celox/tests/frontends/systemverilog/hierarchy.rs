@@ -698,3 +698,12 @@ fn array_parameter_elements_check_unselected_conditional_branch_types() {
         );
     }
 }
+
+sv_backends! {
+    fn child_ports_keep_the_bit_ranges_they_read(sim) {
+        @case "hierarchy::child_ports_keep_the_bit_ranges_they_read";
+    }
+    fn child_ports_keep_the_bit_ranges_of_selected_connections(sim) {
+        @case "hierarchy::child_ports_keep_the_bit_ranges_of_selected_connections";
+    }
+}
