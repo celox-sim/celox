@@ -6592,7 +6592,7 @@ fn class_randomize_rejects_unsupported_semantics() {
             "c.randomize()",
             "constraints",
         ),
-        ("randc bit [1:0] x;", "c.randomize()", "randc"),
+        ("randc bit [8:0] x;", "c.randomize()", "randc"),
         ("rand int x;", "c.srandom()", "argument"),
         ("rand int x;", "c.srandom(1, 2)", "arguments"),
         (
@@ -6797,5 +6797,28 @@ endmodule
     // The analyzer may retain unresolved constants for the frontend to reject.
     if let Ok(ir) = analyze_source(source, Path::new("tagged_inactive_constant.sv")) {
         assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), None);
+    }
+}
+
+#[test]
+fn class_randc_checks_domain_limits() {
+    let values = (0..257)
+        .map(|i| format!("V{i}={i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    for (declarations, members) in [
+        (String::new(), "randc bit [8:0] x;"),
+        (
+            format!("typedef enum bit [15:0] {{{values}}} E;"),
+            "randc E x;",
+        ),
+    ] {
+        for call in ["c.randomize()", "c.randomize(x)"] {
+            let source = format!(
+                "module Top; {declarations} class C; {members} endclass C c; initial begin c=new; void'({call}); end endmodule"
+            );
+            let error = analyze_source(&source, Path::new("randc_limits.sv")).unwrap_err();
+            assert!(error.to_string().contains("randc"), "{error}");
+        }
     }
 }

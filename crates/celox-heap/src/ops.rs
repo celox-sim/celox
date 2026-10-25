@@ -79,6 +79,8 @@ pub const OBJECT_MODE_POP: u64 = 59;
 pub const OBJECT_MODE_SELECT: u64 = 60;
 /// Whether a non-rand property is temporarily random in the active scope.
 pub const OBJECT_MODE_SELECTED: u64 = 61;
+/// Draw a randc domain index; parameter is the property offset, b its domain size.
+pub const OBJECT_RANDOM_CYCLIC: u64 = 62;
 
 /// The opcode word of `op` with parameter `parameter`.
 pub const fn encode(op: u64, parameter: u64) -> u64 {
@@ -187,6 +189,7 @@ impl Heap {
             }
             OBJECT_CLASS => self.class_of(a as Handle).into(),
             OBJECT_RANDOM => self.random_object(a as Handle),
+            OBJECT_RANDOM_CYCLIC => self.random_cyclic_object(a as Handle, parameter as u32, b),
             OBJECT_SEED => {
                 self.seed_object(a as Handle, b as u32);
                 0

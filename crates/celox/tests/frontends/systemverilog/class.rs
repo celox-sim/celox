@@ -388,3 +388,37 @@ sv_backends! {
 sv_backends! {
     fn class_randomization_enum_fill_literals(sim) { @case "class::randomization_enum_fill_literals"; }
 }
+
+sv_backends! {
+    fn class_randomization_cyclic_enum_alias(sim) { @case "class::randomization_cyclic_enum_alias"; }
+    fn class_randomization_cyclic_domains(sim) { @case "class::randomization_cyclic_domains"; }
+    fn class_randomization_cyclic_controls(sim) { @case "class::randomization_cyclic_controls"; }
+    fn class_randomization_cyclic_checkpoint(sim) {
+        @setup { let source = r#"
+            module Top(output bit [63:0] value);
+                timeunit 1ps / 1ps;
+                class C; randc bit [2:0] x; endclass
+                C c;
+                initial begin
+                    c = new;
+                    c.srandom(41);
+                    void'(c.randomize());
+                    #10;
+                    repeat (16) begin
+                        void'(c.randomize());
+                        value = (value << 3) | c.x;
+                    end
+                end
+            endmodule
+        "#; }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("cyclic_checkpoint.sv"))], "Top").four_state(true);
+        sim.run_until(5).unwrap();
+        let saved = sim.checkpoint().unwrap();
+        let value = sim.signal("value");
+        sim.run_until(15).unwrap();
+        let expected = sim.get_four_state(value);
+        sim.restore(&saved).unwrap();
+        sim.run_until(15).unwrap();
+        assert_eq!(sim.get_four_state(value), expected);
+    }
+}

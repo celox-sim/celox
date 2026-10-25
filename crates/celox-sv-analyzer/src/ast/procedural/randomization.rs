@@ -120,7 +120,10 @@ pub(super) fn lower(
                         right: Box::new(Expr::Literal("1'b1".into())),
                     };
                     select.push(Stmt::Eval(classes::object_call(
-                        ObjectOp::ModeSelect(property.field.offset, property.rand),
+                        ObjectOp::ModeSelect(
+                            property.field.offset,
+                            property.rand || property.randc,
+                        ),
                         vec![Expr::Ident(this.clone()), selected],
                     )));
                 }
@@ -146,7 +149,10 @@ pub(super) fn lower(
                             }),
                             op: BinaryOp::LogicAnd,
                             right: Box::new(classes::object_call(
-                                ObjectOp::ModeGet(property.field.offset, property.rand),
+                                ObjectOp::ModeGet(
+                                    property.field.offset,
+                                    property.rand || property.randc,
+                                ),
                                 vec![Expr::Ident(this.clone())],
                             )),
                         },
@@ -264,36 +270,56 @@ fn random_property(
     property: &classes::Property,
     this: &str,
 ) -> Vec<Stmt> {
-    let random = || classes::object_call(ObjectOp::Random, vec![Expr::Ident(this.into())]);
+    let random = || {
+        let op = if property.randc {
+            ObjectOp::RandomCyclic {
+                offset: property.field.offset,
+                count: property
+                    .cyclic_domain_size()
+                    .expect("validated randc domain"),
+            }
+        } else {
+            ObjectOp::Random
+        };
+        classes::object_call(op, vec![Expr::Ident(this.into())])
+    };
     let mut body = Vec::new();
     let value = if let Some(values) = &property.r#type.enum_values {
         let count = values.len() as u64;
         let threshold = count.wrapping_neg() % count;
         let draw = builder.declare("$enum_draw", classes::unsigned_type(64));
-        body.push(Stmt::Loop {
-            kind: LoopKind::DoWhile,
-            init: Vec::new(),
-            condition: Some(Expr::Binary {
-                left: Box::new(Expr::Ident(draw.clone())),
-                op: BinaryOp::Lt,
-                right: Box::new(Expr::Literal(format!("64'd{threshold}"))),
-            }),
-            step: Vec::new(),
-            body: vec![Stmt::Assign {
+        if property.randc {
+            body.push(Stmt::Assign {
                 lhs: LValue::Ident(draw.clone()),
                 rhs: random(),
                 nonblocking: false,
-            }],
-        });
-        body.push(Stmt::Assign {
-            lhs: LValue::Ident(draw.clone()),
-            rhs: Expr::Binary {
-                left: Box::new(Expr::Ident(draw.clone())),
-                op: BinaryOp::Mod,
-                right: Box::new(Expr::Literal(format!("64'd{count}"))),
-            },
-            nonblocking: false,
-        });
+            });
+        } else {
+            body.push(Stmt::Loop {
+                kind: LoopKind::DoWhile,
+                init: Vec::new(),
+                condition: Some(Expr::Binary {
+                    left: Box::new(Expr::Ident(draw.clone())),
+                    op: BinaryOp::Lt,
+                    right: Box::new(Expr::Literal(format!("64'd{threshold}"))),
+                }),
+                step: Vec::new(),
+                body: vec![Stmt::Assign {
+                    lhs: LValue::Ident(draw.clone()),
+                    rhs: random(),
+                    nonblocking: false,
+                }],
+            });
+            body.push(Stmt::Assign {
+                lhs: LValue::Ident(draw.clone()),
+                rhs: Expr::Binary {
+                    left: Box::new(Expr::Ident(draw.clone())),
+                    op: BinaryOp::Mod,
+                    right: Box::new(Expr::Literal(format!("64'd{count}"))),
+                },
+                nonblocking: false,
+            });
+        }
         let literal = |value| {
             Expr::Literal(format_typed_parameter_literal(
                 value,
