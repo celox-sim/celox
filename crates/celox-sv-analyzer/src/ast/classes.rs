@@ -58,6 +58,8 @@ impl Property {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StaticProperty {
     pub name: String,
+    pub local: bool,
+    pub protected: bool,
     /// The class that declares the property.
     pub owner: String,
     pub r#type: Type,
@@ -460,6 +462,8 @@ pub(super) fn class(
             if property.qualifiers.is_static {
                 statics.retain(|known| known.name != property_name);
                 statics.push(StaticProperty {
+                    local: property.qualifiers.local,
+                    protected: property.qualifiers.protected,
                     variable: Class::subroutine_name(name, &property_name),
                     name: property_name,
                     owner: name.to_owned(),

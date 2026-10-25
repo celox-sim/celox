@@ -66,6 +66,13 @@ pub enum AnalyzerError {
     Parse(String),
     #[error("Unsupported SystemVerilog construct: {0}")]
     Unsupported(String),
+    /// A class member is inaccessible from the lexical scope (IEEE 1800-2023 8.18).
+    #[error("{visibility} class member `{owner}::{name}` is not accessible from this scope")]
+    InaccessibleClassMember {
+        owner: String,
+        name: String,
+        visibility: &'static str,
+    },
     /// A dotted name whose first component names no variable or interface
     /// of the scope: a hierarchical name (IEEE 1800-2023 23.6) that the
     /// caller did not resolve to a signal of another instance.
