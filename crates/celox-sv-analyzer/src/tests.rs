@@ -6628,8 +6628,8 @@ fn class_randomize_rejects_unsupported_semantics() {
             "not an instance property",
         ),
         ("const int x = 1;", "c.randomize(x)", "const"),
-        ("local int x;", "c.randomize(x)", "non-public"),
-        ("protected int x;", "c.randomize(x)", "non-public"),
+        ("local int x;", "c.randomize(x)", "not accessible"),
+        ("protected int x;", "c.randomize(x)", "not accessible"),
         ("rand int x;", "c.rand_mode()", "getter requires"),
         ("int x;", "c.x.rand_mode()", "rand or randc"),
         (
@@ -6819,6 +6819,143 @@ fn class_randc_checks_domain_limits() {
             );
             let error = analyze_source(&source, Path::new("randc_limits.sv")).unwrap_err();
             assert!(error.to_string().contains("randc"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn class_visibility_rejects_inaccessible_members() {
+    for visibility in ["local", "protected"] {
+        for member in [
+            "int x;",
+            "static int x;",
+            "function int x(); return 1; endfunction",
+            "static function int x(); return 1; endfunction",
+        ] {
+            let access = if member.contains("function") {
+                "c.x()"
+            } else {
+                "c.x"
+            };
+            for derived in [false, true] {
+                let declaration = if derived {
+                    "class D extends C; endclass D c;"
+                } else {
+                    "C c;"
+                };
+                let source = format!(
+                    "module Top; class C; {visibility} {member} endclass {declaration} int result; initial begin c=new; result={access}; end endmodule"
+                );
+                let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+                assert!(
+                    matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+                    "{source}: {error}"
+                );
+            }
+        }
+    }
+    for member in [
+        "int x;",
+        "static int x;",
+        "function int x(); return 1; endfunction",
+        "static function int x(); return 1; endfunction",
+    ] {
+        let access = if member.contains("function") {
+            "x()"
+        } else {
+            "x"
+        };
+        for prefix in ["", "this.", "super."] {
+            let source = format!(
+                "module Top; class C; local {member} endclass class D extends C; function int read(); return {prefix}{access}; endfunction endclass D c; int result; initial begin c=new; result=c.read(); end endmodule"
+            );
+            let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+            assert!(
+                matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+                "{source}: {error}"
+            );
+        }
+    }
+    for access in ["x=2", "x++"] {
+        let source = format!(
+            "module Top; class C; local static int x; endclass class D extends C; function void write(); {access}; endfunction endclass D c; initial begin c=new; c.write(); end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+        assert!(
+            matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+            "{source}: {error}"
+        );
+    }
+    for access in ["c.x=2", "c.x++", "C::x=2"] {
+        let source = format!(
+            "module Top; class C; local static int x; endclass C c; initial begin c=new; {access}; end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+        assert!(
+            matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn class_visibility_accepts_lexical_access_and_shadowing() {
+    for member in [
+        "int x;",
+        "static int x;",
+        "function int x(); return 1; endfunction",
+        "static function int x(); return 1; endfunction",
+    ] {
+        let access = if member.contains("function") {
+            "x()"
+        } else {
+            "x"
+        };
+        for visibility in ["local", "protected"] {
+            let source = format!(
+                "module Top; class C; {visibility} {member} function int read(C other); return other.{access}; endfunction endclass class D extends C; endclass D c; int result; initial begin c=new; result=c.read(c); end endmodule"
+            );
+            analyze_source(&source, Path::new("visibility.sv"))
+                .unwrap_or_else(|e| panic!("{source}: {e}"));
+        }
+        for prefix in ["", "this.", "super."] {
+            let source = format!(
+                "module Top; class C; protected {member} endclass class D extends C; function int read(); return {prefix}{access}; endfunction endclass D c; int result; initial begin c=new; result=c.read(); end endmodule"
+            );
+            analyze_source(&source, Path::new("visibility.sv"))
+                .unwrap_or_else(|e| panic!("{source}: {e}"));
+        }
+    }
+    for storage in ["", "static"] {
+        let source = format!(
+            "module Top; class C; local {storage} int x; endclass class D extends C; int x; function int read(int x); return x; endfunction function int own(); return x; endfunction endclass D c; int result; initial begin c=new; c.x=2; result=c.own(); end endmodule"
+        );
+        analyze_source(&source, Path::new("visibility.sv")).unwrap();
+    }
+}
+
+#[test]
+fn class_visibility_checks_constructors() {
+    for visibility in ["local", "protected"] {
+        let source = format!(
+            "module Top; class C; {visibility} function new(); endfunction endclass C c; initial c=new; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+        assert!(
+            matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+            "{source}: {error}"
+        );
+        let source = format!(
+            "module Top; class C; {visibility} function new(); endfunction endclass class D extends C; endclass D c; initial c=new; endmodule"
+        );
+        let result = analyze_source(&source, Path::new("visibility.sv"));
+        if visibility == "local" {
+            assert!(matches!(
+                result.unwrap_err(),
+                AnalyzerError::InaccessibleClassMember { .. }
+            ));
+        } else {
+            result.unwrap();
         }
     }
 }
