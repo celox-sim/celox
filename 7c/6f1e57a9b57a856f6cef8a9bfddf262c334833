@@ -1,0 +1,1 @@
+Fix both P2 findings: finalize fatal errors during lazy event drain; capture saved state after final execution and reject stopped final procedures.
