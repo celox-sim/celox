@@ -2849,6 +2849,21 @@ impl NativeBackend {
                     value,
                     mask,
                     written_mask,
+                } if signal.array_layout.is_some() => {
+                    // An unpacked array is written element by element.
+                    let runs = InitialStateData::packed_write_runs(
+                        value,
+                        mask,
+                        written_mask,
+                        signal.width,
+                        self.compiled.options.four_state && signal.is_4state,
+                    );
+                    self.apply_initial_memory_writes(signal, &runs);
+                }
+                InitialStateData::Packed {
+                    value,
+                    mask,
+                    written_mask,
                 } => {
                     let width_mask = if signal.width == 0 {
                         BigUint::default()
@@ -3016,16 +3031,7 @@ impl NativeBackend {
         };
 
         let plane_offset = signal.offset + usize::from(mask_plane) * array.plane_size;
-        let element_bytes = get_byte_size(array.element_width);
-        let element_mask = (BigUint::from(1u8) << array.element_width) - BigUint::from(1u8);
-        let mut value = BigUint::from(0u8);
-        for element in 0..array.element_count {
-            let start = plane_offset + element * array.element_stride;
-            let element_value =
-                BigUint::from_bytes_le(&bytes[start..start + element_bytes]) & &element_mask;
-            value |= element_value << (element * array.element_width);
-        }
-        value
+        array.gather(&bytes[plane_offset..plane_offset + array.element_extent()])
     }
 
     fn write_signal_plane(&mut self, signal: SignalRef, mask_plane: bool, value: &BigUint) {
@@ -3044,17 +3050,11 @@ impl NativeBackend {
         };
 
         let plane_offset = signal.offset + usize::from(mask_plane) * array.plane_size;
-        let element_bytes = get_byte_size(array.element_width);
-        let element_mask = (BigUint::from(1u8) << array.element_width) - BigUint::from(1u8);
-        let bytes = self.mem_bytes_mut();
-        bytes[plane_offset..plane_offset + array.element_count * array.element_stride].fill(0);
-        for element in 0..array.element_count {
-            let element_value = (value >> (element * array.element_width)) & &element_mask;
-            let value_bytes = element_value.to_bytes_le();
-            let copy_len = value_bytes.len().min(element_bytes);
-            let start = plane_offset + element * array.element_stride;
-            bytes[start..start + copy_len].copy_from_slice(&value_bytes[..copy_len]);
-        }
+        // A handle on part of an array keeps the whole array's plane size,
+        // which locates the mask plane: only its own elements are written.
+        let plane = &mut self.mem_bytes_mut()[plane_offset..plane_offset + array.element_extent()];
+        plane.fill(0);
+        array.scatter(plane, value);
     }
 
     /// Run one lane-partitioned kernel on the lane workers.

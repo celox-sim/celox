@@ -63,6 +63,75 @@ pub struct SignalArrayLayout {
     pub plane_size: usize,
 }
 
+impl SignalArrayLayout {
+    /// The bytes from the first element's slot to the end of the last one.
+    /// A layout describing part of an array keeps the whole array's
+    /// `plane_size`, which locates its mask plane.
+    pub fn element_extent(&self) -> usize {
+        self.element_count * self.element_stride
+    }
+
+    /// The packed logical value of the plane stored in `plane`, element 0 in
+    /// the lowest bits, without per-element padding. Linear in the plane size.
+    pub fn gather(&self, plane: &[u8]) -> num_bigint::BigUint {
+        let element_bytes = self.element_width.div_ceil(8);
+        let mut packed = vec![0u8; (self.element_count * self.element_width).div_ceil(8) + 1];
+        for index in 0..self.element_count {
+            let first = index * self.element_width;
+            let (start, shift) = (first / 8, first % 8);
+            let element = &plane[index * self.element_stride..][..element_bytes];
+            for (byte, &raw) in element.iter().enumerate() {
+                let wide = u16::from(raw & self.element_byte_mask(byte)) << shift;
+                packed[start + byte] |= wide as u8;
+                if let Some(next) = packed.get_mut(start + byte + 1) {
+                    *next |= (wide >> 8) as u8;
+                }
+            }
+        }
+        num_bigint::BigUint::from_bytes_le(&packed)
+    }
+
+    /// Store the packed logical `value` into `plane`: each element's bits at
+    /// its stride slot, padding bits inside a slot cleared. Bytes of a slot
+    /// past the element are left alone. Linear in the plane size.
+    pub fn scatter(&self, plane: &mut [u8], value: &num_bigint::BigUint) {
+        let packed = value.to_bytes_le();
+        let byte_at = |first: usize| {
+            let (start, shift) = (first / 8, first % 8);
+            let low = packed.get(start).copied().unwrap_or(0);
+            let high = packed.get(start + 1).copied().unwrap_or(0);
+            ((u16::from(low) | (u16::from(high) << 8)) >> shift) as u8
+        };
+        let element_bytes = self.element_width.div_ceil(8);
+        for index in 0..self.element_count {
+            let first = index * self.element_width;
+            let element = &mut plane[index * self.element_stride..][..element_bytes];
+            for (byte, slot) in element.iter_mut().enumerate() {
+                *slot = byte_at(first + byte * 8) & self.element_byte_mask(byte);
+            }
+        }
+    }
+
+    /// Copy the elements of `src` into `dst`, planes of this layout.
+    pub fn copy(&self, src: &[u8], dst: &mut [u8]) {
+        let element_bytes = self.element_width.div_ceil(8);
+        for index in 0..self.element_count {
+            let at = index * self.element_stride;
+            for byte in 0..element_bytes {
+                dst[at + byte] = src[at + byte] & self.element_byte_mask(byte);
+            }
+        }
+    }
+
+    /// The bits of byte `byte` of an element slot that belong to the element.
+    fn element_byte_mask(&self, byte: usize) -> u8 {
+        match self.element_width.saturating_sub(byte * 8) {
+            8.. => u8::MAX,
+            bits => (1u8 << bits) - 1,
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -71,4 +140,51 @@ pub struct SignalRef {
     pub width: usize,
     pub is_4state: bool,
     pub array_layout: Option<SignalArrayLayout>,
+}
+
+#[cfg(test)]
+mod array_layout_tests {
+    use super::SignalArrayLayout;
+    use num_bigint::BigUint;
+
+    #[test]
+    fn strided_planes_round_trip_like_element_shifts() {
+        for element_width in [1usize, 3, 8, 13, 16, 64, 70] {
+            for element_count in [1, 2, 5, 33] {
+                let element_stride = element_width.div_ceil(8).next_power_of_two();
+                let array = SignalArrayLayout {
+                    element_width,
+                    element_count,
+                    element_stride,
+                    plane_size: element_stride * element_count,
+                };
+                let width = element_width * element_count;
+                // Bits past the array must not reach any slot.
+                let value = (0..width + 9).fold(BigUint::default(), |acc, bit| {
+                    if (bit * 7 + bit / 3) % 5 < 2 {
+                        acc | (BigUint::from(1u8) << bit)
+                    } else {
+                        acc
+                    }
+                });
+                let mut plane = vec![0xa5u8; array.plane_size];
+                array.scatter(&mut plane, &value);
+                let element_mask = (BigUint::from(1u8) << element_width) - 1u8;
+                for index in 0..element_count {
+                    let slot = &plane[index * element_stride..][..element_width.div_ceil(8)];
+                    let want = (&value >> (index * element_width)) & &element_mask;
+                    assert_eq!(
+                        BigUint::from_bytes_le(slot),
+                        want,
+                        "{element_width}x{element_count}"
+                    );
+                }
+                let all = (BigUint::from(1u8) << width) - 1u8;
+                assert_eq!(array.gather(&plane), &value & &all);
+                let mut copied = vec![0x5au8; array.plane_size];
+                array.copy(&plane, &mut copied);
+                assert_eq!(array.gather(&copied), &value & &all);
+            }
+        }
+    }
 }

@@ -1130,6 +1130,21 @@ mod host {
                         value,
                         mask,
                         written_mask,
+                    } if signal.array_layout.is_some() => {
+                        // An unpacked array is written element by element.
+                        let runs = InitialMemoryData::packed_write_runs(
+                            value,
+                            mask,
+                            written_mask,
+                            signal.width,
+                            self.backend.layout().four_state && signal.is_4state,
+                        );
+                        self.apply_initial_memory_writes(signal, &runs);
+                    }
+                    InitialMemoryData::Packed {
+                        value,
+                        mask,
+                        written_mask,
                     } => {
                         let width_mask = if signal.width == 0 {
                             BigUint::default()

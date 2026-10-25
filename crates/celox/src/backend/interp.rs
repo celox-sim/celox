@@ -123,50 +123,41 @@ fn pack_u64(bytes: &mut [u8], shift: usize, bits: usize, value: u64) {
     }
 }
 
+/// The element bytes of an element-strided plane starting at `offset`.
+///
+/// # Safety
+/// `offset + array.element_extent()` must lie inside the allocation `base`
+/// points at, and the plane must not be aliased while the slice lives.
+unsafe fn strided_plane<'a>(
+    base: *mut u8,
+    offset: usize,
+    array: &SignalArrayLayout,
+) -> &'a mut [u8] {
+    unsafe { std::slice::from_raw_parts_mut(base.add(offset), array.element_extent()) }
+}
+
 /// Write `value` into element-strided storage: each element's low
 /// `element_width` bits land at its stride slot, masked to the element width
 /// so no padding bits leak inside or past the slot.
 ///
 /// # Safety
-/// Callers must bound `offset + (element_count - 1) * stride +
-/// ceil(element_width / 8)` inside the allocation `base` points at.
+/// See [`strided_plane`].
 unsafe fn scatter_strided(
     base: *mut u8,
     offset: usize,
     array: &SignalArrayLayout,
     value: &BigUint,
 ) {
-    let element_bytes = array.element_width.div_ceil(8);
-    let element_mask = low_mask(array.element_width);
-    for index in 0..array.element_count {
-        let chunk = ((value >> (index * array.element_width)) & &element_mask).to_bytes_le();
-        unsafe {
-            let dst = base.add(offset + index * array.element_stride);
-            for byte in 0..element_bytes {
-                *dst.add(byte) = chunk.get(byte).copied().unwrap_or(0);
-            }
-        }
-    }
+    array.scatter(unsafe { strided_plane(base, offset, array) }, value);
 }
 
 /// Read element-strided storage back into a packed logical value, gathering
 /// every byte of each element and dropping per-element padding bits.
 ///
 /// # Safety
-/// Callers must bound `offset + (element_count - 1) * stride +
-/// ceil(element_width / 8)` inside the allocation `base` points at.
+/// See [`strided_plane`].
 unsafe fn gather_strided(base: *const u8, offset: usize, array: &SignalArrayLayout) -> BigUint {
-    let element_bytes = array.element_width.div_ceil(8);
-    let element_mask = low_mask(array.element_width);
-    let mut result = BigUint::zero();
-    for index in 0..array.element_count {
-        unsafe {
-            let start = base.add(offset + index * array.element_stride);
-            let raw = BigUint::from_bytes_le(std::slice::from_raw_parts(start, element_bytes));
-            result |= (raw & &element_mask) << (index * array.element_width);
-        }
-    }
-    result
+    array.gather(unsafe { strided_plane(base.cast_mut(), offset, array) })
 }
 
 /// Interpreter view over one backend's live memory image.
@@ -835,27 +826,31 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         let dst_object = self.object_offset(dst)?;
 
         if let Some(array) = self.whole_strided_array(&src_absolute, bit_offset, bits) {
-            let src_base = self.memory.as_ptr() as *const u8;
-            let payload = unsafe { gather_strided(src_base, src_object, &array) };
-            let dst_base = self.memory.as_mut_ptr() as *mut u8;
+            let base = self.memory.as_mut_ptr() as *mut u8;
+            // Whole-object commits copy between distinct objects.
             unsafe {
-                scatter_strided(dst_base, dst_object, &array, &payload);
+                array.copy(
+                    strided_plane(base, src_object, &array),
+                    strided_plane(base, dst_object, &array),
+                );
             }
             let dst_absolute = dst.absolute_addr();
             if self.is_4state_object(&dst_absolute) {
-                let mask = if self
+                let (src_mask, dst_mask) =
+                    (src_object + array.plane_size, dst_object + array.plane_size);
+                let src_4state = self
                     .layout
                     .is_4states
                     .get(&src_absolute)
                     .copied()
-                    .unwrap_or(false)
-                {
-                    unsafe { gather_strided(src_base, src_object + array.plane_size, &array) }
-                } else {
-                    BigUint::zero()
-                };
+                    .unwrap_or(false);
                 unsafe {
-                    scatter_strided(dst_base, dst_object + array.plane_size, &array, &mask);
+                    let dst_plane = strided_plane(base, dst_mask, &array);
+                    if src_4state {
+                        array.copy(strided_plane(base, src_mask, &array), dst_plane);
+                    } else {
+                        array.scatter(dst_plane, &BigUint::zero());
+                    }
                 }
             }
             return Ok(());
