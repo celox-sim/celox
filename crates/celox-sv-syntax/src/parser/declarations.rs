@@ -538,6 +538,7 @@ impl Parser<'_> {
                     return Err(self.error("unfinished generate body item"));
                 }
                 frame.unit.items = std::mem::take(&mut frame.builder.roots);
+                self.adopt_non_ansi_ports(&mut frame.unit)?;
                 self.declare_implicit_nets(&mut frame.unit)?;
                 frame.unit.body = self.range(frame.body_start);
                 if !frame.unit.external {
