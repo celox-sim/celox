@@ -494,7 +494,9 @@ mod queue_tests {
         };
     }
     regressions!(interpreter, build_interpreter);
+    #[cfg(feature = "cranelift")]
     regressions!(cranelift, build_cranelift);
+    #[cfg(feature = "wasm-runtime")]
     regressions!(wasm, build_wasm);
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     regressions!(native, build_native);

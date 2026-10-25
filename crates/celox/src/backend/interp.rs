@@ -3,7 +3,7 @@
 //! [`InterpBackend`] implements [`SimBackend`] by executing the laid-out SIR
 //! directly on the Tier-0 interpreter ([`crate::interpreter::execute_unit`])
 //! instead of generated machine code. It shares the exact memory image ABI
-//! with [`super::JitBackend`] — little-endian byte packing, four-state value
+//! with `JitBackend` — little-endian byte packing, four-state value
 //! and mask regions stored adjacently per object, the runtime-event-buffer
 //! and comb-capture-enable pointers installed into the state header, and the
 //! triggered-bits bitset region — so a simulation can migrate individual

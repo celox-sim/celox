@@ -10,6 +10,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+celox-backend-common = { workspace = true }
 tracing = { workspace = true }
 celox-design = { workspace = true }
 celox-sir = { workspace = true }

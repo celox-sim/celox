@@ -4,6 +4,7 @@ use clap::{Parser, ValueEnum};
 
 #[path = "../tests/test_utils/suite.rs"]
 mod suite;
+#[cfg(feature = "veryl-reference")]
 #[path = "../tests/test_utils/veryl_sim.rs"]
 mod veryl_sim;
 #[path = "../tests/test_utils/veryl_sv.rs"]
