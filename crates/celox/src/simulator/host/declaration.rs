@@ -11,6 +11,21 @@ impl<B: SimBackend> Simulator<B> {
                     value,
                     mask,
                     written_mask,
+                } if signal.array_layout.is_some() => {
+                    // An unpacked array is written element by element.
+                    let runs = InitialStateData::packed_write_runs(
+                        value,
+                        mask,
+                        written_mask,
+                        signal.width,
+                        self.backend.layout().four_state && signal.is_4state,
+                    );
+                    self.apply_initial_memory_writes(signal, &runs);
+                }
+                InitialStateData::Packed {
+                    value,
+                    mask,
+                    written_mask,
                 } => {
                     let all = (BigUint::from(1u8) << signal.width) - 1u8;
                     let written = written_mask & &all;

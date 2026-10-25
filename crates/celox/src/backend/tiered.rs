@@ -2297,6 +2297,83 @@ module Top (
         }
     }
 
+    /// SV unpacked arrays start unknown through packed initial values, take
+    /// element writes and whole-array NBA commits, and read back whole: the
+    /// element-strided interpreter, the packed interpreter and native agree.
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn strided_sv_arrays_initialize_commit_and_read_like_packed_ones() {
+        const SOURCE: &str = r#"
+            module Top (
+                input logic clk, input logic we,
+                input logic [2:0] wi, input logic [12:0] wd, input logic [2:0] ri,
+                output logic [12:0] q
+            );
+                logic [12:0] mem [8];
+                always_ff @(posedge clk) if (we) mem[wi] <= wd;
+                assign q = mem[ri];
+            endmodule
+        "#;
+        fn run<B: crate::backend::SimBackend>(
+            mut sim: Simulator<B>,
+        ) -> (bool, Vec<(num_bigint::BigUint, num_bigint::BigUint)>) {
+            let strided = sim.signal("mem").array_layout.is_some();
+            let (clk, we, wi, wd, ri, q, mem) = (
+                sim.event("clk"),
+                sim.signal("we"),
+                sim.signal("wi"),
+                sim.signal("wd"),
+                sim.signal("ri"),
+                sim.signal("q"),
+                sim.signal("mem"),
+            );
+            let mut seen = vec![sim.get_four_state(mem)];
+            for step in 0..12u16 {
+                sim.modify(|io| {
+                    io.set(we, u8::from(step % 4 != 3));
+                    io.set(wi, (step * 5 % 8) as u8);
+                    io.set(wd, step.wrapping_mul(0x9e5) & 0x1fff);
+                })
+                .unwrap();
+                sim.tick(clk).unwrap();
+                for index in 0..8u8 {
+                    sim.modify(|io| io.set(ri, index)).unwrap();
+                    seen.push(sim.get_four_state(q));
+                }
+                seen.push(sim.get_four_state(mem));
+            }
+            (strided, seen)
+        }
+        let builder = || {
+            Simulator::from_sv_sources(
+                vec![(SOURCE, std::path::Path::new("strided_array.sv"))],
+                "Top",
+            )
+            .four_state(true)
+        };
+        let (_, reference) = run(builder().build_interpreter().unwrap());
+        // Every element starts unknown.
+        assert_eq!(
+            reference[0].1,
+            (num_bigint::BigUint::from(1u8) << (13 * 8)) - 1u8
+        );
+        let gate = Gate::closed();
+        let worker_gate = gate.0.clone();
+        let (strided, interpreted) = run(builder()
+            .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                wait_for_gate_or_cancel(&worker_gate, cancel)?;
+                let image = NativeBackend::compile_image(laid_out, options)?;
+                let shared = unsafe { SharedNativeCode::from_image(image)? };
+                Ok(CompiledCode::Native(Arc::new(shared)))
+            })
+            .unwrap());
+        assert!(strided, "the tiered interpreter stores the array strided");
+        assert_eq!(interpreted, reference);
+        let (strided, native) = run(builder().build_native().unwrap());
+        assert!(strided, "native stores the array strided");
+        assert_eq!(native, reference);
+    }
+
     #[test]
     fn outputs_match_reference_when_promotion_never_happens() {
         let inputs: Vec<u8> = (10..40).collect();
