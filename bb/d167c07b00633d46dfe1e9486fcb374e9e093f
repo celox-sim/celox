@@ -1,0 +1,1 @@
+Separate enum range-overflow and explicit-width regression inputs after earlier width validation changed diagnostic precedence
