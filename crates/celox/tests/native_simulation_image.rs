@@ -241,3 +241,46 @@ endmodule
     let vcd = std::fs::read_to_string(&path).unwrap();
     assert!(vcd.contains("b101"), "{vcd}");
 }
+
+/// Deferred assertions keep their queue through the image: a glitch is
+/// flushed, a lasting failure reports at the end of its slot.
+#[test]
+fn deferred_assertions_run_from_the_image() {
+    const DEFERRED: &str = r#"`timescale 1ns/1ns
+module Top;
+    bit a, b;
+    initial forever begin
+        @(a or b);
+        d: assert #0 (a == b) else $error("d");
+    end
+    initial begin
+        #1 a = 1; #0 b = 1;
+        #1 a = 0;
+        #1 $display("done");
+    end
+endmodule
+"#;
+    let run = |sim: &mut Simulation<_>| {
+        sim.run_until(5).unwrap();
+        sim.drain_runtime_events()
+            .into_iter()
+            .map(|event| match event {
+                RuntimeEvent::Report(report) => report.message,
+                RuntimeEvent::Display { message } => message,
+                event => panic!("unexpected event {event:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = run(&mut builder(DEFERRED).build_native().unwrap());
+    assert_eq!(expected, vec![b"d".to_vec(), b"done".to_vec()]);
+    let image = reloaded(
+        &builder(DEFERRED)
+            .compile_native()
+            .unwrap()
+            .into_program_image(),
+    );
+    let mut sim = Simulation::from_sv_sources(Vec::new(), "Top")
+        .build_native_from_image(image)
+        .unwrap();
+    assert_eq!(run(&mut sim), expected);
+}
