@@ -8,6 +8,13 @@ import { classifyFiles } from "./ci-changes.mjs";
 // package can see the feature's package, as Cargo requires.
 export const CI_FEATURES = Object.freeze([
   "celox/systemverilog",
+  "celox/cranelift",
+  "celox/wasm-runtime",
+  "celox/wasm-component",
+  "celox/veryl-reference",
+  "celox-vpi/cranelift",
+  "celox-vpi/wasm-runtime",
+  "celox-bench/cranelift",
   "celox-test-suite/verilator",
   "celox-test-suite/icarus",
   "celox-test-suite/xezim",
@@ -34,7 +41,6 @@ const SV = Object.freeze({ variants: ["sv"], binaries: ["systemverilog"] });
 // are not generated per variant. Any other crate celox depends on needs all
 // of them.
 export const VARIANT_CRATES = new Map([
-  ["celox-backend-common", NATIVE],
   ["celox-backend-x86", NATIVE],
   ["celox-backend-arm64", NATIVE],
   [

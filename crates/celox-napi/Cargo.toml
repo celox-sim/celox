@@ -9,6 +9,10 @@ description           = "N-API/WASI simulator handles and frontend adapter API f
 readme                = "README.md"
 edition.workspace     = true
 
+[features]
+cranelift = ["celox/cranelift"]
+wasm-component = ["celox/wasm-component"]
+
 [lib]
 crate-type = ["rlib", "cdylib"]
 

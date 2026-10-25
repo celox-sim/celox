@@ -179,8 +179,10 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     }
     match arguments.execution.backend() {
         runner::Backend::Native => execute!(build),
+        #[cfg(feature = "cranelift")]
         runner::Backend::Cranelift => execute!(build_cranelift),
         runner::Backend::Interpreter => execute!(build_interpreter),
+        #[cfg(feature = "wasm-runtime")]
         runner::Backend::Wasm => execute!(build_wasm),
         runner::Backend::Tiered => execute!(build_tiered),
     }

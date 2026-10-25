@@ -68,3 +68,17 @@ test("failed CI preparation cannot export a stale executor or silently skip setu
   assert.throws(() => prepareCi(() => ({ status: 0, stdout: JSON.stringify(message) }),
     { GITHUB_ENV: "/job/env" }, unexpected), /Invalid executor environment/);
 });
+
+test("local tests leave heavy backends off unless explicitly requested", () => {
+  for (const extra of [undefined, "cranelift,wasm-runtime,veryl-reference"]) {
+    const calls = [];
+    run([], (...args) => {
+      calls.push(args);
+      return calls.length === 1 ? { status: 0, stdout: artifact } : { status: 0 };
+    }, { CELOX_TEST_FEATURES: extra });
+    const features = calls.map(([, args]) => args[args.indexOf("--features") + 1]);
+    assert.equal(features[0], features[1]);
+    assert.equal(features[0], "celox/systemverilog,celox-test-suite/runtime-cases"
+      + (extra ? `,${extra}` : ""));
+  }
+});
