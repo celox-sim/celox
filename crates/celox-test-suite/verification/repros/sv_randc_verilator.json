@@ -1,0 +1,33 @@
+{
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-WIDTHTRUNC: <case>/source_0.sv:20:13: Logical operator LOGNOT expects 1 bit on the LHS, but LHS's METHODCALL 'rand_mode' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   20 |         if (!a.x.rand_mode() || !a.y.rand_mode()) errors++;\n      |             ^\n                     ... For warning description see https://verilator.org/warn/WIDTHTRUNC?v=5.052\n                     ... Use \"/* verilator lint_off WIDTHTRUNC */\" and lint_on around source to disable this message.\n%Warning-WIDTHTRUNC: <case>/source_0.sv:20:33: Logical operator LOGNOT expects 1 bit on the LHS, but LHS's METHODCALL 'rand_mode' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   20 |         if (!a.x.rand_mode() || !a.y.rand_mode()) errors++;\n      |                                 ^\n%Warning-WIDTHTRUNC: <case>/source_0.sv:22:17: Logical operator LOGNOT expects 1 bit on the LHS, but LHS's METHODCALL 'randomize' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   22 |             if (!base_a.randomize() || !b.randomize()) errors++;\n      |                 ^\n%Warning-WIDTHTRUNC: <case>/source_0.sv:22:40: Logical operator LOGNOT expects 1 bit on the LHS, but LHS's METHODCALL 'randomize' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   22 |             if (!base_a.randomize() || !b.randomize()) errors++;\n      |                                        ^\n%Warning-WIDTHTRUNC: <case>/source_0.sv:30:17: Logical operator LOGNOT expects 1 bit on the LHS, but LHS's METHODCALL 'randomize' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   30 |             if (!a.randomize(x)) errors++;\n      |                 ^\n%Warning-WIDTHTRUNC: <case>/source_0.sv:35:28: Logical operator LOGNOT expects 1 bit on the LHS, but LHS's METHODCALL 'randomize' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   35 |             repeat (2) if (!a.randomize()) errors++;\n      |                            ^\n%Warning-WIDTHTRUNC: <case>/source_0.sv:36:17: Logical operator LOGNOT expects 1 bit on the LHS, but LHS's METHODCALL 'randomize' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   36 |             if (!a.randomize(null)) errors++;\n      |                 ^\n%Warning-WIDTHTRUNC: <case>/source_0.sv:38:17: Logical operator LOGNOT expects 1 bit on the LHS, but LHS's METHODCALL 'randomize' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   38 |             if (!a.randomize(y)) errors++;\n      |                 ^\n%Warning-WIDTHTRUNC: <case>/source_0.sv:41:33: Logical operator LOGOR expects 1 bit on the LHS, but LHS's METHODCALL 'rand_mode' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   41 |             if (a.x.rand_mode() || a.y.rand_mode()) errors++;\n      |                                 ^~\n%Warning-WIDTHTRUNC: <case>/source_0.sv:41:33: Logical operator LOGOR expects 1 bit on the RHS, but RHS's METHODCALL 'rand_mode' generates 32 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   41 |             if (a.x.rand_mode() || a.y.rand_mode()) errors++;\n      |                                 ^~\n%Error: <case>/source_0.sv:3:5: Duplicate declaration of member name: 'srandom'\n                              : ... note: In instance 'celox_suite_tb.dut'\n    3 |     class Base;\n      |     ^~~~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: <case>/source_0.sv:3:5: Duplicate declaration of function: 'srandom'\n                              : ... note: In instance 'celox_suite_tb.dut'\n    3 |     class Base;\n      |     ^~~~~\n        <case>/source_0.sv:3:5: ... Location of original declaration\n    3 |     class Base;\n      |     ^~~~~\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "Simulation",
+      "name": "class::randomization_cyclic_controls",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::randomization_cyclic_enum_alias at 1213:46: assert_eq errors: expected 0x0, got 0x20",
+      "expectation": "Simulation",
+      "name": "class::randomization_cyclic_enum_alias",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 31; see <case>/build.log\n<case>/source_0.sv:19: error: Can't find task srandom in class Derived\n<case>/source_0.sv:19: error: Enable of unknown task ``a.srandom''.\n<case>/source_0.sv:19: error: Can't find task srandom in class Derived\n<case>/source_0.sv:19: error: Enable of unknown task ``b.srandom''.\n<case>/source_0.sv:20: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:20:      : method path: x.rand_mode\n<case>/source_0.sv:20: error: Object celox_suite_tb.dut.a has no method \"x.rand_mode(...)\".\n<case>/source_0.sv:20: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:20:      : method path: y.rand_mode\n<case>/source_0.sv:20: error: Object celox_suite_tb.dut.a has no method \"y.rand_mode(...)\".\n<case>/source_0.sv:20: error: Unable to elaborate condition expression.\n<case>/source_0.sv:22: Error: randomize is not a method of class Base.\n<case>/source_0.sv:22: error: Object celox_suite_tb.dut.base_a has no method \"randomize(...)\".\n<case>/source_0.sv:22: Error: randomize is not a method of class Derived.\n<case>/source_0.sv:22: error: Object celox_suite_tb.dut.b has no method \"randomize(...)\".\n<case>/source_0.sv:22: error: Unable to elaborate condition expression.\n<case>/source_0.sv:30: Error: randomize is not a method of class Derived.\n<case>/source_0.sv:30: error: Object celox_suite_tb.dut.a has no method \"randomize(...)\".\n<case>/source_0.sv:30: error: Unable to elaborate condition expression.\n<case>/source_0.sv:34: error: Can't find task rand_mode in class Derived\n<case>/source_0.sv:34: error: Enable of unknown task ``alias_a.rand_mode''.\n<case>/source_0.sv:35: Error: randomize is not a method of class Derived.\n<case>/source_0.sv:35: error: Object celox_suite_tb.dut.a has no method \"randomize(...)\".\n<case>/source_0.sv:35: error: Unable to elaborate condition expression.\n<case>/source_0.sv:36: Error: randomize is not a method of class Derived.\n<case>/source_0.sv:36: error: Object celox_suite_tb.dut.a has no method \"randomize(...)\".\n<case>/source_0.sv:36: error: Unable to elaborate condition expression.\n<case>/source_0.sv:38: Error: randomize is not a method of class Derived.\n<case>/source_0.sv:38: error: Object celox_suite_tb.dut.a has no method \"randomize(...)\".\n<case>/source_0.sv:38: error: Unable to elaborate condition expression.\n<case>/source_0.sv:41: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:41:      : method path: x.rand_mode\n<case>/source_0.sv:41: error: Object celox_suite_tb.dut.a has no method \"x.rand_mode(...)\".\n<case>/source_0.sv:41: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:41:      : method path: y.rand_mode\n<case>/source_0.sv:41: error: Object celox_suite_tb.dut.a has no method \"y.rand_mode(...)\".\n<case>/source_0.sv:41: error: Unable to elaborate condition expression.\n<case>/source_0.sv:43: error: Can't find task rand_mode in class Derived\n<case>/source_0.sv:43: error: Enable of unknown task ``alias_a.rand_mode''.\n31 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "class::randomization_cyclic_controls",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 9; see <case>/build.log\n<case>/source_0.sv:22: Error: randomize is not a method of class C.\n<case>/source_0.sv:22: error: Object celox_suite_tb.dut.c has no method \"randomize(...)\".\n<case>/source_0.sv:22: error: Unable to elaborate condition expression.\n<case>/source_0.sv:32: Error: randomize is not a method of class C.\n<case>/source_0.sv:32: error: Object celox_suite_tb.dut.c has no method \"randomize(...)\".\n<case>/source_0.sv:32: error: Unable to elaborate condition expression.\n<case>/source_0.sv:41: Error: randomize is not a method of class C.\n<case>/source_0.sv:41: error: Object celox_suite_tb.dut.c has no method \"randomize(...)\".\n<case>/source_0.sv:41: error: Unable to elaborate condition expression.\n9 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "class::randomization_cyclic_domains",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:14: Error: randomize is not a method of class C.\n<case>/source_0.sv:14: error: Object celox_suite_tb.dut.c has no method \"randomize(...)\".\n<case>/source_0.sv:14: error: Unable to elaborate condition expression.\n3 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "class::randomization_cyclic_enum_alias",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

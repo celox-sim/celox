@@ -608,6 +608,75 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 cannot elaborate class randomize, srandom and rand_mode calls in the randc cases. IEEE 1800-2023 18.4.2, 18.6 and 18.8 define these operations. The unchanged assertions cover full cycles, signed and enum domains, modes and inheritance.",
+      "expectation": "Simulation",
+      "name": "class::randomization_cyclic_controls",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_randc",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 cannot elaborate class randomize, srandom and rand_mode calls in the randc cases. IEEE 1800-2023 18.4.2, 18.6 and 18.8 define these operations. The unchanged assertions cover full cycles, signed and enum domains, modes and inheritance.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_randc_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 cannot elaborate class randomize, srandom and rand_mode calls in the randc cases. IEEE 1800-2023 18.4.2, 18.6 and 18.8 define these operations. The unchanged assertions cover full cycles, signed and enum domains, modes and inheritance.",
+      "expectation": "Simulation",
+      "name": "class::randomization_cyclic_domains",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_randc",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 cannot elaborate class randomize, srandom and rand_mode calls in the randc cases. IEEE 1800-2023 18.4.2, 18.6 and 18.8 define these operations. The unchanged assertions cover full cycles, signed and enum domains, modes and inheritance.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_randc_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 cannot elaborate class randomize, srandom and rand_mode calls in the randc cases. IEEE 1800-2023 18.4.2, 18.6 and 18.8 define these operations. The unchanged assertions cover full cycles, signed and enum domains, modes and inheritance.",
+      "expectation": "Simulation",
+      "name": "class::randomization_cyclic_enum_alias",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_randc",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 cannot elaborate class randomize, srandom and rand_mode calls in the randc cases. IEEE 1800-2023 18.4.2, 18.6 and 18.8 define these operations. The unchanged assertions cover full cycles, signed and enum domains, modes and inheritance.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_randc_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
     }
   ]
 }

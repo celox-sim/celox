@@ -1067,3 +1067,147 @@ module Top(output bit done, output int errors);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomization_cyclic_domains
+  (source "randc_domains.sv" #"
+module Top(output bit done, output int errors);
+    typedef enum bit signed [63:0] {NEG=-7, MID=2, HIGH=91} E;
+    typedef enum bit [63:0] {ONLY='1} Single;
+    class C;
+        randc bit [7:0] byte_value;
+        randc bit signed [1:0] signed_value;
+        randc E value;
+        randc Single single_value;
+        rand bit [7:0] ordinary;
+    endclass
+    C c;
+    bit [255:0] seen;
+    bit [3:0] signed_seen;
+    bit [2:0] enum_seen;
+    int index;
+    initial begin
+        c = new;
+        repeat (3) begin
+            seen = 0;
+            repeat (256) begin
+                if (!c.randomize(byte_value, single_value, ordinary)) errors++;
+                if (seen[c.byte_value]) errors++;
+                seen[c.byte_value] = 1;
+                if (c.single_value != 64'hffffffffffffffff) errors++;
+            end
+            if (seen != '1) errors++;
+        end
+        repeat (8) begin
+            signed_seen = 0;
+            repeat (4) begin
+                if (!c.randomize(signed_value)) errors++;
+                if (c.signed_value < -2 || c.signed_value > 1) errors++;
+                index = c.signed_value + 2;
+                if (signed_seen[index]) errors++;
+                signed_seen[index] = 1;
+            end
+            if (signed_seen != 15) errors++;
+            enum_seen = 0;
+            repeat (3) begin
+                if (!c.randomize(value)) errors++;
+                case (c.value)
+                    NEG: index=0;
+                    MID: index=1;
+                    HIGH: index=2;
+                    default: begin errors++; index=0; end
+                endcase
+                if (enum_seen[index]) errors++;
+                enum_seen[index] = 1;
+            end
+            if (enum_seen != 7) errors++;
+        end
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomization_cyclic_controls
+  (source "randc_controls.sv" #"
+module Top(output bit done, output int errors);
+    class Base;
+        randc bit [2:0] x;
+        int calls;
+        function void post_randomize(); calls++; endfunction
+    endclass
+    class Derived extends Base;
+        randc bit [1:0] y;
+    endclass
+    Derived a, alias_a, b;
+    Base base_a;
+    bit [7:0] seen;
+    bit [3:0] seen_y;
+    bit [2:0] saved_x;
+    bit [1:0] saved_y;
+    initial begin
+        a = new; b = new; alias_a = a; base_a = a;
+        a.srandom(27); b.srandom(27);
+        if (!a.x.rand_mode() || !a.y.rand_mode()) errors++;
+        repeat (8) begin
+            if (!base_a.randomize() || !b.randomize()) errors++;
+            if (a.x != b.x || a.y != b.y) errors++;
+            if (seen[a.x]) errors++;
+            seen[a.x] = 1;
+        end
+        if (seen != 255) errors++;
+        seen = 0; seen_y = 0;
+        repeat (8) begin
+            if (!a.randomize(x)) errors++;
+            if (seen[a.x]) errors++;
+            seen[a.x] = 1;
+            saved_x = a.x; saved_y = a.y;
+            alias_a.rand_mode(0);
+            repeat (2) if (!a.randomize()) errors++;
+            if (!a.randomize(null)) errors++;
+            if (a.x != saved_x || a.y != saved_y) errors++;
+            if (!a.randomize(y)) errors++;
+            if (seen_y[a.y]) errors++;
+            seen_y[a.y] = 1;
+            if (a.x.rand_mode() || a.y.rand_mode()) errors++;
+            if (seen_y == 15) seen_y = 0;
+            alias_a.rand_mode(1);
+        end
+        if (seen != 255 || seen_y != 0) errors++;
+        if (a.calls != 48) errors++;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case randomization_cyclic_enum_alias
+  (source "randc_enum_alias.sv" #"
+module Top(output bit done, output int errors);
+    typedef enum bit signed [63:0] {NEG=-7, MID=2, HIGH=91} E;
+    typedef E Alias;
+    class C; randc Alias value; endclass
+    C c;
+    bit [2:0] seen;
+    int index;
+    initial begin
+        c = new;
+        repeat (8) begin
+            seen = 0;
+            repeat (3) begin
+                if (!c.randomize()) errors++;
+                case (c.value)
+                    NEG: index=0;
+                    MID: index=1;
+                    HIGH: index=2;
+                    default: begin errors++; index=0; end
+                endcase
+                if (seen[index]) errors++;
+                seen[index] = 1;
+            end
+            if (seen != 7) errors++;
+        end
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))

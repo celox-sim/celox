@@ -557,10 +557,10 @@ pub(super) fn random_selection(
                 }
                 if property.field.handle.is_some()
                     || (property.r#type.is_enum && property.r#type.enum_values.is_none())
-                    || property.randc
+                    || (property.randc && property.cyclic_domain_size().is_none())
                 {
                     return Err(unsupported(
-                        "randomize arguments require integral, non-randc properties with a supported enum domain",
+                        "randomize arguments require integral properties with a supported enum domain",
                     ));
                 }
                 bits[index + 1] = '1';

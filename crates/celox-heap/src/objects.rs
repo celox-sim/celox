@@ -17,6 +17,8 @@ pub(crate) struct Object {
     random_state: u64,
     random_modes: RandomModes,
     saved_random_modes: Vec<RandomModes>,
+    /// Remaining domain indices for each randc property, keyed by byte offset.
+    random_cycles: fxhash::FxHashMap<u32, Vec<u16>>,
     bytes: Box<[u8]>,
     /// Byte offsets of the handle properties, with what they refer to.
     pub(crate) handles: Vec<(u32, HandleKind)>,
@@ -30,6 +32,14 @@ struct RandomModes {
 }
 
 impl Object {
+    fn random(&mut self) -> u64 {
+        self.random_state = self.random_state.wrapping_add(0x9e3779b97f4a7c15);
+        let mut word = self.random_state;
+        word = (word ^ (word >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        word = (word ^ (word >> 27)).wrapping_mul(0x94d049bb133111eb);
+        word ^ (word >> 31)
+    }
+
     pub(crate) fn size(&self) -> usize {
         self.bytes.len()
     }
@@ -71,6 +81,7 @@ impl Heap {
                 random_state: 0,
                 random_modes: RandomModes::default(),
                 saved_random_modes: Vec::new(),
+                random_cycles: Default::default(),
                 bytes: vec![0; size].into(),
                 handles: Vec::new(),
             },
@@ -92,11 +103,36 @@ impl Heap {
         let Some(object) = self.object_mut(handle) else {
             return 0;
         };
-        object.random_state = object.random_state.wrapping_add(0x9e3779b97f4a7c15);
-        let mut word = object.random_state;
-        word = (word ^ (word >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-        word = (word ^ (word >> 27)).wrapping_mul(0x94d049bb133111eb);
-        word ^ (word >> 31)
+        object.random()
+    }
+
+    /// Draw without replacement from an immutable domain (IEEE 1800-2023
+    /// 18.4.2). Lazy Fisher-Yates uses bounded storage and uniform draws.
+    /// Seeding changes the RNG, but does not discard an unfinished cycle.
+    pub(crate) fn random_cyclic_object(&mut self, handle: Handle, offset: u32, count: u64) -> u64 {
+        assert!((1..=256).contains(&count), "invalid randc domain size");
+        let Some(object) = self.object_mut(handle) else {
+            return 0;
+        };
+        let remaining = object.random_cycles.entry(offset).or_default();
+        if remaining.is_empty() {
+            remaining.extend(0..count as u16);
+        }
+        let count = remaining.len() as u64;
+        let threshold = count.wrapping_neg() % count;
+        let index = loop {
+            let draw = object.random();
+            if draw >= threshold {
+                break (draw % count) as usize;
+            }
+        };
+        u64::from(
+            object
+                .random_cycles
+                .get_mut(&offset)
+                .unwrap()
+                .swap_remove(index),
+        )
     }
 
     /// Random properties start enabled. Modes are shared by aliases of an
@@ -286,6 +322,40 @@ mod tests {
 #[cfg(test)]
 mod random_tests {
     use super::*;
+
+    #[test]
+    fn cyclic_domains_survive_reseeding_and_checkpoint_restore() {
+        for count in [1, 3, 256] {
+            let mut heap = Heap::new();
+            let object = heap.new_object(1, 2);
+            let other = heap.new_object(1, 2);
+            heap.seed_object(object, 12);
+            heap.seed_object(other, 12);
+            let first = heap.random_cyclic_object(object, 0, count);
+            assert_eq!(first, heap.random_cyclic_object(other, 0, count));
+            let mut saved = heap.clone();
+            let mut seen = crate::HashSet::from_iter([first]);
+            for _ in 1..count {
+                // Seeding does not make consumed values eligible again.
+                heap.seed_object(object, 19);
+                saved.seed_object(object, 19);
+                let value = heap.random_cyclic_object(object, 0, count);
+                assert_eq!(value, saved.random_cyclic_object(object, 0, count));
+                assert!(seen.insert(value));
+            }
+            for offset in [0, 1, 0] {
+                let seen: crate::HashSet<_> = (0..count)
+                    .map(|_| heap.random_cyclic_object(object, offset, count))
+                    .collect();
+                assert_eq!(seen.len(), count as usize);
+                assert!(seen.iter().all(|&value| value < count));
+            }
+            assert_eq!(heap.take_fault(), None);
+        }
+        let mut heap = Heap::new();
+        assert_eq!(heap.random_cyclic_object(NULL, 0, 3), 0);
+        assert_eq!(heap.take_fault(), Some(Fault::NullDereference));
+    }
 
     #[test]
     fn random_streams_are_independent_and_checkpointed() {
