@@ -1,6 +1,1 @@
-Revision history for #2076:
-
-rev 2 (rebase) 2026-10-25 20:53 UTC — Fix PR 2075 regression coverage: distinguish sized enum width errors from out-of-range values
-rev 1 (initial) 2026-10-25 20:53 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2076,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"3c3ca263b9bbd73f12f39720161856215a7de6fd","timestamp_iso":"2026-10-25T20:53:15Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"3c3ca263b9bbd73f12f39720161856215a7de6fd","new_sha":"e187e5e4f1463ff178931cf412399cbd64b8bd02","timestamp_iso":"2026-10-25T20:53:15Z","reason":"Fix PR 2075 regression coverage: distinguish sized enum width errors from out-of-range values","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/3c3ca263b9bbd73f12f39720161856215a7de6fd...e187e5e4f1463ff178931cf412399cbd64b8bd02"}]} -->
+Sync merged prerequisite PRs 2061 and 2067 before continuing final procedure support
