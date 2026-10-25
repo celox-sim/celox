@@ -247,7 +247,12 @@ pub(in crate::ast) fn packed_ranges(
     // historical primitive/alias kernel includes nested datatype dimensions.
     // Aggregate fields use their own independently scheduled type ranges.
     let mut all = dimensions.to_vec();
-    for data in &tree.declarations().types {
+    let bounds = dimensions
+        .iter()
+        .map(|dimension| dimension.tokens)
+        .collect::<Vec<_>>();
+    for id in tree.spans().types.within(&bounds) {
+        let data = tree.declarations().data_type(id);
         if dimensions.iter().any(|bound| {
             bound.tokens.start <= data.tokens.start && data.tokens.end <= bound.tokens.end
         }) {

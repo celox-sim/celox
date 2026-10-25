@@ -103,7 +103,9 @@ impl ScopeImports {
         // Qualified expression and type names carry their package segment natively.
         let native = tree.declarations();
         let ranges = active_ranges(tree)?;
-        for expression in &native.expressions {
+        let spans = tree.spans();
+        for id in spans.expressions.within(&ranges) {
+            let expression = native.expression(id);
             if !in_ranges(expression.tokens.start, &ranges) {
                 continue;
             }
@@ -138,7 +140,8 @@ impl ScopeImports {
                 }
             }
         }
-        for ty in &native.types {
+        for id in spans.types.within(&ranges) {
+            let ty = native.data_type(id);
             if in_ranges(ty.tokens.start, &ranges)
                 && let celox_sv_syntax::DataTypeKind::Named(path) = &ty.kind
                 && let [package, name] = path.as_slice()
@@ -353,6 +356,59 @@ fn in_ranges(offset: usize, ranges: &[celox_sv_syntax::TokenRange]) -> bool {
     let next = ranges.partition_point(|range| range.start <= offset);
     next > 0 && offset < ranges[next - 1].end
 }
+/// Whole-file facts the reference collection selects from, built once per
+/// file so each scope costs what its own token ranges contain.
+#[derive(Debug)]
+pub(crate) struct Facts {
+    /// Token spans of the plain-name packages of qualified names.
+    qualified_bases: HashSet<(usize, usize)>,
+    /// First tokens of the bare-name keys of patterns.
+    pattern_keys: HashSet<usize>,
+}
+
+impl Facts {
+    fn of(tree: &SyntaxTree) -> &Self {
+        use celox_sv_syntax::ExprKind;
+        tree.spans().imports.get_or_init(|| {
+            let native = tree.declarations();
+            let name = |id| {
+                matches!(native.expression(id).kind, ExprKind::Name(_))
+                    .then_some(native.expression(id).tokens)
+            };
+            let qualified_bases = native
+                .expressions
+                .iter()
+                .filter_map(|expression| match &expression.kind {
+                    ExprKind::Member {
+                        expression,
+                        separator,
+                        ..
+                    } if separator == "::" => name(*expression),
+                    _ => None,
+                })
+                .map(|tokens| (tokens.start, tokens.end))
+                .collect();
+            // Bare pattern keys name members; they do not bind wildcard imports.
+            let pattern_keys = native
+                .expressions
+                .iter()
+                .flat_map(|expression| match &expression.kind {
+                    ExprKind::Pattern { items, .. } => {
+                        items.iter().filter_map(|item| item.key).collect::<Vec<_>>()
+                    }
+                    _ => Vec::new(),
+                })
+                .filter_map(name)
+                .map(|tokens| tokens.start)
+                .collect();
+            Self {
+                qualified_bases,
+                pattern_keys,
+            }
+        })
+    }
+}
+
 /// Unqualified expression and type references in the selected native scope.
 pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>> {
     use celox_sv_syntax::{DataTypeKind, ExprKind};
@@ -361,33 +417,10 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
         return HashMap::default();
     };
     let nested = nested_declarations(tree);
-    let qualified: HashSet<_> = native
-        .expressions
-        .iter()
-        .filter_map(|expression| match &expression.kind {
-            ExprKind::Member {
-                expression,
-                separator,
-                ..
-            } if separator == "::" => Some(*expression),
-            _ => None,
-        })
-        .collect();
-    // Bare pattern keys name members; they do not bind wildcard imports.
-    let pattern_keys: HashSet<_> = native
-        .expressions
-        .iter()
-        .flat_map(|expression| match &expression.kind {
-            ExprKind::Pattern { items, .. } => {
-                items.iter().filter_map(|item| item.key).collect::<Vec<_>>()
-            }
-            _ => Vec::new(),
-        })
-        .filter_map(|id| {
-            matches!(native.expression(id).kind, ExprKind::Name(_))
-                .then_some(native.expression(id).tokens.start)
-        })
-        .collect();
+    let Facts {
+        qualified_bases,
+        pattern_keys,
+    } = Facts::of(tree);
     let mut names: HashMap<String, Vec<usize>> = HashMap::default();
     let mut add = |name: &str, offset| {
         let name = normalize_identifier(name);
@@ -399,18 +432,18 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
             names.entry(name).or_default().push(offset);
         }
     };
-    for expression in &native.expressions {
+    let spans = tree.spans();
+    for id in spans.expressions.within(&ranges) {
+        let expression = native.expression(id);
         if let ExprKind::Name(name) = &expression.kind
             && !pattern_keys.contains(&expression.tokens.start)
-            && !qualified.iter().any(|base| {
-                native.expression(*base).tokens == expression.tokens
-                    && matches!(&native.expression(*base).kind, ExprKind::Name(_))
-            })
+            && !qualified_bases.contains(&(expression.tokens.start, expression.tokens.end))
         {
             add(&name.spelling, expression.tokens.start);
         }
     }
-    for ty in &native.types {
+    for id in spans.types.within(&ranges) {
+        let ty = native.data_type(id);
         if let DataTypeKind::Named(path) = &ty.kind
             && let [name] = path.as_slice()
         {
