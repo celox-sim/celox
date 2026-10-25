@@ -1690,6 +1690,20 @@ impl SimBackend for TieredBackend {
         }
     }
 
+    fn comb_capture_event_enabled(&self) -> Vec<bool> {
+        match &self.phase {
+            Phase::Interpreting(Some(interp)) => interp.comb_capture_event_enabled(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.comb_capture_event_enabled(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.comb_capture_event_enabled(),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
     fn stable_region_size(&self) -> usize {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.stable_region_size(),

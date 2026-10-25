@@ -782,16 +782,36 @@ impl Parser<'_> {
                 frames.push(frame);
                 continue;
             }
+            // A deferred immediate assertion as a module item is the same
+            // assertion in an `always_comb` (IEEE 1800-2023 16.4.3).
+            let deferred_assertion = |at: usize| {
+                matches!(self.nth(at), "assert" | "assume" | "cover")
+                    && matches!(self.nth(at + 1), "#" | "final")
+            };
+            // A module item, also in a generate region or block.
+            let static_deferred = frame.item_start
+                && frame.delimiters.is_empty()
+                && frame
+                    .scopes
+                    .iter()
+                    .all(|scope| matches!(*scope, "endgenerate" | "end" | "endcase"))
+                && (deferred_assertion(0) || self.nth(1) == ":" && deferred_assertion(2));
             if frame.item_start
                 && frame.delimiters.is_empty()
                 && !frame
                     .scopes
                     .iter()
                     .any(|scope| matches!(*scope, "endproperty" | "endsequence"))
-                && matches!(
-                    self.peek(),
-                    "initial" | "always" | "always_comb" | "always_latch" | "always_ff" | "final"
-                )
+                && (static_deferred
+                    || matches!(
+                        self.peek(),
+                        "initial"
+                            | "always"
+                            | "always_comb"
+                            | "always_latch"
+                            | "always_ff"
+                            | "final"
+                    ))
             {
                 let parameters = self.parameter_declarations.len();
                 let aliases = self.type_aliases.len();
@@ -799,7 +819,11 @@ impl Parser<'_> {
                 let times = self.time_declarations.len();
                 let assigns = self.assign_statements.len();
                 let start = self.at;
-                let id = self.procedure()?;
+                let id = if static_deferred {
+                    self.static_deferred_assertion()?
+                } else {
+                    self.procedure()?
+                };
                 frame.unit.procedures.push(id);
                 frame.record(self, start, BodyItemKind::Procedure(id))?;
                 frame.unit.parameter_declarations.extend(

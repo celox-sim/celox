@@ -433,6 +433,7 @@ impl<B: SimBackend> Simulation<B> {
         // Only a timed simulation ends at an RTL `$finish`; a bare
         // `Simulator`, ticks included, leaves that to the host.
         simulator.finish_sites = simulator.schedule.finish_sites;
+        simulator.timed = true;
         simulator.skip_runtime_finish();
         state.initialize_declarations(&mut simulator)?;
         Ok(Self {
@@ -683,7 +684,42 @@ impl<B: SimBackend> Simulation<B> {
         if self.reports.fail_on.is_some() {
             return self.watched_step();
         }
+        // With nothing scheduled, the step ends the slot too.
+        self.end_idle_slot(self.state.next_event_time().unwrap_or(u64::MAX))?;
         self.step_until(u64::MAX)
+    }
+
+    /// A slot with nothing due is over when a run leaves its time. In a
+    /// design with deferred assertions, logic that host writes or the
+    /// initial settle left dirty settles there, and the actions waiting from
+    /// any settle at that time mature, so that a deferred `$fatal` ends the
+    /// run at that time.
+    #[inline]
+    fn end_idle_slot(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
+        if !self.simulator.deferred_assertions
+            || end_time <= self.state.time()
+            || self.state.next_event_time() == Some(self.state.time())
+        {
+            return Ok(());
+        }
+        self.settle_idle_slot()
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn settle_idle_slot(&mut self) -> Result<(), RuntimeErrorCode> {
+        let result = if self.simulator.dirty {
+            let result = self.simulator.eval_comb_checked();
+            self.simulator.dirty = false;
+            result
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result.and_then(|()| self.simulator.mature_deferred_assertions()) {
+            self.flush_error_output();
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// [`Self::step`] while [`Self::set_fail_on`] is set: a slot that only
@@ -765,15 +801,31 @@ impl<B: SimBackend> Simulation<B> {
     /// that wake no process, at the current time, and watch its reports. A
     /// watched run does this before it moves to a later time.
     fn watch_settle(&mut self) -> Result<(), RuntimeErrorCode> {
-        if !self.simulator.dirty {
+        // The run leaves the time or ends at it: the slot is over, and the
+        // deferred actions waiting from any settle at that time mature
+        // before the reports are watched.
+        let mature = self.simulator.deferred_assertions
+            && self.state.next_event_time() != Some(self.state.time());
+        if !self.simulator.dirty && !mature {
             return Ok(());
         }
-        if let Err(error) = self.simulator.eval_comb_checked() {
+        if self.simulator.dirty {
+            if let Err(error) = self.simulator.eval_comb_checked() {
+                self.flush_error_output();
+                return Err(error);
+            }
+            self.simulator.dirty = false;
+        }
+        let matured = if mature {
+            self.simulator.mature_deferred_assertions()
+        } else {
+            Ok(())
+        };
+        self.watch_reports();
+        if let Err(error) = matured {
             self.flush_error_output();
             return Err(error);
         }
-        self.simulator.dirty = false;
-        self.watch_reports();
         Ok(())
     }
 
@@ -831,8 +883,12 @@ impl<B: SimBackend> Simulation<B> {
         self.reports.failure = None;
         // With reports to watch, step one slot at a time; the run below
         // then only advances the time.
-        if self.reports.fail_on.is_some() && !self.watched_steps(end_time, u64::MAX)? {
-            return Ok(());
+        if self.reports.fail_on.is_some() {
+            if !self.watched_steps(end_time, u64::MAX)? {
+                return Ok(());
+            }
+        } else {
+            self.end_idle_slot(end_time)?;
         }
         let reached = match self.shadow.take() {
             None => self.state.run_until(&mut self.simulator, end_time)?,
@@ -871,6 +927,15 @@ impl<B: SimBackend> Simulation<B> {
         if self.time() != last || self.is_finished() || self.is_stopped() {
             return Ok(());
         }
+        // Leaving `last` ends its slot.
+        if self.reports.fail_on.is_some() {
+            self.watch_settle()?;
+            if self.reports.failure.is_some() {
+                return Ok(());
+            }
+        } else {
+            self.end_idle_slot(time)?;
+        }
         self.state.advance_time(&mut self.simulator.backend, time);
         if let Some(shadow) = &mut self.shadow {
             shadow
@@ -900,6 +965,7 @@ impl<B: SimBackend> Simulation<B> {
             self.run_until(end_time)?;
             return Ok(!self.state.is_stopped());
         }
+        self.end_idle_slot(end_time)?;
         let mut steps = 0;
         while let Some(next_time) = self.state.next_event_time() {
             if next_time > end_time {
@@ -948,6 +1014,16 @@ impl<B: SimBackend> Simulation<B> {
     /// Takes the runtime events (`$display`, messages, `$finish`, ...) the
     /// design emitted since the last call, in emission order.
     pub fn drain_runtime_events(&mut self) -> Vec<crate::RuntimeEvent> {
+        // A slot with nothing more due is over, also before the first step:
+        // the initial settle of combinational logic belongs to time zero.
+        // A fatal action is drained as a fatal report.
+        if self.simulator.deferred_assertions
+            && self.state.next_event_time() != Some(self.state.time())
+        {
+            // Lazily settled logic runs in the slot too.
+            self.simulator.settle_for_runtime_event_drain();
+            let _ = self.simulator.mature_deferred_assertions();
+        }
         let mut events = std::mem::take(&mut self.reports.events);
         events.extend(self.simulator.drain_runtime_events());
         events

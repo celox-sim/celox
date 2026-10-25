@@ -1404,12 +1404,14 @@ fn readmem_diagnostics_identify_task_and_requested_range() {
     }
 }
 
+/// The action of a deferred cover, like that of a deferred assertion, is
+/// one subroutine call (IEEE 1800-2023 16.4).
 #[test]
-fn rejects_deferred_cover_instead_of_discarding_its_semantics() {
+fn rejects_deferred_cover_actions_other_than_a_task_call() {
     for timing in ["#0", "final"] {
         let source =
             format!("module Top(output logic y); initial cover {timing} (1) y = 1; endmodule");
-        assert!(build_error(&source).contains("deferred immediate cover"));
+        assert!(build_error(&source).contains("deferred assertion action"));
     }
 }
 
