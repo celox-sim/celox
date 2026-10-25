@@ -100,7 +100,7 @@ struct Unit {
 pub(super) struct Timescales {
     // Identical expanded tokens have identical native scope positions. Content keys
     // remain valid when ParsedSource values move or their trees are dropped.
-    units: HashMap<String, Arc<Unit>>,
+    units: HashMap<crate::source_tree::SourceText, Arc<Unit>>,
     definitions: HashMap<String, Scope>,
     packages: HashMap<String, Scope>,
     precision: Option<i32>,
@@ -210,12 +210,8 @@ fn install_context<'a>(
     }
 }
 
-fn key(tree: &SyntaxTree) -> String {
-    tree.declarations()
-        .tokens
-        .iter()
-        .map(|token| token.text.as_str())
-        .collect()
+fn key(tree: &SyntaxTree) -> crate::source_tree::SourceText {
+    tree.source_text().clone()
 }
 
 fn exponent(number: &str, suffix: &str) -> Converted<i32> {
@@ -384,34 +380,15 @@ pub(crate) fn generated_source_declarations(
 pub(super) fn validate_queries(
     tree: &AnalysisContext<'_>,
     ranges: &[celox_sv_syntax::TokenRange],
-    excluded: &[celox_sv_syntax::TokenRange],
+    excluded: &crate::source_tree::Ranges,
 ) -> Converted<()> {
-    use celox_sv_syntax::{ExprKind, StatementKind};
     let native = tree.declarations();
-    let callees: HashSet<_> = native
-        .expression_nodes()
-        .filter_map(|(_, node)| match node.kind {
-            ExprKind::Call { expression, .. } => Some(expression),
-            _ => None,
-        })
-        .collect();
-    let statements: HashSet<_> = native
-        .statements
-        .iter()
-        .filter_map(|statement| match statement.kind {
-            StatementKind::Expression(id) => Some(id),
-            _ => None,
-        })
-        .collect();
-    for (id, expression) in native.expression_nodes() {
-        let at = expression.tokens.start;
-        if !ranges
-            .iter()
-            .any(|range| range.start <= at && at < range.end)
-            || excluded
-                .iter()
-                .any(|range| range.start <= at && at < range.end)
-        {
+    let facts = validation::Facts::of(tree);
+    let (callees, statements) = (&facts.callees, &facts.expression_statements);
+    let scope = crate::source_tree::Ranges::new(ranges.iter().copied());
+    for id in tree.spans().expressions.within(ranges) {
+        let at = native.expression(id).tokens.start;
+        if !scope.covers(at) || excluded.covers(at) {
             continue;
         }
         if callees.contains(&id) {
@@ -743,7 +720,7 @@ impl Timescales {
                 .insert(scopes[i].name.clone(), scopes[i].clone());
             }
             design.units.insert(
-                key(tree).to_string(),
+                key(tree),
                 Arc::new(Unit {
                     scale: unit,
                     scopes,
