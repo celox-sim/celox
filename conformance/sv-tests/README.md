@@ -10,10 +10,13 @@ Each test has separate `2state` and `4state` rows (`test`, `state_mode`, `result
 The official runner owns metadata parsing, compatible-runner filtering, mode
 priority, library injection, timeouts, expected failures and simulation
 `:assert:` evaluation. The adapter declares only the driver’s supported
-`parsing`, `elaboration` and `simulation` modes. It forwards source files, include
-directories, defines, an optional explicit top and the selected state mode to
-the Rust driver. Parsing mode stops after preprocessing and syntax parsing; it
-does not build semantic module metadata, select a root, elaborate or simulate.
+`preprocessing`, `parsing`, `elaboration` and `simulation` modes. It forwards
+source files, include directories, defines, an optional explicit top and the
+selected state mode to
+the Rust driver. Preprocessing mode expands macros and includes, emits the
+resulting text, and stops before syntax parsing or root selection. Parsing mode
+stops after preprocessing and syntax parsing; it does not build semantic module
+metadata, select a root, elaborate or simulate.
 The official mode priority still chooses elaboration for default cases and for
 cases that permit both parsing and elaboration. In elaboration and simulation
 modes, sources without a module still undergo preprocessing and parsing; root
@@ -32,6 +35,13 @@ command-line defines apply to each file.
 | `pass` | the official runner emitted `PASS` |
 | `fail` | the official runner emitted `FAIL` |
 | `skip` | the official runner skipped an incompatible test or unsupported mode |
+
+All 90 preprocessing cases at the pinned revision now execute in both state
+modes, leaving no skipped expectation rows. Each mode reports 89 passes and
+one failure: `chapter-22/22.11--pragma-invalid.sv` expects a bare `` `pragma ``
+to be rejected, but the preprocessor currently accepts it. This failure remains
+visible in the baseline. Upstream preprocessing verdicts check process success
+and expected failure; they do not compare the emitted text against a golden file.
 
 The official runner’s process exit code is separate from the case verdict.
 The wrapper reads its `PASS`/`FAIL` log messages; it does not reconstruct their
