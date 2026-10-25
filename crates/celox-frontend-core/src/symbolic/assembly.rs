@@ -2520,6 +2520,29 @@ fn extend_boundaries(
     target.len() != old_len
 }
 
+/// Add the boundaries of `source` within its range to `target`, mapping the
+/// range of `source` onto the equally wide range of `target`.
+fn extend_shifted_boundaries(
+    boundaries: &mut HashMap<AbsoluteAddr, BTreeSet<usize>>,
+    (source, source_access): (AbsoluteAddr, BitAccess),
+    (target, target_access): (AbsoluteAddr, BitAccess),
+) -> bool {
+    let shifted: Vec<usize> = boundaries
+        .get(&source)
+        .into_iter()
+        .flatten()
+        .filter(|&&boundary| source_access.lsb <= boundary && boundary <= source_access.msb + 1)
+        .map(|&boundary| boundary - source_access.lsb + target_access.lsb)
+        .collect();
+    if shifted.is_empty() || (source == target && source_access == target_access) {
+        return false;
+    }
+    let target = boundaries.entry(target).or_default();
+    let old_len = target.len();
+    target.extend(shifted);
+    target.len() != old_len
+}
+
 fn propagate_boundaries(
     bindings: &PackageBindings,
     expanded: &HashMap<InstancePath, InstanceId>,
@@ -2570,6 +2593,26 @@ fn propagate_boundaries(
                                     &mut current_boundaries,
                                     parent_abs,
                                     child_abs,
+                                );
+                            }
+
+                            // Child -> Parent: where the child reads the
+                            // port in parts, the connected range of a parent
+                            // variable is read in the same parts, as in
+                            // `a = {x[7:4], ...}` within one module. Only a
+                            // connection of one range as wide as the port maps
+                            // bit for bit.
+                            let mut sources = child_addr.sources.iter();
+                            if let (Some(source), None) = (sources.next(), sources.next())
+                                && let GlueAddr::Parent(parent_var) = source.id
+                                && source.access.msb - source.access.lsb
+                                    == target.access.msb - target.access.lsb
+                            {
+                                let parent_abs = bindings.locate(*id, parent_var);
+                                changed |= extend_shifted_boundaries(
+                                    &mut current_boundaries,
+                                    (child_abs, target.access),
+                                    (parent_abs, source.access),
                                 );
                             }
                         }
