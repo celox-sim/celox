@@ -1,0 +1,1 @@
+Review: static-method check matches the declaring class, exported property types fixed in the declaring scope. Rebased with the parameterized-class review fixes.
