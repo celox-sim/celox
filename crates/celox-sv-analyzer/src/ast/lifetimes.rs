@@ -608,6 +608,9 @@ impl Flow<'_> {
             Stmt::WaitEvent(items) => {
                 for item in items {
                     self.read(&item.expr, written)?;
+                    if let Some(iff) = &item.iff {
+                        self.read(iff, written)?;
+                    }
                 }
                 Ok(Exits::next(written))
             }
@@ -759,7 +762,10 @@ pub(super) fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
             .collect(),
         Stmt::Local { init, .. } => init.iter().collect(),
         Stmt::Delay { amount: expr, .. } | Stmt::Wait(expr) => vec![expr],
-        Stmt::WaitEvent(items) => items.iter().map(|item| &item.expr).collect(),
+        Stmt::WaitEvent(items) => items
+            .iter()
+            .flat_map(|item| std::iter::once(&item.expr).chain(&item.iff))
+            .collect(),
         // The statements of an `@*` describe its reads and do not run.
         Stmt::WaitImplicit(_) | Stmt::Break | Stmt::Continue => Vec::new(),
     }

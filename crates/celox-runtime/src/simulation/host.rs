@@ -5,7 +5,7 @@ use fxhash::{FxHashMap, FxHashSet};
 use crate::{
     SignalRef, SimulatorErrorCode,
     backend::SimBackend,
-    timing::{CountedRefs, Halt, Value, read},
+    timing::{CountedRefs, GatedWriteRefs, Halt, Value, read, write_gated},
 };
 
 /// The units a timed step executes: combinational settling, flip-flop
@@ -175,6 +175,9 @@ impl<T: UnitExecutor + HostBoundary + ?Sized> SimulationExecutor for T {}
 pub struct HostWatch {
     counted: FxHashMap<usize, CountedRefs>,
     waited: FxHashSet<usize>,
+    /// Gated wait terms by the offset of their signal, whose counters a
+    /// write bumps with the gate as the write leaves it.
+    gated: FxHashMap<usize, Vec<GatedWriteRefs>>,
     log: Vec<(SignalRef, Value)>,
 }
 
@@ -186,12 +189,19 @@ impl HostWatch {
                 .map(|refs| (refs.signal.offset, refs))
                 .collect(),
             waited,
+            gated: FxHashMap::default(),
             log: Vec::new(),
         }
     }
 
+    /// Also count the writes of the signals of `gated` terms.
+    pub fn with_gated(mut self, gated: FxHashMap<usize, Vec<GatedWriteRefs>>) -> Self {
+        self.gated = gated;
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.counted.is_empty() && self.waited.is_empty()
+        self.counted.is_empty() && self.waited.is_empty() && self.gated.is_empty()
     }
 
     /// Run `write`, which writes `signal` in `backend`, and observe it.
@@ -204,7 +214,13 @@ impl HostWatch {
         let counted = self.counted.get(&signal.offset).copied();
         let waited = self.waited.contains(&signal.offset);
         if counted.is_none() && !waited {
-            write(backend);
+            if !self.gated.is_empty()
+                && let Some(gated) = self.gated.get(&signal.offset)
+            {
+                write_gated(backend, signal, gated, write);
+            } else {
+                write(backend);
+            }
             return;
         }
         let old = read(backend, signal);
@@ -212,6 +228,9 @@ impl HostWatch {
         let new = read(backend, signal);
         if let Some(counted) = counted {
             counted.bump(backend, &old, &new);
+        }
+        for term in self.gated.get(&signal.offset).into_iter().flatten() {
+            term.bump(backend, &old, &new);
         }
         if waited && old != new {
             self.log.push((signal, new));

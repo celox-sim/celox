@@ -196,7 +196,6 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("streaming concatenation", 447),
     ("loop-generate unroll limit exceeded", 448),
     ("iff-qualified always_ff event", 452),
-    ("iff-qualified event", 1444),
     ("nonblocking assignment inside always_comb", 453),
     ("genvar update operator", 455),
     ("reduction operator in parameter expression", 456),

@@ -614,6 +614,9 @@ impl<B: SimBackend> Simulation<B> {
         F: FnOnce(&mut crate::IOContext<B>),
     {
         let result = self.simulator.modify(f);
+        // The tracked writes counted their occurrences of gated waits.
+        self.state
+            .note_gated_host_writes(&mut self.simulator.backend, false);
         let finished = self.sync_finish_checked();
         result?;
         finished?;
@@ -984,6 +987,8 @@ impl<B: SimBackend> Simulation<B> {
     /// writes may wake a process or changed an event signal. Waits and
     /// counters see the values the writes left, not each write.
     pub fn note_raw_writes(&mut self) {
+        self.state
+            .note_gated_host_writes(&mut self.simulator.backend, true);
         self.state.note_host_writes(&self.simulator.backend, false);
     }
 

@@ -4350,10 +4350,16 @@ pub(crate) fn attach_instance_glue(
             .values()
             .any(|module| !module.sim_module.nba_switches.is_empty()))
     .then(|| {
+        // A gate is read at each write of its term's signal too.
         let mut seeds: HashSet<SourceVarId> = module
             .wait_sites
             .iter()
-            .flat_map(|site| site.terms.iter().map(|&(signal, _)| signal))
+            .flat_map(|site| {
+                site.terms
+                    .iter()
+                    .map(|&(signal, _)| signal)
+                    .chain(site.gates.iter().flatten().map(|gate| gate.signal))
+            })
             .collect();
         let triggers = module
             .eval_only_ff_blocks
@@ -4404,6 +4410,24 @@ pub(crate) fn attach_instance_glue(
         );
         seeds
     });
+    // The signals and gates of this module's gated waits: a combinational
+    // process writing one keeps its procedural order (IEEE 1800-2023
+    // 9.4.2.3 judges the gate at the write).
+    let gated: HashSet<SourceVarId> = module
+        .wait_sites
+        .iter()
+        .flat_map(|site| {
+            site.terms
+                .iter()
+                .zip(&site.gates)
+                .filter_map(|(&(signal, _), gate)| {
+                    gate.as_ref()
+                        .filter(|gate| gate.counters.is_some())
+                        .map(|gate| [signal, gate.signal])
+                })
+        })
+        .flatten()
+        .collect();
     let (comb_blocks, arena, created, comb_observers, comb_sites, comb_alternatives) =
         lower_comb_processes(
             &lowered.source,
@@ -4419,6 +4443,7 @@ pub(crate) fn attach_instance_glue(
             warnings,
             waits,
             watch_seeds.as_ref(),
+            &gated,
         )
         .map_err(|error| match error {
             sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
@@ -5005,6 +5030,7 @@ fn lower_comb_processes(
     warnings: &mut Vec<crate::warning::PendingWarning>,
     waits: bool,
     watch_seeds: Option<&HashSet<SourceVarId>>,
+    gated: &HashSet<SourceVarId>,
 ) -> Result<
     (
         Vec<LogicPath<SourceVarId>>,
@@ -5109,6 +5135,7 @@ fn lower_comb_processes(
                     process,
                     random_seeds[&(2, index)],
                     targets,
+                    gated,
                     &mut arena,
                 ) {
                     comb_blocks.extend(paths);
@@ -5291,13 +5318,15 @@ fn watchable_variables(
 
 /// The imperative unit of an `always_comb` process lowered symbolically to
 /// `targets`, and its [`CombAlternative`], if the unit may store a variable
-/// of the design twice in one execution. Otherwise nothing of the attempt
+/// of the design twice in one execution or writes one in `gated`, the
+/// signals and gates of gated waits. Otherwise nothing of the attempt
 /// remains in `pm`.
 fn lower_comb_alternative(
     pm: &mut procedural::ProcModule<'_>,
     process: &sv::ir::CombProcess,
     random_seed: u32,
     targets: Vec<VarAtomBase<SourceVarId>>,
+    gated: &HashSet<SourceVarId>,
     arena: &mut SLTNodeArena<SourceVarId>,
 ) -> Option<(Vec<LogicPath<SourceVarId>>, CombAlternative)> {
     let checkpoint = pm.checkpoint();
@@ -5321,11 +5350,17 @@ fn lower_comb_alternative(
                 _ => None,
             })
             .map(|(id, unit)| {
-                let candidates: Vec<_> =
+                let mut candidates: Vec<_> =
                     celox_frontend_core::watch::multi_store_candidates(unit, |&address| {
                         (!pm.is_hidden(address) && pm.var(address).array_dims.is_empty())
                             .then_some(address)
                     });
+                candidates.extend(
+                    targets
+                        .iter()
+                        .map(|target| target.id)
+                        .filter(|id| gated.contains(id)),
+                );
                 (id, candidates)
             })
             .filter(|(_, candidates)| !candidates.is_empty())

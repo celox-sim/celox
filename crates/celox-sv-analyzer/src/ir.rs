@@ -109,6 +109,7 @@ impl Module {
                             FfEdge::Neg => EventEdge::Neg,
                         },
                         expr: Expr::Ident(event.signal.clone()),
+                        iff: None,
                     })
                     .collect(),
             )];
@@ -1229,7 +1230,9 @@ impl InitialProcess {
         };
         (init.is_empty()
             && step.is_empty()
-            && items.iter().all(|item| item.edge == EventEdge::Any)
+            && items
+                .iter()
+                .all(|item| item.edge == EventEdge::Any && item.iff.is_none())
             && !leaves_the_process_loop(body))
         .then_some((items.as_slice(), body))
     }

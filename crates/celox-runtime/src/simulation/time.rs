@@ -108,7 +108,7 @@ impl<B: SimBackend> SimulationState<B> {
                     self.observe_host_write(signal, &value);
                 }
                 self.settle_host_resume(executor, &mut suspended.round, &suspended.levels)?;
-                self.observe(executor.backend(), None);
+                self.observe_settled(executor.backend());
             }
             self.continue_round(
                 executor,

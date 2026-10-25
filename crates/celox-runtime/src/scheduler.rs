@@ -85,6 +85,7 @@ impl<B: SimBackend> Scheduler<B> {
         self.event_queue.peek().map(|e| e.time)
     }
 
+    #[inline]
     pub fn push(&mut self, event: SimEvent<B>) {
         self.event_queue.push(event);
     }
