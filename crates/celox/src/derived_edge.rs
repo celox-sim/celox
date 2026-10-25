@@ -717,7 +717,10 @@ impl Emitter<'_> {
 /// settle before the domains evaluate.
 #[derive(Clone, Copy, Debug)]
 enum Settle {
-    #[cfg_attr(not(all(test, feature = "systemverilog")), allow(dead_code))]
+    #[cfg_attr(
+        not(all(test, feature = "systemverilog", feature = "cranelift")),
+        allow(dead_code)
+    )]
     Fixed(bool),
     /// A flag object, not zero when it must.
     Flag(AbsoluteAddr),
@@ -851,7 +854,7 @@ pub(crate) fn without_units(program: &LaidOutProgram) -> LaidOutProgram {
 }
 
 /// A generated edge unit and the edge it runs, for the tests.
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(all(test, feature = "systemverilog", feature = "cranelift"))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TestEdgeUnit {
     pub(crate) event: AbsoluteAddr,
@@ -861,12 +864,12 @@ pub(crate) struct TestEdgeUnit {
     pub(crate) index: usize,
 }
 
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(all(test, feature = "systemverilog", feature = "cranelift"))]
 pub(crate) type TestEdgeUnits = std::sync::Arc<std::sync::Mutex<Vec<TestEdgeUnit>>>;
 
 /// Append an edge unit of every event with a plan this module emits, for
 /// each edge, settle and own-edge case, and record them in `sink`.
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(all(test, feature = "systemverilog", feature = "cranelift"))]
 pub(crate) fn attach_test_units(program: &mut LaidOutProgram, sink: &TestEdgeUnits) {
     let model = ScheduleModel::derive(&program.design, &program.runtime.runtime_schema);
     for event in crate::edge_plans::event_addresses(program) {
@@ -893,7 +896,7 @@ pub(crate) fn attach_test_units(program: &mut LaidOutProgram, sink: &TestEdgeUni
     }
 }
 
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(all(test, feature = "systemverilog", feature = "cranelift"))]
 mod tests {
     use std::path::Path;
 

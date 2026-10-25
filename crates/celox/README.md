@@ -4,6 +4,19 @@
 crates use its low-level `Simulator::from_frontend` hook after lowering their
 own artifact through `celox-frontend-sdk`.
 
+The default `host-runtime` feature provides native, interpreter and tiered
+execution. Optional execution engines are enabled explicitly:
+
+| Feature | Enables |
+| --- | --- |
+| `cranelift` | `build_cranelift()` and the Cranelift JIT backend |
+| `wasm-runtime` | `build_wasm()` using Wasmtime |
+| `wasm-component` | Hosting Veryl `.wasm` component libraries |
+| `veryl-reference` | Development comparisons against upstream Veryl's simulator |
+
+Native component libraries and WASM byte generation do not need Wasmtime.
+Cross-codegen features enable Cranelift for their host execution fallback.
+
 A frontend crate should wrap that hook with a constructor named for its own
 artifact:
 

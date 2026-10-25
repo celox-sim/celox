@@ -81,8 +81,10 @@ impl<B: SimBackend> Backend for CeloxBackend<B> {
     }
 }
 
+#[cfg(feature = "veryl-reference")]
 struct VerylBackend(super::veryl_sim::VerylSimAdapter);
 
+#[cfg(feature = "veryl-reference")]
 impl VerylBackend {
     fn signal(&mut self, path: &SignalPath) -> super::veryl_sim::VerylSignalRef {
         let instances: Vec<_> = path
@@ -94,6 +96,7 @@ impl VerylBackend {
     }
 }
 
+#[cfg(feature = "veryl-reference")]
 impl Backend for VerylBackend {
     fn write(&mut self, path: &SignalPath, payload: BigUint, mask: BigUint) -> Result<()> {
         let signal = self.signal(path);
@@ -126,6 +129,7 @@ pub fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         .iter()
         .map(|source| (source.text.as_str(), source.path.as_path()))
         .collect::<Vec<_>>();
+    #[cfg(feature = "veryl-reference")]
     if backend == "veryl" {
         if !design.parameters.is_empty() {
             return Err("the veryl-simulator adapter cannot set top parameters".into());
@@ -158,9 +162,11 @@ pub fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
                 .build_native()
                 .map_err(classify_build_error)?,
         )),
+        #[cfg(feature = "cranelift")]
         "cranelift" => Box::new(CeloxBackend(
             builder.build_cranelift().map_err(classify_build_error)?,
         )),
+        #[cfg(feature = "cranelift")]
         "cranelift-parallel" => Box::new(CeloxBackend(
             builder
                 .threads(4)
@@ -168,6 +174,7 @@ pub fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
                 .build_cranelift()
                 .map_err(classify_build_error)?,
         )),
+        #[cfg(feature = "wasm-runtime")]
         "wasm" => Box::new(CeloxBackend(
             builder.build_wasm().map_err(classify_build_error)?,
         )),

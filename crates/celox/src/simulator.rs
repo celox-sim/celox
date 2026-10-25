@@ -55,7 +55,7 @@ mod host {
     use crate::backend::native::{NativeBackend, SharedNativeCode};
     use crate::{
         IOContext, RuntimeErrorCode,
-        backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
+        backend::{MemoryLayout, SimBackend},
         ir::{
             DisplaySizing, InitialMemoryData, InitialMemoryWriteRun, InstancePath,
             RuntimeEventKind, RuntimeEventSite, RuntimeProgram, SignalRef, VariableInfo,
@@ -2561,7 +2561,7 @@ mod host {
         }
 
         /// The edge facts of `event`.
-        #[cfg(all(test, feature = "systemverilog"))]
+        #[cfg(all(test, feature = "systemverilog", feature = "cranelift"))]
         pub(crate) fn event_edge(&self, event: B::Event) -> celox_runtime::EventEdge {
             self.event_edges[event.id()]
         }
@@ -2707,7 +2707,7 @@ mod host {
         /// Build VCD signal descriptors for all instances.
         ///
         /// The returned descriptors are self-contained (no IR references) and can
-        /// be cached alongside [`SharedJitCode`] so that VCD works on cache-hit
+        /// be cached alongside `SharedJitCode` so that VCD works on cache-hit
         /// paths without the original [`RuntimeProgram`].
         pub fn build_vcd_descs(&self, four_state_mode: bool) -> Vec<crate::VcdSignalDesc> {
             let mut descs = Vec::new();
@@ -3024,6 +3024,8 @@ mod host {
         }
     }
 
+    #[cfg(feature = "cranelift")]
+    use crate::backend::{JitBackend, SharedJitCode};
     // ── JitBackend-specific methods ──────────────────────────────────────
     impl Simulator {
         pub fn builder<'a>(code: &'a str, top: &'a str) -> SimulatorBuilder<'a, Simulator> {
@@ -3077,6 +3079,7 @@ mod host {
         }
     }
 
+    #[cfg(feature = "cranelift")]
     impl Simulator<JitBackend> {
         /// Returns the shared compiled JIT code, allowing it to be reused
         /// for creating additional simulator instances without recompilation.
@@ -3090,6 +3093,7 @@ mod host {
         }
     }
 
+    #[cfg(feature = "wasm-runtime")]
     impl Simulator<crate::backend::wasm_runtime::WasmBackend> {
         /// Consume the simulator and return the inner Wasmtime backend.
         pub fn into_backend(self) -> crate::backend::wasm_runtime::WasmBackend {
