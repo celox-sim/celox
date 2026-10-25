@@ -1,6 +1,1 @@
-Revision history for #1977:
-
-rev 2 (rebase) 2026-10-25 09:14 UTC — Restack on the Native merge-kind correction in #1976; the SV read-default implementation is unchanged.
-rev 1 (initial) 2026-10-25 09:14 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":1977,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"4d14885492b63a21e26b95ca38308d3f29700fad","timestamp_iso":"2026-10-25T09:14:16Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"4d14885492b63a21e26b95ca38308d3f29700fad","new_sha":"55b4c4fc924bbb0731d664288d583b5f5dff16dc","timestamp_iso":"2026-10-25T09:14:16Z","reason":"Restack on the Native merge-kind correction in #1976; the SV read-default implementation is unchanged.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/4d14885492b63a21e26b95ca38308d3f29700fad...55b4c4fc924bbb0731d664288d583b5f5dff16dc"}]} -->
+Update the diagnostic-mask regression that still expected constant invalid unpacked writes to be rejected; verify successful elaboration without inferred-latch diagnostics under error and warn policies.
