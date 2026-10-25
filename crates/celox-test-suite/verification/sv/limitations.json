@@ -2458,5 +2458,39 @@
         "class::randomization_cyclic_enum_alias"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_scan_string_format",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "IEEE 1800-2023 21.3.4.3 permits a string expression as the scan format. Verilator 5.052 requires a format string literal and rejects both a string variable and a string method expression with \"unexpected IDENTIFIER, expecting STRING\". The string-source case with a literal format remains enabled.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/scan-string-format-verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "scan::sscanf_string_format_expression"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_scan_string_format",
+    "category": "simulator_runtime_limitation",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "IEEE 1800-2023 21.3.4.3 permits a string expression as the scan format. Icarus 13.0 compiles this case but vvp terminates with SIGSEGV. A reduced source using only a string format variable, without a method expression, also crashes. The string-source case with a literal format remains enabled.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/scan-string-format-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "scan::sscanf_string_format_expression"
+      ]
+    }
   }
 ]
