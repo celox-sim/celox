@@ -1,1 +1,6 @@
-Correct the validation backend name from interpreter to Wasm; no source changes.
+Revision history for #1981:
+
+rev 2 (rebase) 2026-10-25 09:36 UTC — Correct the validation backend name from interpreter to Wasm; no source changes.
+rev 1 (initial) 2026-10-25 09:36 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1981,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"1355bbe6994f18baecabda710bd8a148fe4b019a","timestamp_iso":"2026-10-25T09:36:12Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"1355bbe6994f18baecabda710bd8a148fe4b019a","new_sha":"1bd8785a16c0edbbc86ab051e51e054af48c2709","timestamp_iso":"2026-10-25T09:36:12Z","reason":"Correct the validation backend name from interpreter to Wasm; no source changes.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/1355bbe6994f18baecabda710bd8a148fe4b019a...1bd8785a16c0edbbc86ab051e51e054af48c2709"}]} -->
