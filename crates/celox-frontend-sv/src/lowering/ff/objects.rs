@@ -115,13 +115,17 @@ impl Ff<'_, '_> {
                 let object = self.handle(&args[0])?;
                 self.heap_call(ops::OBJECT_CLASS, &[object])
             }
+            ObjectOp::Copy => {
+                let object = self.handle(&args[0])?;
+                self.heap_call(ops::OBJECT_COPY, &[object])
+            }
         };
         let (width, signed) = op.result_type();
         let value = self.b.alloc_bit(width, signed);
         self.b.emit(SIRInstruction::Slice(value, result, 0, width));
         let (temp, name) = self.m.temp("object", width, signed, false);
         let kind = match op {
-            ObjectOp::New { .. } => Some(celox_design::ValueKind::ObjRef),
+            ObjectOp::New { .. } | ObjectOp::Copy => Some(celox_design::ValueKind::ObjRef),
             ObjectOp::Load(field) => field.handle.map(|handle| match handle {
                 HandleProperty::String => celox_design::ValueKind::StrRef,
                 HandleProperty::Object => celox_design::ValueKind::ObjRef,

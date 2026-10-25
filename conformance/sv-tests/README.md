@@ -107,6 +107,13 @@ stays a passing negative case because `par_cls::b` outside the class is
 rejected. `8.5--properties_enum` keeps failing because enumeration constants
 declared in a class are not supported.
 
+Shallow copies update two more rows: both state modes for `8.12--shallow_copy`
+change from fail to pass. The case was simulated and its displayed values
+checked: the property of the copy keeps the value it was copied with after the
+method call changes the original. Full official runs at the pinned revision
+report 1081 passing cases in 2state and 1092 in 4state, with no passing case
+regressing.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.

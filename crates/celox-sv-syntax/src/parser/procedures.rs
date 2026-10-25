@@ -888,7 +888,9 @@ impl Parser<'_> {
                 },
             );
         } else if !matches!(self.peek(), ";" | "," | "") {
-            self.expression(0)?;
+            // A shallow copy of an object (8.12).
+            let value = self.expression(0)?;
+            return self.node(start, ExprKind::Copy(value));
         }
         // The declaration retains its explicit Unconverted semantic owner.
         // This range validates allocation grammar without introducing execution.

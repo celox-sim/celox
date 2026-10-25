@@ -77,6 +77,8 @@ pub enum ExprKind {
         member: Name,
         value: Option<ExprId>,
     },
+    /// `new h`: a shallow copy of the object of handle `h` (8.12).
+    Copy(ExprId),
     Member {
         expression: ExprId,
         separator: String,

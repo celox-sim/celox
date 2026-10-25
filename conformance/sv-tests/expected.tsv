@@ -1469,8 +1469,8 @@ chapter-8/8.11--this.sv	2state	pass
 chapter-8/8.11--this.sv	4state	pass
 chapter-8/8.12--assignment.sv	2state	pass
 chapter-8/8.12--assignment.sv	4state	pass
-chapter-8/8.12--shallow_copy.sv	2state	fail
-chapter-8/8.12--shallow_copy.sv	4state	fail
+chapter-8/8.12--shallow_copy.sv	2state	pass
+chapter-8/8.12--shallow_copy.sv	4state	pass
 chapter-8/8.13--inheritance.sv	2state	pass
 chapter-8/8.13--inheritance.sv	4state	pass
 chapter-8/8.14--override_member.sv	2state	pass

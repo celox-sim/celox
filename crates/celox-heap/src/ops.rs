@@ -81,6 +81,8 @@ pub const OBJECT_MODE_SELECT: u64 = 60;
 pub const OBJECT_MODE_SELECTED: u64 = 61;
 /// Draw a randc domain index; parameter is the property offset, b its domain size.
 pub const OBJECT_RANDOM_CYCLIC: u64 = 62;
+/// `copy(object)`: a new object with a copy of the properties of `object`.
+pub const OBJECT_COPY: u64 = 63;
 
 /// The opcode word of `op` with parameter `parameter`.
 pub const fn encode(op: u64, parameter: u64) -> u64 {
@@ -222,6 +224,7 @@ impl Heap {
             OBJECT_MODE_SELECTED => {
                 u64::from(self.selected_random_mode(a as Handle, parameter as u32))
             }
+            OBJECT_COPY => self.copy_object(a as Handle).into(),
             other => panic!("unknown heap operation {other}"),
         }
     }

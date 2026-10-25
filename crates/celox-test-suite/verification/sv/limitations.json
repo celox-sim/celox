@@ -2061,6 +2061,23 @@
     }
   },
   {
+    "id": "sv_icarus_shallow_copies",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not parse a shallow copy (second = new first; is a syntax error, \"Malformed statement\"), which IEEE 1800-2023 8.12 defines; the case also compares class handles, which Icarus does not implement, see sv_icarus_classes. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::shallow_copies"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_class_property_string_methods",
     "category": "simulator_compile_limitation",
     "phase": "compile",

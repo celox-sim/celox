@@ -646,6 +646,10 @@
     "sv_class-X4": {
       "title": "A typedef inside a class declared in a generate block does not see the generate block's localparams (`typedef bit [K-1:0] T` uses the module-level K, or none)",
       "standard": "IEEE 1800-2023 23.9, 27.5"
+    },
+    "sv_class-X11": {
+      "title": "In a non-top module, a shallow copy of a class-scoped static handle (`h = new C::last`) leaves h null",
+      "standard": "IEEE 1800-2023 8.12, 8.23, 8.9"
     }
   },
   "cases": [
@@ -3967,6 +3971,14 @@
       "classification": "xezim_bug",
       "bug": "sv_class-X4",
       "note": "Derived is declared in generate block g, whose localparam K = 3 hides the module's K = 2; `typedef bit [K-1:0] T` must use K = 3 (23.9: names resolve from the declaration scope upward), so $bits = 3. xezim prints 1 (as top and non-top); in a reduction with another class it uses the module K (2). It does not depend on `extends`: a plain class in g behaves the same, while a static function in the same class returns K = 3. Repro: work/review5/xezim/r/c3c.sv, work/review5/xezim/r/c3_genscope.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "class::shallow_copies",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X11",
+      "note": "As top xezim prints the expected three lines. As non-top dut, `third = new Item::last` (shallow copy of the static handle, 8.12) leaves third null, so third.a is a fatal null dereference. Copying from a local handle (`tmp = Item::last; third = new tmp`) works, and Item::last itself reads non-null. Repro: work/review5/xezim/r/c9_static.sv (+ .wrap.sv)."
     }
   ]
 }
