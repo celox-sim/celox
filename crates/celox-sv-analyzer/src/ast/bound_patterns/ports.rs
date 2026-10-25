@@ -99,28 +99,6 @@ impl BoundPattern {
         Ok(())
     }
 
-    pub(in crate::ast) fn visit_expressions<'a>(&'a self, visit: &mut impl FnMut(&'a Expr)) {
-        fn value<'a>(value: &'a Value, visit: &mut impl FnMut(&'a Expr)) {
-            match value {
-                Value::Pattern(pattern) => pattern.visit_expressions(visit),
-                Value::Expression { expr, .. } => visit(expr),
-            }
-        }
-        match &self.items {
-            Items::Value(expr) | Items::ArrayValue { value: expr, .. } => visit(expr),
-            Items::List(items) | Items::Repeat(_, items) => {
-                for item in items {
-                    value(item, visit);
-                }
-            }
-            Items::Keyed(items) => {
-                for (_, item) in items {
-                    value(item, visit);
-                }
-            }
-        }
-    }
-
     pub(in crate::ast) fn map_expressions(&mut self, map: &mut impl FnMut(Expr) -> Expr) {
         fn value(value: &mut Value, map: &mut impl FnMut(Expr) -> Expr) {
             match value {

@@ -64,3 +64,12 @@ sv_backends! {
         @case "types::preserves_integer_atom_state_kinds";
     }
 }
+
+sv_backends! {
+    fn undriven_internal_nets_are_high_impedance(sim) {
+        @case "types::undriven_internal_nets_are_high_impedance";
+    }
+    fn undriven_internal_nets_convert_to_two_state_zero(sim) {
+        @case "types::undriven_internal_nets_convert_to_two_state_zero";
+    }
+}
