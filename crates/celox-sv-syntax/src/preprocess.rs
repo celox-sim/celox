@@ -431,6 +431,16 @@ impl Preprocessor {
                 }
                 name if passthrough(name) => {
                     if active {
+                        // IEEE 1800-2023 22.11 requires a pragma name, even
+                        // when the implementation does not recognize it.
+                        if name == "pragma"
+                            && tokens
+                                .iter()
+                                .take_while(|token| token.kind != TokenKind::Newline)
+                                .all(Token::is_trivia)
+                        {
+                            return Err(self.error(origin, "expected a name after `pragma"));
+                        }
                         output.extend([token, name_token]);
                     }
                 }
@@ -1115,6 +1125,31 @@ mod tests {
             .map(|t| t.text.as_str())
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    #[test]
+    fn pragmas_require_a_name_on_the_directive_line() {
+        for code in [
+            "`pragma",
+            "`pragma \t",
+            "`pragma // comment\nmodule M; endmodule",
+            "`pragma /* comment */\nmodule M; endmodule",
+            "`pragma\nmodule M; endmodule",
+        ] {
+            let error = Preprocessor::default()
+                .preprocess(code, "pragma.sv")
+                .unwrap_err();
+            assert!(error.to_string().contains("expected a name after `pragma"));
+        }
+        for code in [
+            "`pragma unknown",
+            "`pragma /* comment */ unknown value=1\nmodule M; endmodule",
+            "`ifdef UNDEFINED\n`pragma\n`endif\nmodule M; endmodule",
+        ] {
+            Preprocessor::default()
+                .preprocess(code, "pragma.sv")
+                .unwrap();
+        }
     }
 
     #[test]
