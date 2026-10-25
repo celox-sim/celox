@@ -121,7 +121,7 @@ fn emit_prepared_eu_inner(
         );
     }
     dump_native_block_context(label, "after_isel", &sir_eu, &mfunc, diagnostics);
-    let check_runtime_events = label == "eval_comb_apply_ff"
+    let check_runtime_events = celox_backend_common::loops_ticks(label)
         && options.native_tick_loop
         && sir_eu.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {
@@ -347,7 +347,7 @@ fn emit_prepared_eu_inner(
     } else {
         &[]
     };
-    let result = if label == "eval_comb_apply_ff" && options.native_tick_loop {
+    let result = if celox_backend_common::loops_ticks(label) && options.native_tick_loop {
         emit_with_plan_tick_loop(
             &mfunc,
             &ra.assignment,

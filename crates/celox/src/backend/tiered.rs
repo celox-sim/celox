@@ -387,6 +387,23 @@ impl CompiledTier {
         }
     }
 
+    fn run_process_many(
+        &mut self,
+        index: usize,
+        count: u64,
+    ) -> (u64, Result<(), SimulatorErrorCode>) {
+        match self {
+            #[cfg(feature = "cranelift")]
+            Self::Jit(jit) => jit.run_process_many(index, count),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Self::Native(native) => native.run_process_many(index, count),
+        }
+    }
+
     /// Resolve the phase-specific apply event for a shared trigger address
     /// and execute it.
     fn apply_ff_at_addr(&mut self, addr: &AbsoluteAddr) -> Result<(), SimulatorErrorCode> {
@@ -1636,6 +1653,21 @@ impl SimBackend for TieredBackend {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.run_process(index),
             Phase::Compiled(compiled) => compiled.run_process(index),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
+    fn run_process_many(
+        &mut self,
+        index: usize,
+        count: u64,
+    ) -> (u64, Result<(), SimulatorErrorCode>) {
+        self.maybe_promote();
+        self.maybe_upgrade();
+        self.count_evaluation_for_current_tier();
+        match &mut self.phase {
+            Phase::Interpreting(Some(interp)) => interp.run_process_many(index, count),
+            Phase::Compiled(compiled) => compiled.run_process_many(index, count),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }

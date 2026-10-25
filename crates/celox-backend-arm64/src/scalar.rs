@@ -237,7 +237,7 @@ pub fn emit_prepared_eu_with_arena(
         }
     };
     sir_eu.verify_result().map_err(PrepareError::Sir)?;
-    let tick_loop = label == "eval_comb_apply_ff" && native_tick_loop;
+    let tick_loop = celox_backend_common::loops_ticks(label) && native_tick_loop;
     let check_runtime_events = tick_loop
         && sir_eu.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {
