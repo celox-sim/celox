@@ -122,7 +122,8 @@ pub(crate) fn plan_lane_kernels(
             parallel.eval_apply_ffs[&event].units().collect(),
         ));
     }
-    if !parallel.eval_comb.is_empty() {
+    // Shared comb-then-FF ticks run the comb and event kernels instead.
+    if !parallel.eval_comb.is_empty() && laid_out.sir.merge_comb_apply {
         for &event in &events {
             candidates.push((
                 LaneKernelKind::Fused(event),

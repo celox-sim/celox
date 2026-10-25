@@ -356,6 +356,7 @@ mod tests {
             eval_comb: Vec::new(),
             eval_apply_ffs: FxHashMap::default(),
             eval_comb_apply_ffs: FxHashMap::default(),
+            merge_comb_apply: true,
             eval_only_ffs: FxHashMap::default(),
             apply_ffs: FxHashMap::default(),
             parallel: None,
