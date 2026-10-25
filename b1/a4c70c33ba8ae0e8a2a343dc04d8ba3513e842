@@ -1,0 +1,1 @@
+Gate the tiered capture-event getter JIT arm after syncing master; fixes merge queue #2005 compile failures. Default and Cranelift tests, Clippy, formatting, and ARM64 cross-check passed.
