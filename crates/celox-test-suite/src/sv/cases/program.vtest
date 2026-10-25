@@ -35,6 +35,8 @@
 ; A program's nonblocking assignment updates in the Re-NBA region, after the
 ; design's NBA region; the design processes the update wakes run in the
 ; active region set that follows.
+; Four-state, so that `always @(r)` waits for a change; two-state mode would
+; also run it once at time zero (#2026).
 (case program_nonblocking_updates_follow_design_updates
   (source "program_renba.sv" #"
     module Top;
@@ -58,6 +60,7 @@
     endprogram
   "#)
   (top Top)
+  (four_state)
   (run_to_finish)
   (expect_output "design sees r=1 count=0\nprogram count=1 r=1\ndesign sees r=11 count=1\nprogram count=2 r=11\ndesign sees r=12 count=2\n"))
 

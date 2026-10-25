@@ -228,35 +228,30 @@ fn latch_policy_preserves_compilation_diagnostic_overrides() {
 }
 
 #[test]
-fn change_return_activation_in_both_state_modes_at_o0_and_o2() {
+fn change_return_activation_at_o0_and_o2() {
     for name in [
         "latch::same_activation_change_return",
         "latch::hierarchy_same_activation_change_return",
     ] {
         let case = celox_test_suite::sv::case(name).unwrap();
         let design = case.design();
-        for four_state in [false, true] {
-            for level in [celox::OptLevel::O0, celox::OptLevel::O2] {
-                let mut sim = celox::Simulation::from_sv_sources(
-                    design
-                        .sources
-                        .iter()
-                        .map(|source| (source.text.as_str(), source.path.as_path()))
-                        .collect(),
-                    "Top",
-                )
-                .four_state(four_state)
-                .opt_level(level)
-                .build_interpreter()
-                .unwrap();
-                sim.run_until(10_000).unwrap_or_else(|error| {
-                    panic!("{name}, four_state={four_state}, {level:?}: {error}")
-                });
-                assert!(
-                    sim.is_finished(),
-                    "{name}, four_state={four_state}, {level:?}"
-                );
-            }
+        // The cases are four-state: two-state mode runs `always @*` at time zero.
+        for level in [celox::OptLevel::O0, celox::OptLevel::O2] {
+            let mut sim = celox::Simulation::from_sv_sources(
+                design
+                    .sources
+                    .iter()
+                    .map(|source| (source.text.as_str(), source.path.as_path()))
+                    .collect(),
+                "Top",
+            )
+            .four_state(true)
+            .opt_level(level)
+            .build_interpreter()
+            .unwrap();
+            sim.run_until(10_000)
+                .unwrap_or_else(|error| panic!("{name}, {level:?}: {error}"));
+            assert!(sim.is_finished(), "{name}, {level:?}");
         }
     }
 }

@@ -171,8 +171,9 @@
   (assert_eq y 9))
 
 (case explicit_list_of_every_read_waits_for_a_change
-  ; Like `always @*`, the list waits before its first run: neither the
-  ; declaration initializers nor the write of `y` wake it (9.4.2).
+  ; In four-state mode, like `always @*`, the list waits before its first
+  ; run: neither the declaration initializers nor the write of `y` wake it
+  ; (9.4.2). Two-state mode runs it at time zero (#2021).
   (source "level_list.sv" #"
                 module Top(output logic [7:0] y);
                     logic [7:0] a = 8'd0;
@@ -187,6 +188,7 @@
                 endmodule
             "#)
   (top Top)
+  (four_state)
   (run_until 1)
   (assert_eq y 1)
   (run_until 3)
@@ -217,6 +219,8 @@
   (run_to_finish)
   (assert_eq y 9))
 
+; In four-state mode the list waits for a change; two-state mode also runs
+; it once at time zero (#2026).
 (case list_with_an_extra_signal_wakes_on_it
   (source "extra_signal.sv" #"
                 module Top;
@@ -232,6 +236,7 @@
                 endmodule
             "#)
   (top Top)
+  (four_state)
   (run_to_finish)
   (expect_output "sum=3\nsum=3\n"))
 

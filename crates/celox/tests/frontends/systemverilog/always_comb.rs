@@ -27,3 +27,15 @@ sv_backends! {
         @case "always_comb::explicit_list_of_every_read_settles_like_a_wildcard";
     }
 }
+
+sv_backends! {
+    fn two_state_sensitivity_lists_run_at_time_zero(sim) {
+        @case "always_comb::two_state_sensitivity_lists_run_at_time_zero";
+    }
+}
+
+sv_backends! {
+    fn two_state_other_sensitivity_lists_run_at_time_zero(sim) {
+        @case "always_comb::two_state_other_sensitivity_lists_run_at_time_zero";
+    }
+}

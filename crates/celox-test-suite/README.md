@@ -177,6 +177,7 @@ case still runs its original assertions by default.
 | `eager_assertion_messages` | Veryl `$assert` / `$assert_continue` message argument effects occur even on success; these calls have no standard SV counterpart |
 | `two_state_zero_division` | The suite's two-state model returns zero for division/remainder by zero, including four-state `logic` destinations in emitted SV (11.3.4, 11.4.3) |
 | `two_state_initialization` | An explicit check of zero-initialized storage even for emitted four-state `logic` (6.8, Table 6-7) |
+| `two_state_time_zero_settle` | Two-state `always @*` and sensitivity-list processes run once at time zero, after the initial blocks, as Verilator settles them, whereas SV has them wait for a change (9.2.2.2, 9.4.2) |
 
 The initial review tags 21 cases; cases may carry multiple tags. Matching a
 word such as `source_order` in a case name is insufficient: the two output
