@@ -1,0 +1,52 @@
+{
+  "standard": "IEEE 1800-2023 9.2.2.2 and 9.4.2",
+  "expected": "In four-state SV, `always @*` and a sensitivity-list process wait at their event control until an input changes, so an output whose inputs never change stays X. The suite case's two-state oracle follows Verilator, which runs these processes once at time zero after the initial blocks.",
+  "probes": [
+    {
+      "name": "time_zero_settle",
+      "note": "The suite case always_comb::two_state_sensitivity_lists_run_at_time_zero.",
+      "source": "module Top;\n    localparam logic [1:0] READ = 2'd1;\n    logic [1:0] cur_state;\n    logic wvalid, wready;\n    logic [15:0] wstrb;\n    logic cen;\n    logic [15:0] wen;\n    logic [3:0] st = 4'd2;\n    logic hit;\n    always @(cur_state or wvalid or wready or wstrb[15:0]) begin\n        if (cur_state == READ) begin\n            cen = 1'b0;\n            wen = 16'hffff;\n        end else if (wvalid && wready) begin\n            cen = 1'b0;\n            wen = ~wstrb;\n        end else begin\n            cen = 1'b1;\n            wen = 16'hffff;\n        end\n    end\n    always @* hit = (st == 4'd2);\n    initial begin\n        #1 $display(\"%b %h %b\", cen, wen, hit);\n        $finish;\n    end\nendmodule\n",
+      "verilator_compile": {
+        "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "verilator_run": {
+        "command": "<repro>/obj/VTop",
+        "exit_code": 0,
+        "output": "1 ffff 1\n- <repro>/probe.sv:25: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 1ps; walltime 0.000 s; speed 36.075 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+      },
+      "icarus_compile": {
+        "command": "iverilog -g2012 -s Top -o <repro>/probe.vvp <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "icarus_run": {
+        "command": "vvp <repro>/probe.vvp",
+        "exit_code": 0,
+        "output": "x xxxx x\n<repro>/probe.sv:25: $finish called at 1 (1s)\n"
+      }
+    },
+    {
+      "name": "other_lists",
+      "note": "The suite case always_comb::two_state_other_sensitivity_lists_run_at_time_zero: lists that do not name exactly the reads of their statement.",
+      "source": "module Top;\n    logic [3:0] a, b;\n    logic [3:0] y, z;\n    always @(a or b) y = a + 4'd1;\n    always @(a) z = a + b + 4'd2;\n    initial begin\n        b = 4'd5;\n        #1 $display(\"%0d %0d\", y, z);\n        $finish;\n    end\nendmodule\n",
+      "verilator_compile": {
+        "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "verilator_run": {
+        "command": "<repro>/obj/VTop",
+        "exit_code": 0,
+        "output": "1 7\n- <repro>/probe.sv:9: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 1ps; walltime 0.000 s; speed 37.509 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+      },
+      "icarus_compile": {
+        "command": "iverilog -g2012 -s Top -o <repro>/probe.vvp <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "icarus_run": {
+        "command": "vvp <repro>/probe.vvp",
+        "exit_code": 0,
+        "output": "x x\n<repro>/probe.sv:9: $finish called at 1 (1s)\n"
+      }
+    }
+  ]
+}

@@ -553,6 +553,24 @@
     }
   },
   {
+    "id": "sv_icarus_two_state_time_zero_settle",
+    "category": "simulator_two_state",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0 / Verilator 5.052",
+    "reason": "Icarus 13.0 simulates the emitted design in four-state SV, where `always @*` and a sensitivity-list process wait for a change (IEEE 1800-2023 9.2.2.2, 9.4.2), so an output whose inputs never change stays X. The case's two-state oracle follows Verilator 5.052, which runs these processes once at time zero after the initial blocks, as Celox's two-state mode does; a standalone probe prints `1 ffff 1` in Verilator and `x xxxx x` in Icarus.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_two_state_time_zero_settle.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "always_comb::two_state_sensitivity_lists_run_at_time_zero",
+        "always_comb::two_state_other_sensitivity_lists_run_at_time_zero"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_generate_case_unknown_label",
     "category": "simulator_compile_limitation",
     "phase": "compile",

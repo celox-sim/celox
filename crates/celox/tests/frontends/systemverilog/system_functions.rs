@@ -280,21 +280,24 @@ sv_backends! {
         @build Simulator::from_sv_sources(vec![(source, Path::new("random_sensitivity.sv"))], "Top").four_state(false);
         let a = sim.signal("a");
         let b = sim.signal("b");
+        // Two-state mode runs `always @*` once at time zero, like always_comb.
         let first = sim.get(a);
         assert_ne!(first, 0u8.into());
-        assert_eq!(sim.get(b), 0u8.into());
+        let first_b = sim.get(b);
+        assert_ne!(first_b, 0u8.into());
         let initial_draw = sim.get(sim.signal("initial_draw"));
         assert_ne!(initial_draw, 0u8.into());
-        assert_eq!(sim.get(sim.signal("star_draw")), 0u8.into());
+        let star_draw = sim.get(sim.signal("star_draw"));
+        assert_ne!(star_draw, 0u8.into());
         let global_input = sim.signal("global_input");
         sim.modify(|io| io.set(global_input, 1u8)).unwrap();
         assert_ne!(sim.get(a), first);
-        assert_eq!(sim.get(b), 0u8.into());
+        assert_eq!(sim.get(b), first_b);
         let trigger = sim.signal("trigger");
         sim.modify(|io| io.set(trigger, 1u8)).unwrap();
-        assert_ne!(sim.get(b), 0u8.into());
+        assert_ne!(sim.get(b), first_b);
         assert_eq!(sim.get(sim.signal("initial_draw")), initial_draw);
-        assert_eq!(sim.get(sim.signal("star_draw")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("star_draw")), star_draw);
     }
 
     fn urandom_select_keeps_distinct_source_calls(sim) {

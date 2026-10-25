@@ -3950,6 +3950,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         arena: &mut SLTNodeArena<SourceVarId>,
     ) -> Result<Vec<LogicPath<SourceVarId>>, sv::AnalyzerError> {
         let always_comb = kind != sv::ir::CombProcessKind::AlwaysStar;
+        // `always @*` and a sensitivity list wait for a change (IEEE
+        // 1800-2023 9.2.2.2). In two-state mode their outputs would then
+        // start as a real 0, so they run once at time zero, after the
+        // `initial` blocks, like `always_comb`, as Verilator settles them.
+        let runs_at_time_zero = always_comb || !self.m.four_state;
         self.direct = true;
         let mut reads = self.m.implicit_reads(body, always_comb);
         reads.extend(self.m.implicit_reads(sensitivity_body, always_comb));
@@ -4113,7 +4118,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             counter_snapshots.push((counter, saved_counter));
         }
         let run = self.b.alloc_bit(1, false);
-        if always_comb {
+        if runs_at_time_zero {
             let first = self.b.alloc_bit(1, false);
             self.b
                 .emit(SIRInstruction::Unary(first, UnaryOp::LogicNot, init));
@@ -4227,7 +4232,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 target: LogicPathTarget::Process {
                     process: initialized,
                     sensitivity_counters: sensitivity_counters.clone(),
-                    startup: (!always_comb).then(|| celox_slt::CombStartup {
+                    startup: (!runs_at_time_zero).then(|| celox_slt::CombStartup {
                         initialized,
                         counters: counter_snapshots.clone(),
                         inputs: sources
@@ -4239,7 +4244,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                     after_initials: matches!(
                         kind,
                         sv::ir::CombProcessKind::AlwaysComb | sv::ir::CombProcessKind::AlwaysLatch
-                    ),
+                    ) || (kind == sv::ir::CombProcessKind::AlwaysStar
+                        && !self.m.four_state),
                     target,
                     unit: Box::new(unit.clone()),
                 },
