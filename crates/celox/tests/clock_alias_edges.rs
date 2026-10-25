@@ -108,3 +108,98 @@ endmodule
     assert_eq!(sim.get(sim.signal("p")), 2u8.into());
     assert_eq!(sim.get(sim.signal("n")), 1u8.into());
 }
+
+/// rtlmeter C906's PLIC shape: a clock cell's output lands in one bit of a
+/// vector, the bit is replicated over a slice of another vector, and each
+/// instance takes its clock from one bit of that. Every instance clock is a
+/// copy of the cell's output, so all of them share the root clock's domain.
+const REPLICATED_CLOCKS: &str = "
+    module clk_cell(input logic clk_in, output logic clk_out);
+      assign clk_out = clk_in;
+    endmodule
+    module kid(input logic kid_clk, input logic kid_nclk, output logic [7:0] up, output logic [7:0] down);
+      always_ff @(posedge kid_clk) up <= up + 1;
+      always_ff @(negedge kid_nclk) down <= down + 1;
+    endmodule
+    module Top(input logic clk, output logic [31:0] ups, output logic [31:0] downs);
+      logic [1:0] group_clk;
+      logic [7:0] kid_clk;
+      for (genvar g = 0; g < 2; g++) begin : groups
+        clk_cell x_cell(.clk_in(clk), .clk_out(group_clk[g]));
+        assign kid_clk[g*4+:4] = {4{group_clk[g]}};
+      end
+      logic [7:0] up [8];
+      logic [7:0] down [8];
+      for (genvar i = 0; i < 8; i++) begin : kids
+        kid x_kid(.kid_clk(kid_clk[i]), .kid_nclk(kid_clk[i]), .up(up[i]), .down(down[i]));
+      end
+      always_comb begin
+        ups = 0;
+        downs = 0;
+        for (int i = 0; i < 8; i++) begin
+          ups = ups + up[i];
+          downs = downs + down[i];
+        end
+      end
+    endmodule";
+
+#[test]
+fn replicated_bits_of_a_cell_clock_share_its_domain() {
+    let result = celox::Simulator::from_sv_sources(
+        vec![(REPLICATED_CLOCKS, std::path::Path::new("replicated.sv"))],
+        "Top",
+    )
+    .trace_post_optimized_sir()
+    .build_with_trace();
+    result.res.unwrap_or_else(|error| panic!("{error:?}"));
+    let program = result.trace.post_optimized_sir.unwrap();
+    // The root clock's event shared by every rising-edge copy; a copy
+    // sensed at the falling edge stays a clock of its own, as a whole
+    // variable copy does. Without the wiring, every kid clock is an event.
+    assert_eq!(program.sir.eval_apply_ffs.len(), 1 + 8);
+
+    let mut sim = Simulation::from_sv_sources(
+        vec![(REPLICATED_CLOCKS, std::path::Path::new("replicated.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap_or_else(|error| panic!("{error:?}"));
+    sim.add_clock("clk", 10, 3); // rising 3, 13, 23, 33; falling 8, 18, 28
+    let (ups, downs) = (sim.signal("ups"), sim.signal("downs"));
+    sim.run_until(35).unwrap();
+    assert_eq!(sim.get(ups), (8u32 * 4).into());
+    assert_eq!(sim.get(downs), (8u32 * 3).into());
+}
+
+/// A process that reads a vector before it writes it sees the vector's old
+/// value: `g` takes the level `clk` had before the edge, so it is not a
+/// copy of `clk` and its rising edges are `clk`'s falling ones.
+const PREVIOUS_VALUE_CLOCK: &str = "
+    module Top(input logic clk, output logic [31:0] cnt);
+      logic g;
+      logic [1:0] v;
+      always_comb begin
+        g = v[0];
+        v = {2{clk}};
+      end
+      logic [31:0] r;
+      always_ff @(posedge g) r <= r + 1;
+      assign cnt = r;
+    endmodule";
+
+#[test]
+fn a_bit_read_before_its_write_is_not_a_copy() {
+    let result = celox::Simulator::from_sv_sources(
+        vec![(PREVIOUS_VALUE_CLOCK, std::path::Path::new("previous.sv"))],
+        "Top",
+    )
+    .trace_post_optimized_sir()
+    .build_with_trace();
+    result.res.unwrap_or_else(|error| panic!("{error:?}"));
+    let program = result.trace.post_optimized_sir.unwrap();
+    let g = program.get_addr(&[], &["g"]).unwrap();
+    assert!(
+        program.sir.eval_apply_ffs.contains_key(&g),
+        "`g` is a clock of its own"
+    );
+}

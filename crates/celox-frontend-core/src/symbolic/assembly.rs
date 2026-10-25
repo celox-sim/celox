@@ -2833,6 +2833,9 @@ fn unify_clock_domains(
     let mut drive_graph: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>> = HashMap::default();
     // The edge each clock is sensed at: `true` rising, `false` falling.
     let mut polarities: HashMap<AbsoluteAddr, bool> = HashMap::default();
+    // Every range definition by its target, to follow single bits through
+    // wiring.
+    let mut wires: HashMap<AbsoluteAddr, Vec<Wire<'_>>> = HashMap::default();
 
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
@@ -2854,6 +2857,24 @@ fn unify_clock_domains(
             }
         };
 
+        for logic_path in &sim_module.comb_blocks {
+            // A definition reading a value from before its process ran
+            // is not a wire: `g = v[0]; v = {2{clk}};` makes `g` the old
+            // level of `clk`.
+            if !logic_path.previous_sources.is_empty() {
+                continue;
+            }
+            if let Some(target) = logic_path.target.var() {
+                wires
+                    .entry(bindings.locate(*id, target.id))
+                    .or_default()
+                    .push(Wire {
+                        access: target.access,
+                        expr: logic_path.expr,
+                        arena: WireArena::Comb(&sim_module.arena, *id),
+                    });
+            }
+        }
         // Internal aliases (e.g. `assign clk_internal = clk_port;`)
         for logic_path in &sim_module.comb_blocks {
             // Only unify whole-variable copies. Gated clocks and part-selects
@@ -2883,6 +2904,23 @@ fn unify_clock_domains(
                     GlueAddr::Parent(var) => width(sim_module, var),
                     GlueAddr::Child(var) => width(child_module, var),
                 };
+                for (_, logic_path) in glue_block
+                    .input_ports
+                    .iter()
+                    .chain(&glue_block.output_ports)
+                {
+                    if let Some(target) = logic_path.target.var() {
+                        let located = match target.id {
+                            GlueAddr::Parent(var) => bindings.locate(*id, var),
+                            GlueAddr::Child(var) => bindings.locate(child_id, var),
+                        };
+                        wires.entry(located).or_default().push(Wire {
+                            access: target.access,
+                            expr: logic_path.expr,
+                            arena: WireArena::Glue(&glue_block.arena, *id, child_id),
+                        });
+                    }
+                }
 
                 // Inputs: Parent -> Child (Parent drives Child)
                 for (_, logic_path) in &glue_block.input_ports {
@@ -2918,6 +2956,69 @@ fn unify_clock_domains(
                     }
                 }
             }
+        }
+    }
+
+    // A one-bit variable wired to a bit of a vector that is in turn wired
+    // to a one-bit variable, through bit selects, concatenations,
+    // replications and port connections, is a copy of that variable: a
+    // clock gated in a cell, collected into a vector and replicated to the
+    // clock inputs of many instances is the cell's output clock.
+    let one_bit = |addr: AbsoluteAddr| {
+        modules[&instance_modules[&addr.instance_id]]
+            .variables
+            .get(&addr.var_id)
+            .is_some_and(|variable| {
+                variable.metadata.width == 1 && variable.metadata.array_dims.is_empty()
+            })
+    };
+    let resolve = |(addr, bit): (AbsoluteAddr, usize)| {
+        let wire = wires
+            .get(&addr)?
+            .iter()
+            .find(|wire| wire.access.lsb <= bit && bit <= wire.access.msb)?;
+        let bit = bit - wire.access.lsb;
+        match wire.arena {
+            WireArena::Comb(arena, instance) => wired_bit(arena, wire.expr, bit)
+                .map(|(var, bit)| (bindings.locate(instance, var), bit)),
+            WireArena::Glue(arena, parent, child) => {
+                wired_bit(arena, wire.expr, bit).map(|(var, bit)| match var {
+                    GlueAddr::Parent(var) => (bindings.locate(parent, var), bit),
+                    GlueAddr::Child(var) => (bindings.locate(child, var), bit),
+                })
+            }
+        }
+    };
+    let mut targets = wires
+        .keys()
+        .copied()
+        .filter(|&addr| one_bit(addr))
+        .collect::<Vec<_>>();
+    targets.sort_unstable();
+    for target in targets {
+        let mut node = (target, 0);
+        for _ in 0..MAX_WIRED_BIT_STEPS {
+            let Some(next) = resolve(node) else {
+                break;
+            };
+            if one_bit(next.0) {
+                if next.0 != target {
+                    for addr in [target, next.0] {
+                        let polarity = modules[&instance_modules[&addr.instance_id]]
+                            .variables
+                            .get(&addr.var_id)
+                            .and_then(|variable| {
+                                celox_design::edges::polarity(variable.metadata.kind)
+                            });
+                        if let Some(polarity) = polarity {
+                            polarities.insert(addr, polarity);
+                        }
+                    }
+                    drive_graph.entry(next.0).or_default().push(target);
+                }
+                break;
+            }
+            node = next;
         }
     }
 
@@ -3026,6 +3127,66 @@ fn unify_clock_domains(
         clock_domains.insert(addr, current);
     }
     clock_domains
+}
+
+/// The most wiring hops followed from a one-bit variable to its source.
+const MAX_WIRED_BIT_STEPS: usize = 64;
+
+/// The node arena of a range definition, with the instances its
+/// addresses resolve in.
+#[derive(Clone, Copy)]
+enum WireArena<'a> {
+    Comb(&'a SLTNodeArena<SourceVarId>, InstanceId),
+    /// A port connection: the parent's and the child's instance.
+    Glue(&'a SLTNodeArena<GlueAddr>, InstanceId, InstanceId),
+}
+
+/// One range definition of a variable: `access` of the target takes `expr`.
+struct Wire<'a> {
+    access: BitAccess,
+    expr: NodeId,
+    arena: WireArena<'a>,
+}
+
+/// The variable bit that bit `bit` of `node` is wired to: a read of a
+/// variable, through bit selects and concatenations (replications are
+/// concatenations), with no operator in between.
+fn wired_bit<A: Copy + std::hash::Hash + Eq>(
+    arena: &SLTNodeArena<A>,
+    mut node: NodeId,
+    mut bit: usize,
+) -> Option<(A, usize)> {
+    loop {
+        match arena.get(node) {
+            celox_slt::SLTNode::Input {
+                variable,
+                index,
+                access,
+                ..
+            } if index.is_empty() => {
+                return (bit <= access.msb - access.lsb).then_some((*variable, access.lsb + bit));
+            }
+            celox_slt::SLTNode::Slice { expr, access } => {
+                if bit > access.msb - access.lsb {
+                    return None;
+                }
+                bit += access.lsb;
+                node = *expr;
+            }
+            celox_slt::SLTNode::Concat(parts) => {
+                // Parts run from the most significant one.
+                let mut offset = 0;
+                let (part, inner) = parts.iter().rev().find_map(|&(part, width)| {
+                    let found = (bit < offset + width).then_some((part, bit - offset));
+                    offset += width;
+                    found
+                })?;
+                node = part;
+                bit = inner;
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// The `(target, source)` of a path that copies one whole variable into
