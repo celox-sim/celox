@@ -4,7 +4,7 @@
 //! sv-tests. This process reports only compiler/simulator success or failure.
 //!
 //! ```text
-//! sv_tests --mode parsing|elaboration|simulation --state-mode 2state|4state \
+//! sv_tests --mode preprocessing|parsing|elaboration|simulation --state-mode 2state|4state \
 //!     [--top NAME] [--define NAME[=VALUE]] [--include DIR] -- FILE...
 //! ```
 
@@ -14,6 +14,7 @@ use std::{collections::BTreeSet, env, path::PathBuf, process::ExitCode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
+    Preprocessing,
     Parsing,
     Elaboration,
     Simulation,
@@ -52,6 +53,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         match arg.as_str() {
             "--mode" if mode.is_none() => {
                 mode = Some(match value.as_str() {
+                    "preprocessing" => Mode::Preprocessing,
                     "parsing" => Mode::Parsing,
                     "elaboration" => Mode::Elaboration,
                     "simulation" => Mode::Simulation,
@@ -143,6 +145,12 @@ fn run(options: &Options) -> Result<(), String> {
                 .map_err(|error| error.to_string())
         })
         .collect::<Result<_, _>>()?;
+    if options.mode == Mode::Preprocessing {
+        for text in &texts {
+            print!("{text}");
+        }
+        return Ok(());
+    }
     let sources: Vec<_> = texts
         .iter()
         .zip(&options.files)
@@ -164,7 +172,9 @@ fn run(options: &Options) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let top = select_top(&parsed, options.top.as_deref())?;
     match options.mode {
-        Mode::Parsing => unreachable!("parsing returned before root selection"),
+        Mode::Preprocessing | Mode::Parsing => {
+            unreachable!("preprocessing and parsing returned before root selection")
+        }
         // A Simulator rejects designs with processes, which it does not run.
         Mode::Elaboration => celox::Simulation::from_sv_sources(sources, &top)
             .four_state(options.four_state)
@@ -242,7 +252,7 @@ fn main() -> ExitCode {
         Ok(options) => options,
         Err(error) => {
             eprintln!(
-                "{error}\nusage: sv_tests --mode parsing|elaboration|simulation --state-mode 2state|4state [--top NAME] [--define NAME[=VALUE]] [--include DIR] -- FILE..."
+                "{error}\nusage: sv_tests --mode preprocessing|parsing|elaboration|simulation --state-mode 2state|4state [--top NAME] [--define NAME[=VALUE]] [--include DIR] -- FILE..."
             );
             return ExitCode::from(2);
         }
@@ -295,7 +305,7 @@ mod tests {
         assert_eq!(o.includes, [PathBuf::from("headers")]);
         assert_eq!(o.files, [PathBuf::from("a.sv"), PathBuf::from("b.sv")]);
         for args in [
-            vec!["--mode", "preprocessing", "--state-mode", "2state", "a.sv"],
+            vec!["--mode", "unknown", "--state-mode", "2state", "a.sv"],
             vec!["--mode", "elaboration", "--state-mode", "both", "a.sv"],
             vec![
                 "--mode",
@@ -354,6 +364,28 @@ mod tests {
             includes: Vec::new(),
             files,
         }
+    }
+
+    #[test]
+    fn preprocessing_stops_before_syntax_and_reports_directive_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture(
+            dir.path(),
+            "tokens.sv",
+            "`define WORD expanded\n`WORD\nmodule unfinished;",
+        );
+        let mut opts = fixture_options(vec![path], Mode::Preprocessing);
+        run(&opts).unwrap();
+        opts.mode = Mode::Parsing;
+        assert!(run(&opts).is_err());
+        let path = fixture(dir.path(), "invalid.sv", "`include \"missing.svh\"\n");
+        assert!(run(&fixture_options(vec![path], Mode::Preprocessing)).is_err());
+        assert_eq!(
+            options(&["--mode", "preprocessing", "--state-mode", "2state", "a.sv"])
+                .unwrap()
+                .mode,
+            Mode::Preprocessing
+        );
     }
 
     #[test]
