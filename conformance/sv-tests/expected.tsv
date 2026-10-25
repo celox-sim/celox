@@ -1087,8 +1087,8 @@ chapter-5/5.9-string-word-assignment.sv	2state	pass
 chapter-5/5.9-string-word-assignment.sv	4state	pass
 chapter-5/5.9.1-string-special-chars.sv	2state	pass
 chapter-5/5.9.1-string-special-chars.sv	4state	pass
-chapter-6/6.10--implicit_continuous_assignment.sv	2state	fail
-chapter-6/6.10--implicit_continuous_assignment.sv	4state	fail
+chapter-6/6.10--implicit_continuous_assignment.sv	2state	pass
+chapter-6/6.10--implicit_continuous_assignment.sv	4state	pass
 chapter-6/6.10--implicit_port.sv	2state	pass
 chapter-6/6.10--implicit_port.sv	4state	pass
 chapter-6/6.10--implicit_port_connection.sv	2state	pass

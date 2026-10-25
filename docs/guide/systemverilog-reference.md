@@ -16,7 +16,7 @@ synthesis and is tested at the design level.
 
 | Area | Supported |
 | --- | --- |
-| Modules | ANSI ports, `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them) |
+| Modules | ANSI ports, `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, implicit nets of output port connections and continuous assignment targets (`default_nettype none` disables them), hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them) |
 | Programs | `program` declarations with ports and parameters, instantiated from modules like a module; their `initial` procedures run in the reactive region set (see [Programs](#programs)) |
 | Generate | `for` (with `genvar`), `if`, `case`; constant expressions including `**` |
 | Hierarchical references | reads of nets and variables of other instances, and procedural writes of their variables, including selects of unpacked array elements (`u.mem[i][7:0] = v`), through names that start at an instance of the module (also of a generate block or an instance array element), at the module's own name, at an enclosing module's name (upward) or at `$root`; see [Hierarchical references](#hierarchical-references) |
