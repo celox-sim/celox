@@ -120,7 +120,7 @@ mod expressions;
 mod ff_process;
 mod functions;
 mod generate;
-mod imports;
+pub(crate) mod imports;
 mod inlining;
 mod instances;
 mod interface_ast;
@@ -147,7 +147,7 @@ mod subroutine_owners;
 pub(crate) mod timescales;
 pub(crate) mod type_parameters;
 mod types;
-mod validation;
+pub(crate) mod validation;
 pub(crate) mod warnings;
 
 use array_compatibility::selected_unpacked_shape;

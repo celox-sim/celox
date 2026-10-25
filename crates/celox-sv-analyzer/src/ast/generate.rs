@@ -692,10 +692,10 @@ fn parameter_literal_references(
         ranges.push(item.tokens);
     }
     let mut references = HashSet::default();
-    for (_, expression) in native.expression_nodes() {
-        if !ranges.iter().any(|range| {
-            range.start <= expression.tokens.start && expression.tokens.end <= range.end
-        }) {
+    let scope = crate::source_tree::Ranges::new(ranges.iter().copied());
+    for id in tree.spans().expressions.within(&ranges) {
+        let expression = native.expression(id);
+        if !scope.contains(expression.tokens) {
             continue;
         }
         if let ExprKind::Name(name) | ExprKind::Member { name, .. } = &expression.kind {
