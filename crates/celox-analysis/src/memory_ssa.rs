@@ -201,6 +201,19 @@ pub struct ClobberMemo {
     results: fxhash::FxHashMap<usize, usize>,
 }
 
+impl ClobberMemo {
+    /// The number of accesses whose clobber it holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.results.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.results.is_empty()
+    }
+}
+
 impl ClobberWalker {
     #[must_use]
     pub fn new() -> Self {
@@ -1070,8 +1083,8 @@ mod tests {
         assert_eq!(analysis.graph.access_count(), 2);
     }
 
-    /// Sessions sharing a memo resolve every start exactly as fresh
-    /// sessions do, over random CFGs with loops, joins and disjoint,
+    /// Sessions sharing a memo, or a memo dropped in between, resolve every
+    /// start exactly as fresh sessions do, over random CFGs with loops, joins and disjoint,
     /// overlapping and repeated stores.
     #[test]
     fn memoized_sessions_match_fresh_sessions() {
@@ -1149,11 +1162,18 @@ mod tests {
                     .collect::<Vec<_>>();
                 fresh_calls += calls.get();
                 let mut walker = ClobberWalker::new();
+                // A client may drop the memo between sessions, as a size
+                // budget does.
+                let drops = sessions.iter().map(|_| next(4) == 0).collect::<Vec<_>>();
                 let mut memo = ClobberMemo::default();
                 calls.set(0);
                 let memoized = sessions
                     .iter()
-                    .map(|starts| {
+                    .zip(&drops)
+                    .map(|(starts, &drop)| {
+                        if drop {
+                            memo = ClobberMemo::default();
+                        }
                         let mut session =
                             walker.query_memoized(&analysis.graph, &query, &oracle, &mut memo);
                         starts
