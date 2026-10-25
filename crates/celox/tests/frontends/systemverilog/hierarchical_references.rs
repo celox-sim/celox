@@ -7,6 +7,9 @@ sv_backends! {
     fn writes_memory_elements_of_instances_below(sim) {
         @case "hierarchical_references::writes_memory_elements_of_instances_below";
     }
+    fn nonblocking_element_writes_keep_hierarchical_writes_of_the_same_step(sim) {
+        @case "hierarchical_references::nonblocking_element_writes_keep_hierarchical_writes_of_the_same_step";
+    }
     fn names_instance_array_elements_and_generated_instances(sim) {
         @case "hierarchical_references::names_instance_array_elements_and_generated_instances";
     }
