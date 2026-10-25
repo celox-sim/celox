@@ -1,0 +1,1 @@
+Replace diagnostic-label comparisons with an explicit typed native merge kind; keep labels exclusively for diagnostics and symbols.
