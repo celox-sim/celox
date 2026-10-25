@@ -831,8 +831,8 @@ chapter-22/22.11--pragma-basic.sv	2state	pass
 chapter-22/22.11--pragma-basic.sv	4state	pass
 chapter-22/22.11--pragma-complex.sv	2state	pass
 chapter-22/22.11--pragma-complex.sv	4state	pass
-chapter-22/22.11--pragma-invalid.sv	2state	fail
-chapter-22/22.11--pragma-invalid.sv	4state	fail
+chapter-22/22.11--pragma-invalid.sv	2state	pass
+chapter-22/22.11--pragma-invalid.sv	4state	pass
 chapter-22/22.11--pragma-nested.sv	2state	pass
 chapter-22/22.11--pragma-nested.sv	4state	pass
 chapter-22/22.11--pragma-number-multi.sv	2state	pass
