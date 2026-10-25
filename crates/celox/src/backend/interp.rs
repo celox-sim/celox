@@ -1122,33 +1122,20 @@ impl<'a> TriggerAddrs<'a> {
     }
 }
 
-/// The trigger-bearing addresses of one clock's FF units, from every group
-/// it is scheduled in.
-#[derive(Default)]
-struct ClockTriggerAddrs {
-    /// Whether the clock's groups also snapshot the combinational units'
-    /// addresses: an eval/apply clock may run them in a combined tick.
-    with_comb: bool,
-    ff: Vec<(AbsoluteAddr, u32)>,
+/// The FF units of one clock in one schedule group, and the trigger-bearing
+/// addresses they store. A group snapshots only those: a snapshot is read by
+/// a trigger store the group runs, and a store without one marks nothing.
+struct UnitGroup {
+    units: Vec<PreparedUnit>,
+    trigger_addrs: Vec<(AbsoluteAddr, u32)>,
 }
 
-/// The trigger-bearing addresses snapshot at the entry of a group of
-/// `clock`.
-fn clock_trigger_addrs<'a>(
-    event_trigger_addrs: &'a HashMap<AbsoluteAddr, ClockTriggerAddrs>,
-    comb_trigger_addrs: &'a [(AbsoluteAddr, u32)],
-    clock: AbsoluteAddr,
-) -> TriggerAddrs<'a> {
-    let Some(addrs) = event_trigger_addrs.get(&clock) else {
-        return TriggerAddrs::default();
-    };
-    TriggerAddrs {
-        first: if addrs.with_comb {
-            comb_trigger_addrs
-        } else {
-            &[]
-        },
-        second: &addrs.ff,
+impl UnitGroup {
+    fn new(units: &[ExecutionUnit<RegionedAbsoluteAddr>], four_state: bool) -> Self {
+        Self {
+            units: prepare_units(units, four_state),
+            trigger_addrs: collect_trigger_addrs(units),
+        }
     }
 }
 
@@ -1269,9 +1256,9 @@ unsafe fn read_word(memory: &[u64], offset: usize) -> u64 {
 /// startup path relies on.
 pub struct InterpBackend {
     eval_comb_units: Vec<PreparedUnit>,
-    eval_apply_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>>,
-    eval_only_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>>,
-    apply_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>>,
+    eval_apply_units: HashMap<AbsoluteAddr, UnitGroup>,
+    eval_only_units: HashMap<AbsoluteAddr, UnitGroup>,
+    apply_units: HashMap<AbsoluteAddr, UnitGroup>,
     /// One unit per process kernel.
     process_units: Vec<PreparedUnit>,
     layout: MemoryLayout,
@@ -1291,11 +1278,10 @@ pub struct InterpBackend {
     /// schedule, mirroring the compiled `comb_apply_func`. The other
     /// eval/apply clocks run `eval_comb_units` followed by their
     /// `eval_apply_units` in one group, without a copy of either.
-    fused_comb_apply_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>>,
-    /// Trigger-bearing addresses per schedule group, precomputed so a group
-    /// invocation only performs snapshot reads.
+    fused_comb_apply_units: HashMap<AbsoluteAddr, UnitGroup>,
+    /// Trigger-bearing addresses of the combinational units, precomputed so
+    /// a group invocation only performs snapshot reads.
     comb_trigger_addrs: Vec<(AbsoluteAddr, u32)>,
-    event_trigger_addrs: HashMap<AbsoluteAddr, ClockTriggerAddrs>,
     /// Reused group-entry trigger snapshots; sorted by address and region.
     trigger_snapshots: Vec<((AbsoluteAddr, u32), u64)>,
     /// The extern functions the units call.
@@ -1423,56 +1409,36 @@ impl InterpBackend {
         // program; executing independently scheduled comb and FF units can
         // observe a different pre-edge snapshot around reset and NBA regions,
         // exactly as with the compiled backends.
-        let fused_comb_apply_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>> = laid_out
+        let comb_trigger_addrs = collect_trigger_addrs(&laid_out.sir.eval_comb);
+        let groups = |ffs: &HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>| {
+            ffs.iter()
+                .map(|(addr, units)| (*addr, UnitGroup::new(units, four_state)))
+                .collect::<HashMap<_, _>>()
+        };
+        let eval_apply_units = groups(&laid_out.sir.eval_apply_ffs);
+        let eval_only_units = groups(&laid_out.sir.eval_only_ffs);
+        let apply_units = groups(&laid_out.sir.apply_ffs);
+        // A fused tick stands for the combinational units and the clock's FF
+        // units, so it snapshots the addresses of theirs that it stores.
+        let fused_comb_apply_units: HashMap<AbsoluteAddr, UnitGroup> = laid_out
             .sir
             .eval_apply_ffs
             .keys()
             .filter_map(|clock| {
                 let fused = laid_out.sir.eval_comb_apply_ffs.get(clock)?;
-                Some((*clock, prepare_units(fused, four_state)))
+                let mut group = UnitGroup::new(fused, four_state);
+                group.trigger_addrs.retain(|addr| {
+                    comb_trigger_addrs.binary_search(addr).is_ok()
+                        || [&eval_apply_units, &eval_only_units, &apply_units]
+                            .into_iter()
+                            .filter_map(|groups| groups.get(clock))
+                            .any(|ffs| ffs.trigger_addrs.binary_search(addr).is_ok())
+                });
+                Some((*clock, group))
             })
             .collect();
         let eval_comb_units = prepare_units(&laid_out.sir.eval_comb, four_state);
-        let eval_apply_units = laid_out
-            .sir
-            .eval_apply_ffs
-            .iter()
-            .map(|(addr, units)| (*addr, prepare_units(units, four_state)))
-            .collect();
-        let eval_only_units = laid_out
-            .sir
-            .eval_only_ffs
-            .iter()
-            .map(|(addr, units)| (*addr, prepare_units(units, four_state)))
-            .collect();
-        let apply_units = laid_out
-            .sir
-            .apply_ffs
-            .iter()
-            .map(|(addr, units)| (*addr, prepare_units(units, four_state)))
-            .collect();
         let process_units = prepare_units(&laid_out.sir.processes, four_state);
-        // Only eval/apply clocks receive combined ticks; eval-only and
-        // apply-only groups fall back to the default two-phase evaluation.
-        let comb_trigger_addrs = collect_trigger_addrs(&laid_out.sir.eval_comb);
-        let mut event_trigger_addrs: HashMap<AbsoluteAddr, ClockTriggerAddrs> = HashMap::default();
-        for clock in laid_out.sir.eval_apply_ffs.keys() {
-            event_trigger_addrs.entry(*clock).or_default().with_comb = true;
-        }
-        // Split scheduling can register the same canonical clock under both
-        // maps; merge the address sets so neither phase loses snapshots.
-        for (clock, units) in laid_out
-            .sir
-            .eval_apply_ffs
-            .iter()
-            .chain(&laid_out.sir.eval_only_ffs)
-            .chain(&laid_out.sir.apply_ffs)
-        {
-            let entry = event_trigger_addrs.entry(*clock).or_default();
-            entry.ff.extend(collect_trigger_addrs(units));
-            entry.ff.sort_unstable();
-            entry.ff.dedup();
-        }
 
         let mut backend = Self {
             eval_comb_units,
@@ -1494,7 +1460,6 @@ impl InterpBackend {
             four_state_inits,
             fused_comb_apply_units,
             comb_trigger_addrs,
-            event_trigger_addrs,
             trigger_snapshots: Vec::new(),
             emit_triggers: options.emit_triggers,
             extern_functions: options
@@ -1602,6 +1567,13 @@ impl SimBackend for InterpBackend {
     }
 
     fn eval_apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
+        let UnitGroup {
+            units,
+            trigger_addrs,
+        } = self
+            .eval_apply_units
+            .get_mut(&event.addr())
+            .expect("scheduled event missing from SIR program");
         run_units(
             self.memory.as_mut_slice(),
             &self.layout,
@@ -1609,30 +1581,36 @@ impl SimBackend for InterpBackend {
             self.four_state,
             &mut self.comb_capture_enabled,
             &mut self.heap,
-            self.eval_apply_units
-                .get_mut(&event.addr())
-                .expect("scheduled event missing from SIR program"),
-            clock_trigger_addrs(
-                &self.event_trigger_addrs,
-                &self.comb_trigger_addrs,
-                event.addr(),
-            ),
+            units,
+            TriggerAddrs {
+                first: trigger_addrs,
+                second: &[],
+            },
             &mut self.trigger_snapshots,
             self.emit_triggers,
         )
     }
 
     fn eval_comb_apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
-        let trigger_addrs = clock_trigger_addrs(
-            &self.event_trigger_addrs,
-            &self.comb_trigger_addrs,
-            event.addr(),
-        );
-        let (first, second): (&mut [PreparedUnit], &mut [PreparedUnit]) =
+        let (first, second, trigger_addrs): (&mut [PreparedUnit], &mut [PreparedUnit], _) =
             if let Some(fused) = self.fused_comb_apply_units.get_mut(&event.addr()) {
-                (fused, &mut [])
-            } else if let Some(ff_units) = self.eval_apply_units.get_mut(&event.addr()) {
-                (&mut self.eval_comb_units, ff_units)
+                (
+                    &mut fused.units,
+                    &mut [],
+                    TriggerAddrs {
+                        first: &fused.trigger_addrs,
+                        second: &[],
+                    },
+                )
+            } else if let Some(ffs) = self.eval_apply_units.get_mut(&event.addr()) {
+                (
+                    &mut self.eval_comb_units,
+                    &mut ffs.units,
+                    TriggerAddrs {
+                        first: &self.comb_trigger_addrs,
+                        second: &ffs.trigger_addrs,
+                    },
+                )
             } else {
                 // Events outside the eval/apply map keep the default ordering.
                 self.eval_comb()?;
@@ -1653,6 +1631,13 @@ impl SimBackend for InterpBackend {
     }
 
     fn eval_only_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
+        let UnitGroup {
+            units,
+            trigger_addrs,
+        } = self
+            .eval_only_units
+            .get_mut(&event.addr())
+            .expect("scheduled event missing from SIR program");
         run_units(
             self.memory.as_mut_slice(),
             &self.layout,
@@ -1660,20 +1645,24 @@ impl SimBackend for InterpBackend {
             self.four_state,
             &mut self.comb_capture_enabled,
             &mut self.heap,
-            self.eval_only_units
-                .get_mut(&event.addr())
-                .expect("scheduled event missing from SIR program"),
-            clock_trigger_addrs(
-                &self.event_trigger_addrs,
-                &self.comb_trigger_addrs,
-                event.addr(),
-            ),
+            units,
+            TriggerAddrs {
+                first: trigger_addrs,
+                second: &[],
+            },
             &mut self.trigger_snapshots,
             self.emit_triggers,
         )
     }
 
     fn apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
+        let UnitGroup {
+            units,
+            trigger_addrs,
+        } = self
+            .apply_units
+            .get_mut(&event.addr())
+            .expect("scheduled event missing from SIR program");
         run_units(
             self.memory.as_mut_slice(),
             &self.layout,
@@ -1681,14 +1670,11 @@ impl SimBackend for InterpBackend {
             self.four_state,
             &mut self.comb_capture_enabled,
             &mut self.heap,
-            self.apply_units
-                .get_mut(&event.addr())
-                .expect("scheduled event missing from SIR program"),
-            clock_trigger_addrs(
-                &self.event_trigger_addrs,
-                &self.comb_trigger_addrs,
-                event.addr(),
-            ),
+            units,
+            TriggerAddrs {
+                first: trigger_addrs,
+                second: &[],
+            },
             &mut self.trigger_snapshots,
             self.emit_triggers,
         )
@@ -2234,5 +2220,62 @@ module Top (
         let interpreted = builder().build_interpreter().unwrap();
         assert_eq!(interpreted.backend.eval_apply_units.len(), 3);
         assert_eq!(run(interpreted), run(builder().build_cranelift().unwrap()));
+    }
+
+    /// A testbench schedules its flip-flops in separate eval and apply
+    /// groups. Those groups snapshot only the trigger addresses their own
+    /// units store, not the combinational ones, and trigger the same
+    /// edges as the compiled backend.
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn split_groups_snapshot_only_their_own_trigger_addresses() {
+        const SOURCE: &str = "`timescale 1ns/1ns
+module Top;
+  logic clk = 0, en = 0;
+  logic gclk;
+  logic [7:0] q = 0, g = 0, seen = 0;
+  assign gclk = clk & en;
+  always #5 clk = ~clk;
+  always_ff @(posedge clk) q <= q + 8'd1;
+  always_ff @(posedge gclk) g <= g + q;
+  always @(posedge gclk) seen = seen + 8'd1;
+  initial begin
+    #23 en = 1;
+    #40 en = 0;
+    #20 en = 1;
+  end
+endmodule
+";
+        let path = std::path::Path::new("top.sv");
+        let build = || crate::Simulation::from_sv_sources(vec![(SOURCE, path)], "Top");
+        let mut interpreted = build().build_interpreter().unwrap();
+        let mut compiled = build().build_cranelift().unwrap();
+        let backend = &interpreted.simulator.backend;
+        assert!(backend.emit_triggers);
+        assert!(!backend.comb_trigger_addrs.is_empty());
+        assert!(!backend.apply_units.is_empty());
+        for group in backend
+            .eval_only_units
+            .values()
+            .chain(backend.apply_units.values())
+        {
+            for addr in &group.trigger_addrs {
+                assert!(backend.comb_trigger_addrs.binary_search(addr).is_err());
+            }
+        }
+        let mut values = Vec::new();
+        for time in (0..200).step_by(3) {
+            interpreted.run_until(time).unwrap();
+            compiled.run_until(time).unwrap();
+            for name in ["q", "g", "seen"] {
+                let (a, b) = (interpreted.signal(name), compiled.signal(name));
+                values.push((time, name, interpreted.get(a), compiled.get(b)));
+            }
+        }
+        let seen = interpreted.signal("seen");
+        assert!(interpreted.get(seen) > BigUint::from(3u8));
+        for (time, name, interpreted, compiled) in values {
+            assert_eq!(interpreted, compiled, "{name} at {time}");
+        }
     }
 }
