@@ -500,7 +500,11 @@ jobs:
             https://github.com/chipsalliance/sv-tests.git "$revision"
           git -C "$RUNNER_TEMP/sv-tests" checkout -q FETCH_HEAD
           git -C "$RUNNER_TEMP/sv-tests" submodule update --init --depth 1 \
-            third_party/tests/uvm third_party/tests/uvm-1.2
+            third_party/tests/uvm third_party/tests/uvm-1.2 \
+            third_party/tests/easyUVM third_party/tests/uvm-examples
+
+      - name: Generate the upstream main-tests corpus
+        run: python conformance/sv-tests/prepare.py "$RUNNER_TEMP/sv-tests"
 
       - name: Validate the adapter against the official runner
         env:
@@ -532,6 +536,7 @@ jobs:
           name: sv-tests-report
           path: |
             ${{ runner.temp }}/sv-tests-report.tsv
+            ${{ runner.temp }}/sv-tests-report.summary.json
             ${{ runner.temp }}/sv-tests-results
           if-no-files-found: ignore
           retention-days: 14
