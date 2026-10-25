@@ -15,6 +15,7 @@
     "verilator/program.json",
     "verilator/random_plusargs.json",
     "verilator/review_regressions.json",
+    "verilator/scan.json",
     "verilator/string.json",
     "verilator/synthesizable.json",
     "verilator/system_functions.json",

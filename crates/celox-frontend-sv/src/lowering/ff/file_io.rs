@@ -37,6 +37,7 @@ impl Ff<'_, '_> {
         let (id, _) = self.m.temp("file_arg", width, signed, four_state);
         self.store(id, SIROffset::Static(0), width, reg);
         Ok(HostRequestValue {
+            value_kind: celox_design::ValueKind::Bits,
             id,
             width,
             signed,
@@ -101,6 +102,7 @@ impl Ff<'_, '_> {
             0,
             values,
             vec![HostRequestValue {
+                value_kind: celox_design::ValueKind::Bits,
                 id,
                 width: 32,
                 signed: false,
@@ -151,6 +153,7 @@ impl Ff<'_, '_> {
             operation,
             values,
             vec![HostRequestValue {
+                value_kind: celox_design::ValueKind::Bits,
                 float_precision: None,
                 id,
                 width: 32,

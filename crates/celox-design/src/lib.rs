@@ -536,6 +536,9 @@ pub struct HostRequestValue<A> {
     pub width: usize,
     pub signed: bool,
     pub is_string: bool,
+    /// The payload representation, independent of display formatting.
+    #[serde(default)]
+    pub value_kind: ValueKind,
     #[serde(default)]
     pub float_precision: Option<FloatPrecision>,
 }
@@ -543,6 +546,7 @@ pub struct HostRequestValue<A> {
 impl<A: Copy> HostRequestValue<A> {
     pub fn map<B>(&self, map: &mut impl FnMut(A) -> B) -> HostRequestValue<B> {
         HostRequestValue {
+            value_kind: self.value_kind,
             id: map(self.id),
             width: self.width,
             signed: self.signed,
@@ -2032,6 +2036,7 @@ mod tests {
     #[test]
     fn host_request_mapping_relocates_operands_and_results() {
         let value = |id| HostRequestValue {
+            value_kind: ValueKind::StrRef,
             id,
             width: 17,
             signed: true,
@@ -2051,6 +2056,7 @@ mod tests {
         assert_eq!(relocated.process, 2);
         assert_eq!(relocated.args[0].width, 17);
         assert!(relocated.results[0].signed);
+        assert_eq!(relocated.args[0].value_kind, ValueKind::StrRef);
         assert_eq!(relocated.strings, site.strings);
     }
 

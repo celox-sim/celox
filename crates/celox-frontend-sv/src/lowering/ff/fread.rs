@@ -61,6 +61,7 @@ impl Ff<'_, '_> {
             values,
             vec![
                 HostRequestValue {
+                    value_kind: celox_design::ValueKind::Bits,
                     float_precision: None,
                     id: result_id,
                     width: 32,
@@ -68,6 +69,7 @@ impl Ff<'_, '_> {
                     is_string: false,
                 },
                 HostRequestValue {
+                    value_kind: celox_design::ValueKind::Bits,
                     float_precision: None,
                     id: data_id,
                     width,

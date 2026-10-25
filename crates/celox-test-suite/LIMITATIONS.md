@@ -345,6 +345,17 @@ records the native-runner result; the case stays enabled on all Celox backends.
 
 ## SystemVerilog suite
 
+Verilator 5.052 rejects a string variable or string method expression as the
+`$sscanf` format, requiring a literal instead. IEEE 1800-2023 21.3.4.3 permits
+string expressions here. Only `scan::sscanf_string_format_expression` is
+excluded for Verilator; string sources with literal formats remain enabled.
+The [direct lint observation](verification/sv/limitations/scan-string-format-verilator.json)
+retains the diagnostic against the unchanged shared source. Icarus 13.0
+compiles the dynamic-format case but crashes in `vvp`; a reduced source using
+only a format variable also crashes. This same case is excluded for Icarus,
+with the [runtime observation and reduced source](verification/sv/limitations/scan-string-format-icarus.json)
+retained separately. The literal-format case remains enabled for both tools.
+
 Named unpacked array parameter forwarding is checked against IEEE 1800-2023
 6.20.2 and 7.6. Verilator 5.052 passes the whole-array forwarding case, but
 reverses elements across opposite declaration directions and rejects a constant
