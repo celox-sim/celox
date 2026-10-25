@@ -3475,6 +3475,9 @@ struct WorkLowering<'a, Addr: Clone + Eq + Hash> {
     execution_units: Vec<ExecutionUnit<Addr>>,
     pending_fold_indices: Vec<usize>,
     pending_fold_roots: HashSet<NodeId>,
+    /// The processes whose unit an acyclic projection has run (see
+    /// [`Self::lower`]).
+    run_processes: HashSet<Addr>,
 }
 
 impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a, Addr> {
@@ -3488,6 +3491,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             execution_units: Vec::new(),
             pending_fold_indices: Vec::new(),
             pending_fold_roots: HashSet::default(),
+            run_processes: HashSet::default(),
         }
     }
 
@@ -3880,6 +3884,14 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                 if exact_fold {
                     self.pending_fold_indices.push(idx);
                     self.pending_fold_roots.extend(fold_root);
+                } else if let LogicPathTarget::Process { process, .. } = &input[idx].target
+                    && !self.run_processes.insert(*process)
+                {
+                    // The unit writes every output of its process. Each
+                    // projection depends on all its sources, so they were
+                    // all written before the first projection ran the unit,
+                    // and this projection's activation guard would find them
+                    // unchanged.
                 } else {
                     self.emit_node(idx);
                 }
@@ -5393,6 +5405,130 @@ mod tests {
                     "a later projection must not remain live across an earlier Store"
                 );
             }
+        }
+    }
+
+    /// A process writes all its outputs in one run of its unit, so the unit
+    /// is emitted at its first projection only, while a downstream path of
+    /// each output still follows the process.
+    #[test]
+    fn acyclic_process_unit_runs_at_its_first_projection_only() {
+        use celox_sir::{SIROffset, SIRValue};
+        const INPUT: usize = 0;
+        const PROCESS: usize = 10;
+        let outputs = [1, 2, 3];
+        let mut builder = SIRBuilder::<usize>::new();
+        let value = builder.alloc_bit(8, false);
+        builder.emit(SIRInstruction::Load(value, INPUT, SIROffset::Static(0), 8));
+        for output in outputs {
+            builder.emit(SIRInstruction::Store(
+                output,
+                SIROffset::Static(0),
+                8,
+                value,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+        let marker = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Imm(marker, SIRValue::new(1u8)));
+        builder.emit(SIRInstruction::Store(
+            PROCESS,
+            SIROffset::Static(0),
+            1,
+            marker,
+            Vec::new(),
+            Vec::new(),
+        ));
+        builder.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = builder.drain();
+        let unit = celox_sir::ExecutionUnit {
+            entry_block_id: celox_sir::BlockId(0),
+            blocks,
+            register_map,
+        };
+
+        let mut arena = SLTNodeArena::<usize>::new();
+        let input = |arena: &mut SLTNodeArena<usize>, variable| {
+            arena
+                .alloc(SLTNode::Input {
+                    variable,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, 7),
+                    signed: false,
+                })
+                .unwrap()
+        };
+        let path = |target, expr, sources: &[usize]| LogicPath {
+            transparent_copy: false,
+            target,
+            sources: sources
+                .iter()
+                .map(|&source| VarAtomBase::new(source, 0, 7))
+                .collect(),
+            previous_sources: crate::HashSet::default(),
+            address_sources: crate::HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: crate::HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
+            pre_lower_nodes: Vec::new(),
+            expr,
+        };
+        let mut paths = Vec::new();
+        for output in outputs {
+            let expr = input(&mut arena, output);
+            paths.push(path(
+                LogicPathTarget::Process {
+                    process: PROCESS,
+                    after_initials: false,
+                    sensitivity_counters: Vec::new(),
+                    startup: None,
+                    target: VarAtomBase::new(output, 0, 7),
+                    unit: Box::new(unit.clone()),
+                },
+                expr,
+                &[INPUT],
+            ));
+            // A consumer of each output, scheduled after its projection.
+            let read = input(&mut arena, output);
+            paths.push(path(
+                LogicPathTarget::Var(VarAtomBase::new(output + 100, 0, 7)),
+                read,
+                &[output],
+            ));
+        }
+        let widths = [INPUT, PROCESS]
+            .into_iter()
+            .chain(outputs)
+            .chain(outputs.map(|output| output + 100))
+            .map(|variable| (variable, if variable == PROCESS { 1 } else { 8 }))
+            .collect();
+        let result = sort(
+            paths,
+            &arena,
+            &crate::HashSet::default(),
+            &crate::HashMap::default(),
+            false,
+            &widths,
+            1,
+        )
+        .unwrap();
+        let stores = |variable| {
+            result
+                .execution_units
+                .iter()
+                .flat_map(|unit| unit.blocks.values())
+                .flat_map(|block| &block.instructions)
+                .filter(|instruction| {
+                    matches!(instruction, SIRInstruction::Store(target, ..) if *target == variable)
+                })
+                .count()
+        };
+        assert_eq!(stores(PROCESS), 1, "the unit runs once");
+        for output in outputs {
+            assert_eq!(stores(output), 1);
+            assert_eq!(stores(output + 100), 1, "each consumer is emitted");
         }
     }
 }
