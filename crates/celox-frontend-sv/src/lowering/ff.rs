@@ -297,6 +297,27 @@ impl<'p, 'a> Ff<'p, 'a> {
         let Some(id) = self.m.id(lvalue.name()) else {
             return;
         };
+        let variable = self.m.var(id);
+        let constant = match lvalue {
+            sv::ir::LValue::Ident(_) => None,
+            sv::ir::LValue::Select { msb, lsb, .. } => sv::typecheck::eval_const_expr_with_types(
+                msb,
+                self.m.constants,
+                self.m.parameter_types,
+            )
+            .zip(sv::typecheck::eval_const_expr_with_types(
+                lsb,
+                self.m.constants,
+                self.m.parameter_types,
+            ))
+            .and_then(|(msb, lsb)| constant_select_write(variable, msb, lsb)),
+        };
+        // An empty constant write is not a dynamic write of the whole
+        // variable. Keep it out of publication and latch-coverage targets.
+        if matches!(constant, Some((None, _))) {
+            return;
+        }
+        let constant = constant.and_then(|(access, _)| access);
         if blocking {
             self.working.insert(id);
         } else {
@@ -305,7 +326,6 @@ impl<'p, 'a> Ff<'p, 'a> {
         if self.m.is_hidden(id) {
             return;
         }
-        let variable = self.m.var(id);
         // A run-time bit select within one array element writes only that
         // element (see `write`); a run-time element may be any of them.
         let element_write = dynamic_array_element_lvalue(
@@ -329,20 +349,6 @@ impl<'p, 'a> Ff<'p, 'a> {
             .flatten()
             .and_then(|write| write.window)
             .unwrap_or(BitAccess::new(0, variable.width - 1));
-        let constant = match lvalue {
-            sv::ir::LValue::Ident(_) => None,
-            sv::ir::LValue::Select { msb, lsb, .. } => sv::typecheck::eval_const_expr_with_types(
-                msb,
-                self.m.constants,
-                self.m.parameter_types,
-            )
-            .zip(sv::typecheck::eval_const_expr_with_types(
-                lsb,
-                self.m.constants,
-                self.m.parameter_types,
-            ))
-            .and_then(|(msb, lsb)| constant_select_write(variable, msb, lsb)?.0),
-        };
         if constant.is_none() {
             // `write` takes the same order: a constant range, then one
             // run-time element, then a read-modify-write of the variable.

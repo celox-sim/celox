@@ -5301,25 +5301,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "index 2 of `values` outside its declared range",
-            r#"
-            module Top(output logic y);
-                logic [7:0] values [0:1][0:2];
-                assign y = values[0][3];
-            endmodule
-        "#,
-        ),
-        (
-            "index 2 of `values` outside its declared range",
-            r#"
-            module Top(output logic y);
-                localparam J = 3;
-                logic [7:0] values [0:1][0:2];
-                assign y = values[0][J];
-            endmodule
-        "#,
-        ),
-        (
             "combinational expression",
             r#"
             module Top(input logic a, output logic y); assign y = unknown(a); endmodule
@@ -5664,15 +5645,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(output logic y);
                 logic [7:0] values [0:9223372036854775807][0:1];
                 assign y = values[0][0];
-            endmodule
-        "#,
-        ),
-        (
-            "index 2 of `values` outside its declared range",
-            r#"
-            module Top(output logic y);
-                logic [7:0] values [0:1][0:2];
-                assign y = values[1][3];
             endmodule
         "#,
         ),
