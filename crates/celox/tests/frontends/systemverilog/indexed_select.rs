@@ -369,3 +369,9 @@ fn continuous_part_selects_partly_outside_drive_the_bits_inside() {
     assert_eq!(sim.get(q), 0xc1u8.into());
     assert_eq!(sim.get(r), 0x5au8.into());
 }
+
+sv_backends! {
+    fn generated_pipeline_with_explicit_generate_branches(sim) {
+        @case "indexed_select::generated_pipeline_with_explicit_generate_branches";
+    }
+}

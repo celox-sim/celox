@@ -821,11 +821,24 @@ pub(crate) struct NativeCodegenTrace {
     pub state_layout: String,
 }
 
+/// Optimization context of a merged native function. Diagnostic labels do
+/// not describe whether pending values can be produced outside this function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NativeMergeKind {
+    /// A complete sequential group of execution units.
+    Complete,
+    /// Combinational settling followed by an FF event in the same function.
+    FusedCombAndFf,
+    /// One task of a partitioned kernel; other tasks may define pending state.
+    Partial,
+}
+
 fn prepare_merged_sir(
     units: &[&crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
     layout: &MemoryLayout,
     four_state: bool,
     label: &str,
+    merge_kind: NativeMergeKind,
     first_ff_unit: Option<usize>,
     diagnostics: &crate::optimizer::SirDiagnostics,
     cancel: Option<&CompileCancel>,
@@ -900,7 +913,7 @@ fn prepare_merged_sir(
         }
     }
     report_phase("comb_state_dse");
-    if label == "eval_comb_apply_ff"
+    if merge_kind == NativeMergeKind::FusedCombAndFf
         && crate::optimizer::sir::promote_fused_comb_static_slots(&mut sir_eu).map_err(
             |source| {
                 codegen_err(CodegenError::Optimization {
@@ -914,10 +927,17 @@ fn prepare_merged_sir(
         verify(&sir_eu, "after final fused comb StateSSA promotion")?;
     }
     report_phase("comb_state_ssa");
-    crate::optimizer::sir::pass_eliminate_working_round_trip::eliminate_working_round_trip(
-        &mut sir_eu,
-        &boundaries,
-    );
+    match merge_kind {
+        NativeMergeKind::Partial => {
+            crate::optimizer::sir::pass_eliminate_working_round_trip::eliminate_partial_working_round_trip(&mut sir_eu);
+        }
+        NativeMergeKind::Complete | NativeMergeKind::FusedCombAndFf => {
+            crate::optimizer::sir::pass_eliminate_working_round_trip::eliminate_working_round_trip(
+                &mut sir_eu,
+                &boundaries,
+            );
+        }
+    }
     verify(&sir_eu, "after x86 direct working rewrite")?;
     if cancelled(cancel) {
         return Err(cancelled_error());
@@ -937,7 +957,7 @@ fn prepare_merged_sir(
         &mut sir_eu,
         layout,
         four_state,
-        label == "eval_comb_apply_ff",
+        merge_kind == NativeMergeKind::FusedCombAndFf,
         diagnostics,
         || cancelled(cancel),
     )
@@ -972,6 +992,7 @@ fn compile_units(
         layout,
         four_state,
         label,
+        NativeMergeKind::Complete,
         None,
         x86_options,
         capture_trace,
@@ -985,6 +1006,7 @@ pub(super) fn compile_unit_refs(
     layout: &MemoryLayout,
     four_state: bool,
     label: &str,
+    merge_kind: NativeMergeKind,
     first_ff_unit: Option<usize>,
     x86_options: &crate::backend::X86BackendOptions,
     capture_trace: bool,
@@ -996,6 +1018,7 @@ pub(super) fn compile_unit_refs(
         layout,
         four_state,
         label,
+        merge_kind,
         first_ff_unit,
         x86_options,
         capture_trace,
@@ -1014,6 +1037,7 @@ pub(super) fn compile_unit_refs_inspected(
     layout: &MemoryLayout,
     four_state: bool,
     label: &str,
+    merge_kind: NativeMergeKind,
     first_ff_unit: Option<usize>,
     x86_options: &crate::backend::X86BackendOptions,
     capture_trace: bool,
@@ -1103,6 +1127,7 @@ pub(super) fn compile_unit_refs_inspected(
         layout,
         four_state,
         label,
+        merge_kind,
         first_ff_unit,
         diagnostics,
         cancel,
@@ -1288,6 +1313,7 @@ pub(super) fn native_function_at(
 struct NativeCompileTask<'a> {
     units: Vec<&'a crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
     label: &'static str,
+    merge_kind: NativeMergeKind,
     first_ff_unit: Option<usize>,
     bindings: Vec<String>,
 }
@@ -1343,7 +1369,9 @@ fn collect_comb_apply_compile_tasks<'a>(
         };
         let binding = format!("{LABEL} trigger={}", sir.get_path(addr));
         let index = if let Some(index) = tasks.iter().position(|task| {
-            task.label == LABEL && task.first_ff_unit == first_ff_unit && task.units == unit_refs
+            task.merge_kind == NativeMergeKind::FusedCombAndFf
+                && task.first_ff_unit == first_ff_unit
+                && task.units == unit_refs
         }) {
             tasks[index].bindings.push(binding);
             index
@@ -1352,6 +1380,7 @@ fn collect_comb_apply_compile_tasks<'a>(
             tasks.push(NativeCompileTask {
                 units: unit_refs,
                 label: LABEL,
+                merge_kind: NativeMergeKind::FusedCombAndFf,
                 first_ff_unit,
                 bindings: vec![binding],
             });
@@ -1382,6 +1411,7 @@ fn collect_ff_compile_tasks_from<'a>(
             tasks.push(NativeCompileTask {
                 units: unit_refs,
                 label,
+                merge_kind: NativeMergeKind::Complete,
                 first_ff_unit: None,
                 bindings: vec![binding],
             });
@@ -2037,6 +2067,7 @@ fn compile_program(
                 layout,
                 options.four_state,
                 task.label,
+                task.merge_kind,
                 task.first_ff_unit,
                 &options.x86_options,
                 capture_trace,
@@ -2087,6 +2118,7 @@ fn compile_program(
                                 layout,
                                 four_state,
                                 task.label,
+                                task.merge_kind,
                                 task.first_ff_unit,
                                 x86_options,
                                 capture_trace,
@@ -2146,6 +2178,7 @@ fn compile_program(
                 layout,
                 options.four_state,
                 &format!("eval_comb_unit[{index}]"),
+                NativeMergeKind::Complete,
                 None,
                 &options.x86_options,
                 false,
@@ -2168,6 +2201,7 @@ fn compile_program(
                 layout,
                 options.four_state,
                 &format!("process[{index}]"),
+                NativeMergeKind::Complete,
                 None,
                 &options.x86_options,
                 false,
