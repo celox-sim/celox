@@ -10,6 +10,14 @@
 //! number of memory definitions, and `F` is the number of MemoryPhi inputs. A
 //! clobber query is linear in the visited graph in the worst case and reuses
 //! one `O(D + F)` scratch allocation across all of that query's start points.
+//!
+//! The clobber walk is exact on acyclic graphs.  On cyclic graphs its result
+//! can depend on the start of the walk: a MemoryPhi whose inputs are all still
+//! on the walk stack is kept as a version of its own although every input
+//! resolves to one value once the walk completes (see
+//! `memory_versions::tests::clobber_walker_cycle_rule_is_not_canonical_on_loops`).
+//! Clients that need a canonical certificate of the memory state, such as
+//! reload-recipe verification, use [`crate::memory_versions`] instead.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -180,38 +188,9 @@ pub struct ClobberWalker {
     epochs: Vec<u32>,
     states: Vec<u8>,
     results: Vec<Option<ClobberResolution>>,
-    /// Whether a resolved access's walk met an unresolved cycle.
-    cyclic: Vec<bool>,
     epoch: u32,
     frames: Vec<ResolveFrame>,
-    /// Results with whether their walk met an unresolved cycle.
-    values: Vec<(ClobberResolution, bool)>,
-}
-
-/// Clobbers of one alias query over one graph, kept across query sessions.
-///
-/// It holds only accesses whose walk met no unresolved cycle. Such a walk
-/// covers an acyclic part of the graph, which determines its result whatever
-/// the session's start points, so a later session resolves the access to the
-/// same result without walking it again. Accesses whose walk met a cycle
-/// depend on the MemoryPhi being resolved and are walked again in each
-/// session, as without the memo.
-#[derive(Debug, Default)]
-pub struct ClobberMemo {
-    results: fxhash::FxHashMap<usize, usize>,
-}
-
-impl ClobberMemo {
-    /// The number of accesses whose clobber it holds.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.results.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.results.is_empty()
-    }
+    values: Vec<ClobberResolution>,
 }
 
 impl ClobberWalker {
@@ -252,31 +231,12 @@ impl ClobberWalker {
             self.epochs.fill(0);
             self.epoch = 1;
         }
-        self.cyclic.resize(graph.nodes.len(), false);
         ClobberQuery {
             walker: self,
             graph,
             query,
             alias_oracle,
-            memo: None,
         }
-    }
-
-    /// Like [`Self::query`], reusing and extending `memo`, which must only
-    /// ever be used with this graph and an equal query and alias oracle.
-    pub fn query_memoized<'a, D, Q, A>(
-        &'a mut self,
-        graph: &'a MemoryAccessGraph<D>,
-        query: &'a Q,
-        alias_oracle: &'a A,
-        memo: &'a mut ClobberMemo,
-    ) -> ClobberQuery<'a, D, Q, A>
-    where
-        A: AliasOracle<D, Q>,
-    {
-        let mut session = self.query(graph, query, alias_oracle);
-        session.memo = Some(memo);
-        session
     }
 
     fn find_clobber<D, Q>(
@@ -285,7 +245,6 @@ impl ClobberWalker {
         start: usize,
         query: &Q,
         alias_oracle: &impl AliasOracle<D, Q>,
-        mut memo: Option<&mut ClobberMemo>,
     ) -> MemoryClobber {
         let current_epoch = self.epoch;
         self.frames.clear();
@@ -297,40 +256,28 @@ impl ClobberWalker {
                 ResolveFrame::Enter(access) => {
                     if self.epochs[access] == current_epoch && self.states[access] != 0 {
                         match self.states[access] {
-                            1 => self.values.push((ClobberResolution::Cycle, true)),
-                            2 => self.values.push((
+                            1 => self.values.push(ClobberResolution::Cycle),
+                            2 => self.values.push(
                                 self.results[access]
                                     .expect("a resolved clobber node retains its result"),
-                                self.cyclic[access],
-                            )),
+                            ),
                             _ => unreachable!("current-epoch clobber state is valid"),
                         }
                         continue;
                     }
                     self.epochs[access] = current_epoch;
-                    if let Some(&result) = memo.as_ref().and_then(|memo| memo.results.get(&access))
-                    {
-                        let result = ClobberResolution::Access(result);
-                        self.states[access] = 2;
-                        self.results[access] = Some(result);
-                        self.cyclic[access] = false;
-                        self.values.push((result, false));
-                        continue;
-                    }
                     self.states[access] = 1;
                     self.results[access] = None;
                     match &nodes[access] {
                         MemoryAccessNode::LiveOnEntry => {
-                            let result = ClobberResolution::Access(access);
-                            self.resolve(access, result, false, &mut memo);
+                            self.resolve(access, ClobberResolution::Access(access));
                         }
                         MemoryAccessNode::Definition {
                             definition,
                             previous,
                         } => {
                             if alias_oracle.may_alias(definition, query) {
-                                let result = ClobberResolution::Access(access);
-                                self.resolve(access, result, false, &mut memo);
+                                self.resolve(access, ClobberResolution::Access(access));
                             } else {
                                 self.frames.push(ResolveFrame::FinishDefinition(access));
                                 self.frames.push(ResolveFrame::Enter(previous.0));
@@ -351,7 +298,7 @@ impl ClobberWalker {
                     }
                 }
                 ResolveFrame::FinishDefinition(access) => {
-                    let (result, cyclic) = self
+                    let result = self
                         .values
                         .pop()
                         .expect("a MemoryDef predecessor produces one clobber result");
@@ -360,9 +307,9 @@ impl ClobberWalker {
                         // resolved independently of the active MemoryPhi.
                         self.states[access] = 0;
                         self.results[access] = None;
-                        self.values.push((result, cyclic));
+                        self.values.push(result);
                     } else {
-                        self.resolve(access, result, cyclic, &mut memo);
+                        self.resolve(access, result);
                     }
                 }
                 ResolveFrame::FinishPhi { access, inputs } => {
@@ -373,9 +320,7 @@ impl ClobberWalker {
                         .expect("every MemoryPhi input produces one clobber result");
                     let mut common = None::<ClobberResolution>;
                     let mut diverged = false;
-                    let mut cyclic = false;
-                    for (result, input_cyclic) in self.values.drain(first..) {
-                        cyclic |= input_cyclic;
+                    for result in self.values.drain(first..) {
                         if result == ClobberResolution::Cycle {
                             continue;
                         }
@@ -390,12 +335,12 @@ impl ClobberWalker {
                     } else {
                         common.unwrap_or(ClobberResolution::Access(access))
                     };
-                    self.resolve(access, result, cyclic, &mut memo);
+                    self.resolve(access, result);
                 }
             }
         }
 
-        let (resolution, _) = self
+        let resolution = self
             .values
             .pop()
             .expect("one clobber query produces one result");
@@ -406,22 +351,11 @@ impl ClobberWalker {
         }
     }
 
-    /// Record `access` as resolved to `result` in this session, and in `memo`
-    /// when its walk met no unresolved cycle.
-    fn resolve(
-        &mut self,
-        access: usize,
-        result: ClobberResolution,
-        cyclic: bool,
-        memo: &mut Option<&mut ClobberMemo>,
-    ) {
+    /// Record `access` as resolved to `result` in this session.
+    fn resolve(&mut self, access: usize, result: ClobberResolution) {
         self.states[access] = 2;
         self.results[access] = Some(result);
-        self.cyclic[access] = cyclic;
-        if let (false, ClobberResolution::Access(result), Some(memo)) = (cyclic, result, memo) {
-            memo.results.insert(access, result);
-        }
-        self.values.push((result, cyclic));
+        self.values.push(result);
     }
 }
 
@@ -433,7 +367,6 @@ pub struct ClobberQuery<'a, D, Q, A> {
     graph: &'a MemoryAccessGraph<D>,
     query: &'a Q,
     alias_oracle: &'a A,
-    memo: Option<&'a mut ClobberMemo>,
 }
 
 impl<D, Q, A> ClobberQuery<'_, D, Q, A>
@@ -442,13 +375,8 @@ where
 {
     pub fn clobber(&mut self, start: MemoryAccessId) -> Option<MemoryClobber> {
         (start.0 < self.graph.nodes.len()).then(|| {
-            self.walker.find_clobber(
-                &self.graph.nodes,
-                start.0,
-                self.query,
-                self.alias_oracle,
-                self.memo.as_deref_mut(),
-            )
+            self.walker
+                .find_clobber(&self.graph.nodes, start.0, self.query, self.alias_oracle)
         })
     }
 }
@@ -1081,114 +1009,6 @@ mod tests {
         assert_eq!(analysis.only_clobber(), TestClobber::Definition((0, 0)));
         assert_eq!(analysis.graph.definition_count(), 1);
         assert_eq!(analysis.graph.access_count(), 2);
-    }
-
-    /// Sessions sharing a memo, or a memo dropped in between, resolve every
-    /// start exactly as fresh sessions do, over random CFGs with loops, joins and disjoint,
-    /// overlapping and repeated stores.
-    #[test]
-    fn memoized_sessions_match_fresh_sessions() {
-        let mut seed = 0x2545_f491_4f6c_dd1du64;
-        let mut next = |bound: usize| {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            (seed % bound as u64) as usize
-        };
-        let mut cases = 0;
-        let mut memo_calls = 0;
-        let mut fresh_calls = 0;
-        for _ in 0..400 {
-            let blocks = 1 + next(7);
-            let successors = (0..blocks)
-                .map(|block| {
-                    let mut outgoing = Vec::new();
-                    if block + 1 < blocks {
-                        outgoing.push(block + 1);
-                    }
-                    for _ in 0..next(3) {
-                        outgoing.push(next(blocks));
-                    }
-                    outgoing
-                })
-                .collect::<Vec<_>>();
-            let Ok(cfg) = ControlFlowGraph::analyze(successors, 0) else {
-                continue;
-            };
-            let events = (0..blocks)
-                .map(|block| {
-                    (0..next(4))
-                        .map(|index| {
-                            let writes = if next(3) == 0 {
-                                vec![]
-                            } else {
-                                vec![exact(1, 4 * next(4) as i64, 4 * (1 + next(2)))]
-                            };
-                            event((block, index), vec![], writes)
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-            let analysis = analyze(&cfg, &events);
-            let accesses = analysis.graph.access_count();
-            let calls = std::cell::Cell::new(0usize);
-            let oracle = |definition: &Instruction, query: &MemoryEffect<Object>| {
-                calls.set(calls.get() + 1);
-                analysis.writes[definition]
-                    .iter()
-                    .copied()
-                    .any(|write| effects_may_alias(write, *query))
-            };
-            for _ in 0..4 {
-                let query = exact(1, 4 * next(4) as i64, 4 * (1 + next(2)));
-                let sessions = (0..1 + next(6))
-                    .map(|_| {
-                        (0..1 + next(4))
-                            .map(|_| MemoryAccessId(next(accesses)))
-                            .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<_>>();
-                let mut fresh_walker = ClobberWalker::new();
-                calls.set(0);
-                let fresh = sessions
-                    .iter()
-                    .map(|starts| {
-                        let mut session = fresh_walker.query(&analysis.graph, &query, &oracle);
-                        starts
-                            .iter()
-                            .map(|&start| session.clobber(start))
-                            .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<_>>();
-                fresh_calls += calls.get();
-                let mut walker = ClobberWalker::new();
-                // A client may drop the memo between sessions, as a size
-                // budget does.
-                let drops = sessions.iter().map(|_| next(4) == 0).collect::<Vec<_>>();
-                let mut memo = ClobberMemo::default();
-                calls.set(0);
-                let memoized = sessions
-                    .iter()
-                    .zip(&drops)
-                    .map(|(starts, &drop)| {
-                        if drop {
-                            memo = ClobberMemo::default();
-                        }
-                        let mut session =
-                            walker.query_memoized(&analysis.graph, &query, &oracle, &mut memo);
-                        starts
-                            .iter()
-                            .map(|&start| session.clobber(start))
-                            .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<_>>();
-                memo_calls += calls.get();
-                assert_eq!(memoized, fresh, "{sessions:?} {query:?} {events:?}");
-            }
-            cases += 1;
-        }
-        assert!(cases > 200, "{cases}");
-        assert!(memo_calls < fresh_calls, "{memo_calls} {fresh_calls}");
     }
 
     #[test]
