@@ -1,0 +1,12 @@
+{
+  "tool": "icarus",
+  "version": "Icarus Verilog 13.0",
+  "case": "scan::sscanf_string_format_expression",
+  "source": "src/sv/cases/scan.vtest",
+  "method": "The unchanged shared source compiles with iverilog -g2012 -s tb and crashes when executed by vvp. Removing the string-method-expression call still crashes; the reduced source below isolates a format variable. The added testbench checks the same ok assertion.",
+  "status": "runtime_error",
+  "signal": 11,
+  "stdout": "",
+  "stderr": "",
+  "reduced_source": "\n    module Top(output logic ok);\n      string source = \"42\";\n      string fmt = \"%d\";\n      int value, count;\n      initial begin\n        count = $sscanf(source, fmt, value);\n        ok = count == 1 && value == 42;\n        count = $sscanf(\"56\", fmt, value);\n        ok &= count == 1 && value == 56;\n      end\n    endmodule\n  \nmodule tb; wire ok; Top dut(ok); initial begin #1; if (ok !== 1) $fatal(1, \"scan failed\"); $display(\"PASS\"); $finish; end endmodule\n"
+}

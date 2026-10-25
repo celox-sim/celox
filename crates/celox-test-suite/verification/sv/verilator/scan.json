@@ -1,0 +1,27 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "IEEE 1800-2023 21.3.4.3 permits a string expression as the scan format. Verilator 5.052 requires a format string literal and rejects both a string variable and a string method expression with \"unexpected IDENTIFIER, expecting STRING\". The string-source case with a literal format remains enabled.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/scan-string-format-verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_scan_string_format",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 21.3.4.3 permits a string expression as the scan format. Verilator 5.052 requires a format string literal and rejects both a string variable and a string method expression with \"unexpected IDENTIFIER, expecting STRING\". The string-source case with a literal format remains enabled.",
+        "upstream": []
+      },
+      "name": "scan::sscanf_string_format_expression",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

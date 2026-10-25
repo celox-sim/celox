@@ -807,8 +807,8 @@ chapter-21/21.3--fwrite-boh.sv	2state	fail
 chapter-21/21.3--fwrite-boh.sv	4state	fail
 chapter-21/21.3--fwrite.sv	2state	fail
 chapter-21/21.3--fwrite.sv	4state	fail
-chapter-21/21.3--sscanf.sv	2state	fail
-chapter-21/21.3--sscanf.sv	4state	fail
+chapter-21/21.3--sscanf.sv	2state	pass
+chapter-21/21.3--sscanf.sv	4state	pass
 chapter-21/21.3--ungetc.sv	2state	fail
 chapter-21/21.3--ungetc.sv	4state	fail
 chapter-21/21.4--readmemb.sv	2state	pass

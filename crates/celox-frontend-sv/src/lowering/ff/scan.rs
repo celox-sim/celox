@@ -1,5 +1,5 @@
 use super::*;
-use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue};
+use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue, ValueKind};
 
 impl Ff<'_, '_> {
     pub(super) fn scan_function(
@@ -24,7 +24,7 @@ impl Ff<'_, '_> {
                 .m
                 .comparison_width(&argument, &argument)
                 .ok_or_else(|| {
-                    unsupported("scan source/format must be a packed integral or literal string")
+                    unsupported("scan source/format must be a packed integral or string")
                 })?;
             // File descriptors are 32-bit packed values (21.3.1), even when
             // the actual expression has a wider integral type.
@@ -33,8 +33,26 @@ impl Ff<'_, '_> {
             } else {
                 width
             };
-            let (id, _) = self.host_hidden("scan_input", &argument, width, false, true)?;
+            let value_kind = if self.m.expr_is_string(&argument) {
+                ValueKind::StrRef
+            } else {
+                ValueKind::Bits
+            };
+            let (id, _) = self.host_hidden(
+                "scan_input",
+                &argument,
+                width,
+                false,
+                value_kind == ValueKind::Bits,
+            )?;
+            // Keep captured strings rooted across the host-request suspension.
+            self.m
+                .variables
+                .get_mut(&id)
+                .expect("scan input")
+                .value_kind = value_kind;
             inputs.push(HostRequestValue {
+                value_kind,
                 float_precision: None,
                 id,
                 width,
@@ -44,6 +62,7 @@ impl Ff<'_, '_> {
         }
         let (result_id, result_name) = self.m.temp("scan_count", 32, true, false);
         let mut results = vec![HostRequestValue {
+            value_kind: ValueKind::Bits,
             float_precision: None,
             id: result_id,
             width: 32,
@@ -70,6 +89,7 @@ impl Ff<'_, '_> {
             let (id, name) = self.m.temp("scan_value", width, false, precision.is_none());
             self.m.variables.get_mut(&id).expect("scan temporary").float = precision;
             results.push(HostRequestValue {
+                value_kind: ValueKind::Bits,
                 float_precision: precision,
                 id,
                 width,

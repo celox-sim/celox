@@ -1524,6 +1524,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let (id, _) = self.m.temp("vcd_argument", width, signed, is_4state);
             self.store(id, SIROffset::Static(0), width, reg);
             values.push(HostRequestValue {
+                value_kind: celox_design::ValueKind::Bits,
                 float_precision: None,
                 id,
                 width,
@@ -2221,6 +2222,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let (seed_id, seed_result) =
             self.host_hidden("distribution_seed", &formal, 32, true, true)?;
         let value = |id| HostRequestValue {
+            value_kind: celox_design::ValueKind::Bits,
             float_precision: None,
             id,
             width: 32,
@@ -2288,6 +2290,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut results = Vec::new();
         let (ret_id, ret_name) = self.m.temp("plusargs_result", 32, true, false);
         results.push(HostRequestValue {
+            value_kind: celox_design::ValueKind::Bits,
             float_precision: None,
             id: ret_id,
             width: 32,
@@ -2306,6 +2309,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .ok_or_else(|| unsupported("integral plusargs destination"))?;
             let (id, result) = self.host_hidden("plusargs_value", &captured, width, false, true)?;
             results.push(HostRequestValue {
+                value_kind: celox_design::ValueKind::Bits,
                 float_precision: None,
                 id,
                 width,
@@ -2326,6 +2330,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             kind: HostRequestKind::Plusargs,
             operation: u32::from(value_query),
             args: vec![HostRequestValue {
+                value_kind: celox_design::ValueKind::Bits,
                 float_precision: None,
                 id: query_id,
                 width,
