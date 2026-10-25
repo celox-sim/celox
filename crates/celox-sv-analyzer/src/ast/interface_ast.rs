@@ -13,10 +13,12 @@ pub(super) struct State {
 }
 struct InstanceGuard {
     state: std::rc::Rc<AnalysisState>,
+    revision: u64,
 }
 impl Drop for InstanceGuard {
     fn drop(&mut self) {
         self.state.interfaces.active_instances.borrow_mut().pop();
+        self.state.revision.restore(self.revision);
     }
 }
 
@@ -56,6 +58,7 @@ pub(super) fn analyze(
     }
     let _instance = InstanceGuard {
         state: tree.state.clone(),
+        revision: tree.state.revision.change(),
     };
     let _timescales =
         timescales::install_for_tree(&tree.state.timescales, packages.timescales.clone(), tree)?;
