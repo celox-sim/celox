@@ -60,6 +60,14 @@ limit before completion fails the command. This limit does not bound compilation
 or work within a single step/tick; use an external process timeout when a wall
 clock limit is needed. `--unlimited` removes the step/tick limit. Source languages cannot be mixed in one invocation.
 
+For a SystemVerilog testbench, a positional argument starting with `+` (or
+`--plusarg +ARG`, repeatable) is a plusarg, not a source: `$test$plusargs` and
+`$value$plusargs` see them in command-line order, on every backend.
+
+```sh
+celox run tb.v --top tb +iterations=9 --plusarg +trace
+```
+
 ## Select execution and collect measurements
 
 `celox run` accepts `--threads N` (1–64, default 1) and `--four-state` for both

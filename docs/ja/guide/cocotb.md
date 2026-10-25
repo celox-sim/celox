@@ -54,6 +54,13 @@ Verylでは完了前にtick上限に達すると失敗します。
 コンパイルや1ステップ・tick内の処理時間は制限しないため、実時間の制限が必要な場合は
 外部のタイムアウト機能を使ってください。1回の実行で言語を混在させることはできません。
 
+SVのtestbenchでは、`+`で始まる位置引数（または繰り返し指定できる`--plusarg +ARG`）はソースではなくplusargです。
+`$test$plusargs`と`$value$plusargs`はコマンドラインの順に参照します（全バックエンド対応）。
+
+```sh
+celox run tb.v --top tb +iterations=9 --plusarg +trace
+```
+
 両言語とも`--backend native|tiered|interpreter|cranelift|wasm`で実行方式を選べます（既定native）。
 tieredはインタープリターで開始し、待機中のイベントを保ちながら生成コードへ移行します。
 両言語とも`--threads N`（1〜64、既定1）で並列度を指定できます。

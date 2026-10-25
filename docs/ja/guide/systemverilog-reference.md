@@ -536,7 +536,7 @@ program の書き込みが駆動する設計の連続代入と組み合わせ論
 ホスト I/O には `Simulation::from_sv_sources` を使います。組合せプロセスからは
 未対応です。時間付き実行が必要なエッジプロセスを `Simulator` で構築するとエラーになります。
 
-引数は `.plusargs(["+COUNT=12", "+TRACE"])` で順序を保って渡します。
+引数は `.plusargs(["+COUNT=12", "+TRACE"])`、または [`celox run`](./cocotb.md) の `+` 引数で順序を保って渡します。
 `$test$plusargs` は前方一致で検索し、`$value$plusargs` は整数変換と packed 整数変数への
 `%s` を扱います。最初に一致した引数を使い、未一致の場合は書き込み先の値を保持します。
 real 変換と動的 string は未対応です。
