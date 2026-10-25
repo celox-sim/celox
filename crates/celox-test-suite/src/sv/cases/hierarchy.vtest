@@ -1561,3 +1561,126 @@
   (top Top)
   (run_to_finish)
   (expect_output "59 593\n"))
+
+(case inout_tristate_driver_in_child_reaches_parent
+  (four_state)
+  (source "inout_child_driver.sv" #"
+    module Pad(input logic [7:0] oe, dr, inout wire [7:0] pad,
+               output wire [7:0] ext);
+      for (genvar i = 0; i < 8; i++) begin : g
+        assign ext[i] = pad[i];
+        assign pad[i] = oe[i] ? dr[i] : 1'bz;
+      end
+    endmodule
+    module Block(input logic [7:0] oe, dr, inout wire [7:0] pad,
+                 output wire [7:0] ext);
+      Pad pad_cell(.oe(oe), .dr(dr), .pad(pad), .ext(ext));
+    endmodule
+    module Top(input logic [7:0] oe, dr, output wire [7:0] ext, seen,
+               output logic floating);
+      wire [7:0] pad;
+      Block block(.oe(oe), .dr(dr), .pad(pad), .ext(ext));
+      assign seen = pad;
+      assign floating = (pad[7] === 1'bz);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set oe 0xff) (set dr 0xa5))
+  (assert_eq ext 0xa5)
+  (assert_eq seen 0xa5)
+  (assert_eq floating 0)
+  (modify (set oe 0x0f))
+  (assert_eq ext (fourstate 0x05 0xf0))
+  (assert_eq seen (fourstate 0x05 0xf0))
+  (assert_eq floating 1)
+  (modify (set oe 0))
+  (assert_eq ext (fourstate 0 0xff))
+  (assert_eq seen (fourstate 0 0xff)))
+
+(case inout_tristate_nets_read_zero_in_two_state
+  (source "inout_two_state.sv" #"
+    module Pad(input logic [7:0] oe, dr, inout wire [7:0] pad,
+               output wire [7:0] ext);
+      for (genvar i = 0; i < 8; i++) begin : g
+        assign ext[i] = pad[i];
+        assign pad[i] = oe[i] ? dr[i] : 1'bz;
+      end
+    endmodule
+    module Reader(inout wire [7:0] io, output wire [7:0] y);
+      assign y = io;
+    endmodule
+    module Top(input logic [7:0] oe, dr, input logic en, input logic [7:0] a,
+               output bit [7:0] ext, seen, read);
+      wire [7:0] pad, w;
+      Pad pad_cell(.oe(oe), .dr(dr), .pad(pad), .ext(ext));
+      assign seen = pad;
+      assign w = en ? a : 8'bz;
+      Reader reader(.io(w), .y(read));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set oe 0xff) (set dr 0x5a) (set en 1) (set a 0xc3))
+  (assert_eq ext 0x5a)
+  (assert_eq seen 0x5a)
+  (assert_eq read 0xc3)
+  (modify (set oe 0xf0) (set en 0))
+  (assert_eq ext 0x50)
+  (assert_eq seen 0x50)
+  (assert_eq read 0)
+  (modify (set oe 0))
+  (assert_eq ext 0)
+  (assert_eq seen 0))
+
+(case inout_tristate_driver_in_parent_reaches_child
+  (four_state)
+  (source "inout_parent_driver.sv" #"
+    module Reader(inout wire [3:0] io, output wire [3:0] y);
+      assign y = io;
+    endmodule
+    module Pass(inout wire [3:0] io, output wire [3:0] y);
+      Reader reader(.io(io), .y(y));
+    endmodule
+    module Top(input logic en, input logic [3:0] a,
+               output wire [3:0] direct, nested, open);
+      wire [3:0] w;
+      assign w = en ? a : 4'bz;
+      Reader reader(.io(w), .y(direct));
+      Pass pass(.io(w), .y(nested));
+      Reader unconnected(.y(open));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set en 1) (set a 0x9))
+  (assert_eq direct 0x9)
+  (assert_eq nested 0x9)
+  (assert_eq open (fourstate 0 0xf))
+  (modify (set en 0))
+  (assert_eq direct (fourstate 0 0xf))
+  (assert_eq nested (fourstate 0 0xf)))
+
+(case inout_tristate_drivers_reach_implicit_nets
+  (four_state)
+  (source "inout_implicit_net.sv" #"
+    module Pad(input logic oe, d, inout wire io);
+      assign io = oe ? d : 1'bz;
+    endmodule
+    module Source(input logic d, output wire y);
+      assign y = d;
+    endmodule
+    module Reader(inout wire io, output wire y);
+      assign y = io;
+    endmodule
+    module Top(input logic oe, d, output wire from_pad, from_source);
+      Pad pad(.oe(oe), .d(d), .io(pad_net));
+      Reader pad_reader(.io(pad_net), .y(from_pad));
+      Source source(.d(d), .y(source_net));
+      Reader source_reader(.io(source_net), .y(from_source));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set oe 1) (set d 1))
+  (assert_eq from_pad 1)
+  (assert_eq from_source 1)
+  (modify (set oe 0) (set d 0))
+  (assert_eq from_pad (fourstate 0 1))
+  (assert_eq from_source 0))

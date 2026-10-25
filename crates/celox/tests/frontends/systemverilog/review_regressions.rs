@@ -4842,6 +4842,103 @@ fn expands_function_calls_in_child_input_connections() {
 }
 
 #[test]
+fn rejects_inout_nets_with_several_drivers() {
+    // Both sides of an inout connection are one net (IEEE 1800-2023 23.3.3);
+    // resolving several drivers of it is not supported yet.
+    let pad = r#"
+        module Pad(input logic oe, inout wire io); assign io = oe ? 1'b1 : 1'bz; endmodule
+        module Pass(input logic oe, inout wire io); Pad pad(.oe(oe), .io(io)); endmodule
+    "#;
+    for top in [
+        // Two children drive the net.
+        r#"module Top(input logic a, b, output wire y);
+               wire w;
+               Pad left(.oe(a), .io(w));
+               Pad right(.oe(b), .io(w));
+               assign y = w;
+           endmodule"#,
+        // The parent and a child below a pass-through module drive the net.
+        r#"module Top(input logic a, b, output wire y);
+               wire w;
+               assign w = a ? 1'b0 : 1'bz;
+               Pass pass(.oe(b), .io(w));
+               assign y = w;
+           endmodule"#,
+        // A child output and a child inout drive the net.
+        r#"module Source(output logic y); assign y = 1'b0; endmodule
+           module Top(input logic a, output wire y);
+               wire w;
+               Source source(.y(w));
+               Pad pad(.oe(a), .io(w));
+               assign y = w;
+           endmodule"#,
+    ] {
+        let error = cranelift_build_error(&format!("{pad}{top}"));
+        assert!(error.contains("multiple net drivers for `w`"), "{error}");
+    }
+    // A driver of the net inside the child and one on the parent's side of
+    // an inout port of the child.
+    let error = cranelift_build_error(
+        r#"
+        module Pad(input logic oe, inout wire io); assign io = oe ? 1'b1 : 1'bz; endmodule
+        module Block(input logic a, b, inout wire io);
+            assign io = a ? 1'b0 : 1'bz;
+            Pad pad(.oe(b), .io(io));
+        endmodule
+        module Top(input logic a, b, output wire y);
+            wire w;
+            Block block(.a(a), .b(b), .io(w));
+            assign y = w;
+        endmodule
+    "#,
+    );
+    assert!(error.contains("multiple net drivers for `io`"), "{error}");
+}
+
+#[test]
+fn rejects_variables_and_expressions_on_inout_ports() {
+    // Only nets may be on either side of an inout port (IEEE 1800-2023
+    // 23.3.3.2).
+    let reader = r#"
+        module Reader(inout wire [3:0] io, output wire [3:0] y); assign y = io; endmodule
+        module Pad(input logic oe, inout wire [3:0] io); assign io = oe ? 4'h1 : 4'hz; endmodule
+    "#;
+    for (top, variable) in [
+        (
+            r#"module Top(input logic [3:0] a, output wire [3:0] y);
+                   logic [3:0] v;
+                   assign v = a;
+                   Reader reader(.io(v), .y(y));
+               endmodule"#,
+            Some("variable `v`"),
+        ),
+        (
+            r#"module Top(input logic oe, output logic [3:0] v);
+                   Pad pad(.oe(oe), .io(v));
+               endmodule"#,
+            Some("variable `v`"),
+        ),
+        (
+            r#"module Top(input logic [3:0] a, output wire [3:0] y);
+                   wire [3:0] w;
+                   Reader reader(.io(w[3:0] ^ a), .y(y));
+               endmodule"#,
+            None,
+        ),
+    ] {
+        let error = cranelift_build_error(&format!("{reader}{top}"));
+        assert!(
+            error.contains("inout port `io` must connect to a net"),
+            "{error}"
+        );
+        assert!(
+            variable.is_none_or(|variable| error.contains(variable)),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn rejects_local_drivers_of_implicit_child_output_nets() {
     let source = r#"
         module Source(output logic y); assign y = 1'b1; endmodule
