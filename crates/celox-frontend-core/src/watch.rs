@@ -388,50 +388,199 @@ pub fn multi_store_only_candidates<A, K: Eq + std::hash::Hash + Clone>(
 
 /// [`multi_store_candidates`] with the written key of each instruction
 /// given by `key`, for callers that count only some kinds of writes.
+///
+/// The blocks are condensed into strongly connected components once; each
+/// component then knows the keys written in it or downstream of it, so a
+/// write is a candidate if its key is written again later in its block, or
+/// in a block reachable from it. Candidates come in the order of their
+/// first such write, by block id and then position.
 pub fn multi_write_candidates<A, K: Eq + std::hash::Hash + Clone>(
     unit: &ExecutionUnit<A>,
     key: impl Fn(&SIRInstruction<A>) -> Option<K>,
 ) -> Vec<K> {
-    let writes = |block: &celox_sir::BasicBlock<A>| -> Vec<Option<K>> {
-        block.instructions.iter().map(&key).collect()
-    };
-    let block_writes: crate::HashMap<celox_sir::BlockId, Vec<Option<K>>> = unit
-        .blocks
-        .iter()
-        .map(|(&id, block)| (id, writes(block)))
-        .collect();
     let mut blocks: Vec<_> = unit.blocks.keys().copied().collect();
     blocks.sort_unstable();
-    let mut candidates: Vec<K> = Vec::new();
-    for &start in &blocks {
-        for (position, written) in block_writes[&start].iter().enumerate() {
-            let Some(written) = written else {
-                continue;
-            };
-            if candidates.contains(written) {
-                continue;
-            }
-            let rewritten = |block: &celox_sir::BlockId, from: usize| {
-                block_writes[block][from..]
-                    .iter()
-                    .any(|other| other.as_ref() == Some(written))
-            };
-            let mut found = rewritten(&start, position + 1);
-            let mut seen = crate::HashSet::default();
-            let mut work = successors(&unit.blocks[&start].terminator);
-            while !found && let Some(block) = work.pop() {
-                if !seen.insert(block) || !unit.blocks.contains_key(&block) {
-                    continue;
+    let index: crate::HashMap<celox_sir::BlockId, usize> = blocks
+        .iter()
+        .enumerate()
+        .map(|(position, &block)| (block, position))
+        .collect();
+    let mut key_ids: crate::HashMap<K, usize> = crate::HashMap::default();
+    let mut keys: Vec<K> = Vec::new();
+    let mut write_counts: Vec<usize> = Vec::new();
+    let writes: Vec<Vec<usize>> = blocks
+        .iter()
+        .map(|block| {
+            unit.blocks[block]
+                .instructions
+                .iter()
+                .filter_map(&key)
+                .map(|written| {
+                    let id = *key_ids.entry(written).or_insert_with_key(|written| {
+                        keys.push(written.clone());
+                        write_counts.push(0);
+                        keys.len() - 1
+                    });
+                    write_counts[id] += 1;
+                    id
+                })
+                .collect()
+        })
+        .collect();
+    let edges: Vec<Vec<usize>> = blocks
+        .iter()
+        .map(|block| {
+            successors(&unit.blocks[block].terminator)
+                .into_iter()
+                .filter_map(|successor| index.get(&successor).copied())
+                .collect()
+        })
+        .collect();
+    let (component_of, components) = strongly_connected_components(&edges);
+    let cyclic: Vec<bool> = components
+        .iter()
+        .map(|members| members.len() > 1 || edges[members[0]].contains(&members[0]))
+        .collect();
+
+    // A key written once is rewritten only around a loop; the others are
+    // looked up in per-component bit sets, a chunk of keys at a time so the
+    // sets stay small.
+    let tracked: Vec<usize> = (0..keys.len()).filter(|&id| write_counts[id] > 1).collect();
+    let mut bit_of = vec![usize::MAX; keys.len()];
+    for (bit, &id) in tracked.iter().enumerate() {
+        bit_of[id] = bit;
+    }
+    let mut reached: Vec<Vec<bool>> = writes
+        .iter()
+        .enumerate()
+        .map(|(block, written)| vec![cyclic[component_of[block]]; written.len()])
+        .collect();
+    const CHUNK_WORDS: usize = 64;
+    const CHUNK_BITS: usize = CHUNK_WORDS * 64;
+    for chunk_start in (0..tracked.len()).step_by(CHUNK_BITS) {
+        let in_chunk = |id: usize| {
+            let bit = bit_of[id];
+            (bit != usize::MAX && bit >= chunk_start && bit < chunk_start + CHUNK_BITS)
+                .then(|| bit - chunk_start)
+        };
+        // Components come sinks first, so each one's successors are done.
+        let mut downstream = vec![[0u64; CHUNK_WORDS]; components.len()];
+        for (component, members) in components.iter().enumerate() {
+            let mut set = [0u64; CHUNK_WORDS];
+            for &block in members {
+                for &id in &writes[block] {
+                    if let Some(bit) = in_chunk(id) {
+                        set[bit / 64] |= 1 << (bit % 64);
+                    }
                 }
-                found = rewritten(&block, 0);
-                work.extend(successors(&unit.blocks[&block].terminator));
+                for &successor in &edges[block] {
+                    let below = component_of[successor];
+                    if below != component {
+                        for (word, other) in set.iter_mut().zip(&downstream[below]) {
+                            *word |= other;
+                        }
+                    }
+                }
             }
-            if found {
-                candidates.push(written.clone());
+            downstream[component] = set;
+        }
+        for (block, written) in writes.iter().enumerate() {
+            let component = component_of[block];
+            if cyclic[component] {
+                continue;
+            }
+            for (position, &id) in written.iter().enumerate() {
+                let Some(bit) = in_chunk(id) else {
+                    continue;
+                };
+                reached[block][position] = edges[block].iter().any(|&successor| {
+                    downstream[component_of[successor]][bit / 64] & (1 << (bit % 64)) != 0
+                });
+            }
+        }
+    }
+
+    let mut is_candidate = vec![false; keys.len()];
+    let mut candidates: Vec<K> = Vec::new();
+    let mut remaining: crate::HashMap<usize, usize> = crate::HashMap::default();
+    for (block, written) in writes.iter().enumerate() {
+        remaining.clear();
+        for &id in written {
+            *remaining.entry(id).or_default() += 1;
+        }
+        for (position, &id) in written.iter().enumerate() {
+            let left = remaining.get_mut(&id).expect("counted above");
+            *left -= 1;
+            if !is_candidate[id] && (*left > 0 || reached[block][position]) {
+                is_candidate[id] = true;
+                candidates.push(keys[id].clone());
             }
         }
     }
     candidates
+}
+
+/// Tarjan's strongly connected components of the graph whose node `n` has
+/// the successors `edges[n]`: the component of every node, and the members
+/// of every component, listed so that a component comes after all the
+/// components reachable from it.
+fn strongly_connected_components(edges: &[Vec<usize>]) -> (Vec<usize>, Vec<Vec<usize>>) {
+    const UNVISITED: usize = usize::MAX;
+    let count = edges.len();
+    let mut order = vec![UNVISITED; count];
+    let mut low = vec![0; count];
+    let mut on_stack = vec![false; count];
+    let mut component_of = vec![UNVISITED; count];
+    let mut components: Vec<Vec<usize>> = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
+    let mut next_order = 0;
+    // Explicit call stack of (node, index of its next edge to follow).
+    let mut calls: Vec<(usize, usize)> = Vec::new();
+    for root in 0..count {
+        if order[root] != UNVISITED {
+            continue;
+        }
+        calls.push((root, 0));
+        order[root] = next_order;
+        low[root] = next_order;
+        next_order += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        while let Some(&mut (node, ref mut next_edge)) = calls.last_mut() {
+            if let Some(&successor) = edges[node].get(*next_edge) {
+                *next_edge += 1;
+                if order[successor] == UNVISITED {
+                    order[successor] = next_order;
+                    low[successor] = next_order;
+                    next_order += 1;
+                    stack.push(successor);
+                    on_stack[successor] = true;
+                    calls.push((successor, 0));
+                } else if on_stack[successor] {
+                    low[node] = low[node].min(order[successor]);
+                }
+                continue;
+            }
+            calls.pop();
+            if let Some(&(parent, _)) = calls.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] == order[node] {
+                let mut members = Vec::new();
+                loop {
+                    let member = stack.pop().expect("the root is on the stack");
+                    on_stack[member] = false;
+                    component_of[member] = components.len();
+                    members.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                components.push(members);
+            }
+        }
+    }
+    (component_of, components)
 }
 
 /// Surround every store or commit in `unit` whose destination `watch_for`
@@ -1132,7 +1281,7 @@ pub fn declare_pending_slots(
 mod tests {
     use celox_sir::{SIRBuilder, SIRInstruction, SIROffset, SIRTerminator, SIRValue};
 
-    use super::multi_store_candidates;
+    use super::{multi_store_candidates, multi_write_candidates, successors, write_destination};
 
     /// Store a constant to `address` at the open block.
     fn store(b: &mut SIRBuilder<u32>, address: u32) {
@@ -1221,5 +1370,190 @@ mod tests {
         b.switch_to_block(resume);
         store(&mut b, 4);
         assert!(candidates(&mut b).is_empty());
+    }
+
+    /// The direct search [`multi_write_candidates`] replaced: a walk over
+    /// the reachable blocks from every write.
+    fn candidates_by_walk(unit: &celox_sir::ExecutionUnit<u32>) -> Vec<u32> {
+        let key = |instruction: &SIRInstruction<u32>| write_destination(instruction).copied();
+        let mut blocks: Vec<_> = unit.blocks.keys().copied().collect();
+        blocks.sort_unstable();
+        let mut candidates: Vec<u32> = Vec::new();
+        for &start in &blocks {
+            for (position, written) in unit.blocks[&start].instructions.iter().enumerate() {
+                let Some(written) = key(written) else {
+                    continue;
+                };
+                if candidates.contains(&written) {
+                    continue;
+                }
+                let rewritten = |block: &celox_sir::BlockId, from: usize| {
+                    unit.blocks[block].instructions[from..]
+                        .iter()
+                        .any(|other| key(other) == Some(written))
+                };
+                let mut found = rewritten(&start, position + 1);
+                let mut seen = crate::HashSet::default();
+                let mut work = successors(&unit.blocks[&start].terminator);
+                while !found && let Some(block) = work.pop() {
+                    if !seen.insert(block) || !unit.blocks.contains_key(&block) {
+                        continue;
+                    }
+                    found = rewritten(&block, 0);
+                    work.extend(successors(&unit.blocks[&block].terminator));
+                }
+                if found {
+                    candidates.push(written);
+                }
+            }
+        }
+        candidates
+    }
+
+    /// A random unit: sparse block ids, forward and backward edges (loops),
+    /// edges to missing blocks, returns, and stores, commits and other
+    /// instructions over a few addresses.
+    fn random_unit(seed: u64) -> celox_sir::ExecutionUnit<u32> {
+        use celox_sir::{BasicBlock, BlockId, RegisterId, SIRSwitchCase};
+        let state = std::cell::Cell::new(seed);
+        let next = |bound: u64| {
+            state.set(
+                state
+                    .get()
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407),
+            );
+            (state.get() >> 33) % bound
+        };
+        let count = 1 + next(30) as usize;
+        let addresses = 1 + next(12) as u32;
+        let back_edges = next(4);
+        let id = |n: usize| BlockId(n * 3 + 1);
+        let mut blocks = crate::HashMap::default();
+        for n in 0..count {
+            let mut instructions = Vec::new();
+            for _ in 0..next(5) {
+                let address = next(addresses as u64) as u32;
+                instructions.push(match next(4) {
+                    0 => SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
+                    1 => SIRInstruction::Commit(
+                        address,
+                        address,
+                        SIROffset::Static(0),
+                        1,
+                        Vec::new(),
+                    ),
+                    _ => SIRInstruction::Store(
+                        address,
+                        SIROffset::Static(0),
+                        1,
+                        RegisterId(0),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                });
+            }
+            let target = || {
+                let roll = next(10);
+                if roll == 0 {
+                    BlockId(0)
+                } else if roll <= back_edges {
+                    id(next(n as u64 + 1) as usize)
+                } else {
+                    id((n + 1 + next(4) as usize).min(count))
+                }
+            };
+            let terminator = match next(5) {
+                0 => SIRTerminator::Return,
+                1 | 2 => SIRTerminator::Jump(target(), Vec::new()),
+                3 => SIRTerminator::Branch {
+                    cond: RegisterId(0),
+                    true_block: (target(), Vec::new()),
+                    false_block: (target(), Vec::new()),
+                },
+                _ => SIRTerminator::Switch {
+                    selector: RegisterId(0),
+                    cases: (0..3u8)
+                        .map(|value| SIRSwitchCase {
+                            value: value.into(),
+                            target: target(),
+                        })
+                        .collect(),
+                    default: target(),
+                },
+            };
+            blocks.insert(
+                id(n),
+                BasicBlock {
+                    id: id(n),
+                    params: Vec::new(),
+                    instructions,
+                    terminator,
+                },
+            );
+        }
+        celox_sir::ExecutionUnit {
+            entry_block_id: id(0),
+            blocks,
+            register_map: Default::default(),
+        }
+    }
+
+    #[test]
+    fn candidates_match_a_walk_from_every_write() {
+        for seed in 0..5000 {
+            let unit = random_unit(seed);
+            let fast = multi_write_candidates(&unit, |instruction| {
+                write_destination(instruction).copied()
+            });
+            assert_eq!(fast, candidates_by_walk(&unit), "seed {seed}:\n{unit}");
+        }
+    }
+
+    #[test]
+    fn candidates_beyond_one_chunk_of_keys_are_found() {
+        // Two blocks storing 10000 addresses each, the second only the
+        // even ones: more keys than one chunk of the bit sets holds.
+        use celox_sir::{BasicBlock, BlockId, RegisterId};
+        let stores = |addresses: &mut dyn Iterator<Item = u32>| {
+            addresses
+                .map(|address| {
+                    SIRInstruction::Store(
+                        address,
+                        SIROffset::Static(0),
+                        1,
+                        RegisterId(0),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut blocks = crate::HashMap::default();
+        for (id, instructions, terminator) in [
+            (
+                0,
+                stores(&mut (0..10000)),
+                SIRTerminator::Jump(BlockId(1), Vec::new()),
+            ),
+            (1, stores(&mut (0..10000).step_by(2)), SIRTerminator::Return),
+        ] {
+            blocks.insert(
+                BlockId(id),
+                BasicBlock {
+                    id: BlockId(id),
+                    params: Vec::new(),
+                    instructions,
+                    terminator,
+                },
+            );
+        }
+        let unit = celox_sir::ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map: Default::default(),
+        };
+        let found = multi_store_candidates(&unit, |address| Some(*address));
+        assert_eq!(found, (0..10000).step_by(2).collect::<Vec<u32>>());
     }
 }
