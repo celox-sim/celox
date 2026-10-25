@@ -4362,13 +4362,43 @@ impl<'p, 'a> Ff<'p, 'a> {
                     value_name,
                     mask,
                     mask_name,
+                    sites: None,
                 }
             })
             .collect();
+        // Publish only the elements an array's nonblocking writes wrote, so
+        // an edge costs its writes rather than the whole array.
+        let mut staged = staged;
+        if self.kernel.is_none() && !self.direct {
+            for stage in &mut staged {
+                if self.m.var(stage.id).array_dims.is_empty() {
+                    continue;
+                }
+                let Some(count) = array_nba_site_count(body, stage.id, self.m) else {
+                    continue;
+                };
+                let sites = (0..count)
+                    .map(|_| {
+                        let (lsb, lsb_name) = self.m.temp("nba_lsb", 64, false, false);
+                        let (msb, msb_name) = self.m.temp("nba_msb", 64, false, false);
+                        let (hit, hit_name) = self.m.temp("nba_hit", 1, false, false);
+                        NbaArraySite {
+                            lsb,
+                            lsb_name,
+                            msb,
+                            msb_name,
+                            hit,
+                            hit_name,
+                        }
+                    })
+                    .collect();
+                stage.sites = Some(sites);
+            }
+        }
         let body = if staged.is_empty() {
             body.to_vec()
         } else {
-            stage_nonblocking(body, &staged, self.m)
+            stage_nonblocking(body, &staged, self.m, &mut HashMap::default())
         };
         // A variable staged for an exact publication has no next state of
         // its own: only its merge publishes it. A shared variable is written
@@ -4390,6 +4420,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let zero = self.b.alloc_bit(width, false);
                 self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
                 self.store(stage.mask, SIROffset::Static(0), width, zero);
+            } else if stage.sites.is_some() {
+                // The merge clears the mask bits it published.
             } else {
                 // Nothing writes the mask's stable state, which stays zero;
                 // a store may not span the elements of an array.
@@ -4552,6 +4584,87 @@ struct NbaStage {
     value_name: String,
     mask: SourceVarId,
     mask_name: String,
+    /// For an unpacked array, the sites of its nonblocking writes, when each
+    /// runs at most once an evaluation: the merge then publishes only the
+    /// elements they wrote. Without them every element is merged.
+    sites: Option<Vec<NbaArraySite>>,
+}
+
+/// A nonblocking write of a staged unpacked array: the bit range it wrote,
+/// in the array's flattened bits, and whether it ran.
+struct NbaArraySite {
+    lsb: SourceVarId,
+    lsb_name: String,
+    msb: SourceVarId,
+    msb_name: String,
+    hit: SourceVarId,
+    hit_name: String,
+}
+
+/// The number of nonblocking writes of the unpacked array `id` in `stmts`,
+/// when each is a select [`stage_nonblocking`] stages and none is in a loop,
+/// so that each runs at most once an evaluation.
+fn array_nba_site_count(
+    stmts: &[sv::ir::Stmt],
+    id: SourceVarId,
+    pm: &ProcModule<'_>,
+) -> Option<usize> {
+    let writes = |stmt: &sv::ir::Stmt| {
+        let mut found = false;
+        stmt.walk(&mut |stmt| match stmt {
+            sv::ir::Stmt::Assign {
+                lhs,
+                nonblocking: true,
+                ..
+            } => found |= pm.id(lhs.name()) == Some(id),
+            sv::ir::Stmt::AssignConcat {
+                parts,
+                nonblocking: true,
+                ..
+            } => found |= parts.iter().any(|part| pm.id(part.name()) == Some(id)),
+            _ => {}
+        });
+        found
+    };
+    let mut count = 0;
+    for stmt in stmts {
+        match stmt {
+            sv::ir::Stmt::Assign {
+                lhs,
+                nonblocking: true,
+                ..
+            } if pm.id(lhs.name()) == Some(id) => match lhs {
+                sv::ir::LValue::Select {
+                    msb,
+                    lsb,
+                    array_slice_width: None,
+                    ..
+                } if expr_from_const_expr(msb).is_some() && expr_from_const_expr(lsb).is_some() => {
+                    count += 1;
+                }
+                _ => return None,
+            },
+            sv::ir::Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                count += array_nba_site_count(then_body, id, pm)?;
+                count += array_nba_site_count(else_body, id, pm)?;
+            }
+            sv::ir::Stmt::Case { items, default, .. } => {
+                for item in items {
+                    count += array_nba_site_count(&item.body, id, pm)?;
+                }
+                if let Some(default) = default {
+                    count += array_nba_site_count(default, id, pm)?;
+                }
+            }
+            other if writes(other) => return None,
+            _ => {}
+        }
+    }
+    Some(count)
 }
 
 /// `stmts` with every nonblocking assignment to a staged variable writing
@@ -4560,6 +4673,7 @@ fn stage_nonblocking(
     stmts: &[sv::ir::Stmt],
     staged: &[NbaStage],
     pm: &ProcModule<'_>,
+    next_site: &mut HashMap<SourceVarId, usize>,
 ) -> Vec<sv::ir::Stmt> {
     let stage_of = |lvalue: &sv::ir::LValue| {
         staged
@@ -4596,6 +4710,29 @@ fn stage_nonblocking(
                 nonblocking: true,
             } if stage_of(lhs).is_some() => {
                 let stage = stage_of(lhs).unwrap();
+                if let (Some(sites), sv::ir::LValue::Select { msb, lsb, .. }) = (&stage.sites, lhs)
+                {
+                    let index = next_site.entry(stage.id).or_default();
+                    let site = &sites[*index];
+                    *index += 1;
+                    let record = |name: &str, rhs: sv::ir::Expr| sv::ir::Stmt::Assign {
+                        lhs: sv::ir::LValue::Ident(name.to_string()),
+                        rhs,
+                        nonblocking: false,
+                    };
+                    out.push(record(
+                        &site.lsb_name,
+                        expr_from_const_expr(lsb).expect("a staged site's bounds are expressions"),
+                    ));
+                    out.push(record(
+                        &site.msb_name,
+                        expr_from_const_expr(msb).expect("a staged site's bounds are expressions"),
+                    ));
+                    out.push(record(
+                        &site.hit_name,
+                        sv::ir::Expr::Literal("1'b1".to_string()),
+                    ));
+                }
                 out.push(sv::ir::Stmt::Assign {
                     lhs: renamed(lhs, &stage.value_name),
                     rhs: rhs.clone(),
@@ -4631,8 +4768,8 @@ fn stage_nonblocking(
                 else_body,
             } => out.push(sv::ir::Stmt::If {
                 condition: condition.clone(),
-                then_body: stage_nonblocking(then_body, staged, pm),
-                else_body: stage_nonblocking(else_body, staged, pm),
+                then_body: stage_nonblocking(then_body, staged, pm, next_site),
+                else_body: stage_nonblocking(else_body, staged, pm, next_site),
             }),
             sv::ir::Stmt::Case {
                 kind,
@@ -4646,12 +4783,12 @@ fn stage_nonblocking(
                     .iter()
                     .map(|item| sv::ir::CaseItem {
                         labels: item.labels.clone(),
-                        body: stage_nonblocking(&item.body, staged, pm),
+                        body: stage_nonblocking(&item.body, staged, pm, next_site),
                     })
                     .collect(),
                 default: default
                     .as_ref()
-                    .map(|body| stage_nonblocking(body, staged, pm)),
+                    .map(|body| stage_nonblocking(body, staged, pm, next_site)),
             }),
             sv::ir::Stmt::Loop {
                 kind,
@@ -4664,7 +4801,7 @@ fn stage_nonblocking(
                 init: init.clone(),
                 condition: condition.clone(),
                 step: step.clone(),
-                body: stage_nonblocking(body, staged, pm),
+                body: stage_nonblocking(body, staged, pm, next_site),
             }),
             other => out.push(other.clone()),
         }
@@ -4682,7 +4819,14 @@ fn emit_nba_merges(builder: &mut SIRBuilder<Addr>, staged: &[NbaStage], pm: &Pro
         if let Some(element_width) =
             unpacked_element_width(variable).filter(|_| !variable.array_dims.is_empty())
         {
-            emit_array_nba_merge(builder, stage, variable, element_width);
+            match &stage.sites {
+                Some(sites) => {
+                    for site in sites {
+                        emit_array_site_merge(builder, stage, site, variable, element_width);
+                    }
+                }
+                None => emit_array_nba_merge(builder, stage, variable, element_width),
+            }
             continue;
         }
         let width = variable.width;
@@ -4746,41 +4890,81 @@ fn emit_nba_merges(builder: &mut SIRBuilder<Addr>, staged: &[NbaStage], pm: &Pro
     }
 }
 
-/// [`emit_nba_merges`] for an unpacked array: a loop merges each element,
-/// since an access may not span elements.
-fn emit_array_nba_merge(
+/// [`emit_nba_merges`] for one write site of an unpacked array: when it ran,
+/// a loop merges the elements its bit range covers, and clears their mask
+/// bits and its hit for the next evaluation. Another site that wrote the
+/// same element merged it already, and then finds its mask clear.
+fn emit_array_site_merge(
     builder: &mut SIRBuilder<Addr>,
     stage: &NbaStage,
+    site: &NbaArraySite,
     variable: &SvVariable,
     element_width: usize,
 ) {
     let count = variable.width / element_width;
-    let four_state = variable.is_4state;
-    let alloc = |builder: &mut SIRBuilder<Addr>| {
-        if four_state {
-            builder.alloc_logic(element_width)
-        } else {
-            builder.alloc_bit(element_width, false)
-        }
+    let hit = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Load(
+        hit,
+        working(site.hit),
+        SIROffset::Static(0),
+        1,
+    ));
+    let first = builder.new_block();
+    let done = builder.new_block();
+    let next = builder.new_block();
+    builder.seal_block(SIRTerminator::Branch {
+        cond: hit,
+        true_block: (first, Vec::new()),
+        false_block: (next, Vec::new()),
+    });
+
+    builder.switch_to_block(first);
+    let load = |builder: &mut SIRBuilder<Addr>, id| {
+        let value = builder.alloc_bit(64, false);
+        builder.emit(SIRInstruction::Load(
+            value,
+            working(id),
+            SIROffset::Static(0),
+            64,
+        ));
+        value
     };
-    let first = builder.alloc_bit(64, false);
-    builder.emit(SIRInstruction::Imm(first, SIRValue::new(0u8)));
+    let lsb = load(builder, site.lsb);
+    let msb = load(builder, site.msb);
+    let reversed = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Binary(reversed, msb, BinaryOp::LtU, lsb));
+    let low = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Mux(low, reversed, msb, lsb));
+    let high = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Mux(high, reversed, lsb, msb));
+    let width = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(
+        width,
+        SIRValue::new(element_width as u64),
+    ));
+    let start = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Binary(start, low, BinaryOp::DivU, width));
+    let end = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Binary(end, high, BinaryOp::DivU, width));
     let index = builder.alloc_bit(64, false);
     let header = builder.new_block_with(vec![index]);
     let body_index = builder.alloc_bit(64, false);
     let body = builder.new_block_with(vec![body_index]);
-    let exit = builder.new_block();
-    builder.seal_block(SIRTerminator::Jump(header, vec![first]));
+    builder.seal_block(SIRTerminator::Jump(header, vec![start]));
 
     builder.switch_to_block(header);
     let limit = builder.alloc_bit(64, false);
     builder.emit(SIRInstruction::Imm(limit, SIRValue::new(count as u64)));
+    let inside = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Binary(inside, index, BinaryOp::LtU, limit));
+    let covered = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Binary(covered, index, BinaryOp::LeU, end));
     let more = builder.alloc_bit(1, false);
-    builder.emit(SIRInstruction::Binary(more, index, BinaryOp::LtU, limit));
+    builder.emit(SIRInstruction::Binary(more, inside, BinaryOp::And, covered));
     builder.seal_block(SIRTerminator::Branch {
         cond: more,
         true_block: (body, vec![index]),
-        false_block: (exit, Vec::new()),
+        false_block: (done, Vec::new()),
     });
 
     builder.switch_to_block(body);
@@ -4789,6 +4973,60 @@ fn emit_array_nba_merge(
         element_width,
         bit_offset: 0,
         dynamic_bit_offset: None,
+    };
+    emit_element_merge(builder, stage, variable, element_width, &offset);
+    let clear = builder.alloc_bit(element_width, false);
+    builder.emit(SIRInstruction::Imm(clear, SIRValue::new(0u8)));
+    builder.emit(SIRInstruction::Store(
+        working(stage.mask),
+        offset,
+        element_width,
+        clear,
+        Vec::new(),
+        Vec::new(),
+    ));
+    let one = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+    let following = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Binary(
+        following,
+        body_index,
+        BinaryOp::Add,
+        one,
+    ));
+    builder.seal_block(SIRTerminator::Jump(header, vec![following]));
+
+    builder.switch_to_block(done);
+    let unset = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Imm(unset, SIRValue::new(0u8)));
+    builder.emit(SIRInstruction::Store(
+        working(site.hit),
+        SIROffset::Static(0),
+        1,
+        unset,
+        Vec::new(),
+        Vec::new(),
+    ));
+    builder.seal_block(SIRTerminator::Jump(next, Vec::new()));
+
+    builder.switch_to_block(next);
+}
+
+/// Merge the staged nonblocking value of one element of an unpacked array
+/// into its stable state, in the bits its mask marks.
+fn emit_element_merge(
+    builder: &mut SIRBuilder<Addr>,
+    stage: &NbaStage,
+    variable: &SvVariable,
+    element_width: usize,
+    offset: &SIROffset,
+) {
+    let alloc = |builder: &mut SIRBuilder<Addr>| {
+        if variable.is_4state {
+            builder.alloc_logic(element_width)
+        } else {
+            builder.alloc_bit(element_width, false)
+        }
     };
     let current = alloc(builder);
     builder.emit(SIRInstruction::Load(
@@ -4821,12 +5059,51 @@ fn emit_array_nba_merge(
     builder.emit(SIRInstruction::Binary(merged, kept, BinaryOp::Or, taken));
     builder.emit(SIRInstruction::Store(
         stable(stage.id),
-        offset,
+        offset.clone(),
         element_width,
         merged,
         Vec::new(),
         Vec::new(),
     ));
+}
+
+/// [`emit_nba_merges`] for an unpacked array: a loop merges each element,
+/// since an access may not span elements.
+fn emit_array_nba_merge(
+    builder: &mut SIRBuilder<Addr>,
+    stage: &NbaStage,
+    variable: &SvVariable,
+    element_width: usize,
+) {
+    let count = variable.width / element_width;
+    let first = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(first, SIRValue::new(0u8)));
+    let index = builder.alloc_bit(64, false);
+    let header = builder.new_block_with(vec![index]);
+    let body_index = builder.alloc_bit(64, false);
+    let body = builder.new_block_with(vec![body_index]);
+    let exit = builder.new_block();
+    builder.seal_block(SIRTerminator::Jump(header, vec![first]));
+
+    builder.switch_to_block(header);
+    let limit = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(limit, SIRValue::new(count as u64)));
+    let more = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Binary(more, index, BinaryOp::LtU, limit));
+    builder.seal_block(SIRTerminator::Branch {
+        cond: more,
+        true_block: (body, vec![index]),
+        false_block: (exit, Vec::new()),
+    });
+
+    builder.switch_to_block(body);
+    let offset = SIROffset::Element {
+        index: body_index,
+        element_width,
+        bit_offset: 0,
+        dynamic_bit_offset: None,
+    };
+    emit_element_merge(builder, stage, variable, element_width, &offset);
     let one = builder.alloc_bit(64, false);
     builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
     let next = builder.alloc_bit(64, false);
