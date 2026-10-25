@@ -888,3 +888,30 @@ endmodule
     (assert_eq default_u_bits 8)
     (assert_eq default_whole_negative (>= (& value 15) 8))
     (assert_eq default_element_negative 0)))
+
+; An undeclared identifier on the left-hand side of a continuous assignment
+; is an implicit scalar net of the scope of the assignment (IEEE 1800-2023
+; 6.10): here in the module, in a concatenation, and in a generate block,
+; read by continuous assignments and an event list.
+(case continuous_assignment_targets_declare_implicit_nets
+  (source "implicit_nets.sv" #"
+    module Top(input logic [1:0] a, output logic y, output logic [1:0] pq,
+               output logic g_out, output logic z);
+      assign x = a[1];
+      assign {p, q} = a;
+      assign y = x;
+      assign pq = {p, q};
+      if (1) begin : g
+        assign w = ~a[0];
+        assign g_out = w;
+      end
+      always @(x or q) z = x ^ q;
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 1 2 3)
+    (modify (set a value))
+    (assert_eq y (>> value 1))
+    (assert_eq pq value)
+    (assert_eq g_out (== (& value 1) 0))
+    (assert_eq z (^ (>> value 1) (& value 1)))))

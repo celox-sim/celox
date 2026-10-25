@@ -538,6 +538,7 @@ impl Parser<'_> {
                     return Err(self.error("unfinished generate body item"));
                 }
                 frame.unit.items = std::mem::take(&mut frame.builder.roots);
+                self.declare_implicit_nets(&mut frame.unit)?;
                 frame.unit.body = self.range(frame.body_start);
                 if !frame.unit.external {
                     self.expect(frame.end)?;
@@ -1340,6 +1341,7 @@ impl Parser<'_> {
             return Ok(true);
         }
         if name == "resetall" {
+            self.default_nettype = Some("wire".to_string());
             self.time_directives.push(TimeDirective {
                 kind: TimeDirectiveKind::Reset,
                 tokens: self.range(start),
@@ -1363,6 +1365,9 @@ impl Parser<'_> {
                 ) =>
             {
                 return Err(self.error("invalid default_nettype value"));
+            }
+            "default_nettype" => {
+                self.default_nettype = (self.peek() != "none").then(|| self.peek().to_string());
             }
             "unconnected_drive" if !matches!(self.peek(), "pull0" | "pull1") => {
                 return Err(self.error("unconnected_drive requires pull0 or pull1"));

@@ -1382,6 +1382,58 @@ fn deep_generate_bodies_parse_clone_and_drop_on_the_default_stack() {
 }
 
 #[test]
+fn deep_generate_blocks_declare_implicit_nets_on_the_default_stack() {
+    let syntax = parse(&format!(
+        "module M;logic a;{}assign x=a;{}endmodule",
+        "if(1) begin:g ".repeat(10_000),
+        "end ".repeat(10_000)
+    ));
+    let nets: Vec<_> = syntax
+        .net_declarations
+        .iter()
+        .flat_map(|net| &net.variables)
+        .map(|variable| variable.name.value())
+        .collect();
+    assert_eq!(nets, ["x"]);
+}
+
+#[test]
+fn continuous_assignment_targets_declare_implicit_nets_in_their_scope() {
+    let syntax = parse(
+        "module M(input a);wire d;assign {p,q[0]}=a;assign d=a;\
+         if(1) begin:g assign w=a;assign p=a; end endmodule",
+    );
+    let names = |items: &[BodyItemId]| -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|&item| match syntax.body_item(item).kind {
+                BodyItemKind::Net(id) => Some(
+                    syntax.net_declarations[id.0].variables[0]
+                        .name
+                        .value()
+                        .to_string(),
+                ),
+                _ => None,
+            })
+            .collect()
+    };
+    let unit = &syntax.units[0];
+    assert_eq!(names(&unit.items), ["p", "q", "d"]);
+    let block = unit
+        .items
+        .iter()
+        .find_map(|&item| match &syntax.body_item(item).kind {
+            BodyItemKind::Conditional { then_body, .. } => Some(*then_body),
+            _ => None,
+        })
+        .unwrap();
+    let BodyItemKind::Block { items, .. } = &syntax.body_item(block).kind else {
+        panic!("generate block");
+    };
+    assert_eq!(names(items), ["w"]);
+}
+
+#[test]
 fn ordinary_net_declarations_retain_qualifiers_types_dimensions_and_values() {
     let code = "module M;wire signed[7:0] a[2:1],b=3+2;trireg(small)scalared[3:0]c;tri(strong0,weak1)vectored logic[4:0]#(1:2:3,4,5)d;wire T[3:0]#1 e;input wire p;C child();if(1)begin:g uwire bit q;end endmodule interface I;tri t;endinterface";
     let native = Declarations::parse(code, Path::new("nets.sv")).unwrap();
