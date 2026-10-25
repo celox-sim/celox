@@ -17,6 +17,17 @@ pub fn eliminate_working_round_trip(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     _eu_boundary_blocks: &[BlockId],
 ) {
+    eliminate_working_round_trip_impl(eu, false);
+}
+
+/// Optimize one partial event task. Pending values can have producers outside
+/// this function, so publication requires proof of a local definition on every
+/// path. Sparse publication can also consume dirty entries from other tasks.
+pub fn eliminate_partial_working_round_trip(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    eliminate_working_round_trip_impl(eu, true);
+}
+
+fn eliminate_working_round_trip_impl(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, partial: bool) {
     use crate::HashMap;
 
     // Phase 1: Scan — collect info about each WORKING variable
@@ -140,9 +151,16 @@ pub fn eliminate_working_round_trip(
         .collect();
 
     let unsafe_after_store = super::commit_ops::direct_stable_store_hazards(eu);
+    let uninitialized = (partial && !eligible.is_empty())
+        .then(|| super::commit_ops::uninitialized_working_observations(eu));
     let eligible: crate::HashSet<AbsoluteAddr> = eligible
         .into_iter()
-        .filter(|addr| !unsafe_after_store.contains_addr(*addr))
+        .filter(|addr| {
+            !unsafe_after_store.contains_addr(*addr)
+                && !uninitialized
+                    .as_ref()
+                    .is_some_and(|undefined| undefined.contains_addr(*addr))
+        })
         .collect();
 
     // Sparse state has no per-EU seed: every producer writes the same pending
@@ -151,7 +169,8 @@ pub fn eliminate_working_round_trip(
     let sparse_eligible: crate::HashSet<AbsoluteAddr> = sparse_vars
         .iter()
         .filter(|(addr, info)| {
-            info.has_store
+            !partial
+                && info.has_store
                 && info.stable_addr.is_some()
                 && !info.invalid_apply
                 && !unsafe_after_store.contains_addr(**addr)
@@ -626,5 +645,123 @@ mod tests {
             unit.blocks[&BlockId(2)].instructions[0],
             SIRInstruction::Commit(..)
         ));
+    }
+    #[test]
+    fn partial_event_keeps_publication_of_another_producers_fragment() {
+        let mut unit = eu(vec![block(
+            0,
+            vec![
+                working_seed(SIROffset::Static(24), 8),
+                SIRInstruction::Store(
+                    addr(WORKING_REGION),
+                    SIROffset::Static(24),
+                    8,
+                    RegisterId(1),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                working_apply(SIROffset::Static(16), 8),
+                working_apply(SIROffset::Static(24), 8),
+            ],
+            SIRTerminator::Return,
+        )]);
+        let before = unit.clone();
+        eliminate_partial_working_round_trip(&mut unit);
+        assert_eq!(unit, before);
+    }
+
+    #[test]
+    fn partial_event_requires_a_definition_on_every_branch() {
+        for both_paths in [false, true] {
+            let store = || {
+                SIRInstruction::Store(
+                    addr(WORKING_REGION),
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(1),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            };
+            let mut unit = eu(vec![
+                block(
+                    0,
+                    vec![],
+                    SIRTerminator::Branch {
+                        cond: RegisterId(3),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                ),
+                block(1, vec![store()], SIRTerminator::Jump(BlockId(3), vec![])),
+                block(
+                    2,
+                    if both_paths { vec![store()] } else { vec![] },
+                    SIRTerminator::Jump(BlockId(3), vec![]),
+                ),
+                block(
+                    3,
+                    vec![working_apply(SIROffset::Static(0), 8)],
+                    SIRTerminator::Return,
+                ),
+            ]);
+            let before = unit.clone();
+            eliminate_partial_working_round_trip(&mut unit);
+            if both_paths {
+                assert!(unit.blocks[&BlockId(3)].instructions.is_empty());
+                assert!(
+                    matches!(unit.blocks[&BlockId(1)].instructions[0],SIRInstruction::Store(address,..) if address.region==STABLE_REGION)
+                );
+            } else {
+                assert_eq!(unit, before);
+            }
+        }
+    }
+
+    #[test]
+    fn partial_event_keeps_unseeded_dynamic_pending_values() {
+        let mut unit = eu(vec![block(
+            0,
+            vec![
+                indexed_working_store(),
+                working_apply(SIROffset::Static(0), 64),
+            ],
+            SIRTerminator::Return,
+        )]);
+        let before = unit.clone();
+        eliminate_partial_working_round_trip(&mut unit);
+        assert_eq!(unit, before);
+    }
+
+    #[test]
+    fn partial_event_can_redirect_a_locally_seeded_dynamic_update() {
+        let mut unit = eu(vec![block(
+            0,
+            vec![
+                working_seed(SIROffset::Static(0), 64),
+                indexed_working_store(),
+                working_apply(SIROffset::Static(0), 64),
+            ],
+            SIRTerminator::Return,
+        )]);
+        eliminate_partial_working_round_trip(&mut unit);
+        assert!(
+            matches!(unit.blocks[&BlockId(0)].instructions.as_slice(),[SIRInstruction::Store(address,SIROffset::Element {..},..)] if address.region==STABLE_REGION)
+        );
+    }
+    #[test]
+    fn partial_event_keeps_reads_of_another_producers_pending_fragment() {
+        let mut unit = eu(vec![block(
+            0,
+            vec![
+                working_seed(SIROffset::Static(0), 8),
+                SIRInstruction::Load(RegisterId(2), addr(WORKING_REGION), SIROffset::Static(8), 8),
+                working_apply(SIROffset::Static(0), 8),
+            ],
+            SIRTerminator::Return,
+        )]);
+        let before = unit.clone();
+        eliminate_partial_working_round_trip(&mut unit);
+        assert_eq!(unit, before);
     }
 }
