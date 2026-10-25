@@ -83,6 +83,9 @@ pub(crate) struct SchedulerRefs {
     pub(crate) kernel_events: Vec<u64>,
     /// Per clock slot, the bit of `levels` of its event.
     pub(crate) clock_events: Vec<u64>,
+    /// The bits of `levels` of clocks derived from the others, which any
+    /// slot may change.
+    pub(crate) derived_events: u64,
     pub(crate) clock_next: SignalRef,
     pub(crate) clock_period: SignalRef,
     pub(crate) clock_value: SignalRef,
@@ -324,7 +327,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             time_slots: model.time_slots.iter().map(resolve).collect(),
             scheduler: model.scheduler.as_ref().and_then(|scheduler| {
                 let slots = &scheduler.slots;
-                Some(SchedulerRefs {
+                let mut refs = SchedulerRefs {
                     unit: scheduler.unit?,
                     limit: resolve(&slots.limit),
                     now: resolve(&slots.now),
@@ -408,7 +411,19 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                     clock_period: resolve(&slots.clock_period),
                     clock_value: resolve(&slots.clock_value),
                     clock_armed: resolve(&slots.clock_armed),
-                })
+                    derived_events: 0,
+                };
+                // What no kernel and no clock writes itself derives from them.
+                let all = 1u64
+                    .checked_shl(refs.events.len() as u32)
+                    .map_or(u64::MAX, |bit| bit - 1);
+                let driven = refs
+                    .kernel_events
+                    .iter()
+                    .chain(&refs.clock_events)
+                    .fold(0, |mask, &bits| mask | bits);
+                refs.derived_events = all & !driven;
+                Some(refs)
             }),
             kernel_fallback: model
                 .scheduler
