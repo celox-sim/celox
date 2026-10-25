@@ -168,7 +168,7 @@ pub enum SimulatorErrorKind {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum CodegenError {
-    #[cfg(feature = "host-runtime")]
+    #[cfg(feature = "cranelift")]
     #[error("{0}")]
     Cranelift(
         #[from]
@@ -232,7 +232,7 @@ pub enum CodegenError {
         source: std::io::Error,
     },
 
-    #[cfg(feature = "host-runtime")]
+    #[cfg(feature = "wasm-runtime")]
     #[error("WASM {stage} failed: {source}")]
     Wasm {
         stage: &'static str,
@@ -398,7 +398,7 @@ impl From<CodegenError> for SimulatorError {
     }
 }
 
-#[cfg(feature = "host-runtime")]
+#[cfg(feature = "cranelift")]
 impl From<celox_backend_cranelift::CraneliftError> for SimulatorError {
     fn from(error: celox_backend_cranelift::CraneliftError) -> Self {
         CodegenError::from(error).into()
@@ -426,6 +426,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "cranelift")]
     #[test]
     fn simulator_error_keeps_the_backend_source_chain() {
         let backend = celox_backend_cranelift::CraneliftError::NativeTarget {

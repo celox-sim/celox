@@ -420,6 +420,7 @@ fn process_writes_reach_the_waveform() {
     );
 }
 
+#[cfg(feature = "cranelift")]
 #[test]
 fn veryl_testbenches_reject_artifacts_with_processes() {
     let source = r#"

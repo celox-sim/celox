@@ -149,7 +149,7 @@ jobs:
 
       - name: cargo clippy
         if: (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') && needs.changes.outputs.rust_full != 'false'
-        run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim --no-deps
+        run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim --no-deps
 
       - name: Lint the crates this pull request can affect
         if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_lint_packages != ''
@@ -259,7 +259,7 @@ jobs:
         if: needs.changes.outputs.rust_full != 'false'
         run: >-
           cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci
-          --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
+          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the tests this pull request can affect
         id: scoped-tests
@@ -305,7 +305,7 @@ jobs:
         if: needs.changes.outputs.rust_full != 'false'
         run: >-
           cargo test --locked --workspace --exclude 'lydite*' --doc
-          --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
+          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the documentation tests of the changed libraries
         if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_libraries != ''
@@ -722,7 +722,7 @@ jobs:
 
       - name: Test partial-word reduction AND on AArch64
         run: >-
-          cargo test --locked -p celox --features systemverilog
+          cargo test --locked -p celox --features systemverilog,cranelift,wasm-runtime,wasm-component,veryl-reference
           --test systemverilog wide_reduction_and_respects_partial_storage_words::native
 
       - name: Check x86-64 cross-codegen from AArch64
