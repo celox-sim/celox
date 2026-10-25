@@ -1,1 +1,1 @@
-Sync merged prerequisite PRs 2061 and 2067 before continuing final procedure support
+Drop merged class visibility PR and fix required retained exclusion rows in PR 2076 before adding final procedures
