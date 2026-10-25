@@ -229,3 +229,13 @@ These fixtures exercise the actual upstream runner with a controlled driver,
 including mode priority, skips, negative tests, assertions, timeouts, library
 injection and missing-environment failures. The Rust example is a single-case
 compiler/simulator driver; it does not parse sv-tests metadata or judge verdicts.
+
+`iff`-qualified event controls in processes update two rows: both state modes
+for `9.4.2.3--event_conditional` change from fail to pass. The official runner
+selects elaboration for this probe, a plain `always @(posedge clk iff en == 1)`
+with a nonblocking body, which now runs as a process. A copy with driven clock,
+enable and data was simulated: the register keeps its value at an edge with the
+enable low and loads the data at the next edge with it high, as in Verilator
+5.052. Full official runs at the pinned revision report 546 passing cases in
+2state and 548 in 4state, with no passing case regressing. `iff` on `always_ff`
+events stays rejected.

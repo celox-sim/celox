@@ -1623,8 +1623,8 @@ chapter-9/9.4.2.1--event_or_op.sv	2state	pass
 chapter-9/9.4.2.1--event_or_op.sv	4state	pass
 chapter-9/9.4.2.2--event_implicit.sv	2state	pass
 chapter-9/9.4.2.2--event_implicit.sv	4state	pass
-chapter-9/9.4.2.3--event_conditional.sv	2state	fail
-chapter-9/9.4.2.3--event_conditional.sv	4state	fail
+chapter-9/9.4.2.3--event_conditional.sv	2state	pass
+chapter-9/9.4.2.3--event_conditional.sv	4state	pass
 chapter-9/9.4.2.4--event_sequence.sv	2state	fail
 chapter-9/9.4.2.4--event_sequence.sv	4state	fail
 chapter-9/9.4.3--event_sequence_controls.sv	2state	pass
