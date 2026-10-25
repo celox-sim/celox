@@ -72,6 +72,7 @@ pub(super) struct State {
 /// Restores the previously analyzed package when dropped.
 pub(super) struct InPackage {
     previous: Option<String>,
+    revision: u64,
     state: std::rc::Rc<AnalysisState>,
 }
 
@@ -79,6 +80,7 @@ impl Drop for InPackage {
     fn drop(&mut self) {
         let previous = self.previous.take();
         *self.state.scope.package.borrow_mut() = previous;
+        self.state.revision.restore(self.revision);
     }
 }
 
@@ -88,6 +90,7 @@ pub(super) fn enter_package(state: &std::rc::Rc<AnalysisState>, name: &str) -> I
     let previous = state.scope.package.borrow_mut().replace(name.to_string());
     InPackage {
         previous,
+        revision: state.revision.change(),
         state: state.clone(),
     }
 }
@@ -107,6 +110,7 @@ pub(super) fn qualified_name(state: &AnalysisState, package: &str, name: &str) -
 /// Restores the previously imported symbols when dropped.
 pub(super) struct Installed {
     previous: Arc<ScopeSymbols>,
+    revision: u64,
     state: std::rc::Rc<AnalysisState>,
 }
 
@@ -114,6 +118,7 @@ impl Drop for Installed {
     fn drop(&mut self) {
         let previous = std::mem::take(&mut self.previous);
         *self.state.scope.imported.borrow_mut() = previous;
+        self.state.revision.restore(self.revision);
     }
 }
 
@@ -123,6 +128,7 @@ pub(super) fn install(state: &std::rc::Rc<AnalysisState>, symbols: Arc<ScopeSymb
     let previous = state.scope.imported.replace(symbols);
     Installed {
         previous,
+        revision: state.revision.change(),
         state: state.clone(),
     }
 }

@@ -28,6 +28,10 @@ pub(super) struct AnalysisState {
     next_call_site: std::rc::Rc<std::cell::Cell<usize>>,
     timescales: timescales::State,
     diagnostics: RefCell<Vec<warnings::AnalyzerWarning>>,
+    /// Revision of the imported scope, the analyzed package, the active
+    /// interface instances and the root-subroutine mode.
+    revision: generate::Revision,
+    generate_items: generate::Memo,
     /// Classes laid out so far, by name.
     classes: std::cell::RefCell<HashMap<String, std::rc::Rc<classes::Class>>>,
 }
@@ -678,6 +682,8 @@ impl Module {
         let specialization =
             syntax_tree.child(syntax_tree.syntax_tree, applicable_parameter_overrides);
         let syntax_tree = &specialization;
+        // The collectors below each elaborate the same generate scopes.
+        let _elaborations = generate::memoize(syntax_tree);
         let _imported = scope::install(&syntax_tree.state, imported.clone());
         let with_imported = |mut functions: const_functions::ConstantFunctions| {
             functions.extend_missing(&imported.constant_functions);
