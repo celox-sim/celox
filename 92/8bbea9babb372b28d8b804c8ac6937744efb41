@@ -1,0 +1,1 @@
+Review: class-scoped type arguments use the specialization being declared, unpacked dimensions keyed by normalized bounds, packed element signing in keys, class parameters fully hide shadowed constants (also four-state values), no specializations from unselected generate blocks, interface classes reuse their recorded bases. Rebased onto master.
