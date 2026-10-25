@@ -691,6 +691,107 @@ pub type LoopMember = (ModuleId, VarAtomBase<SourceVarId>);
 /// [`schedule_symbolic_rtl`], which also reports the ranges the blocks of a
 /// combinational loop write when the scheduler rejects one.
 #[allow(clippy::too_many_arguments)]
+/// The sensitivity atoms whose occurrences the processes and observers of
+/// `comb_blocks` and `comb_observers` count, with their counters, in order of
+/// discovery: the atoms they list, then the upstream atoms of transparent
+/// copies into them. `same_kind` tells whether a copy carries occurrences
+/// between two variables.
+fn sensitivity_probes(
+    comb_blocks: &[LogicPath<AbsoluteAddr>],
+    comb_observers: &[CombObserver<AbsoluteAddr>],
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    same_kind: impl Fn(&AbsoluteAddr, &AbsoluteAddr) -> bool,
+) -> Vec<(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)> {
+    let mut probes = Vec::new();
+    let mut probed = HashSet::default();
+    for path in comb_blocks {
+        if let LogicPathTarget::Process {
+            sensitivity_counters,
+            ..
+        } = &path.target
+        {
+            for &(source, counter) in sensitivity_counters {
+                if probed.insert((source, counter)) {
+                    probes.push((source, counter));
+                }
+            }
+        }
+    }
+    for observer in comb_observers {
+        for &(source, counter) in &observer.sensitivity_counters {
+            if probed.insert((source, counter)) {
+                probes.push((source, counter));
+            }
+        }
+    }
+    add_copied_probes(&mut probes, &mut probed, comb_blocks, arena, same_kind);
+    probes
+}
+
+/// Adds to `probes` the upstream atoms of the transparent copies of
+/// `comb_blocks` into atoms of `probes`, transitively, each with the counter
+/// of the atom it reaches. `probed` holds the entries of `probes`.
+///
+/// A direct wire/port connection carries occurrences as well as its settled
+/// value. Preserve them when a kernel writes the upstream object twice
+/// before the copy path is evaluated. Only equal-width, unindexed copies are
+/// transparent here; expressions remain scheduled combinational evaluations.
+fn add_copied_probes(
+    probes: &mut Vec<(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)>,
+    probed: &mut HashSet<(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)>,
+    comb_blocks: &[LogicPath<AbsoluteAddr>],
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    same_kind: impl Fn(&AbsoluteAddr, &AbsoluteAddr) -> bool,
+) {
+    let mut copies_to: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
+    for (path_index, path) in comb_blocks.iter().enumerate() {
+        if let LogicPathTarget::Var(target) = &path.target
+            && path.transparent_copy
+        {
+            copies_to.entry(target.id).or_default().push(path_index);
+        }
+    }
+    let mut next_probe = 0;
+    while next_probe < probes.len() {
+        let (source, counter) = probes[next_probe];
+        next_probe += 1;
+        for &path_index in copies_to.get(&source.id).into_iter().flatten() {
+            let path = &comb_blocks[path_index];
+            let LogicPathTarget::Var(target) = &path.target else {
+                unreachable!("copies_to holds variable targets");
+            };
+            if !target.access.overlaps(&source.access) {
+                continue;
+            }
+            let celox_slt::SLTNode::Input {
+                variable,
+                access,
+                index,
+                ..
+            } = arena.get(path.expr)
+            else {
+                continue;
+            };
+            if !index.is_empty()
+                || !same_kind(variable, &target.id)
+                || access.msb - access.lsb != target.access.msb - target.access.lsb
+            {
+                continue;
+            }
+            let lsb = source.access.lsb.max(target.access.lsb);
+            let msb = source.access.msb.min(target.access.msb);
+            let upstream = VarAtomBase::new(
+                *variable,
+                access.lsb + lsb - target.access.lsb,
+                access.lsb + msb - target.access.lsb,
+            );
+            if probed.insert((upstream, counter)) {
+                probes.push((upstream, counter));
+            }
+        }
+    }
+}
+
 pub fn schedule_symbolic_rtl_reporting_loops(
     symbolic: SymbolicRtl,
     fused_ff_factory: Option<&dyn FusedFfLoweringFactory>,
@@ -866,73 +967,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         );
         // Count sensitivity occurrences before any optimizer can coalesce
         // consecutive writes whose final value is unchanged.
-        let mut probes = Vec::new();
-        for path in &comb_blocks {
-            if let LogicPathTarget::Process {
-                sensitivity_counters,
-                ..
-            } = &path.target
-            {
-                for &(source, counter) in sensitivity_counters {
-                    if !probes.contains(&(source, counter)) {
-                        probes.push((source, counter));
-                    }
-                }
-            }
-        }
-        for observer in &comb_observers {
-            for &(source, counter) in &observer.sensitivity_counters {
-                if !probes.contains(&(source, counter)) {
-                    probes.push((source, counter));
-                }
-            }
-        }
-        // A direct wire/port connection carries occurrences as well as its
-        // settled value. Preserve them when a kernel writes the upstream
-        // object twice before the copy path is evaluated. Only equal-width,
-        // unindexed copies are transparent here; expressions remain scheduled
-        // combinational evaluations.
-        let mut next_probe = 0;
-        while next_probe < probes.len() {
-            let (source, counter) = probes[next_probe];
-            next_probe += 1;
-            for path in &comb_blocks {
-                let LogicPathTarget::Var(target) = &path.target else {
-                    continue;
-                };
-                if !path.transparent_copy
-                    || target.id != source.id
-                    || !target.access.overlaps(&source.access)
-                {
-                    continue;
-                }
-                let celox_slt::SLTNode::Input {
-                    variable,
-                    access,
-                    index,
-                    ..
-                } = global_arena.get(path.expr)
-                else {
-                    continue;
-                };
-                if !index.is_empty()
-                    || (four_state && variables[variable].1 != variables[&target.id].1)
-                    || access.msb - access.lsb != target.access.msb - target.access.lsb
-                {
-                    continue;
-                }
-                let lsb = source.access.lsb.max(target.access.lsb);
-                let msb = source.access.msb.min(target.access.msb);
-                let upstream = VarAtomBase::new(
-                    *variable,
-                    access.lsb + lsb - target.access.lsb,
-                    access.lsb + msb - target.access.lsb,
-                );
-                if !probes.contains(&(upstream, counter)) {
-                    probes.push((upstream, counter));
-                }
-            }
-        }
+        let probes = sensitivity_probes(
+            &comb_blocks,
+            &comb_observers,
+            &global_arena,
+            |source, target| !four_state || variables[source].1 == variables[target].1,
+        );
         declaration_probes = probes.clone();
         occurrence_probes = probes.clone();
         // Signals a flip-flop evaluation may store twice in its working
@@ -5695,5 +5735,155 @@ impl GateBuilder<'_> {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(var: u32) -> AbsoluteAddr {
+        AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: SourceVarId(var),
+        }
+    }
+
+    /// The previous propagation, which scans every path for each probe.
+    fn add_copied_probes_by_scan(
+        probes: &mut Vec<(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)>,
+        comb_blocks: &[LogicPath<AbsoluteAddr>],
+        arena: &SLTNodeArena<AbsoluteAddr>,
+        same_kind: impl Fn(&AbsoluteAddr, &AbsoluteAddr) -> bool,
+    ) {
+        let mut next_probe = 0;
+        while next_probe < probes.len() {
+            let (source, counter) = probes[next_probe];
+            next_probe += 1;
+            for path in comb_blocks {
+                let LogicPathTarget::Var(target) = &path.target else {
+                    continue;
+                };
+                if !path.transparent_copy
+                    || target.id != source.id
+                    || !target.access.overlaps(&source.access)
+                {
+                    continue;
+                }
+                let celox_slt::SLTNode::Input {
+                    variable,
+                    access,
+                    index,
+                    ..
+                } = arena.get(path.expr)
+                else {
+                    continue;
+                };
+                if !index.is_empty()
+                    || !same_kind(variable, &target.id)
+                    || access.msb - access.lsb != target.access.msb - target.access.lsb
+                {
+                    continue;
+                }
+                let lsb = source.access.lsb.max(target.access.lsb);
+                let msb = source.access.msb.min(target.access.msb);
+                let upstream = VarAtomBase::new(
+                    *variable,
+                    access.lsb + lsb - target.access.lsb,
+                    access.lsb + msb - target.access.lsb,
+                );
+                if !probes.contains(&(upstream, counter)) {
+                    probes.push((upstream, counter));
+                }
+            }
+        }
+    }
+
+    /// Indexing the transparent copies by target finds the probes the scan
+    /// of every path finds, in the same order.
+    #[test]
+    fn copied_probes_match_path_scan() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        let mut copied = 0;
+        for _ in 0..50 {
+            let mut arena = SLTNodeArena::new();
+            let mut comb_blocks = Vec::new();
+            for _ in 0..60 {
+                let target_lsb = next(12);
+                let target_width = 1 + next(4);
+                let source_lsb = next(12);
+                // Mostly equal widths, so that most copies are transparent.
+                let source_width = if next(5) == 0 {
+                    1 + next(4)
+                } else {
+                    target_width
+                };
+                let expr = if next(8) == 0 {
+                    arena
+                        .alloc(celox_slt::SLTNode::Constant(
+                            BigUint::from(0u32),
+                            BigUint::from(0u32),
+                            source_width,
+                            false,
+                        ))
+                        .unwrap()
+                } else {
+                    arena
+                        .alloc(celox_slt::SLTNode::Input {
+                            variable: addr(next(12) as u32),
+                            signed: false,
+                            index: Vec::new(),
+                            access: BitAccess::new(source_lsb, source_lsb + source_width - 1),
+                        })
+                        .unwrap()
+                };
+                comb_blocks.push(LogicPath {
+                    target: LogicPathTarget::Var(VarAtomBase::new(
+                        addr(next(12) as u32),
+                        target_lsb,
+                        target_lsb + target_width - 1,
+                    )),
+                    transparent_copy: next(6) != 0,
+                    sources: HashSet::default(),
+                    previous_sources: HashSet::default(),
+                    address_sources: HashSet::default(),
+                    local_inputs: Vec::new(),
+                    order_before: HashSet::default(),
+                    comb_capture_enable_sites: Vec::new(),
+                    comb_capture_enable_always: false,
+                    pre_lower_nodes: Vec::new(),
+                    expr,
+                });
+            }
+            let mut probes = Vec::new();
+            for _ in 0..4 {
+                let lsb = next(14);
+                let probe = (
+                    VarAtomBase::new(addr(next(12) as u32), lsb, lsb + next(3)),
+                    addr(100 + next(3) as u32),
+                );
+                if !probes.contains(&probe) {
+                    probes.push(probe);
+                }
+            }
+            // Variables 0..6 are four-state and the others two-state.
+            let same_kind =
+                |a: &AbsoluteAddr, b: &AbsoluteAddr| (a.var_id.0 < 6) == (b.var_id.0 < 6);
+            let mut expected = probes.clone();
+            add_copied_probes_by_scan(&mut expected, &comb_blocks, &arena, same_kind);
+            let mut probed = probes.iter().copied().collect();
+            add_copied_probes(&mut probes, &mut probed, &comb_blocks, &arena, same_kind);
+            assert_eq!(probes, expected);
+            assert_eq!(probed.len(), probes.len());
+            copied += probes.len();
+        }
+        // The cases find copies, beyond the 4 initial probes each.
+        assert!(copied > 50 * 4 + 50, "{copied} probes");
     }
 }
