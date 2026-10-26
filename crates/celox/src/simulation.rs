@@ -316,6 +316,17 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         self.dump_unless_rewound(timestamp);
     }
 
+    /// Combinational logic still to settle belongs to `timestamp`, so its
+    /// reports read that time: settle it before the run moves on.
+    fn try_leave_time(&mut self, _timestamp: u64) -> Result<(), Halt> {
+        if self.timestamped_reports && self.dirty {
+            self.eval_comb_checked().map_err(Halt::Error)?;
+            self.dirty = false;
+            self.runtime_finish()?;
+        }
+        Ok(())
+    }
+
     /// Deferred assertions mature in the Observed and Postponed regions of
     /// the slot (IEEE 1800-2023 16.4).
     fn try_end_time_slot(&mut self, _timestamp: u64) -> Result<(), Halt> {
@@ -774,7 +785,11 @@ impl<B: SimBackend> Simulation<B> {
             return self.watched_step();
         }
         // With nothing scheduled, the step ends the slot too.
+        let was_stopped = self.is_stopped();
         self.end_idle_slot(self.state.next_event_time().unwrap_or(u64::MAX))?;
+        if !was_stopped && self.is_stopped() {
+            return Ok(Some(self.time()));
+        }
         self.step_until(u64::MAX)
     }
 
@@ -785,7 +800,7 @@ impl<B: SimBackend> Simulation<B> {
     /// run at that time.
     #[inline]
     fn end_idle_slot(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
-        if !self.simulator.host_slot_work
+        if (!self.simulator.host_slot_work && !self.simulator.timestamped_reports)
             || end_time <= self.state.time()
             || self.state.next_event_time() == Some(self.state.time())
         {
@@ -800,7 +815,8 @@ impl<B: SimBackend> Simulation<B> {
         let result = if self.simulator.dirty {
             let result = self.simulator.eval_comb_checked();
             self.simulator.dirty = false;
-            result
+            // A `$finish` of the settle finishes the simulation here.
+            result.and_then(|()| self.sync_finish_checked())
         } else {
             Ok(())
         };
@@ -822,7 +838,7 @@ impl<B: SimBackend> Simulation<B> {
         while let Some(next_time) = self.state.next_event_time() {
             if next_time > self.state.time() {
                 self.watch_settle()?;
-                if self.reports.failure.is_some() {
+                if self.is_finished() || self.is_stopped() || self.reports.failure.is_some() {
                     return Ok(Some(self.state.time()));
                 }
             }
@@ -870,7 +886,7 @@ impl<B: SimBackend> Simulation<B> {
             }
             if next_time > self.state.time() {
                 self.watch_settle()?;
-                if self.reports.failure.is_some() {
+                if self.is_finished() || self.is_stopped() || self.reports.failure.is_some() {
                     return Ok(false);
                 }
             }
@@ -884,7 +900,7 @@ impl<B: SimBackend> Simulation<B> {
             }
         }
         self.watch_settle()?;
-        Ok(self.reports.failure.is_none())
+        Ok(!self.is_stopped() && self.reports.failure.is_none())
     }
 
     /// Settle combinational logic that no step settled, as after host writes
@@ -903,7 +919,11 @@ impl<B: SimBackend> Simulation<B> {
             return Ok(());
         }
         if self.simulator.dirty {
-            if let Err(error) = self.simulator.eval_comb_checked() {
+            if let Err(error) = self
+                .simulator
+                .eval_comb_checked()
+                .and_then(|()| self.sync_finish_checked())
+            {
                 self.finalize_fatal(&error);
                 self.flush_error_output();
                 return Err(error);
@@ -985,7 +1005,11 @@ impl<B: SimBackend> Simulation<B> {
                 return Ok(());
             }
         } else {
+            let was_stopped = self.is_stopped();
             self.end_idle_slot(end_time)?;
+            if !was_stopped && self.is_stopped() {
+                return Ok(());
+            }
         }
         let reached = match self.shadow.take() {
             None => self.state.run_until(&mut self.simulator, end_time)?,
@@ -1034,6 +1058,9 @@ impl<B: SimBackend> Simulation<B> {
         } else {
             self.end_idle_slot(time)?;
         }
+        if self.is_finished() || self.is_stopped() {
+            return Ok(());
+        }
         self.state.advance_time(&mut self.simulator.backend, time);
         if let Some(shadow) = &mut self.shadow {
             shadow
@@ -1063,7 +1090,11 @@ impl<B: SimBackend> Simulation<B> {
             self.run_until(end_time)?;
             return Ok(!self.state.is_stopped());
         }
+        let was_stopped = self.is_stopped();
         self.end_idle_slot(end_time)?;
+        if !was_stopped && self.is_stopped() {
+            return Ok(false);
+        }
         let mut steps = 0;
         while let Some(next_time) = self.state.next_event_time() {
             if next_time > end_time {

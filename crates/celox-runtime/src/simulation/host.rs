@@ -146,6 +146,14 @@ pub trait HostBoundary: UnitExecutor {
     fn try_end_time_slot(&mut self, _timestamp: u64) -> Result<(), Halt> {
         Ok(())
     }
+
+    /// Called before a run or a step moves from `timestamp` to a later time:
+    /// before the step of a later slot, and at the end of a run to a time
+    /// without work. An error ends the run there, as an error of a step
+    /// does, and so does a `$finish` the host ran there.
+    fn try_leave_time(&mut self, _timestamp: u64) -> Result<(), Halt> {
+        Ok(())
+    }
 }
 
 /// How many time slots a compiled scheduler may run at once (see
