@@ -21,6 +21,10 @@ test("Lydite core changes and shared configuration run core checks", () => {
   for (const path of [
     "crates/lydite/src/main.rs",
     "crates/lydite-ir/src/lib.rs",
+    "crates/aplite/src/finite.rs",
+    "crates/aplite/README.md",
+    "crates/aplite/tests/model.rs",
+    "scripts/check-aplite-release.mjs",
     "lydite/editor/server.py",
     "Cargo.lock",
     "Cargo.toml",
@@ -306,4 +310,11 @@ test("normal CI and standalone core conformance never build the bridge", () => {
   const coreGate = readFileSync(`${root}lydite/conformance/veryl/run_ci.sh`, "utf8");
   assert.doesNotMatch(coreGate, /lydite-celox/);
   assert.match(coreGate, /-p lydite-ir -p lydite -p lydite-solver -p lydite-syntax -p lydite-verify/);
+});
+
+// The extracted solver is tested directly as well as through its proof consumers.
+test("Aplite runs its own tests in the Lydite lane", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/lydite-checks.yml", import.meta.url), "utf8");
+  assert.match(workflow, /cargo test --locked .* -p aplite/);
+  assert.deepEqual(celoxRustTestScope(["crates/aplite/src/finite.rs"], packages).packages ?? [], []);
 });

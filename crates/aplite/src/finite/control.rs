@@ -2,7 +2,7 @@
 //! A selected subset may be fixed; all remaining variables stay symbolic.
 //! All cases share the original limits; SAT is replayed on the ORIGINAL query.
 use super::*;
-use lydite_ir::{boolv, bv, node, not};
+use crate::{boolv, bv, node, not};
 
 pub(super) fn empty(hint: SearchHint) -> Outcome {
     Outcome {
@@ -243,15 +243,15 @@ fn asserted_polarity(t: &Term, negative: bool, b: &mut Budget, depth: usize) -> 
         let args = &t.0.args;
         let result = match operation(t)? {
             Op::Not => visit(&args[0], !negative, b, depth + 1, memo)?,
-            Op::And if !negative => lydite_ir::and(
+            Op::And if !negative => crate::and(
                 visit(&args[0], false, b, depth + 1, memo)?,
                 visit(&args[1], false, b, depth + 1, memo)?,
             ),
-            Op::Or if negative => lydite_ir::and(
+            Op::Or if negative => crate::and(
                 visit(&args[0], true, b, depth + 1, memo)?,
                 visit(&args[1], true, b, depth + 1, memo)?,
             ),
-            Op::Implies if negative => lydite_ir::and(
+            Op::Implies if negative => crate::and(
                 visit(&args[0], false, b, depth + 1, memo)?,
                 visit(&args[1], true, b, depth + 1, memo)?,
             ),
@@ -649,7 +649,7 @@ pub(super) fn route(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lydite_ir::{and, eq, ite, var};
+    use crate::{and, eq, ite, var};
     fn or(x: Term, y: Term) -> Term {
         node(Sort::Bool, "or", vec![x, y])
     }

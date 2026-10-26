@@ -1,6 +1,6 @@
 //! Bounded exact distribution of constant-index word lookups over ITE addresses.
 use super::*;
-use lydite_ir::{and, boolv, bv, eq, ite};
+use crate::{and, boolv, bv, eq, ite};
 
 const MAX_ROWS: usize = 64;
 const MAX_CREATED_NODES: usize = 4096;
@@ -79,7 +79,7 @@ impl Rewrite {
             t.clone()
         } else if self.room(1, b) {
             self.charge(1, b)?;
-            lydite_ir::node(t.0.sort.clone(), t.0.op.clone(), args)
+            crate::node(t.0.sort.clone(), t.0.op.clone(), args)
         } else {
             t.clone()
         };
@@ -114,7 +114,7 @@ impl Rewrite {
                     self.word_rewrites += 1;
                     n = ite(
                         and(
-                            lydite_ir::not(n.0.args[0].clone()),
+                            crate::not(n.0.args[0].clone()),
                             n.0.args[2].0.args[0].clone(),
                         ),
                         n.0.args[2].0.args[1].clone(),
@@ -360,7 +360,7 @@ impl Rewrite {
             for key in &unchanged {
                 enable = and(
                     enable,
-                    lydite_ir::not(eq(write_address.clone(), bv(width, *key))),
+                    crate::not(eq(write_address.clone(), bv(width, *key))),
                 );
             }
             let result = ite(
@@ -453,7 +453,7 @@ impl Rewrite {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lydite_ir::{and, boolv, bv, node, not, var};
+    use crate::{and, boolv, bv, node, not, var};
 
     fn budget() -> Budget {
         Budget {
@@ -741,7 +741,7 @@ mod tests {
 #[cfg(test)]
 mod word_normalization_tests {
     use super::*;
-    use lydite_ir::{node, not, var};
+    use crate::{node, not, var};
     fn b() -> Budget {
         Budget {
             limits: Limits::default(),

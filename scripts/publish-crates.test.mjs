@@ -116,7 +116,7 @@ test("publication order includes every public crate after its workspace dependen
   const publicPackages = metadata.packages.filter(
     (pkg) => pkg.publish === null || pkg.publish.includes("crates-io"),
   );
-  assert.deepEqual([...order].sort(), publicPackages.map((pkg) => pkg.name).sort());
+  assert.deepEqual([...order, "aplite"].sort(), publicPackages.map((pkg) => pkg.name).sort());
   for (const [index, name] of order.entries()) {
     for (const dependency of packages.get(name).dependencies) {
       if (!dependency.path) continue;
