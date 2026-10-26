@@ -1,1 +1,1 @@
-Rebase SVA history support onto current master after the deferred-assertion dependency merged.
+Rebase on merged fork/process control and advance the history image version above its updated base.
