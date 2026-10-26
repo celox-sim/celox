@@ -538,6 +538,15 @@ jobs:
           --expected conformance/sv-tests/expected.tsv
           --report "$RUNNER_TEMP/sv-tests-report.tsv"
 
+      - name: Summarize sv-tests failures
+        if: always()
+        shell: bash
+        run: |
+          report="$RUNNER_TEMP/sv-tests-report.summary.md"
+          if [ -f "$report" ]; then
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Retain the report and official per-case logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -546,6 +555,8 @@ jobs:
           path: |
             ${{ runner.temp }}/sv-tests-report.tsv
             ${{ runner.temp }}/sv-tests-report.summary.json
+            ${{ runner.temp }}/sv-tests-report.summary.md
+            ${{ runner.temp }}/sv-tests-report.failures.json
             ${{ runner.temp }}/sv-tests-results
           if-no-files-found: ignore
           retention-days: 14
