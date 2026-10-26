@@ -42,6 +42,7 @@ const RELEASE_PLEASE_FILES = new Set([
 // dependencies of celox-napi. ci-changes.test.mjs checks the workspace graph
 // so adding a dependency cannot silently make this exclusion unsafe.
 const RUST_ONLY_CRATES = new Set([
+  "aplite",
   "celox-test-suite",
   "celox-bench",
   "celox-bench-sv",
@@ -308,8 +309,8 @@ if (
 // Lydite core tests run independently; bridge CI is disabled.
 export function celoxRustTestScope(files, packages) {
   return rustTestScope(
-    files.filter((path) => !/^(?:\.\/)?(?:lydite\/|crates\/lydite(?:-|\/))/.test(path)),
-    packages.filter((pkg) => !/^lydite(?:-|$)/.test(pkg.name)),
+    files.filter((path) => !/^(?:\.\/)?(?:lydite\/|crates\/(?:lydite(?:-|\/)|aplite\/))/.test(path)),
+    packages.filter((pkg) => !/^(?:lydite(?:-|$)|aplite$)/.test(pkg.name)),
   );
 }
 

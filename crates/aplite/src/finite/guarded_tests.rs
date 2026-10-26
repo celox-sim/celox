@@ -1,5 +1,5 @@
 use super::*;
-use lydite_ir::{and, boolv, bv, eq, ite, node, not, var};
+use crate::{and, boolv, bv, eq, ite, node, not, var};
 fn imp(a: Term, b: Term) -> Term {
     node(Sort::Bool, "=>", vec![a, b])
 }

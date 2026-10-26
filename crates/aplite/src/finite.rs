@@ -5,7 +5,7 @@
 //! requested context terms. Readonly arrays use exact finite-observation reduction
 //! and total sparse-array model replay. Unsupported terms or exhausted budgets yield Unknown.
 //! Diagnostics are not proof certificates: UNSAT trusts this Rust implementation.
-use lydite_ir::{Env, Res, Sort, Term};
+use crate::{Env, Res, Sort, Term};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -859,7 +859,7 @@ impl Blast {
             t.clone()
         } else {
             self.charge_guarded(b)?;
-            lydite_ir::node(t.0.sort.clone(), t.0.op.clone(), args)
+            crate::node(t.0.sort.clone(), t.0.op.clone(), args)
         };
         memo.insert(t.clone(), value.clone());
         Ok(value)
@@ -928,7 +928,7 @@ impl Blast {
         }
         self.charge_guarded(b)?;
         self.guarded_rewrites += 1;
-        Ok(Some(lydite_ir::ite(
+        Ok(Some(crate::ite(
             t.0.args[0].clone(),
             yes,
             t.0.args[2].clone(),
@@ -1685,14 +1685,13 @@ fn split_choices(formula: &Term, blast: &Blast, b: &mut Budget) -> Res<Vec<Lit>>
     Ok(best)
 }
 
-/// Compatibility entry point: use proof-oriented search, as in 0.11.2.
-/// SAT is still returned and validated normally, even though the hint is UNSAT.
 /// Validate the entire original formula AND diagnostic context before any
 /// compositional projection can discard derived-context expressions.
-pub(crate) fn validate_original_context(formula: &Term, context: &Env) -> Res<(usize, u64)> {
+pub fn validate_original_context(formula: &Term, context: &Env) -> Res<(usize, u64)> {
     validate_original_context_with_limits(formula, context, Limits::default())
 }
-pub(crate) fn validate_original_context_with_limits(
+/// Validate the complete input under an explicit budget; returns term and work counts.
+pub fn validate_original_context_with_limits(
     formula: &Term,
     context: &Env,
     limits: Limits,
@@ -2106,7 +2105,7 @@ fn solve_plain(formula: &Term, context: &Env, limits: Limits, search_hint: Searc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lydite_ir::{and, boolv, bv, eq, ite, node, not, var};
+    use crate::{and, boolv, bv, eq, ite, node, not, var};
     fn check(t: Term) -> Outcome {
         let proof = solve(&t, &Env::new(), Limits::default());
         let witness = solve_with_hint(&t, &Env::new(), Limits::default(), SearchHint::Sat);

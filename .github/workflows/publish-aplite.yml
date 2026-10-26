@@ -1,0 +1,60 @@
+name: Publish Aplite
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: aplite-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.ref_name }}
+
+jobs:
+  validate:
+    name: Validate and test Aplite release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Check release identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-aplite.mjs validate
+      - uses: ./.github/actions/setup-rust
+      - name: Test and verify standalone package
+        run: |
+          cargo test --locked -p aplite
+          cargo package --locked -p aplite
+
+  publish:
+    name: Publish Aplite to crates.io
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-rust
+      - name: Authenticate to crates.io
+        id: crates_io_auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish independent package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates_io_auth.outputs.token }}
+        run: node scripts/publish-aplite.mjs publish
