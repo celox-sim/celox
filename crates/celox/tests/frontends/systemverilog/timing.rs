@@ -1236,3 +1236,129 @@ fn function_join_none_interpreter() {
         );
     }
 }
+
+// Activation-local compound event expressions (IEEE 1800-2023 9.4.2).
+timed_cases! {
+    fn fork_compound_event_tracks_result_not_operands = "fork::compound_event_tracks_result_not_operands";
+    fn fork_compound_event_activations_outlive_parent = "fork::compound_event_activations_outlive_parent";
+    fn fork_compound_event_function_scratch_isolated = "fork::compound_event_function_scratch_isolated";
+    fn fork_compound_event_four_state_lsb_edges = "fork::compound_event_four_state_lsb_edges";
+}
+
+#[test]
+fn fork_compound_event_rejects_nonautomatic_operands() {
+    let source = r#"
+        module Top;
+            int operand;
+            function automatic int pulse(); operand=1; operand=0; return 0; endfunction
+            initial begin
+                automatic int local_value=1;
+                int unused_result;
+                fork
+                    begin @(operand && local_value); end
+                    begin #1; unused_result=pulse(); end
+                join
+            end
+        endmodule
+    "#;
+    let error = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("function_operand_write.sv"))],
+        "Top",
+    )
+    .build()
+    .err()
+    .unwrap_or_else(|| panic!("mixed global operands need additional observation boundaries"))
+    .to_string();
+    assert!(
+        error.contains("activation-local event expression reading a non-automatic variable"),
+        "{error}"
+    );
+}
+
+#[test]
+fn fork_compound_event_interpreter() {
+    for name in [
+        "compound_event_tracks_result_not_operands",
+        "compound_event_activations_outlive_parent",
+        "compound_event_function_scratch_isolated",
+        "compound_event_four_state_lsb_edges",
+    ] {
+        crate::suite::run_case(&format!("fork::{name}"), "interpreter");
+    }
+}
+
+#[test]
+fn fork_compound_event_rejects_transitive_global_and_default_reads() {
+    for expression in ["outer(local_value)", "with_default(local_value)"] {
+        let source = format!(
+            r#"
+            module Top;
+                int global_value=1;
+                function automatic int inner(); return global_value; endfunction
+                function automatic int outer(input int x); return x+inner(); endfunction
+                function automatic int with_default(input int x, input int y=inner()); return x+y; endfunction
+                initial begin
+                    automatic int local_value=0;
+                    fork begin @({expression}); end begin #1; local_value=1; end join
+                end
+            endmodule
+        "#
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(
+                source.as_str(),
+                std::path::Path::new("global_probe_read.sv"),
+            )],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("global reads require additional event observation"))
+        .to_string();
+        assert!(
+            error.contains("activation-local event expression reading a non-automatic variable"),
+            "{expression}: {error}"
+        );
+    }
+}
+
+#[test]
+fn fork_compound_event_rejects_implicit_expression_writes() {
+    for expression in [
+        "put(value,1)+put(value,0)",
+        "$random(value)",
+        "$dist_uniform(value,0,1)",
+        "$value$plusargs(\"v=%d\",value)",
+    ] {
+        let source = format!(
+            r#"
+            module Top;
+                function automatic int put(output int dst,input int x); dst=x; return 0; endfunction
+                initial begin
+                    automatic int value=0;
+                    int discard;
+                    fork
+                        begin @(value==1); end
+                        begin #1; discard={expression}; end
+                    join
+                end
+            endmodule
+        "#
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(
+                source.as_str(),
+                std::path::Path::new("implicit_probe_write.sv"),
+            )],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("implicit writes need safe observation boundaries"))
+        .to_string();
+        assert!(
+            error.contains("implicit write to an activation-local event operand"),
+            "{expression}: {error}"
+        );
+    }
+}

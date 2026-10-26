@@ -429,6 +429,8 @@ impl Plan {
                 Some("a declaration initializer")
             } else if slots.kind == celox_design::ProcessKind::Final {
                 Some("a final procedure")
+            } else if process.frame.is_some() {
+                Some("the process has dynamic activation frames")
             } else if slots.program.is_some() {
                 Some("a program process runs in the reactive region set")
             } else if slots.requires_timed_simulation {

@@ -650,6 +650,10 @@
     "sv_class-X11": {
       "title": "In a non-top module, a shallow copy of a class-scoped static handle (`h = new C::last`) leaves h null",
       "standard": "IEEE 1800-2023 8.12, 8.23, 8.9"
+    },
+    "sv_fork-X1": {
+      "title": "Compound events on automatic block locals wake before the expression changes or miss subsequent edges",
+      "standard": "IEEE 1800-2023 9.4.2, Table 9-2"
     }
   },
   "cases": [
@@ -3987,6 +3991,22 @@
       "classification": "xezim_bug",
       "bug": "sv_rest-X2",
       "note": "p::make() constructs with the typed constructor call `h = p::C::new`; xezim leaves the handle unusable (h == null is x), so h.v is a fatal null dereference and the run ends before the script (as top too). Replacing it with `h = new` prints the expected 5. Repro: work/review5/xezim/r/c4_typed.sv, work/review5/xezim/r/c4_new.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "fork::compound_event_tracks_result_not_operands",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_fork-X1",
+      "note": "The shared case returns q=102 instead of 3. A standalone initial automatic int value=0; fork @(value>2) $display(...) alongside #1 value=1; #1 value=2; #1 value=3 wakes at time 0 with value=0. The result remains false until time 3; clause 9.4.2 excludes operand-only changes. See verification/repros/sv_fork_compound_events.md."
+    },
+    {
+      "suite": "sv",
+      "name": "fork::compound_event_four_state_lsb_edges",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_fork-X1",
+      "note": "The shared case reports rises=0 instead of 3. Its assignments are separated by #1 delays, so transient coalescing cannot explain the mismatch. A reduced one-shot concatenation edge wait wakes at time 0, before any write. Clause 9.4.2 requires edge detection on the result LSB, including the X/Z transitions in Table 9-2. See verification/repros/sv_fork_compound_events.md."
     }
   ]
 }

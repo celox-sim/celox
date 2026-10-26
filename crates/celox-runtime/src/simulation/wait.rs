@@ -103,13 +103,13 @@ impl<B: SimBackend> SimulationState<B> {
         backend: &mut B,
         signal: SignalRef,
         write: impl FnOnce(&mut B),
-    ) {
+    ) -> Result<(), Halt> {
         if self.model.counted.is_empty()
             && self.model.probes_by_offset.is_empty()
             && self.process_state.waiters.is_empty()
         {
             write(backend);
-            return;
+            return Ok(());
         }
         let counted = self.model.counted_by_offset.get(&signal.offset).copied();
         let probes = self.model.probes_by_offset.get(&signal.offset);
@@ -133,30 +133,36 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         if !self.process_state.waiters.is_empty() {
-            self.observe(backend, Some(signal));
+            self.observe(backend, Some(signal))?;
         }
+        Ok(())
     }
 
     /// Test the waits against the current state, or only their terms on
     /// signal `only` after a write of it. Woken processes become ready.
     #[inline]
-    pub(super) fn observe(&mut self, backend: &B, only: Option<SignalRef>) {
-        self.check_waits(backend, only, false);
+    pub(super) fn observe(&mut self, backend: &mut B, only: Option<SignalRef>) -> Result<(), Halt> {
+        self.check_waits(backend, only, false)
     }
 
     /// Like [`Self::observe`], at a point where only design code wrote
     /// state: terms on signals that only the host and the scheduler write
     /// cannot have changed.
     #[inline]
-    pub(super) fn observe_driven(&mut self, backend: &B) {
+    pub(super) fn observe_driven(&mut self, backend: &mut B) -> Result<(), Halt> {
         if !self.process_state.waiters.none_driven() {
-            self.check_waits(backend, None, true);
+            self.check_waits(backend, None, true)?;
         }
+        Ok(())
     }
 
-    fn check_waits(&mut self, backend: &B, only: Option<SignalRef>, driven_only: bool) {
+    fn check_waits(
+        &mut self,
+        backend: &mut B,
+        only: Option<SignalRef>,
+        driven_only: bool,
+    ) -> Result<(), Halt> {
         let processes = &self.model.processes;
-        let state = StateView::new(backend);
         let ProcessState {
             waiters,
             ready,
@@ -165,10 +171,46 @@ impl<B: SimBackend> SimulationState<B> {
             cells,
             ..
         } = &mut self.process_state;
+        let mut error = None;
         waiters.retain(driven_only, |process, waiter| {
+            if error.is_some() {
+                return true;
+            }
             let terms = &processes[process].wait_sites[waiter.site];
             let mut wake = false;
             for (index, term) in terms.iter().enumerate() {
+                if let Some(probe) = processes[process].frame.as_ref().and_then(|frame| {
+                    frame
+                        .event_probes
+                        .iter()
+                        .find(|probe| probe.result == term.signal)
+                }) {
+                    if only.is_some_and(|signal| !probe.inputs.contains(&signal)) {
+                        continue;
+                    }
+                    match super::activation::event_probe(
+                        backend,
+                        &processes[process],
+                        &activations[process],
+                        cells,
+                        probe,
+                    ) {
+                        Ok(value) => {
+                            let Baseline::Value(last) = &mut waiter.baselines[index] else {
+                                error = Some(SimulatorErrorCode::InternalError.into());
+                                return true;
+                            };
+                            wake |= occurs(term.kind, last, &value);
+                            *last = value;
+                        }
+                        Err(failure) => {
+                            error = Some(failure);
+                            return true;
+                        }
+                    }
+                    continue;
+                }
+                let state = StateView::new(&*backend);
                 if only.is_some_and(|signal| signal != term.signal) || (driven_only && !term.driven)
                 {
                     continue;
@@ -243,6 +285,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
             !wake
         });
+        error.map_or(Ok(()), Err)
     }
 
     /// Whether the change from the image `last` to `now` is an occurrence of

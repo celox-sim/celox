@@ -4864,6 +4864,19 @@ pub(crate) fn attach_instance_glue(
         }
     }
     module.comb_alternatives = comb_alternatives;
+    // Probe results are activation-local values, never global occurrences.
+    let probe_results: HashSet<_> = module
+        .processes
+        .iter()
+        .filter_map(|process| process.frame.as_ref())
+        .flat_map(|frame| {
+            frame
+                .event_probes
+                .iter()
+                .flat_map(|probe| probe.scratch.iter().copied())
+        })
+        .collect();
+    candidates.retain(|signal| !probe_results.contains(signal));
     module.counter_slots =
         celox_frontend_core::watch::declare_counter_slots(&mut module.variables, candidates);
     if waits {

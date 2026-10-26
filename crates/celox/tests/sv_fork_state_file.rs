@@ -558,3 +558,90 @@ endmodule"#
         check(build().build_wasm().unwrap());
     }
 }
+
+#[test]
+fn compound_event_baselines_restore_and_probe_entries_cannot_resume() {
+    const SOURCE: &str = r#"`timescale 1ns/1ns
+        module Top(output int q);
+            initial begin
+                automatic int value=0;
+                q=0;
+                fork
+                    begin @(value>2); q=q+1; end
+                    begin #2; value=1; #1; value=3; end
+                join
+                q=q+2;
+            end
+        endmodule
+    "#;
+    let mut source =
+        Simulation::from_sv_sources(vec![(SOURCE, Path::new("compound_state.sv"))], "Top")
+            .build_interpreter()
+            .unwrap();
+    source.run_until(1).unwrap();
+    let probe = source
+        .program()
+        .runtime_schema
+        .process_frames
+        .iter()
+        .flatten()
+        .flat_map(|frame| &frame.event_probes)
+        .next()
+        .unwrap()
+        .resume;
+    let file = bytes(&source.save_state().unwrap());
+    let mut target =
+        Simulation::from_sv_sources(vec![(SOURCE, Path::new("compound_state.sv"))], "Top")
+            .build_native()
+            .unwrap();
+    target.load_state(&file).unwrap();
+    for mutation in 0..3 {
+        let mut invalid = file.clone();
+        let processes = &mut invalid.schedule.as_mut().unwrap().processes;
+        let ProcessRef::Activation(waiter) = processes.waiters[0].process else {
+            panic!("dynamic waiter");
+        };
+        let activation = processes
+            .activations
+            .iter_mut()
+            .find(|activation| activation.id == waiter)
+            .unwrap();
+        let mut set = |suffix: &str, number: u64| {
+            let (_, value) = activation
+                .private
+                .iter_mut()
+                .find(|(name, _)| name.ends_with(suffix))
+                .unwrap();
+            let width = value.width.div_ceil(8) as usize;
+            value.value = number.to_le_bytes()[..width].to_vec();
+            value.mask.fill(0);
+        };
+        match mutation {
+            0 => set("resume", u64::from(probe)),
+            1 => set(
+                "status",
+                u64::from(celox_design::ProcessStatus::EventProbe.code()),
+            ),
+            2 => {
+                set(
+                    "status",
+                    u64::from(celox_design::ProcessStatus::Fork.code()),
+                );
+                set("delay", u64::from(probe) | (1 << 16) | (2 << 32));
+            }
+            _ => unreachable!(),
+        }
+        let error = target.load_state(&bytes(&invalid)).unwrap_err().to_string();
+        assert!(
+            error.contains("invalid continuation or status")
+                || error.contains("invalid control payload"),
+            "{error}"
+        );
+        assert_eq!(target.time(), 1);
+        assert_eq!(target.get(target.signal("q")), 0u8.into());
+    }
+    target.run_until(2).unwrap();
+    assert_eq!(target.get(target.signal("q")), 0u8.into());
+    target.run_until(4).unwrap();
+    assert_eq!(target.get(target.signal("q")), 3u8.into());
+}

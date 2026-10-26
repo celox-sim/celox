@@ -157,6 +157,28 @@ impl ProcessKernelBuilder {
         Ok(())
     }
 
+    /// Open a separate dispatch entry for a pure event-expression probe.
+    /// The caller must close it with `end_event_probe`, without scheduling
+    /// operations or executing the waiting process's continuation.
+    pub fn begin_event_probe(&mut self) -> Result<(BlockId, u32), ProcessKernelError> {
+        let resume = self.resume_blocks.len();
+        if resume > MAX_PROCESS_SUSPENSIONS {
+            return Err(ProcessKernelError::TooManySuspensions);
+        }
+        let previous = self.builder.new_block();
+        self.builder
+            .seal_block(SIRTerminator::Jump(previous, Vec::new()));
+        let probe = self.builder.new_block();
+        self.resume_blocks.push(probe);
+        self.builder.switch_to_block(probe);
+        Ok((previous, resume as u32))
+    }
+
+    pub fn end_event_probe(&mut self, previous: BlockId) {
+        self.end(ProcessStatus::EventProbe);
+        self.builder.switch_to_block(previous);
+    }
+
     /// Suspend for the number of time units in `amount`, an unsigned
     /// two-state register of [`PROCESS_DELAY_WIDTH`] bits, and continue at
     /// a new resume point. A zero delay resumes after the nonblocking

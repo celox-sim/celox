@@ -89,6 +89,10 @@ pub(super) struct Ff<'p, 'a> {
     kernel: Option<ProcessKernelBuilder>,
     forked: bool,
     frame_locals: Vec<SourceVarId>,
+    event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
+    unobserved_function_writes: HashSet<SourceVarId>,
+    observe_blocking_assignments: bool,
+    implicit_write_depth: usize,
     /// The index of the process being lowered among the module's kernels.
     process: usize,
     /// The wait sites of the process, by local index.
@@ -184,6 +188,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             kernel: None,
             forked: false,
             frame_locals: Vec::new(),
+            event_probes: Vec::new(),
+            unobserved_function_writes: HashSet::default(),
+            observe_blocking_assignments: false,
+            implicit_write_depth: 0,
             direct: false,
             input_occurrences: true,
             process: 0,
@@ -1517,6 +1525,13 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// Execute the user subroutine calls of an expression and replace each by
     /// a hidden variable holding its result.
     fn hoist(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        self.implicit_write_depth += 1;
+        let result = self.hoist_inner(expr);
+        self.implicit_write_depth -= 1;
+        result
+    }
+
+    fn hoist_inner(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use sv::ir::Expr;
         if !self.m.calls(expr) {
             return Ok(expr.clone());
@@ -2882,6 +2897,21 @@ impl<'p, 'a> Ff<'p, 'a> {
     }
 
     fn store(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
+        // Intrinsic and subroutine expression copy-outs, including seed and
+        // plusargs actuals, bypass statement lowering. They cannot introduce
+        // observation yields while caller registers are live. Record the
+        // resolved destination here so a later probe cannot silently miss it.
+        if self.observe_blocking_assignments
+            && self.kernel.is_some()
+            && (self.implicit_write_depth != 0
+                || self.active_calls.iter().any(|name| {
+                    self.m
+                        .subroutine(name)
+                        .is_some_and(|subroutine| !subroutine.is_task)
+                }))
+        {
+            self.unobserved_function_writes.insert(id);
+        }
         let value = if let Some((enabled, forced)) = self.m.force_controls(id) {
             let condition = self.b.alloc_bit(1, false);
             self.b.emit(SIRInstruction::Load(
@@ -3455,6 +3485,27 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok(true)
     }
 
+    /// Publish each blocking assignment before the next statement, without
+    /// switching the writer or releasing deferred join_none children.
+    fn observe_assignment(&mut self, targets: &[sv::ir::LValue]) -> Result<(), sv::AnalyzerError> {
+        if !self.forked || !self.observe_blocking_assignments || self.kernel.is_none() {
+            return Ok(());
+        }
+        let in_function = self.active_calls.iter().any(|name| {
+            self.m
+                .subroutine(name)
+                .is_some_and(|subroutine| !subroutine.is_task)
+        });
+        if in_function || self.implicit_write_depth != 0 {
+            self.unobserved_function_writes
+                .extend(targets.iter().filter_map(|target| self.m.id(target.name())));
+        } else {
+            self.with_kernel(ProcessKernelBuilder::yield_now)
+                .map_err(kernel_error)?;
+        }
+        Ok(())
+    }
+
     fn jump(&mut self, target: BlockId) {
         self.b.seal_block(SIRTerminator::Jump(target, Vec::new()));
     }
@@ -3498,10 +3549,12 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             sv::ir::Stmt::Assign { lhs, rhs, .. } => {
                 self.assign(lhs, rhs)?;
+                self.observe_assignment(std::slice::from_ref(lhs))?;
                 Ok(true)
             }
             sv::ir::Stmt::AssignConcat { parts, rhs, .. } => {
                 self.assign_concat(parts, rhs)?;
+                self.observe_assignment(parts)?;
                 Ok(true)
             }
             sv::ir::Stmt::Delay {
@@ -3697,7 +3750,16 @@ impl<'p, 'a> Ff<'p, 'a> {
                 args,
                 site,
                 assertion,
-            } => self.system_task(*task, args, site.as_ref(), assertion.as_ref()),
+            } => {
+                // System-task output writes (including readmem) have their own
+                // lowering. Until they expose safe per-update boundaries, a
+                // watched automatic destination is rejected like expression
+                // copy-out rather than losing intermediate changes.
+                self.implicit_write_depth += 1;
+                let result = self.system_task(*task, args, site.as_ref(), assertion.as_ref());
+                self.implicit_write_depth -= 1;
+                result
+            }
         }
     }
 
@@ -4072,7 +4134,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         step: &[sv::ir::Stmt],
         body: &[sv::ir::Stmt],
     ) -> Result<bool, sv::AnalyzerError> {
-        if let sv::ir::LoopKind::For = kind
+        if !(self.observe_blocking_assignments && self.kernel.is_some())
+            && let sv::ir::LoopKind::For = kind
             && let Some(canonical) = canonical_for_loop(init, condition, step)
             && self
                 .m
@@ -4557,9 +4620,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.assign(lvalue, &sv::ir::Expr::Ident(formal))?;
             } else {
                 let _ = signed;
-                let parts = lvalues;
-                self.assign_concat(&parts, &sv::ir::Expr::Ident(formal))?;
+                self.assign_concat(&lvalues, &sv::ir::Expr::Ident(formal))?;
             }
+            self.observe_assignment(&lvalues)?;
         }
         let result = subroutine.return_var.as_ref().map(|name| {
             if activation.iter().any(|(local, _)| local == name) {
@@ -5822,6 +5885,54 @@ impl Ff<'_, '_> {
             }
             false
         }
+        // Only kernels containing the new activation-local compound waits
+        // need per-assignment observation. Plain fork kernels keep their
+        // existing suspension count and execution cost.
+        fn has_activation_event(
+            m: &ProcModule<'_>,
+            body: &[sv::ir::Stmt],
+            visited: &mut HashSet<String>,
+        ) -> bool {
+            let mut found = false;
+            let mut calls = Vec::new();
+            for stmt in body {
+                stmt.walk(&mut |stmt| match stmt {
+                    sv::ir::Stmt::WaitEvent(items) => {
+                        found |= items
+                            .iter()
+                            .any(|item| !matches!(&item.expr, sv::ir::Expr::Ident(_)));
+                    }
+                    sv::ir::Stmt::Call { name, .. } => calls.push(name.clone()),
+                    _ => {}
+                });
+                stmt.clone().visit_mut(
+                    &mut |expr| collect_call_names(expr, &mut calls),
+                    &mut |_| {},
+                    &mut |_| {},
+                );
+            }
+            if found {
+                return true;
+            }
+            while let Some(name) = calls.pop() {
+                if !visited.insert(name.clone()) {
+                    continue;
+                }
+                if let Some(sub) = m.subroutine(&name) {
+                    for param in &sub.params {
+                        if let Some(default) = &param.default {
+                            collect_call_names(default, &mut calls);
+                        }
+                    }
+                    if has_activation_event(m, &sub.body, visited) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        self.observe_blocking_assignments =
+            has_activation_event(self.m, body, &mut HashSet::default());
         self.forked = has_fork(
             self.m,
             body,
@@ -5844,6 +5955,21 @@ impl Ff<'_, '_> {
         std::mem::swap(&mut self.b, kernel.builder());
         self.kernel = Some(kernel);
         self.exec_block(body)?;
+        if !self.observe_blocking_assignments && !self.event_probes.is_empty() {
+            return Err(unsupported(
+                "activation-local event expression without assignment observation boundaries",
+            ));
+        }
+        if self.event_probes.iter().any(|probe| {
+            probe
+                .inputs
+                .iter()
+                .any(|input| self.unobserved_function_writes.contains(input))
+        }) {
+            return Err(unsupported(
+                "implicit write to an activation-local event operand without an observation boundary",
+            ));
+        }
         let mut kernel = self.kernel.take().expect("lowering a process kernel");
         std::mem::swap(&mut self.b, kernel.builder());
         let slots = kernel.slots();
@@ -5859,6 +5985,7 @@ impl Ff<'_, '_> {
                 resume_count,
                 private,
                 locals: self.frame_locals,
+                event_probes: self.event_probes,
                 random: self.random.as_ref().unwrap().0,
                 seed: self.random_seed,
                 starts_with_event_wait,
@@ -6611,9 +6738,7 @@ impl Ff<'_, '_> {
             .collect();
         locals.sort_unstable();
         if self.forked && locals.iter().any(|(_, id)| self.frame_locals.contains(id)) {
-            return Err(unsupported(
-                "compound event expression reading a fork-shared automatic variable",
-            ));
+            return self.activation_event_expression(expr, width, signed, float);
         }
         // Another call can copy a new argument into a static formal while
         // the process waits, which a copy taken now would not see.
@@ -6674,6 +6799,190 @@ impl Ff<'_, '_> {
             }],
         ));
         Ok(event)
+    }
+
+    /// An activation-local expression cannot use a module-wide continuous
+    /// proxy. Give it a pure dispatch entry and retain only its sampled result
+    /// in the waiter's existing baseline.
+    fn activation_event_expression(
+        &mut self,
+        expr: &sv::ir::Expr,
+        width: usize,
+        signed: bool,
+        float: Option<celox_sir::FloatPrecision>,
+    ) -> Result<SourceVarId, sv::AnalyzerError> {
+        let mut names = HashSet::default();
+        expr_idents(expr, &mut names);
+        subroutine_reads(self.m, expr, &mut names);
+        if names.iter().any(|name| {
+            self.m
+                .id(name)
+                .is_some_and(|id| self.is_static_task_formal(id))
+        }) {
+            return Err(unsupported(
+                "event expression reading a static task argument",
+            ));
+        }
+        let mut inputs: Vec<_> = names
+            .iter()
+            .filter_map(|name| self.m.id(name))
+            .filter(|id| !self.m.is_hidden(*id) || self.frame_locals.contains(id))
+            .collect();
+        inputs.sort_unstable();
+        inputs.dedup();
+        if inputs.iter().any(|id| !self.frame_locals.contains(id)) {
+            return Err(unsupported(
+                "activation-local event expression reading a non-automatic variable",
+            ));
+        }
+        let (result, name) = self.m.temp("event_probe", width, signed, float.is_none());
+        self.m.variables.get_mut(&result).unwrap().float = float;
+        // Isolate expression code so every clobbered scratch slot can be
+        // audited, including function formals declared before this kernel.
+        let saved_builder = std::mem::take(&mut self.b);
+        let kernel = self.kernel.take();
+        let direct = std::mem::replace(&mut self.direct, true);
+        let lowered = self.assign(&sv::ir::LValue::Ident(name.clone()), expr);
+        self.direct = direct;
+        self.kernel = kernel;
+        let expression_builder = std::mem::replace(&mut self.b, saved_builder);
+        lowered?;
+        let mut unit = seal_builder(expression_builder);
+        let mut scratch = Vec::new();
+        for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
+            match instruction {
+                SIRInstruction::Store(address, _, _, _, triggers, captures) => {
+                    if address.region != STABLE_REGION
+                        || !triggers.is_empty()
+                        || !captures.is_empty()
+                    {
+                        return Err(unsupported("event expression with observable stores"));
+                    }
+                    scratch.push(address.var_id);
+                }
+                SIRInstruction::Commit(..)
+                | SIRInstruction::RuntimeEvent { .. }
+                | SIRInstruction::CombCaptureEvent { .. }
+                | SIRInstruction::CombCaptureEnableIfChanged { .. }
+                | SIRInstruction::ExternCall { .. } => {
+                    return Err(unsupported("event expression with runtime effects"));
+                }
+                SIRInstruction::Imm(..)
+                | SIRInstruction::Binary(..)
+                | SIRInstruction::Unary(..)
+                | SIRInstruction::Load(..)
+                | SIRInstruction::Concat(..)
+                | SIRInstruction::Slice(..)
+                | SIRInstruction::Mux(..) => {}
+            }
+        }
+        scratch.sort_unstable();
+        scratch.dedup();
+        // Function formals and temporaries may predate this process frame.
+        // Give the probe exclusive storage, so instrumentation of the normal
+        // function cannot add observable counters or capture hooks here.
+        let mut copies = HashMap::default();
+        for id in &mut scratch {
+            if *id == result {
+                continue;
+            }
+            if !self.m.is_hidden(*id) || self.frame_locals.contains(id) {
+                return Err(unsupported("event expression modifying persistent state"));
+            }
+            let variable = self.m.var(*id).clone();
+            let (copy, copy_name) = self.m.temp(
+                "event_scratch",
+                variable.width,
+                variable.signed,
+                variable.is_4state,
+            );
+            self.m.variables.insert(
+                copy,
+                SvVariable {
+                    path: vec![copy_name],
+                    ..variable
+                },
+            );
+            copies.insert(*id, copy);
+            *id = copy;
+        }
+        for block in unit.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                *instruction = instruction.map_addr(|address| Addr {
+                    var_id: copies
+                        .get(&address.var_id)
+                        .copied()
+                        .unwrap_or(address.var_id),
+                    ..*address
+                });
+            }
+        }
+        // AST names alone cannot expose implicit receivers or generated
+        // aliases. Validate the complete lowered read set after remapping.
+        for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
+            if let SIRInstruction::Load(_, address, _, _) = instruction
+                && (address.region != STABLE_REGION
+                    || !(self.frame_locals.contains(&address.var_id)
+                        || scratch.contains(&address.var_id)))
+            {
+                return Err(unsupported(
+                    "activation-local event expression reading non-automatic storage",
+                ));
+            }
+        }
+        inputs = unit
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Load(_, address, _, _)
+                    if self.frame_locals.contains(&address.var_id) =>
+                {
+                    Some(address.var_id)
+                }
+                _ => None,
+            })
+            .collect();
+        inputs.sort_unstable();
+        inputs.dedup();
+        let targets: Vec<_> = scratch
+            .iter()
+            .map(|&id| VarAtomBase::new(id, 0, self.m.var(id).width - 1))
+            .collect();
+        let widths = scratch
+            .iter()
+            .map(|&id| (id, self.m.var(id).width))
+            .collect();
+        if super::comb_retention::reads_prior_state(&unit, &targets, &widths) {
+            return Err(unsupported(
+                "activation-local event expression retaining function scratch state",
+            ));
+        }
+        if super::comb_retention::retains_state(
+            &unit,
+            &[VarAtomBase::new(result, 0, width - 1)],
+            &widths,
+        ) {
+            return Err(unsupported(
+                "activation-local event expression without a definite result",
+            ));
+        }
+        let (previous, resume) = self
+            .with_kernel(ProcessKernelBuilder::begin_event_probe)
+            .map_err(kernel_error)?;
+        self.b.inline_execution_unit(&unit);
+        self.with_kernel(|kernel| kernel.end_event_probe(previous));
+        self.event_probes.push(celox_design::ProcessEventProbe {
+            result,
+            resume,
+            inputs,
+            scratch,
+        });
+        // Use the identical pure code for the initial baseline too. Lowering
+        // the call again as ordinary process code could allocate activation
+        // cells or suspend inside a function's temporary declarations.
+        self.b.inline_execution_unit(&unit);
+        Ok(result)
     }
 
     /// Whether `id` is a static formal of a task, which keeps one
@@ -6890,6 +7199,7 @@ fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSe
         for param in &subroutine.params {
             if let Some(default) = &param.default {
                 expr_idents(default, names);
+                collect_call_names(default, &mut pending);
             }
         }
         for stmt in &subroutine.body {
@@ -6982,6 +7292,8 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                         arg_order: arg_order.clone(),
                     }),
                     sv::ir::Stmt::DisableFork
+                    | sv::ir::Stmt::WaitFork
+                    | sv::ir::Stmt::Fork { .. }
                     | sv::ir::Stmt::SystemTask { .. }
                     | sv::ir::Stmt::Delay { .. }
                     | sv::ir::Stmt::WaitEvent(_)
