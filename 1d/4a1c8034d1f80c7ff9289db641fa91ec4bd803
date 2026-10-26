@@ -1,1 +1,1 @@
-Resolve conflicts with current master process-activation and partitioned-settle changes before adding the signal-triggered CLI state capture PR.
+Separate core checkpoint state from effect-handler state as requested, and add core checkpoint persistence for host-composed CLI checkpoints.
