@@ -1463,3 +1463,44 @@ fn widened_zero_compares_equal_to_a_zero_wide_load() {
         assert_eq!(state[output_offset] & 1, 1, "four_state={four_state}");
     }
 }
+
+#[cfg(debug_assertions)]
+#[test]
+fn wide_value_invariant_validation_scales_with_values() {
+    const COUNT: usize = 128;
+    let unit = ExecutionUnit {
+        entry_block_id: SirBlockId(0),
+        blocks: [(
+            SirBlockId(0),
+            BasicBlock {
+                id: SirBlockId(0),
+                params: vec![],
+                instructions: (0..COUNT)
+                    .map(|i| {
+                        SIRInstruction::Imm(
+                            RegisterId(i),
+                            SIRValue::new_four_state(BigUint::from(i), BigUint::default()),
+                        )
+                    })
+                    .collect(),
+                terminator: SIRTerminator::Return,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        register_map: (0..COUNT)
+            .map(|i| (RegisterId(i), RegisterType::Logic { width: 65 }))
+            .collect(),
+    };
+    WIDE_VALUE_VERIFICATIONS.with(|count| count.set(0));
+    let _ = lower_execution_unit(&unit, &empty_layout(), false);
+    let checks = WIDE_VALUE_VERIFICATIONS.with(|count| count.get());
+    assert!(
+        checks >= COUNT,
+        "the invariant must still be checked: {checks}"
+    );
+    assert!(
+        checks <= 2 * COUNT,
+        "repeated whole-map validation: {checks}"
+    );
+}
