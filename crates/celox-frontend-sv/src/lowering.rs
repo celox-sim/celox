@@ -8827,6 +8827,12 @@ fn runtime_select_width(
     if constant(msb).is_some() && constant(lsb).is_some() {
         return None;
     }
+    // A bit select has width one regardless of its runtime position. Sampling
+    // both bounds evaluates the same (potentially inlined) expression twice,
+    // and the zero sample need not even be a valid index computation.
+    if msb == lsb {
+        return Some(1);
+    }
     // The width is the same for every value of the runtime operands.
     let mut sample = constants.clone();
     for name in name_to_id.keys() {
@@ -10509,6 +10515,37 @@ fn inferred_clock(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bit_select_width_does_not_evaluate_a_runtime_zero_sample() {
+        let index = sv::ir::ConstExpr::Ident("index".into());
+        let bound = sv::ir::ConstExpr::Binary {
+            left: Box::new(sv::ir::ConstExpr::Literal("255".into())),
+            op: sv::ir::BinaryOp::Div,
+            right: Box::new(index.clone()),
+        };
+        let names = HashMap::from_iter([("index".into(), SourceVarId(0))]);
+        let constants = HashMap::default();
+        let types = HashMap::default();
+        assert_eq!(
+            runtime_select_width(&bound, &bound, &names, &constants, &types),
+            Some(1)
+        );
+        let high = sv::ir::ConstExpr::Binary {
+            left: Box::new(index.clone()),
+            op: sv::ir::BinaryOp::Add,
+            right: Box::new(sv::ir::ConstExpr::Literal("7".into())),
+        };
+        assert_eq!(
+            runtime_select_width(&high, &index, &names, &constants, &types),
+            Some(8)
+        );
+        let constant = sv::ir::ConstExpr::Literal("3".into());
+        assert_eq!(
+            runtime_select_width(&constant, &constant, &names, &constants, &types),
+            None
+        );
+    }
 
     /// The per-name driver scan [`ModuleDrivers`] replaced, which walks every
     /// process for each name.
