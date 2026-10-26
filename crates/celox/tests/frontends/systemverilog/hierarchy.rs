@@ -776,3 +776,9 @@ fn rejects_malformed_non_ansi_port_declarations() {
         assert!(error.contains(message), "{source}: {error}");
     }
 }
+
+sv_backends! {
+    fn many_sibling_parameter_specializations(sim) {
+        @case "hierarchy::many_sibling_parameter_specializations";
+    }
+}
