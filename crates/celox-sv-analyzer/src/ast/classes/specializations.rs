@@ -402,7 +402,7 @@ pub(in crate::ast) fn specialize(
     let mut bases = Vec::new();
     for id in inherited {
         if let Some(base) = type_binding::procedural_type(id, native, tree, &env, &aliases)?
-            .and_then(|ty| ty.class.clone())
+            .and_then(|ty| ty.class().map(str::to_owned))
         {
             bases.push(base);
         }
@@ -706,7 +706,7 @@ fn type_argument(
                             .type_aliases
                             .get(&scope_key(&scope))
                             .or_else(|| context.type_aliases.get(&scope_key(&class)))
-                            .and_then(|ty| ty.class.clone())
+                            .and_then(|ty| ty.class().map(str::to_owned))
                         {
                             Some(specialization) => Some(specialization),
                             None if super::is_declared(tree, &class) => {

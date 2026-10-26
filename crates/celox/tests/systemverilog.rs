@@ -250,3 +250,6 @@ mod unions;
 
 #[path = "frontends/systemverilog/tagged_unions.rs"]
 mod tagged_unions;
+
+#[path = "frontends/systemverilog/containers.rs"]
+mod containers;

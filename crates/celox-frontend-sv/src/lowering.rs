@@ -1446,6 +1446,13 @@ fn kernel_written_names(
         });
     }
     while let Some((callee, args)) = calls.pop() {
+        if let sv::ir::Callee::Object(op) = &callee {
+            names.extend(
+                procedural::written_object_arguments(op, &args)
+                    .iter()
+                    .map(|lhs| lhs.name().to_string()),
+            );
+        }
         let name = match callee {
             sv::ir::Callee::System(function) => {
                 names.extend(
@@ -1647,6 +1654,11 @@ impl DriverScan<'_> {
             });
         }
         while let Some((callee, args)) = calls.pop() {
+            if let sv::ir::Callee::Object(op) = &callee {
+                for lhs in procedural::written_object_arguments(op, &args) {
+                    record(&lhs);
+                }
+            }
             let name = match callee {
                 sv::ir::Callee::System(function) => {
                     for lvalue in procedural::written_system_arguments(function, &args) {
@@ -10556,6 +10568,11 @@ mod tests {
                     });
                 }
                 while let Some((callee, args)) = calls.pop() {
+                    if let sv::ir::Callee::Object(op) = &callee {
+                        for lhs in procedural::written_object_arguments(op, &args) {
+                            record(drivers, &lhs);
+                        }
+                    }
                     let name = match callee {
                         sv::ir::Callee::System(function) => {
                             for lvalue in procedural::written_system_arguments(function, &args) {

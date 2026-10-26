@@ -89,14 +89,8 @@ fn type_aliases_in_scope(
                     continue;
                 };
                 let context = PackedDimensions::new(HashMap::default(), const_env, &aliases);
-                let ty = type_with_unpacked_ranges(
-                    base,
-                    constant_binding::bind_unpacked_ranges(
-                        &alias.dimensions,
-                        syntax_tree,
-                        &context,
-                    )?,
-                );
+                let ty =
+                    containers::with_dimensions(base, &alias.dimensions, syntax_tree, &context)?;
                 aliases.insert(instances::normalize_identifier(&alias.name.spelling), ty);
             }
             _ => {}

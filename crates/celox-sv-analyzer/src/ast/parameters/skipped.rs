@@ -475,6 +475,7 @@ fn pattern_items(
             left.min(right),
             left.max(right),
             VariableDimensions {
+                container: None,
                 real: false,
                 string: false,
                 class: None,
@@ -498,6 +499,7 @@ fn pattern_items(
             left.min(right),
             left.max(right),
             VariableDimensions {
+                container: None,
                 real: false,
                 string: false,
                 class: None,
@@ -512,6 +514,7 @@ fn pattern_items(
             0,
             count as i128 - 1,
             VariableDimensions {
+                container: None,
                 randomizable: true,
                 enum_values: None,
                 real: false,
