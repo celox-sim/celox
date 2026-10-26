@@ -1,0 +1,1 @@
+Fix both P2 review findings: preserve process-control effects in wait predicates and classify wait fork/fork task calls as requiring process kernels. Restore the predicate entry point after false reevaluations; add four regression cases.
