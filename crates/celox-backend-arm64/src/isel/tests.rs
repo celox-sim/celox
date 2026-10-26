@@ -16,6 +16,7 @@ fn layout_for(address: AbsoluteAddr, width: usize, four_state: bool) -> MemoryLa
     let total_size = plane_size * if four_state { 2 } else { 1 };
     MemoryLayout {
         trace: None,
+        settle: None,
         four_state,
         mode: MemoryLayoutMode::Packed,
         unpacked_arrays: HashMap::default(),

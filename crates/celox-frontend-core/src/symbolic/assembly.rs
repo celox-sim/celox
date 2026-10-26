@@ -8,7 +8,7 @@ use crate::symbolic::artifact::{
 use crate::{
     FrontendLookup, FrontendTrace, FrontendTraceOptions, FusedSirOptimizationHints, HashMap,
     HashSet, InstancePath, ParallelScheduleOptions, ParserError, ScheduledRtl, ScheduledRtlOutput,
-    SourceAddr, SourceLocation, SourceVarId, VariableInfo, flattening,
+    SettlePartitionMode, SourceAddr, SourceLocation, SourceVarId, VariableInfo, flattening,
 };
 use celox_design::{
     BitAccess, CombDerivedClock, CounterKind, CounterSlots, DomainKind, ElaboratedDesign,
@@ -1507,6 +1507,29 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         }
     }
     let parallel_comb_blocks = parallel.enabled().then(|| comb_blocks.clone());
+    // The flag object of a partitioned settle is declared once the
+    // partitions are known; reserve its address now.
+    let root_instance = expanded[&InstancePath(Vec::new())];
+    let settle_flags =
+        settle_partitioning(parallel, &comb_blocks, &global_arena, eval_apply_ffs.len()).map(
+            |target_cost| {
+                let var_id = SourceVarId(
+                    modules[&root_id]
+                        .variables
+                        .keys()
+                        .map(|id| id.0 + 1)
+                        .max()
+                        .unwrap_or(0),
+                );
+                scheduler::SettlePartitioning {
+                    flags: AbsoluteAddr {
+                        instance_id: root_instance,
+                        var_id,
+                    },
+                    target_cost,
+                }
+            },
+        );
     let sched_start = flatten_timing.then(std::time::Instant::now);
     let schedule = match scheduler::sort_with_unpacked_element_widths(
         comb_blocks,
@@ -1517,6 +1540,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &var_widths,
         &unpacked_element_widths,
         next_runtime_error_code,
+        settle_flags,
     ) {
         Ok(schedule) => schedule,
         Err(error) => {
@@ -1557,6 +1581,19 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             });
         }
     };
+    let settle_partitions = schedule.partitions.clone();
+
+    let settle_flags = settle_flags.filter(|_| !settle_partitions.is_empty());
+    if let Some(settle) = &settle_flags {
+        // The flags carry what changed from one settle to the next.
+        persistent_comb_state.insert(settle.flags);
+        declare_settle_flags(
+            &mut modules,
+            root_id,
+            settle.flags.var_id,
+            settle_partitions.len(),
+        );
+    }
     let object_sizes = super::parallel::ObjectSizes {
         widths: &var_widths,
         element_widths: &unpacked_element_widths,
@@ -1677,7 +1714,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     // events; that copy lets the FF part use comb values in registers.
     // Beyond that the copies would multiply the design by its event count,
     // so the ticks share the one `eval_comb` program instead.
-    let merge_comb_apply = eval_apply_ffs.len() <= MERGED_COMB_APPLY_EVENTS;
+    // A merged program drops comb stores the next full settle would redo;
+    // a partitioned settle keeps what its skipped partitions stored.
+    let merge_comb_apply =
+        eval_apply_ffs.len() <= MERGED_COMB_APPLY_EVENTS && settle_flags.is_none();
     let mut eval_comb_apply_ffs = HashMap::default();
     let mut fused_direct_ff_writes = HashMap::default();
     if let (
@@ -1920,6 +1960,21 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .chain(bound_initials)
         .map(|(_, init)| init)
         .collect();
+    if let Some(settle) = &settle_flags {
+        // Every partition runs at the first settle.
+        let partitions = settle_partitions.len();
+        let value = (0..partitions).fold(BigUint::default(), |value, partition| {
+            value | (BigUint::from(1u8) << (partition * 8))
+        });
+        initial_memory_values.push(InitialStateValue {
+            address: settle.flags,
+            data: InitialStateData::Packed {
+                value,
+                mask: BigUint::default(),
+                written_mask: (BigUint::from(1u8) << ((partitions + 1) * 8)) - 1u8,
+            },
+        });
+    }
     let state_objects: HashMap<AbsoluteAddr, VariableMetadata> = instance_modules
         .iter()
         .flat_map(|(&instance_id, module_id)| {
@@ -2326,6 +2381,32 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     let active_commits: Vec<StateAddr> = active_commits.into_iter().map(project).collect();
     let time_slots: Vec<StateAddr> = time_slots.into_iter().map(project).collect();
     let root_instance = expanded[&InstancePath(Vec::new())];
+    let settle_partitions = settle_flags.map(|settle| {
+        let mut marks: HashMap<StateAddr, BTreeSet<u32>> = HashMap::default();
+        for (index, partition) in settle_partitions.iter().enumerate() {
+            let index = index as u32;
+            for addr in &partition.reads {
+                if let Some(&state) = source_to_state.get(addr) {
+                    marks.entry(state).or_default().insert(index);
+                }
+            }
+            for addr in &partition.writes {
+                if let Some(&state) = source_to_state.get(addr) {
+                    marks.entry(state).or_default().insert(index);
+                }
+            }
+        }
+        let mut marks = marks
+            .into_iter()
+            .map(|(state, partitions)| (state, partitions.into_iter().collect()))
+            .collect::<Vec<_>>();
+        marks.sort_unstable();
+        celox_design::SettlePartitions {
+            flags: project(settle.flags),
+            partitions: settle_partitions.len() as u32,
+            marks,
+        }
+    });
     let scheduler = scheduler_slots.map(|slots| celox_design::SchedulerSchema {
         slots: slots.map(|var_id| {
             project(AbsoluteAddr {
@@ -2468,6 +2549,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             time_slots,
             scheduler,
             derived_edges: Vec::new(),
+            settle_partitions,
         },
     };
 
@@ -2483,6 +2565,77 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         scheduled,
         fused_optimization_hints: FusedSirOptimizationHints { direct_ff_writes },
     })
+}
+
+/// Smallest combinational program, in expression nodes, whose settle
+/// [`SettlePartitionMode::Estimated`] partitions.
+const MIN_PARTITIONED_SETTLE_COST: usize = 20_000;
+/// Expression nodes per partition of an estimated partitioned settle.
+const SETTLE_PARTITION_COST: usize = 2_000;
+
+/// The cost per partition of a partitioned settle of `comb_blocks`, or
+/// `None` to keep one pass.
+///
+/// A partition costs a flag test per settle and flag stores in every writer
+/// of what it reads, and pays off when most of the program is idle in most
+/// settles. A design with few event domains drives most of its logic from
+/// one clock, so it keeps the single pass, as does a small program.
+fn settle_partitioning(
+    parallel: &ParallelScheduleOptions,
+    comb_blocks: &[LogicPath<AbsoluteAddr>],
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    events: usize,
+) -> Option<usize> {
+    // Lane-partitioned kernels run the comb program as lane tasks.
+    if parallel.enabled() {
+        return None;
+    }
+    match parallel.settle {
+        SettlePartitionMode::Off => None,
+        SettlePartitionMode::Always => Some(1),
+        SettlePartitionMode::Estimated => {
+            if events <= MERGED_COMB_APPLY_EVENTS {
+                return None;
+            }
+            let cost: usize = comb_blocks
+                .iter()
+                .map(|path| scheduler::path_cost(arena, path))
+                .sum();
+            (cost >= MIN_PARTITIONED_SETTLE_COST).then_some(SETTLE_PARTITION_COST)
+        }
+    }
+}
+
+/// Declare the flags of a settle of `partitions` partitions, one byte each
+/// plus the untracked byte, as a hidden variable of the top module.
+fn declare_settle_flags(
+    modules: &mut HashMap<ModuleId, SimModule>,
+    root: ModuleId,
+    var_id: SourceVarId,
+    partitions: usize,
+) {
+    let width = (partitions + 1) * 8;
+    let variables = &mut modules.get_mut(&root).expect("top module").variables;
+    variables.insert(
+        var_id,
+        crate::symbolic::artifact::SymbolicVariable {
+            path: vec!["$settle".to_string(), "flags".to_string()],
+            kind: crate::VariableKind::Variable,
+            signed: false,
+            metadata: VariableMetadata {
+                width,
+                is_4state: false,
+                kind: DomainKind::Other,
+                type_kind: celox_design::PortTypeKind::Bit,
+                array_dims: Vec::new(),
+                value_kind: Default::default(),
+            },
+            packed_dims: vec![width],
+            unpacked_ranges: Vec::new(),
+            source: None,
+            module_affiliated: false,
+        },
+    );
 }
 
 /// Declare the hidden objects a compiled scheduler exchanges with the

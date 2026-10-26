@@ -660,6 +660,7 @@ fn narrow_wide_shift_uses_only_chunks_covered_by_the_result() {
 
     let layout = MemoryLayout {
         trace: None,
+        settle: None,
         four_state: false,
         mode: MemoryLayoutMode::Packed,
         unpacked_arrays: HashMap::default(),
@@ -836,6 +837,7 @@ fn wide_shift_result_is_canonical_before_mux_condition() {
 
     let layout = MemoryLayout {
         trace: None,
+        settle: None,
         four_state: false,
         mode: MemoryLayoutMode::Packed,
         unpacked_arrays: HashMap::default(),

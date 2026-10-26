@@ -111,6 +111,10 @@ impl super::traits::SimBackend for WasmBackend {
     }
     fn write_memory(&mut self, offset: usize, bytes: &[u8]) {
         self.memory.data_mut(&mut self.store)[offset..offset + bytes.len()].copy_from_slice(bytes);
+        self.mark_settle_range(offset, bytes.len());
+        if self.raw_view_exposed {
+            self.mark_settle_untracked();
+        }
     }
     fn vcd_tracking_enabled(&self) -> bool {
         !self.raw_view_exposed
@@ -683,6 +687,7 @@ impl WasmBackend {
 
     pub fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         self.raw_view_exposed = true;
+        celox_runtime::backend::SimBackend::mark_settle_untracked(self);
         let data = self.memory.data_mut(&mut self.store);
         (data.as_mut_ptr(), self.layout.merged_total_size)
     }

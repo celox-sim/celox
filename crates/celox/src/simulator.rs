@@ -1288,6 +1288,7 @@ mod host {
                     );
                 }
             }
+            self.backend.mark_settle_range(signal.offset, 1);
         }
 
         /// Drain runtime events, lazily evaluating dirty combinational logic.
