@@ -39,6 +39,9 @@ sv_backends! {
     fn class_specialization_keys_follow_the_bound_parameters(sim) { @case "class::specialization_keys_follow_the_bound_parameters"; }
     fn class_derived_classes_keep_their_declaration_scopes(sim) { @case "class::derived_classes_keep_their_declaration_scopes"; }
     fn class_shallow_copies(sim) { @case "class::shallow_copies"; }
+    fn class_classes_of_packages(sim) { @case "class::classes_of_packages"; }
+    fn class_package_classes_by_their_qualified_names(sim) { @case "class::package_classes_by_their_qualified_names"; }
+    fn class_classes_of_the_compilation_unit(sim) { @case "class::classes_of_the_compilation_unit"; }
 }
 
 sv_backends! {
@@ -537,6 +540,74 @@ sv_backends! {
 }
 
 #[test]
+fn classes_of_packages_in_other_sources_are_used_through_their_layouts() {
+    let package = "package shapes;
+        class Shape;
+            int id;
+            static int made;
+            function new(int id); this.id = id; made++; endfunction
+            virtual function int area(); return 0; endfunction
+        endclass
+        class Square extends Shape;
+            int side;
+            function new(int side); super.new(side + 1); this.side = side; endfunction
+            virtual function int area(); return side * side; endfunction
+        endclass
+    endpackage";
+    let module = "module Top(output int area, output int id, output int made);
+        import shapes::*;
+        Shape shape;
+        initial begin
+            shape = Square::new(4);
+            area = shape.area();
+            id = shape.id;
+            made = shapes::Shape::made;
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![
+            (package, Path::new("shapes.sv")),
+            (module, Path::new("top.sv")),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("area")), 16u32.into());
+    assert_eq!(sim.get(sim.signal("id")), 5u32.into());
+    assert_eq!(sim.get(sim.signal("made")), 1u32.into());
+}
+
+#[test]
+fn misused_classes_of_other_scopes_are_rejected() {
+    for (source, want) in [
+        (
+            "package p; class Box #(int N = 2); endclass endpackage
+             module Top; import p::*; Box #(3) box; endmodule",
+            "specialization of parameterized class `p::Box` outside the scope that declares it",
+        ),
+        // A package variable has one writing instance (#1146), static
+        // properties of package classes too.
+        (
+            "package p; class C; static int n; function new(); n++; endfunction endclass endpackage
+             module W; p::C c; initial c = new; endmodule
+             module Top; W a(); W b(); endmodule",
+            "multiple drivers of package",
+        ),
+    ] {
+        let Err(error) =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+                .build()
+        else {
+            panic!("`{source}` is rejected");
+        };
+        let error = error.to_string();
+        assert!(error.contains(want), "{error}");
+    }
+}
+
+#[test]
 fn a_class_of_another_module_does_not_hide_a_package() {
     let source = "package P; typedef bit [2:0] T; endpackage
         module Other; class P; typedef int T; endclass endmodule
@@ -590,6 +661,88 @@ fn type_arguments_keep_their_dimensions_scopes_and_class_scoped_types() {
 }
 
 #[test]
+fn classes_of_packages_in_other_sources_keep_their_behaviour() {
+    let package = r#"package p;
+  class B; virtual function int f(); return 1; endfunction endclass
+  interface class I; pure virtual function int id(); endclass
+  class R; rand int x; int hooked; function void pre_randomize(); hooked = 5; endfunction endclass
+  class P #(int N = 1);
+    static function int f(); return P::N; endfunction
+  endclass
+  typedef P#(2) P2;
+  class Plain; function int v(); return 9; endfunction endclass
+  typedef Plain Alias;
+  interface class Getter #(type T = int); pure virtual function T get(); endclass
+endpackage
+package q;
+  class C; extern function int f(); endclass
+  function int C::f(); return 2; endfunction
+endpackage
+package r;
+  class C; extern function int f(); endclass
+  function int C::f(); return 3; endfunction
+endpackage"#;
+    let module = r#"package w1; int p; endpackage
+package w2; int p; endpackage
+module Top(output int cast, output int over, output int iface, output int hooked, output int special, output int alias_v, output int qf, output int rf, output int got);
+  import w1::*;
+  import w2::*;
+  class D extends p::B; virtual function int f(); return 4; endfunction endclass
+  class M implements p::I; virtual function int id(); return 6; endfunction endclass
+  interface class Getter #(type T = int); pure virtual function T get(); endclass
+  class G implements Getter#(int); virtual function int get(); return 8; endfunction endclass
+  p::B b;
+  D d;
+  M m;
+  p::R rr;
+  p::Alias al;
+  q::C qc;
+  r::C rc;
+  G g;
+  initial begin
+    d = new;
+    m = new;
+    rr = new;
+    void'(rr.randomize());
+    al = p::Alias::new;
+    qc = new; rc = new; g = new;
+    cast = $cast(b, d);
+    over = b.f();
+    iface = m.id();
+    hooked = rr.hooked;
+    special = p::P2::f();
+    alias_v = al.v();
+    qf = qc.f();
+    rf = rc.f();
+    got = g.get();
+  end
+endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![
+            (package, Path::new("packages.sv")),
+            (module, Path::new("top.sv")),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(0).unwrap();
+    for (signal, value) in [
+        ("cast", 1u32),
+        ("over", 4),
+        ("iface", 6),
+        ("hooked", 5),
+        ("special", 2),
+        ("alias_v", 9),
+        ("qf", 2),
+        ("rf", 3),
+        ("got", 8),
+    ] {
+        assert_eq!(sim.get(sim.signal(signal)), value.into(), "{signal}");
+    }
+}
+
+#[test]
 fn specializations_tell_types_apart_and_keep_their_bases() {
     let source = r#"module Top(output int packed_made, output int unpacked_made, output int width, output int base_n);
   localparam int K = 2;
@@ -625,6 +778,58 @@ endmodule"#;
     assert_eq!(sim.get(sim.signal("base_n")), 2u32.into());
 }
 
+#[test]
+fn classes_keep_the_identity_and_signatures_of_their_scopes() {
+    let first = r#"`timescale 1ns/1ns
+class C; bit [7:0] x; endclass
+module A(output int a);
+  C c;
+  initial begin c = new; c.x = 300; a = c.x; end
+endmodule"#;
+    let second = r#"`timescale 1ns/1ns
+package p;
+  parameter int N = 8;
+  class B; virtual function int f(); return 1; endfunction static function bit [N-1:0] g(); return '1; endfunction endclass
+endpackage
+package q;
+  class D extends p::B; virtual function int f(); return 5; endfunction endclass
+endpackage
+class C; bit [15:0] x; endclass
+module Top(output int narrow, output int wide, output int over, output int bits);
+  parameter int N = 16;
+  int a;
+  A ua(.a(a));
+  C c;
+  p::B b;
+  q::D d;
+  initial begin
+    c = new; c.x = 300; d = new; b = d;
+    #1;
+    narrow = a;
+    wide = c.x;
+    over = b.f();
+    bits = $bits(p::B::g());
+  end
+endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![
+            (first, Path::new("first.sv")),
+            (second, Path::new("second.sv")),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(1).unwrap();
+    // Each source's compilation-unit class `C` is its own (3.12.1).
+    assert_eq!(sim.get(sim.signal("narrow")), 44u32.into());
+    assert_eq!(sim.get(sim.signal("wide")), 300u32.into());
+    // A subclass of another package reaches its override.
+    assert_eq!(sim.get(sim.signal("over")), 5u32.into());
+    // A package method keeps the width of its package's parameter.
+    assert_eq!(sim.get(sim.signal("bits")), 8u32.into());
+}
+
 sv_backends! {
     fn class_randomization_enum_inheritance(sim) { @case "class::randomization_enum_inheritance"; }
     fn class_randomization_enum_alias(sim) { @case "class::randomization_enum_alias"; }
@@ -633,6 +838,46 @@ sv_backends! {
 
 sv_backends! {
     fn class_randomization_enum_fill_literals(sim) { @case "class::randomization_enum_fill_literals"; }
+}
+
+// The methods and static properties a module class inherits from a class of
+// a package in another source keep what they are there: a source-local
+// method identifier does not make a method of the module static, and a
+// static property keeps the width the package's constants give it.
+#[test]
+fn inherited_members_of_package_classes_keep_their_declarations() {
+    let package = r#"package p;
+  localparam int N = 8;
+  class B;
+    static bit [N-1:0] x;
+    static function int g(); return 1; endfunction
+  endclass
+endpackage"#;
+    let module = r#"module Top(output int value, output int width);
+  localparam int N = 16;
+  class D extends p::B;
+    int y;
+    function int f(); y = 3; return y + $bits(x); endfunction
+  endclass
+  D d;
+  initial begin
+    d = new;
+    value = d.f();
+    width = $bits(p::B::x);
+  end
+endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![
+            (package, Path::new("packages.sv")),
+            (module, Path::new("top.sv")),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("value")), 11u32.into());
+    assert_eq!(sim.get(sim.signal("width")), 8u32.into());
 }
 
 sv_backends! {

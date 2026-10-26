@@ -88,6 +88,7 @@ fn bind_in_with_validation(
                             let name = normalize_identifier(&part.name.spelling);
                             if (part.arguments.is_some()
                                 || !context.type_aliases.contains_key(&name))
+                                && let Some(name) = super::super::classes::resolve(tree, &name)
                                 && super::super::classes::is_parameterized(tree, &name)
                             {
                                 let name = super::super::classes::specializations::specialize(
@@ -116,6 +117,32 @@ fn bind_in_with_validation(
                             continue;
                         }
                         if path.iter().any(|part| part.arguments.is_some()) {
+                            // A specialization is made where the class is
+                            // declared, from its declaration.
+                            let imported = scope::imported(&tree.state);
+                            let class = match path.as_slice() {
+                                [part] => imported
+                                    .aliases
+                                    .get(&normalize_identifier(&part.name.spelling))
+                                    .cloned(),
+                                [package, member] => Some(scope::qualified_name(
+                                    &tree.state,
+                                    &normalize_identifier(&package.name.spelling),
+                                    &normalize_identifier(&member.name.spelling),
+                                )),
+                                _ => None,
+                            };
+                            if let Some(class) = class.filter(|class| {
+                                imported
+                                    .classes
+                                    .iter()
+                                    .any(|known| known.name.starts_with(&format!("{class}#(")))
+                                    || imported.aliases.values().any(|known| known == class)
+                            }) {
+                                return Err(unsupported(format!(
+                                    "specialization of parameterized class `{class}` outside the scope that declares it"
+                                )));
+                            }
                             return Ok(None);
                         }
                         let name = match path.as_slice() {
@@ -128,7 +155,18 @@ fn bind_in_with_validation(
                             _ => return Ok(None),
                         };
                         let Some(ty) = context.type_aliases.get(&name) else {
-                            if let Some(class) = super::super::classes::handle_type(tree, &name) {
+                            // Inside its package, `p::C` is a name of the
+                            // package itself, whose classes are declared
+                            // under their qualified names.
+                            let class = match path.as_slice() {
+                                [_] => super::super::classes::resolve(tree, &name),
+                                _ => super::super::classes::handle_type(tree, &name)
+                                    .map(|_| name.clone())
+                                    .or_else(|| super::super::classes::resolve(tree, &name)),
+                            };
+                            if let Some(class) = class
+                                .and_then(|class| super::super::classes::handle_type(tree, &class))
+                            {
                                 values.push(class);
                                 continue;
                             }
@@ -357,14 +395,21 @@ fn class_scope(
         && let Some(class) = context
             .type_aliases
             .get(&super::super::classes::specializations::scope_key(&name))
+            .or_else(|| {
+                // A class of a package is declared under its qualified name.
+                let class = super::super::classes::resolve(tree, &name)?;
+                context
+                    .type_aliases
+                    .get(&super::super::classes::specializations::scope_key(&class))
+            })
             .or_else(|| context.type_aliases.get(&name))
             .and_then(|ty| ty.class.clone())
     {
         return Ok(Some(class));
     }
-    if !super::super::classes::is_visible(tree, &name) {
+    let Some(name) = super::super::classes::resolve(tree, &name) else {
         return Ok(None);
-    }
+    };
     if !super::super::classes::is_parameterized(tree, &name) {
         if scope
             .arguments

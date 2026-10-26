@@ -118,6 +118,36 @@ fn named_class(
     dimensions: &PackedDimensions,
 ) -> Converted<Option<String>> {
     let (name, arguments) = match &native.expression(ungroup(id, native)).kind {
+        // A class of a package, `p::C` (IEEE 1800-2023 26.3).
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "::" => {
+            let ExprKind::Name(package) = &native.expression(*expression).kind else {
+                return Ok(None);
+            };
+            let class = scope::qualified_name(
+                &tree.state,
+                &instances::normalize_identifier(&package.spelling),
+                &instances::normalize_identifier(&name.spelling),
+            );
+            // A typedef of the package may name a class or a specialization.
+            if let Some(aliased) = dimensions
+                .type_aliases
+                .get(&class)
+                .and_then(|ty| ty.class.clone())
+            {
+                return Ok(Some(aliased));
+            }
+            if classes::handle_type(tree, &class).is_some() {
+                return Ok(Some(class));
+            }
+            // Inside its package, `p::C` is a name of the package itself,
+            // whose classes are declared under their qualified names.
+            return Ok(classes::resolve(tree, &class)
+                .filter(|class| classes::handle_type(tree, class).is_some()));
+        }
         ExprKind::Name(name) => (name, None),
         ExprKind::Parameterized {
             expression,
@@ -138,14 +168,21 @@ fn named_class(
         && let Some(class) = dimensions
             .type_aliases
             .get(&classes::specializations::scope_key(&name))
+            .or_else(|| {
+                // A class of a package is declared under its qualified name.
+                let class = classes::resolve(tree, &name)?;
+                dimensions
+                    .type_aliases
+                    .get(&classes::specializations::scope_key(&class))
+            })
             .or_else(|| dimensions.type_aliases.get(&name))
             .and_then(|ty| ty.class.clone())
     {
         return Ok(Some(class));
     }
-    if !classes::is_visible(tree, &name) {
+    let Some(name) = classes::resolve(tree, &name) else {
         return Ok(None);
-    }
+    };
     if !classes::is_parameterized(tree, &name) {
         if arguments.is_some_and(|arguments| !arguments.is_empty()) {
             return Err(unsupported(format!(
@@ -468,7 +505,7 @@ pub(in crate::ast) fn method(
             ));
         }
         if method_name == "randomize" {
-            class.check_randomize(tree)?;
+            class.check_randomize()?;
         }
         return Ok(Some((
             Class::subroutine_name(&class_name, &method_name),
@@ -512,11 +549,7 @@ pub(in crate::ast) fn method(
             receiver => receiver,
         }
     };
-    let formals = native
-        .subroutine(method.native)
-        .ports
-        .as_ref()
-        .map_or(0, Vec::len);
+    let formals = method.formals.len();
     let subroutine = if method.is_virtual && !through_super && receiver != Receiver::Static {
         Class::dispatcher_name(&method.owner, &method.name)
     } else {
@@ -711,7 +744,7 @@ pub(in crate::ast) fn constructor(
         )));
     }
     let mut args = vec![Some(class.allocation())];
-    let (actuals, order) = class.constructor_arguments(native, arguments)?;
+    let (actuals, order) = class.constructor_arguments(arguments)?;
     for actual in actuals {
         args.push(
             actual
