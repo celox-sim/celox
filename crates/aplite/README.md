@@ -86,3 +86,34 @@ the query history because learning and search activity are retained. Unknown
 includes invalid predicate indexes and exhausted budgets, and is not Unsat.
 This API supplies reusable solving for future distribution policies; it does not
 implement uniform sampling, variable ordering, or SystemVerilog `randomize()`.
+
+## Bounded hash cells
+
+`HashCells` prepares seed-selected affine XOR predicates over chosen scalar
+variables. A query chooses a prefix of those predicates and their target bits;
+shorter prefixes leave larger cells. The original formula and all predicates are
+compiled once. The cell query uses one temporary SAT database and retains local
+learning while it blocks already-seen projected assignments. It does not recompile
+the formula for each model or retain blockers between cells.
+
+```rust
+use aplite::{CellStatus, Env, HashCells, Limits, Sort, boolv, var};
+let projection = Env::from([("value".into(), var("x".into(), Sort::Bv(3)))]);
+let cells = HashCells::new(&boolv(true), &projection, 2, 42, Limits::default()).unwrap();
+let cell = cells.cell(&[true, false], 8, Limits::default());
+assert_eq!(cell.status, CellStatus::Complete);
+assert!(cell.models.iter().all(|model| model.contains_key("x")));
+```
+
+`Complete` certifies all models in that cell, including an empty cell. `TooLarge`
+means the cell has more models than the caller's bound, and `Unknown` covers
+invalid input or exhausted budgets. Neither exposes a truncated model list.
+All searches and replay in one cell share one work/time budget. Hidden variables
+are existential: multiple witnesses cannot duplicate a projected assignment.
+Call `PreparedQuery::enumerate_cell` directly for custom partition predicates.
+
+These operations are building blocks, **not a uniform sampler**. Uniformly picking
+a cell and then uniformly picking one of its models generally biases results
+when cells have different sizes. A sampling policy must control cell sizing and
+acceptance separately. The exhaustive reservoir sampler remains a test-only reference.
+Rows may be dependent or constant; hash construction preserves those cases.
