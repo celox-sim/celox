@@ -1,0 +1,1 @@
+Fix the pre-existing function-to-task lifetime fixture exposed by CI and retain reviewed Icarus failures for detached-function shared cases
