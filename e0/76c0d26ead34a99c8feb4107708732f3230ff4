@@ -1,1 +1,6 @@
-Clarify that the exhaustive reservoir sampler is test-only; bounded cell queries also permit an empty prefix for small whole-domain size checks.
+Revision history for #2177:
+
+rev 2 (content) 2026-10-26 17:14 UTC — Clarify that the exhaustive reservoir sampler is test-only; bounded cell queries also permit an empty prefix for small whole-domain size checks.
+rev 1 (initial) 2026-10-26 17:14 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2177,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"fa0a52ebbe5b9a83296337219390b7296b386a83","timestamp_iso":"2026-10-26T17:14:06Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"fa0a52ebbe5b9a83296337219390b7296b386a83","new_sha":"e076c0d26ead34a99c8feb4107708732f3230ff4","timestamp_iso":"2026-10-26T17:14:06Z","reason":"Clarify that the exhaustive reservoir sampler is test-only; bounded cell queries also permit an empty prefix for small whole-domain size checks.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/fa0a52ebbe5b9a83296337219390b7296b386a83...e076c0d26ead34a99c8feb4107708732f3230ff4"}]} -->
