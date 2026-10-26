@@ -386,6 +386,7 @@ pub struct Port {
     direction: PortDirection,
     r#type: Type,
     is_net: bool,
+    unresolved_net: bool,
     default: Option<ConstExpr>,
     pattern_target: Option<crate::ast::Type>,
 }
@@ -395,6 +396,7 @@ pub struct Signal {
     name: String,
     r#type: Type,
     is_net: bool,
+    unresolved_net: bool,
     package_variable: Option<(String, String)>,
     hierarchical: Option<String>,
 }
@@ -405,6 +407,7 @@ impl Signal {
             name,
             r#type,
             is_net,
+            unresolved_net: false,
             package_variable: None,
             hierarchical: None,
         }
@@ -450,6 +453,16 @@ impl Signal {
     pub fn is_net(&self) -> bool {
         self.is_net
     }
+
+    /// Whether this is an unresolved, single-driver `uwire` net (6.6.2).
+    pub fn is_unresolved_net(&self) -> bool {
+        self.unresolved_net
+    }
+
+    pub(crate) fn with_unresolved_net(mut self, unresolved: bool) -> Self {
+        self.unresolved_net = unresolved;
+        self
+    }
 }
 
 impl Port {
@@ -459,6 +472,7 @@ impl Port {
             direction,
             r#type,
             is_net,
+            unresolved_net: false,
             default: None,
             pattern_target: None,
         }
@@ -494,6 +508,16 @@ impl Port {
 
     pub fn is_net(&self) -> bool {
         self.is_net
+    }
+
+    /// Whether this is an unresolved, single-driver `uwire` net (6.6.2).
+    pub fn is_unresolved_net(&self) -> bool {
+        self.unresolved_net
+    }
+
+    pub(crate) fn with_unresolved_net(mut self, unresolved: bool) -> Self {
+        self.unresolved_net = unresolved;
+        self
     }
 
     pub(crate) fn with_default(mut self, default: Option<ConstExpr>) -> Self {
