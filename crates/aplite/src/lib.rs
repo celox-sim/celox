@@ -4,7 +4,7 @@
 //! The solver runs in process, without an external SMT executable. Unsupported
 //! expressions and exhausted resource budgets return [`Verdict::Unknown`].
 //! SAT models are replayed against the original formula; UNSAT trusts the solver.
-//! This crate does not provide random sampling of satisfying assignments.
+//! This crate does not provide uniform sampling of satisfying assignments.
 pub mod term;
 pub use term::*;
 pub type Env = std::collections::BTreeMap<String, Term>;
@@ -15,3 +15,6 @@ pub use finite::{
 
 #[cfg(test)]
 mod seeded_tests;
+
+#[cfg(test)]
+mod sampling_oracle;
