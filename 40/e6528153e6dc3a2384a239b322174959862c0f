@@ -1,0 +1,1 @@
+Validate all dynamic-container cases with pinned xezim, correct the two-state runtime-query fixture type, and document remaining independent comparison mismatches
