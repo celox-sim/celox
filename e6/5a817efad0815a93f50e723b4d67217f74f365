@@ -1,1 +1,6 @@
-Add requested independent Aplite Trusted Publishing workflow and release dispatch after authorized 0.0.0 bootstrap.
+Revision history for #2167:
+
+rev 2 (content) 2026-10-26 16:26 UTC — Add requested independent Aplite Trusted Publishing workflow and release dispatch after authorized 0.0.0 bootstrap.
+rev 1 (initial) 2026-10-26 16:26 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2167,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"b9a87e279185a0fa8eb96524a84f2bd69ac92a30","timestamp_iso":"2026-10-26T16:26:49Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"b9a87e279185a0fa8eb96524a84f2bd69ac92a30","new_sha":"e65a817efad0815a93f50e723b4d67217f74f365","timestamp_iso":"2026-10-26T16:26:49Z","reason":"Add requested independent Aplite Trusted Publishing workflow and release dispatch after authorized 0.0.0 bootstrap.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/b9a87e279185a0fa8eb96524a84f2bd69ac92a30...e65a817efad0815a93f50e723b4d67217f74f365"}]} -->
