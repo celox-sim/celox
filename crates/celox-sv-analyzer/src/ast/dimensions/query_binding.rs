@@ -690,6 +690,29 @@ pub(in crate::ast) fn shape(
     while let Some(job) = jobs.pop() {
         match job {
             Job::Enter(id) => {
+                let callee = match native.expression(id).kind {
+                    ExprKind::Call { expression, .. } => expression,
+                    _ => id,
+                };
+                if let ExprKind::Member {
+                    expression, name, ..
+                } = &native.expression(callee).kind
+                    && let Some(container) = containers::native_type(*expression, native, context)
+                {
+                    // Validate the call without executing it. Pop returns the
+                    // declared element type, including packed dimensions and
+                    // authored bounds, rather than a flattened bit vector.
+                    let value = expression_binding::bind(id, tree, context)?;
+                    let shape = if matches!(name.spelling.as_str(), "pop_front" | "pop_back") {
+                        procedural::dimensions_from_type(&container.element)
+                    } else {
+                        let ty = bound_bits_type(&tree.state, &value, context)
+                            .ok_or_else(|| unsupported("container method result type"))?;
+                        scalar(ty.width, ty.signed, ty.width > 1)
+                    };
+                    values.push(shape);
+                    continue;
+                }
                 if let Some((name, dimensions)) = type_binding::argument_alias(id, native)
                     && dimensions.is_empty()
                 {
