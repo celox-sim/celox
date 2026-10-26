@@ -163,6 +163,7 @@ mod port_owners;
 mod timing;
 mod type_binding;
 pub(crate) use parameters::unbounded_parameter_marker;
+mod array_reductions;
 mod containers;
 mod patterns;
 mod procedural;

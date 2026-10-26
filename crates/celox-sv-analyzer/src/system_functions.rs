@@ -844,6 +844,13 @@ pub enum ContainerKind {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContainerOp {
+    ReduceSum,
+    ReduceProduct,
+    ReduceAnd,
+    LegacyReduceProduct,
+    LegacyReduceAnd,
+    ReduceOr,
+    ReduceXor,
     Equal,
     CaseEqual,
     New,
@@ -866,6 +873,17 @@ pub enum ContainerOp {
     Prev,
 }
 impl ContainerOp {
+    pub fn reduction(self) -> Option<crate::ir::BinaryOp> {
+        use crate::ir::BinaryOp;
+        match self {
+            Self::ReduceSum => Some(BinaryOp::Add),
+            Self::ReduceProduct | Self::LegacyReduceProduct => Some(BinaryOp::Mul),
+            Self::ReduceAnd | Self::LegacyReduceAnd => Some(BinaryOp::BitAnd),
+            Self::ReduceOr => Some(BinaryOp::BitOr),
+            Self::ReduceXor => Some(BinaryOp::BitXor),
+            _ => None,
+        }
+    }
     pub fn mutates(self) -> bool {
         matches!(
             self,
@@ -882,7 +900,16 @@ impl ContainerOp {
     pub fn result_type(self, layout: ContainerLayout) -> (usize, bool) {
         match self {
             Self::Equal | Self::CaseEqual => (1, false),
-            Self::Get | Self::PopFront | Self::PopBack => (layout.width as usize, layout.signed),
+            Self::Get
+            | Self::PopFront
+            | Self::PopBack
+            | Self::ReduceSum
+            | Self::ReduceProduct
+            | Self::ReduceAnd
+            | Self::LegacyReduceProduct
+            | Self::LegacyReduceAnd
+            | Self::ReduceOr
+            | Self::ReduceXor => (layout.width as usize, layout.signed),
             Self::Size | Self::Exists | Self::First | Self::Last | Self::Next | Self::Prev => {
                 (32, true)
             }

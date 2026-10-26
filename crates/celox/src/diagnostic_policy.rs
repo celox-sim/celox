@@ -102,10 +102,12 @@ impl DiagnosticPolicy {
     pub(crate) fn sv_options(
         &self,
         timescale: Option<crate::SvTimescale>,
+        legacy_empty_reductions: bool,
     ) -> celox_frontend_sv::AnalysisOptions {
         celox_frontend_sv::AnalysisOptions {
             allow_mixed_timescales: self.level("mixed_timescale") != DiagnosticLevel::Error,
             default_timescale: timescale.map(|scale| (scale.unit, scale.precision)),
+            legacy_empty_reductions,
         }
     }
 

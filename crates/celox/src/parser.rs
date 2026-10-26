@@ -591,6 +591,7 @@ pub fn parse_sv(
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
     sv_timescale: Option<crate::SvTimescale>,
+    legacy_empty_reductions: bool,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
@@ -619,7 +620,7 @@ pub fn parse_sv(
             trace.is_some().then_some(&mut frontend_trace),
             config.allow_inferred_latches,
             warnings,
-            diagnostic_policy.sv_options(sv_timescale),
+            diagnostic_policy.sv_options(sv_timescale, legacy_empty_reductions),
             force_signals,
         )
         .map_err(|error| match error {
@@ -695,6 +696,7 @@ pub fn parse_mixed(
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
     sv_timescale: Option<crate::SvTimescale>,
+    legacy_empty_reductions: bool,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
@@ -845,7 +847,7 @@ pub fn parse_mixed(
                 &requests,
                 config.allow_inferred_latches,
                 &mut warnings,
-                diagnostic_policy.sv_options(sv_timescale),
+                diagnostic_policy.sv_options(sv_timescale, legacy_empty_reductions),
             );
         let external = match external {
             Ok(external) => external,

@@ -172,6 +172,22 @@ method changes above changed only these twelve verdicts, with no passing case
 regressing: 1,208 cases pass in 2state and 1,219 in 4state. Shared tests also cover short-circuiting and
 unknown operands (IEEE 1800-2023 11.4.7).
 
+Integral array reductions (7.12.3) support `sum`, `product`, `and`, `or` and
+`xor`, with or without empty parentheses. The five unmodified
+`chapter-7/arrays/unpacked/reduction-methods` simulation cases pass the
+official runner in both state modes at the pinned revision. Only those ten
+reviewed expectations change from `fail` to `pass`; this is a focused run,
+not a new full-corpus measurement. Shared regressions also exercise fixed
+arrays, queues, integral- and string-indexed associative arrays, element-width
+overflow, signed results, packed type queries and four-state propagation.
+Empty reductions use the operation identity (`product`: one, `and`: all ones,
+`sum` / `or` / `xor`: zero). An explicit `legacy_empty_reductions` build option
+selects zero for all empty reductions. These empty-input cases are covered by
+shared and simulator API regressions; the five upstream cases use nonempty
+arrays and do not distinguish these modes.
+`with` expressions, iterator arguments and
+multidimensional unpacked receivers remain unsupported.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.

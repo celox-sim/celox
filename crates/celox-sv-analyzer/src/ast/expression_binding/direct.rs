@@ -296,6 +296,10 @@ pub(in crate::ast) fn bind_value(
                         ));
                     }
                 }
+                if let Some((value, _)) = array_reductions::bind(id, native, tree, dimensions)? {
+                    values.push(value);
+                    continue;
+                }
                 if let Some(value) = containers::value(id, native, tree, dimensions, false)? {
                     values.push(value);
                     continue;

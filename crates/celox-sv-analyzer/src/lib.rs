@@ -48,6 +48,9 @@ pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AnalysisOptions {
     pub allow_mixed_timescales: bool,
+    /// Compatibility mode: return zero for every empty array reduction,
+    /// rather than the product/bitwise-AND identity. Disabled by default.
+    pub legacy_empty_reductions: bool,
     /// Default unit/precision exponents; precision also bounds global resolution.
     pub default_timescale: Option<(i32, i32)>,
 }
