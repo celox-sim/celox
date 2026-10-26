@@ -35,6 +35,7 @@ impl<B: SimBackend> SimulationState<B> {
             .get(site)
             .ok_or_else(|| Self::site_error(process, site))?;
         let driven = terms.iter().any(|term| term.driven);
+        let frame = &self.model.processes[process].frame;
         self.process_state
             .waiters
             .register(process, driven, |waiter| {
@@ -48,6 +49,12 @@ impl<B: SimBackend> SimulationState<B> {
                         .extend(terms.iter().map(|_| Baseline::Value(Value::default())));
                 }
                 for (term, baseline) in terms.iter().zip(&mut waiter.baselines) {
+                    if frame.as_ref().is_some_and(|frame| {
+                        frame.locals.contains(&term.signal) || frame.private.contains(&term.signal)
+                    }) {
+                        *baseline = Baseline::Value(read(backend, term.signal));
+                        continue;
+                    }
                     match term.counter {
                         Some(counter) => {
                             let seen = backend.get_as(counter);
@@ -154,6 +161,8 @@ impl<B: SimBackend> SimulationState<B> {
             waiters,
             ready,
             reactive,
+            activations,
+            cells,
             ..
         } = &mut self.process_state;
         waiters.retain(driven_only, |process, waiter| {
@@ -165,6 +174,19 @@ impl<B: SimBackend> SimulationState<B> {
                     continue;
                 }
                 let baseline = &mut waiter.baselines[index];
+                if let Some(value) = super::activation::activation_value(
+                    activations,
+                    cells,
+                    &processes[process],
+                    process,
+                    term.signal,
+                ) {
+                    if let Baseline::Value(last) = baseline {
+                        wake |= occurs(term.kind, last, value);
+                        *last = value.clone();
+                        continue;
+                    }
+                }
                 // The common term: a plain signal no counter counts.
                 if let Baseline::Raw(last) = baseline {
                     let now = state.planes(term.signal).expect("a plain signal");

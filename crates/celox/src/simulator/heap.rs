@@ -98,8 +98,11 @@ impl<B: SimBackend> Simulator<B> {
             return;
         }
         let roots = self.handle_roots();
-        self.backend
-            .heap_mut()
-            .collect(roots.into_iter().chain(extra_roots));
+        self.backend.heap_mut().collect(
+            roots
+                .into_iter()
+                .chain(self.process_heap_roots.iter().copied())
+                .chain(extra_roots),
+        );
     }
 }

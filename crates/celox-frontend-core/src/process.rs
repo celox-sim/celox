@@ -192,6 +192,36 @@ impl ProcessKernelBuilder {
         self.suspend(ProcessStatus::Yield)
     }
 
+    /// Reserve one entry point for each child, then return to the runtime to spawn them.
+    /// The caller lowers each child into its entry block and ends it with `complete`.
+    pub fn fork(
+        &mut self,
+        count: usize,
+        join: celox_design::ForkJoin,
+    ) -> Result<(Vec<BlockId>, BlockId), ProcessKernelError> {
+        let first = self.resume_blocks.len();
+        if first + count > MAX_PROCESS_SUSPENSIONS {
+            return Err(ProcessKernelError::TooManySuspensions);
+        }
+        let children: Vec<_> = (0..count).map(|_| self.builder.new_block()).collect();
+        self.resume_blocks.extend(children.iter().copied());
+        let mode = match join {
+            celox_design::ForkJoin::All => 0u64,
+            celox_design::ForkJoin::Any => 1,
+            celox_design::ForkJoin::None => 2,
+        };
+        self.store_delay_constant(first as u64 | ((count as u64) << 16) | (mode << 32));
+        self.slots.const_delays = false;
+        self.slots.requires_timed_simulation = true;
+        self.suspend(ProcessStatus::Fork)?;
+        Ok((children, self.builder.current_block()))
+    }
+
+    pub fn local(&mut self, slot: usize) -> Result<(), ProcessKernelError> {
+        self.store_delay_constant(slot as u64);
+        self.suspend(ProcessStatus::Local)
+    }
+
     /// Suspend the simulation (`$stop`), and continue at a new resume point
     /// when it continues.
     pub fn stop(&mut self) -> Result<(), ProcessKernelError> {
@@ -377,6 +407,11 @@ impl ProcessKernelBuilder {
             .seal_block(SIRTerminator::Jump(join, Vec::new()));
         self.builder.switch_to_block(join);
         Ok(())
+    }
+
+    /// End only this activation, notifying a waiting fork parent.
+    pub fn complete(&mut self) {
+        self.end(ProcessStatus::Done);
     }
 
     /// End the simulation. No block is open afterwards.

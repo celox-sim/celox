@@ -84,6 +84,8 @@ pub(super) struct Ff<'p, 'a> {
     /// body is lowered, and the process reads and writes stable state
     /// directly.
     kernel: Option<ProcessKernelBuilder>,
+    forked: bool,
+    frame_locals: Vec<SourceVarId>,
     /// The index of the process being lowered among the module's kernels.
     process: usize,
     /// The wait sites of the process, by local index.
@@ -149,6 +151,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             random_seed,
             dist_seed: None,
             kernel: None,
+            forked: false,
+            frame_locals: Vec::new(),
             direct: false,
             input_occurrences: true,
             process: 0,
@@ -2991,11 +2995,46 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.wait_level(condition)?;
                 Ok(true)
             }
+            sv::ir::Stmt::Fork { join, branches } => {
+                if self.kernel.is_none() {
+                    return Err(unsupported("fork outside a timed process"));
+                }
+                self.forked = true;
+                let (entries, continuation) = self
+                    .with_kernel(|kernel| kernel.fork(branches.len(), *join))
+                    .map_err(kernel_error)?;
+                self.b.seal_block(SIRTerminator::Return);
+                let loops = std::mem::take(&mut self.loops);
+                let functions = std::mem::take(&mut self.functions);
+                let overlay = std::mem::take(&mut self.overlay);
+                for (entry, branch) in entries.into_iter().zip(branches) {
+                    self.b.switch_to_block(entry);
+                    if self.exec_block(branch)? {
+                        self.with_kernel(ProcessKernelBuilder::complete);
+                    }
+                }
+                self.loops = loops;
+                self.functions = functions;
+                self.overlay = overlay;
+                self.b.switch_to_block(continuation);
+                Ok(true)
+            }
             sv::ir::Stmt::Local { name, init } => {
                 let id = self
                     .m
                     .id(name)
                     .ok_or_else(|| unsupported(format!("local `{name}`")))?;
+                if self.forked && self.kernel.is_some() {
+                    let slot = match self.frame_locals.iter().position(|&local| local == id) {
+                        Some(slot) => slot,
+                        None => {
+                            self.frame_locals.push(id);
+                            self.frame_locals.len() - 1
+                        }
+                    };
+                    self.with_kernel(|kernel| kernel.local(slot))
+                        .map_err(kernel_error)?;
+                }
                 match init {
                     Some(init) => self.assign(&sv::ir::LValue::Ident(name.clone()), init)?,
                     None => self.init_default(id),
@@ -3795,6 +3834,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                     self.element_widths.insert(working(copy), width);
                 }
                 self.m.name_to_id.insert(name.clone(), copy);
+                if self.forked {
+                    let slot = self.frame_locals.len();
+                    self.frame_locals.push(copy);
+                    self.with_kernel(|kernel| kernel.local(slot))
+                        .map_err(kernel_error)?;
+                }
                 activation.push((name.clone(), original));
             }
         }
@@ -5134,7 +5179,40 @@ impl Ff<'_, '_> {
         process: usize,
     ) -> Result<KernelUnit, sv::AnalyzerError> {
         self.process = process;
+        let starts_with_event_wait = slots.requires_timed_simulation;
+        let first_created = self.m.created.len();
+        fn has_fork(
+            m: &ProcModule<'_>,
+            body: &[sv::ir::Stmt],
+            visited: &mut HashSet<String>,
+        ) -> bool {
+            let mut found = false;
+            let mut calls = Vec::new();
+            for stmt in body {
+                stmt.walk(&mut |stmt| match stmt {
+                    sv::ir::Stmt::Fork { .. } => found = true,
+                    sv::ir::Stmt::Call { name, .. } => calls.push(name.clone()),
+                    _ => {}
+                });
+            }
+            found
+                || calls.into_iter().any(|name| {
+                    visited.insert(name.clone())
+                        && m.subroutine(&name)
+                            .is_some_and(|sub| has_fork(m, &sub.body, visited))
+                })
+        }
+        self.forked = has_fork(self.m, body, &mut HashSet::default());
+        // Forks reached through inlined tasks also need per-activation random state.
+        if self.forked {
+            self.urandom_state();
+        }
         let mut kernel = ProcessKernelBuilder::new(slots);
+        if self.forked && self.has_deferred_assertions(body, &mut HashSet::default()) {
+            return Err(unsupported(
+                "deferred assertions in a process with fork-join",
+            ));
+        }
         if let Some(site) = self.deferred_flush_site(body) {
             kernel.flush_deferred_at(site);
         }
@@ -5146,7 +5224,21 @@ impl Ff<'_, '_> {
         let slots = kernel.slots();
         let mut unit = kernel.build();
         prune_unreachable_blocks(&mut unit);
+        let frame = self.forked.then(|| {
+            let mut private = self.m.created[first_created..].to_vec();
+            private.extend([slots.resume, slots.status, slots.delay]);
+            private
+                .retain(|id| !self.frame_locals.contains(id) && Some(*id) != self.m.id(TIME_SLOT));
+            celox_design::ProcessFrame {
+                private,
+                locals: self.frame_locals,
+                random: self.random.as_ref().unwrap().0,
+                seed: self.random_seed,
+                starts_with_event_wait,
+            }
+        });
         Ok(KernelUnit {
+            frame,
             unit,
             slots,
             wait_sites: self.wait_sites,
@@ -5803,7 +5895,12 @@ impl Ff<'_, '_> {
             }
             let id = match &expr {
                 sv::ir::Expr::Ident(name) => match self.m.id(name) {
-                    Some(id) if !self.m.is_hidden(id) => id,
+                    Some(id)
+                        if !self.m.is_hidden(id)
+                            || (self.forked && self.frame_locals.contains(&id)) =>
+                    {
+                        id
+                    }
                     Some(_) => self.event_expression(&expr, samples)?,
                     // A constant never changes.
                     None if self.m.constants.contains_key(name) => continue,
@@ -5886,6 +5983,11 @@ impl Ff<'_, '_> {
             })
             .collect();
         locals.sort_unstable();
+        if self.forked && locals.iter().any(|(_, id)| self.frame_locals.contains(id)) {
+            return Err(unsupported(
+                "compound event expression reading a fork-shared automatic variable",
+            ));
+        }
         // Another call can copy a new argument into a static formal while
         // the process waits, which a copy taken now would not see.
         if locals.iter().any(|&(_, id)| self.is_static_task_formal(id)) {
@@ -5978,7 +6080,7 @@ impl Ff<'_, '_> {
         let mut ids: Vec<_> = names
             .iter()
             .filter_map(|name| self.m.id(name))
-            .filter(|&id| !self.m.is_hidden(id))
+            .filter(|&id| !self.m.is_hidden(id) || (self.forked && self.frame_locals.contains(&id)))
             .collect();
         ids.sort_unstable();
         ids.dedup();
@@ -6067,6 +6169,7 @@ impl Ff<'_, '_> {
 pub(super) struct KernelUnit {
     pub unit: ExecutionUnit<Addr>,
     pub slots: ProcessSlots<SourceVarId>,
+    pub frame: Option<celox_design::ProcessFrame<SourceVarId>>,
     pub wait_sites: Vec<WaitSite<SourceVarId>>,
     pub nba_sites: Vec<NbaSite<SourceVarId>>,
     pub host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,

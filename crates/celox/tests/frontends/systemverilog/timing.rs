@@ -461,8 +461,6 @@ fn event_expressions_with_effects_are_rejected() {
 fn unimplemented_timing_features_are_rejected() {
     for (body, construct, issue) in [
         ("bit a; initial @(a iff a);", "iff-qualified event", 1444),
-        ("initial fork #1; join", "fork-join block", 88),
-        ("initial fork #1; join_none", "fork-join block", 88),
         ("event e; initial -> e;", "named event", 88),
         (
             "bit a, b; initial a = #1 b;",
@@ -1165,3 +1163,24 @@ fn design_processes_a_program_wakes_run_before_the_nonblocking_updates() {
         assert_eq!(values, [0u8.into(), 1u8.into()], "four_state={four_state}");
     }
 }
+
+// Forked child activations and join boundaries.
+timed_cases! {
+    fn fork_join_any_keeps_other_children_running = "fork::join_any_keeps_other_children_running";
+    fn fork_join_none_starts_after_parent_blocks = "fork::join_none_starts_after_parent_blocks";
+    fn fork_repeated_forks_capture_each_automatic_local = "fork::repeated_forks_capture_each_automatic_local";
+    fn fork_nested_forks_wait_for_their_own_children = "fork::nested_forks_wait_for_their_own_children";
+    fn fork_automatic_task_inputs_outlive_the_call = "fork::automatic_task_inputs_outlive_the_call";
+    fn fork_fork_children_wait_for_signal_changes = "fork::fork_children_wait_for_signal_changes";
+    fn fork_repeated_forks_reuse_finished_instances = "fork::repeated_forks_reuse_finished_instances";
+    fn fork_static_locals_are_shared_between_overlapping_children = "fork::static_locals_are_shared_between_overlapping_children";
+    fn fork_fork_nonblocking_updates_keep_each_child_value = "fork::fork_nonblocking_updates_keep_each_child_value";
+    fn fork_children_share_a_live_automatic_local = "fork::children_share_a_live_automatic_local";
+    fn fork_wait_on_shared_automatic_local_wakes_after_child_write = "fork::wait_on_shared_automatic_local_wakes_after_child_write";
+    fn fork_event_on_shared_automatic_local_wakes_after_child_write = "fork::event_on_shared_automatic_local_wakes_after_child_write";
+    fn fork_suspended_child_keeps_automatic_string_alive = "fork::suspended_child_keeps_automatic_string_alive";
+    fn fork_child_delay_uses_current_simulation_time = "fork::child_delay_uses_current_simulation_time";
+    fn fork_join_any_waits_only_for_immediate_children = "fork::join_any_waits_only_for_immediate_children";
+}
+
+timed_cases! { fn fork_four_state_automatic_values_survive_fork_suspension = "fork::four_state_automatic_values_survive_fork_suspension"; }

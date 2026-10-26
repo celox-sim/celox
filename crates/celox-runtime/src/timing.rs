@@ -153,6 +153,7 @@ pub struct NbaSiteRefs {
 /// Control slots and sites of one process kernel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessRefs {
+    pub frame: Option<celox_design::ProcessFrame<SignalRef>>,
     pub kind: celox_design::ProcessKind,
     /// The status slot naming the program instance of a program kernel
     /// ([`celox_design::ProcessSlots::program`]), which runs in the reactive
@@ -175,6 +176,7 @@ impl ProcessRefs {
     /// A process without wait or nonblocking sites.
     pub fn new(status: SignalRef, delay: SignalRef) -> Self {
         Self {
+            frame: None,
             kind: celox_design::ProcessKind::Regular,
             program: None,
             resume: status,
@@ -330,6 +332,8 @@ pub fn planes_occur(kind: CounterKind, old: &[u8], new: &[u8], width: usize) -> 
 /// assignments. All of it is empty in a design without process kernels.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProcessState {
+    pub activations: Vec<crate::simulation::Activation>,
+    pub cells: Vec<Value>,
     /// Processes suspended at a wait.
     pub waiters: Waiters,
     /// Processes ready to run in the active region of the current time.

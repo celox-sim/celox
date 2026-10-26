@@ -2026,6 +2026,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         stmt: &sv::ir::Stmt,
     ) -> Result<Store, sv::AnalyzerError> {
         match stmt {
+            sv::ir::Stmt::Fork { .. } => Err(unsupported("fork outside a timed process")),
             sv::ir::Stmt::Assign {
                 lhs,
                 rhs,
