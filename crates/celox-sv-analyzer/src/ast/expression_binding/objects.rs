@@ -53,6 +53,38 @@ pub(in crate::ast) fn native_class(
     property.r#type.class().map(str::to_owned)
 }
 
+/// Access depends on the lexical class, not the class of the receiver (8.18).
+pub(in crate::ast) fn check_access(
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    owner: &str,
+    name: &str,
+    local: bool,
+    protected: bool,
+) -> Converted<()> {
+    if !local && !protected {
+        return Ok(());
+    }
+    if let Some(scope) = dimensions.class_scope.as_deref() {
+        if scope == owner
+            || (!local
+                && class(tree, dimensions, scope)?.derives_from(
+                    tree,
+                    owner,
+                    &dimensions.const_env,
+                    &dimensions.type_aliases,
+                ))
+        {
+            return Ok(());
+        }
+    }
+    Err(AnalyzerError::InaccessibleClassMember {
+        owner: owner.to_owned(),
+        name: name.to_owned(),
+        visibility: if local { "local" } else { "protected" },
+    })
+}
+
 /// The class whose method is being bound, whose properties and methods
 /// unqualified names may refer to.
 pub(in crate::ast) fn scope_class(dimensions: &PackedDimensions) -> Option<String> {
@@ -115,9 +147,20 @@ pub(in crate::ast) fn static_property(
     let Some(class_name) = class_name else {
         return Ok(None);
     };
-    Ok(class(tree, dimensions, &class_name)?
-        .static_property(&instances::normalize_identifier(&name.spelling))
-        .map(|property| property.variable.clone()))
+    let class = class(tree, dimensions, &class_name)?;
+    let Some(property) = class.static_property(&instances::normalize_identifier(&name.spelling))
+    else {
+        return Ok(None);
+    };
+    check_access(
+        tree,
+        dimensions,
+        &property.owner,
+        &property.name,
+        property.local,
+        property.protected,
+    )?;
+    Ok(Some(property.variable.clone()))
 }
 
 /// The property that native expression `id` names, `h.p` or an unqualified
@@ -157,9 +200,28 @@ pub(in crate::ast) fn property(
         _ => return Ok(None),
     };
     let class = class(tree, dimensions, &class_name)?;
-    let Some(property) = class.property(&instances::normalize_identifier(&name.spelling)) else {
+    let name = instances::normalize_identifier(&name.spelling);
+    let Some(property) = class.property(&name) else {
+        if let Some(property) = class.static_property(&name) {
+            check_access(
+                tree,
+                dimensions,
+                &property.owner,
+                &property.name,
+                property.local,
+                property.protected,
+            )?;
+        }
         return Ok(None);
     };
+    check_access(
+        tree,
+        dimensions,
+        &property.owner,
+        &property.name,
+        property.local,
+        property.protected,
+    )?;
     if receiver.is_none() && dimensions.get(THIS).is_none() {
         return Err(unsupported(format!(
             "non-static property `{}` in a static method",
@@ -202,8 +264,26 @@ pub(in crate::ast) fn unqualified_property(
     };
     let class = class(tree, dimensions, &class_name)?;
     let Some(property) = class.property(name) else {
+        if let Some(property) = class.static_property(name) {
+            check_access(
+                tree,
+                dimensions,
+                &property.owner,
+                &property.name,
+                property.local,
+                property.protected,
+            )?;
+        }
         return Ok(None);
     };
+    check_access(
+        tree,
+        dimensions,
+        &property.owner,
+        &property.name,
+        property.local,
+        property.protected,
+    )?;
     if dimensions.get(THIS).is_none() {
         return Err(unsupported(format!(
             "non-static property `{name}` in a static method"
@@ -300,6 +380,14 @@ pub(in crate::ast) fn method(
     let Some(method) = class.method(&method_name) else {
         return Ok(None);
     };
+    check_access(
+        tree,
+        dimensions,
+        &method.owner,
+        &method.name,
+        method.qualifiers.local,
+        method.qualifiers.protected,
+    )?;
     if through_super && method.is_pure() {
         return Err(unsupported(format!(
             "pure virtual method `{}` called through `super`",
@@ -485,6 +573,16 @@ pub(in crate::ast) fn constructor(
         _ => return Ok(None),
     };
     let class = class(tree, dimensions, &class_name)?;
+    if let Some(method) = class.method("new") {
+        check_access(
+            tree,
+            dimensions,
+            &method.owner,
+            &method.name,
+            method.qualifiers.local,
+            method.qualifiers.protected,
+        )?;
+    }
     if class.is_abstract {
         return Err(unsupported(format!(
             "object of abstract class `{class_name}`"
@@ -555,9 +653,12 @@ pub(super) fn random_selection(
                 if property.constant {
                     return Err(unsupported("randomize argument is a const property"));
                 }
-                if property.field.handle.is_some() || property.r#type.is_enum || property.randc {
+                if property.field.handle.is_some()
+                    || (property.r#type.is_enum && property.r#type.enum_values.is_none())
+                    || (property.randc && property.cyclic_domain_size().is_none())
+                {
                     return Err(unsupported(
-                        "randomize arguments require integral non-enum, non-randc properties",
+                        "randomize arguments require integral properties with a supported enum domain",
                     ));
                 }
                 bits[index + 1] = '1';
@@ -671,28 +772,12 @@ fn check_random_access(
     dimensions: &PackedDimensions,
     property: &classes::Property,
 ) -> Converted<()> {
-    let scope = scope_class(dimensions);
-    let accessible = if property.local {
-        scope.as_deref() == Some(&property.owner)
-    } else if property.protected {
-        scope
-            .and_then(|name| class(tree, dimensions, &name).ok())
-            .is_some_and(|class| {
-                class.derives_from(
-                    tree,
-                    &property.owner,
-                    &dimensions.const_env,
-                    &dimensions.type_aliases,
-                )
-            })
-    } else {
-        true
-    };
-    if !accessible {
-        return Err(unsupported(format!(
-            "randomization access to non-public property `{}`",
-            property.name
-        )));
-    }
-    Ok(())
+    check_access(
+        tree,
+        dimensions,
+        &property.owner,
+        &property.name,
+        property.local,
+        property.protected,
+    )
 }

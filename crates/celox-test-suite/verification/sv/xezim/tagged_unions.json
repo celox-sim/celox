@@ -1,0 +1,103 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:11:60: error: expected RParen, found Identifier 'data'\n    11 |     always_comb current_value = Types::item_t'(tagged Full data);\n       |                                                            ^~~~\n<case>/source_0.sv:11:60: error: expected Semicolon, found Identifier 'data'\n    11 |     always_comb current_value = Types::item_t'(tagged Full data);\n       |                                                            ^~~~\n<case>/source_0.sv:11:64: error: expected identifier, found RParen ')'\n    11 |     always_comb current_value = Types::item_t'(tagged Full data);\n       |                                                                ^\n<case>/source_0.sv:11:64: error: expected Semicolon, found RParen ')'\n    11 |     always_comb current_value = Types::item_t'(tagged Full data);\n       |                                                                ^\n<case>/source_0.sv:11:64: error: unexpected: \")\"\n    11 |     always_comb current_value = Types::item_t'(tagged Full data);\n       |                                                                ^\nParsed 2 file(s): 4 descriptions, 5 errors, 0 warnings\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::casts_ports_and_registers",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "tagged_unions::conditional_struct_payload at 149:5: assert_eq result: expected 0xb5, got 0x10",
+      "expectation": "Simulation",
+      "name": "tagged_unions::conditional_struct_payload",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:8:44: error: expected Semicolon, found Identifier 'data'\n    8 |         if (full_value) item = tagged Full data;\n      |                                            ^~~~\n<case>/source_0.sv:9:9: error: expected expression, found KwElse 'else'\n    9 |         else item = tagged Empty;\n      |         ^~~~\n<case>/source_0.sv:9:14: error: expected Semicolon, found Identifier 'item'\n    9 |         else item = tagged Empty;\n      |              ^~~~\n<case>/source_0.sv:16:30: error: expected Semicolon, found IntegerLiteral '8'h00'\n    16 |         copied = tagged Full 8'h00;\n       |                              ^~~~~\n<case>/source_0.sv:19:30: error: expected Semicolon, found IntegerLiteral '8'ha0'\n    19 |         copied = tagged Full 8'ha0;\n       |                              ^~~~~\nParsed 2 file(s): 2 descriptions, 6 errors, 0 warnings\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::constructors_and_checked_members",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6:73: error: expected RParen, found Identifier 'data'\n    6 |     function automatic logic [7:0] get(input item_t value = tagged Full data,\n      |                                                                         ^~~~\n<case>/source_0.sv:6:73: error: expected Semicolon, found Identifier 'data'\n    6 |     function automatic logic [7:0] get(input item_t value = tagged Full data,\n      |                                                                         ^~~~\n<case>/source_0.sv:6:77: error: expected Semicolon, found Comma ','\n    6 |     function automatic logic [7:0] get(input item_t value = tagged Full data,\n      |                                                                             ^\n<case>/source_0.sv:6:77: error: expected expression, found Comma ','\n    6 |     function automatic logic [7:0] get(input item_t value = tagged Full data,\n      |                                                                             ^\n<case>/source_0.sv:7:40: error: expected Semicolon, found KwInput 'input'\n    7 |                                        input logic [7:0] data = 8'hee);\n      |                                        ^~~~~\n<case>/source_0.sv:7:70: error: expected expression, found RParen ')'\n    7 |                                        input logic [7:0] data = 8'hee);\n      |                                                                      ^\n<case>/source_0.sv:10:94: error: expected RParen, found IntegerLiteral '8'h35'\n    10 |     function automatic logic [7:0] get_nested(input outer_t value = tagged Some (tagged Full 8'h35));\n       |                                                                                              ^~~~~\n<case>/source_0.sv:10:94: error: expected Semicolon, found IntegerLiteral '8'h35'\n    10 |     function automatic logic [7:0] get_nested(input outer_t value = tagged Some (tagged Full 8'h35));\n       |                                                                                              ^~~~~\n<case>/source_0.sv:10:99: error: expected Semicolon, found RParen ')'\n    10 |     function automatic logic [7:0] get_nested(input outer_t value = tagged Some (tagged Full 8'h35));\n       |                                                                                                   ^\n<case>/source_0.sv:10:99: error: expected expression, found RParen ')'\n    10 |     function automatic logic [7:0] get_nested(input outer_t value = tagged Some (tagged Full 8'h35));\n       |                                                                                                   ^\n<case>/source_0.sv:10:100: error: expected Semicolon, found RParen ')'\n    10 |     function automatic logic [7:0] get_nested(input outer_t value = tagged Some (tagged Full 8'h35));\n       |                                                                                                    ^\n<case>/source_0.sv:10:100: error: expected expression, found RParen ')'\n    10 |     function automatic logic [7:0] get_nested(input outer_t value = tagged Some (tagged Full 8'h35));\n       |                                                                                                    ^\n<case>/source_0.sv:14:29: error: expected Semicolon, found IntegerLiteral '8'h19'\n    14 |         value = tagged Full 8'h19;\n       |                             ^~~~~\n<case>/source_0.sv:17:91: error: expected RParen, found IntegerLiteral '8'h2a'\n    17 |     task automatic read_value(output logic [7:0] result, input item_t value = tagged Full 8'h2a);\n       |                                                                                           ^~~~~\n<case>/source_0.sv:17:91: error: expected Semicolon, found IntegerLiteral '8'h2a'\n    17 |     task automatic read_value(output logic [7:0] result, input item_t value = tagged Full 8'h2a);\n       |                                                                                           ^~~~~\n<case>/source_0.sv:17:96: error: expected Semicolon, found RParen ')'\n    17 |     task automatic read_value(output logic [7:0] result, input item_t value = tagged Full 8'h2a);\n       |                                                                                                ^\n<case>/source_0.sv:17:96: error: expected expression, found RParen ')'\n    17 |     task automatic read_value(output logic [7:0] result, input item_t value = tagged Full 8'h2a);\n       |                                                                                                ^\n<case>/source_0.sv:23:42: error: expected RParen, found IntegerLiteral '8'h55'\n    23 |         explicit_value = get(tagged Full 8'h55);\n       |                                          ^~~~~\n<case>/source_0.sv:23:42: error: expected Semicolon, found IntegerLiteral '8'h55'\n    23 |         explicit_value = get(tagged Full 8'h55);\n       |                                          ^~~~~\n<case>/source_0.sv:23:47: error: expected Semicolon, found RParen ')'\n    23 |         explicit_value = get(tagged Full 8'h55);\n       |                                               ^\n... 1 more error(s) in '<case>/source_0.sv' not shown\nParsed 2 file(s): 2 descriptions, 28 errors, 0 warnings\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::default_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:11:29: error: expected Semicolon, found IntegerLiteral '8'd4'\n    11 |         value = tagged Full 8'd4;\n       |                             ^~~~\n<case>/source_0.sv:21:42: error: expected RParen, found IntegerLiteral '8'd7'\n    21 |         value = tagged Some (tagged Full 8'd7);\n       |                                          ^~~~\n<case>/source_0.sv:21:42: error: expected Semicolon, found IntegerLiteral '8'd7'\n    21 |         value = tagged Some (tagged Full 8'd7);\n       |                                          ^~~~\n<case>/source_0.sv:21:46: error: expected Semicolon, found RParen ')'\n    21 |         value = tagged Some (tagged Full 8'd7);\n       |                                              ^\n<case>/source_0.sv:21:46: error: expected expression, found RParen ')'\n    21 |         value = tagged Some (tagged Full 8'd7);\n       |                                              ^\n<case>/source_0.sv:26:30: error: expected Semicolon, found IntegerLiteral '8'd4'\n    26 |         value = tagged Empty 8'd4;\n       |                              ^~~~\n<case>/source_0.sv:41:28: error: expected Semicolon, found Identifier 'value'\n    41 |         return tagged Full value;\n       |                            ^~~~~\n<case>/source_0.sv:44:36: error: expected Colon, found Identifier 'value'\n    44 |         return valid ? tagged Full value : tagged Empty;\n       |                                    ^~~~~\n<case>/source_0.sv:44:42: error: expected Semicolon, found Colon ':'\n    44 |         return valid ? tagged Full value : tagged Empty;\n       |                                          ^\n<case>/source_0.sv:44:42: error: expected expression, found Colon ':'\n    44 |         return valid ? tagged Full value : tagged Empty;\n       |                                          ^\n<case>/source_0.sv:44:44: error: expected Semicolon, found KwTagged 'tagged'\n    44 |         return valid ? tagged Full value : tagged Empty;\n       |                                            ^~~~~~\n<case>/source_0.sv:48:29: error: expected Semicolon, found Identifier 'd'\n    48 |         value = tagged Full d;\n       |                             ^\nParsed 2 file(s): 2 descriptions, 14 errors, 0 warnings\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::factory_and_union_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:8:43: error: expected RParen, found Identifier 'data'\n    8 |         item = tagged Nested (tagged Full data);\n      |                                           ^~~~\n<case>/source_0.sv:8:43: error: expected Semicolon, found Identifier 'data'\n    8 |         item = tagged Nested (tagged Full data);\n      |                                           ^~~~\n<case>/source_0.sv:8:47: error: expected Semicolon, found RParen ')'\n    8 |         item = tagged Nested (tagged Full data);\n      |                                               ^\n<case>/source_0.sv:8:47: error: expected expression, found RParen ')'\n    8 |         item = tagged Nested (tagged Full data);\n      |                                               ^\n<case>/source_0.sv:10:28: error: expected Semicolon, found IntegerLiteral '16'hffff'\n    10 |         item = tagged Word 16'hffff;\n       |                            ^~~~~~~~\n<case>/source_0.sv:14:47: error: expected RParen, found Identifier 'data'\n    14 |             item = tagged Nested (tagged Full data);\n       |                                               ^~~~\n<case>/source_0.sv:14:47: error: expected Semicolon, found Identifier 'data'\n    14 |             item = tagged Nested (tagged Full data);\n       |                                               ^~~~\n<case>/source_0.sv:14:51: error: expected Semicolon, found RParen ')'\n    14 |             item = tagged Nested (tagged Full data);\n       |                                                   ^\n<case>/source_0.sv:14:51: error: expected expression, found RParen ')'\n    14 |             item = tagged Nested (tagged Full data);\n       |                                                   ^\nParsed 2 file(s): 2 descriptions, 11 errors, 0 warnings\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::nested_and_void_constructors",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:7:28: error: expected Semicolon, found Identifier 'data'\n    7 |         item = tagged Full data;\n      |                            ^~~~\nParsed 2 file(s): 2 descriptions, 1 errors, 0 warnings\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::wide_four_state_payload",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6:28: error: expected Semicolon, found IntegerLiteral '0'\n    6 |         item = tagged Full 0;\n      |                            ^\n<case>/source_0.sv:13:28: error: expected Semicolon, found IntegerLiteral '123'\n    13 |         item = tagged Full 123;\n       |                            ^~~\nParsed 3 file(s): 3 descriptions, 2 errors, 0 warnings\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::writable_system_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:18:28: error: expected Semicolon, found IntegerLiteral '0'\n    18 |         item = tagged Full 0;\n       |                            ^\n<case>/source_0.sv:22:43: error: expected RParen, found IntegerLiteral '0'\n    22 |         nested = tagged Some (tagged Full 0);\n       |                                           ^\n<case>/source_0.sv:22:43: error: expected Semicolon, found IntegerLiteral '0'\n    22 |         nested = tagged Some (tagged Full 0);\n       |                                           ^\n<case>/source_0.sv:22:44: error: expected Semicolon, found RParen ')'\n    22 |         nested = tagged Some (tagged Full 0);\n       |                                            ^\n<case>/source_0.sv:22:44: error: expected expression, found RParen ')'\n    22 |         nested = tagged Some (tagged Full 0);\n       |                                            ^\nParsed 2 file(s): 2 descriptions, 6 errors, 0 warnings\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::writable_task_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

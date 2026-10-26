@@ -137,6 +137,12 @@ pub trait SimBackend {
         None
     }
     fn set_comb_capture_event_enabled(&mut self, _active_sites: &[bool]) {}
+    /// Which runtime event sites are enabled for combinational capture, by
+    /// the host before an evaluation or by the evaluation for observers
+    /// whose inputs it changed. Empty for a backend without capture.
+    fn comb_capture_event_enabled(&self) -> Vec<bool> {
+        Vec::new()
+    }
     fn stable_region_size(&self) -> usize;
     fn layout(&self) -> &MemoryLayout;
     /// The heap that handle slots in this backend's state refer to.
@@ -148,6 +154,13 @@ pub trait SimBackend {
     /// the runtime's loop does. An interpreter executes the unit slower
     /// than the loop's native bookkeeping.
     fn runs_compiled_scheduler(&self) -> bool {
+        true
+    }
+
+    /// Whether the code now running has the generated derived-edge units
+    /// (`RuntimeSchema::derived_edges`); otherwise a host walks the
+    /// derived-tick plans.
+    fn runs_derived_edge_units(&self) -> bool {
         true
     }
 

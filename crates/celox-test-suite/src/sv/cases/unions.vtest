@@ -1,0 +1,146 @@
+(group unions (category types))
+
+(case packed_overlay
+  (source "union.sv" #"
+module Top(input bit clk, input logic [15:0] raw, input logic [3:0] nibble,
+           output logic [15:0] value, saved, output logic [7:0] low,
+           output logic signed [31:0] extended);
+    typedef union packed signed {
+        logic [15:0] bits;
+        struct packed { logic [7:0] hi, lo; } parts;
+    } overlay_t;
+    overlay_t data, stored;
+    always_comb begin
+        data.bits = raw;
+        data.parts.lo[3:0] = nibble;
+    end
+    always_ff @(posedge clk) stored <= data;
+    assign value = data.bits;
+    assign low = data.parts.lo;
+    assign extended = data;
+    assign saved = stored.parts;
+endmodule
+"#)
+  (top Top)
+  (for (r n) (list (0 15) (0xa53c 6) (0x7fff 0) (0xffff 1))
+    (modify (set raw r) (set nibble n))
+    (let expected (| (& r 0xfff0) n))
+    (assert_eq value expected)
+    (assert_eq low (& expected 255))
+    (if (& expected 0x8000)
+      (assert_eq extended (| expected 0xffff0000))
+      (assert_eq extended expected))
+    (tick clk)
+    (assert_eq saved expected)))
+
+(case soft_overlay
+  (source "soft_union.sv" #"
+module Top(input bit clk, input logic [15:0] raw, input logic [3:0] nibble,
+           output logic [15:0] value, saved, output logic [7:0] low,
+           output logic [31:0] width);
+    typedef union soft packed {
+        logic [15:0] bits;
+        union soft { logic [7:0] byte_value; logic [3:0] nibble_value; } nested;
+    } overlay_t;
+    overlay_t data, stored;
+    always_comb begin
+        data.bits = raw;
+        data.nested.nibble_value = nibble;
+    end
+    always_ff @(posedge clk) begin
+        stored.bits <= raw;
+        stored.nested.nibble_value <= nibble;
+    end
+    assign value = data;
+    assign low = data.nested.byte_value;
+    assign saved = stored;
+    assign width = $bits(overlay_t);
+endmodule
+"#)
+  (top Top)
+  (assert_eq width 16)
+  (for (r n) (list (0 15) (0xa53c 6) (0x7fff 0) (0xffff 1))
+    (modify (set raw r) (set nibble n))
+    (let expected (| (& r 0xfff0) n))
+    (assert_eq value expected)
+    (assert_eq low (& expected 255))
+    (tick clk)
+    (assert_eq saved expected)))
+
+(case packed_mixed_state
+  (four_state)
+  (source "union_state.sv" #"
+module Top(input logic [7:0] raw, output logic [7:0] four, two, written);
+    union packed { logic [7:0] four_value; bit [7:0] two_value; } data, clean;
+    assign data.four_value = raw;
+    assign clean.two_value = raw;
+    assign four = data.four_value;
+    assign two = data.two_value;
+    assign written = clean.four_value;
+endmodule
+"#)
+  (top Top)
+  (for (v m) (list (0xa5 0) (0xa5 0x0f) (0xff 0xff) (0 0xff))
+    (modify (set raw (fourstate v m)))
+    (assert_eq four (fourstate v m))
+    (assert_eq two (& v (^ m 255)))
+    (assert_eq written (& v (^ m 255)))))
+
+(case soft_wide_four_state
+  (four_state)
+  (source "soft_union_wide.sv" #"
+module Top(input bit clk, input logic [129:0] raw, input logic [7:0] byte_value,
+           output logic [129:0] value, saved);
+    union soft { logic [129:0] wide; logic [7:0] narrow_value; } data, stored;
+    always_comb begin
+        data.wide = raw;
+        data.narrow_value = byte_value;
+    end
+    always_ff @(posedge clk) stored <= data;
+    assign value = data.wide;
+    assign saved = stored.wide;
+endmodule
+"#)
+  (top Top)
+  (for bit (list 0 7 8 63 64 127 128 129)
+    (let v (| (<< 1 bit) 0x5a))
+    (let m (<< 1 bit))
+    (modify (set raw (fourstate v m)) (set byte_value (fourstate 0xa5 0x0f)))
+    (let upper_mask (- (<< 1 130) 256))
+    (let expected (fourstate (| (& v upper_mask) 0xa5) (| (& m upper_mask) 0x0f)))
+    (assert_eq value expected)
+    (tick clk)
+    (assert_eq saved expected)))
+
+(case soft_signed_ports
+  (source "soft_union_ports.sv" #"
+package Types;
+    typedef union soft packed signed {
+        logic signed [3:0] nibble_value;
+        logic [7:0] byte_value;
+    } overlay_t;
+endpackage
+module Update(input Types::overlay_t incoming, input logic [3:0] nibble,
+              output Types::overlay_t outgoing);
+    always_comb begin
+        outgoing = incoming;
+        outgoing.nibble_value = nibble;
+    end
+endmodule
+module Top(input logic [7:0] raw, input logic [3:0] nibble,
+           output logic [15:0] extended, member_extended,
+           output logic [7:0] value);
+    Types::overlay_t incoming, outgoing;
+    assign incoming = raw;
+    Update update_value(.incoming(incoming), .nibble(nibble), .outgoing(outgoing));
+    assign value = outgoing;
+    assign extended = outgoing;
+    assign member_extended = outgoing.nibble_value;
+endmodule
+"#)
+  (top Top)
+  (for (r n e me) (list (0xa5 6 0xffa6 6) (0x75 15 0x7f 0xffff) (0 8 8 0xfff8))
+    (modify (set raw r) (set nibble n))
+    (assert_eq value (& e 255))
+    (assert_eq extended e)
+    (assert_eq member_extended me)))

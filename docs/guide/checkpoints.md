@@ -141,6 +141,10 @@ celox state dump before_failure.state
 celox state diff native.state interpreter.state
 ```
 
+`celox run` saves state files at chosen cycles or times of a SystemVerilog run
+with `--save-state-on`, `--save-state-at` and `--save-state-at-time` (see
+[the command line](cocotb.md#save-state-files-during-a-systemverilog-run)).
+
 `diff` exits with status 1 when the files differ. Both commands skip
 combinational signals unless you pass `--comb`. Dead store elimination at
 `O2` leaves unread combinational signals unwritten, so their saved values are

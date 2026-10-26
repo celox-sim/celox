@@ -60,15 +60,44 @@ limit before completion fails the command. This limit does not bound compilation
 or work within a single step/tick; use an external process timeout when a wall
 clock limit is needed. `--unlimited` removes the step/tick limit. Source languages cannot be mixed in one invocation.
 
+For a SystemVerilog testbench, a positional argument starting with `+` (or
+`--plusarg +ARG`, repeatable) is a plusarg, not a source: `$test$plusargs` and
+`$value$plusargs` see them in command-line order, on every backend.
+
+```sh
+celox run tb.v --top tb +iterations=9 --plusarg +trace
+```
+
 ## Select execution and collect measurements
 
 `celox run` accepts `--threads N` (1–64, default 1) and `--four-state` for both
 languages. Both languages support `--backend native|tiered|interpreter|cranelift|wasm`
-(default: native). Tiered starts interpreted and adopts compiled code at a scheduler
+(default: tiered; native when `--compile-only`, a native image, `--build-cache-dir` or an
+IR dump is requested). Tiered starts interpreted and adopts compiled code at a scheduler
 safe point while preserving pending events. For example:
 
 ```sh
 celox run test/Top.sv --top Top --backend tiered --threads 4
+```
+
+### Save state files during a SystemVerilog run
+
+To compare two runs or two simulators, `celox run` can save
+[state files](checkpoints.md#state-files) for `celox state dump` and `celox state diff`:
+
+| Options | Purpose |
+| --- | --- |
+| `--save-state-on SIGNAL` | Count the cycles of `SIGNAL`, a hierarchical path such as `tb.clk` (the top module's name may be left out). A cycle is a time step at whose end the signal is 1 while it was not at the end of the previous time step. |
+| `--save-state-at N[,M...]` | Save the state after cycles N, M, ... of `--save-state-on`, counted from 1, as `<SIGNAL>-<N>.state`. The file is written right after that time step, with every region of the time done, so its nonblocking updates are included. |
+| `--save-state-at-time T[,U...]` | Save the state after everything due at times up to T, before the run advances past T, as `time-<T>.state`. T is in units of the design's global time precision. |
+| `--save-state-dir DIR` | Write the files to `DIR` (default: the current directory). |
+
+A cycle that the run never reaches is an error. These options are available for
+SystemVerilog testbenches on every backend.
+
+```sh
+celox run c906.v --top tb --save-state-on tb.clk --save-state-at 1000,2000 --save-state-dir states
+celox state diff states/tb.clk-1000.state other/tb.clk-1000.state
 ```
 
 For Veryl native testbenches it also provides:

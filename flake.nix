@@ -9,8 +9,14 @@
     };
     rust-overlay = {
       # Pin the revision explicitly so Renovate can group overlay and Rust updates.
-      url = "github:oxalica/rust-overlay/b0829a2cc9f7b596583331d78a942c1e5170d8a0";
+      url = "github:oxalica/rust-overlay/fad80eb74614f7dc37c1c83df8caae64361eda22";
       inputs.nixpkgs.follows = "nixpkgs";
+    };
+    # The xezim reference simulator for the shared test suite, pinned by
+    # revision so that Renovate proposes updates.
+    xezim = {
+      url = "github:aionhw/xezim/058f2bba58648452e5799d17572356ebcae7d163";
+      flake = false;
     };
   };
 
@@ -19,6 +25,7 @@
       nixpkgs,
       nix-packages,
       rust-overlay,
+      xezim,
       ...
     }:
     let
@@ -55,6 +62,7 @@
           };
           mbx = nix-packages.packages.${system}.mbx;
           mergify-cli = pkgs.callPackage ./nix/mergify-cli.nix { };
+          xezim-simulator = pkgs.callPackage ./nix/xezim { src = xezim; };
           # mbx recognizes a symlink named cargo and preserves Cargo's CLI,
           # including --version. Real Cargo must remain later on PATH.
           cargoShim = pkgs.runCommand "celox-cargo-shim" { } ''
@@ -101,6 +109,7 @@
             pkgs
             mbx
             mergify-cli
+            xezim-simulator
             tools
             python
             rust
@@ -117,6 +126,7 @@
         in
         {
           inherit (e) mbx mergify-cli;
+          xezim = e.xezim-simulator;
           # The devcontainer uses this profile for editor and non-shell commands.
           dev-tools = e.pkgs.buildEnv {
             name = "celox-dev-tools";
@@ -136,17 +146,22 @@
         system:
         let
           e = environments.${system};
+          shell =
+            extra:
+            (e.pkgs.mkShell.override { stdenv = e.stdenv; }) {
+              packages = e.tools ++ extra;
+              CELOX_COCOTB_PYTHON = "${e.python}/bin/python3";
+              Z3_BIN = "${e.pkgs.z3}/bin/z3";
+              shellHook = ''
+                export NPM_CONFIG_PREFIX="''${NPM_CONFIG_PREFIX:-$HOME/.local/share/npm}"
+                export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
+              '';
+            };
         in
         {
-          default = (e.pkgs.mkShell.override { stdenv = e.stdenv; }) {
-            packages = e.tools;
-            CELOX_COCOTB_PYTHON = "${e.python}/bin/python3";
-            Z3_BIN = "${e.pkgs.z3}/bin/z3";
-            shellHook = ''
-              export NPM_CONFIG_PREFIX="''${NPM_CONFIG_PREFIX:-$HOME/.local/share/npm}"
-              export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
-            '';
-          };
+          default = shell [ ];
+          # xezim builds from source, so only its external-suite jobs use it.
+          xezim = shell [ e.xezim-simulator ];
         }
       );
       checks = forAllSystems (

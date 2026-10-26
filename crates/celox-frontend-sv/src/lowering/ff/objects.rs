@@ -60,6 +60,14 @@ impl Ff<'_, '_> {
                 let value = self.integer_of_width(&args[1], field.width as usize, field.signed)?;
                 self.heap_call(ops::OBJECT_STORE, &[object, place, value])
             }
+            ObjectOp::RandomCyclic { offset, count } => {
+                let object = self.handle(&args[0])?;
+                let count = self.constant64(u64::from(*count));
+                self.heap_call(
+                    ops::encode(ops::OBJECT_RANDOM_CYCLIC, u64::from(*offset)),
+                    &[object, count],
+                )
+            }
             ObjectOp::Random
             | ObjectOp::Check(_)
             | ObjectOp::ModeGet(..)
@@ -121,6 +129,7 @@ impl Ff<'_, '_> {
             ObjectOp::Store(_)
             | ObjectOp::ClassOf
             | ObjectOp::Random
+            | ObjectOp::RandomCyclic { .. }
             | ObjectOp::Seed
             | ObjectOp::Check(_)
             | ObjectOp::ModeGet(..)

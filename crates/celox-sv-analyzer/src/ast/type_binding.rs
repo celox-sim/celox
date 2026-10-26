@@ -250,7 +250,7 @@ pub(super) fn alias_base_type(
         return Ok(None);
     }
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
-    binding::bind_in(id, native, tree, &context)
+    binding::bind_alias_in(id, native, tree, &context)
 }
 
 /// Builtin integral identity/width without syntax or aggregate layout.

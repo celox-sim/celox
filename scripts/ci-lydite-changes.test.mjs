@@ -14,10 +14,10 @@ import { readWorkspace } from "./ci-rust-scope.mjs";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const packages = readWorkspace(root);
 const scope = (...files) => lyditeScope(files, packages);
-const both = { core: true, bridge: true };
-const neither = { core: false, bridge: false };
+const coreOnly = { core: true };
+const neither = { core: false };
 
-test("Lydite core changes and shared configuration run both lanes", () => {
+test("Lydite core changes and shared configuration run core checks", () => {
   for (const path of [
     "crates/lydite/src/main.rs",
     "crates/lydite-ir/src/lib.rs",
@@ -31,11 +31,11 @@ test("Lydite core changes and shared configuration run both lanes", () => {
     "crates/new/src/lib.rs",
     "conformance/new/case.sv",
   ])
-    assert.deepEqual(scope(path), both, path);
-  assert.deepEqual(lyditeScope(null, packages), both);
+    assert.deepEqual(scope(path), coreOnly, path);
+  assert.deepEqual(lyditeScope(null, packages), coreOnly);
 });
 
-test("Celox dependencies select the bridge, without rerunning the editor/core", () => {
+test("Celox and bridge changes do not select core checks", () => {
   for (const name of [
     "celox",
     "celox-design",
@@ -47,7 +47,7 @@ test("Celox dependencies select the bridge, without rerunning the editor/core", 
   ])
     assert.deepEqual(
       scope(`crates/${name}/src/lib.rs`),
-      { core: false, bridge: true },
+      { core: false },
       name,
     );
 });
@@ -69,31 +69,14 @@ test("unrelated consumers and upstream private tests do not select Lydite", () =
   assert.deepEqual(scope(), neither);
   assert.deepEqual(
     scope("packages/celox/src/index.ts", "crates/lydite/src/main.rs"),
-    both,
+    coreOnly,
   );
 });
 
-test("PRs run the bridge only for Lydite-owned changes", () => {
-  const pr = (...files) => pullRequestScope(files, packages);
-  for (const path of [
-    "crates/celox/src/lib.rs",
-    "crates/celox-test-suite/src/veryl/cases/flip_flop.vtest",
-  ])
-    assert.deepEqual(pr(path), neither, path);
-  for (const path of [
-    "Cargo.lock",
-    "rust-toolchain.toml",
-    ".github/workflows/lydite-checks.yml",
-    "scripts/ci-lydite-changes.mjs",
-  ])
-    assert.deepEqual(pr(path), { core: true, bridge: false }, path);
-  for (const path of [
-    "crates/lydite-celox/src/lib.rs",
-    "crates/lydite/src/main.rs",
-    "lydite/conformance/veryl-proof/case-exceptions.json",
-  ])
-    assert.equal(pr(path).bridge, true, path);
-  assert.deepEqual(pullRequestScope(null, packages), both);
+test("bridge-only PRs do not select core gates", () => {
+  assert.deepEqual(pullRequestScope(["crates/lydite-celox/src/lib.rs"], packages), neither);
+  assert.deepEqual(pullRequestScope(["crates/lydite/src/main.rs"], packages), coreOnly);
+  assert.deepEqual(pullRequestScope(null, packages), coreOnly);
 });
 
 test("Celox sv-tests changes skip Lydite without masking other changes", () => {
@@ -116,12 +99,12 @@ test("Celox sv-tests changes skip Lydite without masking other changes", () => {
     "crates/lydite/src/main.rs",
     "lydite/conformance/veryl/run_ci.sh",
   ]) {
-    assert.deepEqual(pullRequestScope([...files, path], packages), both, path);
-    assert.deepEqual(pullRequestScope([path, ...files], packages), both, path);
+    assert.deepEqual(pullRequestScope([...files, path], packages), coreOnly, path);
+    assert.deepEqual(pullRequestScope([path, ...files], packages), coreOnly, path);
   }
   assert.deepEqual(
     pullRequestScope([...files, "conformance/unknown/case.sv"], packages),
-    { core: true, bridge: false },
+    { core: true },
   );
 });
 
@@ -146,14 +129,13 @@ test("Cargo.lock edits select only the lanes that reach the changed entries", ()
   );
   assert.deepEqual(pr(edit("serde_json", "dependencies = [", "dependencies = [\n \"new\",")), {
     core: true,
-    bridge: false,
   });
   assert.deepEqual(
     lyditeScope(["Cargo.lock"], packages, edit("celox", "dependencies = [", "dependencies = [\n \"new\",")),
-    { core: false, bridge: true },
+    { core: false },
   );
   assert.deepEqual(pr(lockChanges(lockfile, lockfile)), neither);
-  assert.deepEqual(pr(null), { core: true, bridge: false });
+  assert.deepEqual(pr(null), { core: true });
 });
 
 test("version-only release PRs skip Lydite", () => {
@@ -171,10 +153,9 @@ test("version-only release PRs skip Lydite", () => {
   // Without the release manifest, Cargo changes are ordinary dependency edits.
   assert.deepEqual(pullRequestScope(release.slice(1), packages), {
     core: true,
-    bridge: false,
   });
   assert.equal(
-    pullRequestScope([...release, "crates/lydite/src/main.rs"], packages).bridge,
+    pullRequestScope([...release, "crates/lydite/src/main.rs"], packages).core,
     true,
   );
 });
@@ -196,10 +177,9 @@ test("dependency selection follows new transitive edges automatically", () => {
   ];
   assert.deepEqual(lyditeScope(["crates/new-runtime/src/lib.rs"], graph), {
     core: false,
-    bridge: true,
   });
   graph[0].dependencies.push("new-runtime");
-  assert.deepEqual(lyditeScope(["crates/new-runtime/src/lib.rs"], graph), both);
+  assert.deepEqual(lyditeScope(["crates/new-runtime/src/lib.rs"], graph), coreOnly);
 });
 
 test("Celox packages do not consume the excluded Lydite packages", () => {
@@ -211,7 +191,7 @@ test("Celox packages do not consume the excluded Lydite packages", () => {
   }
 });
 
-test("daily, manual and unknown-diff invocations run every lane", () => {
+test("daily, manual and unknown-diff invocations run only core gates", () => {
   for (const event of ["schedule", "workflow_dispatch", "merge_group"]) {
     const output = execFileSync(
       process.execPath,
@@ -222,7 +202,7 @@ test("daily, manual and unknown-diff invocations run every lane", () => {
         encoding: "utf8",
       },
     );
-    assert.match(output, /core=true\nbridge=true/);
+    assert.match(output, /^core=true\n$/);
   }
 });
 
@@ -245,7 +225,6 @@ test("workflows transfer Rust tests and gate each Lydite lane", () => {
     ["documentation", "core"],
     ["editor", "core"],
     ["veryl-fv", "core"],
-    ["bridge", "bridge"],
   ]) {
     assert.ok(
       workflow.includes(
@@ -254,7 +233,8 @@ test("workflows transfer Rust tests and gate each Lydite lane", () => {
       job,
     );
   }
-  assert.match(workflow, /cargo test --locked "\$\{args\[@\]\}"/);
+  assert.match(workflow, /cargo test --locked -p lydite -p lydite-ir -p lydite-solver -p lydite-syntax -p lydite-verify/);
+  assert.doesNotMatch(workflow, /  bridge:|outputs\.bridge|-p lydite-celox|conformance\/(axi4lite|veryl-proof|veryl-symbolic)/);
   assert.match(
     workflow,
     /  report:\n    name: Report Lydite validation\n[\s\S]*REPORT_NAME: Lydite validation\n        run: node scripts\/report-full-ci\.mjs/,
@@ -265,19 +245,18 @@ test("workflows transfer Rust tests and gate each Lydite lane", () => {
     .split("          PYCODE")[0]
     .replace(/^          /gm, "");
   for (const core of [false, true])
-    for (const bridge of [false, true]) {
+    {
       const needs = {
         changes: {
           result: "success",
-          outputs: { core: String(core), bridge: String(bridge) },
+          outputs: { core: String(core) },
         },
       };
       for (const [job, selected] of [
-        ["rust", core || bridge],
+        ["rust", core],
         ["documentation", core],
         ["editor", core],
         ["veryl-fv", core],
-        ["bridge", bridge],
       ])
         needs[job] = { result: selected ? "success" : "skipped" };
       const run = () =>
@@ -314,4 +293,17 @@ test("scoped Celox PR tests also exclude the bridge and Lydite fixtures", () => 
     if (!path.startsWith("crates/celox/"))
       assert.deepEqual(result.packages, []);
   }
+});
+
+
+test("normal CI and standalone core conformance never build the bridge", () => {
+  for (const pkg of packages.filter(p => p.name !== "lydite-celox"))
+    assert.ok(!pkg.dependencies.includes("lydite-celox"), pkg.name);
+  for (const path of [".github/workflows/ci.yml", ".github/workflows/publish-crates.yml"])
+    assert.match(readFileSync(`${root}${path}`, "utf8"), /cargo doc --locked --workspace --exclude lydite-celox --no-deps/);
+  assert.match(readFileSync(`${root}.github/workflows/rust-cache.yml`, "utf8"), /cargo nextest list --locked --workspace --exclude 'lydite\*'/);
+  assert.match(readFileSync(`${root}lefthook.yml`, "utf8"), /cargo check --workspace --exclude lydite-celox --locked/);
+  const coreGate = readFileSync(`${root}lydite/conformance/veryl/run_ci.sh`, "utf8");
+  assert.doesNotMatch(coreGate, /lydite-celox/);
+  assert.match(coreGate, /-p lydite-ir -p lydite -p lydite-solver -p lydite-syntax -p lydite-verify/);
 });

@@ -3591,25 +3591,30 @@ fn implicit_event_controls_wait_on_the_reads_of_their_statement() {
                 initial forever @* begin if (c > 0) y = a; else y = b; z[i] = 1; @(d); #(d); end\n\
                 endmodule";
     let ir = analyze_source(code, Path::new("implicit.sv")).expect("`@*` in a process");
-    let mut waits = Vec::new();
+    // The frontend reads the statements of an `@*` with the analysis that
+    // gives a combinational `always @*` its sensitivity; the analyzer keeps
+    // the statements the control covers.
+    let mut implicit = Vec::new();
+    let mut explicit = Vec::new();
     for process in ir.modules()[0].initial_processes() {
         for stmt in process.body() {
-            stmt.walk(&mut |stmt| {
-                if let ir::Stmt::WaitEvent(items) = stmt {
-                    waits.push(
-                        items
-                            .iter()
-                            .map(|item| match &item.expr {
-                                ir::Expr::Ident(name) => name.clone(),
-                                expr => panic!("unexpected event expression {expr:?}"),
-                            })
-                            .collect::<Vec<_>>(),
-                    );
-                }
+            stmt.walk(&mut |stmt| match stmt {
+                ir::Stmt::WaitImplicit(reads) => implicit.push(!reads.is_empty()),
+                ir::Stmt::WaitEvent(items) => explicit.push(
+                    items
+                        .iter()
+                        .map(|item| match &item.expr {
+                            ir::Expr::Ident(name) => name.clone(),
+                            expr => panic!("unexpected event expression {expr:?}"),
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => {}
             });
         }
     }
-    assert_eq!(waits, [vec!["c", "a", "b", "i"], vec!["d"]]);
+    assert_eq!(implicit, [true], "one @* over the statements of the block");
+    assert_eq!(explicit, [vec!["d"]]);
 }
 
 #[test]
@@ -6070,7 +6075,6 @@ fn native_system_task_arguments_preserve_strings_omissions_and_query_operands() 
 fn timed_task_calls_require_a_suspendable_context() {
     for caller in [
         "always_comb outer();",
-        "always @* outer();",
         "always_ff @(posedge clk) outer();",
         "function void f(); outer(); endfunction initial f();",
     ] {
@@ -6084,6 +6088,15 @@ fn timed_task_calls_require_a_suspendable_context() {
             "{caller}: {error}"
         );
     }
+    // A plain `always @*` is an ordinary always procedure: the call makes it
+    // a process (IEEE 1800-2023 9.2.2.2.2).
+    let ir = analyze_source(
+        "module Top; task automatic pause(); #1; endtask task automatic outer(); pause(); endtask always @* outer(); endmodule",
+        Path::new("timed_task_star.sv"),
+    )
+    .unwrap();
+    assert!(ir.modules()[0].comb_processes().is_empty());
+    assert_eq!(ir.modules()[0].initial_processes().len(), 1);
 }
 
 #[test]
@@ -6290,11 +6303,10 @@ fn scope_randomize_validates_variable_arguments() {
         ("bit value[2];", "randomize(value)"),
         ("wire value;", "randomize(value)"),
         ("const bit value = 1;", "randomize(value)"),
-        ("enum bit [1:0] {A=0, B=3} value;", "randomize(value)"),
-        (
-            "typedef enum bit [1:0] {A=0, B=3} E; E value;",
-            "std::randomize(value)",
-        ),
+        ("real value;", "randomize(value)"),
+        ("string value;", "randomize(value)"),
+        ("class C; endclass C value;", "randomize(value)"),
+        ("enum bit [1:0] {A=3, B} value;", "randomize(value)"),
         ("bit value;", "std::randomize(value) with {value == 1;}"),
     ] {
         let source = format!("module Top; {declaration} bit ok; initial ok = {call}; endmodule");
@@ -6580,7 +6592,7 @@ fn class_randomize_rejects_unsupported_semantics() {
             "c.randomize()",
             "constraints",
         ),
-        ("randc bit [1:0] x;", "c.randomize()", "randc"),
+        ("randc bit [8:0] x;", "c.randomize()", "randc"),
         ("rand int x;", "c.srandom()", "argument"),
         ("rand int x;", "c.srandom(1, 2)", "arguments"),
         (
@@ -6597,7 +6609,11 @@ fn class_randomize_rejects_unsupported_semantics() {
             "c.f()",
             "object receiver",
         ),
-        ("rand string x;", "c.randomize()", "integral non-enum"),
+        (
+            "rand string x;",
+            "c.randomize()",
+            "integral rand properties",
+        ),
         (
             "rand int x;",
             "c.randomize() with { x == 1; }",
@@ -6612,8 +6628,8 @@ fn class_randomize_rejects_unsupported_semantics() {
             "not an instance property",
         ),
         ("const int x = 1;", "c.randomize(x)", "const"),
-        ("local int x;", "c.randomize(x)", "non-public"),
-        ("protected int x;", "c.randomize(x)", "non-public"),
+        ("local int x;", "c.randomize(x)", "not accessible"),
+        ("protected int x;", "c.randomize(x)", "not accessible"),
         ("rand int x;", "c.rand_mode()", "getter requires"),
         ("int x;", "c.x.rand_mode()", "rand or randc"),
         (
@@ -6663,5 +6679,355 @@ fn randomization_signatures_do_not_force_unused_interface_class_layouts() {
     ] {
         let source = format!("module Top; {declaration} endmodule");
         analyze_source(&source, Path::new("unused_interface_class.sv")).unwrap();
+    }
+}
+
+#[test]
+fn class_randomize_rejects_unresolved_enum_domains() {
+    for members in ["A=3, B", "A=0, B=0", "A=2'bx, B=1"] {
+        let source = format!(
+            "module Top;
+            class C; rand enum bit [1:0] {{{members}}} value; endclass
+            C c; initial begin c = new; void'(c.randomize()); end
+            endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("enum_domain.sv")).is_err(),
+            "{members}"
+        );
+    }
+}
+
+#[test]
+fn tagged_targets_reject_time_values_before_fast_paths() {
+    for value in [
+        "$time",
+        "$stime",
+        "$realtime",
+        "$time()",
+        "$stime()",
+        "$realtime()",
+        "($time)",
+        "$timeunit",
+        "$timeprecision",
+    ] {
+        for declaration in [
+            format!("item_t item; initial item = {value};"),
+            format!("item_t item = {value};"),
+            format!("task consume(input item_t item); endtask initial consume({value});"),
+            format!("function automatic item_t get(); return {value}; endfunction"),
+            format!(
+                "function automatic int get(input item_t item = {value}); return 0; endfunction"
+            ),
+        ] {
+            let source = format!(
+                "module Top; typedef union tagged packed {{ void Empty; logic [7:0] Full; }} item_t; {declaration} endmodule"
+            );
+            assert!(
+                analyze_source(&source, Path::new("tagged_time.sv")).is_err(),
+                "{declaration}"
+            );
+        }
+    }
+}
+
+#[test]
+fn tagged_constant_function_member_sets_packed_bound() {
+    let source = r#"
+module Top(output logic [N-1:0] data);
+    typedef union tagged packed { void Empty; logic [7:0] Full; } item_t;
+    function automatic int size();
+        item_t item;
+        item = tagged Full 8'd4;
+        return item.Full;
+    endfunction
+    localparam int N = size();
+    assign data = '1;
+endmodule
+"#;
+    let ir = analyze_source(source, Path::new("tagged_constant.sv")).unwrap();
+    assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(4));
+    assert_eq!(
+        ir.modules()[0].ports()[0].r#type().resolved_width(),
+        Some(4)
+    );
+}
+
+#[test]
+fn tagged_constant_checks_preserve_guard_width_and_sign() {
+    use ir::{Callee, ConstExpr};
+    let constants = HashMap::default();
+    for (guard, payload, width, signed, expected) in [
+        ("1'b1", "16'h1ff", 8, false, Some(255)),
+        ("1'b1", "8'hfe", 8, true, Some(-2)),
+        ("1'b0", "8'd4", 8, false, None),
+        ("1'bx", "8'd4", 8, false, None),
+        ("1'bz", "8'd4", 8, false, None),
+    ] {
+        let expr = ConstExpr::Function {
+            callee: Callee::Checked { width, signed },
+            args: vec![
+                ConstExpr::Literal(guard.into()),
+                ConstExpr::Literal(payload.into()),
+            ],
+            site: None,
+        };
+        assert_eq!(
+            typecheck::eval_const_expr(&expr, &constants),
+            expected,
+            "{guard}, {payload}"
+        );
+    }
+}
+
+#[test]
+fn tagged_inactive_constant_member_cannot_supply_bound() {
+    let source = r#"
+module Top;
+    typedef union tagged packed { logic [7:0] Empty; logic [7:0] Full; } item_t;
+    function automatic int size();
+        item_t item;
+        item = tagged Empty 8'd4;
+        return item.Full;
+    endfunction
+    localparam int N = size();
+    logic [N-1:0] data;
+endmodule
+"#;
+    // The analyzer may retain unresolved constants for the frontend to reject.
+    if let Ok(ir) = analyze_source(source, Path::new("tagged_inactive_constant.sv")) {
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), None);
+    }
+}
+
+#[test]
+fn class_randc_checks_domain_limits() {
+    let values = (0..257)
+        .map(|i| format!("V{i}={i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    for (declarations, members) in [
+        (String::new(), "randc bit [8:0] x;"),
+        (
+            format!("typedef enum bit [15:0] {{{values}}} E;"),
+            "randc E x;",
+        ),
+    ] {
+        for call in ["c.randomize()", "c.randomize(x)"] {
+            let source = format!(
+                "module Top; {declarations} class C; {members} endclass C c; initial begin c=new; void'({call}); end endmodule"
+            );
+            let error = analyze_source(&source, Path::new("randc_limits.sv")).unwrap_err();
+            assert!(error.to_string().contains("randc"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn class_visibility_rejects_inaccessible_members() {
+    for visibility in ["local", "protected"] {
+        for member in [
+            "int x;",
+            "static int x;",
+            "function int x(); return 1; endfunction",
+            "static function int x(); return 1; endfunction",
+        ] {
+            let access = if member.contains("function") {
+                "c.x()"
+            } else {
+                "c.x"
+            };
+            for derived in [false, true] {
+                let declaration = if derived {
+                    "class D extends C; endclass D c;"
+                } else {
+                    "C c;"
+                };
+                let source = format!(
+                    "module Top; class C; {visibility} {member} endclass {declaration} int result; initial begin c=new; result={access}; end endmodule"
+                );
+                let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+                assert!(
+                    matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+                    "{source}: {error}"
+                );
+            }
+        }
+    }
+    for member in [
+        "int x;",
+        "static int x;",
+        "function int x(); return 1; endfunction",
+        "static function int x(); return 1; endfunction",
+    ] {
+        let access = if member.contains("function") {
+            "x()"
+        } else {
+            "x"
+        };
+        for prefix in ["", "this.", "super."] {
+            let source = format!(
+                "module Top; class C; local {member} endclass class D extends C; function int read(); return {prefix}{access}; endfunction endclass D c; int result; initial begin c=new; result=c.read(); end endmodule"
+            );
+            let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+            assert!(
+                matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+                "{source}: {error}"
+            );
+        }
+    }
+    for access in ["x=2", "x++"] {
+        let source = format!(
+            "module Top; class C; local static int x; endclass class D extends C; function void write(); {access}; endfunction endclass D c; initial begin c=new; c.write(); end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+        assert!(
+            matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+            "{source}: {error}"
+        );
+    }
+    for access in ["c.x=2", "c.x++", "C::x=2"] {
+        let source = format!(
+            "module Top; class C; local static int x; endclass C c; initial begin c=new; {access}; end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+        assert!(
+            matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn class_visibility_accepts_lexical_access_and_shadowing() {
+    for member in [
+        "int x;",
+        "static int x;",
+        "function int x(); return 1; endfunction",
+        "static function int x(); return 1; endfunction",
+    ] {
+        let access = if member.contains("function") {
+            "x()"
+        } else {
+            "x"
+        };
+        for visibility in ["local", "protected"] {
+            let source = format!(
+                "module Top; class C; {visibility} {member} function int read(C other); return other.{access}; endfunction endclass class D extends C; endclass D c; int result; initial begin c=new; result=c.read(c); end endmodule"
+            );
+            analyze_source(&source, Path::new("visibility.sv"))
+                .unwrap_or_else(|e| panic!("{source}: {e}"));
+        }
+        for prefix in ["", "this.", "super."] {
+            let source = format!(
+                "module Top; class C; protected {member} endclass class D extends C; function int read(); return {prefix}{access}; endfunction endclass D c; int result; initial begin c=new; result=c.read(); end endmodule"
+            );
+            analyze_source(&source, Path::new("visibility.sv"))
+                .unwrap_or_else(|e| panic!("{source}: {e}"));
+        }
+    }
+    for storage in ["", "static"] {
+        let source = format!(
+            "module Top; class C; local {storage} int x; endclass class D extends C; int x; function int read(int x); return x; endfunction function int own(); return x; endfunction endclass D c; int result; initial begin c=new; c.x=2; result=c.own(); end endmodule"
+        );
+        analyze_source(&source, Path::new("visibility.sv")).unwrap();
+    }
+}
+
+#[test]
+fn class_visibility_checks_constructors() {
+    for visibility in ["local", "protected"] {
+        let source = format!(
+            "module Top; class C; {visibility} function new(); endfunction endclass C c; initial c=new; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+        assert!(
+            matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+            "{source}: {error}"
+        );
+        let source = format!(
+            "module Top; class C; {visibility} function new(); endfunction endclass class D extends C; endclass D c; initial c=new; endmodule"
+        );
+        let result = analyze_source(&source, Path::new("visibility.sv"));
+        if visibility == "local" {
+            assert!(matches!(
+                result.unwrap_err(),
+                AnalyzerError::InaccessibleClassMember { .. }
+            ));
+        } else {
+            result.unwrap();
+        }
+    }
+}
+
+#[test]
+fn rejects_invalid_enum_declaration_initializers() {
+    for (declaration, diagnostic) in [
+        (
+            "enum logic [2:0] { Global = 4'h2, Local = 4'h3 } value;",
+            "sized literal width 4 differs from base width 3",
+        ),
+        (
+            "typedef enum logic [2:0] { A = 2'b01 } E;",
+            "sized literal width 2 differs from base width 3",
+        ),
+        (
+            "enum bit [1:0] { a=0, b=2'bxx, c=1 } value;",
+            "X/Z value requires an explicit four-state base type",
+        ),
+        (
+            "enum { a='z } value;",
+            "X/Z value requires an explicit four-state base type",
+        ),
+        (
+            "typedef bit [1:0] B; enum B { a=2'b0z } value;",
+            "X/Z value requires an explicit four-state base type",
+        ),
+        (
+            "enum integer { a=0, b={32{1'bx}}, c } value;",
+            "cannot implicitly increment an X/Z value",
+        ),
+        (
+            "enum logic [1:0] { a='z, b } value;",
+            "cannot implicitly increment an X/Z value",
+        ),
+        (
+            "enum logic [1:0] { a=2'bxx, b=a, c } value;",
+            "cannot implicitly increment an X/Z value",
+        ),
+        (
+            "enum logic [1:0] { a='x, b=a | 2'b00, c } value;",
+            "cannot implicitly increment an X/Z value",
+        ),
+    ] {
+        let source = format!("module Top; {declaration} endmodule");
+        let error =
+            analyze_source(&source, Path::new("invalid_enum_initializers.sv")).expect_err(&source);
+        assert!(error.to_string().contains(diagnostic), "{source}: {error}");
+    }
+}
+
+#[test]
+fn preserves_legal_enum_declaration_initializers() {
+    for declaration in [
+        "enum logic [2:0] { A=3'h2, B=3'h3 } value;",
+        "enum bit [3:0] { bronze='h3, silver, gold='h5 } value;",
+        "enum logic [3:0] { A='1 } value;",
+        "enum integer { a=0, b={32{1'bx}}, c=1, d } value;",
+        "enum logic [1:0] { a=2'bxx, b=2'bzz, c=0 } value;",
+        "enum bit [1:0] { a=(2'bxx & 2'b00), b } value;",
+        "enum logic [1:0] { a=2'bxx, b=2'b01, c } value;",
+        "enum logic [1:0] { a=2'bxx, b=a & 2'b00, c } value;",
+        "localparam P=4'h2; enum logic [2:0] { A=P, B=4'h1+1 } value;",
+        "enum logic [2:0] { A=3'(4'h2) } value;",
+        "enum logic [2:0] { A=3'h2 } value [2];",
+        "typedef enum int { W=3 } E; typedef logic [W'(2):0] B; enum B { A=3'b101 } value;",
+        "localparam W=3; enum logic [W-1:0] { A=3'b101 } value;",
+        "enum logic [2:0] { A=3'h2 } [1:0] value;",
+        "typedef enum logic signed [1:0] { A=2'b10, B } E;",
+    ] {
+        let source = format!("module Top; {declaration} endmodule");
+        analyze_source(&source, Path::new("valid_enum_initializers.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
     }
 }

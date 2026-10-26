@@ -15,7 +15,8 @@ outline: [2, 3]
 
 | 領域 | サポート内容 |
 | --- | --- |
-| モジュール | ANSI ポート、`parameter` / `localparam`、型パラメータ（`parameter type`）、名前付き・位置指定のポート／パラメータ接続、階層、インスタンス配列（接続は全要素に共通、または全要素の幅に等しければ要素ごとに分割） |
+| モジュール | ANSI ポート、non-ANSI ポート（ヘッダのポート名と本体の `input` / `output` / `inout` 宣言。同名のネットまたは変数の宣言で型を補える）、`parameter` / `localparam`、型パラメータ（`parameter type`）、名前付き・位置指定のポート／パラメータ接続、階層、インスタンス配列（接続は全要素に共通、または全要素の幅に等しければ要素ごとに分割）、トップ以外のモジュールの `inout` ポートで、どちらか一方の側に連続代入のドライバが1つだけあるネット（`assign io = oe ? d : 'z;` のようなトライステートを含む。両側から駆動値または `z` が読める） |
+| プログラム | ポートとパラメータを持つ `program` 宣言。モジュールと同じくモジュールからインスタンス化し、その `initial` 手続きはリアクティブ領域セットで実行します（下記の「プログラム」を参照） |
 | generate | `for`（`genvar`）、`if`、`case`。`**` を含む定数式 |
 | package | 型、パラメータ、enum、関数。`import p::*;`、`import p::x;`、`p::x` で参照 |
 | interface | 値・型パラメータ、ヘッダーの package import、メンバー、内部ロジックと関数、入れ子の interface インスタンス、インスタンス配列、定数添字で選ぶ配列要素の関数呼び出し、modport 付き・なしのポート、generic interface ポート、interface ポート配列。明示・暗黙の名前付き接続（`.bus(bus)` / `.bus`）、`input` / `output` modport と imported function。詳しい制約は下記参照 |
@@ -24,7 +25,7 @@ outline: [2, 3]
 
 | 領域 | サポート内容 |
 | --- | --- |
-| 型 | `logic`、`bit`、`reg`、packed ベクタ、任意の定数境界と昇順・降順の多次元 packed 配列、packed 構造体、hard packed untagged union、enum（暗黙値を含む）、`typedef`、メモリとして使う unpacked 配列、符号付き・符号なし |
+| 型 | `logic`、`bit`、`reg`、packed ベクタ、任意の定数境界と昇順・降順の多次元 packed 配列、packed 構造体、hard / soft packed untagged union、enum（暗黙値を含む）、`typedef`、メモリとして使う unpacked 配列、符号付き・符号なし |
 | 式 | `**` を含む算術、論理、シフト、比較、リダクション、連結・複製、`?:`、`inside`、`==?` / `!=?`、キャスト（`N'(x)`、`signed'(x)`、`T'(x)`）、`$signed` / `$unsigned` |
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
@@ -39,8 +40,8 @@ outline: [2, 3]
 | 連続論理 | `assign`、`wire w = expr;` |
 | 組み合わせプロセス | `always_comb`、`always @*`、ブロッキング代入の `always_latch`、ブロックローカル変数、逐次・依存するブロッキング代入、プロセスが書き込む前の変数の読み出し（直前の値） |
 | 順序プロセス | `always_ff @(posedge clk)`、`always @(posedge clk or negedge rst_n)` など。ブロッキング・ノンブロッキング代入、連結を代入先とする代入、4 値のクロック・リセット信号、複数のクロックドメインで共有する非同期リセット、同一クロック・同一リセットの両エッジを使うプロセス、あるプロセスのクロックを別のプロセスの非同期リセットとして使う信号（時間付きの `Simulation` はすべてのエッジを実行します。`Simulator::tick` はイベントの立ち上がりエッジだけです） |
-| initial ブロック | `initial` ブロックと変数宣言の初期化子（`logic [7:0] v = 8'h5a;`、interface のメンバーを含む）。初期化子は `initial` ブロックより先に適用。書き込む値が定数のもの（定数の `if` / `for`、`$readmemh` / `$readmemb` を含む）は初期状態を定める。デザインの状態を読むものやシステムタスクを呼ぶものなどそれ以外は、時間を持つ `Simulation` で時刻 0 からプロセスとして実行（`Simulator` はプロセスを実行しないため、このようなデザインでは `SimulatorErrorKind::ProcessRequiresSimulation` でビルドに失敗） |
-| 文 | `if` / `else`、`case`、`casez`、`casex`、`case ... inside`、`unique` / `priority`、`for`、`while`、`do ... while`、`repeat`、`forever`、`foreach`（反復回数が定数なら展開し、そうでなければ実行時に実行）、`break` / `continue` / `return`、即時アサーション |
+| initial ブロック | `initial` ブロックと変数宣言の初期化子（`logic [7:0] v = 8'h5a;`、interface のメンバーを含む）。初期化子は `initial` ブロックより先に適用。書き込む値が定数のもの（定数の `if`、`$readmemh` / `$readmemb`、実行前に反復回数が分かるループ（`repeat` と、1 つの変数を定数ずつ固定の境界まで進める `for` / `while` / `do`-`while`）を含む）は初期状態を定める。デザインの状態を読むものやシステムタスクを呼ぶものなどそれ以外は、時間を持つ `Simulation` で時刻 0 からプロセスとして実行（`Simulator` はプロセスを実行しないため、このようなデザインでは `SimulatorErrorKind::ProcessRequiresSimulation` でビルドに失敗） |
+| 文 | `if` / `else`、`case`、`casez`、`casex`、`case ... inside`、`unique` / `priority`、`for`、`while`、`do ... while`、`repeat`、`forever`、`foreach`（反復回数が定数なら展開し、そうでなければ実行時に実行）、`break` / `continue` / `return`、即時アサーションと遅延付き即時アサーション |
 | 関数 | `input` / `output` / `inout` 引数を持てる `function` と、`task`。`return`、または関数名への代入で値を返す。ローカル変数と `localparam`、部分選択や複合的な代入先への代入。呼び出しはインライン展開。定数式（パラメータ、範囲）の中の定数引数による呼び出しはエラボレーション時に評価 |
 
 ### タイミング制御 {#timing-controls}
@@ -49,7 +50,7 @@ outline: [2, 3]
 
 | 制御 | 対応範囲 |
 | --- | --- |
-| `#delay` | 整数と実数の遅延、`#(min:typ:max)`（typ の値）、[時間リテラル](#time-literal-delays)。X / Z の遅延は 0 として扱う |
+| `#delay` | 整数と実数の遅延、`#(min:typ:max)`（typ の値）、`#pkg::D` のような package スコープの値、[時間リテラル](#time-literal-delays)。X / Z の遅延は 0 として扱う |
 | `@(...)` | 変数、`posedge` / `negedge` / `edge`、`or` または `,` で並べた項目、ビット選択・部分選択・実行時添字の選択、pure な関数呼び出しを含む任意の式、文が読む変数を待つ `@*` / `@(*)` |
 | `wait (condition)` | 任意の条件。X / Z の条件は偽として扱う |
 | 代入 | ブロッキング代入とノンブロッキング代入。代入先はブロッキング代入と同じで、unpacked 配列の要素や実行時に決まる位置も使えます。ノンブロッキング代入は代入を実行した時点で評価した位置に、そのタイムスロットの NBA 領域で反映します。代入先の範囲外のビットと、X や Z のビットを含む位置には書き込みません |
@@ -73,8 +74,9 @@ outline: [2, 3]
 `initial` と通常の `always` から、`#delay`・`@(event)`・`wait (condition)` を
 含む task を呼び出せます。task のネストも可能です。呼び出しは呼び出し元の状態機械に
 インライン展開されます。エッジ待ちの `always` は task の完了後に次のエッジを待ちます。
-function・`always_comb`・`always_ff` からの時間待ち task 呼び出しは拒否します。
-`always @*` からの呼び出しも現在は拒否します（[#1710](https://github.com/celox-sim/celox/issues/1710)）。
+時間待ち task を呼ぶ `always @*` もプロセスとして実行します。文が読む変数（task の引数を含み、
+task 本体が読む変数は含まない）の変化を待ち、task の実行中に起きた変化は見送ります。
+function・`always_comb`・`always_latch`・`always_ff` からの時間待ち task 呼び出しは拒否します。
 
 automatic な引数とローカル変数は呼び出しごとに独立し、中断中も保持されます。
 module 内の static task の引数は共有されます。input／inout は呼び出し時にコピーされ、output／inout は
@@ -92,13 +94,19 @@ package／`$unit` の static 引数を持つ時間待ち task と、static task 
 プロセスごとの永続的な乱数列を使い、文の実行順序と短絡評価に従います
 （IEEE 1800-2023 18.12）。
 
-`with` 制約、enum 変数、unpacked 配列、net、定数、
+64ビット以下のスカラーenumにも対応し、既知の宣言値だけから抽選します。
+型エイリアス、負数、飛び飛びの値、整数との引数混在を扱えます。enumにもプロセス単位の
+乱数列・短絡評価・チェックポイント復元が適用されます。
+
+`with` 制約、値域が未対応または未解決のenum、unpacked 配列、net、定数、
 select・連結式の引数は未対応として拒否します。
 
 ### クラスの乱数化
 
 `object.randomize()` は有効な `rand` プロパティを乱数化し、成功値の1（signed `int`）を返します。
-制約のないクラスで、64ビット以下の2値・非enum整数型に対応します。
+制約のないクラスで、スカラーenumを含む64ビット以下の2値整数型に対応します。
+enumは宣言された値だけから均等に抽選し、飛び飛びの値や負数にも対応します（18.3、18.4.1）。
+値が未解決またはX/Zを含むenum、列挙子の範囲指定は乱数化に未対応です。
 継承したプロパティも対象になり、基底型のハンドルを通した呼び出しでも、実際のオブジェクトの
 クラスと `pre_randomize()` / `post_randomize()` を使います。子クラスでフックを定義すると
 親のフックを置き換えるため、親の処理も必要なら `super.pre_randomize()` などを明示的に呼びます
@@ -119,7 +127,12 @@ select・連結式の引数は未対応として拒否します。
 オブジェクトごとに独立した乱数列を持ち、生成元のプロセスから初期シードを取得します。
 `object.srandom(seed)` で32ビットのシードを設定でき、チェックポイントは乱数状態とモードを保持します
 （18.13.3、18.14.3）。具体的な乱数列は処理系に依存します。
-`randc` の乱数化、制約、`with`、staticな乱数プロパティ、enum・配列・オブジェクト・文字列の
+`randc` は1〜8ビットの2値整数と、宣言値が256個以下のスカラーenumに対応します。
+各プロパティは全値を重複なく一巡してから次の循環に進みます（18.4.2）。継承、
+`rand_mode`、引数による対象選択とチェックポイント復元にも対応します。無効化中は
+循環を進めず、`srandom` は消費済みの値を保持したまま乱数生成器を再シードします。
+
+制約、`with`、上記の上限を超える `randc`、staticな乱数プロパティ、配列・オブジェクト・文字列の
 乱数化は未対応です。実際の子クラスに制約がある場合は、親のプロパティだけを乱数化せず拒否します。
 `null` を通した呼び出しは実行時エラーです。
 
@@ -157,14 +170,13 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 - 振る舞い記述・検証向けの構文：`final`、代入内のタイミング制御（`a = #1 b`）、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
   named event と `->`、`fork` / `join`、`wait fork` / `disable fork`、並行アサーション、`force` / `release`。
 - プロセス内のタイミング制御：`iff` 修飾（[#1444](https://github.com/celox-sim/celox/issues/1444)）、
-  package スコープの遅延値
-  （[#1710](https://github.com/celox-sim/celox/issues/1710)）、イベント式内の impure な関数呼び出し、
+  イベント式内の impure な関数呼び出し、
   static task 引数を読む `wait` 条件とイベント式。
 - `always_latch` 内のノンブロッキング代入（[#431](https://github.com/celox-sim/celox/issues/431)）。対応するラッチではブロッキング代入を使用してください。
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
-- ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
+- ポートとインスタンス：non-ANSI 形式のポート式（`module m({a, b}, c[3:0], .p(d))` など、[#1953](https://github.com/celox-sim/celox/issues/1953)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
-- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、soft packed union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、`real`。
+- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、`real`。
 - 順序回路のプロセス：イベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）、および `always_ff` での
   単純な信号以外のエッジオペランド（[#464](https://github.com/celox-sim/celox/issues/464)）、複数ビットのエッジ信号、
   非同期リセットを持たない複数のエッジ。
@@ -180,7 +192,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   使われていないパラメータや関数本体の中を含め、書かれた
   場所にかかわらず名前を示して報告します。システムタスクでもシステム関数でもない `$` 名、
   引数の数が誤っている呼び出し、既定値のない引数の省略、値として使ったタスクはエラーです。
-- [DPI-C の対応範囲](#dpi-c-imports)を超える機能と DPI export、トライステートバスと複数ドライバ、階層参照。
+- [DPI-C の対応範囲](#dpi-c-imports)を超える機能と DPI export、複数のドライバを持つネット（トライステートバスを含む）、トップモジュールの `inout` ポート、階層参照。
 
 ## 実行時の挙動 {#semantics-worth-knowing}
 
@@ -257,10 +269,27 @@ package が `p` から実際に import した名前だけです。export を経�
 ブロックローカル変数は、`always_comb` と `always_ff` で字句スコープを持ちます。
 モジュールの信号と同名の変数や、別のブロック・プロセスでの同名変数を扱えます。
 
-### hard packed untagged union
+### packed untagged union
 
 hard packed untagged union のメンバーは、同じビットベクタを共有します。
 全メンバーの幅が一致する必要があります（IEEE 1800-2023 7.3.1）。
+`union soft` / `union soft packed` は幅の異なるメンバーを許容します。
+全体の幅は最大メンバーの幅となり、各メンバーは最下位ビットから配置されます。
+小さいメンバーへの書き込みでは残りの上位ビットを保持します。
+packed union と packed 構造体の入れ子にも対応します。
+
+```systemverilog
+union soft packed {
+    logic [15:0] word_value;
+    logic [7:0] byte_value;
+} data;
+// data.word_value = 16'h1234 の後で data.byte_value = 8'hab とすると data = 16'h12ab。
+```
+
+union 全体の演算は宣言時の符号指定に従います（既定は unsigned）。
+`bit` / `logic` 混在時は 4-state の領域を共有し、2-state メンバーを
+読み書きする際には X/Z を 0 に変換します。
+tagged union と unpacked union は未対応です。
 
 ### 名前付きサブルーチン引数
 
@@ -357,6 +386,36 @@ static な output 引数も、代入しない経路では以前の値を保持�
 文として呼び出したシステム関数（`$countones(f(a));` など）は、式の中の同じ呼び出しと
 同様に検査・評価し、値を捨てます。`$bits` と `$size` は被演算子を評価しません。
 
+### 重大度タスクと報告
+
+`$info`、`$warning`、`$error`、`$fatal`は、fail アクションのない `assert` / `assume` の既定の
+`$error` も含めて、`RuntimeEvent::Report` として報告します（IEEE 1800-2023 20.10）。`Report`
+は重大度、メッセージ、`` `__FILE__ `` と `` `__LINE__ `` が示す呼び出しのファイルと行、報告した
+スコープを持ちます。即時アサーションのアクションブロックからの報告は、そのアサーションも示します。
+文ラベル、`assert` / `assume` / `cover` の別、pass と fail のどちらのアクションから出たかです。
+アクションブロックが呼ぶサブルーチン内の重大度タスクは、アサーションに結び付けません。`time` は
+drain のコンテキストが与える時刻で、VPI ホストはコールバックごとに与えます。`Simulation::set_fail_on`
+の設定中は、報告が出たタイムステップの時刻です。`Report::render` は、
+VPI ホストと `celox` コマンドが表示する形に整形します。`celox` の実行を失敗にするのは `$error` と
+`$fatal` だけで、`$fatal` はさらにシミュレーションをエラーで終了します。
+
+### 遅延付きアサーション
+
+`assert #0`、`assume #0`、`cover #0` とそれぞれの `final` 形のアクションは、プロセスの遅延
+アサーション報告キューで待ちます（IEEE 1800-2023 16.4）。引数はアサーションを実行した時点で
+評価します。プロセスはフラッシュ点でキューを空にします（16.4.2）。
+- タイミング制御を含むプロセスは、イベント制御や wait から再開するたびに。遅延からの再開は
+  フラッシュ点ではありません。
+- エッジで起動する `always` / `always_ff` プロセスは、実行するたびに。
+- `always_comb`、`always_latch`、組み合わせ回路として扱う `always`（タイミング制御が先頭の
+  イベント制御だけのもの）は、再実行するたびに。
+
+タイムスロットが終わると、まだ待っているアクションを `#0` のもの、`final` のものの順に実行します。
+遅延付きの `$fatal` はそこでシミュレーションを終了します。モジュール直下の遅延付きアサーションは、
+`always_comb` に入れた同じアサーションです（16.4.3）。アクションは表示タスクか重大度タスクの
+呼び出し 1 つで、ユーザーのサブルーチンや複数の文は拒否します。`Simulator` では呼び出し 1 回が
+タイムスロットで、組み合わせ回路が落ち着いたときやドメインを実行したときにアクションが成熟します。
+
 ### 定数関数
 
 定数関数は、呼び出す表示タスクと重大度タスクを無視します。
@@ -446,9 +505,29 @@ offset を使い、先頭（0）、現在位置（1）、末尾（2）を基準�
 `always` 系のプロセスでは、`$finish` が `RuntimeEvent::Finish` に
 なるのと同様に `RuntimeEvent::Stop` として報告します。診断レベルの引数では何も
 表示しません。VPI ホストのように対話モードを持たないバッチ実行では `$stop` で終了します。
-`$exit` は呼び出した program ブロックの initial 手続きを終了します（24.7）。
-Celox は program ブロックを持たず、それ以外からの呼び出しは 24.7 の規定どおり無視し、
-その呼び出し位置でコンパイル警告（`Simulator::warnings()`）を出します。定数関数内の呼び出しも同様です。
+`program`（IEEE 1800-2023 24 章）はリーフモジュールと同じく宣言・インスタンス化します。
+その `initial` 手続きはリアクティブ領域セットで実行します。開始、`#` 遅延後の再開、
+イベント制御での起床は Reactive 領域、`#0` からの再開は Re-Inactive 領域で行い、
+ノンブロッキング代入は Re-NBA 領域で更新します（4.4.2.6〜4.4.2.8、24.3.1）。
+リアクティブ領域セットはタイムスロットのアクティブ領域セットが空になってから実行し、
+それが起こした設計側の動作は再びアクティブ領域セットで実行します（4.5）。そのため
+program は、ノンブロッキング更新とそれを受ける論理が落ち着いた後の設計を読みます。
+program の手続きが呼ぶサブルーチンはその手続きの領域で実行します（24.5）。
+設計のプロセスはコンパイル済みスケジューラのまま、program の手続きは参照スケジューラで実行します。
+すべての program のすべての `initial` 手続きが終わると、暗黙の `$finish` でシミュレーションを
+終了します（24.3）。program 内の `always` 手続きと、モジュール・インターフェース・program の
+宣言やインスタンスは名前を示して拒否します。
+未対応: program 内の連続代入は Reactive 領域ではなく設計の組み合わせ論理として評価します。
+program の書き込みが駆動する設計の連続代入と組み合わせ論理は、Icarus・Verilator・xezim と同じく
+リアクティブ領域セットの実行中に落ち着くため、`#0` の後に再開した program はその新しい値を読みます。
+4.5 ではリアクティブ領域セットが空になってから評価します。
+モジュール内に入れ子の program と無名 program は拒否します。どのモジュールからも
+インスタンス化されない program は、設計のトップモジュールと並ぶ暗黙のトップにはなりません。
+
+`$exit` は、program の `initial` 手続きのスレッドから呼ぶと、その program インスタンスの
+すべての `initial` 手続きを終了し（24.7）、program の手続きが残らなければシミュレーションも
+終了します。それ以外からの呼び出しは 24.7 の規定どおり無視し、
+その呼び出し位置でコンパイル警告（`Simulator::warnings()`）を出します。モジュールの定数関数内の呼び出しも同様です。
 関数宣言内の呼び出しは、その関数を使わなくても警告します。定数評価が実行したかどうかには依存しません。
 
 ### 実行時 I/O と plusargs
@@ -457,7 +536,7 @@ Celox は program ブロックを持たず、それ以外からの呼び出し�
 ホスト I/O には `Simulation::from_sv_sources` を使います。組合せプロセスからは
 未対応です。時間付き実行が必要なエッジプロセスを `Simulator` で構築するとエラーになります。
 
-引数は `.plusargs(["+COUNT=12", "+TRACE"])` で順序を保って渡します。
+引数は `.plusargs(["+COUNT=12", "+TRACE"])`、または [`celox run`](./cocotb.md) の `+` 引数で順序を保って渡します。
 `$test$plusargs` は前方一致で検索し、`$value$plusargs` は整数変換と packed 整数変数への
 `%s` を扱います。最初に一致した引数を使い、未一致の場合は書き込み先の値を保持します。
 real 変換と動的 string は未対応です。
@@ -519,6 +598,11 @@ interface型から解決します。generic interfaceポートとgenerate内の�
 `$time` は1を返します。`real` は IEEE 754 倍精度のため、大きな時刻では
 変換時に精度を失う場合があります。checkpoint の復元後は復元した時刻を参照します。
 
+
+`%t` は時刻を設計全体で最も細かい時間精度の単位で、20 桁の欄に表示します（IEEE 1800-2023 20.4.3）。
+`` `timescale 1ns/1ps`` のもとで `#1.5` の後に `$display("%0t", $realtime)` を実行すると `1500` を表示します。
+時間スケールのない設計は既定の 1 ns / 1 ps を使うため、`%t` はやはりピコ秒で表示します。
+報告する時刻を持たない `string` の値に対する `%t` は拒否します。`$timeformat` には対応していません。
 
 `$printtimescale` は IEEE1800-2023 20.4.2 の形式で時刻スコープを表示します。
 例: `Time scale of (Top.child) is 100ns / 10ps`。

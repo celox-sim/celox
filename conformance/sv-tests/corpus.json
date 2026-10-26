@@ -1,0 +1,8 @@
+{
+  "scope": "main",
+  "main_cases": 1650,
+  "generated_cases": 622,
+  "reference_report": "https://chipsalliance.github.io/sv-tests-results/",
+  "reference_build": "https://github.com/chipsalliance/sv-tests/actions/runs/40150201340",
+  "reference_date": "2026-10-25"
+}

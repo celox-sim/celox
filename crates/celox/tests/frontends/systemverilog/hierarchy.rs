@@ -1,6 +1,36 @@
 use super::*;
 
 sv_backends! {
+    fn packed_pattern_parameter_arguments_preserve_wide_values(sim) {
+        @case "hierarchy::packed_pattern_parameter_arguments_preserve_wide_values";
+    }
+
+    fn packed_pattern_parameters_forward_whole_values(sim) {
+        @case "hierarchy::packed_pattern_parameters_forward_whole_values";
+    }
+    fn packed_pattern_parameter_arguments_keep_types_and_unknown_bits(sim) {
+        @case "hierarchy::packed_pattern_parameter_arguments_keep_types_and_unknown_bits";
+    }
+
+    fn array_parameter_elements_select_conditional_whole_arrays(sim) {
+        @case "hierarchy::array_parameter_elements_select_conditional_whole_arrays";
+    }
+    fn array_parameter_elements_preserve_wide_specializations(sim) {
+        @case "hierarchy::array_parameter_elements_preserve_wide_specializations";
+    }
+    fn array_parameter_elements_forward_generated_values(sim) {
+        @case "hierarchy::array_parameter_elements_forward_generated_values";
+    }
+    fn array_parameter_elements_keep_signed_element_types(sim) {
+        @case "hierarchy::array_parameter_elements_keep_signed_element_types";
+    }
+    fn array_parameter_elements_select_package_multidimensional_values(sim) {
+        @case "hierarchy::array_parameter_elements_select_package_multidimensional_values";
+    }
+    fn array_parameter_elements_preserve_four_state_and_conversion(sim) {
+        @case "hierarchy::array_parameter_elements_preserve_four_state_and_conversion";
+    }
+
     fn port_pattern_constant_unpacked_defaults(sim) {
         @case "hierarchy::port_pattern_constant_unpacked_defaults";
     }
@@ -612,5 +642,131 @@ fn rejects_recursive_port_pattern_defaults_for_packed_unions() {
             error.to_string().contains("packed union"),
             "{connection}: {error}"
         );
+    }
+}
+
+#[test]
+fn array_parameter_elements_reject_runtime_values() {
+    for (declaration, expression) in [
+        ("logic [4:0] A[2]='{5'd3,5'd4};", "A[0]"),
+        ("localparam logic [4:0] A[2]='{5'd3,5'd4};", "A[index]"),
+    ] {
+        let source = format!(
+            "module Child #(parameter P=0)(output wire[4:0] y);assign y=P;endmodule\n\
+             module Top(input int index,output wire[4:0] y);{declaration}\n\
+             Child #(.P({expression})) child(.y(y));endmodule"
+        );
+        let error = match Simulator::from_sv_sources(
+            vec![(&source, Path::new("runtime_array_parameter.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        {
+            Err(error) => error,
+            Ok(_) => panic!("runtime parameter argument {expression} must be rejected"),
+        };
+        assert!(
+            error.to_string().contains("parameter"),
+            "{expression}: {error}"
+        );
+    }
+}
+
+#[test]
+fn array_parameter_elements_check_unselected_conditional_branch_types() {
+    for declaration in [
+        "logic[4:0] B[2]='{1,2};",
+        "logic[3:0] B[3]='{1,2,3};",
+        "logic signed[3:0] B[2]='{1,2};",
+        "bit[3:0] B[2]='{1,2};",
+    ] {
+        let source = format!(
+            "module Child #(parameter logic[3:0] Q[2]='{{0,0}})(output wire[3:0] y);\n\
+             assign y=Q[0];endmodule\n\
+             module Top(output wire[3:0] y);localparam logic[3:0] A[2]='{{3,4}};\n\
+             localparam {declaration}\n\
+             Child #(.Q(1 ? A : B)) child(.y(y));endmodule"
+        );
+        assert!(
+            Simulator::from_sv_sources(
+                vec![(&source, Path::new("conditional_array_type.sv"))],
+                "Top"
+            )
+            .build_cranelift()
+            .is_err(),
+            "unselected conditional branch with {declaration} must be rejected"
+        );
+    }
+}
+
+sv_backends! {
+    fn non_ansi_ports_take_body_declarations(sim) {
+        @case "hierarchy::non_ansi_ports_take_body_declarations";
+    }
+    fn child_ports_keep_the_bit_ranges_they_read(sim) {
+        @case "hierarchy::child_ports_keep_the_bit_ranges_they_read";
+    }
+    fn child_ports_keep_the_bit_ranges_of_selected_connections(sim) {
+        @case "hierarchy::child_ports_keep_the_bit_ranges_of_selected_connections";
+    }
+    fn inout_tristate_driver_in_child_reaches_parent(sim) {
+        @case "hierarchy::inout_tristate_driver_in_child_reaches_parent";
+    }
+    fn inout_tristate_nets_read_zero_in_two_state(sim) {
+        @case "hierarchy::inout_tristate_nets_read_zero_in_two_state";
+    }
+    fn inout_tristate_driver_in_parent_reaches_child(sim) {
+        @case "hierarchy::inout_tristate_driver_in_parent_reaches_child";
+    }
+    fn inout_tristate_drivers_reach_implicit_nets(sim) {
+        @case "hierarchy::inout_tristate_drivers_reach_implicit_nets";
+    }
+}
+
+#[test]
+fn rejects_malformed_non_ansi_port_declarations() {
+    for (source, message) in [
+        (
+            "module Top(a, y); input a; endmodule",
+            "port `y` has no port declaration",
+        ),
+        (
+            "module Top(a); input a; input a; endmodule",
+            "port `a` is declared more than once",
+        ),
+        (
+            "module Top(a); input a; output b; endmodule",
+            "port declaration `b` names no port",
+        ),
+        (
+            "module Top(a); input [3:0] a; wire [7:0] a; endmodule",
+            "its net or variable declaration differ",
+        ),
+        (
+            "module Top(a); input a; wire [3:0] a; endmodule",
+            "its net or variable declaration differ",
+        ),
+        (
+            "module Top(q); output reg q; reg q; endmodule",
+            "port `q` with a net or variable type is declared again",
+        ),
+        (
+            "module Top(q); output q; reg q = 1'b1; endmodule",
+            "variable declaration of non-ANSI port `q` with an initializer",
+        ),
+        (
+            "module Top({y, z}); output y, z; assign y = 1'b1; assign z = 1'b0; endmodule",
+            "non-ANSI port expressions",
+        ),
+    ] {
+        let error = Simulator::from_sv_sources(vec![(source, Path::new("ports.sv"))], "Top")
+            .build_cranelift()
+            .expect_err(source)
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(error.contains(message), "{source}: {error}");
     }
 }

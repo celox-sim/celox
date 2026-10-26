@@ -101,6 +101,9 @@ impl<B: SimBackend> Simulator<B> {
                     template: site.strings.first().cloned(),
                     sizing: DisplaySizing::Ieee,
                     scope,
+                    location: None,
+                    assertion: None,
+                    deferred: None,
                     arg_widths: Vec::new(),
                     arg_signed: Vec::new(),
                     arg_is_string: Vec::new(),
@@ -491,7 +494,9 @@ mod queue_tests {
         };
     }
     regressions!(interpreter, build_interpreter);
+    #[cfg(feature = "cranelift")]
     regressions!(cranelift, build_cranelift);
+    #[cfg(feature = "wasm-runtime")]
     regressions!(wasm, build_wasm);
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     regressions!(native, build_native);

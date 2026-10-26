@@ -1,0 +1,334 @@
+(group tagged_unions (category types))
+
+(case constructors_and_checked_members
+  (source "tagged_union.sv" #"
+module Top(input bit full_value, input logic [7:0] data,
+           output logic [7:0] result, output logic [31:0] width,
+           output logic [7:0] widened, selected, selected_context, signed_sum);
+    typedef union tagged packed { void Empty; logic [7:0] Full; logic [3:0] Short; } item_t;
+    item_t item, copied;
+    always_comb begin
+        if (full_value) item = tagged Full data;
+        else item = tagged Empty;
+        copied = item;
+        result = full_value ? copied.Full : 8'h5a;
+        if (full_value) begin
+            copied.Full[3:0] = 4'hf;
+            result = copied.Full;
+        end
+        copied = tagged Full 8'h00;
+        copied.Full = data[0] + data[0];
+        widened = copied.Full;
+        copied = tagged Full 8'ha0;
+        copied.Full[3:0] = (data[0] + data[0]) >> 1;
+        selected = copied.Full;
+        copied.Full[3:0] = (data[0] << 4) >> 4;
+        selected_context = copied.Full;
+        copied.Full = 2'sb11 + 2'sb11;
+        signed_sum = copied.Full;
+    end
+    assign width = $bits(item_t);
+endmodule
+"#)
+  (top Top)
+  (assert_eq width 10)
+  (assert_eq result 0x5a)
+  (for value (list 0 0xa5 0xff)
+    (modify (set full_value 1) (set data value))
+    (assert_eq result (| value 15))
+    (assert_eq widened (* (& value 1) 2))
+    (assert_eq selected (| 0xa0 (& value 1)))
+    (assert_eq selected_context 0xa0)
+    (assert_eq signed_sum 0xfe)
+    (modify (set full_value 0))
+    (assert_eq result 0x5a)))
+
+(case nested_and_void_constructors
+  (source "tagged_nested.sv" #"
+module Top(input bit enabled, input logic [7:0] data,
+           output logic [7:0] result, output logic safe_and, safe_or);
+    typedef union tagged packed { void Empty; logic [7:0] Full; } inner_t;
+    typedef union tagged packed { inner_t Nested; logic [15:0] Word; } outer_t;
+    outer_t item;
+    always_comb begin
+        item = tagged Nested (tagged Full data);
+        result = item.Nested.Full;
+        item = tagged Word 16'hffff;
+        safe_and = 1'b0 && (item.Nested.Full == 8'hff);
+        safe_or = 1'b1 || (item.Nested.Full == 8'hff);
+        if (enabled) begin
+            item = tagged Nested (tagged Full data);
+            item.Nested.Full = data ^ 8'hff;
+            result = item.Nested.Full;
+        end
+    end
+endmodule
+"#)
+  (top Top)
+  (for value (list 0 0xa5 0xff)
+    (modify (set enabled 0) (set data value))
+    (assert_eq result value)
+    (assert_eq safe_and 0)
+    (assert_eq safe_or 1)
+    (modify (set enabled 1))
+    (assert_eq result (^ value 255))))
+
+(case casts_ports_and_registers
+  (four_state)
+  (source "tagged_ports.sv" #"
+package Types;
+    typedef union tagged packed { void Empty; logic signed [7:0] Full; } item_t;
+endpackage
+module Pass(input Types::item_t incoming, output Types::item_t outgoing);
+    assign outgoing = incoming;
+endmodule
+module Top(input bit clk, input bit read_saved, input logic signed [3:0] data,
+           output logic signed [15:0] result, output logic [7:0] saved_result);
+    Types::item_t current_value, copied, saved;
+    always_comb current_value = Types::item_t'(tagged Full data);
+    Pass pass_value(.incoming(current_value), .outgoing(copied));
+    always_ff @(posedge clk) saved <= copied;
+    assign result = copied.Full;
+    assign saved_result = read_saved ? saved.Full : 8'h00;
+endmodule
+"#)
+  (top Top)
+  (assert_eq saved_result 0)
+  (for (d expected saved) (list (0 0 0) (7 7 7) (8 0xfff8 0xf8) (15 0xffff 0xff))
+    (modify (set data d))
+    (assert_eq result expected)
+    (tick clk)
+    (modify (set read_saved 1))
+    (assert_eq saved_result saved)))
+
+(case wide_four_state_payload
+  (four_state)
+  (source "tagged_wide.sv" #"
+module Top(input logic [129:0] data, output logic [129:0] result,
+           output logic [31:0] width);
+    typedef union tagged packed { void Empty; logic [129:0] Full; } item_t;
+    item_t item;
+    always_comb begin
+        item = tagged Full data;
+        result = item.Full;
+    end
+    assign width = $bits(item_t);
+endmodule
+"#)
+  (top Top)
+  (assert_eq width 131)
+  (for bit (list 0 63 64 127 128 129)
+    (let v (| 1 (<< 1 bit)))
+    (let m (<< 1 bit))
+    (modify (set data (fourstate v m)))
+    (assert_eq result (fourstate v m))))
+
+(case conditional_struct_payload
+  (source "tagged_struct.sv" #"
+module Top(input bit enabled, input logic [7:0] data, output logic [7:0] result);
+    typedef union tagged packed {
+        void Empty;
+        struct packed { bit [3:0] high; logic [3:0] low; } Data;
+    } item_t;
+    item_t item;
+    always_comb begin
+        item = enabled ? tagged Data '{data[7:4], data[3:0]} : tagged Empty;
+        result = 8'h5a;
+        if (enabled) begin
+            item.Data.high += 1;
+            result = {item.Data.high, item.Data.low};
+            item.Data = '{high: 0, low: 0};
+        end
+    end
+endmodule
+"#)
+  (top Top)
+  (assert_eq result 0x5a)
+  (for value (list 0 0xa5 0xff)
+    (modify (set enabled 1) (set data value))
+    (assert_eq result (& (+ value 16) 255))
+    (modify (set enabled 0))
+    (assert_eq result 0x5a)))
+
+(case writable_task_arguments
+  (source "tagged_arguments.sv" #"
+module Top(input logic [7:0] data, output logic [7:0] result, nested_result, function_result);
+    typedef union tagged packed { void Empty; logic [7:0] Full; } item_t;
+    union tagged packed { void Empty; item_t Some; } nested;
+    item_t item;
+    logic [7:0] unused_result;
+    task automatic set_value(output logic [7:0] value, input logic [7:0] d);
+        value = d;
+    endtask
+    task automatic increment(inout logic [7:0] value);
+        value += 1;
+    endtask
+    function automatic logic [7:0] complement(output logic [7:0] value, input logic [7:0] d);
+        value = ~d;
+        return d;
+    endfunction
+    always_comb begin
+        item = tagged Full 0;
+        set_value({item.Full[7:4], item.Full[3:0]}, data);
+        increment(item.Full);
+        result = item.Full;
+        nested = tagged Some (tagged Full 0);
+        set_value(nested.Some.Full, data);
+        nested_result = nested.Some.Full;
+        unused_result = complement(item.Full, data);
+        function_result = item.Full;
+    end
+endmodule
+"#)
+  (top Top)
+  (for value (list 0 1 0xa5 0xff)
+    (modify (set data value))
+    (assert_eq result (& (+ value 1) 255))
+    (assert_eq nested_result value)
+    (assert_eq function_result (^ value 255))))
+
+(case writable_system_arguments
+  (source "tagged_system_arguments.sv" #"
+module Top(output logic ok);
+    union tagged packed { void Empty; logic [31:0] Full; } item;
+    int count, seed, a, b;
+    initial begin
+        item = tagged Full 0;
+        count = $sscanf("42", "%d", item.Full);
+        ok = count == 1 && item.Full == 42;
+        count = $sscanf("165", "%d", item.Full[7:0]);
+        ok &= count == 1 && item.Full == 165;
+        count = $sscanf("bad", "%d", item.Full);
+        ok &= count == 0 && item.Full == 165;
+        item = tagged Full 123;
+        seed = 123;
+        a = $random(item.Full);
+        b = $random(seed);
+        ok &= a == b && item.Full == seed;
+        a = $dist_uniform(item.Full, 1, 10);
+        b = $dist_uniform(seed, 1, 10);
+        ok &= a == b && item.Full == seed;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1))
+
+(case factory_and_union_arguments
+  (source "tagged_factory.sv" #"
+module Top(input bit enabled, input logic [7:0] data,
+           output logic [7:0] result, copied, output logic selected,
+           output logic [31:0] constant_width, constant_signed, constant_nested, constant_lazy);
+    typedef union tagged packed { void Empty; logic [7:0] Full; } item_t;
+    typedef item_t alias_t;
+    typedef union tagged packed { void Empty; logic signed [7:0] Full; } signed_t;
+    typedef union tagged packed { void Empty; item_t Some; } outer_t;
+    function automatic int size();
+        item_t value;
+        value = tagged Full 8'd4;
+        return value.Full;
+    endfunction
+    function automatic int negative();
+        signed_t value;
+        value = tagged Full (-8'sd2);
+        return value.Full;
+    endfunction
+    function automatic int nested();
+        outer_t value;
+        value = tagged Some (tagged Full 8'd7);
+        return value.Some.Full;
+    endfunction
+    function automatic int lazy();
+        union tagged packed { logic [7:0] Empty; logic [7:0] Full; } value;
+        value = tagged Empty 8'd4;
+        return 1'b1 ? 3 : value.Full;
+    endfunction
+    localparam int N = size();
+    localparam int S = negative();
+    localparam int T = nested();
+    localparam int L = lazy();
+    logic [N-1:0] sized;
+    assign constant_width = $bits(sized);
+    assign constant_signed = S;
+    assign constant_nested = T;
+    assign constant_lazy = L;
+    item_t item;
+    logic [1:0] bits;
+    function automatic item_t make(input logic [7:0] value);
+        return tagged Full value;
+    endfunction
+    function automatic item_t optional(input bit valid, input logic [7:0] value);
+        return valid ? tagged Full value : tagged Empty;
+    endfunction
+    function automatic int zero(input logic [7:0] unused_value); return 0; endfunction
+    task automatic fill(output alias_t value, input logic [7:0] d);
+        value = tagged Full d;
+    endtask
+    task automatic invert(inout item_t value);
+        value = tagged Full (~value.Full);
+    endtask
+    always_comb begin
+        item = make(data);
+        result = item.Full;
+        fill(.d(data), .value(item));
+        invert(item);
+        copied = item.Full;
+        item = optional(enabled, data);
+        bits = 2'b01;
+        selected = bits[enabled ? zero(item.Full) : 1];
+    end
+endmodule
+"#)
+  (top Top)
+  (assert_eq constant_width 4)
+  (assert_eq constant_signed 0xfffffffe)
+  (assert_eq constant_nested 7)
+  (assert_eq constant_lazy 3)
+  (for value (list 0 1 0xa5 0xff)
+    (modify (set enabled 0) (set data value))
+    (assert_eq result value)
+    (assert_eq copied (^ value 255))
+    (assert_eq selected 0)
+    (modify (set enabled 1))
+    (assert_eq selected 1)))
+
+(case default_arguments
+  (source "tagged_defaults.sv" #"
+module Top(input logic [7:0] data,
+           output logic [7:0] scoped, omitted, explicit_value, task_value, nested_value, void_value);
+    typedef union tagged packed { void Empty; logic [7:0] Full; } item_t;
+    typedef union tagged packed { void Empty; item_t Some; } outer_t;
+    function automatic logic [7:0] get(input item_t value = tagged Full data,
+                                       input logic [7:0] data = 8'hee);
+        return value.Full;
+    endfunction
+    function automatic logic [7:0] get_nested(input outer_t value = tagged Some (tagged Full 8'h35));
+        return value.Some.Full;
+    endfunction
+    function automatic logic [7:0] get_void(input item_t value = tagged Empty);
+        value = tagged Full 8'h19;
+        return value.Full;
+    endfunction
+    task automatic read_value(output logic [7:0] result, input item_t value = tagged Full 8'h2a);
+        result = value.Full;
+    endtask
+    always_comb begin
+        scoped = get();
+        omitted = get(, 8'h00);
+        explicit_value = get(tagged Full 8'h55);
+        read_value(task_value);
+        nested_value = get_nested();
+        void_value = get_void();
+    end
+endmodule
+"#)
+  (top Top)
+  (for value (list 0 1 0xa5 0xff)
+    (modify (set data value))
+    (assert_eq scoped value)
+    (assert_eq omitted value)
+    (assert_eq explicit_value 0x55)
+    (assert_eq task_value 0x2a)
+    (assert_eq nested_value 0x35)
+    (assert_eq void_value 0x19)))

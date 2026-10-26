@@ -128,7 +128,7 @@ fn captured_class_method_identity_is_required_by_existing_module_consumers() {
 }
 
 #[test]
-fn ignored_program_methods_do_not_corrupt_native_function_query_scope() {
+fn program_functions_do_not_corrupt_native_function_query_scope() {
     let tree=parse_source("program unused;function int helper();return 1;endfunction endprogram module M(input logic[1:0]a);function automatic int g(input logic[3:0]a);logic[$bits(a)-1:0]x;return $bits(x);endfunction localparam N=g(0);endmodule",Path::new("native-subroutine-query-scopes.sv")).unwrap();
     let ir =
         crate::analyze::analyze_source(crate::ast::Source::from_syntax(&tree).unwrap()).unwrap();
@@ -136,13 +136,18 @@ fn ignored_program_methods_do_not_corrupt_native_function_query_scope() {
     // N using the module's shadowed width (2), also on immutable81ebab922.
     // This retirement preserves that pre-existing behavior; runtime formals
     // and body-local type discovery still use the proper native scope.
-    let g = ir.modules()[0]
+    let module = ir
+        .modules()
+        .iter()
+        .find(|module| module.name() == "M")
+        .unwrap();
+    let g = module
         .subroutines()
         .iter()
         .find(|routine| routine.name == "g")
         .unwrap();
     assert_eq!(g.params[0].r#type.resolved_width(), Some(4));
-    let local = ir.modules()[0]
+    let local = module
         .locals()
         .iter()
         .find(|local| local.name.starts_with("x@"))

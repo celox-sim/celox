@@ -1382,6 +1382,58 @@ fn deep_generate_bodies_parse_clone_and_drop_on_the_default_stack() {
 }
 
 #[test]
+fn deep_generate_blocks_declare_implicit_nets_on_the_default_stack() {
+    let syntax = parse(&format!(
+        "module M;logic a;{}assign x=a;{}endmodule",
+        "if(1) begin:g ".repeat(10_000),
+        "end ".repeat(10_000)
+    ));
+    let nets: Vec<_> = syntax
+        .net_declarations
+        .iter()
+        .flat_map(|net| &net.variables)
+        .map(|variable| variable.name.value())
+        .collect();
+    assert_eq!(nets, ["x"]);
+}
+
+#[test]
+fn continuous_assignment_targets_declare_implicit_nets_in_their_scope() {
+    let syntax = parse(
+        "module M(input a);wire d;assign {p,q[0]}=a;assign d=a;\
+         if(1) begin:g assign w=a;assign p=a; end endmodule",
+    );
+    let names = |items: &[BodyItemId]| -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|&item| match syntax.body_item(item).kind {
+                BodyItemKind::Net(id) => Some(
+                    syntax.net_declarations[id.0].variables[0]
+                        .name
+                        .value()
+                        .to_string(),
+                ),
+                _ => None,
+            })
+            .collect()
+    };
+    let unit = &syntax.units[0];
+    assert_eq!(names(&unit.items), ["p", "q", "d"]);
+    let block = unit
+        .items
+        .iter()
+        .find_map(|&item| match &syntax.body_item(item).kind {
+            BodyItemKind::Conditional { then_body, .. } => Some(*then_body),
+            _ => None,
+        })
+        .unwrap();
+    let BodyItemKind::Block { items, .. } = &syntax.body_item(block).kind else {
+        panic!("generate block");
+    };
+    assert_eq!(names(items), ["w"]);
+}
+
+#[test]
 fn ordinary_net_declarations_retain_qualifiers_types_dimensions_and_values() {
     let code = "module M;wire signed[7:0] a[2:1],b=3+2;trireg(small)scalared[3:0]c;tri(strong0,weak1)vectored logic[4:0]#(1:2:3,4,5)d;wire T[3:0]#1 e;input wire p;C child();if(1)begin:g uwire bit q;end endmodule interface I;tri t;endinterface";
     let native = Declarations::parse(code, Path::new("nets.sv")).unwrap();
@@ -2003,6 +2055,10 @@ fn datatype_contexts_reject_general_dimension_and_signing_grammar() {
         "struct signed {int x;}",
         "struct packed {int x;} unsigned",
         "struct tagged {int x;}",
+        "struct soft {int x;}",
+        "union soft signed {int x;}",
+        "union soft tagged {int x;}",
+        "union tagged soft {int x;}",
         "struct packed {}",
         "union {}",
         "enum real {A}",
@@ -2036,6 +2092,8 @@ fn datatype_contexts_preserve_enum_ranges_and_aggregate_qualifiers() {
         "struct packed signed {logic[3:0] x;}",
         "union packed unsigned {int x; bit[31:0] y;}",
         "union tagged {int x; void nothing;}",
+        "union soft {int x; bit y;}",
+        "union soft packed signed {int x; bit y;}",
         "enum {A}",
         "enum int unsigned {A}",
         "enum logic [3:0] {A}",
@@ -2245,6 +2303,16 @@ fn numeric_literal_grammar_keeps_integer_real_time_and_macro_base_spellings() {
         parse(&format!("module M #(parameter P={literal}); endmodule"));
     }
     parse("`define BASE 'h ff\nmodule M #(parameter P=8 `BASE); endmodule");
+    for (definitions, literal) in [
+        ("`define W 4", "5'd`W"),
+        ("`define V ff", "8'h`V"),
+        ("`define V 1x", "'sb`V"),
+        ("`define V 0f", "8'h`V"),
+    ] {
+        parse(&format!(
+            "{definitions}\nmodule M #(parameter P={literal}); endmodule"
+        ));
+    }
 }
 
 #[test]
@@ -2699,6 +2767,12 @@ fn resetall_is_only_legal_outside_design_elements() {
 
 #[test]
 fn based_literal_expression_values_are_compact_without_losing_source_tokens() {
+    let native = parse("`define W 4\nmodule M; initial x=5'd`W; endmodule");
+    assert!(
+        native.expressions.iter().any(
+            |expression| matches!(&expression.kind, ExprKind::Literal(text) if text == "5'd4")
+        )
+    );
     for (authored, value) in [("'h x", "'hx"), ("8'd 6", "8'd6"), ("4 'h f", "4'hf")] {
         let source = format!("module M; initial x={authored}; endmodule");
         let native = parse(&source);
@@ -2725,14 +2799,20 @@ fn specparam_retains_its_body_item_boundary() {
 }
 
 #[test]
-fn module_deferred_assertions_do_not_become_final_procedures() {
+/// A deferred assertion as a module item is an `always_comb` procedure
+/// (IEEE 1800-2023 16.4.3), never a `final` one.
+fn module_deferred_assertions_become_always_comb_procedures() {
     for keyword in ["assert", "assume", "cover"] {
         for deferral in ["#0", "final"] {
             let native = parse(&format!("module M; {keyword} {deferral} (1); endmodule"));
-            assert!(native.procedures.is_empty());
-            assert!(
-                matches!(&native.body_item(native.units[0].items[0]).kind, BodyItemKind::Unconverted { category, .. } if category == keyword)
-            );
+            let [procedure] = &native.procedures[..] else {
+                panic!("{:?}", native.procedures)
+            };
+            assert_eq!(procedure.kind, ProcedureKind::AlwaysComb);
+            assert!(matches!(
+                &native.statement(procedure.body).kind,
+                StatementKind::Assertion { keyword: k, .. } if k == keyword
+            ));
         }
     }
 }
@@ -2798,4 +2878,31 @@ fn class_random_qualifiers_and_constraints_are_preserved() {
     assert!(!class.properties[0].qualifiers.randc);
     assert!(class.properties[1].qualifiers.randc);
     assert!(!class.properties[1].qualifiers.rand);
+}
+
+#[test]
+fn non_ansi_port_declarations_fold_into_the_header() {
+    let syntax = parse(
+        "module M(a, b, q);\n input [7:0] a;\n input wire b;\n output reg [7:0] q;\n \
+         wire [7:0] a;\n always @(posedge b) q <= a;\nendmodule\n",
+    );
+    let unit = &syntax.units[0];
+    assert_eq!(unit.port_style, PortStyle::Ansi);
+    let ports: Vec<_> = unit
+        .ports
+        .iter()
+        .map(|port| (port.direction, port.net_type.as_deref(), port.variable))
+        .collect();
+    assert_eq!(
+        ports,
+        [
+            (Some(Direction::Input), Some("wire"), false),
+            (Some(Direction::Input), Some("wire"), false),
+            (Some(Direction::Output), None, false),
+        ]
+    );
+    // The port declarations and the completing net declaration are gone
+    // from the body.
+    assert!(unit.net_declarations.is_empty());
+    assert_eq!(unit.items.len(), 1);
 }

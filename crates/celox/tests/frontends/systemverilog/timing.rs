@@ -2,7 +2,8 @@
 //! processes, driven through the timed `Simulation`.
 //!
 //! Every exclusion names what Celox lacks for the case, so the change that
-//! adds it removes the exclusion. Supported cases run on every backend.
+//! adds it removes the exclusion. Supported cases run on every backend,
+//! and natively also from a serialized native image.
 
 macro_rules! timed_cases {
     () => {};
@@ -28,6 +29,13 @@ macro_rules! timed_cases {
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             #[test]
             $(#[$attr])*
+            fn native_image() {
+                crate::suite::run_case($case, "native-image");
+            }
+
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[test]
+            $(#[$attr])*
             fn native_parallel() {
                 crate::suite::run_case($case, "native-parallel");
             }
@@ -48,6 +56,20 @@ macro_rules! timed_cases {
     };
 }
 
+// Program blocks (IEEE 1800-2023 Clause 24) and the reactive region set.
+timed_cases! {
+    fn program_reads_design_after_nonblocking_updates_settle = "program::program_reads_design_after_nonblocking_updates_settle";
+    fn program_nonblocking_updates_follow_design_updates = "program::program_nonblocking_updates_follow_design_updates";
+    fn program_zero_delay_resumes_in_the_re_inactive_region = "program::program_zero_delay_resumes_in_the_re_inactive_region";
+    fn design_activity_of_a_program_waits_for_the_reactive_region_set = "program::design_activity_of_a_program_waits_for_the_reactive_region_set";
+    fn program_exit_ends_its_initial_procedures = "program::program_exit_ends_its_initial_procedures";
+    fn simulation_ends_when_program_procedures_end = "program::simulation_ends_when_program_procedures_end";
+    fn program_ports_connect_to_design_nets = "program::program_ports_connect_to_design_nets";
+    fn programs_reject_always_procedures = "program::programs_reject_always_procedures";
+    fn programs_reject_instances = "program::programs_reject_instances";
+    fn program_waits_see_host_driven_edges_after_design_updates = "program::program_waits_see_host_driven_edges_after_design_updates";
+}
+
 timed_cases! {
     fn timed_task_automatic_scalar_calls_keep_separate_storage = "timing::timed_task_automatic_scalar_calls_keep_separate_storage";
     fn timed_task_four_state_storage_survives_suspension = "timing::timed_task_four_state_storage_survives_suspension";
@@ -55,6 +77,11 @@ timed_cases! {
     fn timed_task_nested_copyback_wait_and_return = "timing::timed_task_nested_copyback_wait_and_return";
     fn timed_task_static_formals_remain_shared = "timing::timed_task_static_formals_remain_shared";
     fn timed_task_in_edge_always_rearms_after_return = "timing::timed_task_in_edge_always_rearms_after_return";
+    fn always_star_timed_task_calls_run_as_processes = "timing::always_star_timed_task_calls_run_as_processes";
+    fn always_star_timed_task_calls_assign_nonblocking = "timing::always_star_timed_task_calls_assign_nonblocking";
+    fn always_star_timed_task_calls_wait_on_nested_call_defaults = "timing::always_star_timed_task_calls_wait_on_nested_call_defaults";
+    fn always_star_timed_task_calls_wait_on_folded_branch_reads = "timing::always_star_timed_task_calls_wait_on_folded_branch_reads";
+    fn package_scoped_delay_values_wait_their_value = "timing::package_scoped_delay_values_wait_their_value";
     fn time_calls_in_child_port_subroutines = "timing::time_calls_in_child_port_subroutines";
     fn time_calls_in_child_port_actuals = "timing::time_calls_in_child_port_actuals";
     fn time_literal_delays_accept_all_units = "timing::time_literal_delays_accept_all_units";
@@ -160,6 +187,7 @@ timed_cases! {
     fn parallel_flip_flop_parts_keep_pulses = "timing::parallel_flip_flop_parts_keep_pulses";
     fn staged_nonblocking_writes_follow_later_blocking_writes = "timing::staged_nonblocking_writes_follow_later_blocking_writes";
     fn intermediate_combinational_writes_replace_split_definitions = "timing::intermediate_combinational_writes_replace_split_definitions";
+    fn intermediate_combinational_writes_reach_part_select_waiters_settled = "timing::intermediate_combinational_writes_reach_part_select_waiters_settled";
     fn intermediate_combinational_writes_reach_concatenated_ports = "timing::intermediate_combinational_writes_reach_concatenated_ports";
     fn blocking_write_waiters_run_before_nonblocking_updates = "timing::blocking_write_waiters_run_before_nonblocking_updates";
     fn blocking_write_waiters_rearm_before_nonblocking_updates = "timing::blocking_write_waiters_rearm_before_nonblocking_updates";
@@ -167,6 +195,9 @@ timed_cases! {
     fn plain_always_expression_edges_run_as_processes = "timing::plain_always_expression_edges_run_as_processes";
     fn plain_always_multi_bit_edges_follow_the_lsb = "timing::plain_always_multi_bit_edges_follow_the_lsb";
     fn plain_always_edges_without_a_reset_run_as_processes = "timing::plain_always_edges_without_a_reset_run_as_processes";
+    fn derived_clocks_follow_several_nonblocking_updates = "timing::derived_clocks_follow_several_nonblocking_updates";
+    fn derived_clocks_follow_active_region_commits = "timing::derived_clocks_follow_active_region_commits";
+    fn derived_clocks_follow_superseded_publications = "timing::derived_clocks_follow_superseded_publications";
 }
 
 #[test]
@@ -491,12 +522,6 @@ fn unimplemented_timing_features_are_rejected() {
             "always_ff event control",
             88,
         ),
-        // #1710
-        (
-            "bit q; task t(); #1 q = 1; endtask always @* t();",
-            "timed task call in a combinational process",
-            88,
-        ),
     ] {
         let source = format!("module Top; {body} endmodule");
         let error = celox::Simulation::from_sv_sources(
@@ -571,6 +596,14 @@ fn timing_controls_outside_suspendable_processes_are_rejected() {
             "bit a; function automatic bit f(); #1; return a; endfunction",
             "delay control in a function",
         ),
+        (
+            "bit q; task t(); #1 q = 1; endtask always_comb t();",
+            "timed task call in an always_comb body",
+        ),
+        (
+            "bit q, e; task t(); #1 q = 1; endtask always_latch if (e) t();",
+            "timed task call in an always_latch body",
+        ),
     ] {
         let source = format!("module Top; {body} endmodule");
         let error = celox::Simulation::from_sv_sources(
@@ -583,6 +616,76 @@ fn timing_controls_outside_suspendable_processes_are_rejected() {
         .to_string();
         assert!(error.contains(construct), "{body}: {error}");
     }
+}
+
+/// The default of an omitted task argument is read by the call, so an
+/// `always @*` that calls the task waits on what the default reads, as for a
+/// combinational `always @*`. Icarus 13.0 agrees; Verilator 5.052 does not
+/// wake the process.
+#[test]
+fn always_star_timed_task_calls_wait_on_omitted_argument_defaults() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            timeunit 1ns / 1ns;
+            logic [7:0] a = 8'd0;
+            logic [7:0] y_r = 8'd0;
+            task automatic delayed(input logic [7:0] v = a);
+                #1 y_r = v;
+            endtask
+            always @* delayed();
+            initial #2 a = 8'd5;
+            assign y = y_r;
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("star_default.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
+    sim.run_until(4).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 5u8.into());
+}
+
+/// An `always @*` that is still in a timed task when a variable of its event
+/// list changes misses the change: its event control waits only for changes
+/// after it is reached again (IEEE 1800-2023 9.4.2). Icarus 13.0 agrees;
+/// Verilator 5.052 reruns the call for the missed change.
+#[test]
+fn always_star_timed_task_calls_miss_changes_while_suspended() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            timeunit 1ns / 1ns;
+            logic [7:0] a = 8'd0;
+            logic [7:0] y_r = 8'd0;
+            task automatic delayed(input logic [7:0] v);
+                #2 y_r = v + 8'd1;
+            endtask
+            always @* delayed(a);
+            initial begin
+                #1 a = 8'd5;
+                #1 a = 8'd6;
+                #5 a = 8'd7;
+            end
+            assign y = y_r;
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("star_missed.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(6).unwrap();
+    assert_eq!(
+        sim.get(sim.signal("y")),
+        6u8.into(),
+        "a = 6 came while suspended"
+    );
+    sim.run_until(10).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 8u8.into());
 }
 
 /// A nonblocking site stages its value (`NbaSite::pending`) only if its
@@ -696,6 +799,20 @@ sv_backends! {
 sv_backends! {
     fn static_function_readonly_initializer_calls_execute_once(sim) {
         @case "timing::static_function_readonly_initializer_calls_execute_once";
+    }
+}
+
+sv_backends! {
+    fn edge_nonblocking_updates_keep_later_writes_of_other_bits(sim) {
+        @case "timing::edge_nonblocking_updates_keep_later_writes_of_other_bits";
+    }
+
+    fn edge_nonblocking_updates_follow_writes_their_blocking_results_wake(sim) {
+        @case "timing::edge_nonblocking_updates_follow_writes_their_blocking_results_wake";
+    }
+
+    fn edge_blocking_results_precede_later_process_writes(sim) {
+        @case "timing::edge_blocking_results_precede_later_process_writes";
     }
 }
 
@@ -938,4 +1055,113 @@ fn nonblocking_assignments_to_reversed_array_slices_reverse_the_elements() {
     sim.run_until(2).unwrap();
     // m[1:0] <= w writes w[0] to m[1], as m[3:2] = w writes w[0] to m[3].
     assert_eq!(sim.get(sim.signal("elements")), 0xaabb_aabbu32.into());
+}
+
+/// A program that executes `$stop` leaves its other procedures of the time
+/// slot in the reactive region set (IEEE 1800-2023 24.3.1, 20.2). The
+/// simulation cannot be saved there; continued, the slot runs its Re-Inactive
+/// and Re-NBA regions and then the design activity they create (4.5), which
+/// leaves the reactive region set empty, so a state file saved then resumes as
+/// the uninterrupted simulation does.
+#[test]
+fn programs_continue_after_a_stop_and_survive_a_state_file() {
+    let source = r#"
+        module Top(output bit [7:0] a, b, c);
+            timeunit 1ns / 1ns;
+            bit go;
+            always @(posedge go) c <= c + 8'd1;
+            Tb t(a, b, go);
+        endmodule
+        program Tb(output bit [7:0] a, b, output bit go);
+            timeunit 1ns / 1ns;
+            initial begin #1 $stop; a = 1; #0 a = 2; b <= 3; go = 1; #2 go = 0; #1 go = 1; end
+            initial begin #1 b = 4; #0 b = 5; end
+            // Keeps the program running past the stop.
+            initial forever #1;
+        endprogram
+    "#;
+    let build = |four_state: bool| {
+        celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("reactive_state.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap()
+    };
+    let through_bytes = |file: &celox::StateFile| {
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        celox::StateFile::read_from(bytes.as_slice()).unwrap()
+    };
+    let values = |sim: &mut celox::Simulation| {
+        ["a", "b", "c"].map(|name| {
+            let signal = sim.signal(name);
+            sim.get(signal)
+        })
+    };
+    for four_state in [false, true] {
+        let mut whole = build(four_state);
+        whole.run_until(10).unwrap();
+        assert!(whole.is_stopped(), "four_state={four_state}");
+        assert!(whole.save_state().is_err(), "four_state={four_state}");
+        whole.run_until(1).unwrap();
+        // The Re-NBA update `b <= 3` follows `#0 b = 5`, and the flip-flop the
+        // program clocks runs after both.
+        assert_eq!(
+            values(&mut whole),
+            [2u8.into(), 3u8.into(), 1u8.into()],
+            "four_state={four_state}"
+        );
+        let file = through_bytes(&whole.save_state().unwrap());
+        let mut loaded = build(four_state);
+        loaded.load_state(&file).unwrap();
+        assert_eq!(
+            through_bytes(&loaded.save_state().unwrap()),
+            file,
+            "four_state={four_state}"
+        );
+        whole.run_until(10).unwrap();
+        loaded.run_until(10).unwrap();
+        let expected = values(&mut whole);
+        assert_eq!(expected[2], 2u8.into(), "four_state={four_state}");
+        assert_eq!(values(&mut loaded), expected, "four_state={four_state}");
+    }
+}
+
+/// A design process that a program's write wakes runs in the active region
+/// set with the flip-flop that write clocks, before the nonblocking update
+/// (IEEE 1800-2023 4.5): it reads the flip-flop's old value, as Icarus 13.0,
+/// Verilator 5.052 and xezim 0.11.3 do.
+#[test]
+fn design_processes_a_program_wakes_run_before_the_nonblocking_updates() {
+    let source = r#"
+        module Top(output logic [7:0] seen, q);
+            timeunit 1ns / 1ns;
+            wire go;
+            initial q = 0;
+            always_ff @(posedge go) q <= q + 8'd1;
+            always @(posedge go) seen = q;
+            P p(go);
+        endmodule
+        program P(output logic go);
+            timeunit 1ns / 1ns;
+            initial begin go = 0; #1 go = 1; #10; end
+        endprogram
+    "#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("program_wakes.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(5).unwrap();
+        let values = ["seen", "q"].map(|name| {
+            let signal = sim.signal(name);
+            sim.get(signal)
+        });
+        assert_eq!(values, [0u8.into(), 1u8.into()], "four_state={four_state}");
+    }
 }

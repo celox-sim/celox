@@ -10,15 +10,15 @@ mod selected;
 mod strings;
 pub(super) use calls::{statement as call_statement, statement_root as call_statement_root};
 pub(super) use direct::{
-    arguments, bind_value, call_name as native_name, callable_name, cast_target_native, real_value,
-    remove_real_division_guards, ungroup,
+    arguments, bind_value, call_name as native_name, callable_name, cast_target_native,
+    member_context, real_value, remove_real_division_guards, ungroup,
 };
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
 pub(super) use objects::{
     Cast as ObjectCast, Receiver as ObjectReceiver, cast as object_cast,
-    check_assignment as check_handle_assignment, constructor as object_constructor,
-    method as object_method, property as object_property, rand_mode_call as object_rand_mode_call,
-    receiver as object_receiver, this as object_this,
+    check_access as check_member_access, check_assignment as check_handle_assignment,
+    constructor as object_constructor, method as object_method, property as object_property,
+    rand_mode_call as object_rand_mode_call, receiver as object_receiver, this as object_this,
 };
 pub(super) use strings::{
     call as string_call, method as string_method, native_string, to_string as string_operand,

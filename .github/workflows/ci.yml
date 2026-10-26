@@ -107,7 +107,7 @@ jobs:
           submodules: recursive
 
       - name: Install Nix
-        uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
 
       - name: Check locked Nix development environment
@@ -149,7 +149,7 @@ jobs:
 
       - name: cargo clippy
         if: (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') && needs.changes.outputs.rust_full != 'false'
-        run: cargo clippy --locked --workspace --all-targets --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus --no-deps
+        run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim --no-deps
 
       - name: Lint the crates this pull request can affect
         if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_lint_packages != ''
@@ -162,7 +162,7 @@ jobs:
         if: (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') && needs.changes.outputs.rust_full != 'false'
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --locked --workspace --no-deps
+        run: cargo doc --locked --workspace --exclude lydite-celox --no-deps
 
       - name: Build the API documentation this pull request can affect
         if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_doc_libraries != ''
@@ -211,6 +211,9 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
+    env:
+      CELOX_CI_REPORT_DIR: work/ci-reports/rust
+      HAS_MERGIFY_TOKEN: ${{ secrets.MERGIFY_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -220,7 +223,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          key: vtest-v1
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Initialize Rust test reports
+        run: node scripts/ci-rust-reports.mjs reset
 
       - uses: actions/setup-python@v7
         if: needs.changes.outputs.rust_vpi_e2e != 'false'
@@ -236,6 +243,10 @@ jobs:
         with:
           tool: cargo-nextest@0.9.144
 
+      - name: Build the optimized vtest executor
+        if: needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_packages), ' celox ')
+        run: node scripts/run-vtest.mjs --prepare-ci
+
       # Enable the frontend and suite features together so common integration
       # tests run once, rather than once per Cargo feature combination.
       # nextest schedules tests from all binaries on one pool; `cargo test`
@@ -244,12 +255,14 @@ jobs:
       # (scripts/ci-rust-scope.mjs); merge groups and the daily run keep the
       # Celox workspace. lydite-checks.yml owns Lydite tests at its own cadence.
       - name: Run workspace tests with CI features
+        id: workspace-tests
         if: needs.changes.outputs.rust_full != 'false'
         run: >-
           cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci
-          --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus
+          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the tests this pull request can affect
+        id: scoped-tests
         if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_packages != ''
         env:
           BUILDS: ${{ needs.changes.outputs.rust_builds }}
@@ -257,12 +270,42 @@ jobs:
         run: |
           node scripts/run-ci-rust-scope.mjs test
 
+      - name: Collect Rust test reports
+        if: success() || failure()
+        run: node scripts/ci-rust-reports.mjs collect
+
+      - name: Run cocotb VPI end-to-end test
+        id: cocotb-tests
+        if: needs.changes.outputs.rust_vpi_e2e != 'false'
+        env:
+          RUST_FULL: ${{ needs.changes.outputs.rust_full }}
+          BUILDS: ${{ needs.changes.outputs.rust_builds }}
+        run: |
+          CELOX_COCOTB_PYTHON="$(command -v python)" node scripts/run-ci-cocotb.mjs
+
+      - name: Retain Rust test reports
+        if: (success() || failure()) && hashFiles('work/ci-reports/rust/*.xml') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-test-results
+          path: work/ci-reports/rust/*.xml
+          retention-days: 14
+
+      - name: Upload Rust test results to Mergify
+        if: (success() || failure()) && env.HAS_MERGIFY_TOKEN == 'true' && hashFiles('work/ci-reports/rust/*.xml') != ''
+        uses: mergifyio/gha-mergify-ci@392d123d84a27960993927aec1f2cbb059fb95c1 # v27
+        with:
+          token: ${{ secrets.MERGIFY_TOKEN }}
+          report_path: work/ci-reports/rust/*.xml
+          job_name: rust-tests
+          test_step_outcome: ${{ steps.cocotb-tests.outcome == 'failure' && 'failure' || steps.workspace-tests.outcome != 'skipped' && steps.workspace-tests.outcome || steps.scoped-tests.outcome }}
+
       # nextest does not run documentation tests.
       - name: Run workspace documentation tests with CI features
         if: needs.changes.outputs.rust_full != 'false'
         run: >-
           cargo test --locked --workspace --exclude 'lydite*' --doc
-          --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus
+          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the documentation tests of the changed libraries
         if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_libraries != ''
@@ -275,26 +318,23 @@ jobs:
           if [ -n "$FEATURES" ]; then args+=(--features "$FEATURES"); fi
           cargo test --locked --doc "${args[@]}"
 
+  rust-default-tests:
+    name: Rust default-feature tests
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.rust == 'true' && (needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_libraries), ' celox ')))) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
       - name: Verify default-feature library and documentation tests
-        if: needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_libraries), ' celox ')
         run: |
           cargo test --locked -p celox --lib
           cargo test --locked -p celox --doc
-
-      - name: Run cocotb VPI end-to-end test
-        if: needs.changes.outputs.rust_vpi_e2e != 'false'
-        env:
-          FEATURES: ${{ needs.changes.outputs.rust_full != 'false' && 'celox/systemverilog' || needs.changes.outputs.rust_features }}
-        run: |
-          args=()
-          # Match the feature set of VPI's scoped nextest build. Features of
-          # other selected packages (such as external adapters) are unrelated.
-          for feature in ${FEATURES//,/ }; do
-            case "$feature" in celox/*) args+=(--features "$feature");; esac
-          done
-          CELOX_COCOTB_PYTHON="$(command -v python)" \
-            cargo test --locked -p celox-vpi --features systemverilog "${args[@]}" --test cocotb_e2e \
-            cocotb_ -- --ignored
 
   external-suites:
     name: External suite (${{ matrix.suite }}, ${{ matrix.tool }})
@@ -308,9 +348,11 @@ jobs:
       fail-fast: false
       matrix:
         suite: [veryl, sv]
-        tool: [verilator, icarus]
+        tool: [verilator, icarus, xezim]
     env:
       VERIFY_TOOL: ${{ matrix.tool }}
+      # xezim builds from source, so only its jobs enter the shell with it.
+      VERIFY_SHELL: ${{ matrix.tool == 'xezim' && '.#xezim' || '.' }}
       VERIFY_SUITE: ${{ matrix.suite }}
       VERIFY_BIN: ${{ matrix.suite == 'sv' && format('verify-sv-{0}', matrix.tool) || format('verify-{0}', matrix.tool) }}
       VERIFY_BASELINE: ${{ matrix.suite == 'sv' && format('crates/celox-test-suite/verification/sv/{0}.json', matrix.tool) || format('crates/celox-test-suite/verification/{0}.json', matrix.tool) }}
@@ -321,12 +363,12 @@ jobs:
 
       # Use the same locked tool versions as the retained exclusion evidence.
       - name: Install Nix
-        uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31
 
       - name: Test live simulator adapters
         if: matrix.suite == 'veryl'
         run: >-
-          nix develop --no-update-lock-file --command
+          nix develop "$VERIFY_SHELL" --no-update-lock-file --command
           cargo test --locked -p celox-test-suite --features "$VERIFY_TOOL"
           --test oracles -- --ignored
 
@@ -334,7 +376,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           mkdir -p "$RUNNER_TEMP/external-suite"
-          nix develop --no-update-lock-file --command \
+          nix develop "$VERIFY_SHELL" --no-update-lock-file --command \
             cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
             --bin "$VERIFY_BIN" -- --list > "$RUNNER_TEMP/external-suite/catalogue.json"
 
@@ -345,7 +387,7 @@ jobs:
           # The runner returns 1 for retained failures as well as regressions.
           # The next step checks the complete fresh report and the exit status.
           rm -f "$RUNNER_TEMP/external-suite/logs/results.json"
-          if nix develop --no-update-lock-file --command \
+          if nix develop "$VERIFY_SHELL" --no-update-lock-file --command \
             cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
             --bin "$VERIFY_BIN" -- --fresh --jobs 2 \
             --output "$RUNNER_TEMP/external-suite/logs"; then
@@ -360,7 +402,7 @@ jobs:
         env:
           VERIFY_EXIT_STATUS: ${{ steps.verify.outputs.exit_status }}
         run: >-
-          nix develop --no-update-lock-file --command
+          nix develop "$VERIFY_SHELL" --no-update-lock-file --command
           node scripts/check-external-suite-report.mjs
           "$RUNNER_TEMP/external-suite/logs/results.json" "$VERIFY_BASELINE"
           "$RUNNER_TEMP/external-suite/catalogue.json" "$VERIFY_EXIT_STATUS" "$VERIFY_SUITE"
@@ -458,7 +500,11 @@ jobs:
             https://github.com/chipsalliance/sv-tests.git "$revision"
           git -C "$RUNNER_TEMP/sv-tests" checkout -q FETCH_HEAD
           git -C "$RUNNER_TEMP/sv-tests" submodule update --init --depth 1 \
-            third_party/tests/uvm third_party/tests/uvm-1.2
+            third_party/tests/uvm third_party/tests/uvm-1.2 \
+            third_party/tests/easyUVM third_party/tests/uvm-examples
+
+      - name: Generate the upstream main-tests corpus
+        run: python conformance/sv-tests/prepare.py "$RUNNER_TEMP/sv-tests"
 
       - name: Validate the adapter against the official runner
         env:
@@ -490,6 +536,7 @@ jobs:
           name: sv-tests-report
           path: |
             ${{ runner.temp }}/sv-tests-report.tsv
+            ${{ runner.temp }}/sv-tests-report.summary.json
             ${{ runner.temp }}/sv-tests-results
           if-no-files-found: ignore
           retention-days: 14
@@ -596,13 +643,15 @@ jobs:
   # into a successful check merely because a downstream job was skipped.
   rust:
     name: Rust Test & NAPI Build
-    needs: [changes, rust-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites]
+    needs: [changes, rust-tests, rust-default-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     env:
       CHANGES_RESULT: ${{ needs.changes.result }}
       RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
       RUST_RESULT: ${{ needs.rust-tests.result }}
+      DEFAULT_REQUIRED: ${{ needs.changes.result != 'success' || (needs.changes.outputs.rust == 'true' && (needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_libraries), ' celox '))) }}
+      DEFAULT_RESULT: ${{ needs.rust-default-tests.result }}
       SV_TESTS_REQUIRED: ${{ needs.changes.outputs.rust != 'false' && needs.changes.outputs.rust_sv_tests != 'false' }}
       SV_TESTS_RESULT: ${{ needs.sv-tests.result }}
       # Platform coverage is mandatory in queue and full validation runs.
@@ -621,6 +670,9 @@ jobs:
           test "$CHANGES_RESULT" = success
           if [ "$RUST_REQUIRED" != false ] || [ "$RUST_RESULT" != skipped ]; then
             test "$RUST_RESULT" = success
+          fi
+          if [ "$DEFAULT_REQUIRED" != false ] || [ "$DEFAULT_RESULT" != skipped ]; then
+            test "$DEFAULT_RESULT" = success
           fi
           if [ "$SV_TESTS_REQUIRED" != false ] || [ "$SV_TESTS_RESULT" != skipped ]; then
             test "$SV_TESTS_RESULT" = success
@@ -675,7 +727,7 @@ jobs:
 
       - name: Test partial-word reduction AND on AArch64
         run: >-
-          cargo test --locked -p celox --features systemverilog
+          cargo test --locked -p celox --features systemverilog,cranelift,wasm-runtime,wasm-component,veryl-reference
           --test systemverilog wide_reduction_and_respects_partial_storage_words::native
 
       - name: Check x86-64 cross-codegen from AArch64
@@ -925,6 +977,7 @@ jobs:
         docs,
         lint,
         rust-tests,
+        rust-default-tests,
         sv-tests,
         external-suites,
         common-cells,

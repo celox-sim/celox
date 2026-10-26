@@ -4,8 +4,8 @@
 //! sv-tests. This process reports only compiler/simulator success or failure.
 //!
 //! ```text
-//! sv_tests --mode parsing|elaboration|simulation --state-mode 2state|4state \
-//!     [--top NAME] [--define NAME[=VALUE]] [--include DIR] -- FILE...
+//! sv_tests --mode preprocessing|parsing|elaboration|simulation --state-mode 2state|4state \
+//!     [--top NAME] [--define NAME[=VALUE]] [--include DIR] [--simvariant ARG] -- FILE...
 //! ```
 
 #![allow(clippy::disallowed_methods)] // This binary is the process environment boundary.
@@ -14,6 +14,7 @@ use std::{collections::BTreeSet, env, path::PathBuf, process::ExitCode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
+    Preprocessing,
     Parsing,
     Elaboration,
     Simulation,
@@ -26,6 +27,7 @@ struct Options {
     top: Option<String>,
     defines: Vec<(String, Option<String>)>,
     includes: Vec<PathBuf>,
+    simvariants: Vec<String>,
     files: Vec<PathBuf>,
 }
 
@@ -35,6 +37,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut top = None;
     let mut defines = Vec::new();
     let mut includes = Vec::new();
+    let mut simvariants = Vec::new();
     let mut files = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -52,6 +55,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         match arg.as_str() {
             "--mode" if mode.is_none() => {
                 mode = Some(match value.as_str() {
+                    "preprocessing" => Mode::Preprocessing,
                     "parsing" => Mode::Parsing,
                     "elaboration" => Mode::Elaboration,
                     "simulation" => Mode::Simulation,
@@ -84,6 +88,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                 defines.push((name.to_string(), replacement));
             }
             "--include" => includes.push(value.into()),
+            "--simvariant" => simvariants.push(value.clone()),
             _ => return Err(format!("unknown, duplicate or invalid option: {arg}")),
         }
     }
@@ -96,6 +101,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         top,
         defines,
         includes,
+        simvariants,
         files,
     })
 }
@@ -132,6 +138,14 @@ fn select_top(
 }
 
 fn run(options: &Options) -> Result<(), String> {
+    for include in &options.includes {
+        if !include.is_dir() {
+            return Err(format!(
+                "include directory is unavailable: {}",
+                include.display()
+            ));
+        }
+    }
     let includes: Vec<_> = options.includes.iter().map(PathBuf::as_path).collect();
     let texts: Vec<_> = options
         .files
@@ -143,6 +157,12 @@ fn run(options: &Options) -> Result<(), String> {
                 .map_err(|error| error.to_string())
         })
         .collect::<Result<_, _>>()?;
+    if options.mode == Mode::Preprocessing {
+        for text in &texts {
+            print!("{text}");
+        }
+        return Ok(());
+    }
     let sources: Vec<_> = texts
         .iter()
         .zip(&options.files)
@@ -164,7 +184,9 @@ fn run(options: &Options) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let top = select_top(&parsed, options.top.as_deref())?;
     match options.mode {
-        Mode::Parsing => unreachable!("parsing returned before root selection"),
+        Mode::Preprocessing | Mode::Parsing => {
+            unreachable!("preprocessing and parsing returned before root selection")
+        }
         // A Simulator rejects designs with processes, which it does not run.
         Mode::Elaboration => celox::Simulation::from_sv_sources(sources, &top)
             .four_state(options.four_state)
@@ -172,11 +194,26 @@ fn run(options: &Options) -> Result<(), String> {
             .map(|_| ())
             .map_err(|error| error.to_string()),
         Mode::Simulation => {
-            let sim = celox::Simulation::from_sv_sources(sources, &top)
-                .four_state(options.four_state)
-                .build()
-                .map_err(|error| error.to_string())?;
-            simulate(sim)
+            // Upstream simvariants are separate runs, each with one plusarg.
+            // Recreate the simulation so no variable or scheduler state leaks.
+            let variants: Vec<Vec<String>> = if options.simvariants.is_empty() {
+                vec![Vec::new()]
+            } else {
+                options
+                    .simvariants
+                    .iter()
+                    .map(|arg| vec![arg.clone()])
+                    .collect()
+            };
+            for plusargs in variants {
+                let sim = celox::Simulation::from_sv_sources(sources.clone(), &top)
+                    .four_state(options.four_state)
+                    .plusargs(plusargs)
+                    .build()
+                    .map_err(|error| error.to_string())?;
+                simulate(sim)?;
+            }
+            Ok(())
         }
     }
 }
@@ -188,13 +225,11 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
     let mut output = |sim: &mut celox::Simulation| -> Result<(), String> {
         for event in sim.drain_runtime_events() {
             match event {
-                celox::RuntimeEvent::Display { message }
-                | celox::RuntimeEvent::AssertContinue { message } => {
-                    stdout.write_all(&message).unwrap();
-                    stdout.write_all(b"\n").unwrap();
-                }
-                celox::RuntimeEvent::Write { message } => stdout.write_all(&message).unwrap(),
-                celox::RuntimeEvent::AssertFatal { message } => {
+                celox::RuntimeEvent::Report(celox::Report {
+                    severity: celox::Severity::Fatal,
+                    message,
+                    ..
+                }) => {
                     stdout.write_all(&message).unwrap();
                     stdout.write_all(b"\n").unwrap();
                     return Err(format!(
@@ -204,6 +239,12 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
                             .unwrap_or_else(|_| message.escape_ascii().to_string())
                     ));
                 }
+                celox::RuntimeEvent::Display { message }
+                | celox::RuntimeEvent::Report(celox::Report { message, .. }) => {
+                    stdout.write_all(&message).unwrap();
+                    stdout.write_all(b"\n").unwrap();
+                }
+                celox::RuntimeEvent::Write { message } => stdout.write_all(&message).unwrap(),
                 celox::RuntimeEvent::Finish | celox::RuntimeEvent::Stop => {}
                 celox::RuntimeEvent::Missed { count } => {
                     return Err(format!("{count} runtime events were lost"));
@@ -238,7 +279,7 @@ fn main() -> ExitCode {
         Ok(options) => options,
         Err(error) => {
             eprintln!(
-                "{error}\nusage: sv_tests --mode parsing|elaboration|simulation --state-mode 2state|4state [--top NAME] [--define NAME[=VALUE]] [--include DIR] -- FILE..."
+                "{error}\nusage: sv_tests --mode preprocessing|parsing|elaboration|simulation --state-mode 2state|4state [--top NAME] [--define NAME[=VALUE]] [--include DIR] [--simvariant ARG] -- FILE..."
             );
             return ExitCode::from(2);
         }
@@ -291,7 +332,7 @@ mod tests {
         assert_eq!(o.includes, [PathBuf::from("headers")]);
         assert_eq!(o.files, [PathBuf::from("a.sv"), PathBuf::from("b.sv")]);
         for args in [
-            vec!["--mode", "preprocessing", "--state-mode", "2state", "a.sv"],
+            vec!["--mode", "unknown", "--state-mode", "2state", "a.sv"],
             vec!["--mode", "elaboration", "--state-mode", "both", "a.sv"],
             vec![
                 "--mode",
@@ -348,8 +389,87 @@ mod tests {
             top: None,
             defines: Vec::new(),
             includes: Vec::new(),
+            simvariants: Vec::new(),
             files,
         }
+    }
+
+    #[test]
+    fn missing_include_directory_is_a_driver_error_even_without_an_include_directive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture(dir.path(), "valid.sv", "module Top; endmodule");
+        let mut opts = fixture_options(vec![path], Mode::Preprocessing);
+        opts.includes = vec![dir.path().join("missing")];
+        assert!(
+            run(&opts)
+                .unwrap_err()
+                .contains("include directory is unavailable")
+        );
+    }
+
+    #[test]
+    fn simulation_variants_use_separate_arguments_and_fresh_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture(
+            dir.path(),
+            "variants.sv",
+            r#"
+module Top;
+    int value = 0;
+    initial begin
+        if (!$value$plusargs("value=%d", value)) $fatal(1, "missing variant");
+        if (value != 1 && value != 2) $fatal(1, "bad variant");
+        if ($test$plusargs("value=1") && $test$plusargs("value=2"))
+            $fatal(1, "arguments combined");
+        #1;
+        value = 99;
+        $finish;
+    end
+endmodule
+"#,
+        );
+        let mut opts = fixture_options(vec![path], Mode::Simulation);
+        opts.simvariants = vec!["value=1".into(), "value=2".into()];
+        run(&opts).unwrap();
+        opts.simvariants = vec!["other=1".into(), "value=1".into()];
+        assert!(run(&opts).is_err());
+        opts.simvariants = vec!["value=1".into(), "value=3".into()];
+        assert!(run(&opts).is_err());
+        let opts = options(&[
+            "--mode",
+            "simulation",
+            "--state-mode",
+            "2state",
+            "--simvariant",
+            "value=1",
+            "--simvariant",
+            "value=2",
+            "a.sv",
+        ])
+        .unwrap();
+        assert_eq!(opts.simvariants, ["value=1", "value=2"]);
+    }
+
+    #[test]
+    fn preprocessing_stops_before_syntax_and_reports_directive_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture(
+            dir.path(),
+            "tokens.sv",
+            "`define WORD expanded\n`WORD\nmodule unfinished;",
+        );
+        let mut opts = fixture_options(vec![path], Mode::Preprocessing);
+        run(&opts).unwrap();
+        opts.mode = Mode::Parsing;
+        assert!(run(&opts).is_err());
+        let path = fixture(dir.path(), "invalid.sv", "`include \"missing.svh\"\n");
+        assert!(run(&fixture_options(vec![path], Mode::Preprocessing)).is_err());
+        assert_eq!(
+            options(&["--mode", "preprocessing", "--state-mode", "2state", "a.sv"])
+                .unwrap()
+                .mode,
+            Mode::Preprocessing
+        );
     }
 
     #[test]

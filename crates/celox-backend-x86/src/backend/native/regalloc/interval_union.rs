@@ -662,6 +662,38 @@ impl DynamicSlotUnion {
     }
 }
 
+/// The slots occupying one CFG row, one bit per slot: `any` where a slot has
+/// occupancy in the row, `full` where it occupies the whole row. They decide
+/// most first-fit probes without walking a slot's nodes.
+#[derive(Debug, Clone, Default)]
+struct RowSlots {
+    any: Vec<u64>,
+    full: Vec<u64>,
+}
+
+impl RowSlots {
+    fn set(bits: &mut Vec<u64>, slot: usize, value: bool) {
+        let word = slot / 64;
+        if word >= bits.len() {
+            if !value {
+                return;
+            }
+            bits.resize(word + 1, 0);
+        }
+        if value {
+            bits[word] |= 1 << (slot % 64);
+        } else {
+            bits[word] &= !(1 << (slot % 64));
+        }
+    }
+
+    fn or_into(bits: &[u64], mask: &mut [u64]) {
+        for (mask, bits) in mask.iter_mut().zip(bits) {
+            *mask |= bits;
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct DynamicIntervalMatrix {
     index: Arc<IntervalIndex>,
@@ -669,6 +701,8 @@ pub(super) struct DynamicIntervalMatrix {
     assignments: BTreeMap<AllocationBundleId, usize>,
     block_slot_counts: Vec<u32>,
     full_ends: Arc<[SlotIndex]>,
+    /// Per CFG row, the slots occupying it; derived from `unions`.
+    row_slots: Vec<RowSlots>,
 }
 
 impl PartialEq for DynamicIntervalMatrix {
@@ -695,6 +729,7 @@ impl DynamicIntervalMatrix {
             assignments: BTreeMap::new(),
             block_slot_counts: vec![0; cfg.successors.len()],
             full_ends: Arc::from([]),
+            row_slots: vec![RowSlots::default(); cfg.successors.len()],
         })
     }
 
@@ -761,11 +796,40 @@ impl DynamicIntervalMatrix {
         else {
             return Ok(self.unions.len());
         };
-        Ok(self
-            .unions
-            .iter()
-            .position(|union| !union.interferes_indexed_with_hint(segments, hint))
-            .unwrap_or(self.unions.len()))
+        // The lowest slot without interference, as a scan of every slot
+        // finds it: a slot occupying a whole row in which a segment starts
+        // interferes, a slot with no occupancy in any of the rows does not,
+        // and the others are checked node by node.
+        let words = self.unions.len().div_ceil(64);
+        let mut any = vec![0u64; words];
+        let mut full = vec![0u64; words];
+        for (segment, block) in segments.iter() {
+            let row = &self.row_slots[block];
+            RowSlots::or_into(&row.any, &mut any);
+            if self
+                .full_ends
+                .get(block)
+                .is_some_and(|&end| segment.start < end)
+            {
+                RowSlots::or_into(&row.full, &mut full);
+            }
+        }
+        for word in 0..words {
+            let mut candidates = !full[word];
+            while candidates != 0 {
+                let slot = word * 64 + candidates.trailing_zeros() as usize;
+                if slot >= self.unions.len() {
+                    return Ok(self.unions.len());
+                }
+                if any[word] & (1 << (slot % 64)) == 0
+                    || !self.unions[slot].interferes_indexed_with_hint(segments, hint)
+                {
+                    return Ok(slot);
+                }
+                candidates &= candidates - 1;
+            }
+        }
+        Ok(self.unions.len())
     }
 
     pub(super) fn assign_validated(
@@ -812,6 +876,17 @@ impl DynamicIntervalMatrix {
         } else {
             self.unions[slot].insert_indexed(bundle, segments)?;
         }
+        let mut previous_block = None;
+        for (_, block) in segments.iter() {
+            if previous_block == Some(block) {
+                continue;
+            }
+            previous_block = Some(block);
+            let row = &mut self.row_slots[block];
+            RowSlots::set(&mut row.any, slot, true);
+            let full = self.unions[slot].heads.get(block) == DynamicSlotUnion::FULL;
+            RowSlots::set(&mut row.full, slot, full);
+        }
         for block in newly_occupied_blocks {
             self.block_slot_counts[block] = self.block_slot_counts[block]
                 .checked_add(1)
@@ -846,6 +921,25 @@ impl DynamicIntervalMatrix {
                     [],
                     format!("dynamic slot {slot} has no assigned sparse range"),
                 ));
+            }
+        }
+        for (block, row) in self.row_slots.iter().enumerate() {
+            for (slot, union) in self.unions.iter().enumerate() {
+                let bit = |bits: &[u64]| {
+                    bits.get(slot / 64)
+                        .is_some_and(|word| word & (1 << (slot % 64)) != 0)
+                };
+                let head = union.heads.get(block);
+                if bit(&row.any) != (head != DynamicSlotUnion::NONE)
+                    || bit(&row.full) && head != DynamicSlotUnion::FULL
+                {
+                    return Err(IntervalUnionError::new(
+                        "INTERVAL_UNION.ROW_SLOTS",
+                        self.index.block_ids.get(block).copied(),
+                        [],
+                        format!("row occupancy bits disagree with dynamic slot {slot}"),
+                    ));
+                }
             }
         }
         if self
@@ -938,6 +1032,75 @@ mod tests {
 
     use super::*;
     use crate::native::mir::{MBlock, MFunction, MInst, SpillDesc, VRegAllocator};
+
+    /// First fit picks the slot a scan of every slot picks, over random
+    /// bundles in several rows: whole rows, partial ranges, and ranges past a
+    /// row's full endpoint.
+    #[test]
+    fn first_fit_matches_a_scan_of_every_slot() {
+        let blocks = 4;
+        let mut function = MFunction::new(VRegAllocator::new(), Vec::<SpillDesc>::new());
+        for block in 0..blocks {
+            let mut mblock = MBlock::new(BlockId(block));
+            if block + 1 < blocks {
+                mblock.push(MInst::Jump {
+                    target: BlockId(block + 1),
+                });
+            } else {
+                mblock.push(MInst::Return);
+            }
+            function.blocks.push(mblock);
+        }
+        let cfg = super::super::cfg::normalize(&mut function).unwrap();
+        let ends = (0..blocks).map(|block| (block, 8)).collect();
+        let mut seed = 0x853c_49e6_748f_ea9bu64;
+        let mut next = |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        for _ in 0..40 {
+            let mut matrix = DynamicIntervalMatrix::with_block_ends(&cfg, &ends).unwrap();
+            for bundle in 0..120 {
+                let mut segments = Vec::new();
+                for block in 0..blocks {
+                    if next(3) != 0 {
+                        continue;
+                    }
+                    let (start, end) = match next(4) {
+                        0 => (0, 8),
+                        1 => (8, 9 + next(2)),
+                        _ => {
+                            let start = next(8);
+                            (start, start + 1 + next(8 - start))
+                        }
+                    };
+                    segments.push(LiveSegment {
+                        block: BlockId(block),
+                        start: SlotIndex::for_test(start),
+                        end: SlotIndex::for_test(end),
+                    });
+                }
+                if segments.is_empty() {
+                    continue;
+                }
+                let range = matrix.make_range(segments).unwrap();
+                let scanned = matrix
+                    .unions
+                    .iter()
+                    .position(|union| !union.interferes_indexed(range.validated()))
+                    .unwrap_or(matrix.unions.len());
+                let slot = matrix.first_available_validated(range.validated()).unwrap();
+                assert_eq!(slot, scanned);
+                matrix
+                    .assign_validated(AllocationBundleId(bundle), slot, range.validated())
+                    .unwrap();
+            }
+            matrix.verify().unwrap();
+            assert!(matrix.slot_count() > 3);
+        }
+    }
 
     fn one_block_cfg() -> NormalizedCfg {
         let mut block = MBlock::new(BlockId(0));

@@ -216,6 +216,8 @@ pub(in crate::ast) fn cast_target_native(
 }
 
 enum Finish {
+    ScopeRandomize(Vec<Option<Vec<i128>>>),
+    Tagged(packed_structs::Construction),
     Unary(String),
     Binary(String),
     Mux,
@@ -233,7 +235,7 @@ enum Finish {
     /// A string operation on the bound children, see [`strings`].
     StringCall(StringOp),
     /// A read of property `property` of the object handle child.
-    ObjectLoad(crate::ast::classes::Property),
+    ObjectLoad(Box<crate::ast::classes::Property>),
     /// A call of method subroutine `name` with `formals` formals; the first
     /// child is the object handle when `receiver` is one.
     MethodCall {
@@ -266,6 +268,34 @@ pub(in crate::ast) fn bind_value(
         match job {
             Job::Enter(id, target, scope) => {
                 let dimensions = scope.as_deref().unwrap_or(dimensions);
+                if let Some(shape) = target.as_deref()
+                    && shape
+                        .members
+                        .first()
+                        .is_some_and(packed_structs::PackedMember::is_tagged)
+                    && !matches!(
+                        native.expression(id).kind,
+                        ExprKind::Group(_) | ExprKind::Conditional { .. } | ExprKind::Tagged { .. }
+                    )
+                {
+                    let actual = if let ExprKind::Cast { target, .. } = native.expression(id).kind {
+                        cast_shape(target, native, tree, dimensions)?
+                            .and_then(|shape| shape.pattern_type(&tree.state, dimensions))
+                    } else {
+                        bound_patterns::native_value_type(id, tree, dimensions)?
+                    };
+                    if !actual.is_some_and(|ty| {
+                        ty.members
+                            .first()
+                            .is_some_and(|member| member.same_owner(&shape.members[0]))
+                            && ty.packed_ranges.len() == 1
+                            && ty.unpacked_ranges.is_empty()
+                    }) {
+                        return Err(unsupported(
+                            "assignment to a tagged union requires the same union type or a tagged expression",
+                        ));
+                    }
+                }
                 if let Some(call) = objects::rand_mode_call(tree, id, native, dimensions, false)? {
                     values.push(call);
                     continue;
@@ -389,8 +419,8 @@ pub(in crate::ast) fn bind_value(
                         Finish::Mux,
                         vec![
                             (*condition, None),
-                            (*then_expression, None),
-                            (*else_expression, None),
+                            (*then_expression, target.clone()),
+                            (*else_expression, target.clone()),
                         ],
                     ),
                     ExprKind::Concatenation(parts) if !parts.is_empty() => {
@@ -409,7 +439,10 @@ pub(in crate::ast) fn bind_value(
                             tree,
                             dimensions,
                         )?),
-                        vec![(*expression, None)],
+                        vec![(
+                            *expression,
+                            cast_shape(*target, native, tree, dimensions)?.map(Rc::new),
+                        )],
                     ),
                     ExprKind::Call {
                         expression,
@@ -499,6 +532,7 @@ pub(in crate::ast) fn bind_value(
                             }
                             let actuals =
                                 args.iter().filter_map(|arg| arg.value).collect::<Vec<_>>();
+                            let mut domains = Vec::with_capacity(actuals.len());
                             for &actual in &actuals {
                                 let ExprKind::Name(name) = &native.expression(actual).kind else {
                                     return Err(unsupported(
@@ -509,11 +543,17 @@ pub(in crate::ast) fn bind_value(
                                 let shape = dimensions
                                     .get(&name)
                                     .ok_or_else(|| unsupported("scope randomize variable"))?;
-                                if !shape.unpacked.is_empty() || !shape.randomizable {
+                                if !shape.unpacked.is_empty()
+                                    || !shape.randomizable
+                                    || shape.real
+                                    || shape.string
+                                    || shape.class.is_some()
+                                {
                                     return Err(unsupported(
-                                        "scope randomize requires a packed non-enum variable",
+                                        "scope randomize requires a packed variable with a supported enum domain",
                                     ));
                                 }
+                                domains.push(shape.enum_values.clone());
                                 if !expressions::query_actual_is_writable(
                                     &Expr::Ident(name),
                                     dimensions,
@@ -524,12 +564,7 @@ pub(in crate::ast) fn bind_value(
                                 }
                             }
                             jobs.push(Job::Finish(
-                                Finish::Call {
-                                    name: "std::randomize".into(),
-                                    args: actuals.iter().copied().map(Some).collect(),
-                                    order: Vec::new(),
-                                    system: Some(SystemFunction::ScopeRandomize),
-                                },
+                                Finish::ScopeRandomize(domains),
                                 actuals.len(),
                                 scope.clone(),
                             ));
@@ -669,6 +704,13 @@ pub(in crate::ast) fn bind_value(
                                 return Err(unsupported(format!("integral argument of `{name}`")));
                             }
                             let actuals = args.iter().map(|arg| arg.value).collect::<Vec<_>>();
+                            for (position, id) in actuals.iter().enumerate() {
+                                if function.writes_argument(position)
+                                    && let Some(id) = id
+                                {
+                                    check_tagged_copyout(*id, None, tree, dimensions)?;
+                                }
+                            }
                             (
                                 Finish::Call {
                                     name,
@@ -687,6 +729,14 @@ pub(in crate::ast) fn bind_value(
                                         .get(&name)
                                         .and_then(|shapes| shapes.get(position))
                                 {
+                                    if dimensions
+                                        .subroutine_directions
+                                        .get(&name)
+                                        .and_then(|directions| directions.get(position))
+                                        .is_some_and(|direction| direction.is_written())
+                                    {
+                                        check_tagged_copyout(*id, Some(shape), tree, dimensions)?;
+                                    }
                                     array_compatibility::check_native_unpacked_assignment(
                                         &tree.state,
                                         *id,
@@ -756,9 +806,10 @@ pub(in crate::ast) fn bind_value(
                         let (property, receiver) = objects::property(tree, id, native, dimensions)?
                             .expect("checked by the guard");
                         match receiver {
-                            Some(receiver) => {
-                                (Finish::ObjectLoad(property), vec![(receiver, None)])
-                            }
+                            Some(receiver) => (
+                                Finish::ObjectLoad(Box::new(property)),
+                                vec![(receiver, None)],
+                            ),
                             None => {
                                 values.push(objects::load(&property, objects::this()));
                                 continue;
@@ -810,7 +861,25 @@ pub(in crate::ast) fn bind_value(
                     ExprKind::Assignment { .. } => {
                         return Err(unsupported("assignment used as an expression"));
                     }
-                    ExprKind::Tagged { .. } => return Err(unsupported("tagged union expression")),
+                    ExprKind::Tagged { member, value } => {
+                        let shape = target.as_deref().ok_or_else(|| {
+                            unsupported("tagged union expression without a type context")
+                        })?;
+                        let plan = packed_structs::construction_member(
+                            shape,
+                            &instances::normalize_identifier(&member.spelling),
+                        )?;
+                        if value.is_some() != plan.shape.is_some() {
+                            return Err(unsupported(
+                                "tagged member payload does not match void/non-void member",
+                            ));
+                        }
+                        let children = value
+                            .iter()
+                            .map(|id| (*id, plan.shape.clone().map(Rc::new)))
+                            .collect();
+                        (Finish::Tagged(plan), children)
+                    }
                     ExprKind::Streaming { .. } => {
                         return Err(unsupported("streaming concatenation"));
                     }
@@ -833,6 +902,9 @@ pub(in crate::ast) fn bind_value(
                 let start = values.len().checked_sub(count).ok_or_else(disagreement)?;
                 let mut operands = values.split_off(start);
                 let value = match finish {
+                    Finish::Tagged(plan) => {
+                        packed_structs::construct(&tree.state, plan, operands.pop(), dimensions)?
+                    }
                     Finish::Unary(op) => {
                         let operand = operands.pop().ok_or_else(disagreement)?;
                         if strings::string_value(&operand, dimensions) {
@@ -928,6 +1000,46 @@ pub(in crate::ast) fn bind_value(
                     Finish::Concat => Expr::Concat(operands),
                     Finish::StringCall(op) => {
                         strings::call(op, strings::operands(op, operands, dimensions))
+                    }
+                    Finish::ScopeRandomize(domains) => {
+                        // Preserve the original call when no enum is present.
+                        // Every scalar operation succeeds and returns signed int 1;
+                        // bitwise AND preserves that type and evaluates all operands.
+                        if domains.iter().all(Option::is_none) {
+                            Expr::Call {
+                                callee: Callee::System(SystemFunction::ScopeRandomize),
+                                args: operands.into_iter().map(Some).collect(),
+                                arg_order: Vec::new(),
+                            }
+                        } else {
+                            let mut calls =
+                                operands.into_iter().zip(domains).map(|(operand, domain)| {
+                                    let mut args = vec![Some(operand)];
+                                    let function = if let Some(values) = domain {
+                                        args.extend(values.into_iter().map(|value| {
+                                            Some(Expr::Literal(format_typed_parameter_literal(
+                                                value,
+                                                64,
+                                                value < 0,
+                                            )))
+                                        }));
+                                        SystemFunction::ScopeRandomizeEnum
+                                    } else {
+                                        SystemFunction::ScopeRandomize
+                                    };
+                                    Expr::Call {
+                                        callee: Callee::System(function),
+                                        args,
+                                        arg_order: Vec::new(),
+                                    }
+                                });
+                            let first = calls.next().ok_or_else(disagreement)?;
+                            calls.fold(first, |left, right| Expr::Binary {
+                                left: Box::new(left),
+                                op: BinaryOp::BitAnd,
+                                right: Box::new(right),
+                            })
+                        }
                     }
                     Finish::ObjectLoad(property) => {
                         let handle = operands.pop().ok_or_else(disagreement)?;
@@ -1411,11 +1523,15 @@ fn selected_value(
             read_index_value(*id, native, tree, dimensions)?;
         }
     }
-    Ok(expr_from_lvalue(
+    let value = expr_from_lvalue(
         &tree.state,
         &selected_lvalue(root, native, tree, dimensions, false)?,
         dimensions,
-    ))
+    );
+    let guards = member_context(root, native, tree, dimensions)?
+        .map(|(guards, _)| guards)
+        .unwrap_or_default();
+    packed_structs::checked_value(guards, value, &tree.state, dimensions)
 }
 
 pub(in crate::ast) fn selected_lvalue(
@@ -1441,6 +1557,14 @@ pub(in crate::ast) fn selected_lvalue(
         return packed_structs::whole_member(&tree.state, parts, qualified, dimensions);
     }
     let finish = |name: String, context: &PackedDimensions, strict: bool| -> Converted<LValue> {
+        if context.get(&name).is_some_and(|ty| {
+            ty.members
+                .first()
+                .is_some_and(packed_structs::PackedMember::is_tagged)
+                && suffix.len() >= ty.unpacked.len() + ty.packed.len()
+        }) {
+            return Err(unsupported("bit-select or part-select of a tagged union"));
+        }
         if context
             .get(&name)
             .is_some_and(|ty| ty.real && suffix.len() > ty.unpacked.len())
@@ -1723,6 +1847,77 @@ pub(in crate::ast) fn remove_real_division_guards(expr: Expr, dims: &PackedDimen
         },
         expr => expr,
     }
+}
+
+/// Preserve the native member path before flattening it to bit coordinates.
+pub(in crate::ast) fn member_context(
+    mut root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+) -> Converted<Option<(Vec<Expr>, Type)>> {
+    while let ExprKind::Select { expression, .. } = native.expression(root).kind {
+        root = expression;
+    }
+    if !matches!(native.expression(root).kind, ExprKind::Member { .. }) {
+        return Ok(None);
+    }
+    let (mut parts, qualified) = path(root, native, tree, dims)?;
+    if let Some(name) = qualified {
+        parts[0] = name;
+    }
+    packed_structs::member_access(parts, dims, &tree.state)
+}
+
+fn cast_shape(
+    target: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+) -> Converted<Option<VariableDimensions>> {
+    let ty = if let Some(name) = call_name(&tree.state, target, native) {
+        dims.type_aliases.get(&name).cloned()
+    } else if let ExprKind::Type(id) = native.expression(target).kind {
+        type_binding::binding::bind_in(id, native, tree, dims)?
+    } else {
+        None
+    };
+    Ok(ty
+        .filter(|ty| !ty.members.is_empty())
+        .map(|ty| procedural::dimensions_from_type(&ty)))
+}
+
+/// Output/inout copy-out is an assignment to the actual, whose nominal tagged
+/// type must match the formal. Concatenations and system outputs are integral.
+fn check_tagged_copyout(
+    root: ExprId,
+    formal: Option<&VariableDimensions>,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+) -> Converted<()> {
+    let native = tree.declarations();
+    let mut pending = vec![(root, formal)];
+    while let Some((root, formal)) = pending.pop() {
+        let root = ungroup(root, native);
+        if let ExprKind::Concatenation(parts) = &native.expression(root).kind {
+            pending.extend(parts.iter().map(|id| (*id, None)));
+            continue;
+        }
+        let Some(actual) = bound_patterns::native_value_type(root, tree, dims)? else {
+            continue;
+        };
+        if actual.tagged_identity().is_some()
+            && formal
+                .and_then(|shape| shape.pattern_type(&tree.state, dims))
+                .as_ref()
+                != Some(&actual)
+        {
+            return Err(unsupported(
+                "copy-out to a tagged union requires the same union type",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

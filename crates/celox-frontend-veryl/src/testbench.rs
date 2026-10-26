@@ -1,6 +1,6 @@
 use celox_design::{
     BitAccess, DisplaySizing, InstanceId, PortTypeKind, RuntimeEventKind, RuntimeEventSite,
-    StateAddr,
+    Severity, StateAddr,
 };
 use celox_testbench::{
     AssertMessage as GenericAssertMessage, ClockCount as GenericClockCount, ExprBytecode,
@@ -103,12 +103,15 @@ fn runtime_event_site_for_assert(
     };
     RuntimeEventSite {
         kind: match kind {
-            AssertKind::Fatal => RuntimeEventKind::AssertFatal,
-            AssertKind::Continue => RuntimeEventKind::AssertContinue,
+            AssertKind::Fatal => RuntimeEventKind::Report(Severity::Fatal),
+            AssertKind::Continue => RuntimeEventKind::Report(Severity::Error),
         },
         template,
         sizing: DisplaySizing::Veryl,
         scope: None,
+        location: None,
+        assertion: None,
+        deferred: None,
         arg_widths: value_args.iter().map(assert_arg_width).collect(),
         arg_signed: value_args
             .iter()

@@ -131,10 +131,30 @@ impl DistanceMap {
             // Preserve malformed rows for the structured MIR verifier.
             return;
         }
+        // A pathological ordering can compress poorly. Keep the ordinary map
+        // in that case rather than making its representation larger. The
+        // estimate is that of one index point per `CHUNK_SIZE` entries, so
+        // the finer index changes no row's representation, and with it no
+        // iteration order.
+        let estimate = sorted
+            .chunks(CHUNK_SIZE)
+            .map(encoded_len)
+            .try_fold(0usize, |len, chunk| {
+                u32::try_from(len).ok()?;
+                len.checked_add(chunk)
+            });
+        let Some(estimate) = estimate else {
+            return;
+        };
+        if estimate + sorted.len().div_ceil(CHUNK_SIZE) * std::mem::size_of::<(VReg, u32)>()
+            >= map.len() * 8
+        {
+            return;
+        }
         let mut data = Vec::new();
         let mut index = Vec::new();
         let mut max_instructions = 0;
-        for chunk in sorted.chunks(CHUNK_SIZE) {
+        for chunk in sorted.chunks(INDEX_STRIDE) {
             let Ok(offset) = u32::try_from(data.len()) else {
                 return;
             };
@@ -149,11 +169,6 @@ impl DistanceMap {
                 previous_key = key.0;
                 previous_value = i64::from(value);
             }
-        }
-        // A pathological ordering can compress poorly. Keep the ordinary map
-        // in that case rather than making its representation larger.
-        if data.len() + index.len() * std::mem::size_of::<(VReg, u32)>() >= map.len() * 8 {
-            return;
         }
         *self = Self::Frozen(Arc::new(FrozenRow {
             values: Arc::clone(values),
@@ -507,7 +522,13 @@ impl<'a> IntoIterator for &'a DistanceMap {
     }
 }
 
+/// The fewest live values a row needs to be frozen.
 const CHUNK_SIZE: usize = 64;
+
+/// Entries per index point of a frozen row. Delta coding restarts at each
+/// one, so a lookup is a binary search over the index and at most this many
+/// decoded entries.
+const INDEX_STRIDE: usize = 16;
 
 #[derive(Debug)]
 pub(in crate::native::regalloc) struct FrozenRow {
@@ -592,6 +613,25 @@ impl<'a> Iterator for RelativeIter<'a> {
     }
 }
 
+/// The bytes [`DistanceMap::freeze`] writes for `chunk`, one run of delta
+/// coding.
+fn encoded_len(chunk: &[(VReg, u32)]) -> usize {
+    let varint_len = |value: u64| (64 - value.leading_zeros() as usize).div_ceil(7).max(1);
+    let mut previous_key = 0;
+    let mut previous_value = 0i64;
+    chunk
+        .iter()
+        .map(|&(key, value)| {
+            let delta = i64::from(value) - previous_value;
+            let len = varint_len(u64::from(key.0 - previous_key))
+                + varint_len(((delta << 1) ^ (delta >> 63)) as u64);
+            previous_key = key.0;
+            previous_value = i64::from(value);
+            len
+        })
+        .sum()
+}
+
 fn write_varint(data: &mut Vec<u8>, mut value: u64) {
     while value >= 128 {
         data.push(value as u8 | 128);
@@ -620,8 +660,9 @@ impl FrozenRow {
             .index
             .partition_point(|&(first, _)| first <= key)
             .checked_sub(1)?;
-        let start = chunk * CHUNK_SIZE;
-        for (&candidate, value) in FrozenIter::new(self, chunk, (self.len - start).min(CHUNK_SIZE))
+        let start = chunk * INDEX_STRIDE;
+        for (&candidate, value) in
+            FrozenIter::new(self, chunk, (self.len - start).min(INDEX_STRIDE))
         {
             if candidate == key {
                 return Some(value);
@@ -662,7 +703,7 @@ impl<'a> Iterator for FrozenIter<'a> {
         if self.remaining == 0 {
             return None;
         }
-        if self.position.is_multiple_of(CHUNK_SIZE) {
+        if self.position.is_multiple_of(INDEX_STRIDE) {
             self.key = 0;
             self.value = 0;
         }
@@ -678,6 +719,51 @@ impl<'a> Iterator for FrozenIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoded_lengths_match_the_written_bytes() {
+        let row = (0..200u32)
+            .map(|id| {
+                (
+                    VReg(id * id % 977 + id * 5),
+                    (id * 7919) % 70_000 + (id % 3) * (1 << 24),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        for chunk in row.chunks(CHUNK_SIZE).chain(row.chunks(INDEX_STRIDE)) {
+            let mut data = Vec::new();
+            let (mut previous_key, mut previous_value) = (0, 0i64);
+            for &(key, value) in chunk {
+                write_varint(&mut data, u64::from(key.0 - previous_key));
+                let delta = i64::from(value) - previous_value;
+                write_varint(&mut data, ((delta << 1) ^ (delta >> 63)) as u64);
+                previous_key = key.0;
+                previous_value = i64::from(value);
+            }
+            assert_eq!(encoded_len(chunk), data.len());
+        }
+    }
+
+    #[test]
+    fn frozen_rows_find_every_key_across_index_points() {
+        let pool = (0..4096).map(VReg).collect::<Arc<[_]>>();
+        let mut map = DistanceMap::default();
+        for id in 0..700 {
+            map.insert(
+                VReg(id * 5 + id % 3),
+                NextUseDistance::local((id * 37 % 1000) as usize),
+            );
+        }
+        let expected = map.clone();
+        map.freeze(&pool);
+        assert!(matches!(map, DistanceMap::Frozen(_)));
+        for key in pool.iter() {
+            assert_eq!(map.get(key), expected.get(key), "{key}");
+        }
+        assert_eq!(map, expected);
+    }
 
     #[test]
     fn direct_block_transfers_match_materialized_maps_across_relative_rows() {

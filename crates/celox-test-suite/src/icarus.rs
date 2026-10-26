@@ -154,6 +154,9 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
                     // nonequivalent element types or different sizes.
                     | "Element types are not compatible in array assignment."
                     | "Unpacked dimensions are not compatible in array assignment."
+                    // IEEE 1800-2023 24.3: what a program shall not contain.
+                    | "Always statements are not allowed in program blocks."
+                    | "Module instantiations are not allowed in program blocks."
             ) || (error.starts_with("A reference to a net or variable (`")
                 && error.ends_with("') is not allowed in a constant expression."))
                 || (error.starts_with("Array ") && error.ends_with(" needs an array index here."))

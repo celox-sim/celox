@@ -37,11 +37,12 @@ fn exercise<B: SimBackend>(mut simulation: Simulation<B>) {
 const SOURCE: &str = r#"module Top(output int count,a,b,c,index,order,first,second,aliased,alias_count,eof,failure,partial,keep,
     output logic [67:0] wide,output logic [7:0] unknown,output bit [7:0] two_state);
     int values[0:1];
+    string source = " 12,99 ffQ";
     function automatic [31:0] scan_source(); order=order*10+1; scan_source="7 8"; endfunction
     function automatic [31:0] scan_format(); order=order*10+2; scan_format="%d%d"; endfunction
     function automatic int next_index(); order=order*10+3; next_index=index; index+=1; endfunction
     initial begin
-        count=$sscanf(" 12,99 ffQ","%2d,%*d %h%c",a,b,c);
+        count=$sscanf(source,"%2d,%*d %h%c",a,b,c);
         index=0; order=0; count=count+$sscanf(scan_source(),scan_format(),values[next_index()],values[next_index()])-2;
         first=values[0];second=values[1];
         aliased=1;alias_count=$sscanf("9","%d",aliased,aliased);
@@ -77,8 +78,8 @@ fn fscanf_preserves_mismatch_lookahead_and_rejects_checkpoint() {
     let path = directory.path().join("input.txt");
     std::fs::write(&path, b"12 34Q 7").unwrap();
     let source = format!(
-        r#"module Top(output int n,a,b,c,fail,last,eof);int fd;
-        initial begin fd=$fopen("{}","r");n=$fscanf({{32'h12345678,fd}},"%d",a);
+        r#"module Top(output int n,a,b,c,fail,last,eof);int fd;string fmt="%d";
+        initial begin fd=$fopen("{}","r");n=$fscanf({{32'h12345678,fd}},fmt,a);
         n=n+$fscanf({{96'h123456789abcdef123456789,fd}},"%d",b);
         fail=$fscanf(fd,"%d",b);n=n+$fscanf(fd,"%c%d",c,last);
         eof=$fscanf(fd,"%d",b);end endmodule"#,

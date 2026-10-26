@@ -69,9 +69,11 @@ fn optimize_bit_extracts(
     // Collect replacements: (and_inst_idx) -> replacement Load instruction
     struct Replacement {
         and_idx: usize,
-        load_inst: SIRInstruction<RegionedAbsoluteAddr>,
-        result_reg: RegisterId,
-        result_width: usize,
+        r_result: RegisterId,
+        addr: RegionedAbsoluteAddr,
+        bit_offset: usize,
+        // Bits read from memory: the mask width, truncated to the And's width.
+        load_width: usize,
         // Dead instruction indices to no-op (Shr + Imm(shift) + Imm(mask))
         dead_indices: Vec<usize>,
     }
@@ -135,7 +137,11 @@ fn optimize_bit_extracts(
             continue;
         }
 
-        let new_load = SIRInstruction::Load(*r_result, *addr, SIROffset::Static(base + k), w);
+        // The And keeps its own width: a mask narrower than the result
+        // zero-extends the extracted field, and a wider one is truncated.
+        let Some(result_width) = register_map.get(r_result).map(RegisterType::width) else {
+            continue;
+        };
 
         let dead = vec![
             shifted_def_idx, // Shr instruction
@@ -145,9 +151,10 @@ fn optimize_bit_extracts(
 
         replacements.push(Replacement {
             and_idx: idx,
-            load_inst: new_load,
-            result_reg: *r_result,
-            result_width: w,
+            r_result: *r_result,
+            addr: *addr,
+            bit_offset: base + k,
+            load_width: w.min(result_width),
             dead_indices: dead,
         });
     }
@@ -193,30 +200,57 @@ fn optimize_bit_extracts(
                 | SIRInstruction::Load(dst, _, _, _) => *dst,
                 _ => continue,
             };
-            if use_count.get(&def_reg).copied().unwrap_or(0) == 0 {
-                // Also decrement use counts for operands of this dead instruction
+            if use_count.get(&def_reg).copied().unwrap_or(0) == 0 && dead_set.insert(dead_idx) {
+                // Multiple replacements may share this definition. Removing
+                // it consumes its operands once, not once per replacement.
                 if let SIRInstruction::Binary(_, lhs, _, rhs) = &instructions[dead_idx] {
                     *use_count.entry(*lhs).or_default() =
                         use_count.get(lhs).copied().unwrap_or(0).saturating_sub(1);
                     *use_count.entry(*rhs).or_default() =
                         use_count.get(rhs).copied().unwrap_or(0).saturating_sub(1);
                 }
-                dead_set.insert(dead_idx);
             }
         }
     }
 
     // Build replacement map
-    let mut replacement_map: HashMap<usize, SIRInstruction<RegionedAbsoluteAddr>> =
+    let mut next_register = register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
+    let mut fresh_register = |register_map: &mut HashMap<RegisterId, RegisterType>, width| {
+        next_register += 1;
+        let reg = RegisterId(next_register);
+        register_map.insert(reg, RegisterType::Logic { width });
+        reg
+    };
+    let mut replacement_map: HashMap<usize, Vec<SIRInstruction<RegionedAbsoluteAddr>>> =
         HashMap::default();
     for repl in replacements {
-        replacement_map.insert(repl.and_idx, repl.load_inst);
-        register_map.insert(
-            repl.result_reg,
-            RegisterType::Logic {
-                width: repl.result_width,
-            },
-        );
+        let load = |dst| {
+            SIRInstruction::Load(
+                dst,
+                repl.addr,
+                SIROffset::Static(repl.bit_offset),
+                repl.load_width,
+            )
+        };
+        let result_width = register_map[&repl.r_result].width();
+        let new_insts = if repl.load_width == result_width {
+            register_map.insert(
+                repl.r_result,
+                RegisterType::Logic {
+                    width: repl.load_width,
+                },
+            );
+            vec![load(repl.r_result)]
+        } else {
+            let field = fresh_register(register_map, repl.load_width);
+            let zeros = fresh_register(register_map, result_width - repl.load_width);
+            vec![
+                load(field),
+                SIRInstruction::Imm(zeros, SIRValue::new(0u64)),
+                SIRInstruction::Concat(repl.r_result, vec![zeros, field]),
+            ]
+        };
+        replacement_map.insert(repl.and_idx, new_insts);
     }
 
     // Rebuild instructions
@@ -225,8 +259,8 @@ fn optimize_bit_extracts(
         if dead_set.contains(&i) {
             continue;
         }
-        if let Some(new_inst) = replacement_map.remove(&i) {
-            out.push(new_inst);
+        if let Some(new_insts) = replacement_map.remove(&i) {
+            out.extend(new_insts);
         } else {
             out.push(inst);
         }
@@ -366,6 +400,69 @@ mod tests {
     }
 
     #[test]
+    fn preserves_ssa_when_replacements_share_a_shift() {
+        let addr = test_addr();
+        let other = RegionedAbsoluteAddr {
+            instance_id: InstanceId(1),
+            ..addr
+        };
+        let mut unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Load(RegisterId(0), addr, SIROffset::Static(0), 8),
+                        SIRInstruction::Load(RegisterId(8), other, SIROffset::Static(0), 8),
+                        SIRInstruction::Imm(RegisterId(1), SIRValue::new(2u64)),
+                        SIRInstruction::Binary(
+                            RegisterId(2),
+                            RegisterId(0),
+                            BinaryOp::Shr,
+                            RegisterId(1),
+                        ),
+                        SIRInstruction::Imm(RegisterId(3), SIRValue::new(3u64)),
+                        SIRInstruction::Binary(
+                            RegisterId(4),
+                            RegisterId(2),
+                            BinaryOp::And,
+                            RegisterId(3),
+                        ),
+                        SIRInstruction::Imm(RegisterId(5), SIRValue::new(15u64)),
+                        SIRInstruction::Binary(
+                            RegisterId(6),
+                            RegisterId(2),
+                            BinaryOp::And,
+                            RegisterId(5),
+                        ),
+                        SIRInstruction::Binary(
+                            RegisterId(7),
+                            RegisterId(8),
+                            BinaryOp::Shr,
+                            RegisterId(1),
+                        ),
+                        SIRInstruction::RuntimeEvent {
+                            site_id: 0,
+                            args: vec![RegisterId(4), RegisterId(6), RegisterId(7)],
+                        },
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: (0..9)
+                .map(|id| (RegisterId(id), RegisterType::Logic { width: 8 }))
+                .collect(),
+        };
+        unit.verify_result().unwrap();
+        BitExtractPeepholePass.run(&mut unit, &PassOptions::default());
+        unit.verify_result().unwrap();
+    }
+
+    #[test]
     fn keeps_shift_result_used_by_runtime_event() {
         let addr = test_addr();
         let mut instructions = vec![
@@ -380,7 +477,7 @@ mod tests {
             },
         ];
         let mut register_map = HashMap::default();
-        register_map.insert(RegisterId(4), RegisterType::Logic { width: 8 });
+        register_map.insert(RegisterId(4), RegisterType::Logic { width: 2 });
         let mut use_count = HashMap::default();
         for inst in &instructions {
             record_uses(inst, &mut use_count);

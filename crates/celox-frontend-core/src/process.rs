@@ -62,6 +62,9 @@ pub struct ProcessKernelBuilder {
     resume_blocks: Vec<BlockId>,
     /// The wait site whose resume point is being lowered.
     wait_site: Option<u32>,
+    /// The runtime event site the process reports at its flush points
+    /// (see [`Self::flush_deferred_at`]).
+    flush_site: Option<u32>,
 }
 
 impl ProcessKernelBuilder {
@@ -78,7 +81,15 @@ impl ProcessKernelBuilder {
             },
             resume_blocks: vec![start],
             wait_site: None,
+            flush_site: None,
         }
+    }
+
+    /// Report runtime event site `site` whenever the process resumes from
+    /// an event control or a wait: a flush point of its deferred
+    /// assertions (IEEE 1800-2023 16.4.2). A resume after a delay is not.
+    pub fn flush_deferred_at(&mut self, site: u32) {
+        self.flush_site = Some(site);
     }
 
     /// The kernel's control slots, with [`ProcessSlots::const_delays`] set
@@ -225,6 +236,12 @@ impl ProcessKernelBuilder {
         self.store_delay_constant(u64::from(site));
         self.end(ProcessStatus::Pending);
         self.builder.switch_to_block(woken);
+        if let Some(site_id) = self.flush_site {
+            self.builder.emit(SIRInstruction::RuntimeEvent {
+                site_id,
+                args: Vec::new(),
+            });
+        }
     }
 
     /// `wait (condition)` (IEEE 1800-2023 9.4.3) at wait site `site`:
@@ -366,6 +383,13 @@ impl ProcessKernelBuilder {
     pub fn finish(&mut self) {
         self.wait_site = None;
         self.end(ProcessStatus::Finish);
+    }
+
+    /// End the kernel and the other kernels of its program instance
+    /// (`$exit`, IEEE 1800-2023 24.7). No block is open afterwards.
+    pub fn exit(&mut self) {
+        self.wait_site = None;
+        self.end(ProcessStatus::Exit);
     }
 
     /// Complete the kernel. If a block is still open, the process ends there.

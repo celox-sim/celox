@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn limitations_only_exclude_cases_with_retained_failure_evidence() {
-        for tool in ["verilator", "icarus"] {
+        for tool in ["verilator", "icarus", "xezim"] {
             for group in limitations() {
                 let Some(cases) = group["cases"][tool].as_array() else {
                     continue;

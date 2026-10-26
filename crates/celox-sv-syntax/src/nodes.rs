@@ -183,6 +183,7 @@ pub enum DataTypeKind {
     TypeOf(ExprId),
     Struct {
         union: bool,
+        soft: bool,
         tagged: bool,
         packed: bool,
         fields: Vec<Field>,
@@ -328,6 +329,14 @@ pub enum UnitKind {
     Interface,
     Package,
     Program,
+}
+
+impl UnitKind {
+    /// A module or a program, which IEEE 1800-2023 24.3 makes a leaf module
+    /// with its own scheduling: both elaborate as design units.
+    pub fn is_module_like(self) -> bool {
+        matches!(self, Self::Module | Self::Program)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

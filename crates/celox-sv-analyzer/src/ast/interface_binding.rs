@@ -475,6 +475,7 @@ pub(super) fn analyze_module(
                         is_net: port.is_net,
                         is_const: false,
                         package_variable: None,
+                        hierarchical: None,
                     };
                     module.symbols.as_mut().unwrap().signals.push(signal);
                     let Some(connection) = connections
@@ -748,8 +749,8 @@ pub(super) fn analyze_module(
     // Check authored declarations before module collection can prefer a local
     // function/type/constant over an imported interface binding of the same name.
     let authored = imports::scope_names(tree)?;
-    for bound in imported.interface_members.values() {
-        if authored.contains(bound) {
+    for (path, bound) in &imported.interface_members {
+        if authored.contains(bound) && !imported.local_aliases.contains(path) {
             return Err(unsupported(format!(
                 "interface binding collides with declaration `{bound}`"
             )));

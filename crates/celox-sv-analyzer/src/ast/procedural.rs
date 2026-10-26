@@ -67,13 +67,15 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// Whether the body's variables are automatic by default.
     automatic: bool,
     task_timing: bool,
+    return_shape: Option<VariableDimensions>,
     pub(super) sensitivity_body: Vec<Stmt>,
 }
 
 /// The packed and unpacked shape of a declared type, as selects see it.
 pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
     VariableDimensions {
-        randomizable: !r#type.is_enum,
+        randomizable: !r#type.is_enum || r#type.enum_values.is_some(),
+        enum_values: r#type.enum_values.clone(),
         real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
         string: matches!(r#type.kind(), TypeKind::String),
         class: r#type.class().map(str::to_owned),
@@ -115,6 +117,7 @@ pub(super) fn scoped_type(mut r#type: Type, const_env: &HashMap<String, i128>) -
 pub(super) fn int_type() -> Type {
     Type {
         is_enum: false,
+        enum_values: None,
         kind: TypeKind::Bit,
         is_signed: true,
         packed_ranges: vec![PackedRange::new(
@@ -140,6 +143,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         Self {
             automatic,
             task_timing: false,
+            return_shape: None,
             sensitivity_body: Vec::new(),
             tree,
             dims: dims.clone(),
@@ -279,6 +283,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 .push(entry);
         }
         for property in &class.statics {
+            // A base's local static is not visible in the derived class (8.18).
+            // Keep it out of the alias table so binding can diagnose its use.
+            if property.local && property.owner != class.name {
+                continue;
+            }
             let entry = self.take_binding(
                 &property.name,
                 Some(property.variable.clone()),
@@ -470,6 +479,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             if let celox_sv_syntax::ExprKind::Concatenation(items) = &native.expression(id).kind {
                 pending.extend(items.iter().rev().copied());
             } else {
+                if expression_binding::member_context(id, native, self.tree, &self.dims)?
+                    .is_some_and(|(guards, _)| !guards.is_empty())
+                {
+                    return Err(unsupported(
+                        "concatenation assignment to a tagged union member",
+                    ));
+                }
+                self.reject_tagged_integral_target(id)?;
                 let mut target =
                     expression_binding::variable_lvalue(id, native, self.tree, &self.dims)?;
                 self.rename_lvalue(&mut target);
@@ -518,6 +535,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         if let Some(stmt) = self.property_assignment(op, nonblocking, left, right)? {
             return Ok(stmt);
         }
+        if op != "=" {
+            self.reject_tagged_integral_target(left)?;
+        }
         let (written, lhs) = self.native_lvalue(left)?;
         if op != "="
             && expression_binding::native_string(
@@ -529,7 +549,24 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         {
             return Err(unsupported(format!("operator `{op}` on a string")));
         }
-        let mut rhs = if op == "=" {
+        let member_context = expression_binding::member_context(
+            left,
+            self.tree.declarations(),
+            self.tree,
+            &self.dims,
+        )?;
+        let mut rhs = if op == "="
+            && let Some((_, ty)) = &member_context
+        {
+            let shape = procedural::dimensions_from_type(ty);
+            expression_binding::bind_value(
+                right,
+                self.tree.declarations(),
+                self.tree,
+                &self.dims,
+                Some(&shape),
+            )?
+        } else if op == "=" {
             expression_binding::expression(
                 right,
                 self.tree.declarations(),
@@ -542,15 +579,23 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 expression_binding::value(right, self.tree.declarations(), self.tree, &self.dims)?;
             assignment_op_expr(&self.tree.state, &written, op, value, &self.dims)?
         };
-        // A two-state member of a four-state packed struct drops unknown bits.
+        // Preserve assignment sizing before checked accesses introduce a temporary
+        // (IEEE 1800-2023 11.8.2), using the selected destination width.
+        // A two-state member of a four-state packed struct also drops unknown bits.
         if matches!(
             written,
             LValue::Select {
                 is_2state: true,
                 ..
             }
-        ) {
+        ) || member_context
+            .as_ref()
+            .is_some_and(|(guards, _)| !guards.is_empty())
+        {
             rhs = coerce_procedural_assignment_rhs(&self.tree.state, rhs, &written, &self.dims);
+        }
+        if let Some((guards, _)) = member_context {
+            rhs = packed_structs::checked_value(guards, rhs, &self.tree.state, &self.dims)?;
         }
         self.rename_expr(&mut rhs);
         Ok(Stmt::Assign {
@@ -829,6 +874,17 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         })
     }
 
+    fn reject_tagged_integral_target(&self, root: celox_sv_syntax::ExprId) -> Converted<()> {
+        if dimensions::operand_shape(root, self.tree, &self.dims)?.is_some_and(|ty| {
+            ty.members
+                .first()
+                .is_some_and(packed_structs::PackedMember::is_tagged)
+        }) {
+            return Err(unsupported("integral update of a tagged union"));
+        }
+        Ok(())
+    }
+
     fn inc_or_dec(&self, root: celox_sv_syntax::ExprId) -> Result<Stmt, AnalyzerError> {
         let celox_sv_syntax::ExprKind::Unary {
             operator,
@@ -854,6 +910,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 expression_binding::object_receiver(self.tree, receiver, native, &self.dims)?;
             return self.property_store(&property, handle, op, Expr::Literal("1".into()));
         }
+        self.reject_tagged_integral_target(*expression)?;
         let (written, lhs) = self.native_lvalue(*expression)?;
         let mut rhs = assignment_op_expr(
             &self.tree.state,
@@ -862,6 +919,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             Expr::Literal("1".into()),
             &self.dims,
         )?;
+        if let Some((guards, _)) =
+            expression_binding::member_context(*expression, native, self.tree, &self.dims)?
+        {
+            rhs = packed_structs::checked_value(guards, rhs, &self.tree.state, &self.dims)?;
+        }
         self.rename_expr(&mut rhs);
         Ok(Stmt::Assign {
             lhs,
@@ -1240,6 +1302,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             let error = Stmt::SystemTask {
                 task: SystemTask::Severity(system_functions::Severity::Error),
                 site: source_span(declarations.expression(root).tokens, self.tree),
+                assertion: None,
                 args: vec![SystemTaskArg::Str(
                     "$cast of a class handle to an incompatible class".into(),
                 )],
@@ -1280,6 +1343,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 return Ok(vec![Stmt::SystemTask {
                     task: SystemTask::Display(system_functions::Radix::Decimal),
                     site: source_span(declarations.expression(root).tokens, self.tree),
+                    assertion: None,
                     args: vec![SystemTaskArg::Str(timescales::print_message(
                         root,
                         self.tree,
@@ -1327,12 +1391,31 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 Ok(SystemTaskArg::Expr(value))
             })
             .collect::<Result<Vec<_>, AnalyzerError>>()?;
+        let mut args = args;
+        // A string literal that %t converts is bound as a value: the binder
+        // handles every literal form, triple quotes and escapes included.
+        let mut bind = |index: usize| -> Result<Option<Expr>, AnalyzerError> {
+            let Some(id) = arguments.get(index).and_then(|arg| arg.value) else {
+                return Ok(None);
+            };
+            let mut value =
+                expression_binding::bind_value(id, declarations, self.tree, &self.dims, None)?;
+            self.rename_expr(&mut value);
+            Ok(Some(value))
+        };
+        scale_time_conversions(
+            task,
+            &mut args,
+            timescales::time_divisor(root, self.tree)?,
+            &mut bind,
+        )?;
         // Keep Veryl's assertion calls as calls: their message arguments
         // execute even on success, unlike an SV assertion's fail action.
         Ok(vec![Stmt::SystemTask {
             task,
             args,
             site: source_span(declarations.expression(root).tokens, self.tree),
+            assertion: None,
         }])
     }
 
@@ -1534,12 +1617,67 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
 }
 
 /// The default failure action of a native immediate assertion.
-fn assertion_failure(keyword: &str) -> Vec<Stmt> {
+/// The default fail action of an `assert` or `assume`: a call to `$error`
+/// at the assertion (IEEE 1800-2023 20.10).
+fn assertion_failure(keyword: &str, site: Option<crate::procedural::SourceSpan>) -> Vec<Stmt> {
     vec![Stmt::SystemTask {
         task: SystemTask::Severity(system_functions::Severity::Error),
         args: vec![SystemTaskArg::Str(format!("{keyword} failed"))],
-        site: None,
+        site,
+        assertion: None,
     }]
+}
+
+/// Check the action of a deferred assertion: one subroutine call (IEEE
+/// 1800-2023 16.4). Only display and severity tasks are supported, since
+/// a user subroutine would run in the Reactive region and could wake
+/// processes there.
+fn deferred_action(body: &[Stmt]) -> Result<(), AnalyzerError> {
+    match body {
+        [] => Ok(()),
+        [
+            Stmt::SystemTask {
+                task:
+                    SystemTask::Display(_)
+                    | SystemTask::Write(_)
+                    | SystemTask::Severity(_)
+                    | SystemTask::Fatal,
+                ..
+            },
+        ] => Ok(()),
+        _ => Err(unsupported(
+            "deferred assertion action other than one display or severity task call",
+        )),
+    }
+}
+
+/// Attribute the severity tasks of an assertion's action block to it, and
+/// for a deferred assertion its display tasks, which wait in the same
+/// queue. Tasks in subroutines the block calls are not attributed, and the
+/// tasks of a nested assertion keep its own attribution.
+fn attribute_reports(
+    body: &mut [Stmt],
+    assertion: &celox_design::AssertionSite,
+    outcome: celox_design::AssertionOutcome,
+) {
+    for stmt in body {
+        stmt.walk_mut(&mut |stmt| {
+            let deferred = assertion.deferral != celox_design::AssertionDeferral::None;
+            if let Stmt::SystemTask {
+                task,
+                assertion: attributed @ None,
+                ..
+            } = stmt
+                && (matches!(task, SystemTask::Severity(_) | SystemTask::Fatal)
+                    || deferred && matches!(task, SystemTask::Display(_) | SystemTask::Write(_)))
+            {
+                *attributed = Some(celox_design::AssertionSite {
+                    outcome,
+                    ..assertion.clone()
+                });
+            }
+        });
+    }
 }
 
 /// The declared arguments of a task or function: `(name, direction, type,
@@ -1958,10 +2096,17 @@ pub(super) fn lower_subroutine(
     // any formal can shadow those names (IEEE 1800-2023 13.5.3).
     let defaults = params
         .iter()
-        .map(|(_, _, _, default)| {
+        .map(|(_, _, ty, default)| {
             default
                 .map(|root| {
-                    let mut value = expression_binding::bind(root, tree, &builder.dims)?;
+                    let shape = ty.tagged_identity().map(|_| dimensions_from_type(ty));
+                    let mut value = expression_binding::bind_value(
+                        root,
+                        tree.declarations(),
+                        tree,
+                        &builder.dims,
+                        shape.as_ref(),
+                    )?;
                     builder.rename_expr(&mut value);
                     Ok(value)
                 })
@@ -2008,6 +2153,10 @@ pub(super) fn lower_subroutine(
     if let (Some(name), Some(ty)) = (&return_var, &return_type) {
         formal_types.insert(name.clone(), scoped_type(ty.clone(), declaration_env));
     }
+    builder.return_shape = return_type
+        .as_ref()
+        .filter(|ty| ty.tagged_identity().is_some())
+        .map(dimensions_from_type);
     let parameter_locals_end = builder.state.locals.len();
     let mut items = native.items.clone();
     let mut prologue = Vec::new();
@@ -2324,6 +2473,16 @@ impl BodyBuilder<'_, '_, '_> {
                 &self.dims.const_env,
                 &self.dims.type_aliases,
             )?;
+            if let Some(method) = base.method("new") {
+                expression_binding::check_member_access(
+                    self.tree,
+                    &self.dims,
+                    &method.owner,
+                    &method.name,
+                    method.qualifiers.local,
+                    method.qualifiers.protected,
+                )?;
+            }
             let formals = base.constructor_formals(native);
             if arguments.len() > formals {
                 return Err(unsupported(format!(
@@ -2866,6 +3025,78 @@ pub(super) fn process_site(
     })
 }
 
+/// `%t` reports a time value in the units of `$timeformat`, by default the
+/// smallest time precision of the design (IEEE 1800-2023 20.4.3, Table 20-3),
+/// in which the simulation counts its time. The value is in the time unit of
+/// the calling scope, of which `ticks_per_unit` simulation time units make
+/// one, so each value a `%t` of the template converts is scaled by it.
+fn scale_time_conversions(
+    task: SystemTask,
+    args: &mut [SystemTaskArg<Expr>],
+    ticks_per_unit: u64,
+    bind: &mut impl FnMut(usize) -> Result<Option<Expr>, AnalyzerError>,
+) -> Result<(), AnalyzerError> {
+    if ticks_per_unit == 1 {
+        return Ok(());
+    }
+    let template = match task {
+        SystemTask::Display(_) | SystemTask::Write(_) | SystemTask::Severity(_) => 0,
+        SystemTask::Fatal => usize::from(matches!(args.first(), Some(SystemTaskArg::Expr(_)))),
+        SystemTask::Fdisplay(_)
+        | SystemTask::Fwrite(_)
+        | SystemTask::Assert
+        | SystemTask::AssertContinue => 1,
+        _ => return Ok(()),
+    };
+    let Some(SystemTaskArg::Str(text)) = args.get(template) else {
+        return Ok(());
+    };
+    // The conversions of the template, in the order they take arguments
+    // (21.2.1.2): flags, a width and a precision may precede each.
+    let mut conversions = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            continue;
+        }
+        while chars
+            .next_if(|ch| matches!(ch, '-' | '+' | ' ' | '#' | '0'))
+            .is_some()
+        {}
+        while chars.next_if(char::is_ascii_digit).is_some() {}
+        if chars.next_if_eq(&'.').is_some() {
+            while chars.next_if(char::is_ascii_digit).is_some() {}
+        }
+        if let Some(spec) = chars.next()
+            && "bBoOhHxXdDiIcCsStTeEfFgG".contains(spec)
+        {
+            conversions.push(spec);
+        }
+    }
+    for (offset, spec) in conversions.into_iter().enumerate() {
+        if !matches!(spec, 't' | 'T') {
+            continue;
+        }
+        let index = template + 1 + offset;
+        // A string literal converts as its packed bytes (5.9). The factor is
+        // signed, so the product keeps the signedness of the value (11.8.1).
+        let value = match args.get(index) {
+            Some(SystemTaskArg::Expr(value)) => value.clone(),
+            Some(SystemTaskArg::Str(_)) => match bind(index)? {
+                Some(value) => value,
+                None => continue,
+            },
+            Some(SystemTaskArg::Empty) | None => continue,
+        };
+        args[index] = SystemTaskArg::Expr(Expr::Binary {
+            left: Box::new(value),
+            op: BinaryOp::Mul,
+            right: Box::new(Expr::Literal(format!("64'sd{ticks_per_unit}"))),
+        });
+    }
+    Ok(())
+}
+
 /// Original invocation span of a native token range, when it belongs to one file.
 pub(super) fn source_span(
     tokens: celox_sv_syntax::TokenRange,
@@ -2888,7 +3119,10 @@ pub(super) fn source_span(
             current.start = current.start.min(span.start);
             current.end = current.end.max(span.end);
         } else {
+            let (logical_path, line, _) = native.sources.logical_location(span);
             result = Some(crate::procedural::SourceSpan {
+                logical_path: logical_path.to_owned(),
+                line,
                 path,
                 start: span.start,
                 end: span.end,

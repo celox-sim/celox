@@ -516,12 +516,13 @@
     "id": "veryl_ff_effects",
     "category": "veryl_extension",
     "phase": "emission",
-    "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+    "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0 / xezim 0.11.3",
     "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
     "upstream": [],
     "evidence": [
       "verification/limitations/verilator.json",
       "verification/limitations/icarus.json",
+      "verification/limitations/xezim.json",
       "LIMITATIONS.md#veryl-ff-effects"
     ],
     "cases": {
@@ -627,6 +628,60 @@
         "function_arguments::test_ff_statement_output_copyout_freezes_all_inputs",
         "function_arguments::test_output_copyout_converts_formal_width_and_signedness_in_comb_and_ff",
         "operators::test_pow_operator_runtime_exponent_comb_and_ff"
+      ],
+      "xezim": [
+        "flip_flop::test_ff_assert_message_output_argument_is_eager",
+        "flip_flop::test_ff_bits_and_size_array_dependencies_do_not_alias_later_write",
+        "flip_flop::test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument",
+        "flip_flop::test_ff_dynamic_nonlocal_store_follows_pending_whole_write",
+        "flip_flop::test_ff_effectful_array_item_output_is_not_a_read_alias",
+        "flip_flop::test_ff_function_call_array_literal_branch_view_is_reused_after_merge",
+        "flip_flop::test_ff_function_call_array_literal_effect_is_eager_in_short_circuit_rhs",
+        "flip_flop::test_ff_function_call_array_literal_effect_is_eager_in_ternary_arm",
+        "flip_flop::test_ff_function_call_array_literal_snapshots_scalar_before_callee_write",
+        "flip_flop::test_ff_function_call_array_literal_snapshots_scalar_before_later_write",
+        "flip_flop::test_ff_function_call_array_literal_view_preserves_expression_order",
+        "flip_flop::test_ff_function_call_array_literal_view_preserves_source_order",
+        "flip_flop::test_ff_function_call_bits_and_size_evaluate_effectful_array_argument",
+        "flip_flop::test_ff_function_call_carries_branch_local_static_array_item_cache",
+        "flip_flop::test_ff_function_call_effectful_array_items_are_eager_before_conditional_access",
+        "flip_flop::test_ff_function_call_expression_with_output_argument_and_return_value",
+        "flip_flop::test_ff_function_call_keeps_array_view_active_for_output_index",
+        "flip_flop::test_ff_function_call_merges_directly_forwarded_array_cache",
+        "flip_flop::test_ff_function_call_merges_nested_array_state_at_cache_completion",
+        "flip_flop::test_ff_function_call_merges_nested_array_state_at_static_cache_completion",
+        "flip_flop::test_ff_function_call_merges_outer_array_view_across_nested_short_circuit",
+        "flip_flop::test_ff_function_call_nested_bits_evaluates_effectful_array_argument",
+        "flip_flop::test_ff_function_call_nested_output_statement_in_function_body",
+        "flip_flop::test_ff_function_call_snapshots_pure_array_items_before_later_effect",
+        "flip_flop::test_ff_function_call_statement_with_output_argument",
+        "flip_flop::test_ff_function_call_statement_with_output_argument_and_return_value",
+        "flip_flop::test_ff_function_call_tracks_array_reads_in_output_indices",
+        "flip_flop::test_ff_function_call_tracks_array_view_hidden_in_bound_literal",
+        "flip_flop::test_ff_function_call_tracks_nested_array_reads_in_output_indices",
+        "flip_flop::test_ff_function_call_tracks_nested_static_array_read_through_branch",
+        "flip_flop::test_ff_function_output_index_uses_final_nonlocal_state",
+        "flip_flop::test_ff_nonlocal_source_ternary_preserves_unknown_merge",
+        "flip_flop::test_ff_nonlocal_write_precedes_aliased_formal_output_copyout",
+        "flip_flop::test_ff_outputless_wrapper_direct_dynamic_nonlocal_assignment_is_observable",
+        "flip_flop::test_ff_outputless_wrapper_dynamic_indexed_copyout_to_nonlocal_is_observable",
+        "flip_flop::test_ff_outputless_wrapper_expression_copyout_to_nonlocal_is_observable",
+        "flip_flop::test_ff_outputless_wrapper_indexed_copyout_to_nonlocal_is_observable",
+        "flip_flop::test_ff_outputless_wrapper_nested_copyout_to_nonlocal_is_observable",
+        "flip_flop::test_ff_pure_input_is_snapshotted_before_later_effectful_input",
+        "flip_flop::test_ff_runtime_function_snapshots_helper_input_before_callee_nonlocal_write",
+        "flip_flop::test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write",
+        "flip_flop::test_ff_short_circuit_runtime_write_preserves_later_state_source",
+        "flip_flop::test_ff_skipped_conditional_nonlocal_write_preserves_prior_ff_assignment",
+        "flip_flop::test_ff_statement_function_direct_nonlocal_assignment_is_observable",
+        "four_state_expression_semantics::effectful_ternary_takes_known_true_branch_despite_unknown_bits",
+        "four_state_expression_semantics::ff_procedural_control_uses_known_nonzero_truth",
+        "function_arguments::test_ff_expression_output_copyout_extends_before_splitting_concat",
+        "function_arguments::test_ff_nested_output_copyout_is_visible_before_outer_copyout",
+        "function_arguments::test_ff_output_copyout_to_dynamic_slice_preserves_other_bits",
+        "function_arguments::test_ff_statement_output_copyout_freezes_all_inputs",
+        "function_arguments::test_output_copyout_converts_formal_width_and_signedness_in_comb_and_ff",
+        "operators::test_pow_operator_runtime_exponent_comb_and_ff"
       ]
     }
   },
@@ -670,12 +725,13 @@
     "id": "veryl_negative_for_bounds",
     "category": "veryl_restriction",
     "phase": "emission",
-    "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+    "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0 / xezim 0.11.3",
     "reason": "Veryl 0.21.0 rejects negative bounds in elaborated for loops (InvalidForRange::NegativeBound). This is a frontend restriction, not an external simulator mismatch.",
     "upstream": [],
     "evidence": [
       "verification/limitations/verilator.json",
       "verification/limitations/icarus.json",
+      "verification/limitations/xezim.json",
       "LIMITATIONS.md#veryl-negative-for-bounds"
     ],
     "cases": {
@@ -686,6 +742,10 @@
       "icarus": [
         "flip_flop::test_ff_constant_signed_bounds_in_unrolled_loops",
         "synth_dynamic_loop::test_constant_signed_bounds_in_unrolled_synth_loops"
+      ],
+      "xezim": [
+        "flip_flop::test_ff_constant_signed_bounds_in_unrolled_loops",
+        "synth_dynamic_loop::test_constant_signed_bounds_in_unrolled_synth_loops"
       ]
     }
   },
@@ -693,12 +753,13 @@
     "id": "veryl_runtime_system_calls",
     "category": "veryl_restriction",
     "phase": "emission",
-    "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+    "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0 / xezim 0.11.3",
     "reason": "Veryl 0.21.0 requires an evaluable argument for these direct $clog2/$onehot calls (UnevaluableValue). Runtime operands prevent emission.",
     "upstream": [],
     "evidence": [
       "verification/limitations/verilator.json",
       "verification/limitations/icarus.json",
+      "verification/limitations/xezim.json",
       "LIMITATIONS.md#veryl-runtime-system-calls"
     ],
     "cases": {
@@ -709,6 +770,12 @@
         "system_function::test_direct_ff_onehot_system_function"
       ],
       "icarus": [
+        "system_function::test_direct_comb_clog2_system_function",
+        "system_function::test_direct_comb_onehot_system_function",
+        "system_function::test_direct_ff_clog2_system_function",
+        "system_function::test_direct_ff_onehot_system_function"
+      ],
+      "xezim": [
         "system_function::test_direct_comb_clog2_system_function",
         "system_function::test_direct_comb_onehot_system_function",
         "system_function::test_direct_ff_clog2_system_function",
@@ -738,7 +805,7 @@
     "id": "veryl_native_clock_components",
     "category": "emitter_panic",
     "phase": "emission",
-    "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+    "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0 / xezim 0.11.3",
     "reason": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
     "upstream": [],
     "evidence": [
@@ -746,6 +813,7 @@
       "verification/repros/concurrent_initial_icarus.json",
       "verification/repros/concurrent_initial_gated_drive_verilator.json",
       "verification/repros/concurrent_initial_gated_drive_icarus.json",
+      "verification/limitations/xezim.json",
       "LIMITATIONS.md#veryl-native-clock-components"
     ],
     "cases": {
@@ -762,6 +830,18 @@
         "concurrent_initial::simultaneous_edges"
       ],
       "icarus": [
+        "concurrent_initial::clock_periods",
+        "concurrent_initial::control_flow",
+        "concurrent_initial::gated_drive",
+        "concurrent_initial::hierarchy",
+        "concurrent_initial::mixed_edges",
+        "concurrent_initial::reset",
+        "concurrent_initial::reset_between_edges",
+        "concurrent_initial::reset_only_clock",
+        "concurrent_initial::shared_clock",
+        "concurrent_initial::simultaneous_edges"
+      ],
+      "xezim": [
         "concurrent_initial::clock_periods",
         "concurrent_initial::control_flow",
         "concurrent_initial::gated_drive",

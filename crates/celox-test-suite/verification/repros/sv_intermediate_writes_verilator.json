@@ -139,6 +139,29 @@
         "exit_code": 0,
         "output": "y=01 r=2\n<repro>/probe.sv:7: $finish called at 4 (1s)\n"
       }
+    },
+    {
+      "name": "hierarchical_wait",
+      "note": "The suite case waits_through_names_see_intermediate_combinational_writes.",
+      "source": "module Child;\n  logic c = 0;\n  logic [7:0] a = 8'h15, b = 8'h1, y;\n  always_comb begin y = 8'h0; if (c && b != 8'h9) y = a; end\n  initial begin\n    #2 c = 1;\n    #1 a = 8'h16;\n    #1 b = 8'h2;\n  end\nendmodule\nmodule Top;\n  int n;\n  Child child();\n  initial #1 forever begin @(child.y); n++; end\n  initial begin\n    #5 $display(\"y=%h n=%0d\", child.y, n);\n    $finish;\n  end\nendmodule\n",
+      "verilator_compile": {
+        "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "verilator_run": {
+        "command": "<repro>/obj/VTop",
+        "exit_code": 0,
+        "output": "y=16 n=2\n- <repro>/probe.sv:17: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 5ps; walltime 0.000 s; speed 134.481 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+      },
+      "icarus_compile": {
+        "command": "iverilog -g2012 -s Top -o <repro>/probe.vvp <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "icarus_run": {
+        "command": "vvp <repro>/probe.vvp",
+        "exit_code": 0,
+        "output": "y=16 n=3\n<repro>/probe.sv:17: $finish called at 5 (1s)\n"
+      }
     }
   ]
 }

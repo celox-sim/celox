@@ -66,6 +66,18 @@ pub enum AnalyzerError {
     Parse(String),
     #[error("Unsupported SystemVerilog construct: {0}")]
     Unsupported(String),
+    /// A class member is inaccessible from the lexical scope (IEEE 1800-2023 8.18).
+    #[error("{visibility} class member `{owner}::{name}` is not accessible from this scope")]
+    InaccessibleClassMember {
+        owner: String,
+        name: String,
+        visibility: &'static str,
+    },
+    /// A dotted name whose first component names no variable or interface
+    /// of the scope: a hierarchical name (IEEE 1800-2023 23.6) that the
+    /// caller did not resolve to a signal of another instance.
+    #[error("unresolved hierarchical reference `{path}`")]
+    HierarchicalReference { path: String },
     /// A delay, event control or wait statement in a function, an
     /// `always_comb` or an `always_ff` body (IEEE 1800-2023 9.2.2.2,
     /// 9.2.2.4, 13.4).
@@ -162,6 +174,11 @@ pub enum AnalyzerError {
     /// least significant bit to judge the edge on (IEEE 1800-2023 6.12).
     #[error("`{edge}` of a real expression: edge event controls do not apply to reals")]
     RealEdgeEvent { edge: &'static str },
+    /// An item a program shall not contain: an `always` procedure, or a
+    /// declaration or instance of a module, interface or program (IEEE
+    /// 1800-2023 24.3).
+    #[error("{item} in program `{program}`: a program shall not contain it (IEEE 1800-2023 24.3)")]
+    IllegalProgramItem { program: String, item: String },
 }
 
 impl miette::Diagnostic for AnalyzerError {}
@@ -173,7 +190,7 @@ pub const SV_FRONTEND_TRACKING_ISSUE: u32 = 88;
 /// Dedicated tracking issues, keyed by the leading text of the construct name
 /// carried by [`AnalyzerError::Unsupported`].
 const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
-    ("non-ANSI module port declarations", 426),
+    ("non-ANSI port expressions", 1953),
     ("ref port direction", 427),
     ("nonblocking assignment inside always_latch", 431),
     (
@@ -193,6 +210,7 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("gate primitive instantiation", 457),
     ("undriven net declaration", 460),
     ("non-integer module parameter override", 461),
+    ("nonconstant module parameter override", 461),
     ("always_ff event expression", 464),
     ("package net", 1146),
 ];

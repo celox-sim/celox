@@ -105,6 +105,8 @@ endmodule
   (top Top)
   (run_to_finish))
 
+; `always @*` waits for a change in four-state mode only; two-state mode runs
+; it at time zero (#2021).
 (case classic_star_declaration_startup
   (source "declaration_startup.sv" #"
 module Top;
@@ -120,6 +122,7 @@ module Top;
 endmodule
 "#)
   (top Top)
+  (four_state)
   (run_to_finish))
 
 (case classic_star_initial_startup
@@ -178,6 +181,8 @@ endmodule
   (top Top)
   (run_to_finish))
 
+; `always @*` waits for a change in four-state mode only; two-state mode runs
+; it at time zero (#2021).
 (case same_activation_change_return
   (source "change_return.sv" #"
 module Top;
@@ -201,8 +206,11 @@ module Top;
 endmodule
 "#)
   (top Top)
+  (four_state)
   (run_to_finish))
 
+; `always @*` waits for a change in four-state mode only; two-state mode runs
+; it at time zero (#2021).
 (case hierarchy_same_activation_change_return
   (source "hierarchy_change_return.sv" #"
 module Latch(input wire a, output wire [7:0] q);
@@ -224,6 +232,7 @@ module Top(output wire [7:0] q);
 endmodule
 "#)
   (top Top)
+  (four_state)
   (run_to_finish))
 
 (case star_select_sensitivity
@@ -245,6 +254,8 @@ endmodule
   (top Top)
   (run_to_finish))
 
+; `always @*` waits for a change in four-state mode only; two-state mode runs
+; it at time zero (#2021).
 (case star_complete_declaration_startup
   (source "star_complete_declaration_startup.sv" #"
 module Top;
@@ -260,6 +271,7 @@ module Top;
 endmodule
 "#)
   (top Top)
+  (four_state)
   (run_to_finish))
 
 (case task_call_sensitivity

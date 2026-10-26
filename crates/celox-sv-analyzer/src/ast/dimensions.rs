@@ -132,7 +132,9 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
         dimensions.insert(
             port.name().to_string(),
             VariableDimensions {
-                randomizable: !port.r#type().is_enum && port.randomizable,
+                randomizable: (!port.r#type().is_enum || port.r#type().enum_values.is_some())
+                    && port.randomizable,
+                enum_values: port.r#type().enum_values.clone(),
                 real: matches!(port.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
                 string: matches!(port.r#type().kind(), TypeKind::String),
                 class: port.r#type().class().map(str::to_owned),
@@ -156,7 +158,10 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
         dimensions.insert(
             signal.name().to_string(),
             VariableDimensions {
-                randomizable: !signal.r#type().is_enum && !signal.is_net() && !signal.is_const,
+                randomizable: (!signal.r#type().is_enum || signal.r#type().enum_values.is_some())
+                    && !signal.is_net()
+                    && !signal.is_const,
+                enum_values: signal.r#type().enum_values.clone(),
                 real: matches!(signal.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
                 string: matches!(signal.r#type().kind(), TypeKind::String),
                 class: signal.r#type().class().map(str::to_owned),
@@ -350,6 +355,7 @@ fn extend_variable_dimensions_from_const_env(
         let packed_ranges = ranges.split_off(unpacked);
         let ty = Type {
             is_enum: false,
+            enum_values: None,
             kind: TypeKind::Logic,
             is_signed: variable_type_is_signed(const_env, name),
             packed_ranges,
@@ -364,6 +370,7 @@ fn extend_variable_dimensions_from_const_env(
         let mut shape = procedural::dimensions_from_type(&ty);
         if let Some(existing) = context.get(name) {
             shape.randomizable = existing.randomizable;
+            shape.enum_values = existing.enum_values.clone();
             shape.members = existing.members.clone();
             shape.is_2state = existing.is_2state;
             shape.signed_element_depth = existing.signed_element_depth;
@@ -532,6 +539,7 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                 parameter.name.clone(),
                 VariableDimensions {
                     randomizable: true,
+                    enum_values: None,
                     real: false,
                     string: false,
                     class: None,

@@ -71,7 +71,7 @@ def preflight(root, driver):
         raise ValueError("psutil is required by sv-tests BaseRunner; use the locked development shell")
     if not driver.is_file() or not os.access(driver, os.X_OK):
         raise ValueError(f"Celox driver is not executable: {driver}")
-    for relative in ("tools/runner", "tools/BaseRunner.py", "tests", "conf/runners/libs.json"):
+    for relative in ("tools/runner", "tools/BaseRunner.py", "tests", "conf/runners/libs.json", "conf/meta-tags.conf"):
         if not (root / relative).exists():
             raise ValueError(f"incomplete sv-tests checkout: missing {relative}")
     libraries = json.loads((root / "conf/runners/libs.json").read_text())
@@ -100,6 +100,7 @@ def run_case(root, driver, out_dir, test, state_mode):
         "THIRD_PARTY_DIR": str(root / "third_party"),
         "CELOX_SV_TESTS_DRIVER": str(driver),
         "CELOX_SV_STATE_MODE": state_mode,
+        "CELOX_SV_TESTS_CASE": test,
     })
     result = subprocess.run(
         [sys.executable, str(root / "tools/runner"), "--runner", "celox",
@@ -114,12 +115,64 @@ def run_case(root, driver, out_dir, test, state_mode):
     log = log_path.read_text()
     verdict = official_verdict(result.stderr, log, test)
     meta = log_metadata(log) if log else {}
+    input_issues = json.loads((REPO / "conformance/sv-tests/input-issues.json").read_text())["cases"]
     return {
         "test": test, "state_mode": state_mode, "result": verdict,
         "mode": meta.get("mode", ""), "tags": meta.get("tags", ""),
+        "group": (meta.get("results_group") or "main") if meta else "unclassified",
+        "input_issue": (input_issues.get(test, {}).get("reason", "")
+                        if meta.get("rc") == "1" and "include directory is unavailable:" in log else ""),
         "rc": meta.get("rc", ""), "tool_success": meta.get("tool_success", ""),
         "log": str(log_path),
     }
+
+
+def read_meta_tags(path):
+    meta_tags = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) not in (2, 3):
+            raise ValueError(f"invalid upstream meta-tag entry: {line}")
+        meta_tags[fields[0]] = set(fields[1].split())
+    return meta_tags
+
+
+def summarize(rows, meta_tags=None):
+    """Match upstream totals: count each executed case once and only fully passing tags."""
+    groups = {}
+    for group in sorted({row["group"] for row in rows}):
+        groups[group] = {}
+        for state in sorted({row["state_mode"] for row in rows if row["group"] == group}):
+            selected = [row for row in rows if row["group"] == group and row["state_mode"] == state]
+            counts = Counter(row["result"] for row in selected)
+            executed = counts["pass"] + counts["fail"]
+            tags = {}
+            modes = {}
+            for row in selected:
+                if row["result"] == "skip":
+                    continue
+                modes.setdefault(row["mode"], Counter())[row["result"]] += 1
+                case_tags = set(row["tags"].split())
+                for meta_tag, dependencies in (meta_tags or {}).items():
+                    if not dependencies.isdisjoint(case_tags):
+                        case_tags.add(meta_tag)
+                for tag in case_tags:
+                    tags.setdefault(tag, Counter())[row["result"]] += 1
+            groups[group][state] = {
+                "passed": counts["pass"], "failed": counts["fail"], "skipped": counts["skip"],
+                "executed": executed,
+                "upstream_input_issues": sum(bool(row.get("input_issue")) for row in selected),
+                "pass_percent": round(100 * counts["pass"] / executed, 2) if executed else None,
+                "tags_passed": sum(count["fail"] == 0 for count in tags.values()),
+                "tags_tested": len(tags),
+                "by_tag": {tag: {"passed": count["pass"], "executed": sum(count.values())}
+                           for tag, count in sorted(tags.items())},
+                "by_execution_mode": {mode: dict(count) for mode, count in sorted(modes.items())},
+            }
+    return groups
 
 
 def positive_int(value):
@@ -165,6 +218,7 @@ def main(argv=None):
     root, driver, out_dir = options.sv_tests.resolve(), options.driver.resolve(), options.out_dir.resolve()
     try:
         preflight(root, driver)
+        meta_tags = read_meta_tags(root / "conf/meta-tags.conf")
         modes = MODES if options.state_mode == "both" else (options.state_mode,)
         expected = read_expected(options.expected) if options.expected and options.expected.exists() else {}
         if options.expected and not options.expected.exists() and not options.update:
@@ -181,8 +235,17 @@ def main(argv=None):
             writer = csv.DictWriter(stream, fieldnames=list(rows[0]), delimiter="\t", lineterminator="\n")
             writer.writeheader()
             writer.writerows(rows)
-        for mode in modes:
-            print(f"{mode}: {dict(Counter(v for (_, m), v in results.items() if m == mode))}", file=sys.stderr)
+        groups = summarize(rows, meta_tags)
+        revision = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                  capture_output=True, text=True)
+        summary = {"revision": revision.stdout.strip() if revision.returncode == 0 else None,
+                   "groups": groups}
+        report.with_suffix(".summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        for group, states in groups.items():
+            for mode, counts in states.items():
+                print(f"{group} [{mode}]: {counts['passed']}/{counts['executed']} passed "
+                      f"({counts['pass_percent']}%), {counts['skipped']} skipped, "
+                      f"{counts['tags_passed']}/{counts['tags_tested']} tags passed", file=sys.stderr)
         if options.update:
             expected = {key: value for key, value in expected.items() if key[1] not in modes}
             expected.update(results)

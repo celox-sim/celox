@@ -1,0 +1,312 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_child_signal_access",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_constant_propagation_across_hierarchy",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_deep_hierarchical_path_resolution",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_dynamic_minus_colon_output_port_rmw",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_dynamic_minus_colon_output_port_rmw",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_dynamic_output_port_converts_four_state_child_to_two_state_parent",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_dynamic_output_port_converts_four_state_child_to_two_state_parent",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_dynamic_output_port_rmw_preserves_unselected_bits",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_dynamic_output_port_rmw_preserves_unselected_bits",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_dynamic_prefix_colon_output_port_allows_zero_lsb",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_dynamic_prefix_colon_output_port_allows_zero_lsb",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_dynamic_step_output_port_rmw",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_dynamic_step_output_port_rmw",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_flattened_instance_port_connection",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_hierarchical_concat_feedback_runtime",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_hierarchical_concat_feedback_runtime_multi_observe",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_hierarchical_concat_feedback_with_constant_middle_bit",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_hierarchical_concat_then_overlap_dynamic_index_runtime",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_hierarchical_dual_dynamic_readers_feedback_runtime",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_hierarchical_dynamic_index_feedback_runtime",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_hierarchical_overlapping_partial_write_dynamic_index_runtime",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_inactive_instance_input_output_call_adds_no_parent_driver",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_instance_array_broadcast_and_unpacked_array_connection",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_instance_input_function_output_concat_dynamic_writeback",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "hierarchy::test_instance_input_function_output_writeback reads seen_o with unknown bits in a two-state run",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_instance_input_function_output_writeback",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "hierarchy::test_instance_input_port_assignment_width_context at 368:3: assert_eq o_s16: expected 0xff80, got 0x80",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_instance_input_port_assignment_width_context",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_instance_output_concat_advances_each_destination",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_instance_output_concat_advances_each_destination",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_instance_output_dynamic_index_composes_aliasing_writeback",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_instance_output_dynamic_index_composes_aliasing_writeback",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_instance_output_dynamic_index_function_output_writeback",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_instance_output_dynamic_index_function_output_writeback",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "hierarchy::test_instance_unpacked_array_slice_input at 48:3: assert_eq o_data: expected 0x3412, got 0x0",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_instance_unpacked_array_slice_input",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "hierarchy::test_instance_unpacked_array_slice_output at 69:3: assert_eq o_data: expected 0x3412, got 0x0",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_instance_unpacked_array_slice_output",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_multiple_instances_isolation",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_unconnected_child_output_needs_no_parent_glue",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

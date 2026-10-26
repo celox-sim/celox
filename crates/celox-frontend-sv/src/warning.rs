@@ -57,8 +57,8 @@ pub enum FrontendWarningKind {
         file: String,
         detail: String,
     },
-    /// `$exit` outside a program block, which IEEE 1800-2023 24.7 ignores.
-    /// Celox has no program blocks, so every call is ignored.
+    /// `$exit` outside a thread of a program's `initial` procedure, which
+    /// IEEE 1800-2023 24.7 ignores.
     #[error("`$exit` outside a program block is ignored")]
     ExitOutsideProgram,
 }

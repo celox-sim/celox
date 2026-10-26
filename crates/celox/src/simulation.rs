@@ -57,6 +57,33 @@ impl<B: SimBackend> std::fmt::Debug for SimulationCheckpoint<B> {
 
 /// A timed simulation wrapper around the core logic engine.
 ///
+/// What a host observes inside the time slots of a [`Simulation`], in
+/// addition to the state between steps: changes of its signals before the
+/// flip-flop domains commit, and the settled slot.
+///
+/// A slot observer is how a host such as a VPI driver keeps the regions of
+/// IEEE 1800-2023 4.4 inside one time slot. Its writes are blocking writes
+/// of the host at the slot's time, like [`Simulation::modify`].
+pub trait SlotObserver<B: SimBackend> {
+    /// A round of the slot has run its processes and scheduled values and
+    /// is about to evaluate its flip-flop domains: the round's edges are in
+    /// state and no nonblocking update has been made. Writes are in state
+    /// before the domains evaluate.
+    fn before_domains(&mut self, io: &mut crate::SlotIo<'_, B>, time: u64);
+
+    /// The slot has settled: every region is empty. Writes are updates of
+    /// `time`, which the simulation settles there before it advances.
+    ///
+    /// This is where an observer finds the changes of signals that are not
+    /// among the event signals it watches: after the nonblocking updates of
+    /// the slot and the combinational settle that follows them. That is an
+    /// implementation choice, not an order the standard fixes: the observer's
+    /// callback and the updates the settle makes are active events of the
+    /// same region, which a simulator may process in any order (IEEE
+    /// 1800-2023 4.7).
+    fn end_of_slot(&mut self, io: &mut crate::SlotIo<'_, B>, time: u64);
+}
+
 /// Manages simulation time, periodic clocks, and an event queue.
 ///
 /// The default type parameter uses the host's [`crate::DefaultBackend`].
@@ -72,6 +99,19 @@ pub struct Simulation<B: SimBackend = crate::DefaultBackend> {
     checked_steps: u64,
     /// Why [`crate::SchedulerMode::Differential`] has no shadow.
     unchecked: Option<&'static str>,
+    /// Boxed: only runs with `fail_on` use it.
+    reports: Box<ReportWatch>,
+}
+
+/// Reports a simulation stops at, set by [`Simulation::set_fail_on`].
+#[derive(Debug, Default)]
+struct ReportWatch {
+    fail_on: Option<crate::Severity>,
+    /// Events taken after each step while `fail_on` is set, with the time of
+    /// that step, for the next [`Simulation::drain_runtime_events`].
+    events: Vec<crate::RuntimeEvent>,
+    /// The first report of the last run at or above `fail_on`.
+    failure: Option<crate::Report>,
 }
 
 impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
@@ -218,14 +258,33 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         Ok(())
     }
 
+    fn before_domains(&mut self, timestamp: u64) -> Result<bool, Halt> {
+        Ok(!self.frozen
+            && self.show_slot(timestamp, |observer, io, time| {
+                observer.before_domains(io, time)
+            }))
+    }
+
+    fn take_slot_writes(&mut self) -> bool {
+        std::mem::take(&mut self.slot_writes)
+    }
+
     fn compiled_slots(&self) -> celox_runtime::CompiledSlots {
         use celox_runtime::CompiledSlots;
-        if self.frozen || !self.components.is_empty() || !self.backend.runs_compiled_scheduler() {
+        // Deferred assertions mature when a slot is over, which the
+        // runtime's loop tells apart from the end of a step.
+        if self.frozen
+            || !self.components.is_empty()
+            || self.deferred_assertions
+            || !self.backend.runs_compiled_scheduler()
+        {
             return CompiledSlots::None;
         }
-        // Waveforms record, and the heap collects, at every slot boundary.
+        // Waveforms record, the heap collects and a slot observer looks at
+        // every slot boundary.
         let vcd = &self.sv_vcd;
-        if self.vcd_writer.is_some()
+        if self.slot_observer.is_some()
+            || self.vcd_writer.is_some()
             || vcd.path.is_some()
             || vcd.started.is_some()
             || vcd.pending
@@ -241,6 +300,12 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         self.dump_unless_rewound(timestamp);
     }
 
+    /// Deferred assertions mature in the Observed and Postponed regions of
+    /// the slot (IEEE 1800-2023 16.4).
+    fn try_end_time_slot(&mut self, _timestamp: u64) -> Result<(), Halt> {
+        self.mature_deferred_assertions().map_err(Halt::Error)
+    }
+
     fn try_finish_timed_step(&mut self, timestamp: u64) -> Result<(), Halt> {
         // The time slot is over: no kernel runs, and its updates are in
         // state memory.
@@ -254,7 +319,35 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         })?;
         self.dirty = false;
         self.try_dump_unless_rewound(timestamp)
-            .map_err(|error| Halt::Error(vcd_dump_runtime_error(error)))
+            .map_err(|error| Halt::Error(vcd_dump_runtime_error(error)))?;
+        if !self.frozen {
+            self.slot_writes |= self.show_slot(timestamp, |observer, io, time| {
+                observer.end_of_slot(io, time)
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<B: SimBackend> Simulator<B> {
+    /// Show the slot observer, if any, the state at `time`. Returns whether
+    /// it wrote.
+    fn show_slot(
+        &mut self,
+        time: u64,
+        show: impl FnOnce(&mut dyn SlotObserver<B>, &mut crate::SlotIo<'_, B>, u64),
+    ) -> bool {
+        let Some(observer) = self.slot_observer.as_deref_mut() else {
+            return false;
+        };
+        let mut io = crate::SlotIo::new(crate::IOContext {
+            backend: &mut self.backend,
+            watch: &mut self.host_watch,
+        });
+        show(observer, &mut io, time);
+        let wrote = io.wrote();
+        self.dirty |= wrote;
+        wrote
     }
 }
 
@@ -340,6 +433,7 @@ impl<B: SimBackend> Simulation<B> {
         // Only a timed simulation ends at an RTL `$finish`; a bare
         // `Simulator`, ticks included, leaves that to the host.
         simulator.finish_sites = simulator.schedule.finish_sites;
+        simulator.timed = true;
         simulator.skip_runtime_finish();
         state.initialize_declarations(&mut simulator)?;
         Ok(Self {
@@ -348,6 +442,7 @@ impl<B: SimBackend> Simulation<B> {
             shadow: None,
             checked_steps: 0,
             unchecked: None,
+            reports: Box::default(),
         })
     }
 
@@ -528,6 +623,31 @@ impl<B: SimBackend> Simulation<B> {
         Ok(())
     }
 
+    /// Show every time slot to `observer`, which watches `signals`.
+    ///
+    /// The slots in which a compiled process kernel or host clock may change
+    /// an event signal among `signals` run in the reference loop, where
+    /// [`SlotObserver::before_domains`] sees the change before any domain
+    /// commits; the other kernels' slots stay compiled, one slot per run so
+    /// that [`SlotObserver::end_of_slot`] sees each of them. Changes of other
+    /// signals are the observer's to find, at either point. A differential
+    /// simulation stops checking: the shadow does not see the observer's
+    /// writes.
+    pub fn observe_slots(&mut self, observer: Box<dyn SlotObserver<B>>, signals: &[SignalRef]) {
+        self.simulator.slot_observer = Some(observer);
+        self.state.set_observed_signals(signals.iter().copied());
+        if self.shadow.take().is_some() {
+            self.unchecked = Some("a slot observer writes state the shadow does not see");
+        }
+    }
+
+    /// Stop showing the time slots to the observer of
+    /// [`Self::observe_slots`], and return it.
+    pub fn stop_observing_slots(&mut self) -> Option<Box<dyn SlotObserver<B>>> {
+        self.state.set_observed_signals([]);
+        self.simulator.slot_observer.take()
+    }
+
     /// Register a clock signal and its period, enqueuing the first edge.
     /// Odd periods alternate floor/ceil half periods. Periods below two
     /// time units use a two-unit period so both phases advance time.
@@ -560,7 +680,73 @@ impl<B: SimBackend> Simulation<B> {
     /// Returns the new simulation time, the current time when only host
     /// writes were settled, or None if nothing was to do.
     pub fn step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
+        self.reports.failure = None;
+        if self.reports.fail_on.is_some() {
+            return self.watched_step();
+        }
+        // With nothing scheduled, the step ends the slot too.
+        self.end_idle_slot(self.state.next_event_time().unwrap_or(u64::MAX))?;
         self.step_until(u64::MAX)
+    }
+
+    /// A slot with nothing due is over when a run leaves its time. In a
+    /// design with deferred assertions, logic that host writes or the
+    /// initial settle left dirty settles there, and the actions waiting from
+    /// any settle at that time mature, so that a deferred `$fatal` ends the
+    /// run at that time.
+    #[inline]
+    fn end_idle_slot(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
+        if !self.simulator.deferred_assertions
+            || end_time <= self.state.time()
+            || self.state.next_event_time() == Some(self.state.time())
+        {
+            return Ok(());
+        }
+        self.settle_idle_slot()
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn settle_idle_slot(&mut self) -> Result<(), RuntimeErrorCode> {
+        let result = if self.simulator.dirty {
+            let result = self.simulator.eval_comb_checked();
+            self.simulator.dirty = false;
+            result
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result.and_then(|()| self.simulator.mature_deferred_assertions()) {
+            self.flush_error_output();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// [`Self::step`] while [`Self::set_fail_on`] is set: a slot that only
+    /// settles host writes is watched before the step goes on to the next
+    /// time.
+    #[cold]
+    #[inline(never)]
+    fn watched_step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
+        let mut settled = None;
+        while let Some(next_time) = self.state.next_event_time() {
+            if next_time > self.state.time() {
+                self.watch_settle()?;
+                if self.reports.failure.is_some() {
+                    return Ok(Some(self.state.time()));
+                }
+            }
+            let host_only =
+                self.state.host_pending() && self.state.next_work_time() != Some(next_time);
+            let time = self.step_until(next_time)?;
+            self.watch_reports();
+            if !host_only || self.state.is_stopped() || self.reports.failure.is_some() {
+                return Ok(time);
+            }
+            settled = time;
+        }
+        self.watch_settle()?;
+        Ok(settled)
     }
 
     /// [`Self::step`] that, after settling host writes at the current time,
@@ -578,12 +764,132 @@ impl<B: SimBackend> Simulation<B> {
         result
     }
 
+    /// The steps of a run while [`Self::set_fail_on`] is set, apart from
+    /// the run loop that has no reports to watch. Returns `false` when a
+    /// step stopped at `$stop` or at a failure, or `max_steps` ran out.
+    #[cold]
+    #[inline(never)]
+    fn watched_steps(&mut self, end_time: u64, max_steps: u64) -> Result<bool, RuntimeErrorCode> {
+        let mut steps = 0;
+        while let Some(next_time) = self.state.next_event_time() {
+            if next_time > end_time {
+                break;
+            }
+            if steps >= max_steps {
+                return Ok(false);
+            }
+            if next_time > self.state.time() {
+                self.watch_settle()?;
+                if self.reports.failure.is_some() {
+                    return Ok(false);
+                }
+            }
+            // One slot per step, so that a slot that only settles host
+            // writes is watched before the next runs.
+            self.step_until(next_time)?;
+            self.watch_reports();
+            steps += 1;
+            if self.state.is_stopped() || self.reports.failure.is_some() {
+                return Ok(false);
+            }
+        }
+        self.watch_settle()?;
+        Ok(self.reports.failure.is_none())
+    }
+
+    /// Settle combinational logic that no step settled, as after host writes
+    /// that wake no process, at the current time, and watch its reports. A
+    /// watched run does this before it moves to a later time.
+    fn watch_settle(&mut self) -> Result<(), RuntimeErrorCode> {
+        // The run leaves the time or ends at it: the slot is over, and the
+        // deferred actions waiting from any settle at that time mature
+        // before the reports are watched.
+        let mature = self.simulator.deferred_assertions
+            && self.state.next_event_time() != Some(self.state.time());
+        if !self.simulator.dirty && !mature {
+            return Ok(());
+        }
+        if self.simulator.dirty {
+            if let Err(error) = self.simulator.eval_comb_checked() {
+                self.flush_error_output();
+                return Err(error);
+            }
+            self.simulator.dirty = false;
+        }
+        let matured = if mature {
+            self.simulator.mature_deferred_assertions()
+        } else {
+            Ok(())
+        };
+        self.watch_reports();
+        if let Err(error) = matured {
+            self.flush_error_output();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Stop [`Self::run_until`] and [`Self::run_until_bounded`] after the
+    /// time step of the first report of at least `severity`, which
+    /// [`Self::failure`] then returns. While it is set, the events of each
+    /// step are taken from the design's event buffer after the step and keep
+    /// the time of that step, so none are missed and their reports have an
+    /// exact time. They wait for [`Self::drain_runtime_events`]. `None`
+    /// stops only at `$fatal`, as before.
+    pub fn set_fail_on(&mut self, severity: Option<crate::Severity>) {
+        self.reports.fail_on = severity;
+    }
+
+    /// The report the last run stopped at (see [`Self::set_fail_on`]).
+    /// The next run clears it.
+    pub fn failure(&self) -> Option<&crate::Report> {
+        self.reports.failure.as_ref()
+    }
+
+    fn watch_reports(&mut self) {
+        let Some(fail_on) = self.reports.fail_on else {
+            return;
+        };
+        // A step leaves combinational logic settled.
+        let events =
+            self.simulator
+                .drain_settled_runtime_events_with_context(crate::RuntimeFormatContext {
+                    tb_time: Some(self.state.time()),
+                    scope: None,
+                });
+        if self.reports.failure.is_none() {
+            self.reports.failure = events.iter().find_map(|event| match event {
+                crate::RuntimeEvent::Report(report) if report.severity >= fail_on => {
+                    Some(report.clone())
+                }
+                // A lost event may have been a failure.
+                crate::RuntimeEvent::Missed { count } => Some(crate::Report::new(
+                    fail_on,
+                    format!("missed {count} runtime events").into_bytes(),
+                )),
+                _ => None,
+            });
+        }
+        self.reports.events.extend(events);
+    }
+
     /// Advance time and run until `end_time` (inclusive).
     /// Targets earlier than the current time leave time and state unchanged.
     /// A process that executes `$stop` returns control early, after the time
     /// slot of the stop, with [`Self::is_stopped`] set; calling this again
-    /// continues.
+    /// continues. A report of the severity of [`Self::set_fail_on`] returns
+    /// early in the same way, with [`Self::failure`] set.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
+        self.reports.failure = None;
+        // With reports to watch, step one slot at a time; the run below
+        // then only advances the time.
+        if self.reports.fail_on.is_some() {
+            if !self.watched_steps(end_time, u64::MAX)? {
+                return Ok(());
+            }
+        } else {
+            self.end_idle_slot(end_time)?;
+        }
         let reached = match self.shadow.take() {
             None => self.state.run_until(&mut self.simulator, end_time)?,
             Some(mut shadow) => {
@@ -608,10 +914,41 @@ impl<B: SimBackend> Simulation<B> {
         Ok(())
     }
 
+    /// Run every time slot before `time`, then move to `time` without
+    /// running its slot: the next [`Self::step`] or [`Self::run_until`]
+    /// runs it, together with the host writes made in between. A target not
+    /// after the current time changes nothing. Like [`Self::run_until`], it
+    /// returns early, before `time`, at a `$stop` or `$finish`.
+    pub fn advance_to(&mut self, time: u64) -> Result<(), RuntimeErrorCode> {
+        let Some(last) = time.checked_sub(1).filter(|&last| last >= self.time()) else {
+            return Ok(());
+        };
+        self.run_until(last)?;
+        if self.time() != last || self.is_finished() || self.is_stopped() {
+            return Ok(());
+        }
+        // Leaving `last` ends its slot.
+        if self.reports.fail_on.is_some() {
+            self.watch_settle()?;
+            if self.reports.failure.is_some() {
+                return Ok(());
+            }
+        } else {
+            self.end_idle_slot(time)?;
+        }
+        self.state.advance_time(&mut self.simulator.backend, time);
+        if let Some(shadow) = &mut self.shadow {
+            shadow
+                .state
+                .advance_time(&mut shadow.simulator.backend, time);
+        }
+        Ok(())
+    }
+
     /// Like [`Self::run_until`], but takes at most `max_steps` steps.
     /// Returns `false`, with the simulation at the time of its last step,
     /// when another step would be needed to reach `end_time`, including when
-    /// a step stopped at `$stop`.
+    /// a step stopped at `$stop` or at a [`Self::failure`].
     pub fn run_until_bounded(
         &mut self,
         end_time: u64,
@@ -620,6 +957,15 @@ impl<B: SimBackend> Simulation<B> {
         if end_time < self.state.time() {
             return Ok(true);
         }
+        self.reports.failure = None;
+        if self.reports.fail_on.is_some() {
+            if !self.watched_steps(end_time, max_steps)? {
+                return Ok(false);
+            }
+            self.run_until(end_time)?;
+            return Ok(!self.state.is_stopped());
+        }
+        self.end_idle_slot(end_time)?;
         let mut steps = 0;
         while let Some(next_time) = self.state.next_event_time() {
             if next_time > end_time {
@@ -668,7 +1014,19 @@ impl<B: SimBackend> Simulation<B> {
     /// Takes the runtime events (`$display`, messages, `$finish`, ...) the
     /// design emitted since the last call, in emission order.
     pub fn drain_runtime_events(&mut self) -> Vec<crate::RuntimeEvent> {
-        self.simulator.drain_runtime_events()
+        // A slot with nothing more due is over, also before the first step:
+        // the initial settle of combinational logic belongs to time zero.
+        // A fatal action is drained as a fatal report.
+        if self.simulator.deferred_assertions
+            && self.state.next_event_time() != Some(self.state.time())
+        {
+            // Lazily settled logic runs in the slot too.
+            self.simulator.settle_for_runtime_event_drain();
+            let _ = self.simulator.mature_deferred_assertions();
+        }
+        let mut events = std::mem::take(&mut self.reports.events);
+        events.extend(self.simulator.drain_runtime_events());
+        events
     }
 
     /// Returns the time of the next scheduled event, if any.
@@ -743,6 +1101,16 @@ impl<B: SimBackend> Simulation<B> {
     /// Resolves a signal inside a child instance.
     pub fn child_signal(&self, instance_path: &[(&str, usize)], var: &str) -> SignalRef {
         self.simulator.child_signal(instance_path, var)
+    }
+
+    /// Like [`Self::child_signal`], returning an error for a path that does
+    /// not resolve.
+    pub fn try_child_signal(
+        &self,
+        instance_path: &[(&str, usize)],
+        var: &str,
+    ) -> Result<SignalRef, crate::ir::AddrLookupError> {
+        self.simulator.try_child_signal(instance_path, var)
     }
 
     /// Registers a clock signal by event ID.
@@ -914,8 +1282,11 @@ mod process_tests {
     fn check_all_backends(four_state: bool, steps: usize) {
         let timed = || Simulation::from_frontend(design(four_state, steps)).four_state(four_state);
         check(timed().build_interpreter().unwrap(), steps as u64);
+        #[cfg(feature = "cranelift")]
         check(timed().build_cranelift().unwrap(), steps as u64);
+        #[cfg(feature = "wasm-runtime")]
         check(timed().build_wasm().unwrap(), steps as u64);
+        #[cfg(feature = "cranelift")]
         check(
             timed()
                 .threads(4)
@@ -1067,7 +1438,9 @@ mod process_tests {
                     .emit_triggers()
             };
             check(build().build_interpreter().unwrap());
+            #[cfg(feature = "cranelift")]
             check(build().build_cranelift().unwrap());
+            #[cfg(feature = "wasm-runtime")]
             check(build().build_wasm().unwrap());
             check(build().build_tiered().unwrap());
             #[cfg(any(
@@ -1124,7 +1497,9 @@ mod process_tests {
                         .emit_triggers()
                 };
                 check(build().build_interpreter().unwrap(), step, bit);
+                #[cfg(feature = "cranelift")]
                 check(build().build_cranelift().unwrap(), step, bit);
+                #[cfg(feature = "wasm-runtime")]
                 check(build().build_wasm().unwrap(), step, bit);
                 check(build().build_tiered().unwrap(), step, bit);
                 #[cfg(any(
@@ -1252,24 +1627,28 @@ mod process_tests {
                 "{}",
                 context("interp tick")
             );
+            #[cfg(feature = "cranelift")]
             assert_eq!(
                 timed(build().build_cranelift().unwrap()),
                 want,
                 "{}",
                 context("cranelift timed")
             );
+            #[cfg(feature = "cranelift")]
             assert_eq!(
                 ticked(build().build_cranelift().unwrap()),
                 want,
                 "{}",
                 context("cranelift tick")
             );
+            #[cfg(feature = "wasm-runtime")]
             assert_eq!(
                 timed(build().build_wasm().unwrap()),
                 want,
                 "{}",
                 context("wasm timed")
             );
+            #[cfg(feature = "wasm-runtime")]
             assert_eq!(
                 ticked(build().build_wasm().unwrap()),
                 want,
@@ -1370,7 +1749,9 @@ endmodule
                 .emit_triggers()
             };
             check(build().build_interpreter().unwrap());
+            #[cfg(feature = "cranelift")]
             check(build().build_cranelift().unwrap());
+            #[cfg(feature = "wasm-runtime")]
             check(build().build_wasm().unwrap());
             check(build().build_tiered().unwrap());
             #[cfg(any(
@@ -1487,7 +1868,9 @@ mod four_state_edge_tests {
         ($builder:expr, $check:ident) => {{
             let builder = || $builder.four_state(true).emit_triggers();
             $check(builder().build_interpreter().unwrap());
+            #[cfg(feature = "cranelift")]
             $check(builder().build_cranelift().unwrap());
+            #[cfg(feature = "wasm-runtime")]
             $check(builder().build_wasm().unwrap());
             $check(builder().build_tiered().unwrap());
             #[cfg(any(

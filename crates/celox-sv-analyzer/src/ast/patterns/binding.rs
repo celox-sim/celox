@@ -137,6 +137,7 @@ fn select<'a>(
         let (left, right, count) = dimension_bounds(state, &dim.left, &dim.right, dims)?;
         let sub = Shape::Owned(Rc::new(VariableDimensions {
             randomizable: true,
+            enum_values: None,
             real: false,
             string: false,
             class: None,
@@ -172,7 +173,9 @@ fn select<'a>(
     }
     if !shape.members.is_empty() {
         let members = &shape.members;
-        if members.len() > 1 && members.iter().all(|member| member.offset() == 0) {
+        if members.iter().any(packed_structs::PackedMember::is_tagged)
+            || (members.len() > 1 && members.iter().all(|member| member.offset() == 0))
+        {
             return Err(unsupported("assignment pattern for a packed union"));
         }
         let values = match kind {
@@ -244,6 +247,7 @@ fn select<'a>(
         .ok_or_else(|| unsupported("assignment pattern target width"))?;
     let bit = Shape::Owned(Rc::new(VariableDimensions {
         randomizable: true,
+        enum_values: None,
         real: false,
         string: false,
         class: None,

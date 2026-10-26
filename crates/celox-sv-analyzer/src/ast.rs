@@ -28,6 +28,10 @@ pub(super) struct AnalysisState {
     next_call_site: std::rc::Rc<std::cell::Cell<usize>>,
     timescales: timescales::State,
     diagnostics: RefCell<Vec<warnings::AnalyzerWarning>>,
+    /// Revision of the imported scope, the analyzed package, the active
+    /// interface instances and the root-subroutine mode.
+    revision: generate::Revision,
+    generate_items: generate::Memo,
     /// Classes laid out so far, by name.
     classes: std::cell::RefCell<HashMap<String, std::rc::Rc<classes::Class>>>,
 }
@@ -120,7 +124,7 @@ mod expressions;
 mod ff_process;
 mod functions;
 mod generate;
-mod imports;
+pub(crate) mod imports;
 mod inlining;
 mod instances;
 mod interface_ast;
@@ -147,7 +151,7 @@ mod subroutine_owners;
 pub(crate) mod timescales;
 pub(crate) mod type_parameters;
 mod types;
-mod validation;
+pub(crate) mod validation;
 pub(crate) mod warnings;
 
 use array_compatibility::selected_unpacked_shape;
@@ -188,7 +192,7 @@ use ff_process::ff_processes_from_scope;
 use functions::{functions_from_scope, procedural_truth_condition};
 use inlining::{expand_expr_calls, expr_signedness_with_return_types, substitute_expr_idents};
 pub(crate) use instances::normalize_identifier;
-use instances::{collect_connected_nets, expr_ident_name, instances_from_scope};
+use instances::{expr_ident_name, instances_from_scope};
 use parameters::{
     apply_parameter_overrides, coerce_const_parameter_value, const_env_from_parameters,
     const_expr_from_i128, const_expr_to_expr, enum_member_constants_from_scope,
@@ -257,6 +261,22 @@ pub(crate) struct ModuleParameterBindings<'a> {
     pub values: &'a HashMap<String, ConstExpr>,
     pub types: &'a [(String, Type)],
     pub patterns: &'a [(String, BoundPattern)],
+    pub hierarchical: &'a [HierarchicalSignal],
+}
+
+/// A signal of another instance that hierarchical names of the analyzed
+/// module denote (IEEE 1800-2023 23.6), resolved by the caller against the
+/// elaborated hierarchy. The module refers to it by a local signal `name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchicalSignal {
+    /// The names that denote the signal, as [`crate::ParsedSource::hierarchical_names`]
+    /// spells them.
+    pub paths: Vec<String>,
+    pub name: String,
+    pub r#type: Type,
+    pub is_net: bool,
+    /// The names denote the module's own signal `name`, which they alias.
+    pub local: bool,
 }
 
 impl Source {
@@ -288,7 +308,7 @@ impl Source {
             let scoped_context = context.child(&scoped, &parameter_overrides);
             let syntax_tree = &scoped_context;
             let unit = syntax_tree.root_unit()?;
-            if unit.kind != celox_sv_syntax::UnitKind::Module {
+            if !unit.kind.is_module_like() {
                 continue;
             }
             match unit.port_style {
@@ -316,7 +336,7 @@ impl Source {
                 }
                 celox_sv_syntax::PortStyle::NonAnsi => {
                     return Err(AnalyzerError::Unsupported(
-                        "non-ANSI module port declarations".to_string(),
+                        "non-ANSI port expressions".to_string(),
                     ));
                 }
                 _ => {}
@@ -366,6 +386,7 @@ impl Source {
                 values: parameter_overrides,
                 types: &[],
                 patterns: &[],
+                hierarchical: &[],
             },
             extra_interfaces,
             &packages,
@@ -422,6 +443,27 @@ impl Source {
                         type_parameters::bind(syntax_tree, &own_types)?;
                     imported.pattern_parameter_bindings =
                         type_parameters::bind_patterns(syntax_tree, bindings.patterns)?;
+                    // A hierarchical name reads and writes the local signal
+                    // bound to the other instance's object.
+                    for signal in bindings.hierarchical {
+                        for path in &signal.paths {
+                            imported
+                                .interface_members
+                                .insert(path.clone(), signal.name.clone());
+                        }
+                        if signal.local {
+                            imported.local_aliases.extend(signal.paths.iter().cloned());
+                            continue;
+                        }
+                        imported.state_signals.push(Signal {
+                            is_const: false,
+                            name: signal.name.clone(),
+                            r#type: signal.r#type.clone(),
+                            is_net: signal.is_net,
+                            package_variable: None,
+                            hierarchical: signal.paths.first().cloned(),
+                        });
+                    }
                     if let Some(mut module) = interface_binding::analyze_module(
                         syntax_tree,
                         path,
@@ -457,7 +499,7 @@ impl Source {
                 }
                 celox_sv_syntax::PortStyle::NonAnsi if syntax_tree.root_name()? == module_name => {
                     return Err(AnalyzerError::Unsupported(
-                        "non-ANSI module port declarations".to_string(),
+                        "non-ANSI port expressions".to_string(),
                     ));
                 }
                 _ => {}
@@ -477,8 +519,7 @@ impl Source {
             let scoped = syntax_tree.scoped(handle)?;
             let syntax_tree = &scoped;
             let unit = syntax_tree.root_unit()?;
-            if unit.kind == celox_sv_syntax::UnitKind::Module
-                && unit.port_style != celox_sv_syntax::PortStyle::Wildcard
+            if unit.kind.is_module_like() && unit.port_style != celox_sv_syntax::PortStyle::Wildcard
             {
                 names.push(syntax_tree.root_name()?);
             }
@@ -495,9 +536,7 @@ impl Source {
             let scoped = syntax_tree.scoped(handle)?;
             let syntax_tree = &scoped;
             let unit = syntax_tree.root_unit()?;
-            if unit.kind == celox_sv_syntax::UnitKind::Module
-                && unit.port_style == celox_sv_syntax::PortStyle::Ansi
-            {
+            if unit.kind.is_module_like() && unit.port_style == celox_sv_syntax::PortStyle::Ansi {
                 let name = syntax_tree.root_name()?;
                 let context = AnalysisContext::unspecialized(syntax_tree);
                 interfaces.insert(name, module_interface_from_scope(&context)?);
@@ -512,7 +551,8 @@ impl Source {
 
     pub(crate) fn warnings(&self) -> Vec<warnings::AnalyzerWarning> {
         let mut warnings = self.diagnostics.clone();
-        for module in &self.modules {
+        // A program's functions run in its threads, where `$exit` applies.
+        for module in self.modules.iter().filter(|module| !module.program) {
             warnings::append(&mut warnings, module.constant_functions.warnings());
         }
         warnings
@@ -522,6 +562,9 @@ impl Source {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
     name: String,
+    /// A program (IEEE 1800-2023 24.3), whose processes run in the reactive
+    /// region set.
+    program: bool,
     parameters: Vec<Parameter>,
     ports: Vec<Port>,
     signals: Vec<Signal>,
@@ -625,6 +668,7 @@ impl Module {
     ) -> Result<Self, AnalyzerError> {
         let unit = syntax_tree.scope_handle().unit(syntax_tree.declarations());
         let is_package = unit.is_none_or(|unit| unit.kind == celox_sv_syntax::UnitKind::Package);
+        let program = unit.is_some_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Program);
         let name = unit.map_or_else(
             || packages::UNIT.to_string(),
             |unit| instances::normalize_identifier(&unit.name.spelling),
@@ -638,6 +682,8 @@ impl Module {
         let specialization =
             syntax_tree.child(syntax_tree.syntax_tree, applicable_parameter_overrides);
         let syntax_tree = &specialization;
+        // The collectors below each elaborate the same generate scopes.
+        let _elaborations = generate::memoize(syntax_tree);
         let _imported = scope::install(&syntax_tree.state, imported.clone());
         let with_imported = |mut functions: const_functions::ConstantFunctions| {
             functions.extend_missing(&imported.constant_functions);
@@ -956,6 +1002,7 @@ impl Module {
             );
         }
         packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
+        packed_dimensions.subroutine_directions = Arc::new(subroutine_directions.clone());
         packed_dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
         // Array parameters retain a constant value as well as their signal layout.
         // Bind their values in declaration order before child parameter arguments.
@@ -974,12 +1021,52 @@ impl Module {
             }
         }
         let mut array_initial_processes = Vec::new();
+        let mut packed_pattern_values = HashMap::default();
         for parameter in &array_parameters {
             let process = parameter.initial_process(syntax_tree, &packed_dimensions)?;
             if let Stmt::Assign { rhs, .. } = &process.body[0] {
                 packed_dimensions
                     .array_parameter_values
                     .insert(parameter.signal.name.clone(), rhs.clone());
+                let name = parameter.signal.name();
+                let shape = packed_dimensions.get(name).expect("array parameter shape");
+                if shape.unpacked.is_empty()
+                    && !shape.real
+                    && !shape.string
+                    && shape.class.is_none()
+                {
+                    // An integral value parameter is self-determined before
+                    // conversion at a receiving declaration (6.20.2). The
+                    // pattern's concatenation must retain its declared sign.
+                    let signed = shape.signed;
+                    let is_2state = shape.is_2state;
+                    let width = expr_static_width(
+                        &syntax_tree.state,
+                        &Expr::Ident(name.to_string()),
+                        &packed_dimensions,
+                    )
+                    .ok_or_else(|| unsupported("packed pattern parameter width"))?;
+                    let mut value = Expr::Resize {
+                        expr: Box::new(rhs.clone()),
+                        width,
+                        signed,
+                    };
+                    if is_2state {
+                        value = Expr::Unary {
+                            op: UnaryOp::ToTwoState,
+                            expr: Box::new(value),
+                        };
+                    }
+                    let value = fold_const_integral_expr_preserving_mask(
+                        &syntax_tree.state,
+                        value,
+                        &packed_dimensions.const_env,
+                    );
+                    packed_dimensions
+                        .parameter_values
+                        .insert(name.to_string(), value.clone());
+                    packed_pattern_values.insert(name.to_string(), value);
+                }
             }
             array_initial_processes.push(process);
         }
@@ -1007,6 +1094,7 @@ impl Module {
         // declarations (IEEE 1800-2023 27.6, 23.9).
         let scope_heads: HashSet<&str> = signals
             .iter()
+            .filter(|signal| signal.hierarchical.is_none())
             .map(Signal::name)
             .chain(instances.iter().map(Instance::name))
             .filter_map(generate_scope_head)
@@ -1029,6 +1117,7 @@ impl Module {
             &const_env,
             &imported,
         );
+        parameter_values.extend(packed_pattern_values);
         for (name, value) in &enum_constants.exprs {
             parameter_values
                 .entry(name.clone())
@@ -1224,37 +1313,6 @@ impl Module {
                 },
             );
         }
-        let procedurally_written = procedural::written_names(
-            comb_processes
-                .iter()
-                .flat_map(|process| process.body.iter())
-                .chain(ff_processes.iter().flat_map(|process| process.body.iter())),
-        );
-        let mut connected_nets = HashSet::default();
-        for connection in instances
-            .iter()
-            .flat_map(|instance| instance.port_connections())
-        {
-            if let Some(expr) = connection.actual_expr() {
-                collect_connected_nets(expr, &mut connected_nets);
-            }
-            if let Some(pattern) = connection.bound_pattern() {
-                pattern.visit_expressions(&mut |expr| {
-                    collect_connected_nets(expr, &mut connected_nets)
-                });
-            }
-        }
-        if let Some(signal) = signals.iter().find(|signal| {
-            !imported.declarations_only
-                && signal.is_net()
-                && !procedurally_written.contains(signal.name())
-                && !connected_nets.contains(signal.name())
-        }) {
-            return Err(AnalyzerError::Unsupported(format!(
-                "undriven net declaration `{}`",
-                signal.name()
-            )));
-        }
         // A call of a name an import binds calls the package subroutine or
         // DPI import. Calls of subroutines declared in a generate block were
         // already bound to those.
@@ -1300,7 +1358,7 @@ impl Module {
         }
         procedural::timed_tasks::classify(
             subroutines.iter().chain(imported.subroutines.iter()),
-            &comb_processes,
+            &mut comb_processes,
             &mut ff_processes,
             &mut initial_processes,
         )?;
@@ -1336,6 +1394,7 @@ impl Module {
             ff_processes: ff_processes.clone(),
             aliases: imported.aliases.clone(),
             interface_members: imported.interface_members.clone(),
+            local_aliases: imported.local_aliases.clone(),
             interface_types: imported.interface_types.clone(),
             interface_arrays: imported.interface_arrays.clone(),
             interface_scopes: imported.interface_scopes.clone(),
@@ -1417,6 +1476,7 @@ impl Module {
 
         Ok(Self {
             name,
+            program,
             parameters,
             ports,
             signals,
@@ -1487,6 +1547,11 @@ impl Module {
 
     pub fn dpi_imports(&self) -> &[crate::ir::DpiImport] {
         &self.dpi_imports
+    }
+
+    /// Whether this is a program (IEEE 1800-2023 24.3).
+    pub fn is_program(&self) -> bool {
+        self.program
     }
 }
 
@@ -1710,6 +1775,9 @@ pub struct Signal {
     is_net: bool,
     /// The package variable the signal denotes, as `(package, variable)`.
     package_variable: Option<(String, String)>,
+    /// The hierarchical name of the signal of another instance the signal
+    /// denotes (IEEE 1800-2023 23.6).
+    hierarchical: Option<String>,
 }
 
 impl Signal {
@@ -1720,6 +1788,7 @@ impl Signal {
             is_net: false,
             is_const: false,
             package_variable: None,
+            hierarchical: None,
         }
     }
 
@@ -1730,7 +1799,14 @@ impl Signal {
             is_net: true,
             is_const: false,
             package_variable: None,
+            hierarchical: None,
         }
+    }
+
+    /// The hierarchical name of the signal of another instance the signal
+    /// denotes, as written.
+    pub fn hierarchical(&self) -> Option<&str> {
+        self.hierarchical.as_deref()
     }
 
     /// The package variable (IEEE 1800-2023 26.2) the signal denotes, as
@@ -1969,6 +2045,8 @@ pub enum PortDirection {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Type {
     is_enum: bool,
+    /// Resolved legal values for a scalar enum; None if its domain is unsupported.
+    enum_values: Option<Vec<i128>>,
     kind: TypeKind,
     is_signed: bool,
     packed_ranges: Vec<PackedRange>,
@@ -1986,6 +2064,7 @@ impl Type {
     fn implicit() -> Self {
         Self {
             is_enum: false,
+            enum_values: None,
             kind: TypeKind::Implicit,
             is_signed: false,
             packed_ranges: Vec::new(),
@@ -2000,6 +2079,7 @@ impl Type {
         Self {
             kind,
             is_enum: false,
+            enum_values: None,
             is_signed: false,
             packed_ranges: Vec::new(),
             unpacked_ranges: Vec::new(),
@@ -2028,6 +2108,36 @@ impl Type {
 
     pub fn unpacked_ranges(&self) -> &[UnpackedRange] {
         &self.unpacked_ranges
+    }
+
+    /// How many leading packed dimensions select an element of a signed
+    /// named type (IEEE 1800-2023 7.4.1).
+    pub fn signed_element_depth(&self) -> Option<usize> {
+        self.signed_element_depth
+    }
+
+    /// A type with constant `(left, right)` packed and unpacked bounds.
+    pub fn resolved(
+        kind: TypeKind,
+        is_signed: bool,
+        signed_element_depth: Option<usize>,
+        packed: &[(i128, i128)],
+        unpacked: &[(i128, i128)],
+    ) -> Self {
+        let literal = |value: i128| ConstExpr::Literal(value.to_string());
+        Self {
+            is_signed,
+            signed_element_depth,
+            packed_ranges: packed
+                .iter()
+                .map(|&(left, right)| PackedRange::new(literal(left), literal(right)))
+                .collect(),
+            unpacked_ranges: unpacked
+                .iter()
+                .map(|&(left, right)| UnpackedRange::new(literal(left), literal(right)))
+                .collect(),
+            ..Self::new(kind)
+        }
     }
 }
 
@@ -2254,6 +2364,9 @@ impl LValue {
 pub struct CombProcess {
     creation_order: usize,
     site: Option<crate::procedural::SourceSpan>,
+    /// Where the procedure is written, for an `always @*` that becomes a
+    /// process when it calls a timed task.
+    process_site: Option<crate::procedural::ProcessSite>,
     kind: CombProcessKind,
     condition: Option<ConstExpr>,
     assignments: Vec<Assignment>,
@@ -2292,6 +2405,7 @@ impl CombProcess {
         Self {
             creation_order: 0,
             site: None,
+            process_site: None,
             sensitivity_body: Vec::new(),
             kind,
             condition,
@@ -2304,6 +2418,7 @@ impl CombProcess {
         Self {
             creation_order: 0,
             site: None,
+            process_site: None,
             sensitivity_body: Vec::new(),
             kind,
             condition,
@@ -2722,6 +2837,7 @@ struct UnpackedDimension {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VariableDimensions {
     randomizable: bool,
+    enum_values: Option<Vec<i128>>,
     real: bool,
     /// A `string`: each element is a heap handle, not packed bits.
     string: bool,
@@ -2780,6 +2896,7 @@ struct PackedDimensions {
     /// The declared shape of each argument of each subroutine, for
     /// assignment patterns passed as arguments.
     subroutine_param_shapes: Arc<HashMap<String, Vec<VariableDimensions>>>,
+    subroutine_directions: Arc<lifetimes::Directions>,
     subroutine_param_names: Arc<HashMap<String, Vec<String>>>,
     /// The class whose method is being bound.
     class_scope: Option<String>,
@@ -2804,6 +2921,7 @@ impl PackedDimensions {
             scope_types_complete: false,
             type_query: false,
             subroutine_param_shapes: Arc::default(),
+            subroutine_directions: Arc::default(),
             subroutine_param_names: Arc::default(),
             class_scope: None,
         }
