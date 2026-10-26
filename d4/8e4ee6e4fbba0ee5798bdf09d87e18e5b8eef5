@@ -1,1 +1,1 @@
-Address the remaining four-state clock-edge review with a regression for every IEEE edge-table transition, then revalidate the rebased stack.
+Integrate the newly merged fork/process-control runtime before publishing review fixes.
