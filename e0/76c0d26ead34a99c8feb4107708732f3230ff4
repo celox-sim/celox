@@ -1,0 +1,1 @@
+Clarify that the exhaustive reservoir sampler is test-only; bounded cell queries also permit an empty prefix for small whole-domain size checks.
