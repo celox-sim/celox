@@ -7,6 +7,7 @@ mod edge;
 mod error;
 mod event_buffer;
 pub mod file_io;
+pub mod file_io_backend;
 pub mod parallel;
 pub mod plusargs;
 mod reflection;
@@ -35,9 +36,9 @@ pub use reflection::{
 };
 pub use schedule::{ResolvedSchedule, host_watch};
 pub use simulation::{
-    CompiledSlots, EventInfo, HostBoundary, KernelSchedule, ScheduleKey, ScheduleParts,
-    SchedulerMode, SchedulerStats, SimulationExecutor, SimulationSnapshot, SimulationState,
-    StepObserver, UnitExecutor,
+    CompiledSlots, EventInfo, HostBoundary, KernelSchedule, PersistedSimulationSnapshot,
+    ScheduleKey, ScheduleParts, SchedulerMode, SchedulerStats, SimulationExecutor,
+    SimulationSnapshot, SimulationState, StepObserver, UnitExecutor,
 };
 pub use state_file::{
     BaselineRecord, NbaRecord, ProcessRecord, ScheduleRecord, ScheduledEvent, StateDifference,

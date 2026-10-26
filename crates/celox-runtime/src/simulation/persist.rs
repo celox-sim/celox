@@ -341,3 +341,100 @@ pub struct ScheduleKey {
     pub stopped: bool,
     pub suspended: bool,
 }
+
+/// Pointer-free encoding of a checkpoint's scheduler. Unlike a portable state
+/// file this includes live fork activations and lexical cells. Its schema is
+/// private to the checkpoint container version.
+#[doc(hidden)]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PersistedSimulationSnapshot {
+    time: u64,
+    clocks: Vec<Option<ClockDef>>,
+    events: Vec<(u64, usize, crate::SignalRef, u8, bool)>,
+    high: Vec<usize>,
+    unknown: Vec<usize>,
+    wakeups: Vec<ProcessWakeup>,
+    processes: ProcessState,
+    declarations_pending: bool,
+    host_pending: bool,
+    finished: bool,
+    finalizing: Option<usize>,
+}
+
+impl<B: SimBackend> SimulationSnapshot<B> {
+    #[doc(hidden)]
+    pub fn persisted(&self) -> PersistedSimulationSnapshot {
+        PersistedSimulationSnapshot {
+            time: self.time,
+            clocks: self.clocks.clone(),
+            events: self
+                .event_queue
+                .iter()
+                .map(|event| {
+                    (
+                        event.time,
+                        event.event_ref.id(),
+                        event.signal,
+                        event.next_val,
+                        event.periodic,
+                    )
+                })
+                .collect(),
+            high: self.last_clock_values.iter().collect(),
+            unknown: self.last_clock_unknown.iter().collect(),
+            wakeups: self.process_wakeups.iter().copied().collect(),
+            processes: self.process_state.clone(),
+            declarations_pending: self.declarations_pending,
+            host_pending: self.host_pending,
+            finished: self.finished,
+            finalizing: self.finalizing,
+        }
+    }
+}
+
+impl PersistedSimulationSnapshot {
+    /// Bind event IDs to the receiving compiled instance; machine-code addresses
+    /// never occur in the file.
+    ///
+    /// # Safety
+    /// This record must have been produced from a valid snapshot for the same
+    /// design. Its process state contains raw state-memory offsets.
+    #[doc(hidden)]
+    pub unsafe fn bind<B: SimBackend>(self, events: &[B::Event]) -> Option<SimulationSnapshot<B>> {
+        if self.clocks.len() > events.len()
+            || self
+                .high
+                .iter()
+                .chain(&self.unknown)
+                .any(|&id| id >= events.len())
+        {
+            return None;
+        }
+        let event_queue = self
+            .events
+            .into_iter()
+            .map(|(time, id, signal, next_val, periodic)| {
+                Some(SimEvent {
+                    time,
+                    event_ref: *events.get(id)?,
+                    signal,
+                    next_val,
+                    periodic,
+                })
+            })
+            .collect::<Option<_>>()?;
+        Some(SimulationSnapshot {
+            time: self.time,
+            clocks: self.clocks,
+            event_queue,
+            last_clock_values: self.high.into_iter().collect(),
+            last_clock_unknown: self.unknown.into_iter().collect(),
+            process_wakeups: self.wakeups.into_iter().collect(),
+            process_state: self.processes,
+            declarations_pending: self.declarations_pending,
+            host_pending: self.host_pending,
+            finished: self.finished,
+            finalizing: self.finalizing,
+        })
+    }
+}

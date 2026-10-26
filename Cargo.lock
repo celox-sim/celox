@@ -657,6 +657,7 @@ name = "celox-heap"
 version = "0.11.0"
 dependencies = [
  "fxhash",
+ "serde",
 ]
 
 [[package]]

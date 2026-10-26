@@ -11,7 +11,7 @@ use crate::{Handle, HandleKind, Heap};
 /// The handle of `null`, the value of zero-initialized memory.
 pub const NULL: Handle = 0;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Object {
     class: u32,
     random_state: u64,
@@ -24,7 +24,7 @@ pub(crate) struct Object {
     pub(crate) handles: Vec<(u32, HandleKind)>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct RandomModes {
     overrides: fxhash::FxHashMap<u32, bool>,
     /// Non-rand properties temporarily made random by an argument list.
@@ -47,7 +47,7 @@ impl Object {
 
 /// An error that compiled code made in a heap operation, which the runtime
 /// reports once control returns to it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Fault {
     /// A property access or method call through `null` or a handle of no
     /// live object (IEEE 1800-2023 8.4).
