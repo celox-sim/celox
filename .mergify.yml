@@ -55,6 +55,12 @@ priority_rules:
     priority: 10000
     allow_checks_interruption: true
 
+  - name: Priority merges without interruption
+    conditions:
+      - label = merge-priority
+    priority: 9000
+    allow_checks_interruption: false
+
   - name: Lightweight validated changes first
     conditions:
       - check-success = Lint & Format
@@ -160,7 +166,7 @@ queue_rules:
       # rulesets. Keep those rules enforced by GitHub; Mergify gets no bypass.
 
 pull_request_rules:
-  - name: Authorize emergency merge requests
+  - name: Authorize prioritized merge requests
     conditions:
       - or:
           - base ~= ^(master|develop)$
@@ -169,7 +175,9 @@ pull_request_rules:
           - and:
               - base ~= ^stack/
               - 'body ~= (?m)^Depends-On: '
-      - label = merge-urgent
+      - or:
+          - label = merge-urgent
+          - label = merge-priority
       - -label = release:hold
       - -label = dequeued
       - -draft
