@@ -796,7 +796,7 @@ endmodule
             .runtime_schema
             .processes
             .iter()
-            .filter(|slots| !slots.is_initializer)
+            .filter(|slots| slots.kind != celox_design::ProcessKind::Initializer)
             .map(|slots| slots.const_delays)
             .collect();
         // `initial clk = 1'b0` folds into an initial value. A real delay

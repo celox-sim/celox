@@ -161,6 +161,10 @@ impl<B: SimBackend> SimulationState<B> {
             }
             Err(Halt::Stop) => Ok(Some(self.scheduler.time)),
             Err(Halt::Error(error)) => {
+                if matches!(&error, SimulatorErrorCode::Fatal { .. }) {
+                    let _ = self.finalize_terminal(executor);
+                    return Err(error);
+                }
                 let _ = self.finish_timed_boundary(executor, self.scheduler.time);
                 let _ = executor.flush_output();
                 Err(error)

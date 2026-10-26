@@ -616,6 +616,17 @@ impl std::fmt::Display for ProcessOrigin {
     }
 }
 
+/// When a procedural kernel is invoked by the runtime.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProcessKind {
+    /// Static declarations run before ordinary HDL procedures.
+    Initializer,
+    #[default]
+    Regular,
+    /// A final procedure runs only when simulation ends (IEEE 1800-2023 9.2.3).
+    Final,
+}
+
 /// State through which one process kernel exchanges control with the runtime.
 ///
 /// A process kernel is a resumable function. On entry it reads `resume` to
@@ -625,9 +636,9 @@ impl std::fmt::Display for ProcessOrigin {
 /// checkpoints capture a suspended process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcessSlots<A> {
-    /// A static declaration initializer, executed before all HDL procedures.
-    pub is_initializer: bool,
-    /// This kernel originated from an edge procedure and must execute in Simulation.
+    /// The phase in which the runtime invokes this kernel.
+    pub kind: ProcessKind,
+    /// This kernel requires Simulation's process scheduler rather than Simulator.
     pub requires_timed_simulation: bool,
     /// Every delay the kernel suspends for is a constant of at least one
     /// time unit.
@@ -646,7 +657,7 @@ pub struct ProcessSlots<A> {
 impl<A> ProcessSlots<A> {
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessSlots<B> {
         ProcessSlots {
-            is_initializer: self.is_initializer,
+            kind: self.kind,
             requires_timed_simulation: self.requires_timed_simulation,
             const_delays: self.const_delays,
             program: self.program.map(&mut map),

@@ -355,7 +355,13 @@ impl ScopeSymbols {
                         .cloned()
                         .map(|stmt| rename.stmt(stmt))
                         .collect(),
-                    initializer: process.initializer,
+                    kind: process.kind,
+                    validation_body: process
+                        .validation_body
+                        .iter()
+                        .cloned()
+                        .map(|stmt| rename.stmt(stmt))
+                        .collect(),
                     synthetic: process.synthetic,
                     repeats: process.repeats,
                 })
@@ -596,7 +602,13 @@ impl ScopeSymbols {
                         .cloned()
                         .map(|stmt| rename.stmt(stmt))
                         .collect(),
-                    initializer: process.initializer,
+                    kind: process.kind,
+                    validation_body: process
+                        .validation_body
+                        .iter()
+                        .cloned()
+                        .map(|stmt| rename.stmt(stmt))
+                        .collect(),
                     synthetic: process.synthetic,
                     repeats: process.repeats,
                 })
@@ -609,7 +621,7 @@ impl ScopeSymbols {
 
 /// Whether `process` assigns the signal `name`.
 pub(super) fn initializes(process: &InitialProcess, name: &str) -> bool {
-    process.body.iter().any(|stmt| stmt_initializes(stmt, name))
+    !process.is_final() && process.body.iter().any(|stmt| stmt_initializes(stmt, name))
 }
 
 fn stmt_initializes(stmt: &Stmt, name: &str) -> bool {

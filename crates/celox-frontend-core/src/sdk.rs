@@ -1729,7 +1729,7 @@ fn lower_processes(
     for (index, process) in artifact.processes().iter().enumerate() {
         let name = |slot: &str| vec![format!("$process[{index}]"), slot.to_string()];
         let slots = ProcessSlots {
-            is_initializer: false,
+            kind: celox_design::ProcessKind::Regular,
             requires_timed_simulation: false,
             const_delays: false,
             program: None,

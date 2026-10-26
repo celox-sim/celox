@@ -9,6 +9,7 @@
 use super::*;
 mod assertions;
 mod control;
+mod final_procedures;
 mod foreach;
 mod randomization;
 pub(super) mod timed_tasks;
@@ -1001,6 +1002,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     fn allow_timing(&self, construct: &'static str) -> Result<(), AnalyzerError> {
         match self.body {
             system_functions::Body::Initial => Ok(()),
+            system_functions::Body::Final => Err(AnalyzerError::TimingControlOutsideProcess {
+                construct,
+                context: "a final procedure",
+            }),
             system_functions::Body::Always => Err(AnalyzerError::TimingControlOutsideProcess {
                 construct,
                 context: "an always_comb or always_ff body",
@@ -3021,7 +3026,8 @@ pub(super) fn initial_processes_from_scope(
                     ),
                     condition: None,
                     body,
-                    initializer: true,
+                    kind: celox_design::ProcessKind::Initializer,
+                    validation_body: Vec::new(),
                     synthetic: false,
                     repeats: false,
                 });
@@ -3033,10 +3039,13 @@ pub(super) fn initial_processes_from_scope(
         };
         let construct = match procedure.kind {
             celox_sv_syntax::ProcedureKind::Initial => "initial",
+            celox_sv_syntax::ProcedureKind::Final => "final",
             _ => "always",
         };
         let repeats = match procedure.kind {
-            celox_sv_syntax::ProcedureKind::Initial => false,
+            celox_sv_syntax::ProcedureKind::Initial | celox_sv_syntax::ProcedureKind::Final => {
+                false
+            }
             celox_sv_syntax::ProcedureKind::Always
                 if validation::always_kind(procedure, tree.declarations())?
                     == validation::AlwaysKind::Process
@@ -3047,15 +3056,23 @@ pub(super) fn initial_processes_from_scope(
             _ => continue,
         };
         let (item_dimensions, literals) = views.get(item);
-        // A process statement runs in the body kind of an `initial` block:
-        // it may suspend and call any task.
+        let is_final = procedure.kind == celox_sv_syntax::ProcedureKind::Final;
         let mut builder = BodyBuilder::new(
             tree,
             item_dimensions,
             state,
-            system_functions::Body::Initial,
+            if is_final {
+                system_functions::Body::Final
+            } else {
+                system_functions::Body::Initial
+            },
         );
         let body = builder.native_body(&[procedure.body], &procedure.authored_statements)?;
+        let mut validation_body = if is_final {
+            std::mem::take(&mut builder.sensitivity_body)
+        } else {
+            Vec::new()
+        };
         let mut body = if repeats {
             vec![Stmt::Loop {
                 kind: LoopKind::Forever,
@@ -3067,7 +3084,7 @@ pub(super) fn initial_processes_from_scope(
         } else {
             body
         };
-        for stmt in &mut body {
+        for stmt in body.iter_mut().chain(&mut validation_body) {
             substitute_stmt_constants(&tree.state, stmt, &item.env, literals);
             qualify_stmt(item, stmt);
             substitute_stmt_constants(&tree.state, stmt, const_env, parameter_literals);
@@ -3081,7 +3098,12 @@ pub(super) fn initial_processes_from_scope(
             ),
             condition: None,
             body,
-            initializer: false,
+            kind: if is_final {
+                celox_design::ProcessKind::Final
+            } else {
+                celox_design::ProcessKind::Regular
+            },
+            validation_body,
             synthetic: false,
             repeats,
         });

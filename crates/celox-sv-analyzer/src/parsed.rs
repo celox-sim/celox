@@ -1339,7 +1339,7 @@ mod declaration_tests {
                     &ModuleInterfaces::default(),
                     &packages
                 )
-                .is_err()
+                .is_ok()
         );
         let ir = source
             .analyze_module_declarations("Top", &overrides, &packages)
