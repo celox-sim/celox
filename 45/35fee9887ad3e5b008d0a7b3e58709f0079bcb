@@ -1,0 +1,1 @@
+Fix CI regressions and audit fatal termination across direct simulation APIs before rebasing merged dependencies
