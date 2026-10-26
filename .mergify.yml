@@ -48,6 +48,13 @@ scopes:
 # Use the actual change-based CI result, not the PR title or author, to prefer
 # lightweight changes. Scope isolation handles independent running batches.
 priority_rules:
+  # Emergency requests outrank lightweight changes and may interrupt checks.
+  - name: Emergency merges first
+    conditions:
+      - label = merge-urgent
+    priority: 10000
+    allow_checks_interruption: true
+
   - name: Lightweight validated changes first
     conditions:
       - check-success = Lint & Format
@@ -153,6 +160,26 @@ queue_rules:
       # rulesets. Keep those rules enforced by GitHub; Mergify gets no bypass.
 
 pull_request_rules:
+  - name: Authorize emergency merge requests
+    conditions:
+      - or:
+          - base ~= ^(master|develop)$
+          # A Mergify stack member targets the member below it; the queue
+          # lands the stack on its root, which the bottom member must match.
+          - and:
+              - base ~= ^stack/
+              - 'body ~= (?m)^Depends-On: '
+      - label = merge-urgent
+      - -label = release:hold
+      - -label = dequeued
+      - -draft
+      # A rebase that resolves a conflict queues the PR again by itself.
+      - -conflict
+    actions:
+      label:
+        add:
+          - merge-ready
+
   - name: Queue explicitly requested merges
     conditions:
       - or:

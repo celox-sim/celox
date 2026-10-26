@@ -180,7 +180,7 @@ test("PR-policy repairs are independent of Veryl while dependencies and features
 
 test("lightweight queue priority requires actual skipped product checks and successful lint", () => {
   const priority = queueConfig
-    .split("priority_rules:\n")[1]
+    .split("  - name: Lightweight validated changes first\n")[1]
     .split("queue_rules:\n")[0];
   const conditions = [...priority.matchAll(/^      - (.+)$/gm)].map(
     (m) => m[1],
@@ -193,4 +193,24 @@ test("lightweight queue priority requires actual skipped product checks and succ
   assert.match(priority, /priority: high/);
   assert.match(priority, /allow_checks_interruption: false/);
   assert.doesNotMatch(priority, /label =|head ~=|title ~=/);
+});
+
+
+test("emergency labels authorize normal admission and outrank lightweight checks", () => {
+  const priorities = queueConfig.split("priority_rules:\n")[1].split("queue_rules:\n")[0];
+  const emergency = priorities.split("  - name: Lightweight validated changes first")[0];
+  assert.match(emergency, /name: Emergency merges first/);
+  assert.match(emergency, /conditions:\n      - label = merge-urgent/);
+  assert.match(emergency, /priority: 10000/);
+  assert.match(emergency, /allow_checks_interruption: true/);
+  const admission = queueConfig.split("pull_request_rules:\n")[1];
+  const authorize = admission.split("  - name: Queue explicitly requested merges")[0];
+  assert.match(authorize, /label = merge-urgent/);
+  assert.match(authorize, /actions:\n      label:\n        add:\n          - merge-ready/);
+  for (const guard of ["-label = release:hold", "-label = dequeued", "-draft", "-conflict"])
+    assert.ok(authorize.includes(`      - ${guard}`), guard);
+  assert.match(authorize, /base ~= \^\(master\|develop\)\$/);
+  assert.match(authorize, /base ~= \^stack\//);
+  assert.match(authorize, /Depends-On:/);
+  assert.doesNotMatch(authorize, /queue:|merge:|remove:/);
 });
