@@ -164,6 +164,12 @@ the initial 28 upstream checks passed. Arity and void-result rejection remain ch
 Queue slices, queue operands in concatenations, element-reference persistence,
 warning diagnostics, and queries on nonintegral pop results remain outside
 this change's support contract.
+Logical equivalence (`<->`) now passes six generated cases in both state modes.
+The binary-operator case passes elaboration; the five logical-operator cases
+execute simulations and pass their assertions. A full run before the container
+method changes above changed only these twelve verdicts, with no passing case
+regressing: 1,208 cases pass in 2state and 1,219 in 4state. Shared tests cover unknown operands and
+evaluate both operands exactly once (IEEE 1800-2023 11.4.7).
 
 Logical implication (`->`) now passes six generated cases in both state modes.
 The binary-operator case passes elaboration; the five logical-operator cases

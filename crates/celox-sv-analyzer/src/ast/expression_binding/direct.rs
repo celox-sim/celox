@@ -961,12 +961,14 @@ pub(in crate::ast) fn bind_value(
                                     | "&&"
                                     | "||"
                                     | "->"
+                                    | "<->"
                             )
                         {
                             return Err(unsupported("operator on a real operand"));
                         }
                         let implication = op == "->";
-                        let left = if implication {
+                        let equivalence = op == "<->";
+                        let left = if implication || equivalence {
                             Expr::Unary {
                                 op: UnaryOp::LogicNot,
                                 expr: Box::new(left),
@@ -974,10 +976,21 @@ pub(in crate::ast) fn bind_value(
                         } else {
                             left
                         };
+                        // Each truth-value conversion evaluates its operand once (11.4.7).
+                        let right = if equivalence {
+                            Expr::Unary {
+                                op: UnaryOp::LogicNot,
+                                expr: Box::new(right),
+                            }
+                        } else {
+                            right
+                        };
                         let xnor = matches!(op.as_str(), "~^" | "^~");
                         let value = Expr::Binary {
                             left: Box::new(left),
-                            op: if implication {
+                            op: if equivalence {
+                                BinaryOp::Eq
+                            } else if implication {
                                 BinaryOp::LogicOr
                             } else if xnor {
                                 BinaryOp::BitXor

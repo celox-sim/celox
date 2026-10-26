@@ -1,4 +1,7 @@
 sv_backends! {
+    fn logical_equivalence(sim) { @case "operators::logical_equivalence"; }
+    fn logical_equivalence_unknown(sim) { @case "operators::logical_equivalence_unknown"; }
+    fn logical_equivalence_evaluates_operands_once(sim) { @case "operators::logical_equivalence_evaluates_operands_once"; }
     fn logical_implication_short_circuit(sim) { @case "operators::logical_implication_short_circuit"; }
     fn logical_implication_unknown(sim) { @case "operators::logical_implication_unknown"; }
     fn logical_implication(sim) { @case "operators::logical_implication"; }
