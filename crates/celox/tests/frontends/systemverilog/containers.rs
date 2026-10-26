@@ -1,6 +1,10 @@
 use super::*;
 
 sv_backends! {
+    fn optional_parentheses_packed_result(sim) { @case "containers::optional_parentheses_packed_result"; }
+    fn optional_parentheses(sim) { @case "containers::optional_parentheses"; }
+    fn optional_parentheses_queries(sim) { @case "containers::optional_parentheses_queries"; }
+    fn optional_parentheses_four_state(sim) { @case "containers::optional_parentheses_four_state"; }
     fn queue_argument_side_effects(sim) { @case "containers::queue_argument_side_effects"; }
     fn queue_argument_four_state(sim) { @case "containers::queue_argument_four_state"; }
     fn string_associative_foreach(sim) { @case "containers::string_associative_foreach"; }

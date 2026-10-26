@@ -1236,6 +1236,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         {
             let query_root =
                 expression_binding::call_statement_root(root, discarded, self.tree.declarations())?;
+            if discarded
+                && let Some(mut value) =
+                    containers::value(query_root, native, self.tree, &self.dims, true)?
+            {
+                self.rename_expr(&mut value);
+                return Ok(vec![Stmt::Eval(value)]);
+            }
             if let Some(call) = self.method_call_statement(query_root)? {
                 return Ok(vec![call]);
             }
