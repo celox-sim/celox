@@ -113,8 +113,13 @@ pub(super) fn analyze_module(
         return Ok(None);
     }
     let array_scope = if interface_ports.iter().any(|port| port.array_rank != 0) {
-        let (header_ports, header_tree) =
-            binding_declaration_view(&view_ports, &instantiations, tree, &imported)?;
+        let (header_ports, header_tree) = binding_declaration_view(
+            &view_ports,
+            &instantiations,
+            interface_ports,
+            tree,
+            &imported,
+        )?;
         let mut header_imports = imported.clone();
         header_imports.declarations_only = true;
         Some(Module::from_selected_scope(
@@ -257,8 +262,13 @@ pub(super) fn analyze_module(
         }
     }
     // Resolve the caller's declarations before evaluating instance overrides.
-    let (header_ports, header_tree) =
-        binding_declaration_view(&view_ports, &instantiations, tree, &imported)?;
+    let (header_ports, header_tree) = binding_declaration_view(
+        &view_ports,
+        &instantiations,
+        interface_ports,
+        tree,
+        &imported,
+    )?;
     let mut header_imports = imported.clone();
     header_imports.declarations_only = true;
     let caller = Module::from_selected_scope(
@@ -324,8 +334,13 @@ pub(super) fn analyze_module(
         if generated_item.is_none() {
             // Newly bound instances may unlock declarations used by the next
             // instance's overrides. Keep only still-unbound dependencies out.
-            let (header_ports, header_tree) =
-                binding_declaration_view(&view_ports, &instantiations, tree, &imported)?;
+            let (header_ports, header_tree) = binding_declaration_view(
+                &view_ports,
+                &instantiations,
+                interface_ports,
+                tree,
+                &imported,
+            )?;
             let mut header_imports = imported.clone();
             header_imports.declarations_only = true;
             let caller = Module::from_selected_scope(
@@ -817,11 +832,12 @@ fn native_body_items(tree: &SyntaxTree) -> Converted<Vec<celox_sv_syntax::BodyIt
     Ok(items)
 }
 
-/// Delay declarations that reference local interface instances (and declarations
+/// Delay declarations that reference unbound interface instances or ports (and declarations
 /// depending on those names) until the instances have populated semantic scopes.
 fn binding_declaration_view<'a>(
     selected: &port_owners::Selection<'a>,
     instances: &[celox_sv_syntax::BodyItemId],
+    ports: &[interfaces::NativePortPlan],
     tree: &AnalysisContext<'_>,
     imported: &scope::ScopeSymbols,
 ) -> Converted<(port_owners::Selection<'a>, SyntaxTree)> {
@@ -831,6 +847,7 @@ fn binding_declaration_view<'a>(
         .filter_map(|id| instances::declaration_from_item(*id, tree).ok())
         .flat_map(|instance| instance.instances.iter())
         .map(|instance| instances::normalize_identifier(&instance.name.spelling))
+        .chain(ports.iter().map(|port| port.name.clone()))
         .filter(|name| {
             !imported.interface_types.contains_key(name)
                 && !imported.interface_arrays.contains_key(name)
