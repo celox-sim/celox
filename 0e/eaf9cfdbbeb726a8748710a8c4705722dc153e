@@ -1,1 +1,6 @@
-Replace routine lockfile maintenance with security-only Dependabot updates as requested by the user.
+Revision history for #2199:
+
+rev 2 (content) 2026-10-26 18:54 UTC — Replace routine lockfile maintenance with security-only Dependabot updates as requested by the user.
+rev 1 (initial) 2026-10-26 18:54 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2199,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"6fb149bdb1e24996e24f6015f81c662e06486c33","timestamp_iso":"2026-10-26T18:54:47Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"6fb149bdb1e24996e24f6015f81c662e06486c33","new_sha":"0eeaf9cfdbbeb726a8748710a8c4705722dc153e","timestamp_iso":"2026-10-26T18:54:47Z","reason":"Replace routine lockfile maintenance with security-only Dependabot updates as requested by the user.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/6fb149bdb1e24996e24f6015f81c662e06486c33...0eeaf9cfdbbeb726a8748710a8c4705722dc153e"}]} -->
