@@ -1,6 +1,11 @@
 //! Reusable scalar encoding with temporary Boolean assumptions.
 use super::*;
 
+mod cell;
+mod hashing;
+pub use cell::{Cell, CellStatus};
+pub use hashing::HashCells;
+
 /// Select the polarity of a predicate supplied when preparing the query.
 #[derive(Clone, Copy, Debug)]
 pub struct Assumption {
