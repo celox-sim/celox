@@ -1,1 +1,1 @@
-Address the four-state asynchronous-reset history review finding and rebase the SVA stack onto current master.
+Address the remaining four-state clock-edge review with a regression for every IEEE edge-table transition, then revalidate the rebased stack.
