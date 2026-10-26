@@ -1,4 +1,6 @@
-pub use celox_sir_opt::{OptLevel, OptimizeOptions, ParallelPartition, SirDiagnostics, SirPass};
+pub use celox_sir_opt::{
+    OptLevel, OptimizeOptions, ParallelPartition, SettlePartition, SirDiagnostics, SirPass,
+};
 
 pub mod sir;
 
@@ -98,5 +100,12 @@ pub(crate) fn parallel_schedule_options(
         parallel.synchronization_cost = 0;
         parallel.minimum_speedup_percent = 0;
     }
+    parallel.settle = if !options.is_enabled(SirPass::PartitionedSettle) {
+        celox_frontend_core::SettlePartitionMode::Off
+    } else if options.settle_partition() == SettlePartition::Always {
+        celox_frontend_core::SettlePartitionMode::Always
+    } else {
+        celox_frontend_core::SettlePartitionMode::Estimated
+    };
     parallel
 }

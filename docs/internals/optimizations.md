@@ -101,6 +101,15 @@ unnecessary:
   compile the clock's domain once more; the `derived_edge_units` selector
   (`-sir:derived_edge_units`, `SirPass::DerivedEdgeUnits`) turns them off to
   trade tick speed for build time.
+- the combinational settle can be cut into partitions, contiguous ranges of
+  its schedule, that run only when their dirty flag is set
+  (`partitioned_settle`, off unless enabled). A partition that runs sets the
+  flags of the partitions reading what it writes; every other writer sets them
+  too: generated stores and commits of state a partition reads or writes, host
+  writes, state loads, and a retained raw view of the state, after which every
+  partition runs. `SimulatorBuilder::settle_check` runs each settle a second
+  time with every partition flagged and panics where the two differ; effects
+  of partitions that run twice, such as runtime events, then happen twice.
 - in the time slots a compiled scheduler runs, a combinational settle waits
   until its results are read: it runs, where the reference loop last
   settled, before a process kernel or domain that reads combinational outputs

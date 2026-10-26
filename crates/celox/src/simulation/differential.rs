@@ -163,8 +163,9 @@ fn difference<B: SimBackend>(
             "scheduling state {key:?}, the reference {reference:?}"
         ));
     }
-    // The compiled scheduler's slots hold nothing between runs.
-    let scheduler: Vec<_> = primary
+    // The compiled scheduler's slots hold nothing between runs, and the
+    // settle's partition flags only what is left to recompute.
+    let excluded: Vec<_> = primary
         .program
         .runtime_schema
         .scheduler
@@ -174,9 +175,16 @@ fn difference<B: SimBackend>(
             let signal = primary.backend.resolve_signal(address);
             signal.offset..signal.offset + celox_state_layout::get_byte_size(signal.width)
         })
+        .chain(
+            primary
+                .backend
+                .layout()
+                .settle
+                .as_ref()
+                .map(|settle| settle.flags()),
+        )
         .collect();
-    if let Some(offset) = first_difference(&primary.backend, &shadow.simulator.backend, &scheduler)
-    {
+    if let Some(offset) = first_difference(&primary.backend, &shadow.simulator.backend, &excluded) {
         let signal = primary
             .named_signals()
             .into_iter()

@@ -1053,6 +1053,27 @@ pub struct RuntimeSchema<A> {
     /// Generated units that run an edge of an event with every derived
     /// clock domain it reaches, for the events that have them.
     pub derived_edges: Vec<DerivedEdgeUnits<A>>,
+    /// The partitions of a partitioned combinational settle, when it is
+    /// partitioned.
+    pub settle_partitions: Option<SettlePartitions<A>>,
+}
+
+/// A combinational settle split into partitions that run only when state
+/// they read changed since they last ran.
+///
+/// Byte `p` of `flags` is partition `p`'s dirty flag; the byte after the
+/// last partition's is the untracked byte, set once state may change
+/// without anyone setting flags (a retained raw view), after which every
+/// partition always runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettlePartitions<A> {
+    pub flags: A,
+    pub partitions: u32,
+    /// State the settle reads or writes, with the partitions to mark when
+    /// something other than the settle writes it. A written object lists
+    /// its writers as well, so that, as in a single pass, the settle
+    /// recomputes it.
+    pub marks: Vec<(A, Vec<u32>)>,
 }
 
 /// The process units that run the edges of one event together with its
@@ -1279,6 +1300,7 @@ impl<A> Default for RuntimeSchema<A> {
             time_slots: Vec::new(),
             scheduler: None,
             derived_edges: Vec::new(),
+            settle_partitions: None,
         }
     }
 }
