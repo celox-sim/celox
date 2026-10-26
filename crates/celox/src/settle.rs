@@ -2,9 +2,9 @@
 //! the flag layout, and the flag stores of the units outside the settle.
 //!
 //! A partition of the settle runs only when its flag is set. The settle's
-//! own partitions set the flags of their readers; every other writer of
-//! state the settle reads or writes sets them here, at each store or commit
-//! to the state, and host writes set them through
+//! own partitions set the flags of the readers of what they change; every
+//! other writer of state the settle reads or writes sets them here, at each
+//! store or commit that changes the state, and host writes set them through
 //! [`celox_state_layout::SettleLayout`].
 use crate::ir::{
     ExecutionUnit, LaidOutProgram, RegionedAbsoluteAddr, RegisterId, RegisterType, SIRInstruction,
@@ -188,6 +188,29 @@ impl<'a> Marker<'a> {
         }
     }
 
+    /// Whether an access covers more than one element of an element-strided
+    /// array whose elements are padded: a load of it would not gather the
+    /// elements on every backend, so the store cannot be compared.
+    fn spans_padded_elements(
+        &self,
+        address: &RegionedAbsoluteAddr,
+        offset: &SIROffset,
+        width: usize,
+    ) -> bool {
+        let Some(array) = self.layout.unpacked_arrays.get(&address.absolute_addr()) else {
+            return false;
+        };
+        if array.element_stride * 8 == array.element_width {
+            return false;
+        }
+        match offset.constant_bit_offset() {
+            Some(start) => {
+                start / array.element_width != (start + width.max(1) - 1) / array.element_width
+            }
+            None => width > array.element_width,
+        }
+    }
+
     fn instrument(&self, unit: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
         let mut next_register = unit
             .register_map
@@ -195,44 +218,104 @@ impl<'a> Marker<'a> {
             .map(|register| register.0 + 1)
             .max()
             .unwrap_or(0);
-        for block in unit.blocks.values_mut() {
+        let mut alloc = |unit: &mut ExecutionUnit<RegionedAbsoluteAddr>, ty: RegisterType| {
+            let register = RegisterId(next_register);
+            next_register += 1;
+            unit.register_map.insert(register, ty);
+            register
+        };
+        let byte = RegisterType::Bit {
+            width: 8,
+            signed: false,
+        };
+        let block_ids: Vec<_> = unit.blocks.keys().copied().collect();
+        for block_id in block_ids {
+            let block = unit.blocks.get_mut(&block_id).expect("listed block");
+            let old_instructions = std::mem::take(&mut block.instructions);
             let mut one = None;
-            let mut instructions = Vec::with_capacity(block.instructions.len());
-            for instruction in std::mem::take(&mut block.instructions) {
-                let readers = match &instruction {
-                    SIRInstruction::Store(address, ..) => self.readers(address),
-                    SIRInstruction::Commit(_, address, ..) => self.readers(address),
-                    _ => Vec::new(),
+            let mut instructions = Vec::with_capacity(old_instructions.len());
+            for instruction in old_instructions {
+                let target = match &instruction {
+                    SIRInstruction::Store(address, offset, width, ..)
+                    | SIRInstruction::Commit(_, address, offset, width, _) => {
+                        Some((*address, offset.clone(), *width))
+                    }
+                    _ => None,
                 };
-                instructions.push(instruction);
+                let Some((address, offset, width)) = target else {
+                    instructions.push(instruction);
+                    continue;
+                };
+                let readers = self.readers(&address);
                 if readers.is_empty() {
+                    instructions.push(instruction);
                     continue;
                 }
                 let one = *one.get_or_insert_with(|| {
-                    let register = RegisterId(next_register);
-                    next_register += 1;
-                    unit.register_map.insert(
-                        register,
-                        RegisterType::Bit {
-                            width: 8,
-                            signed: false,
-                        },
-                    );
+                    let register = alloc(unit, byte.clone());
                     instructions.push(SIRInstruction::Imm(register, SIRValue::new(1u64)));
                     register
                 });
+                if width > MAX_COMPARED_WIDTH
+                    || self.spans_padded_elements(&address, &offset, width)
+                {
+                    instructions.push(instruction);
+                    for partition in readers {
+                        instructions.push(SIRInstruction::Store(
+                            self.flags,
+                            SIROffset::Static(partition as usize * 8),
+                            8,
+                            one,
+                            Vec::new(),
+                            Vec::new(),
+                        ));
+                    }
+                    continue;
+                }
+                // Set the readers' flags only when the store changes the
+                // state, both planes compared.
+                let old = alloc(unit, RegisterType::Logic { width });
+                instructions.push(SIRInstruction::Load(old, address, offset.clone(), width));
+                instructions.push(instruction);
+                let new = alloc(unit, RegisterType::Logic { width });
+                instructions.push(SIRInstruction::Load(new, address, offset, width));
+                let changed = alloc(
+                    unit,
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                );
+                instructions.push(SIRInstruction::Binary(
+                    changed,
+                    old,
+                    celox_sir::BinaryOp::NeCase,
+                    new,
+                ));
                 for partition in readers {
+                    let flag = alloc(unit, byte.clone());
+                    let marked = alloc(unit, byte.clone());
+                    let offset = SIROffset::Static(partition as usize * 8);
+                    instructions.push(SIRInstruction::Load(flag, self.flags, offset.clone(), 8));
+                    instructions.push(SIRInstruction::Mux(marked, changed, one, flag));
                     instructions.push(SIRInstruction::Store(
                         self.flags,
-                        SIROffset::Static(partition as usize * 8),
+                        offset,
                         8,
-                        one,
+                        marked,
                         Vec::new(),
                         Vec::new(),
                     ));
                 }
             }
-            block.instructions = instructions;
+            unit.blocks
+                .get_mut(&block_id)
+                .expect("listed block")
+                .instructions = instructions;
         }
     }
 }
+
+/// The widest store compared before it marks the readers; wider ones mark
+/// them on every store, like stores across padded array elements.
+const MAX_COMPARED_WIDTH: usize = 4096;

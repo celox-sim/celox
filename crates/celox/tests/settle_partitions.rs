@@ -173,7 +173,7 @@ fn loaded_state_reaches_partitions() {
 mod systemverilog {
     use std::path::Path;
 
-    use celox::{BigUint, SettlePartition, Simulation, SirPass};
+    use celox::{BigUint, SettlePartition, Simulation, Simulator, SirPass};
 
     /// A clock gated through a latch (Xilinx BUFGCE): the latch is a process
     /// of the settle, and the gated clock's edge runs another domain.
@@ -288,6 +288,96 @@ endmodule
         let single = matches_single_pass(SPLIT, &["y", "b", "w", "n"], 10);
         // At 5, y and w follow a through the intermediate 0.
         assert_eq!(single[5][2], BigUint::from(3u8));
+    }
+
+    /// A padded unpacked array (13-bit elements, two bytes each in the
+    /// element-strided layout) whose element writes publish through one bulk
+    /// commit of the whole array: the commit must mark the reader of the last
+    /// element when only that element changes.
+    const PADDED: &str = r#"
+module Top (
+    input logic clk,
+    input logic we,
+    input logic [2:0] idx,
+    input logic [12:0] d,
+    input logic [2:0] ri,
+    output logic [12:0] q,
+    output logic [12:0] last
+);
+    logic [12:0] m [8];
+    always_ff @(posedge clk) if (we) m[idx] <= d;
+    assign q = m[ri];
+    assign last = m[7];
+endmodule
+"#;
+
+    /// Whether `m` is element-strided, and the outputs after each tick.
+    macro_rules! padded_trace {
+        ($sim:expr) => {{
+            let mut sim = $sim;
+            let strided = sim.signal("m").array_layout.is_some();
+            let (clk, we, idx, d, ri) = (
+                sim.event("clk"),
+                sim.signal("we"),
+                sim.signal("idx"),
+                sim.signal("d"),
+                sim.signal("ri"),
+            );
+            let outputs = ["last", "q"].map(|name| sim.signal(name));
+            let mut trace: Vec<Vec<BigUint>> = Vec::new();
+            for step in 0..12u16 {
+                sim.modify(|io| {
+                    io.set(we, 1u8);
+                    // Mostly the last element, sometimes the first.
+                    io.set(idx, if step % 3 == 2 { 0u8 } else { 7u8 });
+                    io.set(d, step.wrapping_mul(0x9e5) & 0x1fff);
+                    io.set(ri, 0u8);
+                })
+                .unwrap();
+                sim.tick(clk).unwrap();
+                trace.push(outputs.iter().map(|&signal| sim.get(signal)).collect());
+            }
+            (strided, trace)
+        }};
+    }
+
+    fn padded(four_state: bool) -> celox::SimulatorBuilder<'static, Simulator> {
+        Simulator::from_sv_sources(vec![(PADDED, Path::new("padded.sv"))], "Top")
+            .four_state(four_state)
+    }
+
+    #[test]
+    fn element_writes_to_a_padded_array_match_single_pass() {
+        for four_state in [false, true] {
+            let (_, single) = padded_trace!(
+                padded(four_state)
+                    .disable_pass(SirPass::PartitionedSettle)
+                    .build_interpreter()
+                    .unwrap()
+            );
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
+            {
+                let (strided, trace) = padded_trace!(
+                    padded(four_state)
+                        .settle_partition(SettlePartition::Always)
+                        .build_native()
+                        .unwrap()
+                );
+                assert!(strided, "native stores the array strided");
+                assert_eq!(trace, single, "native, four_state={four_state}");
+            }
+            let (strided, trace) = padded_trace!(
+                padded(four_state)
+                    .settle_partition(SettlePartition::Always)
+                    .build_tiered()
+                    .unwrap()
+            );
+            assert!(strided, "the tiered interpreter stores the array strided");
+            assert_eq!(trace, single, "tiered, four_state={four_state}");
+        }
     }
 
     #[test]
