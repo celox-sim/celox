@@ -607,6 +607,8 @@ pub struct Module {
     /// The package parameters the module sees, by qualified name and by the
     /// names its imports bind.
     imported_parameters: Vec<Parameter>,
+    /// Elaborated interface scopes, including those without data members.
+    interface_scope_names: Vec<String>,
     /// The symbols of a package, for the scopes that use it.
     symbols: Option<scope::ScopeSymbols>,
 }
@@ -1516,9 +1518,19 @@ impl Module {
             }
         }
 
+        let mut interface_scope_names = imported
+            .interface_types
+            .keys()
+            .chain(imported.interface_arrays.keys())
+            .cloned()
+            .collect::<Vec<_>>();
+        interface_scope_names.sort_unstable();
+        interface_scope_names.dedup();
+
         Ok(Self {
             name,
             program,
+            interface_scope_names,
             parameters,
             ports,
             signals,
@@ -1536,6 +1548,10 @@ impl Module {
             imported_parameters,
             symbols,
         })
+    }
+
+    pub(crate) fn interface_scope_names(&self) -> &[String] {
+        &self.interface_scope_names
     }
 
     pub fn name(&self) -> &str {

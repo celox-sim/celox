@@ -232,6 +232,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     .map(|subroutine| subroutine.map(&mut Into::into, &mut Into::into, &mut |t| t))
                     .collect(),
             )
+            .with_interface_scope_names(module.interface_scope_names().to_vec())
             .with_dpi_imports(module.dpi_imports().to_vec())
             .with_program(module.is_program())
             .with_imported_parameters(imported_parameters)
