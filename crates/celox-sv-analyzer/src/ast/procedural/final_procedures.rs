@@ -26,8 +26,8 @@ pub(super) fn validate(subroutines: &[&Subroutine], processes: &[InitialProcess]
         calls.push((&subroutine.name, callees));
         // Unlike the function-statement restrictions, 13.4.4 concerns an
         // executed event scheduling operation. A folded-away NBA is harmless.
-        let (_, nba, callees) = effects(subroutine.body.iter(), &definitions);
-        if nba {
+        let (_, schedules_events, callees) = effects(subroutine.body.iter(), &definitions);
+        if schedules_events {
             schedules.insert(subroutine.name.clone());
         }
         runtime_calls.push((&subroutine.name, callees));
@@ -81,12 +81,12 @@ pub(super) fn validate(subroutines: &[&Subroutine], processes: &[InitialProcess]
 
 /// Include discarded branches, expression calls and lvalue selectors: legality
 /// is a property of the authored procedure, not just the path executed now.
-fn effects<'a>(
+pub(super) fn effects<'a>(
     body: impl Iterator<Item = &'a Stmt>,
     definitions: &HashMap<&str, &Subroutine>,
 ) -> (bool, bool, HashSet<String>) {
     let mut invalid = false;
-    let mut nba = false;
+    let mut schedules_events = false;
     let mut calls = Calls {
         definitions,
         names: HashSet::default(),
@@ -94,14 +94,25 @@ fn effects<'a>(
         expanded: HashSet::default(),
     };
     for statement in body {
-        statement.walk(&mut |statement| {
+        statement.walk_without_detached_children(&mut |statement| {
             invalid |= matches!(
                 statement,
-                Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::WaitImplicit(_) | Stmt::Wait(_)
+                Stmt::Delay { .. }
+                    | Stmt::WaitEvent(_)
+                    | Stmt::WaitImplicit(_)
+                    | Stmt::Wait(_)
+                    | Stmt::WaitFork
+                    | Stmt::Fork {
+                        join: celox_design::ForkJoin::All | celox_design::ForkJoin::Any,
+                        ..
+                    }
             );
-            nba |= matches!(
+            schedules_events |= matches!(
                 statement,
-                Stmt::Assign {
+                Stmt::Fork {
+                    join: celox_design::ForkJoin::None,
+                    ..
+                } | Stmt::Assign {
                     nonblocking: true,
                     ..
                 } | Stmt::AssignConcat {
@@ -144,7 +155,7 @@ fn effects<'a>(
         });
     }
     calls.expand_defaults();
-    (invalid, nba, calls.names)
+    (invalid, schedules_events, calls.names)
 }
 
 struct Calls<'map, 'definition> {

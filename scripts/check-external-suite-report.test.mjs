@@ -285,6 +285,12 @@ test("every retained baseline accepts only its existing failures", () => {
           result.accepted_failures,
           tool === "icarus"
             ? [
+                "fork_control::function_join_none_automatic_values_outlive_returns",
+                "fork_control::function_join_none_calls_in_defaults_need_process_frames",
+                "fork_control::function_join_none_children_can_call_timed_tasks",
+                "fork_control::function_join_none_event_driven_caller",
+                "fork_control::function_join_none_preserves_expression_temporaries",
+                "fork_control::function_join_none_retains_child_only_class_handle",
                 "hierarchy::packed_pattern_parameter_arguments_keep_types_and_unknown_bits",
                 "hierarchy::packed_pattern_parameter_arguments_preserve_wide_values",
                 "hierarchy::packed_pattern_parameters_forward_whole_values",

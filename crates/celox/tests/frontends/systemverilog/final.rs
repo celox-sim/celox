@@ -519,3 +519,57 @@ fn saving_state_preserves_fatal_and_runs_final() {
     }
     check_backends!(source, check);
 }
+
+#[test]
+fn final_join_none_initializes_declarations_but_never_runs_children() {
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(2).unwrap();
+        for (name, expected) in [
+            ("initialized", 1u8),
+            ("child", 0),
+            ("tail", 1),
+            ("other", 1),
+        ] {
+            assert_eq!(sim.get(sim.signal(name)), expected.into(), "{name}");
+        }
+        let mut messages = displays(sim.drain_runtime_events());
+        messages.sort();
+        assert_eq!(
+            messages,
+            vec![
+                b"fork initialized=1 child=0 tail=1".to_vec(),
+                b"other=1".to_vec()
+            ]
+        );
+        sim.run_until(100).unwrap();
+        assert_eq!(sim.get(sim.signal("child")), 0u8.into());
+    }
+    check_backends!(include_str!("../../fixtures/final/join_none.sv"), check);
+}
+
+#[test]
+fn final_join_none_children_stay_detached_across_stop_resume() {
+    let source = r#"`timescale 1ns/1ns
+    module Top(output int child, calls, other);
+        initial begin child=0; calls=0; other=0; #10 child=99; end
+        final begin
+            fork child=1; #1 child=2; join_none
+            calls++; $stop; calls++;
+        end
+        final other++;
+    endmodule"#;
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(0).unwrap();
+        sim.finish().unwrap();
+        assert!(sim.is_stopped());
+        assert_eq!(sim.get(sim.signal("child")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("calls")), 1u8.into());
+        sim.step().unwrap();
+        assert!(!sim.is_stopped());
+        sim.run_until(100).unwrap();
+        assert_eq!(sim.get(sim.signal("child")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("calls")), 2u8.into());
+        assert_eq!(sim.get(sim.signal("other")), 1u8.into());
+    }
+    check_backends!(source, check);
+}

@@ -146,11 +146,17 @@ the calling process's identity; `wait fork` remains forbidden in functions.
 
 Checkpoints preserve children, their locals and pending joins. Layout-independent
 state files do not yet record dynamic activations and report an error; use
-`checkpoint()` / `restore()` instead. Forks in functions or final procedures,
-deferred assertions in a process containing forks,
-and compound event expressions reading fork-shared automatic locals remain
+`checkpoint()` / `restore()` instead. Deferred assertions in a process containing
+forks and compound event expressions reading fork-shared automatic locals remain
 unsupported. Direct event controls on those locals and `wait` conditions are
 supported.
+
+Functions may use `fork ... join_none` when called from an `initial` or plain
+`always` process. Their detached children may call tasks and suspend; automatic
+arguments and locals survive the function return (13.4.4). Blocking operations
+in the function itself remain forbidden. Scheduling calls in declaration
+initializers, `final`, `always_comb`, and `always_ff` are diagnosed; the latter
+two contexts do not currently provide a process kernel for such calls.
 
 ### Class randomization
 
@@ -692,7 +698,9 @@ nonblocking assignment made directly in a final procedure never applies its
 queued update. Timing controls and calls to user tasks are rejected, including
 through functions. Calls to functions that schedule events after returning
 require an initial/always process context and are rejected from final
-procedures (13.4.4). `fork` / `join_none` inside final procedures remains unsupported.
+procedures (13.4.4). Direct `fork ... join_none` declarations initialize during
+the final procedure, but its detached children never start: finals execute
+without blocking and no scheduled events execute afterward (9.2.3, 9.3.2).
 
 ### Programs {#programs}
 

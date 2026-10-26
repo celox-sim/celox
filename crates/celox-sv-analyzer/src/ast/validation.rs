@@ -191,8 +191,7 @@ fn validate_final(
             | StatementKind::WaitOrder { .. } => Some("wait statement"),
             StatementKind::Parallel { join, .. } if join != "join_none" => Some("fork-join block"),
             // 13.4.4 permits join_none in functions. Its child statements
-            // obey task rules, so leave the whole construct to the existing
-            // unsupported parallel-process binder rather than rejecting it.
+            // obey task rules rather than the parent's function restrictions.
             StatementKind::Parallel { .. } => continue,
             StatementKind::Assertion { keyword, .. } if keyword == "expect" => {
                 Some("expect statement")

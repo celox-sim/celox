@@ -299,6 +299,7 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
             |builder, (name, value)| builder.param(name, *value),
         );
         return Ok(match backend {
+            "interpreter" => Box::new(TimedBackend::new(builder.build_interpreter()?)),
             "native" => Box::new(TimedBackend::new(builder.build_native()?)),
             // The image goes through its container bytes, as an attached
             // image does, and the simulation takes its metadata from it.

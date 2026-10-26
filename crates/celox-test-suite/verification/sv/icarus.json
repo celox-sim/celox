@@ -3,6 +3,7 @@
     "icarus/aggregate_regressions.json",
     "icarus/always_comb.json",
     "icarus/class.json",
+    "icarus/fork_control.json",
     "icarus/generate.json",
     "icarus/hierarchy.json",
     "icarus/indexed_select.json",

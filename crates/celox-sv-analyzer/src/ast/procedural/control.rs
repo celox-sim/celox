@@ -33,6 +33,8 @@ enum Job {
         join: celox_design::ForkJoin,
         branches: Vec<Vec<Stmt>>,
         start: usize,
+        sensitivity: usize,
+        parent_body: system_functions::Body,
     },
     IfNext(IfState),
     IfBranch {
@@ -154,7 +156,14 @@ impl BodyBuilder<'_, '_, '_> {
                                 join,
                                 branches,
                                 start: output.len(),
+                                sensitivity: self.sensitivity_body.len(),
+                                parent_body: self.body,
                             });
+                            // Detached children obey task rules, independently
+                            // of the function/final procedure spawning them.
+                            if join == celox_design::ForkJoin::None {
+                                self.body = system_functions::Body::Initial;
+                            }
                             jobs.push(Job::Enter(id));
                         }
                     } else {
@@ -168,8 +177,21 @@ impl BodyBuilder<'_, '_, '_> {
                     join,
                     mut branches,
                     start,
+                    sensitivity,
+                    parent_body,
                 } => {
+                    self.body = parent_body;
                     let branch = output.split_off(start);
+                    // Folded-away statements still carry syntactic effects,
+                    // but belong to the child, not its function/final parent.
+                    // Preserve that boundary just as for executable branches.
+                    let discarded = self.sensitivity_body.split_off(sensitivity);
+                    if !discarded.is_empty() {
+                        self.sensitivity_body.push(Stmt::Fork {
+                            join,
+                            branches: vec![discarded],
+                        });
+                    }
                     let mut returns = false;
                     for stmt in &branch {
                         stmt.walk(&mut |s| returns |= matches!(s, Stmt::Return(_)));
@@ -191,7 +213,11 @@ impl BodyBuilder<'_, '_, '_> {
                         output.extend(self.block_item_declaration(declaration)?)
                     }
                     StatementKind::Parallel { items, join, .. } => {
-                        self.allow_timing("fork-join block")?;
+                        if join != "join_none"
+                            || matches!(self.body, system_functions::Body::Always)
+                        {
+                            self.allow_timing("fork-join block")?;
+                        }
                         self.push_scope();
                         let join = match join.as_str() {
                             "join" => celox_design::ForkJoin::All,

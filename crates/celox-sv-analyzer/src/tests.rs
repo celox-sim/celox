@@ -7197,14 +7197,90 @@ fn final_procedures_allow_direct_nba_and_unexecuted_scheduling_calls() {
 }
 
 #[test]
-fn final_join_none_is_unsupported_rather_than_a_function_statement_violation() {
-    let error = analyze_source(
+fn detached_children_obey_task_rules_in_functions_and_finals() {
+    for source in [
         "module Top; final fork #1; join_none endmodule",
-        Path::new("final_join_none.sv"),
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("fork-join block"), "{error}");
-    assert!(error.to_string().contains("final procedure"), "{error}");
+        "module Top; function void f(); fork #1; join_none endfunction initial f(); endmodule",
+    ] {
+        analyze_source(source, Path::new("join_none.sv")).unwrap();
+    }
+}
+
+#[test]
+fn folded_detached_children_keep_their_process_scope() {
+    for child in [
+        "if (0) #1;",
+        "if (1) ; else wait (value);",
+        "if (0) @(value);",
+        "if (0) delay_task();",
+        "fork begin if (0) #1; end join",
+        "if (0) fork #1; join",
+    ] {
+        for context in [
+            format!(
+                "function automatic void f(); fork begin {child} end join_none endfunction initial f();"
+            ),
+            format!("final fork begin {child} end join_none"),
+        ] {
+            let source = format!(
+                "module Top; bit value; task delay_task(); #1; endtask {context} endmodule"
+            );
+            analyze_source(&source, Path::new("folded_detached.sv"))
+                .unwrap_or_else(|error| panic!("{source}: {error}"));
+        }
+    }
+}
+
+#[test]
+fn folded_function_branches_still_reject_blocking_statements() {
+    for statement in [
+        "#1;",
+        "wait (value);",
+        "@(value);",
+        "delay_task();",
+        "fork #1; join",
+        "fork #1; join_any",
+    ] {
+        for branch in [
+            format!("if (0) {statement}"),
+            format!("if (1) ; else {statement}"),
+        ] {
+            let source = format!(
+                "module Top; bit value; task delay_task(); #1; endtask function automatic void f(); {branch} endfunction initial f(); endmodule"
+            );
+            assert!(
+                analyze_source(&source, Path::new("folded_blocking.sv")).is_err(),
+                "{source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn detached_function_scheduling_requires_a_process_caller() {
+    for body in [
+        "final f();",
+        "int initialized = f();",
+        "always_comb value = f();",
+        "always_ff @(posedge clk) value <= f();",
+    ] {
+        let source = format!(
+            "module Top; bit clk; int value; function int f(); fork #1; join_none return 1; endfunction {body} endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("invalid_join_none.sv")).is_err(),
+            "{source}"
+        );
+    }
+    for statement in ["#1;", "wait (1);", "fork #1; join", "fork #1; join_any"] {
+        let source = format!(
+            "module Top; function void f(); {statement} endfunction initial f(); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("blocking_function.sv")).is_err(),
+            "{source}"
+        );
+    }
 }
 
 #[test]

@@ -1210,3 +1210,29 @@ timed_cases! {
     fn fork_control_review_event_driven_caller_propagates_wait_fork_through_tasks = "fork_control::event_driven_caller_propagates_wait_fork_through_tasks";
     fn fork_control_review_event_driven_caller_spawns_untimed_children = "fork_control::event_driven_caller_spawns_untimed_children";
 }
+
+timed_cases! {
+    fn fork_control_function_join_none_automatic_values_outlive_returns = "fork_control::function_join_none_automatic_values_outlive_returns";
+    fn fork_control_function_join_none_children_can_call_timed_tasks = "fork_control::function_join_none_children_can_call_timed_tasks";
+    fn fork_control_function_join_none_preserves_expression_temporaries = "fork_control::function_join_none_preserves_expression_temporaries";
+    fn fork_control_function_join_none_retains_child_only_class_handle = "fork_control::function_join_none_retains_child_only_class_handle";
+    fn fork_control_function_join_none_event_driven_caller = "fork_control::function_join_none_event_driven_caller";
+    fn fork_control_function_join_none_calls_in_defaults_need_process_frames = "fork_control::function_join_none_calls_in_defaults_need_process_frames";
+}
+
+#[test]
+fn function_join_none_interpreter() {
+    for name in [
+        "automatic_values_outlive_returns",
+        "children_can_call_timed_tasks",
+        "calls_in_defaults_need_process_frames",
+        "event_driven_caller",
+        "preserves_expression_temporaries",
+        "retains_child_only_class_handle",
+    ] {
+        crate::suite::run_case(
+            &format!("fork_control::function_join_none_{name}"),
+            "interpreter",
+        );
+    }
+}
