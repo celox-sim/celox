@@ -8729,9 +8729,12 @@ fn timed_task_edge_drivers_are_checked_against_child_outputs() {
 }
 
 #[test]
-fn timed_task_edge_drivers_of_package_variables_are_checked_across_instances() {
-    let error = cranelift_build_error(
-        r#"
+fn timed_task_edge_processes_of_several_instances_may_write_a_package_variable() {
+    // `always` processes, unlike `always_ff`, may share their variables
+    // (IEEE 1800-2023 6.5, 9.2.2.4).
+    celox::Simulation::from_sv_sources(
+        vec![(
+            r#"
         package p; bit q; endpackage
         module Child(input bit clk);
             task automatic pause; #1; endtask
@@ -8741,11 +8744,12 @@ fn timed_task_edge_drivers_of_package_variables_are_checked_across_instances() {
             Child first(clk), second(clk);
         endmodule
     "#,
-    );
-    assert!(
-        error.contains("multiple drivers of package variable `p::q`"),
-        "{error}"
-    );
+            Path::new("timed_task_package_writers.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .unwrap_or_else(|error| panic!("{error}"));
 }
 
 mod aggregate_regressions {
