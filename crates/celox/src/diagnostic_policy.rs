@@ -86,6 +86,7 @@ impl DiagnosticPolicy {
                 code,
                 "mixed_timescale"
                     | "interface_array_query"
+                    | "interface_array_parameter"
                     | "unpacked_port_default"
                     | "multiple_always_ff_drivers"
                     | "inferred_latch"
