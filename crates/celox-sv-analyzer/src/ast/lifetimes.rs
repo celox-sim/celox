@@ -71,9 +71,12 @@ fn keep_in<T>(
 ) -> Result<(), AnalyzerError> {
     let mut index = 0;
     while index < stmts.len() {
+        // A sampled value of a static local is its value from an earlier
+        // time slot (IEEE 1800-2023 16.5.1), which the local keeps.
         if let Stmt::Local { name, init } = &stmts[index]
             && statics.contains_key(name)
             && (concurrent
+                || sampled_reads(&stmts[index + 1..], name)
                 || entry(
                     state,
                     name,
@@ -837,6 +840,25 @@ pub(super) fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
         | Stmt::Break
         | Stmt::Continue => Vec::new(),
     }
+}
+
+/// Whether a sampled value function in `stmts` reads `name`.
+fn sampled_reads(stmts: &[Stmt], name: &str) -> bool {
+    let mut found = false;
+    for stmt in stmts {
+        stmt.walk(&mut |stmt| {
+            for expr in stmt_exprs(stmt) {
+                visit_calls(expr, &mut |callee, args| {
+                    if let Callee::System(function) = callee
+                        && function.reads_sampled_values()
+                    {
+                        found |= args.iter().flatten().any(|arg| expr_reads(arg, name));
+                    }
+                });
+            }
+        });
+    }
+    found
 }
 
 /// Call `f` with the callee and arguments of every call in `expr`.
