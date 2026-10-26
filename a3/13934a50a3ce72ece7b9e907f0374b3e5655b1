@@ -1,0 +1,1 @@
+Drop obsolete external Depends-On marker after PR 2201 merged; publish against master to avoid stale stack-base validation
