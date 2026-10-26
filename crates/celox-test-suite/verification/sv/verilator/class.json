@@ -441,6 +441,17 @@
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
+      "name": "class::shallow_copies",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "class::specialization_keys_follow_the_bound_parameters",
       "phase": "execute",
       "status": "passed",
