@@ -7,6 +7,9 @@
 //! calls that are not system functions. Bodies are interpreted from their
 //! procedural statements.
 
+mod value;
+use value::Value;
+
 use num_bigint::BigUint;
 use std::cell::{Cell, RefCell};
 
@@ -78,6 +81,9 @@ impl ConstantEnvironment for Environment<'_> {
     }
     fn function_state(&self) -> Option<&State> {
         Some(self.functions)
+    }
+    fn literal(&self, name: &str) -> Option<&typecheck::IntegralLiteral> {
+        self.constants.literal(name)
     }
 }
 
@@ -829,7 +835,7 @@ pub(super) fn eval_expression_literal(
     constants: &HashMap<String, i128>,
 ) -> Option<typecheck::IntegralLiteral> {
     let Expr::Call {
-        callee: Callee::Subroutine(name),
+        callee: Callee::Subroutine(_),
         ..
     } = expr
     else {
@@ -840,24 +846,7 @@ pub(super) fn eval_expression_literal(
         functions: state,
     };
     let constants: &dyn ConstantEnvironment = &env;
-    let functions = state.functions.borrow().functions.clone();
-    let (_, ty) = functions.get(name)?.return_var.as_ref()?;
-    let width = ty
-        .resolved_width()
-        .or_else(|| typecheck::resolve_packed_width_in_env(ty.packed_ranges(), constants))?;
-    let mut frame = Frame {
-        constants,
-        values: HashMap::default(),
-        types: HashMap::default(),
-        temporaries: 0,
-        iterations: 0,
-    };
-    let value = frame.eval(expr)?;
-    typecheck::parse_integral_literal(&format_typed_parameter_literal(
-        value,
-        width,
-        ty.is_signed(),
-    ))
+    Frame::new(constants).eval(expr).map(Value::into_literal)
 }
 
 /// The value of a call of an installed constant function.
@@ -866,26 +855,24 @@ pub(crate) fn eval_call(
     args: &[crate::ir::ConstExpr],
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
-    let state = constants.function_state()?;
-    let functions = state.functions.borrow().functions.clone();
-    let function = functions.get(name)?;
-    let values = args
-        .iter()
-        .map(|arg| crate::typecheck::eval_const_expr_in_env(arg, constants))
-        .collect::<Option<Vec<_>>>()?;
-    let depth = state.depth.get();
-    if depth >= MAX_DEPTH {
-        return None;
-    }
-    struct DepthGuard<'a>(&'a Cell<usize>, usize);
-    impl Drop for DepthGuard<'_> {
-        fn drop(&mut self) {
-            self.0.set(self.1);
-        }
-    }
-    state.depth.set(depth + 1);
-    let _depth = DepthGuard(&state.depth, depth);
-    call(function, &values, constants)
+    eval_ir_call(name, args, constants)?.number().copied()
+}
+
+fn eval_ir_call(
+    name: &str,
+    args: &[crate::ir::ConstExpr],
+    constants: &dyn ConstantEnvironment,
+) -> Option<Value> {
+    let expr = Expr::Call {
+        callee: Callee::Subroutine(name.into()),
+        args: args
+            .iter()
+            .cloned()
+            .map(|arg| Some(parameters::const_expr_to_expr(arg.into())))
+            .collect(),
+        arg_order: Vec::new(),
+    };
+    Frame::new(constants).eval(&expr)
 }
 
 /// Preserve the declared result type when freezing a caller's function value.
@@ -899,67 +886,80 @@ pub(super) fn eval_call_literal(
         constants,
         functions: state,
     };
-    let constants: &dyn ConstantEnvironment = &env;
-    let functions = state.functions.borrow().functions.clone();
-    let (_, ty) = functions.get(name)?.return_var.as_ref()?;
-    let width = ty
-        .resolved_width()
-        .or_else(|| typecheck::resolve_packed_width_in_env(ty.packed_ranges(), constants))?;
-    let value = eval_call(name, args, constants)?;
-    typecheck::parse_integral_literal(&format_typed_parameter_literal(
-        value,
-        width,
-        ty.is_signed(),
-    ))
+    eval_ir_call(name, args, &env).map(Value::into_literal)
 }
 
+fn call_value(name: &str, args: &[Value], constants: &dyn ConstantEnvironment) -> Option<Value> {
+    let state = constants.function_state()?;
+    let functions = state.functions.borrow().functions.clone();
+    let function = functions.get(name)?;
+    let depth = state.depth.get();
+    if depth >= MAX_DEPTH {
+        return None;
+    }
+    struct DepthGuard<'a>(&'a Cell<usize>, usize);
+    impl Drop for DepthGuard<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.1);
+        }
+    }
+    state.depth.set(depth + 1);
+    let _depth = DepthGuard(&state.depth, depth);
+    call_in_frame(function, args, Frame::new(constants))
+}
+
+#[cfg(test)]
 fn call(
     function: &ConstantFunction,
     args: &[i128],
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
-    let mut frame = Frame {
-        constants,
-        values: HashMap::default(),
-        types: HashMap::default(),
-        temporaries: 0,
-        iterations: 0,
-    };
-    let mut values = args.to_vec();
-    for position in args.len()..function.params.len() {
-        values.push(frame.eval(function.argument_defaults[position].as_ref()?)?);
-    }
-    call_in_frame(function, &values, frame)
+    let args = args.iter().copied().map(Value::integer).collect::<Vec<_>>();
+    call_in_frame(function, &args, Frame::new(constants))?
+        .number()
+        .copied()
 }
 
-fn call_in_frame(function: &ConstantFunction, args: &[i128], mut frame: Frame<'_>) -> Option<i128> {
-    if args.len() != function.params.len() {
+fn call_in_frame(
+    function: &ConstantFunction,
+    args: &[Value],
+    mut frame: Frame<'_>,
+) -> Option<Value> {
+    if args.len() > function.params.len() {
         return None;
     }
     #[cfg(test)]
     FUNCTION_CALLS.with(|count| count.set(count.get() + 1));
-    for ((name, r#type), value) in function.params.iter().zip(args) {
+    for (position, (name, r#type)) in function.params.iter().enumerate() {
         frame.declare(name, r#type)?;
-        frame.set(name, *value);
+        let value = match args.get(position) {
+            Some(value) => value.clone(),
+            None => {
+                let width = frame.type_of(name)?.0;
+                frame.assignment_value(function.argument_defaults[position].as_ref()?, width)?
+            }
+        };
+        frame.set(name, value)?;
     }
     let (return_name, return_type) = function.return_var.as_ref()?;
     frame.declare(return_name, return_type)?;
-    frame.set(return_name, 0);
+    frame.return_width = Some(frame.type_of(return_name)?.0);
+    frame.set(return_name, Value::integer(0))?;
     match frame.block(&function.body)? {
         Flow::Return(Some(value)) => {
-            frame.set(return_name, value);
+            frame.set(return_name, value)?;
         }
         Flow::Next | Flow::Return(None) => {}
         Flow::Break | Flow::Continue => return None,
     }
-    frame.values.get(return_name).copied()
+    frame.values.remove(return_name)
 }
 
 enum Flow {
     Next,
     Break,
     Continue,
-    Return(Option<i128>),
+    Return(Option<Value>),
 }
 
 /// Calls borrow their caller's values; only parameters, locals, the return
@@ -967,8 +967,10 @@ enum Flow {
 /// overlay, preserving the former copied environment's lookup precedence.
 struct Frame<'a> {
     constants: &'a dyn ConstantEnvironment,
-    values: HashMap<String, i128>,
+    values: HashMap<String, Value>,
     types: HashMap<String, (usize, bool)>,
+    two_state: HashSet<String>,
+    return_width: Option<usize>,
     temporaries: usize,
     iterations: usize,
 }
@@ -992,11 +994,32 @@ impl ConstantEnvironment for Frame<'_> {
         self.constants.function_state()
     }
     fn get(&self, name: &str) -> Option<&i128> {
-        self.values.get(name).or_else(|| self.constants.get(name))
+        match self.values.get(name) {
+            Some(value) => value.number(),
+            None => self.constants.get(name),
+        }
+    }
+    fn literal(&self, name: &str) -> Option<&typecheck::IntegralLiteral> {
+        match self.values.get(name) {
+            Some(value) => value.wide(),
+            None => self.constants.literal(name),
+        }
     }
 }
 
-impl Frame<'_> {
+impl<'a> Frame<'a> {
+    fn new(constants: &'a dyn ConstantEnvironment) -> Self {
+        Self {
+            constants,
+            values: HashMap::default(),
+            types: HashMap::default(),
+            two_state: HashSet::default(),
+            return_width: None,
+            temporaries: 0,
+            iterations: 0,
+        }
+    }
+
     fn type_of(&self, name: &str) -> Option<(usize, bool)> {
         self.types.get(name).copied().or_else(|| {
             dimensions::parameter_type_from_lookup(name, &|marker| {
@@ -1020,17 +1043,29 @@ impl Frame<'_> {
                 crate::typecheck::resolve_packed_width_in_env(r#type.packed_ranges(), self)
             })?
             .max(1);
+        if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+            return None;
+        }
+        if r#type.kind() == crate::ir::TypeKind::Bit {
+            self.two_state.insert(name.to_string());
+        }
         self.types
             .insert(name.to_string(), (width, r#type.is_signed()));
         Some(())
     }
 
-    fn set(&mut self, name: &str, value: i128) {
+    fn set(&mut self, name: &str, value: Value) -> Option<()> {
         let value = match self.type_of(name) {
-            Some((width, signed)) => fit(value, width, signed),
+            Some((width, signed)) => value.resize(width, signed)?,
             None => value,
         };
+        let value = if self.two_state.contains(name) {
+            value.into_two_state()
+        } else {
+            value
+        };
         self.values.insert(name.to_string(), value);
+        Some(())
     }
 
     fn tick(&mut self) -> Option<()> {
@@ -1038,44 +1073,52 @@ impl Frame<'_> {
         (self.iterations <= MAX_ITERATIONS).then_some(())
     }
 
-    fn eval(&mut self, expr: &Expr) -> Option<i128> {
+    fn eval(&mut self, expr: &Expr) -> Option<Value> {
         let lowered: crate::ir::ConstExpr = self.lower(expr)?.into();
-        // The literal evaluator propagates expression widths; the plain one
-        // covers what it does not model.
         if let Some(literal) =
-            crate::typecheck::eval_const_integral_literal_in_env(&lowered, self, &|name| {
+            typecheck::eval_const_integral_literal_in_env(&lowered, self, &|name| {
                 self.type_of(name)
             })
         {
-            return crate::typecheck::integral_literal_as_i128(&literal, literal.signed);
+            return Some(Value::from_literal(literal));
         }
-        self.eval_lowered(&lowered)
+        self.eval_lowered(&lowered).map(Value::integer)
     }
 
-    /// A bare unbased fill is assignment-sized, rather than a 32-bit value.
-    /// Fill the interpreter's storage; `assign`/`set` narrows it to the target.
-    fn assignment_value(&mut self, expr: &Expr) -> Option<i128> {
+    fn assignment_value(&mut self, expr: &Expr, width: usize) -> Option<Value> {
+        if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+            return None;
+        }
         if let Expr::Literal(text) = expr
             && text.trim_start().starts_with('\'')
-            && let Some(text) = resize_unbased_fill_literal_for_cast(text, 128, false)
+            && let Some(text) = resize_unbased_fill_literal_for_cast(text, width, false)
         {
-            let literal = typecheck::parse_integral_literal(&text)?;
-            return typecheck::integral_literal_as_i128(&literal, false);
+            return typecheck::parse_integral_literal(&text).map(Value::from_literal);
         }
-        self.eval(expr)
+        let lowered: crate::ir::ConstExpr = self.lower(expr)?.into();
+        if let Some(literal) = typecheck::eval_const_assignment_in_env(
+            &lowered,
+            self,
+            &|name| self.type_of(name),
+            width,
+        ) {
+            return Some(Value::from_literal(literal));
+        }
+        self.eval_lowered(&lowered).map(Value::integer)
     }
 
     fn truth(&mut self, expr: &Expr) -> Option<bool> {
-        Some(self.eval(expr)? != 0)
+        // An unknown procedural condition does not select the then branch.
+        Some(self.eval(expr)?.truth() == Some(true))
     }
 
-    /// A temporary holding `value` with the given type.
-    fn temporary(&mut self, value: i128, width: usize, signed: bool) -> ConstExpr {
+    fn temporary(&mut self, value: Value) -> Option<ConstExpr> {
+        let (width, signed) = value.r#type();
         let name = format!("\0constant_function_temporary{}", self.temporaries);
         self.temporaries += 1;
         self.types.insert(name.clone(), (width.max(1), signed));
-        self.set(&name, value);
-        ConstExpr::Ident(name)
+        self.set(&name, value)?;
+        Some(ConstExpr::Ident(name))
     }
 
     /// `expr` as a constant expression, with the parts the constant
@@ -1099,11 +1142,46 @@ impl Frame<'_> {
                 else_expr,
             } => {
                 // Only the selected arm is evaluated.
-                if self.truth(condition)? {
-                    self.lower(then_expr)?
-                } else {
-                    self.lower(else_expr)?
+                match self.eval(condition)?.truth() {
+                    Some(true) => self.lower(then_expr)?,
+                    Some(false) => self.lower(else_expr)?,
+                    None => ConstExpr::Mux {
+                        condition: Box::new(self.lower(condition)?),
+                        then_expr: Box::new(self.lower(then_expr)?),
+                        else_expr: Box::new(self.lower(else_expr)?),
+                    },
                 }
+            }
+            Expr::Call {
+                callee: Callee::Subroutine(name),
+                args,
+                ..
+            } => {
+                let functions = self
+                    .constants
+                    .function_state()?
+                    .functions
+                    .borrow()
+                    .functions
+                    .clone();
+                let function = functions.get(name)?;
+                let actuals = resolved_arguments(
+                    self.constants.function_state()?,
+                    &Callee::Subroutine(name.clone()),
+                    args,
+                )?;
+                let mut values = Vec::with_capacity(actuals.len());
+                for (arg, (_, ty)) in actuals.iter().zip(&function.params) {
+                    let width = ty.resolved_width().or_else(|| {
+                        typecheck::resolve_packed_width_in_env(ty.packed_ranges(), self)
+                    })?;
+                    values.push(self.assignment_value(arg, width)?);
+                }
+                if actuals.len() > function.params.len() {
+                    return None;
+                }
+                let value = call_value(name, &values, self)?;
+                self.temporary(value)?
             }
             Expr::Call { callee, args, .. } => ConstExpr::Function {
                 callee: callee.clone(),
@@ -1113,23 +1191,30 @@ impl Frame<'_> {
                     .collect::<Option<_>>()?,
                 site: None,
             },
-            Expr::Select { expr, msb, lsb, .. } => {
-                let value = self.eval(expr)?;
+            Expr::Select {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => {
                 let msb = self.eval_lowered(&msb.clone().into())?;
                 let lsb = self.eval_lowered(&lsb.clone().into())?;
-                let (high, low) = (msb.max(lsb), msb.min(lsb));
-                let width = usize::try_from(high - low).ok()? + 1;
-                let shifted = value.checked_shr(u32::try_from(low).ok()?)?;
-                self.temporary(fit(shifted, width, false), width, false)
+                ConstExpr::SelectRange {
+                    expr: Box::new(self.lower(expr)?),
+                    msb: Box::new(const_expr_from_i128(msb)),
+                    lsb: Box::new(const_expr_from_i128(lsb)),
+                    signed: *signed,
+                }
             }
             Expr::Resize {
                 expr,
                 width,
                 signed,
-            } => {
-                let value = self.eval(expr)?;
-                self.temporary(fit(value, *width, *signed), *width, *signed)
-            }
+            } => ConstExpr::Resize {
+                expr: Box::new(self.lower(expr)?),
+                width: *width,
+                signed: *signed,
+            },
             Expr::Inside { expr, items } => {
                 let mut found = false;
                 for item in items {
@@ -1159,14 +1244,13 @@ impl Frame<'_> {
                 if literal.width == 0 {
                     return None;
                 }
-                let value = crate::typecheck::integral_literal_as_i128(&literal, false)?;
-                self.temporary(value, literal.width, false)
+                self.temporary(Value::from_literal(literal))?
             }
         })
     }
 
     /// Fold concatenations with each operand's own width before the surrounding
-    /// assignment can resize the value. This interpreter stores at most 128 bits.
+    /// assignment can resize the value.
     fn concat_literal(&mut self, expr: &Expr) -> Option<crate::typecheck::IntegralLiteral> {
         self.tick()?;
         let (parts, count) = match expr {
@@ -1190,14 +1274,14 @@ impl Frame<'_> {
         for part in parts {
             let literal = self.concat_literal(part)?;
             width = width.checked_add(literal.width)?;
-            if width > 128 {
+            if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
                 return None;
             }
             value = (value << literal.width) | literal.value;
             mask = (mask << literal.width) | literal.mask;
         }
         let total = width.checked_mul(count)?;
-        if total > 128 {
+        if total > constant_folding::MAX_CONSTANT_CONCAT_BITS {
             return None;
         }
         let mut result_value = BigUint::default();
@@ -1225,11 +1309,11 @@ impl Frame<'_> {
         Some(Flow::Next)
     }
 
-    fn assign(&mut self, lhs: &LValue, value: i128) -> Option<()> {
+    fn assign(&mut self, lhs: &LValue, value: Value) -> Option<()> {
         match lhs {
             LValue::Ident(name) => {
                 if self.type_of(name).is_none() {
-                    let r#type = self
+                    let ty = self
                         .constants
                         .function_state()?
                         .functions
@@ -1237,29 +1321,16 @@ impl Frame<'_> {
                         .locals
                         .get(name)
                         .cloned()?;
-                    self.declare(name, &r#type)?;
+                    self.declare(name, &ty)?;
                 }
-                self.set(name, value);
+                self.set(name, value)?;
             }
             LValue::Select { name, msb, lsb, .. } => {
                 let msb = self.eval_lowered(&msb.clone().into())?;
                 let lsb = self.eval_lowered(&lsb.clone().into())?;
-                let (high, low) = (msb.max(lsb), msb.min(lsb));
-                let width = u32::try_from(high.checked_sub(low)?).ok()?.checked_add(1)?;
-                let low = u32::try_from(low).ok()?;
-                if low.checked_add(width)? > 128 {
-                    return None;
-                }
-                let mask = if width == 128 {
-                    u128::MAX
-                } else {
-                    (1u128 << width) - 1
-                } << low;
-                let old = *self.get(name)? as u128;
-                self.set(
-                    name,
-                    ((old & !mask) | (((value as u128) << low) & mask)) as i128,
-                );
+                let old = self.values.get(name)?.clone();
+                let value = old.write(msb.max(lsb), msb.min(lsb), value)?;
+                self.set(name, value)?;
             }
         }
         Some(())
@@ -1268,7 +1339,16 @@ impl Frame<'_> {
     fn stmt(&mut self, stmt: &Stmt) -> Option<Flow> {
         match stmt {
             Stmt::Assign { lhs, rhs, .. } => {
-                let value = self.assignment_value(rhs)?;
+                let width = match lhs {
+                    LValue::Ident(name) => self.type_of(name)?.0,
+                    LValue::Select { msb, lsb, .. } => usize::try_from(
+                        self.eval_lowered(&msb.clone().into())?
+                            .abs_diff(self.eval_lowered(&lsb.clone().into())?),
+                    )
+                    .ok()?
+                    .checked_add(1)?,
+                };
+                let value = self.assignment_value(rhs, width)?;
                 self.assign(lhs, value)?;
             }
             Stmt::Local { name, init } => {
@@ -1282,10 +1362,10 @@ impl Frame<'_> {
                     .cloned()?;
                 self.declare(name, &r#type)?;
                 let value = match init {
-                    Some(init) => self.assignment_value(init)?,
-                    None => 0,
+                    Some(init) => self.assignment_value(init, self.type_of(name)?.0)?,
+                    None => Value::integer(0),
                 };
-                self.set(name, value);
+                self.set(name, value)?;
             }
             Stmt::If {
                 condition,
@@ -1350,7 +1430,7 @@ impl Frame<'_> {
                     return None;
                 }
                 let mut remaining = match kind {
-                    LoopKind::Repeat(count) => Some(self.eval(count)?),
+                    LoopKind::Repeat(count) => Some(*self.eval(count)?.number()?),
                     _ => None,
                 };
                 let mut first = true;
@@ -1384,7 +1464,10 @@ impl Frame<'_> {
             Stmt::Continue => return Some(Flow::Continue),
             Stmt::Return(value) => {
                 let value = match value {
-                    Some(value) => Some(self.assignment_value(value)?),
+                    Some(value) => {
+                        let width = self.return_width?;
+                        Some(self.assignment_value(value, width)?)
+                    }
                     None => None,
                 };
                 return Some(Flow::Return(value));

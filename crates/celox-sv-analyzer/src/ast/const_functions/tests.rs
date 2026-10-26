@@ -198,18 +198,25 @@ fn copied_call(
     };
     call_in_frame(
         function,
-        args,
+        &args.iter().copied().map(Value::integer).collect::<Vec<_>>(),
         Frame {
             constants: &context,
-            values: constants.clone(),
+            values: constants
+                .iter()
+                .map(|(name, value)| (name.clone(), Value::integer(*value)))
+                .collect(),
             types: parameter_types_from_const_env(constants)
                 .into_iter()
                 .map(|(name, ty)| (name, (ty.width, ty.signed)))
                 .collect(),
+            two_state: HashSet::default(),
+            return_width: None,
             temporaries: 0,
             iterations: 0,
         },
-    )
+    )?
+    .number()
+    .copied()
 }
 
 #[test]
