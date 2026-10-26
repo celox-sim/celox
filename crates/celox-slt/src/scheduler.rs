@@ -2431,8 +2431,12 @@ pub struct ScheduleResult<Addr> {
 /// Byte `p` of `flags`, a two-state object, is partition `p`'s dirty flag:
 /// the settle runs the partition only when it is not zero, and clears it.
 /// A partition that runs sets the flags of the partitions reading what it
-/// writes; every other writer of state a partition reads must set its flag
-/// too ([`SettlePartition::reads`]).
+/// changed; every other writer of state a partition reads must set its flag
+/// too ([`SettlePartition::reads`]). Byte `N` (for `N` partitions) is the
+/// untracked byte, which runs every partition on every settle. Byte `N + 1`
+/// is computed when the settle starts: it runs every partition of this
+/// settle when the untracked byte or enough flags are set, and the
+/// partitions then skip comparing what they wrote.
 #[derive(Clone, Copy, Debug)]
 pub struct SettlePartitioning<Addr> {
     pub flags: Addr,
@@ -3509,6 +3513,12 @@ struct PlannedPartition<Addr> {
     pinned: bool,
 }
 
+/// Run every partition of a settle that starts with at least
+/// `1 / FULL_SETTLE_DIVISOR` of its flags set (or the untracked byte), and
+/// skip comparing what the partitions write: running the whole settle then
+/// costs about a single pass.
+const FULL_SETTLE_DIVISOR: usize = 3;
+
 /// A chunk of an object a partition writes, compared before and after the
 /// partition runs.
 struct WatchedChunk<Addr> {
@@ -3516,6 +3526,10 @@ struct WatchedChunk<Addr> {
     offset: SIROffset,
     width: usize,
     readers: Vec<usize>,
+    /// The readers at or before the partition in the schedule: the only ones
+    /// marked when the settle runs every partition, since the others run
+    /// after it in the same settle.
+    earlier: Vec<usize>,
 }
 
 /// The widest chunk of a written object compared at once.
@@ -3812,6 +3826,11 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                         ),
                         width: chunk,
                         readers: targets.clone(),
+                        earlier: targets
+                            .iter()
+                            .copied()
+                            .filter(|&reader| reader <= partition)
+                            .collect(),
                     });
                 }
             }
@@ -3910,15 +3929,161 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         }
     }
 
-    /// Open partition `index`: run it only when its flag or the untracked
-    /// byte (`untracked`) is set, and clear its flag. Values computed before
-    /// it may be reused inside, but not the other way round, so the
-    /// expression cache starts over.
+    /// Start a settle of `count` partitions: run all of them when the
+    /// untracked byte or at least `1 / FULL_SETTLE_DIVISOR` of their flags
+    /// are set, recorded in the full byte.
+    fn begin_settle(&mut self, flags: Addr, count: usize) {
+        let all = self.builder.alloc_bit(count * 8, false);
+        self.builder.emit(SIRInstruction::Load(
+            all,
+            flags,
+            SIROffset::Static(0),
+            count * 8,
+        ));
+        let count_width = UnaryOp::PopCount.result_width(count * 8);
+        let dirty = self.builder.alloc_bit(count_width, false);
+        self.builder
+            .emit(SIRInstruction::Unary(dirty, UnaryOp::PopCount, all));
+        let threshold = self.builder.alloc_bit(count_width, false);
+        self.builder.emit(SIRInstruction::Imm(
+            threshold,
+            SIRValue::new(count.div_ceil(FULL_SETTLE_DIVISOR) as u64),
+        ));
+        let busy = self.builder.alloc_bit(1, false);
+        self.builder.emit(SIRInstruction::Binary(
+            busy,
+            dirty,
+            BinaryOp::GeU,
+            threshold,
+        ));
+        let untracked = self.builder.alloc_bit(8, false);
+        self.builder.emit(SIRInstruction::Load(
+            untracked,
+            flags,
+            SIROffset::Static(count * 8),
+            8,
+        ));
+        let zero = self.builder.alloc_bit(8, false);
+        self.builder
+            .emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
+        let raw = self.builder.alloc_bit(1, false);
+        self.builder
+            .emit(SIRInstruction::Binary(raw, untracked, BinaryOp::Ne, zero));
+        let full = self.builder.alloc_bit(1, false);
+        self.builder
+            .emit(SIRInstruction::Binary(full, busy, BinaryOp::Or, raw));
+        let one = self.builder.alloc_bit(8, false);
+        self.builder
+            .emit(SIRInstruction::Imm(one, SIRValue::new(1u64)));
+        let byte = self.builder.alloc_bit(8, false);
+        self.builder
+            .emit(SIRInstruction::Mux(byte, full, one, zero));
+        self.builder.emit(SIRInstruction::Store(
+            flags,
+            SIROffset::Static((count + 1) * 8),
+            8,
+            byte,
+            Vec::new(),
+            Vec::new(),
+        ));
+    }
+
+    /// Whether the settle of `count` partitions runs every partition.
+    fn settle_is_full(&mut self, flags: Addr, count: usize) -> RegisterId {
+        let byte = self.builder.alloc_bit(8, false);
+        self.builder.emit(SIRInstruction::Load(
+            byte,
+            flags,
+            SIROffset::Static((count + 1) * 8),
+            8,
+        ));
+        let zero = self.builder.alloc_bit(8, false);
+        self.builder
+            .emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
+        let full = self.builder.alloc_bit(1, false);
+        self.builder
+            .emit(SIRInstruction::Binary(full, byte, BinaryOp::Ne, zero));
+        full
+    }
+
+    /// Compare each chunk with its value before the partition ran (`old`),
+    /// and set the flags of its `readers` when it changed: one change bit per
+    /// reader set, then one flag update per reader.
+    fn mark_changed_readers(
+        &mut self,
+        flags: Addr,
+        one: RegisterId,
+        chunks: Vec<(&WatchedChunk<Addr>, &[usize], RegisterId)>,
+    ) {
+        let mut set_changes: Vec<(&[usize], RegisterId)> = Vec::new();
+        for (chunk, readers, old) in chunks {
+            let new = self.builder.alloc_logic(chunk.width);
+            self.builder.emit(SIRInstruction::Load(
+                new,
+                chunk.object,
+                chunk.offset.clone(),
+                chunk.width,
+            ));
+            // Both planes: an X turning into a known value is a change.
+            let changed = self.builder.alloc_bit(1, false);
+            self.builder
+                .emit(SIRInstruction::Binary(changed, old, BinaryOp::NeCase, new));
+            match set_changes.iter_mut().find(|(set, _)| *set == readers) {
+                Some((_, any)) => {
+                    let both = self.builder.alloc_bit(1, false);
+                    self.builder
+                        .emit(SIRInstruction::Binary(both, *any, BinaryOp::Or, changed));
+                    *any = both;
+                }
+                None => set_changes.push((readers, changed)),
+            }
+        }
+        let mut reader_changes: BTreeMap<usize, RegisterId> = BTreeMap::new();
+        for (readers, changed) in set_changes {
+            for &reader in readers {
+                let any = match reader_changes.get(&reader).copied() {
+                    Some(any) => {
+                        let both = self.builder.alloc_bit(1, false);
+                        self.builder
+                            .emit(SIRInstruction::Binary(both, any, BinaryOp::Or, changed));
+                        both
+                    }
+                    None => changed,
+                };
+                reader_changes.insert(reader, any);
+            }
+        }
+        for (reader, changed) in reader_changes {
+            let flag = self.builder.alloc_bit(8, false);
+            self.builder.emit(SIRInstruction::Load(
+                flag,
+                flags,
+                SIROffset::Static(reader * 8),
+                8,
+            ));
+            let marked = self.builder.alloc_bit(8, false);
+            self.builder
+                .emit(SIRInstruction::Mux(marked, changed, one, flag));
+            self.builder.emit(SIRInstruction::Store(
+                flags,
+                SIROffset::Static(reader * 8),
+                8,
+                marked,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+    }
+
+    /// Open partition `index` of `count`: run it only when its flag or the
+    /// full byte is set, and clear its flag. Values computed before it may
+    /// be reused inside, but not the other way round, so the expression
+    /// cache starts over.
     fn begin_partition(
         &mut self,
         flags: Addr,
         index: usize,
-        untracked: usize,
+        count: usize,
         partition: &PlannedPartition<Addr>,
     ) {
         self.flush_pending_folds();
@@ -3938,7 +4103,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             self.builder.emit(SIRInstruction::Load(
                 all,
                 flags,
-                SIROffset::Static(untracked * 8),
+                SIROffset::Static((count + 1) * 8),
                 8,
             ));
             let flag = self.builder.alloc_bit(8, false);
@@ -3984,48 +4149,49 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         }
     }
 
-    /// Close a partition: set the flags of the partitions reading what it
-    /// changed, then join the path that skipped it.
-    fn end_partition(&mut self, flags: Addr, partition: &PlannedPartition<Addr>) {
+    /// Close a partition of a settle of `count`: set the flags of the
+    /// partitions reading what it changed, then join the path that skipped
+    /// it.
+    fn end_partition(&mut self, flags: Addr, count: usize, partition: &PlannedPartition<Addr>) {
         self.flush_pending_folds();
         if !partition.watched.is_empty() {
             let one = self.builder.alloc_bit(8, false);
             self.builder
                 .emit(SIRInstruction::Imm(one, SIRValue::new(1u64)));
             let old = std::mem::take(&mut self.partition_old);
-            for (chunk, old) in partition.watched.iter().zip(old) {
-                let new = self.builder.alloc_logic(chunk.width);
-                self.builder.emit(SIRInstruction::Load(
-                    new,
-                    chunk.object,
-                    chunk.offset.clone(),
-                    chunk.width,
-                ));
-                // Both planes: an X turning into a known value is a change.
-                let changed = self.builder.alloc_bit(1, false);
-                self.builder
-                    .emit(SIRInstruction::Binary(changed, old, BinaryOp::NeCase, new));
-                for &reader in &chunk.readers {
-                    let flag = self.builder.alloc_bit(8, false);
-                    self.builder.emit(SIRInstruction::Load(
-                        flag,
-                        flags,
-                        SIROffset::Static(reader * 8),
-                        8,
-                    ));
-                    let marked = self.builder.alloc_bit(8, false);
-                    self.builder
-                        .emit(SIRInstruction::Mux(marked, changed, one, flag));
-                    self.builder.emit(SIRInstruction::Store(
-                        flags,
-                        SIROffset::Static(reader * 8),
-                        8,
-                        marked,
-                        Vec::new(),
-                        Vec::new(),
-                    ));
-                }
-            }
+            let full = self.settle_is_full(flags, count);
+            let skip = self.builder.new_block();
+            let compare = self.builder.new_block();
+            let join = self.builder.new_block();
+            self.builder.seal_block(SIRTerminator::Branch {
+                cond: full,
+                true_block: (skip, Vec::new()),
+                false_block: (compare, Vec::new()),
+            });
+            // Every partition runs in this settle: only the earlier readers
+            // need their flags, for the next one.
+            self.builder.switch_to_block(skip);
+            let earlier: Vec<_> = partition
+                .watched
+                .iter()
+                .zip(&old)
+                .filter(|(chunk, _)| !chunk.earlier.is_empty())
+                .map(|(chunk, &old)| (chunk, chunk.earlier.as_slice(), old))
+                .collect();
+            self.mark_changed_readers(flags, one, earlier);
+            self.builder
+                .seal_block(SIRTerminator::Jump(join, Vec::new()));
+            self.builder.switch_to_block(compare);
+            let all = partition
+                .watched
+                .iter()
+                .zip(&old)
+                .map(|(chunk, &old)| (chunk, chunk.readers.as_slice(), old))
+                .collect();
+            self.mark_changed_readers(flags, one, all);
+            self.builder
+                .seal_block(SIRTerminator::Jump(join, Vec::new()));
+            self.builder.switch_to_block(join);
         }
         if !partition.marks.is_empty() {
             let one = self.builder.alloc_bit(8, false);
@@ -4547,7 +4713,13 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         if let Some((plan, flags)) = &plan {
             if let Some(partition) = plan.first_work.iter().position(|&first| first == index) {
                 if partition > 0 {
-                    lowering.end_partition(*flags, &plan.partitions[partition - 1]);
+                    lowering.end_partition(
+                        *flags,
+                        plan.partitions.len(),
+                        &plan.partitions[partition - 1],
+                    );
+                } else {
+                    lowering.begin_settle(*flags, plan.partitions.len());
                 }
                 lowering.begin_partition(
                     *flags,
@@ -4567,7 +4739,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     if let Some((plan, flags)) = &plan
         && let Some(last) = plan.partitions.last()
     {
-        lowering.end_partition(*flags, last);
+        lowering.end_partition(*flags, plan.partitions.len(), last);
     }
     // Flush the final exact grouped-fold run after the SCC loop.
     lowering.flush_pending_folds();
@@ -5279,8 +5451,9 @@ mod tests {
             ]
         );
         assert!(result.partitions.iter().all(|partition| !partition.pinned));
-        // Each partition loads its own flag and the untracked-writes flag
-        // after them, and sets its reader's when it changed what it wrote.
+        // The settle starts by reading the untracked byte (24) to decide the
+        // full byte (32). Each partition loads its own flag and the full
+        // byte, and sets its reader's flag when it changed what it wrote.
         let mut loaded = Vec::new();
         let mut stored = Vec::new();
         let mut compares = 0;
@@ -5302,11 +5475,13 @@ mod tests {
         }
         loaded.sort_unstable();
         stored.sort_unstable();
-        // Guards of 0, 8 and 16, the untracked byte for each, and the
-        // readers' flags of partitions 1 and 2 before a conditional mark.
-        assert_eq!(loaded, vec![0, 8, 8, 16, 16, 24, 24, 24]);
-        // The clears of all three flags, and the marks of partitions 1 and 2.
-        assert_eq!(stored, vec![0, 8, 8, 16, 16]);
+        // Guards of 0, 8 and 16, the readers' flags of partitions 1 and 2
+        // before a conditional mark, the untracked byte, and the full byte
+        // for the three guards and the two partitions that compare.
+        assert_eq!(loaded, vec![0, 8, 8, 16, 16, 24, 32, 32, 32, 32, 32]);
+        // The clears of all three flags, the marks of partitions 1 and 2,
+        // and the full byte.
+        assert_eq!(stored, vec![0, 8, 8, 16, 16, 32]);
         // 11 and 12 are compared before their readers are marked.
         assert_eq!(compares, 2);
     }
