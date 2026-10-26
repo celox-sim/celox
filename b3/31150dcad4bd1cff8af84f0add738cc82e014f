@@ -1,1 +1,1 @@
-Take over SVA review work and rebase the remaining stack after #1878 merged; preserve existing sampled-value fixes.
+Rebase on the just-merged fork and process-control stack; advance image versions above master version 41.
