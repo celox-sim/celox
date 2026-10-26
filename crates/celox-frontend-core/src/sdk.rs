@@ -1973,6 +1973,7 @@ pub fn lower_frontend_artifact(
         host_request_sites: Vec::new(),
         time_slot: None,
         sample_shadows: Vec::new(),
+        initial_copies: Vec::new(),
     };
     let symbolic = SymbolicRtl {
         modules: [(module_id, sim_module.clone())].into_iter().collect(),

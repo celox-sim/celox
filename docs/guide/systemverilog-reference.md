@@ -210,7 +210,7 @@ waits zero.
 | System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | Random numbers | `$urandom`, `$urandom_range`, `$random` and `$dist_uniform` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
 | Simulation time | `$time`, `$stime` and `$realtime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
-| Sampled values | `$sampled` in edge-triggered processes, processes with timing controls, `initial` blocks and the subroutines they call; see [Sampled values](#sampled-values) |
+| Sampled values | `$sampled` in edge-triggered processes, processes with timing controls, `initial` blocks and the subroutines they call; `$past`, `$rose`, `$fell`, `$stable` and `$changed` in edge-triggered processes with one event; see [Sampled values](#sampled-values) |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop`, `$exit` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | Runtime I/O | `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb`, and [VCD controls](./vcd#systemverilog-source-controls) in timed processes |
 | State | two-state and four-state simulation |
@@ -724,6 +724,21 @@ an `always` lowered as combinational logic, a continuous assignment) is
 rejected: such a process reruns when its inputs change, not when their sampled
 values do. A design that uses `$sampled` runs the compiled scheduler one slot
 at a time.
+
+`$past(e, k, gate)` is the sampled value of `e` at the `k`-th previous tick of
+its clock at which `gate` held, the `iff` of the clock (9.4.2.3), and `$rose`, `$fell`, `$stable`
+and `$changed` compare the sampled value of their operand with the one at the
+previous tick, with case equality for integral values and numeric equality for
+`real`/`shortreal` (`$rose` and `$fell` look at the least
+significant bit). Before enough ticks, the past value is the declared or
+default value (16.9.3). `k` is a positive constant. The clock is inferred
+(16.14.6): the functions are supported in an `always_ff` or `always` process
+whose only timing control is one edge event, such as `@(posedge clk)`, and
+which therefore runs at each tick. The process keeps a history register for
+each variable of the operand and updates it with nonblocking assignments at
+the end of each run. An explicit clocking event argument, processes with
+more than one event (such as an asynchronous reset) and calls in subroutines
+are rejected.
 
 ### Deferred assertions
 
