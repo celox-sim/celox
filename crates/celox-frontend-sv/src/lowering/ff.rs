@@ -5847,6 +5847,7 @@ impl Ff<'_, '_> {
         let mut kernel = self.kernel.take().expect("lowering a process kernel");
         std::mem::swap(&mut self.b, kernel.builder());
         let slots = kernel.slots();
+        let resume_count = kernel.resume_count();
         let mut unit = kernel.build();
         prune_unreachable_blocks(&mut unit);
         let frame = self.forked.then(|| {
@@ -5855,6 +5856,7 @@ impl Ff<'_, '_> {
             private
                 .retain(|id| !self.frame_locals.contains(id) && Some(*id) != self.m.id(TIME_SLOT));
             celox_design::ProcessFrame {
+                resume_count,
                 private,
                 locals: self.frame_locals,
                 random: self.random.as_ref().unwrap().0,

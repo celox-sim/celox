@@ -144,10 +144,13 @@ It removes pending starts, event waits and scheduled resumptions; a subsequent
 fork can reuse their activation storage. Calls through tasks and functions keep
 the calling process's identity; `wait fork` remains forbidden in functions.
 
-Checkpoints preserve children, their locals and pending joins. Layout-independent
-state files do not yet record dynamic activations and report an error; use
-`checkpoint()` / `restore()` instead. Deferred assertions in a process containing
-forks and compound event expressions reading fork-shared automatic locals remain
+Checkpoints and layout-independent state files preserve children, their locals,
+random streams and pending joins. State files also preserve strings held only
+by suspended children or shared automatic locals. Non-null class objects or
+dynamic containers and nonempty string/object values in pending NBA writes, host
+writes or event-wait baselines remain unsupported in activation state files; use
+`checkpoint()` / `restore()` for those states. Deferred assertions in a process
+containing forks and compound event expressions reading fork-shared automatic locals remain
 unsupported. Direct event controls on those locals and `wait` conditions are
 supported.
 
