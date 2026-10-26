@@ -1389,6 +1389,7 @@ fn path(
     tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<(Vec<String>, Option<String>)> {
+    let authored = root;
     // A static class property is a variable of the module.
     if let Some(variable) = objects::static_property(tree, root, native, dimensions)? {
         return Ok((vec![variable], None));
@@ -1426,12 +1427,25 @@ fn path(
                 let last = prefix.last_mut().ok_or_else(disagreement)?;
                 last.push_str(&format!("[{value}]"));
                 prefix.extend(parts.into_iter().rev());
+                if base.is_none()
+                    && let Some(name) =
+                        interface_binding::unindexed_parameter(&prefix, tree, dimensions, authored)
+                {
+                    return Ok((vec![name], None));
+                }
                 return Ok((prefix, base));
             }
             _ => return Err(unsupported("member receiver")),
         }
     }
     parts.reverse();
+    if qualified.is_none()
+        && let Some(name) =
+            interface_binding::unindexed_parameter(&parts, tree, dimensions, authored)
+    {
+        return Ok((vec![name], None));
+    }
+
     if let Some(length) = qualified {
         if parts.len() == length + 1 {
             let base = parts[..2].join("::");

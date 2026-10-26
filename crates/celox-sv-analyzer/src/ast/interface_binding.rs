@@ -33,6 +33,43 @@ pub(super) struct ArrayBinding {
     pub ranges: Vec<(i128, i128)>,
 }
 
+/// Compatibility shorthand for an unindexed interface-array value parameter.
+/// Follow the first element in declaration order, including nonzero bounds.
+/// Runtime members and type parameters retain their ordinary indexed lookup.
+pub(super) fn unindexed_parameter(
+    path: &[String],
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    root: celox_sv_syntax::ExprId,
+) -> Option<String> {
+    let (member, handle) = path.split_last()?;
+    let root_name = handle.first()?;
+    if dimensions.get(root_name).is_some()
+        || dimensions.const_env.contains_key(root_name)
+        || dimensions.parameter_values.contains_key(root_name)
+    {
+        return None;
+    }
+    let imported = scope::imported(&tree.state);
+    let array = imported.interface_arrays.get(&handle.join("."))?;
+    let element = array.elements.first()?;
+    let bound = imported
+        .interface_members
+        .get(&format!("{element}.{member}"))?;
+    if !imported.parameter_values.contains_key(bound) {
+        return None;
+    }
+    warnings::append(
+        &mut tree.state.diagnostics.borrow_mut(),
+        [warnings::AnalyzerWarning::InterfaceArrayParameter {
+            path: path.join("."),
+            element: element.clone(),
+            site: procedural::source_span(tree.declarations().expression(root).tokens, tree),
+        }],
+    );
+    Some(bound.clone())
+}
+
 pub(super) fn analyze_module(
     tree: &AnalysisContext<'_>,
     path: &Path,
