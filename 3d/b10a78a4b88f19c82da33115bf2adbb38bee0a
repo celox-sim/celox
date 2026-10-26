@@ -1,0 +1,1 @@
+Fix P2 review: program exit leaves retired fork activation storage that cannot round-trip through portable state files.
