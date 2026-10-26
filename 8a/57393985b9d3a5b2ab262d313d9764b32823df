@@ -1,0 +1,7 @@
+Revision history for #2177:
+
+rev 3 (rebase) 2026-10-26 18:10 UTC
+rev 2 (content) 2026-10-26 17:14 UTC — Clarify that the exhaustive reservoir sampler is test-only; bounded cell queries also permit an empty prefix for small whole-domain size checks.
+rev 1 (initial) 2026-10-26 17:14 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2177,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"fa0a52ebbe5b9a83296337219390b7296b386a83","timestamp_iso":"2026-10-26T17:14:06Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"fa0a52ebbe5b9a83296337219390b7296b386a83","new_sha":"e076c0d26ead34a99c8feb4107708732f3230ff4","timestamp_iso":"2026-10-26T17:14:06Z","reason":"Clarify that the exhaustive reservoir sampler is test-only; bounded cell queries also permit an empty prefix for small whole-domain size checks.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/fa0a52ebbe5b9a83296337219390b7296b386a83...e076c0d26ead34a99c8feb4107708732f3230ff4"},{"number":3,"change_type":"rebase","old_sha":"e076c0d26ead34a99c8feb4107708732f3230ff4","new_sha":"c2a33b9581709847768eb5ad13811d2959fe7e5b","timestamp_iso":"2026-10-26T18:10:38Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/e076c0d26ead34a99c8feb4107708732f3230ff4...c2a33b9581709847768eb5ad13811d2959fe7e5b"}]} -->
