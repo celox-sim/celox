@@ -223,6 +223,7 @@ impl Parser<'_> {
             base,
             interfaces,
             has_constraints: false,
+            constraints: Vec::new(),
             parameter_ports,
             parameters: Vec::new(),
             type_aliases: Vec::new(),
