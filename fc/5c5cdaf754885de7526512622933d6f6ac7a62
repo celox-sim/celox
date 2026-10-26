@@ -1,0 +1,1 @@
+Resolve conflicts with current master process-activation and partitioned-settle changes before adding the signal-triggered CLI state capture PR.
