@@ -217,3 +217,96 @@ endmodule"#)
  (modify (set clk 1)) (run_until 1) (assert_eq q 1)
  (modify (set clk 0)) (run_until 2)
  (modify (set clk 1)) (run_until 3) (assert_eq q 2))
+
+; 13.4.4: detached function children retain automatic arguments/locals after return.
+(case function_join_none_automatic_values_outlive_returns
+ (source "function_fork.sv" #"module Top(output int total, returns, early);
+ function automatic int launch(input int v);
+  int copy = v;
+  fork begin #2; total += copy; end join_none
+  return copy + 10;
+ endfunction
+ initial begin
+  total=0; returns=0; early=0;
+  for (int i=1; i<=3; i++) returns += launch(i);
+  early = total;
+  #3; returns += launch(4); wait fork;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq returns 36) (assert_eq early 0) (assert_eq total 0)
+ (run_until 2) (assert_eq total 6)
+ (run_until 5) (assert_eq total 10) (assert_eq returns 50))
+
+(case function_join_none_children_can_call_timed_tasks
+ (source "function_task.sv" #"module Top(output int q);
+ task automatic delayed(input int x); #2; q += x; endtask
+ function automatic int launch(input int x);
+  fork begin fork delayed(x); begin #1; q += 4; end join end join_none
+  return x;
+ endfunction
+ initial begin q = launch(3); #3; end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 3)
+ (run_until 1) (assert_eq q 7) (run_until 3) (assert_eq q 10))
+
+(case function_join_none_calls_in_defaults_need_process_frames
+ (source "function_default.sv" #"module Top(output int q, r);
+ function automatic int launch(input int x);
+  fork begin #1; q += x; end join_none
+  return x;
+ endfunction
+ function automatic int wrapper(input int x = launch(3)); return x; endfunction
+ initial begin q=0; r = wrapper(); r += wrapper(4); #2; end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 0) (assert_eq r 7)
+ (run_until 2) (assert_eq q 3))
+
+
+(case function_join_none_event_driven_caller
+ (source "function_event.sv" #"module Top(input bit clk, output int q, r);
+ function automatic int launch(input int x);
+  fork begin #1; q += x; end join_none
+  return x;
+ endfunction
+ initial begin q=0; r=0; end
+ always @(posedge clk) r = launch(3);
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 0)
+ (modify (set clk 1)) (run_until 1) (assert_eq r 3)
+ (run_until 2) (assert_eq q 3)
+ (modify (set clk 0)) (run_until 3)
+ (modify (set clk 1)) (run_until 5) (assert_eq q 6))
+
+(case function_join_none_preserves_expression_temporaries
+ (four_state)
+ (source "function_expression.sv" #"module Top(output int q, r, paired);
+ int live_value;
+ function automatic int launch(input int x);
+  fork begin #1; q += x; end join_none
+  return x + 10;
+ endfunction
+ initial begin
+  q=0; live_value=7;
+  r = live_value + launch(3);
+  paired = launch(4) + launch(5);
+  wait fork;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 0) (assert_eq r 20) (assert_eq paired 29)
+ (run_until 2) (assert_eq q 12))
+
+(case function_join_none_retains_child_only_class_handle
+ (source "function_class.sv" #"module Top(output int q, r);
+ class Cell;
+  int value;
+  function new(int v); value=v; endfunction
+ endclass
+ function automatic int launch(input int x);
+  Cell object = new(x);
+  fork begin #1; q += object.value; end join_none
+  return x;
+ endfunction
+ initial begin q=0; r=launch(3); r+=launch(4); #2; end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 0) (assert_eq r 7)
+ (run_until 2) (assert_eq q 7))

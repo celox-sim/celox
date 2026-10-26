@@ -814,3 +814,18 @@ needs a specification ruling and is tracked in
 [issue #1889](https://github.com/celox-sim/celox/issues/1889); it is not yet a
 confirmed conformance defect. Equality behavior is unchanged pending that
 investigation.
+
+
+### Detached children of functions in Icarus
+
+IEEE 1800-2023 13.4.4 permits `fork ... join_none` inside a function,
+including delays and task calls in its detached children. The six
+`fork_control::function_join_none_*` cases exercise these exceptions while
+keeping the function itself nonblocking. Icarus 13.0 rejects all six with
+`functions cannot have delay statements`; the timed-task child also reports
+`Functions cannot enable/call tasks`. The exact compile failures remain
+executed evidence in [the Icarus report](verification/sv/icarus/fork_control.json),
+not exclusions or passing assertions. Pinned xezim 0.11.3 passes all six;
+Verilator 5.052 passes the five two-state cases and its adapter does not support
+the four-state case. Reproduce with `verify-sv-icarus --filter
+fork_control::function_join_none_`.

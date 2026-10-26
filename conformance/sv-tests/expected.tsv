@@ -277,8 +277,8 @@ chapter-13/13.4.3--const-function.sv	2state	pass
 chapter-13/13.4.3--const-function.sv	4state	pass
 chapter-13/13.4.4--fork-invalid.sv	2state	pass
 chapter-13/13.4.4--fork-invalid.sv	4state	pass
-chapter-13/13.4.4--fork-valid.sv	2state	fail
-chapter-13/13.4.4--fork-valid.sv	4state	fail
+chapter-13/13.4.4--fork-valid.sv	2state	pass
+chapter-13/13.4.4--fork-valid.sv	4state	pass
 chapter-14/14.3--clocking-block-signals-error.sv	2state	fail
 chapter-14/14.3--clocking-block-signals-error.sv	4state	fail
 chapter-14/14.3--clocking-block-signals.sv	2state	pass
