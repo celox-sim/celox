@@ -92,6 +92,11 @@ impl ProcessKernelBuilder {
         self.flush_site = Some(site);
     }
 
+    /// Number of continuation entries emitted so far.
+    pub fn resume_count(&self) -> usize {
+        self.resume_blocks.len()
+    }
+
     /// The kernel's control slots, with [`ProcessSlots::const_delays`] set
     /// for the delays lowered so far.
     pub fn slots(&self) -> ProcessSlots<SourceVarId> {

@@ -80,10 +80,7 @@ endmodule"#;
         sim.run_until(4).unwrap();
         assert_eq!(sim.get(sim.signal("q")), 3u8.into());
     }
-    assert!(matches!(
-        sim.save_state(),
-        Err(celox::StateError::Processes)
-    ));
+    sim.save_state().unwrap();
 }
 
 #[test]
