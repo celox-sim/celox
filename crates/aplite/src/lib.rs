@@ -10,8 +10,8 @@ pub use term::*;
 pub type Env = std::collections::BTreeMap<String, Term>;
 pub mod finite;
 pub use finite::{
-    Assumption, Limits, Outcome, PreparedQuery, Scalar, SearchHint, Verdict, solve, solve_seeded,
-    solve_with_hint,
+    Assumption, Cell, CellStatus, HashCells, Limits, Outcome, PreparedQuery, Scalar, SearchHint,
+    Verdict, solve, solve_seeded, solve_with_hint,
 };
 
 #[cfg(test)]
