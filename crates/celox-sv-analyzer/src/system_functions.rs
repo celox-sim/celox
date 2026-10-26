@@ -896,6 +896,7 @@ impl ContainerOp {
 /// frontend needs no class table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ObjectOp {
+    Randomize(celox_heap::randomization::Program),
     Container {
         op: ContainerOp,
         layout: ContainerLayout,
@@ -955,7 +956,8 @@ impl ObjectOp {
         match self {
             Self::Container { op, layout } => op.result_type(*layout),
             Self::Random | Self::RandomCyclic { .. } => (64, false),
-            Self::Seed
+            Self::Randomize(_)
+            | Self::Seed
             | Self::Check(_)
             | Self::ModeSet(_)
             | Self::ModePush
@@ -978,6 +980,7 @@ impl fmt::Display for ObjectOp {
             Self::Store(_) => "property write",
             Self::ClassOf => "class query",
             Self::Random => "object random bits",
+            Self::Randomize(_) => "constrained object randomization",
             Self::RandomCyclic { .. } => "object random cyclic index",
             Self::Seed => "object random seed",
             Self::Check(_) => "object receiver check",
