@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+pub mod containers;
 mod objects;
 pub mod ops;
 
@@ -64,7 +65,7 @@ impl Root {
     }
 }
 
-/// Dynamic strings and class objects referenced by [`Handle`].
+/// Dynamic strings, value containers and class objects referenced by [`Handle`].
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Heap {
     strings: HashMap<Handle, Arc<[u8]>>,
@@ -77,6 +78,8 @@ pub struct Heap {
     objects: HashMap<Handle, objects::Object>,
     /// The handle the next object gets.
     next_object: Handle,
+    containers: HashMap<Handle, Arc<containers::Container>>,
+    container_lookup: HashMap<Arc<containers::Container>, Handle>,
     /// The first heap operation error since the runtime last checked.
     fault: Option<Fault>,
     /// Entries below this handle are never collected.
@@ -106,6 +109,8 @@ impl Heap {
             free_buffers: Vec::new(),
             objects: HashMap::default(),
             next_object: NULL + 1,
+            containers: HashMap::default(),
+            container_lookup: HashMap::default(),
             fault: None,
             pinned: 1,
             created: 0,
@@ -150,7 +155,7 @@ impl Heap {
         self.strings.contains_key(&handle)
     }
 
-    /// Whether `other` holds the same strings and objects under the same
+    /// Whether `other` holds the same strings, containers and objects under the same
     /// handles, including object RNG state and strings under construction,
     /// and assigns the same handles to future allocations.
     pub fn same_contents(&self, other: &Heap) -> bool {
@@ -161,6 +166,7 @@ impl Heap {
             && self.pinned == other.pinned
             && self.objects == other.objects
             && self.next_object == other.next_object
+            && self.containers == other.containers
     }
 
     /// The number of live strings, including `""`.
@@ -172,7 +178,7 @@ impl Heap {
         false
     }
 
-    /// Bytes of string contents and object properties, excluding allocator
+    /// Bytes of string contents, container elements and object properties, excluding allocator
     /// overhead.
     pub fn content_size(&self) -> usize {
         self.strings
@@ -183,6 +189,11 @@ impl Heap {
                 .objects
                 .values()
                 .map(objects::Object::size)
+                .sum::<usize>()
+            + self
+                .containers
+                .values()
+                .map(|container| container.size())
                 .sum::<usize>()
     }
 
@@ -205,12 +216,13 @@ impl Heap {
                     strings.insert(root.handle);
                 }
                 HandleKind::Object => {
-                    if self.objects.contains_key(&root.handle) && objects.insert(root.handle) {
+                    if objects.insert(root.handle) {
                         pending.extend(
                             self.handles_of(root.handle)
                                 .into_iter()
                                 .map(|(kind, handle)| Root { kind, handle }),
                         );
+                        pending.extend(self.container_roots(root.handle));
                     }
                 }
             }
@@ -225,11 +237,14 @@ impl Heap {
             live
         });
         self.objects.retain(|handle, _| objects.contains(handle));
+        self.containers.retain(|handle, _| objects.contains(handle));
+        self.container_lookup
+            .retain(|_, handle| objects.contains(handle));
         // No buffer outlives the kernel that built it.
         self.buffers.clear();
         self.free_buffers.clear();
         self.created = 0;
-        self.live_after_collection = self.len() + self.objects.len();
+        self.live_after_collection = self.len() + self.objects.len() + self.containers.len();
     }
 
     fn new_buffer(&mut self, bytes: Vec<u8>) -> u64 {
