@@ -24,6 +24,22 @@ impl Ff<'_, '_> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let result = match op {
+            ObjectOp::Randomize(program) => {
+                let object = self.handle(&args[0])?;
+                let check = self.integer_of_width(&args[1], 1, false)?;
+                let bytes = serde_json::to_vec(program).expect("constraint program serialization");
+                let mut buffer = self.heap_call(ops::NEW, &[]);
+                for chunk in bytes.chunks(8) {
+                    let value = chunk
+                        .iter()
+                        .fold(0u64, |value, byte| (value << 8) | u64::from(*byte));
+                    let value = self.constant64(value);
+                    let count = self.constant64(chunk.len() as u64);
+                    buffer = self.heap_call(ops::APPEND_BYTES, &[buffer, value, count]);
+                }
+                let program = self.heap_call(ops::FREEZE, &[buffer]);
+                self.heap_call(ops::OBJECT_RANDOMIZE, &[object, program, check])
+            }
             ObjectOp::Container { .. } => unreachable!("handled by container_call"),
             ObjectOp::New {
                 class,
@@ -132,7 +148,8 @@ impl Ff<'_, '_> {
                 HandleProperty::String => celox_design::ValueKind::StrRef,
                 HandleProperty::Object => celox_design::ValueKind::ObjRef,
             }),
-            ObjectOp::Store(_)
+            ObjectOp::Randomize(_)
+            | ObjectOp::Store(_)
             | ObjectOp::ClassOf
             | ObjectOp::Random
             | ObjectOp::RandomCyclic { .. }

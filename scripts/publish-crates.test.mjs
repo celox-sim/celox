@@ -120,6 +120,12 @@ test("publication order includes every public crate after its workspace dependen
   for (const [index, name] of order.entries()) {
     for (const dependency of packages.get(name).dependencies) {
       if (!dependency.path) continue;
+      // Aplite has an independent release train and must already be available
+      // on crates.io before publishing a Celox version that depends on it.
+      if (dependency.name === "aplite") {
+        assert.equal(dependency.req, `^${packages.get("aplite").version}`);
+        continue;
+      }
       const dependencyIndex = order.indexOf(dependency.name);
       assert.ok(
         dependencyIndex >= 0 && dependencyIndex < index,
