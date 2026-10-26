@@ -198,10 +198,19 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             .processes
             .iter()
             .map(|process| ProcessRefs {
+                frame: process
+                    .frame
+                    .clone()
+                    .map(|frame| frame.map(|id| resolve(&id))),
                 kind: process.slots.kind,
                 program: process.slots.program.as_ref().map(resolve),
                 resume: resolve(&process.slots.resume),
-                starts_with_event_wait: process.slots.requires_timed_simulation,
+                starts_with_event_wait: process
+                    .frame
+                    .as_ref()
+                    .map_or(process.slots.requires_timed_simulation, |frame| {
+                        frame.starts_with_event_wait
+                    }),
                 status: resolve(&process.slots.status),
                 delay: resolve(&process.slots.delay),
                 wait_sites: process

@@ -125,6 +125,9 @@ pub trait HostBoundary: UnitExecutor {
         CompiledSlots::None
     }
 
+    /// Live values kept in dynamic process frames, outside backend state memory.
+    fn retain_process_values(&mut self, _values: &[(crate::SignalRef, crate::timing::Value)]) {}
+
     /// Called after the state for a simulation timestamp has stabilized.
     fn finish_timed_step(&mut self, _timestamp: u64) {}
 

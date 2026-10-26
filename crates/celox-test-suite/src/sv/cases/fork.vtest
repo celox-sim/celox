@@ -1,0 +1,220 @@
+(group fork (category sequential))
+
+; IEEE 1800-2023 9.3.2: concurrent stackless processes and their join boundaries.
+
+(case join_any_keeps_other_children_running
+ (source "join_any_keeps_other_children_running.sv" #"module Top(output int q);
+ initial begin
+  q=0;
+  fork begin #1; q=1; end begin #3; q=q+4; end join_any
+  q=q+2;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 7))
+
+(case join_none_starts_after_parent_blocks
+ (source "join_none_starts_after_parent_blocks.sv" #"module Top(output int q);
+ initial begin
+  q=0;
+  fork begin q=q+2; #1; q=q+4; end join_none
+  q=1;
+  #2; q=q+8;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 15))
+
+(case repeated_forks_capture_each_automatic_local
+ (source "repeated_forks_capture_each_automatic_local.sv" #"module Top(output int q);
+ int n=3;
+ initial begin
+  q=0;
+  for(int i=0; i<n; i++) begin
+   automatic int k=i;
+   fork begin #(k+1); q=q+k+1; end join_none
+  end
+  #5;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 6))
+
+(case nested_forks_wait_for_their_own_children
+ (source "nested_forks_wait_for_their_own_children.sv" #"module Top(output int q);
+ initial begin
+  q=0;
+  fork
+   begin fork begin #1; q=q+1; end begin #3; q=q+2; end join q=q+4; end
+   begin #2; q=q+8; end
+  join
+  q=q+16;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 31))
+
+(case automatic_task_inputs_outlive_the_call
+ (source "automatic_task_inputs_outlive_the_call.sv" #"module Top(output int q);
+ task automatic start(input int k);
+   fork begin #(k+1); q=q+k+1; end join_none
+ endtask
+ int n=3;
+ initial begin q=0; for(int i=0;i<n;i++) start(i); #5; end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 6))
+
+(case fork_children_wait_for_signal_changes
+ (source "fork_children_wait_for_signal_changes.sv" #"module Top(output int q);
+ bit signal_bit;
+ initial begin q=0;
+ fork begin @(posedge signal_bit); q=q+1; end begin #2; signal_bit=1; end join
+ q=q+2;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 3))
+
+(case repeated_forks_reuse_finished_instances
+ (source "repeated_forks_reuse_finished_instances.sv" #"module Top(output int q);
+ int n=20;
+ initial begin q=0;
+ for(int i=0;i<n;i++) begin
+   fork begin #0; q=q+1; end begin #0; q=q+2; end join
+ end
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 60))
+
+(case static_locals_are_shared_between_overlapping_children
+ (source "static_locals_are_shared_between_overlapping_children.sv" #"module Top(output int q);
+ int n=3;
+ initial begin q=0;
+ for(int i=0;i<n;i++) begin
+   static int k=0;
+   k=i;
+   fork begin #1; q=q+k; end join_none
+ end
+ #2;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 6))
+
+(case fork_nonblocking_updates_keep_each_child_value
+ (source "fork_nonblocking_updates_keep_each_child_value.sv" #"module Top(output int q);
+ int n=3;
+ bit [2:0] values;
+ initial begin q=0;
+ for(int i=0;i<n;i++) begin
+   automatic int k=i;
+   fork begin #1; values[k] <= 1; end join_none
+ end
+ #2; q=values;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 7))
+
+(case children_share_a_live_automatic_local
+ (source "children_share_a_live_automatic_local.sv" #"module Top(output int q);
+ initial begin
+ automatic int value=0;
+ q=0;
+ fork begin #1; value=7; end begin #2; q=value; end join
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 7))
+
+(case wait_on_shared_automatic_local_wakes_after_child_write
+ (source "wait_on_shared_automatic_local_wakes_after_child_write.sv" #"module Top(output int q);
+ initial begin
+ automatic bit value=0;
+ q=0;
+ fork begin #1; value=1; end begin wait(value); q=7; end join
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 7))
+
+(case event_on_shared_automatic_local_wakes_after_child_write
+ (source "event_on_shared_automatic_local_wakes_after_child_write.sv" #"module Top(output int q);
+ initial begin
+ automatic bit value=0;
+ q=0;
+ fork begin #1; value=1; end begin @(posedge value); q=7; end join
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 7))
+
+(case suspended_child_keeps_automatic_string_alive
+ (source "suspended_child_keeps_automatic_string_alive.sv" #"module Top(output int q);
+ task automatic start(input int k);
+   string saved;
+   saved.itoa(k);
+   fork begin #2; q=q+saved.atoi(); end join_none
+ endtask
+ string garbage;
+ int n=1100;
+ initial begin
+   q=0;
+   start(7);
+   start(11);
+   for(int i=0;i<n;i++) garbage.itoa(i);
+   #1;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 18))
+
+(case child_delay_uses_current_simulation_time
+ (source "fork_time.sv" #"module Top(output int q);
+ initial begin q=0; fork begin #1; q=q+$time; end begin #2; q=q+$time; end join q=q+$time; end
+endmodule"#)
+ (top Top) (run_until 3) (assert_eq q 5))
+
+(case join_any_waits_only_for_immediate_children
+ (source "fork_grandchild.sv" #"module Top(output bit [2:0] q);
+ initial begin
+ fork
+  begin fork begin #3; q[0]=1; end join_none end
+  begin #5; q[1]=1; end
+ join_any
+ q[2]=1;
+ end
+endmodule"#)
+ (top Top) (run_until 1) (assert_eq q 4)
+ (run_until 3) (assert_eq q 5)
+ (run_until 5) (assert_eq q 7))
+
+(case four_state_automatic_values_survive_fork_suspension
+ (four_state)
+ (source "fork_four_state.sv" #"
+module Top(output logic [3:0] q);
+ task automatic start(input logic [3:0] value);
+  logic [3:0] saved[2];
+  saved[0]=value;
+  saved[1]=value;
+  fork begin #2; q=saved[1]; end join_none
+ endtask
+ initial begin q=0; start(4'b10xz); #3; end
+endmodule"#)
+ (top Top) (run_until 1) (assert_eq q (fourstate 0 0))
+ (run_until 2) (assert_eq q (fourstate 10 3)))
