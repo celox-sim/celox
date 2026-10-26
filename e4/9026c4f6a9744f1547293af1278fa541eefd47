@@ -1,0 +1,1 @@
+Fix #2194 CI type inference ambiguity in the zero-width string formatting test after serde_json becomes a transitive dependency.
