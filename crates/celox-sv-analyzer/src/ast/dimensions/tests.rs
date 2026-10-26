@@ -46,6 +46,74 @@ fn query_number(
 }
 
 #[test]
+fn repeated_literal_port_defaults_do_not_rediscover_declarations() {
+    for count in [8, 32, 128] {
+        let ports = (0..count)
+            .map(|i| format!("input logic [7:0] p{i}[2] = '{{2{{8'd60-1}}}}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let code = format!("module Top({ports}, output wire [7:0] y); assign y=p0[0]; endmodule");
+        let tree =
+            crate::source_tree::parse_scope_fixture(&code, Path::new("literal-port-defaults.sv"))
+                .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        SYNTAX_TYPE_DISCOVERIES.with(|queries| queries.set(0));
+        let source = Source::from_syntax(&tree).unwrap();
+        assert_eq!(source.modules()[0].ports().len(), count + 1);
+        assert_eq!(
+            SYNTAX_TYPE_DISCOVERIES.with(|queries| queries.get()),
+            0,
+            "{count} ports"
+        );
+    }
+}
+
+#[test]
+fn literal_arithmetic_queries_keep_widths_and_skip_scope_discovery() {
+    let code = "module Top; assign y=$bits(8'd60-1)+$bits(-8'sd1+16'sd2)+$bits(1'b0 ? 8'hff : 16'hffff)+$bits(~8'hff)+$bits(32'd1<<64'd40); endmodule";
+    let tree =
+        crate::source_tree::parse_scope_fixture(code, Path::new("literal-query-types.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let input = PackedDimensions::default();
+    SYNTAX_TYPE_DISCOVERIES.with(|queries| queries.set(0));
+    let values = native_calls(&tree)
+        .into_iter()
+        .map(|root| {
+            query_number(
+                root,
+                &tree,
+                &HashMap::default(),
+                &HashMap::default(),
+                Some(&input),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values, [Some(32), Some(16), Some(16), Some(8), Some(32)]);
+    assert_eq!(SYNTAX_TYPE_DISCOVERIES.with(|queries| queries.get()), 0);
+}
+
+#[test]
+fn queries_still_discover_names_in_unselected_conditional_arms() {
+    let code = "module Top; logic [15:0] data; assign y=$bits(1'b0 ? data : 8'hff); endmodule";
+    let tree =
+        crate::source_tree::parse_scope_fixture(code, Path::new("conditional-query-types.sv"))
+            .unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    SYNTAX_TYPE_DISCOVERIES.with(|queries| queries.set(0));
+    assert_eq!(
+        query_number(
+            native_calls(&tree)[0],
+            &tree,
+            &HashMap::default(),
+            &HashMap::default(),
+            Some(&PackedDimensions::default())
+        ),
+        Some(16)
+    );
+    assert!(SYNTAX_TYPE_DISCOVERIES.with(|queries| queries.get()) > 0);
+}
+
+#[test]
 fn function_result_queries_preserve_expression_bodies() {
     let tree = crate::source_tree::parse_scope_fixture(
         r#"
