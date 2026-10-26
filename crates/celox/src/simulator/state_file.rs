@@ -14,10 +14,12 @@ use crate::HashMap;
 use celox_runtime::scheduler::SimEvent;
 use celox_runtime::timing::Baseline;
 use celox_runtime::{
-    BaselineRecord, NbaRecord, ProcessRecord, ProcessState, ScheduleParts, ScheduleRecord,
-    ScheduledEvent, StateFile, StateObject, StateRole, WaiterRecord,
+    BaselineRecord, NbaRecord, ProcessRecord, ProcessRef, ProcessState, ScheduleParts,
+    ScheduleRecord, ScheduledEvent, StateFile, StateObject, StateRole, WaiterRecord,
 };
 use num_bigint::BigUint;
+
+mod activations;
 
 use super::checkpoint::CheckpointError;
 use super::host::Simulator;
@@ -36,7 +38,7 @@ pub enum StateError {
     MissingSchedule,
     #[error("evaluating combinational logic failed: {0}")]
     Runtime(RuntimeErrorCode),
-    /// Dynamic fork activations have storage outside the named state objects.
+    /// No longer returned: portable state files include dynamic activations.
     #[error("state files do not record dynamic fork activations; use a checkpoint instead")]
     Processes,
     /// Not returned: state files record strings by their contents. Kept so
@@ -455,7 +457,11 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     /// Express a schedule by event and signal names.
-    pub(crate) fn name_schedule(&self, parts: ScheduleParts<B>) -> ScheduleRecord {
+    pub(crate) fn name_schedule(
+        &self,
+        parts: ScheduleParts<B>,
+        strings: &mut Vec<Vec<u8>>,
+    ) -> Result<ScheduleRecord, StateError> {
         let signal_paths: HashMap<usize, String> = self
             .state_schema()
             .objects
@@ -484,8 +490,8 @@ impl<B: SimBackend> Simulator<B> {
             signal: signal_path(event),
             value: event.next_val,
         };
-        let processes = self.name_processes(&parts, &signal_paths);
-        ScheduleRecord {
+        let processes = self.name_processes(&parts, &signal_paths, strings)?;
+        Ok(ScheduleRecord {
             time: parts.time,
             clocks: parts
                 .clocks
@@ -501,7 +507,7 @@ impl<B: SimBackend> Simulator<B> {
             high_events: parts.high_events.into_iter().map(event_path).collect(),
             unknown_events: parts.unknown_events.into_iter().map(event_path).collect(),
             processes,
-        }
+        })
     }
 
     /// The status slot of each process, by which a state file names it.
@@ -528,7 +534,8 @@ impl<B: SimBackend> Simulator<B> {
         &self,
         parts: &ScheduleParts<B>,
         signal_paths: &HashMap<usize, String>,
-    ) -> ProcessRecord {
+        strings: &mut Vec<Vec<u8>>,
+    ) -> Result<ProcessRecord, StateError> {
         let path = |signal: SignalRef| {
             signal_paths
                 .get(&signal.offset)
@@ -536,9 +543,16 @@ impl<B: SimBackend> Simulator<B> {
                 .unwrap_or_default()
         };
         let statuses = self.process_statuses();
-        let process = |index: usize| path(statuses[index]);
         let state = &parts.process_state;
-        ProcessRecord {
+        let process = |index: usize| {
+            if state.activations.is_empty() {
+                ProcessRef::Kernel(path(statuses[index]))
+            } else {
+                ProcessRef::Activation(index as u64)
+            }
+        };
+        let kernel = |index: usize| state.activations.get(index).map_or(index, |a| a.kernel);
+        let mut record = ProcessRecord {
             wakeups: parts
                 .process_wakeups
                 .iter()
@@ -555,7 +569,7 @@ impl<B: SimBackend> Simulator<B> {
                         .runtime_schema
                         .wait_sites
                         .iter()
-                        .filter(|site| site.process == index)
+                        .filter(|site| site.process == kernel(index))
                         .nth(waiter.site)
                         .map(|site| {
                             site.terms
@@ -633,7 +647,27 @@ impl<B: SimBackend> Simulator<B> {
             host_writes: Vec::new(),
             host_pending: parts.host_pending,
             finished: parts.finished,
-        }
+            reactive: state.reactive.iter().map(|&index| process(index)).collect(),
+            re_inactive: state
+                .re_inactive
+                .iter()
+                .map(|&index| process(index))
+                .collect(),
+            re_nba_queue: state
+                .re_nba_queue
+                .iter()
+                .map(|update| NbaRecord {
+                    target: path(update.target),
+                    lsb: update.lsb as u64,
+                    width: update.width as u64,
+                    value: update.value.0.to_bytes_le(),
+                    mask: update.value.1.to_bytes_le(),
+                })
+                .collect(),
+            ..ProcessRecord::default()
+        };
+        self.capture_activation_values(state, &mut record, strings)?;
+        Ok(record)
     }
 
     /// The host writes a timed simulation has yet to show its waits, by
@@ -690,9 +724,10 @@ impl<B: SimBackend> Simulator<B> {
         &self,
         record: &ProcessRecord,
         signals: &HashMap<String, SignalRef>,
+        strings: &[Vec<u8>],
     ) -> Result<(Vec<(usize, u64)>, ProcessState), Vec<String>> {
         let statuses = self.process_statuses();
-        let processes: HashMap<String, usize> = statuses
+        let mut processes: HashMap<ProcessRef, usize> = statuses
             .iter()
             .enumerate()
             .filter_map(|(index, status)| {
@@ -700,20 +735,25 @@ impl<B: SimBackend> Simulator<B> {
                     .iter()
                     .find(|(_, signal)| signal.offset == status.offset)?
                     .0;
-                Some((path.clone(), index))
+                Some((ProcessRef::Kernel(path.clone()), index))
             })
             .collect();
+        let (activations, cells) =
+            self.resolve_activation_values(record, strings, &mut processes)?;
+        let kernel = |index: usize| activations.get(index).map_or(index, |a| a.kernel);
         let mut unknown: Vec<String> = record
             .wakeups
             .iter()
             .map(|(name, _)| name)
             .chain(&record.ready)
             .chain(&record.inactive)
+            .chain(&record.reactive)
+            .chain(&record.re_inactive)
             .chain(record.waiters.iter().map(|waiter| &waiter.process))
             .filter(|name| !processes.contains_key(*name))
-            .cloned()
+            .map(ToString::to_string)
             .collect();
-        let process = |name: &String| processes.get(name).copied();
+        let process = |name: &ProcessRef| processes.get(name).copied();
         let wakeups: Vec<_> = record
             .wakeups
             .iter()
@@ -721,6 +761,8 @@ impl<B: SimBackend> Simulator<B> {
             .collect();
         let ready = record.ready.iter().filter_map(process).collect();
         let inactive = record.inactive.iter().filter_map(process).collect();
+        let reactive = record.reactive.iter().filter_map(process).collect();
+        let re_inactive = record.re_inactive.iter().filter_map(process).collect();
         let mut waiters = celox_runtime::timing::Waiters::default();
         for waiter in &record.waiters {
             let Some(index) = process(&waiter.process) else {
@@ -731,12 +773,24 @@ impl<B: SimBackend> Simulator<B> {
                 .runtime_schema
                 .wait_sites
                 .iter()
-                .filter(|site| site.process == index)
+                .filter(|site| site.process == kernel(index))
                 .collect::<Vec<_>>();
             let site = usize::try_from(waiter.site).ok();
             // Each baseline has the kind of its term: a counter for a
             // counted signal, a value otherwise.
             let counted = |signal: &crate::AbsoluteAddr| {
+                if self
+                    .program
+                    .runtime_schema
+                    .process_frames
+                    .get(kernel(index))
+                    .and_then(Option::as_ref)
+                    .is_some_and(|frame| {
+                        frame.locals.contains(signal) || frame.private.contains(signal)
+                    })
+                {
+                    return false;
+                }
                 self.program
                     .runtime_schema
                     .watches
@@ -761,7 +815,7 @@ impl<B: SimBackend> Simulator<B> {
                 .runtime_schema
                 .wait_sites
                 .iter()
-                .filter(|site| site.process == index)
+                .filter(|site| site.process == kernel(index))
                 .nth(site.unwrap_or_default())
                 .is_some_and(|site| {
                     site.terms.iter().any(|(signal, _)| {
@@ -798,7 +852,7 @@ impl<B: SimBackend> Simulator<B> {
             );
         }
         let mut nba_queue = Vec::new();
-        for update in &record.nba_queue {
+        for update in record.nba_queue.iter().chain(&record.re_nba_queue) {
             match signals.get(&update.target) {
                 // A queued assignment covers a nonempty range of its target.
                 Some(&target)
@@ -825,6 +879,7 @@ impl<B: SimBackend> Simulator<B> {
                 None => unknown.push(update.target.clone()),
             }
         }
+        let re_nba_queue = nba_queue.split_off(record.nba_queue.len().min(nba_queue.len()));
         let counted = self.counted_signals();
         let mut domain_counters = vec![[0; 3]; counted.len()];
         for (name, counters) in &record.domain_counters {
@@ -836,18 +891,23 @@ impl<B: SimBackend> Simulator<B> {
                 None => unknown.push(name.clone()),
             }
         }
+        self.validate_activation_schedule(record, &processes, &activations, &mut unknown);
         if !unknown.is_empty() {
             return Err(unknown);
         }
         Ok((
             wakeups,
             ProcessState {
+                activations,
+                cells,
                 waiters,
                 ready,
                 inactive,
                 nba_queue,
+                reactive,
+                re_inactive,
+                re_nba_queue,
                 domain_counters,
-                ..ProcessState::default()
             },
         ))
     }
@@ -857,6 +917,7 @@ impl<B: SimBackend> Simulator<B> {
     pub(crate) fn resolve_schedule(
         &self,
         record: &ScheduleRecord,
+        strings: &[Vec<u8>],
     ) -> Result<ScheduleParts<B>, StateError> {
         let events: HashMap<String, B::Event> = self
             .backend
@@ -889,7 +950,7 @@ impl<B: SimBackend> Simulator<B> {
             )
             .cloned()
             .collect();
-        let processes = self.resolve_processes(&record.processes, &signals);
+        let processes = self.resolve_processes(&record.processes, &signals, strings);
         if let Err(names) = &processes {
             unknown.extend(names.iter().cloned());
         }

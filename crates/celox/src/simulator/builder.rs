@@ -4182,6 +4182,64 @@ mod host {
     #[cfg(all(
         test,
         feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn portable_fork_state_remaps_reordered_compiled_kernels() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output bit [4:0] q);
+ initial begin
+   fork begin #2; q[0]=1; end begin #4; q[1]=1; end join
+   q[2]=1;
+ end
+ initial begin fork begin #3; q[3]=1; end join q[4]=1; end
+endmodule"#;
+        let sources = vec![(source, std::path::Path::new("reordered.sv"))];
+        let mut origin = crate::Simulation::from_sv_sources(sources.clone(), "Top")
+            .build_native()
+            .unwrap();
+        origin.run_until(1).unwrap();
+        let file = origin.save_state().unwrap();
+        let (mut program, warnings, options, _, _) =
+            crate::Simulation::from_sv_sources(sources, "Top")
+                .emit_triggers()
+                .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided)
+                .unwrap();
+        let schema = &mut program.runtime.runtime_schema;
+        let count = schema.processes.len();
+        assert!(count > 1);
+        schema.processes.reverse();
+        schema.process_origins.reverse();
+        schema.process_frames.reverse();
+        for site in &mut schema.wait_sites {
+            site.process = count - 1 - site.process;
+        }
+        for site in &mut schema.nba_sites {
+            site.process = count - 1 - site.process;
+        }
+        for site in &mut schema.host_request_sites {
+            site.process = count - 1 - site.process;
+        }
+        program.sir.processes.reverse();
+        let image =
+            crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
+        let runtime = image.runtime_program();
+        // SAFETY: this image was compiled from the trusted fixture above.
+        let backend = unsafe { crate::backend::native::NativeBackend::from_image(image) }.unwrap();
+        let mut simulator =
+            crate::Simulator::with_backend_and_program_for_simulation(backend, runtime, warnings);
+        simulator.apply_initial_values();
+        simulator.modify(|_| {}).unwrap();
+        let mut target = crate::Simulation::new(simulator);
+        target.load_state(&file).unwrap();
+        target.run_until(5).unwrap();
+        assert_eq!(target.get(target.signal("q")), 31u8.into());
+    }
+
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
         any(
             all(target_arch = "x86_64", not(feature = "arm64-codegen")),
             all(target_arch = "aarch64", not(feature = "x86_64-codegen"))

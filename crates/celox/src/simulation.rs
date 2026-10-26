@@ -557,16 +557,15 @@ impl<B: SimBackend> Simulation<B> {
         if self.state.is_suspended() {
             return Err(CheckpointError::Stopped.into());
         }
-        if self.state.has_fork_activations() {
-            return Err(StateError::Processes);
-        }
         let mut file = self
             .simulator
             .state_schema()
             .capture(&self.simulator.backend)?;
         let parts = self.state.export_schedule(&self.simulator.backend);
-        let mut record = self.simulator.name_schedule(parts);
+        let mut record = self.simulator.name_schedule(parts, &mut file.strings)?;
         record.processes.host_writes = self.simulator.name_host_writes();
+        self.simulator
+            .validate_activation_queue_values(&record.processes)?;
         file.schedule = Some(record);
         Ok(file)
     }
@@ -577,12 +576,20 @@ impl<B: SimBackend> Simulation<B> {
     pub fn load_state(&mut self, file: &celox_runtime::StateFile) -> Result<(), StateError> {
         let record = file.schedule.as_ref().ok_or(StateError::MissingSchedule)?;
         self.simulator.check_vcd_rewind(record.time)?;
-        let parts = self.simulator.resolve_schedule(record)?;
+        self.simulator
+            .validate_activation_queue_values(&record.processes)?;
+        let mut parts = self.simulator.resolve_schedule(record, &file.strings)?;
         let host_writes = self
             .simulator
             .resolve_host_writes(&record.processes.host_writes)?;
         self.simulator.load_state_at_time(file, record.time)?;
+        self.simulator.bind_activation_strings(
+            &mut parts.process_state,
+            &record.processes,
+            &file.strings,
+        );
         self.state.import_schedule(parts);
+        self.state.retain_activation_roots(&mut self.simulator);
         // The file keeps the time in its schedule, not in the time slots.
         let time = self.state.time();
         self.state.advance_time(&mut self.simulator.backend, time);

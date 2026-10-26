@@ -219,7 +219,20 @@ the differences. Combinational signals are recomputed after loading, so they
 need not match; their saved values only seed combinational loops declared with
 `true_loop`, which settle back into the saved state. A `Simulation` state file also records the time, clocks and
 pending events by name, and where the design's processes are suspended or
-waiting.
+waiting. Dynamic fork activations use named kernels and frame slots, with
+file-local parent/child and shared-local references. This includes pending
+joins, random streams and all active/reactive scheduling queues. Graph, slot
+and continuation validation happens before loading changes the simulator.
+
+Activation state files preserve strings in suspended private frames and shared
+automatic locals. They reject non-null class objects, and nonempty string/object
+values in queued NBA writes, host writes or event-wait baselines. Use checkpoints
+for those states. Host filesystem and external-effect restore restrictions remain
+the same as for other state files.
+
+Files requiring activation or reactive-region records use format version 3.
+Files without those records continue to use version 1 or 2; both remain readable.
+Older Celox builds cannot read version 3.
 
 The `celox` command line tool inspects state files:
 

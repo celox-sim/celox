@@ -659,6 +659,8 @@ pub enum ProcessKind {
 /// Storage switched when several activations execute the same kernel.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessFrame<A> {
+    /// Number of legal continuation entries in the compiled kernel.
+    pub resume_count: usize,
     /// Compiler temporaries and control slots private to each activation.
     pub private: Vec<A>,
     /// Automatic locals shared with children until the declaration is re-entered.
@@ -670,6 +672,7 @@ pub struct ProcessFrame<A> {
 impl<A> ProcessFrame<A> {
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessFrame<B> {
         ProcessFrame {
+            resume_count: self.resume_count,
             private: self.private.into_iter().map(&mut map).collect(),
             locals: self.locals.into_iter().map(&mut map).collect(),
             random: map(self.random),
