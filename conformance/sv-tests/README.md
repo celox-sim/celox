@@ -45,7 +45,7 @@ modes, sources without a module still undergo preprocessing and parsing; root
 detection then reports the actual no-root diagnostic. The current
 compiler and simulator require a module root, so the driver reports a failure for
 rootless unit, package and interface inputs. The official runner still decides
-the case verdict, including expected failures. There is no `no_top` classification
+the case verdict, including expected failures. There is no `no_top` verdict
 or preemptive skip. Without an explicit top, the driver infers a single root from
 parsed declarations and instantiations; multiple roots receive a diagnostic
 because Celox’s simulator requires one root. Each input file is a separate
@@ -361,3 +361,68 @@ These fixtures exercise the actual upstream runner with a controlled driver,
 including mode priority, skips, negative tests, assertions, timeouts, library
 injection and missing-environment failures. The Rust example is a single-case
 compiler/simulator driver; it does not parse sv-tests metadata or judge verdicts.
+
+## Failure triage
+
+`run.py` now writes four companion artifacts:
+
+- `report.tsv`: official verdicts plus `failure_category`, `diagnostic`, a bounded
+  diagnostic excerpt (`evidence`), and `negative_test` (`1`, `0`, or empty when unknown).
+- `report.summary.json`: schema version 2, collection completeness, requested and
+  collected row counts, per-group/per-state totals, failure counts and frequent
+  diagnostics. `classification_version` identifies the diagnostic rules.
+- `report.summary.md`: a readable overview, also attached to the CI job summary.
+- `report.failures.json`: every failing case with its classification and log path,
+  plus collection errors. No case is removed from the TSV or denominator.
+
+Categories describe **observed diagnostics**, not proven compiler root causes:
+
+| Category | Evidence |
+| --- | --- |
+| `unsupported` | explicit unsupported-construct or single-module-root diagnostic |
+| `compile_error` | parse-error or illegal-context diagnostic, even if the selected mode was simulation |
+| `runtime_error` | `$fatal` or lost-runtime-event diagnostic |
+| `assertion_failure` | official simulation output validation failed after a successful positive invocation |
+| `unexpected_success` | a negative test's driver succeeded |
+| `timeout` | upstream timeout return code **and** timeout diagnostic |
+| `crash` | Rust panic diagnostic or abnormal/signal return code |
+| `input_issue` | the reviewed upstream input defect described above |
+| `environment` | missing include directory without the reviewed input exception |
+| `unclassified` | unknown diagnostic, missing log, or TSV/log metadata disagreement |
+
+For example, a parser error on a valid but unimplemented grammar construct is
+still `compile_error`; the classifier does not guess whether the source or the
+parser is wrong. A nonzero return code in simulation mode alone does not establish
+a runtime bug because compilation may have failed first. Frequent diagnostic
+counts normalize source paths and line numbers; `.failures.json` retains the
+individual evidence and log locations. Tag counts still overlap as described above.
+
+Negative-test passes accompanied by unsupported, root-requirement, timeout or
+crash diagnostics appear in `negative_pass_diagnostics` for review. They remain
+**official passes**, not new failures. No assertion expression is evaluated by
+this classification code.
+
+Missing drivers, missing libraries, runner exceptions and other collection
+errors still return exit code 2 and prohibit `--update`. A failed collection now
+retains already completed rows and separate `collection_errors`, with
+`complete: false`; cancelled/unrun cases do not become invented failure rows.
+An incomplete report must not be used as a full conformance score. Successful
+collection has `complete: true` even when comparison with expectations returns 1.
+
+Reclassify a downloaded or older **run report**, without rerunning simulations or
+changing `expected.tsv`:
+
+```bash
+python conformance/sv-tests/reporting.py work/sv-tests-report.tsv \
+  --log-root work/sv-tests-results \
+  --meta-tags ../sv-tests/conf/meta-tags.conf \
+  --output work/triage/report.tsv
+```
+
+`--log-root` relocates logs using `STATE/TEST/official.log`. Otherwise the paths
+in the TSV are used (relative paths resolve against the TSV directory).
+`--meta-tags` should reference the matching pinned checkout; omit it to count
+only literal tags, reported as `meta_tags_expanded: false`. The existing summary
+supplies the corpus revision and incomplete-collection provenance. Without a
+completeness marker in that summary, offline reports use `complete: null`
+(unknown), not a claim that every case ran. Missing logs stay unclassified.
