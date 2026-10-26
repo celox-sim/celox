@@ -1,1 +1,6 @@
-Record the completed driver and focused UVM validation in the PR description.
+Revision history for #2141:
+
+rev 2 (rebase) 2026-10-26 11:00 UTC — Record the completed driver and focused UVM validation in the PR description.
+rev 1 (initial) 2026-10-26 11:00 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2141,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"59962176bc0f03f6b5357a1b5b747b012a05149c","timestamp_iso":"2026-10-26T11:00:22Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"59962176bc0f03f6b5357a1b5b747b012a05149c","new_sha":"1747a3d272803c466a3b089fa800a81b5f10d10c","timestamp_iso":"2026-10-26T11:00:22Z","reason":"Record the completed driver and focused UVM validation in the PR description.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/59962176bc0f03f6b5357a1b5b747b012a05149c...1747a3d272803c466a3b089fa800a81b5f10d10c"}]} -->
