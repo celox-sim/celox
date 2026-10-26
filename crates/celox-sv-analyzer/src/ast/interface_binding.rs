@@ -248,12 +248,15 @@ pub(super) fn analyze_module(
                     .ok_or_else(|| {
                         unsupported(format!("interface member `{}.{member}`", port.name))
                     })?;
-                bound.ports.push(Port::new(
-                    signal.name.clone(),
-                    *direction,
-                    signal.r#type.clone(),
-                    signal.is_net,
-                ));
+                bound.ports.push(
+                    Port::new(
+                        signal.name.clone(),
+                        *direction,
+                        signal.r#type.clone(),
+                        signal.is_net,
+                    )
+                    .with_unresolved_net(signal.unresolved_net),
+                );
             }
             bound
                 .signals
@@ -488,6 +491,7 @@ pub(super) fn analyze_module(
                         name: port.name.clone(),
                         r#type: port.r#type.clone(),
                         is_net: port.is_net,
+                        unresolved_net: port.unresolved_net,
                         is_const: false,
                         package_variable: None,
                         hierarchical: None,

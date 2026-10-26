@@ -148,7 +148,8 @@ pub(super) fn net_signals(
             base.clone(),
             constant_binding::bind_unpacked_ranges(&variable.dimensions, tree, &context)?,
         );
-        signals.push(Signal::new_net(name, ty));
+        signals
+            .push(Signal::new_net(name, ty).with_unresolved_net(declaration.net_type == "uwire"));
     }
     Ok(signals)
 }

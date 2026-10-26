@@ -1702,6 +1702,52 @@ struct DriverWrite {
     element: Option<(i128, i128)>,
 }
 
+/// Repeated zero-delay aliases of a declared net have one effective value
+/// (IEEE 1800-2023 6.5, 6.6.1). Keep the authored process indices so removing
+/// an alias does not renumber the random streams of later processes.
+/// Only whole-net identifier reads qualify: calls, slices, variables and
+/// conditional assignments retain their independent driver identities.
+fn redundant_net_aliases(module: &sv::ir::Module) -> HashSet<usize> {
+    let nets: HashSet<_> = module
+        .signals()
+        .iter()
+        .filter(|signal| {
+            signal.is_net() && !signal.is_unresolved_net() && signal.hierarchical().is_none()
+        })
+        .map(|signal| signal.name())
+        .chain(
+            module
+                .ports()
+                .iter()
+                .filter(|port| port.is_net() && !port.is_unresolved_net())
+                .map(|port| port.name()),
+        )
+        .collect();
+    let mut aliases = HashSet::default();
+    let mut redundant = HashSet::default();
+    for (index, process) in module.comb_processes().iter().enumerate() {
+        if process.kind() != sv::ir::CombProcessKind::ContinuousAssign
+            || process.condition().is_some()
+        {
+            continue;
+        }
+        let [
+            sv::ir::Stmt::Assign {
+                lhs: sv::ir::LValue::Ident(target),
+                rhs: sv::ir::Expr::Ident(source),
+                nonblocking: false,
+            },
+        ] = process.body()
+        else {
+            continue;
+        };
+        if nets.contains(target.as_str()) && !aliases.insert((target.as_str(), source.as_str())) {
+            redundant.insert(index);
+        }
+    }
+    redundant
+}
+
 /// The drivers of the variables of a module, by variable name, found by one
 /// walk of each process. Each query returns the drivers in process order.
 struct ModuleDrivers {
@@ -1789,7 +1835,11 @@ impl ModuleDrivers {
         };
         let comb = module.comb_processes();
         let ff = module.ff_processes();
+        let redundant = redundant_net_aliases(module);
         for (index, process) in comb.iter().enumerate() {
+            if redundant.contains(&index) {
+                continue;
+            }
             let active = condition_is_active(process.condition(), constants, parameter_types);
             walk(
                 process.body(),
@@ -5294,9 +5344,13 @@ fn lower_comb_processes(
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
     let random_seeds = process_random_seeds(module);
+    let redundant = redundant_net_aliases(module);
     let watchable =
         watch_seeds.map(|seeds| watchable_variables(&pm, module, port_assignments, seeds));
     for (index, process) in module.comb_processes().iter().enumerate() {
+        if redundant.contains(&index) {
+            continue;
+        }
         if let Some(condition) = process.condition() {
             let condition =
                 sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)

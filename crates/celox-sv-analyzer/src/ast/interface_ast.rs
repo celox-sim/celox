@@ -156,7 +156,8 @@ pub(super) fn signature(
                 PortDirection::Input,
                 rename.r#type(signal.r#type.clone()),
                 signal.is_net,
-            ))
+            )
+            .with_unresolved_net(signal.unresolved_net))
         })
         .collect::<Converted<_>>()?;
     module
