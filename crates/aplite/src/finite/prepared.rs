@@ -3,8 +3,10 @@ use super::*;
 
 mod cell;
 mod hashing;
+mod sampler;
 pub use cell::{Cell, CellStatus};
 pub use hashing::HashCells;
+pub use sampler::{SampleBatch, Sampler};
 
 /// Select the polarity of a predicate supplied when preparing the query.
 #[derive(Clone, Copy, Debug)]
