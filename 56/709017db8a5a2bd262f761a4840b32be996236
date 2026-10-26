@@ -1,0 +1,6 @@
+Revision history for #2121:
+
+rev 2 (content) 2026-10-26 09:41 UTC — Separate core checkpoint state from effect-handler state as requested, and add core checkpoint persistence for host-composed CLI checkpoints.
+rev 1 (initial) 2026-10-26 09:41 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2121,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"fc5c5cdaf754885de7526512622933d6f6ac7a62","timestamp_iso":"2026-10-26T09:41:19Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"fc5c5cdaf754885de7526512622933d6f6ac7a62","new_sha":"d966c7221743d28d491ccbda87b3f66389d17eaa","timestamp_iso":"2026-10-26T09:41:19Z","reason":"Separate core checkpoint state from effect-handler state as requested, and add core checkpoint persistence for host-composed CLI checkpoints.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/fc5c5cdaf754885de7526512622933d6f6ac7a62...d966c7221743d28d491ccbda87b3f66389d17eaa"}]} -->
