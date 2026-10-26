@@ -839,35 +839,18 @@ fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> 
                 .iter()
                 .map(|(text, path)| (text.as_str(), path.as_path()))
                 .collect();
-            let untimed = configure_sv(
+            // VPI advances time and dispatches callbacks even for a process-free
+            // DUT. Compile its process-capable image directly, rather than first
+            // compiling an untimed image and repeating analysis and optimization
+            // when that builder discovers a process.
+            let simulation = configure_sv(
                 design,
-                celox::Simulator::from_sv_sources(refs.clone(), &design.top),
+                celox::Simulation::from_sv_sources(refs, &design.top),
             )
-            .compile_native();
-            let image = match untimed {
-                Ok(simulator) => {
-                    report_warnings(simulator.warnings())?;
-                    simulator.into_program_image()
-                }
-                // A design with processes runs as a timed simulation, in step
-                // with the VPI time callbacks.
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        celox::SimulatorErrorKind::ProcessRequiresSimulation(_)
-                    ) =>
-                {
-                    let simulation = configure_sv(
-                        design,
-                        celox::Simulation::from_sv_sources(refs, &design.top),
-                    )
-                    .compile_native()
-                    .map_err(|error| format!("compilation failed:\n{error}"))?;
-                    report_warnings(simulation.warnings())?;
-                    simulation.into_program_image()
-                }
-                Err(error) => return Err(format!("compilation failed:\n{error}")),
-            };
+            .compile_native()
+            .map_err(|error| format!("compilation failed:\n{error}"))?;
+            report_warnings(simulation.warnings())?;
+            let image = simulation.into_program_image();
             return Ok(image);
         }
         #[cfg(not(feature = "systemverilog"))]
