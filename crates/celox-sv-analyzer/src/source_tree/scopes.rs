@@ -65,7 +65,7 @@ pub(super) fn handles(native: &Declarations) -> Converted<Vec<ScopeHandle>> {
         if !unit.external
             && matches!(
                 unit.kind,
-                UnitKind::Module | UnitKind::Interface | UnitKind::Package
+                UnitKind::Module | UnitKind::Program | UnitKind::Interface | UnitKind::Package
             )
         {
             result.push(handle);

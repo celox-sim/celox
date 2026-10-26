@@ -1,0 +1,59 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "random_plusargs::dist_uniform_bounds_seed_and_replay",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "random_plusargs::dist_uniform_converts_wide_and_signed_seeds_to_int_formals at 87:3: assert_eq ok: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "random_plusargs::dist_uniform_converts_wide_and_signed_seeds_to_int_formals",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "random_plusargs::dist_uniform_reference_sequence at 114:3: assert_eq ok: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "random_plusargs::dist_uniform_reference_sequence",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "random_plusargs::packed_string_literals_preserve_bytes_and_unsignedness",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "random_plusargs::plusargs_absent_preserves_destination",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

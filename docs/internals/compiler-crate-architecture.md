@@ -84,7 +84,9 @@ signedness, and mixed two-state/four-state member conversions follow IEEE
 This first structure extension supports constant in-range member selections.
 Arrays of structures with member access, dynamic or out-of-range member
 selections, struct-valued parameter member evaluation, assignment patterns,
-unpacked structures, and unions remain unsupported. Member access on function
+unpacked structures, and tagged/unpacked unions remain unsupported.
+Hard and soft packed untagged unions share offset-zero member storage; soft
+unions use the largest member width and preserve upper bits on narrower writes. Member access on function
 formals is also deferred. These forms must be diagnosed rather than silently
 lowered as accesses to the entire structure.
 

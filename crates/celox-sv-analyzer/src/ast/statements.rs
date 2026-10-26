@@ -163,6 +163,9 @@ pub(super) fn expr_from_lvalue(
     lhs: &LValue,
     packed_dimensions: &PackedDimensions,
 ) -> Expr {
+    if let Some(value) = selects::invalid_unpacked_read(state, lhs, packed_dimensions) {
+        return value;
+    }
     let (base, array_slice_width, array_slice_reversed, signed) = match lhs {
         LValue::Ident(name) => return Expr::Ident(name.clone()),
         LValue::Select {

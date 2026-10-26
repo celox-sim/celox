@@ -1,5 +1,6 @@
 use super::state::FunctionLoopControlState;
 use super::*;
+use celox_design::Severity;
 
 pub(crate) fn subtract_written_sensitivity<A: Copy + Eq + std::hash::Hash>(
     atoms: impl IntoIterator<Item = VarAtomBase<A>>,
@@ -100,6 +101,9 @@ fn register_comb_runtime_event_site<'a>(
         template,
         sizing: DisplaySizing::Veryl,
         scope: None,
+        location: None,
+        assertion: None,
+        deferred: None,
         arg_widths: value_args
             .iter()
             .map(|arg| arg.0.comptime().r#type.total_width().unwrap_or(1))
@@ -156,8 +160,10 @@ fn collect_system_function_effect(
         SystemFunctionKind::Finish => (RuntimeEventKind::Finish, None, [].as_slice()),
         SystemFunctionKind::Assert { kind, cond, args } => {
             let event_kind = match kind {
-                veryl_analyzer::ir::AssertKind::Fatal => RuntimeEventKind::AssertFatal,
-                veryl_analyzer::ir::AssertKind::Continue => RuntimeEventKind::AssertContinue,
+                veryl_analyzer::ir::AssertKind::Fatal => RuntimeEventKind::Report(Severity::Fatal),
+                veryl_analyzer::ir::AssertKind::Continue => {
+                    RuntimeEventKind::Report(Severity::Error)
+                }
             };
             (event_kind, Some(&cond.0), args.as_slice())
         }
@@ -220,20 +226,12 @@ fn collect_system_function_effect(
             active,
             None,
         ) => active,
-        (RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal, None, explicit) => {
-            explicit
-        }
-        (
-            RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal,
-            Some(active),
-            Some(explicit),
-        ) => {
+        (RuntimeEventKind::Report(_), None, explicit) => explicit,
+        (RuntimeEventKind::Report(_), Some(active), Some(explicit)) => {
             let inactive = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, active))?;
             Some(arena.alloc(SLTNode::Binary(inactive, BinaryOp::LogicOr, explicit))?)
         }
-        (RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal, Some(active), None) => {
-            Some(active)
-        }
+        (RuntimeEventKind::Report(_), Some(active), None) => Some(active),
         (
             RuntimeEventKind::Display
             | RuntimeEventKind::Write
@@ -266,8 +264,7 @@ fn collect_system_function_effect(
                     | RuntimeEventKind::Stop
             ),
             args: observer_args.clone(),
-            fatal_error_code: matches!(kind, RuntimeEventKind::AssertFatal)
-                .then_some(1_000_000 + site_id as i64),
+            fatal_error_code: kind.is_fatal().then_some(1_000_000 + site_id as i64),
         });
     let observed_ids: HashSet<_> = observed_inputs.iter().map(|atom| atom.id).collect();
     let position_ids: HashSet<_> = position_inputs.iter().map(|atom| atom.id).collect();

@@ -18,8 +18,8 @@ use super::sir_analysis::{UseSite, collect_uses, instruction_uses};
 use super::state_ssa::StateSsa;
 use crate::ir::cfg::SirCfg;
 use crate::ir::{
-    BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction, SIROffset,
-    SIRTerminator, SIRValue, UnaryOp,
+    BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, RegisterType,
+    SIRInstruction, SIROffset, SIRTerminator, SIRValue, UnaryOp,
 };
 use crate::{HashMap, HashSet};
 
@@ -2014,6 +2014,7 @@ pub(crate) fn plan_best_effect_case_dispatch(
         ))
     });
 
+    let mut load_versions = LoadVersions::new(eu, &cfg);
     candidates
         .into_iter()
         .find_map(|(saving, _, origin, group)| {
@@ -2030,6 +2031,7 @@ pub(crate) fn plan_best_effect_case_dispatch(
                 &incoming_values,
                 &predecessors,
                 &cfg,
+                &mut load_versions,
             )
         })
 }
@@ -2048,6 +2050,7 @@ fn build_effect_case_rewrite_plan(
     incoming_values: &HashMap<RegisterId, Vec<IncomingValue>>,
     predecessors: &HashMap<BlockId, Vec<BlockId>>,
     cfg: &SirCfg,
+    load_versions: &mut LoadVersions<'_>,
 ) -> Option<EffectCaseRewritePlan> {
     let cross_block = cross_block_selector_closure(
         eu,
@@ -2149,7 +2152,14 @@ fn build_effect_case_rewrite_plan(
                 known_values: recipe.known_values.clone(),
             };
             if recipe.non_dominating_control_merges.is_empty() {
-                if !loads_are_stable_at(eu, cfg, definitions, sink.0, &recipe.load_frontier) {
+                if !loads_are_stable_at(
+                    eu,
+                    cfg,
+                    definitions,
+                    load_versions,
+                    sink.0,
+                    &recipe.load_frontier,
+                ) {
                     return None;
                 }
                 sink_cases.push(executable);
@@ -2172,6 +2182,7 @@ fn build_effect_case_rewrite_plan(
                 eu,
                 cfg,
                 definitions,
+                load_versions,
                 insertion_block,
                 &recipe.load_frontier,
             ) {
@@ -2283,7 +2294,167 @@ fn recipe_is_available_at_entry(
         })
 }
 
+/// An exact static state location: address, bit offset and width.
+type ExactLocation = (RegionedAbsoluteAddr, usize, usize);
+
+/// Whether a two-state exact access of `width` bits through a register of
+/// type `ty` gives its location a valid slot type (see `StateSsa`).
+fn exact_access_typed(ty: Option<&RegisterType>, width: usize) -> bool {
+    ty.is_some_and(|ty| width != 0 && ty.width() == width)
+}
+
+/// Load versions of one execution unit, shared by the stability checks of
+/// all its sink recipes.
+///
+/// A recipe's loads are stable at a block when each still reads the state
+/// version it read originally. Analyzing each recipe's loads separately
+/// scans the whole unit once per recipe. State SSA versions an exact
+/// location from that location's own definitions and kills, so one analysis
+/// selecting every load of a region versions each location as an analysis
+/// selecting fewer loads does. What depends on the selection is which
+/// locations get a slot and whether their types are valid:
+/// - The shared analysis leaves out the loads that make their location
+///   invalid in every selection containing them. Such a load has no version
+///   there, as in its recipe's own analysis, so the recipe is not stable.
+/// - A static load gives its location a slot, which a packed load of the
+///   same bits then also reads; `loads_are_stable_at` checks per recipe
+///   that the recipe has such a static load.
+struct LoadVersions<'a> {
+    eu: &'a ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &'a SirCfg,
+    regions: BTreeMap<u32, Option<StateSsa>>,
+}
+
+impl<'a> LoadVersions<'a> {
+    fn new(eu: &'a ExecutionUnit<RegionedAbsoluteAddr>, cfg: &'a SirCfg) -> Self {
+        Self {
+            eu,
+            cfg,
+            regions: BTreeMap::new(),
+        }
+    }
+
+    /// The shared versions of `region`, or `None` when its analysis fails.
+    fn region(&mut self, region: u32) -> Option<&StateSsa> {
+        let (eu, cfg) = (self.eu, self.cfg);
+        self.regions
+            .entry(region)
+            .or_insert_with(|| Self::analyze(eu, cfg, region))
+            .as_ref()
+    }
+
+    fn analyze(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        cfg: &SirCfg,
+        region: u32,
+    ) -> Option<StateSsa> {
+        let instructions = || {
+            cfg.block_ids
+                .iter()
+                .flat_map(|block| &eu.blocks[block].instructions)
+        };
+        // An exact store without a valid type makes its location invalid in
+        // every selection, as does a load without one.
+        let invalid = instructions()
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(
+                    address,
+                    SIROffset::Static(bit_offset),
+                    width,
+                    source,
+                    ..,
+                ) if address.region == region
+                    && !exact_access_typed(eu.register_map.get(source), *width) =>
+                {
+                    Some((*address, *bit_offset, *width))
+                }
+                _ => None,
+            })
+            .collect::<HashSet<ExactLocation>>();
+        let loads = instructions()
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Load(
+                    destination,
+                    address,
+                    SIROffset::Static(bit_offset),
+                    width,
+                ) if address.region == region => {
+                    (exact_access_typed(eu.register_map.get(destination), *width)
+                        && !invalid.contains(&(*address, *bit_offset, *width)))
+                    .then_some(*destination)
+                }
+                SIRInstruction::Load(destination, address, SIROffset::PackedElements { .. }, _)
+                    if address.region == region =>
+                {
+                    Some(*destination)
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        StateSsa::analyze_selected_loads_two_state(eu, cfg, region, &loads).ok()
+    }
+}
+
+/// Whether every load in `loads` still reads its original state version on
+/// entry to `target`, as `loads_are_stable_at_by_analysis` decides, from
+/// the unit's shared load versions.
 fn loads_are_stable_at(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirCfg,
+    definitions: &HashMap<RegisterId, DefinitionSite>,
+    versions: &mut LoadVersions<'_>,
+    target: BlockId,
+    loads: &BTreeSet<RegisterId>,
+) -> bool {
+    let mut sites = Vec::with_capacity(loads.len());
+    for &register in loads {
+        let Some(site) = definitions.get(&register) else {
+            return false;
+        };
+        let SIRInstruction::Load(_, address, offset, width) =
+            &eu.blocks[&site.block].instructions[site.index]
+        else {
+            return false;
+        };
+        sites.push((register, site, *address, offset, *width));
+    }
+    if sites
+        .iter()
+        .any(|(_, _, address, ..)| versions.region(address.region).is_none())
+    {
+        return loads_are_stable_at_by_analysis(eu, cfg, definitions, target, loads);
+    }
+    // The locations an analysis of just these loads gives a slot.
+    let locations = sites
+        .iter()
+        .filter_map(|(_, _, address, offset, width)| match offset {
+            SIROffset::Static(bit_offset) => Some((*address, *bit_offset, *width)),
+            _ => None,
+        })
+        .collect::<HashSet<ExactLocation>>();
+    sites
+        .iter()
+        .all(|(register, site, address, offset, width)| {
+            let (SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. }) =
+                offset
+            else {
+                return false;
+            };
+            if !locations.contains(&(*address, *bit_offset, *width)) {
+                return false;
+            }
+            versions.region(address.region).is_some_and(|state| {
+                state
+                    .read_version(site.block, site.index, *register)
+                    .is_some_and(|(slot, original)| {
+                        state.entry_version(target, slot) == Some(original)
+                    })
+            })
+        })
+}
+
+/// `loads_are_stable_at` by an analysis of just `loads`.
+fn loads_are_stable_at_by_analysis(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     cfg: &SirCfg,
     definitions: &HashMap<RegisterId, DefinitionSite>,
@@ -2403,6 +2574,160 @@ mod tests {
                 var_id: VarId::from_raw(variable),
             },
         )
+    }
+
+    /// Shared load versions decide every selection of loads as an analysis
+    /// of just those loads does, over random units with branches, a loop,
+    /// overlapping exact accesses, packed, dynamic and mistyped accesses.
+    #[test]
+    fn shared_load_versions_match_per_recipe_analysis() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        // 0 -> {1, 2} -> 3 -> {3, 4}
+        let successors = [vec![1, 2], vec![3], vec![3], vec![3, 4], vec![]];
+        let mut checked = 0;
+        let mut stable = 0;
+        for _ in 0..300 {
+            let mut register_map = HashMap::default();
+            let mut registers = 0;
+            let mut register = |ty: Option<RegisterType>, map: &mut HashMap<_, _>| {
+                registers += 1;
+                let id = RegisterId(registers);
+                if let Some(ty) = ty {
+                    map.insert(id, ty);
+                }
+                id
+            };
+            let condition = register(Some(bit(1)), &mut register_map);
+            let index = register(Some(bit(2)), &mut register_map);
+            let mut loads = Vec::new();
+            let blocks = successors
+                .iter()
+                .enumerate()
+                .map(|(block, successors)| {
+                    let mut instructions = Vec::new();
+                    for _ in 0..next(5) {
+                        let width = if next(10) == 0 { 0 } else { 4 * (1 + next(2)) };
+                        let bit_offset = 4 * next(3);
+                        // Mostly well typed; sometimes the wrong width or no
+                        // register type at all.
+                        let ty = match next(8) {
+                            0 => None,
+                            1 => Some(bit(width + 1)),
+                            2 => Some(logic(width)),
+                            _ => Some(bit(width)),
+                        };
+                        let addr = address(next(2) as u32);
+                        let value = register(ty, &mut register_map);
+                        match next(6) {
+                            0 | 1 => instructions.push(SIRInstruction::Store(
+                                addr,
+                                SIROffset::Static(bit_offset),
+                                width,
+                                value,
+                                Vec::new(),
+                                Vec::new(),
+                            )),
+                            2 => {
+                                instructions.push(SIRInstruction::Load(
+                                    value,
+                                    addr,
+                                    SIROffset::PackedElements {
+                                        bit_offset,
+                                        element_width: 4,
+                                    },
+                                    width,
+                                ));
+                                loads.push(value);
+                            }
+                            3 if next(3) == 0 => {
+                                instructions.push(SIRInstruction::Load(
+                                    value,
+                                    addr,
+                                    SIROffset::Dynamic(index),
+                                    width,
+                                ));
+                                loads.push(value);
+                            }
+                            _ => {
+                                instructions.push(SIRInstruction::Load(
+                                    value,
+                                    addr,
+                                    SIROffset::Static(bit_offset),
+                                    width,
+                                ));
+                                loads.push(value);
+                            }
+                        }
+                    }
+                    let terminator = match successors.as_slice() {
+                        [] => SIRTerminator::Return,
+                        [target] => SIRTerminator::Jump(BlockId(*target), vec![]),
+                        [then, otherwise] => SIRTerminator::Branch {
+                            cond: condition,
+                            true_block: (BlockId(*then), vec![]),
+                            false_block: (BlockId(*otherwise), vec![]),
+                        },
+                        _ => unreachable!(),
+                    };
+                    (
+                        BlockId(block),
+                        BasicBlock {
+                            id: BlockId(block),
+                            params: vec![],
+                            instructions,
+                            terminator,
+                        },
+                    )
+                })
+                .collect();
+            let eu = ExecutionUnit {
+                entry_block_id: BlockId(0),
+                blocks,
+                register_map,
+            };
+            let cfg = SirCfg::analyze_structure(&eu).unwrap();
+            let definitions = collect_definition_sites(&eu);
+            let mut versions = LoadVersions::new(&eu, &cfg);
+            for _ in 0..12 {
+                let selection = loads
+                    .iter()
+                    .copied()
+                    .filter(|_| next(3) == 0)
+                    .collect::<BTreeSet<_>>();
+                for target in 0..successors.len() {
+                    let target = BlockId(target);
+                    let expected = loads_are_stable_at_by_analysis(
+                        &eu,
+                        &cfg,
+                        &definitions,
+                        target,
+                        &selection,
+                    );
+                    assert_eq!(
+                        loads_are_stable_at(
+                            &eu,
+                            &cfg,
+                            &definitions,
+                            &mut versions,
+                            target,
+                            &selection
+                        ),
+                        expected,
+                        "{selection:?} at {target:?} in {eu:?}"
+                    );
+                    checked += 1;
+                    stable += usize::from(expected && !selection.is_empty());
+                }
+            }
+        }
+        assert!(checked > 10_000, "{checked}");
+        assert!(stable > 100, "{stable}");
     }
 
     #[test]

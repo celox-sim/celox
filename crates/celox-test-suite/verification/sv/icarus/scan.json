@@ -1,0 +1,27 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "IEEE 1800-2023 21.3.4.3 permits a string expression as the scan format. Icarus 13.0 compiles this case but vvp terminates with SIGSEGV. A reduced source using only a string format variable, without a method expression, also crashes. The string-source case with a literal format remains enabled.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_runtime_limitation",
+        "evidence": [
+          "verification/sv/limitations/scan-string-format-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_scan_string_format",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "execute",
+        "reason": "IEEE 1800-2023 21.3.4.3 permits a string expression as the scan format. Icarus 13.0 compiles this case but vvp terminates with SIGSEGV. A reduced source using only a string format variable, without a method expression, also crashes. The string-source case with a literal format remains enabled.",
+        "upstream": []
+      },
+      "name": "scan::sscanf_string_format_expression",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

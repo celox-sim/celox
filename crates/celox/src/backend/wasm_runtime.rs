@@ -2,7 +2,7 @@
 //!
 //! Compiles SIRT → WASM bytecode via [`wasm_codegen`], then instantiates and
 //! executes the generated modules with Wasmtime. Provides the same interface
-//! as [`JitBackend`] so that [`Simulator`] can use either backend.
+//! as `JitBackend` so that [`crate::Simulator`] can use either backend.
 
 use num_bigint::BigUint;
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
@@ -120,6 +120,9 @@ impl super::traits::SimBackend for WasmBackend {
     }
     fn set_comb_capture_event_enabled(&mut self, active_sites: &[bool]) {
         WasmBackend::set_comb_capture_event_enabled(self, active_sites)
+    }
+    fn comb_capture_event_enabled(&self) -> Vec<bool> {
+        WasmBackend::comb_capture_event_enabled(self)
     }
     fn stable_region_size(&self) -> usize {
         WasmBackend::stable_region_size(self)
@@ -703,6 +706,16 @@ impl WasmBackend {
                 mem[enabled_base + idx] = 1;
             }
         }
+    }
+
+    pub fn comb_capture_event_enabled(&self) -> Vec<bool> {
+        let enabled_base = self.layout.merged_total_size + self.layout.runtime_event_buffer_size;
+        let enabled_len = self.layout.runtime_event_site_layouts.len();
+        let mem = self.memory.data(&self.store);
+        mem[enabled_base..enabled_base + enabled_len]
+            .iter()
+            .map(|&enabled| enabled != 0)
+            .collect()
     }
 
     pub fn stable_region_size(&self) -> usize {

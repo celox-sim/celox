@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "loop_idiom::test_guarded_packed_scan",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "loop_idiom::test_guarded_scan_preserves_independent_outputs",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "loop_idiom::test_recovered_bit_count_loop_semantics",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

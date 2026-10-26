@@ -1,0 +1,103 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Syntax error in typedef clause.\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::casts_ports_and_registers",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Syntax error in typedef clause.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module instantiation\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::conditional_struct_payload",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 14; see <case>/build.log\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Syntax error in typedef clause.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module instantiation\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Malformed statement\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::constructors_and_checked_members",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 26; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Syntax error in typedef clause.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Syntax error in typedef clause.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module instantiation\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:1: error: Error in task/function port item after port name item_t.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Syntax error defining function.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:1: error: Error in task/function port item after port name outer_t.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Syntax error defining function.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:1: error: Error in task/function port item after port name item_t.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Syntax error defining function.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:1: error: Error in task/function port item after port name item_t.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::default_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 42; see <case>/build.log\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Syntax error in typedef clause.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Syntax error in typedef clause.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Syntax error in typedef clause.\n<case>/source_0.sv:7: error: 'Full' has already been declared in this scope.\n<case>/source_0.sv:5:      : It was declared here as a variable.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Syntax error in typedef clause.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module instantiation\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Malformed statement\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Malformed statement\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Malformed statement\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: error: Malformed statement\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Malformed statement\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:24: error: Syntax error defining function.\n<case>/source_0.sv:38: syntax error\n<case>/source_0.sv:38: error: Invalid module instantiation\n<case>/source_0.sv:40: syntax error\n<case>/source_0.sv:40: error: Syntax error defining function.\n<case>/source_0.sv:43: syntax error\n<case>/source_0.sv:43: error: Syntax error defining function.\n<case>/source_0.sv:47: syntax error\n<case>/source_0.sv:1: error: Error in task/function port item after port name alias_t.\n<case>/source_0.sv:47: syntax error\n<case>/source_0.sv:50: syntax error\n<case>/source_0.sv:1: error: Error in task/function port item after port name item_t.\n<case>/source_0.sv:50: syntax error\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::factory_and_union_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 16; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Syntax error in typedef clause.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Syntax error in typedef clause.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module instantiation\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::nested_and_void_constructors",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Syntax error in typedef clause.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module instantiation\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::wide_four_state_payload",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Malformed statement\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::writable_system_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 15; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Syntax error in typedef clause.\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module instantiation\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module instantiation\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Malformed statement\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::writable_task_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

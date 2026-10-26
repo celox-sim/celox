@@ -10,6 +10,14 @@
 //! number of memory definitions, and `F` is the number of MemoryPhi inputs. A
 //! clobber query is linear in the visited graph in the worst case and reuses
 //! one `O(D + F)` scratch allocation across all of that query's start points.
+//!
+//! The clobber walk is exact on acyclic graphs.  On cyclic graphs its result
+//! can depend on the start of the walk: a MemoryPhi whose inputs are all still
+//! on the walk stack is kept as a version of its own although every input
+//! resolves to one value once the walk completes (see
+//! `memory_versions::tests::clobber_walker_cycle_rule_is_not_canonical_on_loops`).
+//! Clients that need a canonical certificate of the memory state, such as
+//! reload-recipe verification, use [`crate::memory_versions`] instead.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -262,20 +270,14 @@ impl ClobberWalker {
                     self.results[access] = None;
                     match &nodes[access] {
                         MemoryAccessNode::LiveOnEntry => {
-                            let result = ClobberResolution::Access(access);
-                            self.states[access] = 2;
-                            self.results[access] = Some(result);
-                            self.values.push(result);
+                            self.resolve(access, ClobberResolution::Access(access));
                         }
                         MemoryAccessNode::Definition {
                             definition,
                             previous,
                         } => {
                             if alias_oracle.may_alias(definition, query) {
-                                let result = ClobberResolution::Access(access);
-                                self.states[access] = 2;
-                                self.results[access] = Some(result);
-                                self.values.push(result);
+                                self.resolve(access, ClobberResolution::Access(access));
                             } else {
                                 self.frames.push(ResolveFrame::FinishDefinition(access));
                                 self.frames.push(ResolveFrame::Enter(previous.0));
@@ -305,11 +307,10 @@ impl ClobberWalker {
                         // resolved independently of the active MemoryPhi.
                         self.states[access] = 0;
                         self.results[access] = None;
+                        self.values.push(result);
                     } else {
-                        self.states[access] = 2;
-                        self.results[access] = Some(result);
+                        self.resolve(access, result);
                     }
-                    self.values.push(result);
                 }
                 ResolveFrame::FinishPhi { access, inputs } => {
                     let first = self
@@ -334,9 +335,7 @@ impl ClobberWalker {
                     } else {
                         common.unwrap_or(ClobberResolution::Access(access))
                     };
-                    self.states[access] = 2;
-                    self.results[access] = Some(result);
-                    self.values.push(result);
+                    self.resolve(access, result);
                 }
             }
         }
@@ -350,6 +349,13 @@ impl ClobberWalker {
             ClobberResolution::Access(access) => MemoryClobber::Access(MemoryAccessId(access)),
             ClobberResolution::Cycle => MemoryClobber::Indeterminate,
         }
+    }
+
+    /// Record `access` as resolved to `result` in this session.
+    fn resolve(&mut self, access: usize, result: ClobberResolution) {
+        self.states[access] = 2;
+        self.results[access] = Some(result);
+        self.values.push(result);
     }
 }
 

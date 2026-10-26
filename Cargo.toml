@@ -1,4 +1,6 @@
 [workspace]
+# Keep optional backend and comparison crates out of ordinary local builds.
+default-members = ["crates/celox", "crates/celox-napi", "crates/celox-vpi"]
 members = [
     "crates/celox",
     "crates/celox-analysis",
@@ -86,13 +88,13 @@ lydite-solver         = { path = "crates/lydite-solver" }
 lydite-syntax         = { path = "crates/lydite-syntax" }
 lydite-verify         = { path = "crates/lydite-verify" }
 
-veryl-analyzer = { git = "https://github.com/veryl-lang/veryl.git", rev = "a24ad71b3fddf5987e943a3969dc64f635ed14bf" }
-veryl-emitter = { git = "https://github.com/veryl-lang/veryl.git", rev = "a24ad71b3fddf5987e943a3969dc64f635ed14bf" }
-veryl-metadata = { git = "https://github.com/veryl-lang/veryl.git", rev = "a24ad71b3fddf5987e943a3969dc64f635ed14bf" }
-veryl-parser = { git = "https://github.com/veryl-lang/veryl.git", rev = "a24ad71b3fddf5987e943a3969dc64f635ed14bf", default-features = false }
-veryl-path = { git = "https://github.com/veryl-lang/veryl.git", rev = "a24ad71b3fddf5987e943a3969dc64f635ed14bf" }
-veryl-simulator = { git = "https://github.com/veryl-lang/veryl.git", rev = "a24ad71b3fddf5987e943a3969dc64f635ed14bf" }
-veryl-std = { git = "https://github.com/veryl-lang/veryl.git", rev = "a24ad71b3fddf5987e943a3969dc64f635ed14bf" }
+veryl-analyzer = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "a24ad71b3fddf5987e943a3969dc64f635ed14bf" }
+veryl-emitter = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "a24ad71b3fddf5987e943a3969dc64f635ed14bf" }
+veryl-metadata = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "a24ad71b3fddf5987e943a3969dc64f635ed14bf" }
+veryl-parser = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "a24ad71b3fddf5987e943a3969dc64f635ed14bf", default-features = false }
+veryl-path = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "a24ad71b3fddf5987e943a3969dc64f635ed14bf" }
+veryl-simulator = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "a24ad71b3fddf5987e943a3969dc64f635ed14bf" }
+veryl-std = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "a24ad71b3fddf5987e943a3969dc64f635ed14bf" }
 
 bit-set         = "0.11"
 clap            = { version = "4.5.60", features = ["derive"] }
@@ -100,9 +102,9 @@ fxhash          = "0.2.1"
 itertools       = "0.15.0"
 libc            = "0.2"
 miette          = { version = "7.6" }
-napi            = "=3.14.2"
+napi            = "=3.15.0"
 napi-build      = "=2.6.0"
-napi-derive     = "=3.6.12"
+napi-derive     = "=3.6.13"
 num-bigint      = { version = "0.5", features = ["serde"] }
 num-traits      = "0.2.19"
 rand            = { version = "0.10", default-features = false }
@@ -165,6 +167,12 @@ incremental   = true
 
 [profile.bench]
 debug = true
+
+# Optimize the shared vtest executor while keeping development checks enabled.
+# External dependencies retain the dev profile's package-specific optimization.
+[profile.vtest]
+inherits = "dev"
+opt-level = 1
 
 # Profile for wasm-pack builds. LTO is disabled to avoid a known issue
 # where proc-macro dependencies (syn) get incorrectly compiled for the

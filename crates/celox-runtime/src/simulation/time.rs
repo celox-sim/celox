@@ -170,7 +170,14 @@ impl<B: SimBackend> SimulationState<B> {
             }
             ready.retain(|&process| !self.model.processes[process].starts_with_event_wait);
         }
-        self.step_round(executor, current_time, events_to_process, ready, true)?;
+        self.step_round(
+            executor,
+            current_time,
+            events_to_process,
+            ready,
+            true,
+            false,
+        )?;
         self.end_time(executor, current_time)
     }
 
@@ -185,13 +192,39 @@ impl<B: SimBackend> SimulationState<B> {
         loop {
             let ready = self.take_ready_processes(current_time);
             if ready.is_empty() && self.process_state.ready.is_empty() {
-                break;
+                // The active region set is empty: the reactive region set
+                // runs, and the design activity it creates runs in the active
+                // region set again (IEEE 1800-2023 4.5).
+                if !self.reactive_pending() {
+                    break;
+                }
+                self.charge_pass()?;
+                self.step_round(executor, current_time, Vec::new(), Vec::new(), false, true)?;
+                continue;
             }
             self.charge_pass()?;
-            self.step_round(executor, current_time, Vec::new(), ready, false)?;
+            self.step_round(executor, current_time, Vec::new(), ready, false, false)?;
         }
         executor.try_finish_timed_step(current_time)?;
+        // What the host writes after the slot is an update of its time.
+        if executor.take_slot_writes() {
+            self.host_pending = true;
+        }
+        // The slot is over when nothing more is due at its time, host
+        // writes included.
+        if !self.host_pending && self.next_work_time() != Some(current_time) {
+            executor.try_end_time_slot(current_time)?;
+        }
         Ok(())
+    }
+
+    /// Whether a region of the reactive region set holds work.
+    #[inline]
+    fn reactive_pending(&self) -> bool {
+        let state = &self.process_state;
+        !state.reactive.is_empty()
+            || !state.re_inactive.is_empty()
+            || !state.re_nba_queue.is_empty()
     }
 
     /// Count a round or a pass of the process phase against the slot's
@@ -225,7 +258,9 @@ impl<B: SimBackend> SimulationState<B> {
         }))
     }
 
-    /// Remove the processes waiting for `time`, in declaration order.
+    /// Remove the processes waiting for `time`, in declaration order. Program
+    /// processes resume in the Reactive region (IEEE 1800-2023 24.3.1): they
+    /// join its queue, and only design processes are returned.
     fn take_ready_processes(&mut self, time: u64) -> Vec<usize> {
         let mut ready = Vec::new();
         while let Some(&Reverse((wakeup, process))) = self.process_wakeups.peek() {
@@ -233,7 +268,11 @@ impl<B: SimBackend> SimulationState<B> {
                 break;
             }
             self.process_wakeups.pop();
-            ready.push(process);
+            if self.model.processes[process].program.is_some() {
+                self.process_state.reactive.insert(process);
+            } else {
+                ready.push(process);
+            }
         }
         ready
     }
@@ -254,12 +293,13 @@ impl<B: SimBackend> SimulationState<B> {
         Ok(())
     }
 
-    /// The next time with scheduled events or processes to run.
-    pub(super) fn next_work_time(&self) -> Option<u64> {
+    /// The next time with scheduled events or processes to run, apart
+    /// from host writes to settle.
+    pub fn next_work_time(&self) -> Option<u64> {
         if self.finished {
             return None;
         }
-        if !self.process_state.ready.is_empty() {
+        if !self.process_state.ready.is_empty() || !self.process_state.reactive.is_empty() {
             return Some(self.scheduler.time);
         }
         let process = self.process_wakeups.peek().map(|&Reverse((time, _))| time);

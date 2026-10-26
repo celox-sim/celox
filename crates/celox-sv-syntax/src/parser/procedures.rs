@@ -137,6 +137,22 @@ impl Parser<'_> {
         Ok(id)
     }
 
+    /// A deferred immediate assertion as a module item: an `always_comb`
+    /// procedure whose body is the assertion (IEEE 1800-2023 16.4.3).
+    pub(super) fn static_deferred_assertion(&mut self) -> Result<ProcedureId> {
+        let start = self.at;
+        let body = self.statement_machine()?;
+        let id = ProcedureId(self.procedures.len());
+        let authored_statements = self.body_membership(&[body]);
+        self.procedures.push(Procedure {
+            kind: ProcedureKind::AlwaysComb,
+            body,
+            authored_statements,
+            tokens: self.range(start),
+        });
+        Ok(id)
+    }
+
     /// Capture syntax ownership before execution graph transformations. This
     /// flat membership also keeps deeply nested scopes independent of Rust's
     /// call stack; opaque statement children remain their own captured scope.

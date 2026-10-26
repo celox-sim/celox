@@ -382,10 +382,14 @@ pub(super) fn parameters_from_native_with_environment(
     let parameter_is_2state = native_prefix.is_2state();
     for &native in authored {
         // An unpacked array parameter is a constant variable, not a value.
-        if array_parameters::is_array_parameter(native, syntax_tree.declarations())
-            || scope::imported(&syntax_tree.state)
-                .pattern_parameter_bindings
-                .contains_key(&native.id)
+        if array_parameters::uses_signal_representation(
+            native,
+            syntax_tree,
+            &environment.constants,
+            type_aliases,
+        )? || scope::imported(&syntax_tree.state)
+            .pattern_parameter_bindings
+            .contains_key(&native.id)
         {
             let name = instances::normalize_identifier(&native.name.spelling);
             let marker = unbounded_parameter_marker(&name);
@@ -402,7 +406,12 @@ pub(super) fn parameters_from_native_with_environment(
         }
         environment.literals.remove(&name);
         let const_env = &environment.constants;
-        let mut value = if ownership::default(native).is_some() {
+        let replaced_pattern = !is_local
+            && parameter_overrides.contains_key(&name)
+            && array_parameters::is_array_parameter(native, syntax_tree.declarations());
+        let mut value = if replaced_pattern {
+            parameter_overrides.get(&name).cloned()
+        } else if ownership::default(native).is_some() {
             let imported = scope::imported(&syntax_tree.state);
             let mut proof_context = PackedDimensions::new(
                 parameter_packed_dimensions_with_imported(parameters, &imported),
@@ -935,7 +944,11 @@ pub(super) fn coerce_const_parameter_value(value: i128, width: usize, signed: bo
     }
 }
 
-fn enum_initializer_fits_base_type(value: i128, value_type: ExprType, base_type: ExprType) -> bool {
+pub(super) fn enum_initializer_fits_base_type(
+    value: i128,
+    value_type: ExprType,
+    base_type: ExprType,
+) -> bool {
     // A same-width initializer may change its numeric interpretation when
     // the enum base has different signedness, but it does not lose any bits.
     if value_type.width <= base_type.width || base_type.width >= 128 {
@@ -1033,20 +1046,25 @@ pub(super) fn enum_member_constants_from_items(
         let DataTypeKind::Enum { base, items } = &native.data_type(id).kind else {
             unreachable!();
         };
-        let member_type = match base {
+        let member_base = match base {
             Some(id) => type_binding::enum_constant_base(
                 *id,
                 syntax_tree,
                 &eval_env,
                 &resolved_type_aliases,
-            )?
-            .and_then(|ty| expr_type_from_type(&syntax_tree.state, &ty, &eval_env)),
-            None => Some(ExprType {
-                width: 32,
-                signed: true,
-            }),
+            )?,
+            None => type_binding::builtin_type("int", None),
         }
         .ok_or_else(|| unsupported("enum base type"))?;
+        type_binding::binding::validate_enum_initializers(
+            id,
+            native,
+            syntax_tree,
+            &PackedDimensions::new(HashMap::default(), &eval_env, &resolved_type_aliases),
+            &member_base,
+        )?;
+        let member_type = expr_type_from_type(&syntax_tree.state, &member_base, &eval_env)
+            .ok_or_else(|| unsupported("enum base type"))?;
         let mut next_enum_value = 0i128;
         for new in items {
             let name = instances::normalize_identifier(&new.name.spelling);

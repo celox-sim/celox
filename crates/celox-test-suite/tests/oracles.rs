@@ -1,5 +1,10 @@
 //! Live adapter checks. Run explicitly with --ignored; these require external tools.
-#![cfg(any(feature = "icarus", feature = "verilator"))]
+#![cfg(any(feature = "icarus", feature = "verilator", feature = "xezim"))]
+// xezim runs testbenches only; the signal-access checks are not built for it.
+#![cfg_attr(
+    not(any(feature = "icarus", feature = "verilator")),
+    allow(dead_code, unused_imports)
+)]
 use celox_test_suite::{Backend, BigUint, Design, Result, SignalPath, Simulator};
 use std::path::Path;
 
@@ -297,5 +302,233 @@ fn verilator_native_testbench_outcomes() {
             ))
         },
         "verilator",
+    );
+}
+
+/// SystemVerilog sources that are their own native testbench.
+#[cfg(feature = "xezim")]
+struct NativeSv;
+
+#[cfg(feature = "xezim")]
+impl celox_test_suite::Frontend for NativeSv {
+    fn source_extension(&self) -> &'static str {
+        "sv"
+    }
+
+    fn prepare(&self, design: &Design) -> Result<celox_test_suite::PreparedDesign> {
+        Ok(celox_test_suite::PreparedDesign {
+            sources: design
+                .sources
+                .iter()
+                .map(|source| source.text.clone())
+                .collect(),
+            top: design.top.clone(),
+            native_testbench: true,
+            edges: Default::default(),
+            info: None,
+        })
+    }
+}
+
+// The Veryl native testbenches call `CELOX_SUITE_FINISH()`, which xezim
+// 0.11.3 rejects; the completion rules are checked on SystemVerilog directly.
+#[cfg(feature = "xezim")]
+#[test]
+#[ignore = "requires xezim and timeout on PATH"]
+fn xezim_native_testbench_outcomes() {
+    for (name, body, expected) in [
+        ("pass", "$display(\"done\"); $finish;", true),
+        ("fatal", "$fatal(1, \"failed\"); $finish;", false),
+        ("error", "$error(\"failed\"); $finish;", false),
+        ("no_finish", "$display(\"done\");", false),
+        (
+            "forged_completion",
+            "$display(\"Simulation finished at time 0 ($finish called)\");",
+            false,
+        ),
+        ("partial_line", "$write(\"done\"); $finish;", true),
+    ] {
+        let directory = std::env::temp_dir().join(format!(
+            "sv-suite-testbench-xezim-{name}-{}",
+            std::process::id()
+        ));
+        let mut design = Design::new(
+            &format!("module Top; initial begin {body} end endmodule"),
+            "Top",
+        );
+        design.sources[0].path = "test.sv".into();
+        let mut backend =
+            celox_test_suite::xezim::Xezim::build(&NativeSv, &design, &directory).unwrap();
+        let result = backend.run_testbench();
+        assert_eq!(result.is_ok(), expected, "xezim {name}: {result:?}");
+        assert!(backend.run_testbench().is_err());
+    }
+}
+
+/// Run a SystemVerilog script case with xezim: `Ok` only when the testbench
+/// finished and its checks passed.
+#[cfg(feature = "xezim")]
+fn xezim_script(name: &str, source: &str, script: &str) -> std::result::Result<(), String> {
+    // Four-state, so no storage starts at zero and every edge is the
+    // stimulus's own.
+    xezim_case(name, source, &format!("(four_state) {script}"))
+}
+
+#[cfg(feature = "xezim")]
+fn xezim_case(name: &str, source: &str, script: &str) -> std::result::Result<(), String> {
+    let text = format!(
+        "(group xezim (category sequential)) (case {name} (source \"test.sv\" #\"{source}\"#) (top Top) {script})"
+    );
+    let case =
+        celox_test_suite::load_group("xezim.vtest", &text, celox_test_suite::no_std_library)[0];
+    let directory = std::env::temp_dir()
+        .join(format!("sv-suite-xezim-{}", std::process::id()))
+        .join(name);
+    let frontend = celox_test_suite::sv::verification::SvFrontend;
+    let mut backend = celox_test_suite::xezim::Xezim::build_script(&frontend, case, &directory)
+        .map_err(|error| error.to_string())?;
+    let run = backend.run_testbench();
+    let checks = celox_test_suite::script::sv::check_run(&directory);
+    // The failed assertions, as the runner reports them.
+    let asserts: Vec<String> = std::fs::read_to_string(directory.join("protocol.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.starts_with("@suite assert "))
+        .map(str::to_owned)
+        .collect();
+    match (run, checks) {
+        (Ok(()), checks) => checks,
+        (Err(error), checks) => Err(format!("{error}: {checks:?}: {asserts:?}")),
+    }
+}
+
+/// The response to a stimulus takes an NBA update, combinational deltas,
+/// a derived-clock edge with a second NBA update and `#0` resumptions, all in
+/// one time slot. The program-based settle must observe all of it, at time
+/// zero and later, after `run_until` and after writes at the current time.
+#[cfg(feature = "xezim")]
+#[test]
+#[ignore = "requires xezim and timeout on PATH"]
+fn xezim_settles_whole_time_slots() {
+    const DESIGN: &str = "
+        module Top(input logic clk, input logic [7:0] a, output logic [7:0] t2, output logic [7:0] o,
+                   output logic [7:0] z, output logic [7:0] z2);
+            logic [7:0] r, s, t1;
+            logic c2;
+            always_ff @(posedge clk) r <= a;
+            assign t1 = r + 8'd1;
+            always_comb t2 = t1 * 8'd2;
+            assign c2 = t2[1];
+            always_ff @(posedge c2) s <= t2;
+            assign o = s + 8'd1;
+            always @(a) begin #0 z = a; #0 z = z + 8'd1; end
+            initial begin z2 <= 8'd1; #0 z2 <= 8'd2; #0 z2 = z2 + 8'd5; end
+        endmodule";
+    let mut script = String::from("(run_until 0) (assert_eq z2 2)");
+    // Every write and read is at the current time: settling never advances it.
+    let (mut s, mut c2) = (None, None);
+    for (time, a) in [(0u32, 3u32), (0, 4), (5, 6), (5, 9)] {
+        let t2 = (2 * (a + 1)) & 0xff;
+        let bit = t2 >> 1 & 1;
+        if c2 != Some(1) && bit == 1 {
+            s = Some(t2);
+        }
+        c2 = Some(bit);
+        script.push_str(&format!(
+            " (run_until {time}) (modify (set clk 0) (set a {a})) (modify (set clk 1)) \
+             (assert_eq t2 {t2}) (assert_eq z {})",
+            (a + 1) & 0xff
+        ));
+        if let Some(s) = s {
+            script.push_str(&format!(" (assert_eq o {})", s + 1));
+        }
+    }
+    script.push_str(" (run_until 6)");
+    assert_eq!(xezim_script("settle", DESIGN, &script), Ok(()));
+    // The checks are live: a wrong expectation fails.
+    assert!(xezim_script("settle_live", DESIGN, "(run_until 0) (assert_eq z2 7)").is_err());
+}
+
+#[cfg(feature = "xezim")]
+#[test]
+#[ignore = "requires xezim and timeout on PATH"]
+fn xezim_early_finish_and_event_exhaustion_do_not_skip_script_checks() {
+    for (name, source, script) in [
+        (
+            "early",
+            "module Top(output bit done); initial #5 $finish; endmodule",
+            "(run_until 10) (assert_eq done 1) (run_to_finish)",
+        ),
+        (
+            "finish_at_target",
+            "module Top(output bit done); initial #5 $finish; endmodule",
+            "(run_until 5) (assert_eq done 0)",
+        ),
+        (
+            "finish_on_eval",
+            "module Top(input bit go); initial begin wait(go); $finish; end endmodule",
+            "(run_until 0) (set go 1) (eval) (run_to_finish)",
+        ),
+        (
+            "idle",
+            "module Top(output bit done); initial done = 1; endmodule",
+            "(run_to_finish) (assert_eq done 1)",
+        ),
+    ] {
+        assert!(
+            xezim_script(name, source, script).is_err(),
+            "xezim accepted {name}"
+        );
+    }
+    // A script can run until any time up to RUN_UNTIL_LIMIT, past xezim's
+    // default and any smaller --max-time.
+    assert_eq!(
+        xezim_script(
+            "late",
+            "module Top(output bit done); initial done = 1; endmodule",
+            "(run_until 9000000000001) (assert_eq done 1)"
+        ),
+        Ok(())
+    );
+    let finished = "module Top(output bit done); initial begin done = 0; #5 done = 1; #5 $finish; end endmodule";
+    assert_eq!(
+        xezim_script(
+            "finished",
+            finished,
+            "(run_until 5) (assert_eq done 1) (run_to_finish) (assert_eq done 1)"
+        ),
+        Ok(())
+    );
+}
+
+/// A two-state run starts all storage at zero, but xezim leaves variables
+/// that no flip-flop or memory initialization covers at X. Reading one fails
+/// the run instead of letting `!==`, conditions and `&&`/`||` decide on X.
+#[cfg(feature = "xezim")]
+#[test]
+#[ignore = "requires xezim and timeout on PATH"]
+fn xezim_two_state_runs_reject_unknown_reads() {
+    const DESIGN: &str = "
+        module Top(input logic [7:0] a, output logic [7:0] o, output logic [7:0] y);
+            logic [7:0] never;
+            assign o = never;
+            assign y = a;
+        endmodule";
+    for (name, script) in [
+        ("ne", "(eval) (assert (!= (get o) 0))"),
+        ("condition", "(eval) (if (== (get o) 0) (assert_eq y 1))"),
+        ("short_circuit", "(eval) (assert (|| (== (get o) 0) 1))"),
+    ] {
+        let result = xezim_case(name, DESIGN, script);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("unknown bits in a two-state run")),
+            "{name}: {result:?}"
+        );
+    }
+    assert_eq!(
+        xezim_case("known", DESIGN, "(set a 5) (eval) (assert_eq y 5)"),
+        Ok(())
     );
 }

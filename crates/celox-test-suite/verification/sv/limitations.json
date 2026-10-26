@@ -553,6 +553,24 @@
     }
   },
   {
+    "id": "sv_icarus_two_state_time_zero_settle",
+    "category": "simulator_two_state",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0 / Verilator 5.052",
+    "reason": "Icarus 13.0 simulates the emitted design in four-state SV, where `always @*` and a sensitivity-list process wait for a change (IEEE 1800-2023 9.2.2.2, 9.4.2), so an output whose inputs never change stays X. The case's two-state oracle follows Verilator 5.052, which runs these processes once at time zero after the initial blocks, as Celox's two-state mode does; a standalone probe prints `1 ffff 1` in Verilator and `x xxxx x` in Icarus.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_two_state_time_zero_settle.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "always_comb::two_state_sensitivity_lists_run_at_time_zero",
+        "always_comb::two_state_other_sensitivity_lists_run_at_time_zero"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_generate_case_unknown_label",
     "category": "simulator_compile_limitation",
     "phase": "compile",
@@ -2011,7 +2029,9 @@
         "timing::staged_nonblocking_writes_wake_waiters",
         "timing::intermediate_combinational_writes_keep_other_drivers",
         "timing::parallel_flip_flop_parts_keep_pulses",
-        "timing::staged_nonblocking_writes_follow_later_blocking_writes"
+        "timing::staged_nonblocking_writes_follow_later_blocking_writes",
+        "timing::derived_clocks_follow_superseded_publications",
+        "hierarchical_references::waits_through_names_see_intermediate_combinational_writes"
       ]
     }
   },
@@ -2138,6 +2158,338 @@
     "cases": {
       "verilator": [
         "class::randomization_mode_bit_argument"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_always_star_timed_task",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+    "reason": "Verilator 5.052 schedules an always @* that calls a timed task differently from its event control: the task called for a = 5 at 3 ns writes y at 6 ns instead of 5 ns, a nonblocking update after the task's 1 ns delay lands at 2 ns instead of 3 ns, and a standalone probe shows it rerunning the call for a change made while the task was suspended and for variables only the task body reads. IEEE 1800-2023 9.4.2.2 makes the implicit event list the variables the statement reads, the task's arguments but not its body, and 9.4.2 waits only for changes after the event control is reached. Icarus passes the unchanged shared assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::always_star_timed_task_calls_run_as_processes",
+        "timing::always_star_timed_task_calls_assign_nonblocking"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_package_delay_value",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 reports a syntax error for an unparenthesized package-scoped delay value such as #delays::D. IEEE 1800-2023 A.6.5 permits a ps_identifier as a delay_value. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::package_scoped_delay_values_wait_their_value"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_always_star_folded_branches",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 leaves the reads of a branch that constant folding removes out of the event list of an always @*: a change of a, which the default of the call in `if (0) delayed();` reads, does not wake the process. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, so a constant-false branch still contributes. Celox's combinational and process always @* both count it.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::always_star_timed_task_calls_wait_on_folded_branch_reads"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_always_star_implicit_reads",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 builds the event list of an always @* that calls a timed task without the reads of the defaults of omitted arguments of nested calls, so a change of a does not wake `always @* delayed(pick())` with `pick(input v = a)`, and without the reads of a branch that constant folding removes; it also runs the process at time zero. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, a constant-false branch included, and 9.4.2 waits for a change. Icarus passes the nested-default case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::always_star_timed_task_calls_wait_on_nested_call_defaults",
+        "timing::always_star_timed_task_calls_wait_on_folded_branch_reads"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_enum_randomization",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects class randomize, srandom and rand_mode calls in these enum randomization cases. IEEE 1800-2023 18.3, 18.6 and 18.8 define these operations. The original compile diagnostics are retained.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_enum_randomization_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::randomization_enum_alias",
+        "class::randomization_enum_domain",
+        "class::randomization_enum_fill_literals",
+        "class::randomization_enum_inheritance"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_enum_alias_randomization",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 randomizes an enum typedef alias as its underlying 8-bit integer, producing values outside the declared set {-7, 2, 91}. Generated __VBasicRand assigns a masked VL_RANDOM_RNG_I value instead of selecting from an enum table. IEEE 1800-2023 18.3 restricts enum randomization to declared values; the direct enum and inheritance cases pass unchanged.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_enum_randomization_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::randomization_enum_alias"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_scope_enum_randomize",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects scope randomize and std::randomize calls before simulation. IEEE 1800-2023 18.12 permits randomization of visible scope variables, including enums under 18.3.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_scope_enum_randomize_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::scope_randomize_enum_order",
+        "system_functions::scope_randomize_enum_values"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_scope_enum_randomize",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 scope randomization produces values outside the declared enum domain. Its generated scope helper calls basicStdRandomization with the integer bit width and no enum value table, including for a direct enum variable without a typedef alias. IEEE 1800-2023 18.3 and 18.12 require enum draws to stay in the declared set. Both shared cases retain their original domain assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_scope_enum_randomize_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::scope_randomize_enum_order",
+        "system_functions::scope_randomize_enum_values"
+      ]
+    }
+  },
+  {
+    "id": "sv_program_reactive_region",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+    "reason": "Verilator 5.052 and Icarus 13.0 run the initial procedures of a program in the active region set: a program reads design values before the design's nonblocking updates of the same time slot, its #0 resumes before the design's, and a flip-flop clocked by a program write runs before the program's #0 and its nonblocking update of the flip-flop's input. IEEE 1800-2023 24.3.1 schedules program procedures, their delays and event controls in the Reactive region, #0 in the Re-Inactive region and their nonblocking updates in the Re-NBA region, and 4.5 runs the reactive region set only once the active region set is empty and empties it before the active region set runs again.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/programs-icarus.json",
+      "verification/sv/limitations/programs-verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "program::program_reads_design_after_nonblocking_updates_settle",
+        "program::program_nonblocking_updates_follow_design_updates",
+        "program::program_zero_delay_resumes_in_the_re_inactive_region",
+        "program::design_activity_of_a_program_waits_for_the_reactive_region_set",
+        "program::program_waits_see_host_driven_edges_after_design_updates"
+      ],
+      "verilator": [
+        "program::program_reads_design_after_nonblocking_updates_settle",
+        "program::program_nonblocking_updates_follow_design_updates",
+        "program::program_zero_delay_resumes_in_the_re_inactive_region",
+        "program::design_activity_of_a_program_waits_for_the_reactive_region_set",
+        "program::program_waits_see_host_driven_edges_after_design_updates"
+      ]
+    }
+  },
+  {
+    "id": "sv_program_completion",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+    "reason": "Verilator 5.052 and Icarus 13.0 do not end the simulation when every initial procedure of every program has ended: Icarus keeps running the design's forever loop and Verilator runs until the testbench times out. IEEE 1800-2023 24.3 ends the simulation then with an implicit $finish.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/programs-icarus.json",
+      "verification/sv/limitations/programs-verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "program::simulation_ends_when_program_procedures_end"
+      ],
+      "verilator": [
+        "program::simulation_ends_when_program_procedures_end"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_program_exit",
+    "category": "simulator_unsupported",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 does not define $exit (\"System task/function $exit() is not defined by any module\"). IEEE 1800-2023 24.7 ends every initial procedure of the calling program.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/programs-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "program::program_exit_ends_its_initial_procedures"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_program_exit",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 continues a program initial procedure after $exit and does not end the program's other initial procedures. IEEE 1800-2023 24.7 ends every initial procedure of the calling program.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/programs-verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "program::program_exit_ends_its_initial_procedures"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_program_items",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 rejects an always procedure and a module instance in a program with syntax errors, which the run cannot count as language rejections. Both are illegal in a program (IEEE 1800-2023 24.3), and Icarus rejects them with diagnostics that name the rule.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/programs-verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "program::programs_reject_always_procedures",
+        "program::programs_reject_instances"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_randc",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 cannot elaborate class randomize, srandom and rand_mode calls in the randc cases. IEEE 1800-2023 18.4.2, 18.6 and 18.8 define these operations. The unchanged assertions cover full cycles, signed and enum domains, modes and inheritance.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_randc_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::randomization_cyclic_controls",
+        "class::randomization_cyclic_domains",
+        "class::randomization_cyclic_enum_alias"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_randc_inheritance",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 emits duplicate srandom declarations for the inherited randc control case using both base and derived handles. The shared assertions retain cyclic state and random-mode coverage under IEEE 1800-2023 18.4.2, 18.6.2 and 18.8.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_randc_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::randomization_cyclic_controls"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_randc_enum_alias",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 treats the randc enum typedef alias as its underlying integer. Generated __VBasicRand assigns the cyclic integer draw directly without an enum value table, producing undeclared values. IEEE 1800-2023 18.3 and 18.4.2 require a permutation of declared values. The direct enum and integer cycle case passes unchanged.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_randc_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::randomization_cyclic_enum_alias"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_scan_string_format",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "IEEE 1800-2023 21.3.4.3 permits a string expression as the scan format. Verilator 5.052 requires a format string literal and rejects both a string variable and a string method expression with \"unexpected IDENTIFIER, expecting STRING\". The string-source case with a literal format remains enabled.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/scan-string-format-verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "scan::sscanf_string_format_expression"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_scan_string_format",
+    "category": "simulator_runtime_limitation",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "IEEE 1800-2023 21.3.4.3 permits a string expression as the scan format. Icarus 13.0 compiles this case but vvp terminates with SIGSEGV. A reduced source using only a string format variable, without a method expression, also crashes. The string-source case with a literal format remains enabled.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/scan-string-format-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "scan::sscanf_string_format_expression"
       ]
     }
   }

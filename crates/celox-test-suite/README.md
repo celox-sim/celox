@@ -177,6 +177,7 @@ case still runs its original assertions by default.
 | `eager_assertion_messages` | Veryl `$assert` / `$assert_continue` message argument effects occur even on success; these calls have no standard SV counterpart |
 | `two_state_zero_division` | The suite's two-state model returns zero for division/remainder by zero, including four-state `logic` destinations in emitted SV (11.3.4, 11.4.3) |
 | `two_state_initialization` | An explicit check of zero-initialized storage even for emitted four-state `logic` (6.8, Table 6-7) |
+| `two_state_time_zero_settle` | Two-state `always @*` and sensitivity-list processes run once at time zero, after the initial blocks, as Verilator settles them, whereas SV has them wait for a change (9.2.2.2, 9.4.2) |
 
 The initial review tags 21 cases; cases may carry multiple tags. Matching a
 word such as `source_order` in a case name is insufficient: the two output
@@ -336,6 +337,29 @@ clock polarity for the testbench come from the Celox SystemVerilog analyzer,
 which only reads declarations (after expanding interfaces) for this purpose. Its reviewed tool exclusions are
 in [`verification/sv/limitations.json`](verification/sv/limitations.json). Compiler diagnostics are not suppressed and emitted SV is not
 rewritten to fit a simulator.
+
+The optional `xezim` feature adds [xezim](https://github.com/aionhw/xezim), a
+four-state event-driven simulator, through its command line only
+(`verify-xezim`, `verify-sv-xezim`). It has no signal access: it runs the
+generated testbenches and native testbenches, which report through their stdout
+markers and their completion. Each design is first checked with
+`xezim --compile`, which tells source rejections apart from a run that ends in
+`$fatal`, and then simulated by a second xezim process, which parses it again;
+a run passes only when xezim reports that `$finish` ended it. The xezim branch of a timed testbench
+(``CELOX_SUITE_XEZIM``) settles through a `program`: program code runs in the
+reactive region set, which the scheduler reaches only once the active region
+set is empty, NBA updates and the events they cause included (IEEE 1800-2023
+4.5, 24.3.1). The testbench increments a request count, which is a design event,
+and waits for the program's acknowledgement; a bare `#0` would resume before the
+design reacts. Two-state cases start xezim's flip-flops and memories at zero
+(`XEZIM_INIT_REG=0`, `XEZIM_INIT_MEM=0`) and the generated testbench inputs at
+zero. Other variables start at X, whereas the Icarus harness zeroes all
+storage, so a two-state testbench fails when it reads unknown bits from the
+design. `nix develop .#xezim` adds a pinned xezim (`nix/xezim`) to the
+development shell.
+xezim's retained failures stay executed evidence rather than exclusions:
+[`verification/xezim-review.json`](verification/xezim-review.json) classifies
+each one against IEEE 1800-2023 and names the xezim bug it reproduces.
 
 Local verification reuses unchanged successful results by default. Select the
 cases affected by executable source, stimulus or assertion changes:

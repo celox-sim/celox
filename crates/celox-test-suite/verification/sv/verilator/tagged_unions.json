@@ -1,0 +1,103 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "tagged_unions::casts_ports_and_registers",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:4:9: Unsupported: void (for tagged unions)\n    4 |         void Empty;\n      |         ^~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <case>/source_0.sv:9:26: Unsupported: tagged union\n    9 |         item = enabled ? tagged Data '{data[7:4], data[3:0]} : tagged Empty;\n      |                          ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:9:64: Unsupported: tagged union\n    9 |         item = enabled ? tagged Data '{data[7:4], data[3:0]} : tagged Empty;\n      |                                                                ^~~~~~\n%Error: Exiting due to 3 error(s)\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::conditional_struct_payload",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:5:35: Unsupported: void (for tagged unions)\n    5 |     typedef union tagged packed { void Empty; logic [7:0] Full; logic [3:0] Short; } item_t;\n      |                                   ^~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <case>/source_0.sv:8:32: Unsupported: tagged union\n    8 |         if (full_value) item = tagged Full data;\n      |                                ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:9:21: Unsupported: tagged union\n    9 |         else item = tagged Empty;\n      |                     ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:16:18: Unsupported: tagged union\n   16 |         copied = tagged Full 8'h00;\n      |                  ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:19:18: Unsupported: tagged union\n   19 |         copied = tagged Full 8'ha0;\n      |                  ^~~~~~\n%Error: Exiting due to 5 error(s)\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::constructors_and_checked_members",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:4:35: Unsupported: void (for tagged unions)\n    4 |     typedef union tagged packed { void Empty; logic [7:0] Full; } item_t;\n      |                                   ^~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <case>/source_0.sv:5:35: Unsupported: void (for tagged unions)\n    5 |     typedef union tagged packed { void Empty; item_t Some; } outer_t;\n      |                                   ^~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:6:61: Unsupported: tagged union\n    6 |     function automatic logic [7:0] get(input item_t value = tagged Full data,\n      |                                                             ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:10:69: Unsupported: tagged union\n   10 |     function automatic logic [7:0] get_nested(input outer_t value = tagged Some (tagged Full 8'h35));\n      |                                                                     ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:10:82: Unsupported: tagged union\n   10 |     function automatic logic [7:0] get_nested(input outer_t value = tagged Some (tagged Full 8'h35));\n      |                                                                                  ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:13:66: Unsupported: tagged union\n   13 |     function automatic logic [7:0] get_void(input item_t value = tagged Empty);\n      |                                                                  ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:14:17: Unsupported: tagged union\n   14 |         value = tagged Full 8'h19;\n      |                 ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:17:79: Unsupported: tagged union\n   17 |     task automatic read_value(output logic [7:0] result, input item_t value = tagged Full 8'h2a);\n      |                                                                               ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:23:30: Unsupported: tagged union\n   23 |         explicit_value = get(tagged Full 8'h55);\n      |                              ^~~~~~\n%Error: Exiting due to 9 error(s)\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::default_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:5:35: Unsupported: void (for tagged unions)\n    5 |     typedef union tagged packed { void Empty; logic [7:0] Full; } item_t;\n      |                                   ^~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <case>/source_0.sv:7:35: Unsupported: void (for tagged unions)\n    7 |     typedef union tagged packed { void Empty; logic signed [7:0] Full; } signed_t;\n      |                                   ^~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:8:35: Unsupported: void (for tagged unions)\n    8 |     typedef union tagged packed { void Empty; item_t Some; } outer_t;\n      |                                   ^~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:11:17: Unsupported: tagged union\n   11 |         value = tagged Full 8'd4;\n      |                 ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:16:17: Unsupported: tagged union\n   16 |         value = tagged Full (-8'sd2);\n      |                 ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:21:17: Unsupported: tagged union\n   21 |         value = tagged Some (tagged Full 8'd7);\n      |                 ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:21:30: Unsupported: tagged union\n   21 |         value = tagged Some (tagged Full 8'd7);\n      |                              ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:26:17: Unsupported: tagged union\n   26 |         value = tagged Empty 8'd4;\n      |                 ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:41:16: Unsupported: tagged union\n   41 |         return tagged Full value;\n      |                ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:44:24: Unsupported: tagged union\n   44 |         return valid ? tagged Full value : tagged Empty;\n      |                        ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:44:44: Unsupported: tagged union\n   44 |         return valid ? tagged Full value : tagged Empty;\n      |                                            ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:48:17: Unsupported: tagged union\n   48 |         value = tagged Full d;\n      |                 ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:51:17: Unsupported: tagged union\n   51 |         value = tagged Full (~value.Full);\n      |                 ^~~~~~\n%Error: Exiting due to 13 error(s)\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::factory_and_union_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:4:35: Unsupported: void (for tagged unions)\n    4 |     typedef union tagged packed { void Empty; logic [7:0] Full; } inner_t;\n      |                                   ^~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <case>/source_0.sv:8:16: Unsupported: tagged union\n    8 |         item = tagged Nested (tagged Full data);\n      |                ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:8:31: Unsupported: tagged union\n    8 |         item = tagged Nested (tagged Full data);\n      |                               ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:10:16: Unsupported: tagged union\n   10 |         item = tagged Word 16'hffff;\n      |                ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:14:20: Unsupported: tagged union\n   14 |             item = tagged Nested (tagged Full data);\n      |                    ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:14:35: Unsupported: tagged union\n   14 |             item = tagged Nested (tagged Full data);\n      |                                   ^~~~~~\n%Error: Exiting due to 6 error(s)\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::nested_and_void_constructors",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "tagged_unions::wide_four_state_payload",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:3:27: Unsupported: void (for tagged unions)\n    3 |     union tagged packed { void Empty; logic [31:0] Full; } item;\n      |                           ^~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <case>/source_0.sv:6:16: Unsupported: tagged union\n    6 |         item = tagged Full 0;\n      |                ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:13:16: Unsupported: tagged union\n   13 |         item = tagged Full 123;\n      |                ^~~~~~\n%Error: Exiting due to 3 error(s)\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::writable_system_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:3:35: Unsupported: void (for tagged unions)\n    3 |     typedef union tagged packed { void Empty; logic [7:0] Full; } item_t;\n      |                                   ^~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <case>/source_0.sv:4:27: Unsupported: void (for tagged unions)\n    4 |     union tagged packed { void Empty; item_t Some; } nested;\n      |                           ^~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:18:16: Unsupported: tagged union\n   18 |         item = tagged Full 0;\n      |                ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:22:18: Unsupported: tagged union\n   22 |         nested = tagged Some (tagged Full 0);\n      |                  ^~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:22:31: Unsupported: tagged union\n   22 |         nested = tagged Some (tagged Full 0);\n      |                               ^~~~~~\n%Error: Exiting due to 5 error(s)\n",
+      "expectation": "Simulation",
+      "name": "tagged_unions::writable_task_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

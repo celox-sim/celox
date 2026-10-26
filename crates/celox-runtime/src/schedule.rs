@@ -21,6 +21,8 @@ pub struct ResolvedSchedule<B: SimBackend> {
     pub(crate) signal_to_id: FxHashMap<SignalRef, usize>,
     pub(crate) signal_index_by_id: Vec<usize>,
     pub(crate) processes: Vec<ProcessRefs>,
+    /// The kernels of program instances, in declaration order.
+    pub(crate) program_processes: Vec<usize>,
     /// Counted signals and the domains their counters trigger.
     pub(crate) counted: Vec<CountedDomainRefs>,
     pub(crate) counted_by_offset: FxHashMap<usize, usize>,
@@ -77,6 +79,13 @@ pub(crate) struct SchedulerRefs {
     /// The event id and signal of each host clock the scheduler may run,
     /// in the order of its clock slots.
     pub(crate) clocks: Vec<(usize, SignalRef)>,
+    /// Per process kernel, the bits of `levels` of the events it writes.
+    pub(crate) kernel_events: Vec<u64>,
+    /// Per clock slot, the bit of `levels` of its event.
+    pub(crate) clock_events: Vec<u64>,
+    /// The bits of `levels` of clocks derived from the others, which any
+    /// slot may change.
+    pub(crate) derived_events: u64,
     pub(crate) clock_next: SignalRef,
     pub(crate) clock_period: SignalRef,
     pub(crate) clock_value: SignalRef,
@@ -190,6 +199,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             .iter()
             .map(|process| ProcessRefs {
                 is_initializer: process.slots.is_initializer,
+                program: process.slots.program.as_ref().map(resolve),
                 resume: resolve(&process.slots.resume),
                 starts_with_event_wait: process.slots.requires_timed_simulation,
                 status: resolve(&process.slots.status),
@@ -299,6 +309,12 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             event_info,
             signal_to_id,
             signal_index_by_id,
+            program_processes: processes
+                .iter()
+                .enumerate()
+                .filter(|(_, process)| process.program.is_some())
+                .map(|(index, _)| index)
+                .collect(),
             processes,
             counted,
             counted_by_offset,
@@ -311,7 +327,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             time_slots: model.time_slots.iter().map(resolve).collect(),
             scheduler: model.scheduler.as_ref().and_then(|scheduler| {
                 let slots = &scheduler.slots;
-                Some(SchedulerRefs {
+                let mut refs = SchedulerRefs {
                     unit: scheduler.unit?,
                     limit: resolve(&slots.limit),
                     now: resolve(&slots.now),
@@ -365,6 +381,24 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                         .iter()
                         .map(|event| backend.resolve_event_opt(event).map(|event| event.id()))
                         .collect::<Option<_>>()?,
+                    kernel_events: (0..scheduler.fallback.len())
+                        .map(|index| {
+                            scheduler
+                                .kernel_events
+                                .get(index)
+                                .into_iter()
+                                .flatten()
+                                .fold(0, |mask, &bit| mask | 1 << bit)
+                        })
+                        .collect(),
+                    clock_events: scheduler
+                        .clocks
+                        .iter()
+                        .map(|clock| {
+                            let bit = scheduler.events.iter().position(|event| event == clock)?;
+                            Some(1 << bit)
+                        })
+                        .collect::<Option<_>>()?,
                     clocks: scheduler
                         .clocks
                         .iter()
@@ -377,7 +411,19 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                     clock_period: resolve(&slots.clock_period),
                     clock_value: resolve(&slots.clock_value),
                     clock_armed: resolve(&slots.clock_armed),
-                })
+                    derived_events: 0,
+                };
+                // What no kernel and no clock writes itself derives from them.
+                let all = 1u64
+                    .checked_shl(refs.events.len() as u32)
+                    .map_or(u64::MAX, |bit| bit - 1);
+                let driven = refs
+                    .kernel_events
+                    .iter()
+                    .chain(&refs.clock_events)
+                    .fold(0, |mask, &bits| mask | bits);
+                refs.derived_events = all & !driven;
+                Some(refs)
             }),
             kernel_fallback: model
                 .scheduler

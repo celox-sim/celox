@@ -369,3 +369,37 @@ fn continuous_part_selects_partly_outside_drive_the_bits_inside() {
     assert_eq!(sim.get(q), 0xc1u8.into());
     assert_eq!(sim.get(r), 0x5au8.into());
 }
+
+sv_backends! {
+    fn generated_pipeline_with_unselected_invalid_array_element(sim) {
+        @case "indexed_select::generated_pipeline_with_unselected_invalid_array_element";
+    }
+    fn generated_pipeline_with_unselected_invalid_array_element_four_state(sim) {
+        @case "indexed_select::generated_pipeline_with_unselected_invalid_array_element_four_state";
+    }
+    fn invalid_unpacked_elements_preserve_type_in_conditionals(sim) {
+        @case "indexed_select::invalid_unpacked_elements_preserve_type_in_conditionals";
+    }
+    fn constant_invalid_unpacked_indices_read_defaults_and_ignore_writes(sim) {
+        @case "indexed_select::constant_invalid_unpacked_indices_read_defaults_and_ignore_writes";
+    }
+}
+
+// Icarus 13.0 returns X here, contrary to IEEE 1800-2023 7.4.5 Table 7-1.
+// Keep this regression local, like the partial continuous-select check above.
+sv_backends! {
+    fn constant_invalid_two_state_unpacked_read(sim) {
+        @setup {
+            let source = "module Top(output logic [7:0] q); bit [7:0] b[1]; assign q=b[1]; endmodule";
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("invalid_bit_element.sv"))], "Top").four_state(true);
+        let q=sim.signal("q");
+        assert_eq!(sim.get_four_state(q), (BigUint::default(), BigUint::default()));
+    }
+}
+
+sv_backends! {
+    fn generated_pipeline_with_explicit_generate_branches(sim) {
+        @case "indexed_select::generated_pipeline_with_explicit_generate_branches";
+    }
+}

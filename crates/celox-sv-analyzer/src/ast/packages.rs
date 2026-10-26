@@ -112,6 +112,15 @@ impl Package {
 }
 
 impl Packages {
+    /// The authored name of module `name`, which differs for a
+    /// specialization of a module with generic interface ports.
+    pub fn authored_module_name<'a>(&'a self, name: &'a str) -> &'a str {
+        self.interface_plan
+            .modules
+            .get(name)
+            .map_or(name, |plan| plan.original.as_str())
+    }
+
     /// Global simulation precision, as a power of ten seconds (IEEE 1800-2023 3.14.3).
     pub fn global_time_precision(&self) -> i32 {
         self.timescales.global_precision()

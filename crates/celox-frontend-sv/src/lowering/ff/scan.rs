@@ -1,5 +1,5 @@
 use super::*;
-use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue};
+use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue, ValueKind};
 
 impl Ff<'_, '_> {
     pub(super) fn scan_function(
@@ -24,7 +24,7 @@ impl Ff<'_, '_> {
                 .m
                 .comparison_width(&argument, &argument)
                 .ok_or_else(|| {
-                    unsupported("scan source/format must be a packed integral or literal string")
+                    unsupported("scan source/format must be a packed integral or string")
                 })?;
             // File descriptors are 32-bit packed values (21.3.1), even when
             // the actual expression has a wider integral type.
@@ -33,8 +33,26 @@ impl Ff<'_, '_> {
             } else {
                 width
             };
-            let (id, _) = self.host_hidden("scan_input", &argument, width, false, true)?;
+            let value_kind = if self.m.expr_is_string(&argument) {
+                ValueKind::StrRef
+            } else {
+                ValueKind::Bits
+            };
+            let (id, _) = self.host_hidden(
+                "scan_input",
+                &argument,
+                width,
+                false,
+                value_kind == ValueKind::Bits,
+            )?;
+            // Keep captured strings rooted across the host-request suspension.
+            self.m
+                .variables
+                .get_mut(&id)
+                .expect("scan input")
+                .value_kind = value_kind;
             inputs.push(HostRequestValue {
+                value_kind,
                 float_precision: None,
                 id,
                 width,
@@ -44,6 +62,7 @@ impl Ff<'_, '_> {
         }
         let (result_id, result_name) = self.m.temp("scan_count", 32, true, false);
         let mut results = vec![HostRequestValue {
+            value_kind: ValueKind::Bits,
             float_precision: None,
             id: result_id,
             width: 32,
@@ -55,7 +74,7 @@ impl Ff<'_, '_> {
             let argument = argument
                 .as_ref()
                 .ok_or_else(|| unsupported("omitted scan destination"))?;
-            let (lvalues, _) = self.capture_system_actual(argument)?;
+            let (lvalues, _, guards) = self.capture_system_actual(argument)?;
             let precision = match lvalues.as_slice() {
                 [one] => self.m.id(one.name()).and_then(|id| self.m.var(id).float),
                 _ => None,
@@ -70,13 +89,14 @@ impl Ff<'_, '_> {
             let (id, name) = self.m.temp("scan_value", width, false, precision.is_none());
             self.m.variables.get_mut(&id).expect("scan temporary").float = precision;
             results.push(HostRequestValue {
+                value_kind: ValueKind::Bits,
                 float_precision: precision,
                 id,
                 width,
                 signed: false,
                 is_string: false,
             });
-            destinations.push((lvalues, Expr::Ident(name)));
+            destinations.push((lvalues, Expr::Ident(name), guards));
         }
         let site = self
             .host_request_sites
@@ -95,7 +115,7 @@ impl Ff<'_, '_> {
             .map_err(kernel_error)?;
         // A failed or ignored output must not overwrite a previously assigned
         // alias. Scan assignments are contiguous even with suppressed fields.
-        for (index, (lvalues, value)) in destinations.into_iter().enumerate() {
+        for (index, (lvalues, value, guards)) in destinations.into_iter().enumerate() {
             let condition = Expr::Binary {
                 left: Box::new(Expr::Ident(result_name.clone())),
                 op: sv::ir::BinaryOp::Gt,
@@ -110,6 +130,7 @@ impl Ff<'_, '_> {
                 false_block: (join, Vec::new()),
             });
             self.b.switch_to_block(write);
+            self.check_tagged_guards(&guards)?;
             match lvalues.as_slice() {
                 [one] => self.assign(one, &value)?,
                 parts => self.assign_concat(parts, &value)?,

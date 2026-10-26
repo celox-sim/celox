@@ -100,6 +100,7 @@ GCC-style optimization level presets with per-pass overrides.
 | `PartialForward` | Partial store-load forwarding in combinational blocks |
 | `IdentityStoreBypass` | Detects identity copies and registers address aliases |
 | `TailCallSplit` | Splits large functions into tail-call chains (enabled even at O0) |
+| `DerivedEdgeUnits` | Runs edges of gated/divided clocks in generated units instead of the Rust plan walk (not a SIR transform; costs build time, `-sir:derived_edge_units` to opt out) |
 
 ### Cranelift Backend Optimization
 

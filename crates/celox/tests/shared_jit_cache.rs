@@ -346,7 +346,7 @@ fn precompiled_runtime_preserves_comb_runtime_events() {
 
     let mut runtime = trusted_instance(image);
     assert_eq!(
-        runtime.drain_runtime_events(),
+        bare(runtime.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"y=1".to_vec(),
         }]
@@ -356,7 +356,7 @@ fn precompiled_runtime_preserves_comb_runtime_events() {
     runtime.backend_mut().set(input, 6u8);
     runtime.settle_active_edges(&[]).unwrap();
     assert_eq!(
-        runtime.drain_runtime_events(),
+        bare(runtime.drain_runtime_events()),
         vec![celox::RuntimeEvent::Display {
             message: b"y=7".to_vec(),
         }]
@@ -424,10 +424,12 @@ fn precompiled_runtime_formats_events_with_the_host_time() {
 
     let mut runtime = trusted_instance(image);
     assert_eq!(
-        runtime.drain_runtime_events_with_context(celox::RuntimeFormatContext {
-            tb_time: Some(37),
-            scope: None,
-        }),
+        bare(
+            runtime.drain_runtime_events_with_context(celox::RuntimeFormatContext {
+                tb_time: Some(37),
+                scope: None,
+            })
+        ),
         vec![celox::RuntimeEvent::Display {
             message: b"time=37".to_vec(),
         }]
@@ -483,12 +485,12 @@ fn forced_comb_runtime_events_preserve_procedural_order() {
     drop(sim);
 
     let mut runtime = trusted_instance(image);
-    runtime.drain_runtime_events();
+    bare(runtime.drain_runtime_events());
     let input = runtime.reflection().signal_by_name("Top.a").unwrap().0;
     assert!(runtime.force_signal(input, 7u8.into(), 0u8.into()));
     runtime.eval_comb().unwrap();
     assert_eq!(
-        runtime.drain_runtime_events(),
+        bare(runtime.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Display {
                 message: b"before=0".to_vec(),
@@ -558,7 +560,7 @@ fn precompiled_runtime_distinguishes_write_from_display() {
 
     let mut runtime = trusted_instance(image);
     assert_eq!(
-        runtime.drain_runtime_events(),
+        bare(runtime.drain_runtime_events()),
         vec![
             celox::RuntimeEvent::Write {
                 message: b"a".to_vec(),
@@ -588,16 +590,17 @@ fn precompiled_runtime_reports_fatal_assertions() {
     drop(sim);
 
     let mut runtime = trusted_instance(image);
-    runtime.drain_runtime_events();
+    bare(runtime.drain_runtime_events());
     let input = runtime.signal_ref("Top.a").unwrap();
     runtime.backend_mut().set(input, 1u8);
     let error = runtime.settle_active_edges(&[]).unwrap_err();
     assert!(error.to_string().contains("fatal a=1"));
     assert_eq!(
-        runtime.drain_runtime_events(),
-        vec![celox::RuntimeEvent::AssertFatal {
-            message: b"fatal a=1".to_vec(),
-        }]
+        bare(runtime.drain_runtime_events()),
+        vec![celox::RuntimeEvent::Report(celox::Report::new(
+            celox::Severity::Fatal,
+            b"fatal a=1".to_vec()
+        ))]
     );
 }
 
@@ -619,7 +622,7 @@ fn precompiled_runtime_reports_sequential_fatal_assertions() {
     drop(sim);
 
     let mut runtime = trusted_instance(image);
-    runtime.drain_runtime_events();
+    bare(runtime.drain_runtime_events());
     let clock = runtime.signal("Top.clk").unwrap().clone();
     runtime.backend_mut().set(clock.signal, 1u8);
     let error = runtime
@@ -627,10 +630,11 @@ fn precompiled_runtime_reports_sequential_fatal_assertions() {
         .unwrap_err();
     assert!(error.to_string().contains("ff fatal"));
     assert_eq!(
-        runtime.drain_runtime_events(),
-        vec![celox::RuntimeEvent::AssertFatal {
-            message: b"ff fatal".to_vec(),
-        }]
+        bare(runtime.drain_runtime_events()),
+        vec![celox::RuntimeEvent::Report(celox::Report::new(
+            celox::Severity::Fatal,
+            b"ff fatal".to_vec()
+        ))]
     );
 }
 
@@ -671,6 +675,25 @@ fn native_program_image_rejects_v19_before_loading_float_helper_abi() {
     assert!(matches!(
         celox::NativeProgramImage::discover_appended(&encoded),
         Err(NativeImageContainerError::UnsupportedVersion(19))
+    ));
+}
+
+/// Version 38 adds host operand value kinds to the runtime metadata.
+#[test]
+fn native_program_image_rejects_v37_before_decoding_host_operand_value_kinds() {
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let mut encoded = sim
+        .shared_code()
+        .program_image()
+        .to_container_bytes()
+        .unwrap();
+    let trailer_start = encoded.len() - NATIVE_IMAGE_TRAILER_SIZE;
+    encoded[trailer_start + NATIVE_IMAGE_VERSION_OFFSET
+        ..trailer_start + NATIVE_IMAGE_VERSION_OFFSET + 2]
+        .copy_from_slice(&37u16.to_le_bytes());
+    assert!(matches!(
+        celox::NativeProgramImage::discover_appended(&encoded),
+        Err(NativeImageContainerError::UnsupportedVersion(37))
     ));
 }
 
@@ -1040,4 +1063,18 @@ fn shared_code_concurrent_stress() {
     for t in threads {
         t.join().unwrap();
     }
+}
+
+/// The drained events without the time, scope, location and assertion of
+/// their reports, which these tests do not check.
+fn bare(events: Vec<celox::RuntimeEvent>) -> Vec<celox::RuntimeEvent> {
+    events
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Report(report) => {
+                celox::RuntimeEvent::Report(celox::Report::new(report.severity, report.message))
+            }
+            event => event,
+        })
+        .collect()
 }

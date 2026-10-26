@@ -9,6 +9,9 @@ description.workspace = true
 edition.workspace     = true
 
 [features]
+cranelift = ["celox/cranelift"]
+wasm-runtime = ["celox/wasm-runtime"]
+wasm-component = ["celox/wasm-component"]
 default = ["systemverilog"]
 arm64-codegen = ["celox/arm64-codegen"]
 x86_64-codegen = ["celox/x86_64-codegen"]

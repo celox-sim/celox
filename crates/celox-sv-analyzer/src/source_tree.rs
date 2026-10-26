@@ -5,13 +5,19 @@ use std::path::Path;
 use crate::AnalyzerError;
 mod scopes;
 pub(crate) use scopes::ScopeHandle;
+mod spans;
+pub(crate) use spans::{Ranges, SourceText, Spans, Starts};
 
 /// Shared native arena with copy-on-write support for ownership regressions.
+/// The span index is built on first use and dropped when the arena changes.
 #[derive(Clone, Debug)]
-pub(super) struct Shared<T: Clone>(std::sync::Arc<T>);
+pub(super) struct Shared<T: Clone>(
+    std::sync::Arc<T>,
+    std::sync::Arc<std::sync::OnceLock<spans::Spans>>,
+);
 impl<T: Clone> From<T> for Shared<T> {
     fn from(value: T) -> Self {
-        Self(std::sync::Arc::new(value))
+        Self(std::sync::Arc::new(value), Default::default())
     }
 }
 impl<T: Clone> std::ops::Deref for Shared<T> {
@@ -22,6 +28,7 @@ impl<T: Clone> std::ops::Deref for Shared<T> {
 }
 impl<T: Clone> std::ops::DerefMut for Shared<T> {
     fn deref_mut(&mut self) -> &mut T {
+        self.1 = Default::default();
         std::sync::Arc::make_mut(&mut self.0)
     }
 }
@@ -128,6 +135,18 @@ impl SourceTree {
     }
     pub(crate) fn declarations(&self) -> &celox_sv_syntax::Declarations {
         &self.declarations
+    }
+    /// The token-order index of this file's arenas.
+    pub(crate) fn spans(&self) -> &Spans {
+        self.declarations
+            .1
+            .get_or_init(|| Spans::new(&self.declarations))
+    }
+    /// The expanded token text of this file.
+    pub(crate) fn source_text(&self) -> &SourceText {
+        self.spans()
+            .text
+            .get_or_init(|| SourceText::new(&self.declarations))
     }
 
     pub(crate) fn into_declarations(self) -> celox_sv_syntax::Declarations {

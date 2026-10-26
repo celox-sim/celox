@@ -34,7 +34,7 @@ impl Ff<'_, '_> {
         };
         // Evaluate the reference once, then all value operands, then snapshot
         // the referenced storage so partial reads retain argument side effects.
-        let (lvalues, captured) = self.capture_system_actual(destination)?;
+        let (lvalues, captured, guards) = self.capture_system_actual(destination)?;
         let mut values = Vec::new();
         for (position, arg) in args.iter().enumerate().skip(1) {
             if let Some(arg) = arg {
@@ -61,6 +61,7 @@ impl Ff<'_, '_> {
             values,
             vec![
                 HostRequestValue {
+                    value_kind: celox_design::ValueKind::Bits,
                     float_precision: None,
                     id: result_id,
                     width: 32,
@@ -68,6 +69,7 @@ impl Ff<'_, '_> {
                     is_string: false,
                 },
                 HostRequestValue {
+                    value_kind: celox_design::ValueKind::Bits,
                     float_precision: None,
                     id: data_id,
                     width,
@@ -84,6 +86,7 @@ impl Ff<'_, '_> {
                 u8::from(args.get(3).is_some_and(Option::is_some)).to_string(),
             ],
         )?;
+        self.check_tagged_guards(&guards)?;
         match lvalues.as_slice() {
             [target] => self.assign(target, &data)?,
             targets => self.assign_concat(targets, &data)?,

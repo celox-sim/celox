@@ -3,7 +3,7 @@ use super::*;
 
 pub(in crate::ast) fn classify<'a>(
     subroutines: impl Iterator<Item = &'a Subroutine>,
-    comb: &[CombProcess],
+    comb: &mut Vec<CombProcess>,
     ff: &mut Vec<FfProcess>,
     processes: &mut Vec<InitialProcess>,
 ) -> Result<(), AnalyzerError> {
@@ -86,10 +86,58 @@ pub(in crate::ast) fn classify<'a>(
             ));
         }
     }
-    if comb.iter().any(|process| suspends(&process.body, &timed)) {
-        return Err(unsupported("timed task call in a combinational process"));
-    }
     let initial_count = processes.len();
+    let mut retained = Vec::new();
+    for process in std::mem::take(comb) {
+        if !suspends(&process.body, &timed) {
+            if process.kind == CombProcessKind::AlwaysStar && assigns_nonblocking(&process.body) {
+                return Err(unsupported("nonblocking assignment inside always_comb"));
+            }
+            retained.push(process);
+            continue;
+        }
+        // An `always @*` is an ordinary `always` procedure (IEEE 1800-2023
+        // 9.2.2.2.2): calling a timed task makes it a process that waits on
+        // its implicit event list before each run of its statement.
+        // `always_comb` and `always_latch` may not suspend (9.2.2.2).
+        let context = match process.kind {
+            CombProcessKind::AlwaysStar => None,
+            CombProcessKind::AlwaysLatch => Some("an always_latch body"),
+            CombProcessKind::AlwaysComb | CombProcessKind::ContinuousAssign => {
+                Some("an always_comb body")
+            }
+        };
+        if let Some(context) = context {
+            return Err(AnalyzerError::TimingControlOutsideProcess {
+                construct: "timed task call",
+                context,
+            });
+        }
+        // The frontend reads the wait's statements as it reads those of a
+        // combinational `always @*`, folded branches and the defaults of
+        // omitted arguments included.
+        let mut body = vec![timing::implicit_event(
+            &process.body,
+            &process.sensitivity_body,
+        )];
+        body.extend(process.body);
+        processes.push(InitialProcess {
+            creation_order: process.creation_order,
+            site: process.process_site,
+            condition: process.condition,
+            body: vec![Stmt::Loop {
+                kind: LoopKind::Forever,
+                init: Vec::new(),
+                condition: None,
+                step: Vec::new(),
+                body,
+            }],
+            initializer: false,
+            synthetic: false,
+            repeats: true,
+        });
+    }
+    *comb = retained;
     let mut retained = Vec::new();
     for process in std::mem::take(ff) {
         if !suspends(&process.body, &timed) {
@@ -141,10 +189,31 @@ fn suspends(body: &[Stmt], timed: &HashSet<String>) -> bool {
     for statement in body {
         statement.walk(&mut |statement| {
             result |= match statement {
-                Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::Wait(_) => true,
+                Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::WaitImplicit(_) | Stmt::Wait(_) => {
+                    true
+                }
                 Stmt::Call { name, .. } => timed.contains(name),
                 _ => false,
             };
+        });
+    }
+    result
+}
+
+fn assigns_nonblocking(body: &[Stmt]) -> bool {
+    let mut result = false;
+    for statement in body {
+        statement.walk(&mut |statement| {
+            result |= matches!(
+                statement,
+                Stmt::Assign {
+                    nonblocking: true,
+                    ..
+                } | Stmt::AssignConcat {
+                    nonblocking: true,
+                    ..
+                }
+            );
         });
     }
     result

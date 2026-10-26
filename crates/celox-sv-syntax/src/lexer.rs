@@ -278,8 +278,12 @@ fn lex_with_context(
                     "::", "+:", "-:", "~&", "~|", "~^", "^~", "->", "=>", "*>", "##", "@@", ":=",
                     ":/", ".*", "(*", "*)",
                 ];
+                // `:` followed by a comment (`3'b0://`, `x:/*`) is not `:/`.
+                let comment_after_colon = source[at..].starts_with(":/")
+                    && matches!(bytes.get(at + 2), Some(b'/' | b'*'));
                 let length = OPERATORS
                     .iter()
+                    .filter(|op| !(comment_after_colon && **op == ":/"))
                     .find(|op| source[at..].starts_with(**op))
                     .map_or(1, |op| op.len());
                 at += length;
@@ -401,6 +405,20 @@ mod tests {
             let file = sources.add("bad.sv", text);
             assert!(lex(&sources, file).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn colon_before_comment_is_not_dist_weight() {
+        let text = "3'b0://c\n3'b1:/*c*/ x :/ 2";
+        let mut sources = SourceMap::default();
+        let file = sources.add("colon.sv", text);
+        let tokens = lex(&sources, file).unwrap();
+        let significant = tokens
+            .iter()
+            .filter(|token| !token.is_trivia())
+            .map(|token| token.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(significant, ["3'b0", ":", "3'b1", ":", "x", ":/", "2"]);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use veryl_metadata::component_manifest::{ConnectionFacts, ConnectionTarget, Conn
 mod host;
 mod injected;
 mod loader;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "wasm-component", not(target_family = "wasm")))]
 mod wasm;
 
 use host::{ExternalInstance, HostContext, HostValue, PortDir, PortRole};

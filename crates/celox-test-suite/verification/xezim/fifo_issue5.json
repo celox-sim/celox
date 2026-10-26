@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "fifo_issue5::test_fifo_issue5_subtract_overflow",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

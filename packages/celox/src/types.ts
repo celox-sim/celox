@@ -227,6 +227,47 @@ export interface NativeSimulatorHandle {
  * Opaque handle returned by NAPI for time-based simulation.
  * @internal
  */
+/** The severity of a report (IEEE 1800-2023 20.10). */
+export type Severity = "info" | "warning" | "error" | "fatal";
+
+/** The assertion whose action block issued a report. */
+export interface AssertionSite {
+	/** The statement label, which names the assertion within its scope. */
+	label?: string;
+	directive: "assert" | "assume" | "cover";
+	/** `"observed"` is `#0`. */
+	deferral: "none" | "observed" | "final";
+	/** Which action block issued the report. */
+	outcome: "pass" | "fail";
+}
+
+/**
+ * What a severity task (`$info`, `$warning`, `$error`, `$fatal`) reports.
+ * `message` holds the formatted bytes; decode them explicitly when the
+ * design emits text.
+ */
+export interface Report {
+	kind: "report";
+	severity: Severity;
+	message: Uint8Array;
+	/** The simulation time, when it is known (see `Simulation.setFailOn`). */
+	time?: number;
+	/** The hierarchical name of the scope that issued the report. */
+	scope?: string;
+	/** The file and line of the task call. */
+	file?: string;
+	line?: number;
+	assertion?: AssertionSite;
+}
+
+/** A runtime event a simulation drains with `drainRuntimeEvents()`. */
+export type RuntimeEvent =
+	| { kind: "display" | "write"; message: Uint8Array }
+	| Report
+	| { kind: "finish" | "stop" }
+	/** Events the design's event buffer overwrote before they were drained. */
+	| { kind: "missed"; count: number };
+
 export interface NativeSimulationHandle {
 	addClock(eventId: number, period: number, initialDelay: number): void;
 	schedule(eventId: number, time: number, value: number): void;
@@ -264,6 +305,10 @@ export interface NativeSimulationHandle {
 	clockPeriods?(): { eventId: number; period: number }[];
 	/** Continue the waveform in a new VCD file. */
 	switchVcd?(path: string): void;
+	/** Take the runtime events emitted since the last call. */
+	drainRuntimeEvents?(): RuntimeEvent[];
+	/** Fail runs and steps at a report of at least `severity`. */
+	setFailOn?(severity: Severity | null): void;
 }
 
 /**
@@ -346,7 +391,10 @@ export interface SimulatorOptions {
 	 * bit_extract_peephole, optimize_blocks, split_wide_commits, commit_sinking,
 	 * inline_commit_forwarding, eliminate_dead_working_stores, reschedule,
 	 * coalesce_stores, gvn, concat_folding, xor_chain_folding, vectorize_concat,
-	 * split_coalesced_stores, partial_forward, identity_store_bypass, tail_call_split
+	 * split_coalesced_stores, partial_forward, identity_store_bypass, tail_call_split,
+	 * derived_edge_units (generated units for the edges of gated and divided
+	 * clocks; "-sir:derived_edge_units" walks their plans instead, which
+	 * builds faster and ticks slower)
 	 *
 	 * @example ["-sir:reschedule", "+sir:gvn"]
 	 */

@@ -9,6 +9,7 @@ description           = "Macro-benchmark runners for Celox"
 edition.workspace     = true
 
 [features]
+cranelift = ["celox/cranelift"]
 default = []
 arm64-codegen = ["celox/arm64-codegen"]
 x86_64-codegen = ["celox/x86_64-codegen"]
@@ -38,3 +39,7 @@ veryl-simulator = { workspace = true, features = ["profile"] }
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "parallel-report"
+required-features = ["cranelift"]

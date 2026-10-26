@@ -130,6 +130,10 @@ pub struct SimModule {
     /// 1800-2023 26.2). Every instance of the module refers to that one
     /// object instead of a state object of its own.
     pub package_bindings: HashMap<SourceVarId, PackageBinding>,
+    /// Variables of the module that denote a variable of another instance,
+    /// named by a hierarchical name (IEEE 1800-2023 23.6). Each instance of
+    /// the module refers to the object its binding locates from it.
+    pub hierarchical_bindings: HashMap<SourceVarId, HierarchicalBinding>,
     /// Counter objects of the signals that a unit of the module may store
     /// twice between two runtime checks (see
     /// `crate::watch::multi_store_candidates`). Assembly counts a signal's
@@ -191,6 +195,28 @@ impl<A: Copy> NbaSwitch<A> {
     }
 }
 
+/// The variable of another instance a module variable denotes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct HierarchicalBinding {
+    pub start: HierarchicalStart,
+    /// The instance path segments from the start instance to the instance
+    /// that holds the target, as in [`crate::InstancePath`].
+    pub path: Vec<(String, usize)>,
+    /// The target variable, by the module of that instance: instances of
+    /// one module may reach instances of different modules.
+    pub targets: Vec<(ModuleId, SourceVarId)>,
+}
+
+/// Where the instance path of a [`HierarchicalBinding`] starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HierarchicalStart {
+    /// The top instance.
+    Root,
+    /// The ancestor that many levels above the instance holding the
+    /// variable; 0 is that instance.
+    Ancestor(usize),
+}
+
 /// The package variable a module variable denotes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PackageBinding {
@@ -225,6 +251,7 @@ impl fmt::Debug for SimModule {
             .field("reset_clock_map", &self.reset_clock_map)
             .field("processes", &self.processes)
             .field("package_bindings", &self.package_bindings)
+            .field("hierarchical_bindings", &self.hierarchical_bindings)
             .finish()
     }
 }

@@ -1644,6 +1644,7 @@ fn compile_hdl_to_sir_with_layout_mode(
 mod host {
     use super::super::Simulator;
     use super::*;
+    #[cfg(feature = "cranelift")]
     use crate::backend::JitBackend;
     use crate::ir::LaidOutProgram;
 
@@ -1687,6 +1688,9 @@ mod host {
         /// When true, JIT-compiled functions emit trigger detection code for
         /// edge-based event discovery. Only needed by [`crate::Simulation`].
         pub emit_triggers: bool,
+        /// Generated derived-edge units the tests run, recorded here.
+        #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
+        pub(crate) derived_edge_units: Option<crate::derived_edge::TestEdgeUnits>,
         /// Emit the additional combinational entries needed to reapply foreign
         /// force overrides between procedural store boundaries.
         pub native_force_support: bool,
@@ -1715,20 +1719,24 @@ mod host {
     ///
     /// Keeping compilation separate from initialization lets compiler-only
     /// clients stop after native code generation without applying initial
-    /// values or executing the first combinational settle.
+    /// values or executing the first combinational settle. `Target` is what
+    /// [`Self::initialize`] builds: a [`Simulator`], or a timed
+    /// [`crate::Simulation`] whose image carries the process kernels and the
+    /// compiled scheduler.
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
         target_arch = "aarch64"
     ))]
     #[must_use]
-    pub struct NativeCompilation {
+    pub struct NativeCompilation<Target = Simulator> {
         image: crate::backend::native::NativeProgramImage,
         program: LaidOutProgram,
         warnings: Vec<CompilationWarning>,
         options: SimulatorOptions,
         vcd_path: Option<std::path::PathBuf>,
         injected_components: crate::InjectedComponents,
+        _target: std::marker::PhantomData<Target>,
     }
 
     /// `Simulator` runs no process kernel, so a design with one would
@@ -1744,6 +1752,37 @@ mod host {
         Err(SimulatorError::new(
             SimulatorErrorKind::ProcessRequiresSimulation(origin),
         ))
+    }
+
+    /// A native image records waveforms only if its arrays are packed,
+    /// which an image compiled with VCD enabled has: a VCD file of the host
+    /// (`vcd_path`) or of the design (`$dumpvars`) needs one.
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        target_arch = "aarch64"
+    ))]
+    fn validate_native_vcd_layout(
+        layout: &crate::MemoryLayout,
+        program: &crate::ir::RuntimeProgram,
+        vcd_path: &Option<std::path::PathBuf>,
+    ) -> Result<(), SimulatorError> {
+        let source_vcd = program
+            .runtime_schema
+            .host_request_sites
+            .iter()
+            .any(|site| site.kind == celox_design::HostRequestKind::Vcd);
+        if (vcd_path.is_some() || source_vcd)
+            && layout.unpacked_arrays.values().any(|array| {
+                !array.element_width.is_multiple_of(8)
+                    || array.element_stride != array.element_width / 8
+            })
+        {
+            return Err(SimulatorError::from(crate::CodegenError::message(
+                "VCD requires packed array storage; compile this native image with VCD enabled",
+            )));
+        }
+        Ok(())
     }
 
     #[cfg(any(
@@ -1764,22 +1803,8 @@ mod host {
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
-        let source_vcd = sim
-            .program
-            .runtime_schema
-            .host_request_sites
-            .iter()
-            .any(|site| site.kind == celox_design::HostRequestKind::Vcd);
-        if vcd_path.is_some() || source_vcd {
-            if sim.layout().unpacked_arrays.values().any(|array| {
-                !array.element_width.is_multiple_of(8)
-                    || array.element_stride != array.element_width / 8
-            }) {
-                return Err(SimulatorError::from(crate::CodegenError::message(
-                    "VCD requires packed array storage; compile this native image with VCD enabled",
-                ))
-                .with_warnings(std::mem::take(&mut sim.warnings)));
-            }
+        if let Err(error) = validate_native_vcd_layout(sim.layout(), &sim.program, &vcd_path) {
+            return Err(error.with_warnings(std::mem::take(&mut sim.warnings)));
         }
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
@@ -1856,7 +1881,7 @@ mod host {
         feature = "arm64-codegen",
         target_arch = "aarch64"
     ))]
-    impl NativeCompilation {
+    impl<Target> NativeCompilation<Target> {
         /// Warnings emitted while compiling this artifact.
         pub fn warnings(&self) -> &[CompilationWarning] {
             &self.warnings
@@ -1890,7 +1915,14 @@ mod host {
         ) -> Result<(), crate::backend::native::NativeImageContainerError> {
             self.image.write_container(output_path)
         }
+    }
 
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        target_arch = "aarch64"
+    ))]
+    impl NativeCompilation<Simulator> {
         /// Load the image into executable memory and initialize runtime state.
         pub fn initialize(
             self,
@@ -1902,10 +1934,43 @@ mod host {
                 options,
                 vcd_path,
                 injected_components,
+                _target,
             } = self;
             initialize_native_image(
                 image,
                 program,
+                warnings,
+                options,
+                vcd_path,
+                injected_components,
+            )
+        }
+    }
+
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        target_arch = "aarch64"
+    ))]
+    impl NativeCompilation<crate::Simulation> {
+        /// Load the image into executable memory and start a timed
+        /// simulation of it.
+        pub fn initialize(
+            self,
+        ) -> Result<crate::Simulation<crate::backend::native::NativeBackend>, SimulatorError>
+        {
+            let Self {
+                image,
+                program,
+                warnings,
+                options,
+                vcd_path,
+                injected_components,
+                _target,
+            } = self;
+            SimulatorBuilder::<crate::Simulation>::start_native_image(
+                image,
+                program.into_runtime(),
                 warnings,
                 options,
                 vcd_path,
@@ -1932,6 +1997,8 @@ mod host {
                 diagnostic_policy: Default::default(),
                 sv_timescale: None,
                 emit_triggers: false,
+                #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
+                derived_edge_units: None,
                 native_force_support: false,
                 signal_access: crate::SignalAccessOptions::default(),
                 dead_store_policy: DeadStorePolicy::Off,
@@ -2085,6 +2152,17 @@ mod host {
         #[cfg(test)]
         pub(crate) fn emit_triggers(mut self) -> Self {
             self.options.emit_triggers = true;
+            self
+        }
+
+        /// Append the generated derived-edge units of every event and record
+        /// them in `sink`.
+        #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
+        pub(crate) fn derived_edge_units(
+            mut self,
+            sink: crate::derived_edge::TestEdgeUnits,
+        ) -> Self {
+            self.options.derived_edge_units = Some(sink);
             self
         }
 
@@ -2840,6 +2918,18 @@ mod host {
             {
                 crate::scheduler::attach(&mut laid_out);
             }
+            #[cfg(feature = "host-runtime")]
+            if self
+                .options
+                .optimize_options
+                .is_enabled(crate::optimizer::SirPass::DerivedEdgeUnits)
+            {
+                crate::derived_edge::attach(&mut laid_out);
+            }
+            #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
+            if let Some(sink) = &self.options.derived_edge_units {
+                crate::derived_edge::attach_test_units(&mut laid_out, sink);
+            }
 
             // Link DPI-C imports before code generation, so a missing C
             // function fails the build early; the backends reuse the result.
@@ -2882,6 +2972,7 @@ mod host {
         }
 
         /// Compiles using the Cranelift JIT backend.
+        #[cfg(feature = "cranelift")]
         pub fn build_cranelift(self) -> Result<Simulator<JitBackend>, SimulatorError> {
             let phase_timing = self.options.diagnostics.phase_timing;
             let phase_start = phase_timing.then(crate::timing::now);
@@ -3155,6 +3246,7 @@ mod host {
                 options,
                 vcd_path,
                 injected_components,
+                _target: std::marker::PhantomData,
             })
         }
 
@@ -3210,6 +3302,7 @@ mod host {
                     options,
                     vcd_path,
                     injected_components,
+                    _target: std::marker::PhantomData,
                 },
                 trace,
             ))
@@ -3300,6 +3393,7 @@ mod host {
         }
 
         /// Compiles using the Wasmtime WASM backend.
+        #[cfg(feature = "wasm-runtime")]
         pub fn build_wasm(
             self,
         ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
@@ -3339,6 +3433,7 @@ mod host {
         }
 
         /// Compiles and runs a testbench using the Cranelift JIT backend.
+        #[cfg(feature = "cranelift")]
         pub fn run_test_cranelift(self) -> Result<crate::testbench::TestResult, SimulatorError> {
             run_test_with_sim(self.build_cranelift()?)
         }
@@ -3663,6 +3758,7 @@ mod host {
         }
 
         /// Compiles a timed simulation using the Cranelift JIT backend.
+        #[cfg(feature = "cranelift")]
         pub fn build_cranelift(self) -> Result<crate::Simulation<JitBackend>, SimulatorError> {
             self.build_with_backend(
                 crate::backend::memory_layout::MemoryLayoutMode::Packed,
@@ -3696,7 +3792,70 @@ mod host {
             )
         }
 
+        /// Compiles a timed simulation into a native image without loading
+        /// it. The image carries the process kernels and the compiled
+        /// scheduler; [`NativeCompilation::initialize`] or
+        /// [`Self::build_native_from_image`] starts a simulation of it.
+        #[cfg(any(
+            target_arch = "x86_64",
+            feature = "arm64-codegen",
+            target_arch = "aarch64"
+        ))]
+        pub fn compile_native(
+            mut self,
+        ) -> Result<NativeCompilation<crate::Simulation>, SimulatorError> {
+            self.options.emit_triggers = true;
+            let (laid_out, mut warnings, options, vcd_path, injected_components) = self
+                .into_laid_out_program(
+                    crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+                )?;
+            let image = crate::backend::native::NativeBackend::compile_image(&laid_out, &options)
+                .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
+            Ok(NativeCompilation {
+                image,
+                program: laid_out,
+                warnings,
+                options,
+                vcd_path,
+                injected_components,
+                _target: std::marker::PhantomData,
+            })
+        }
+
+        /// Starts a timed simulation of a native image from
+        /// [`Self::compile_native`], without code generation. The design's
+        /// runtime metadata comes from `image`; the sources of this builder
+        /// are not used, its runtime options (scheduler, DPI symbols,
+        /// plusargs, VCD output) are.
+        ///
+        /// An image from [`Simulator::builder`] has no compiled scheduler,
+        /// so every time slot runs in the reference loop.
+        #[cfg(any(
+            target_arch = "x86_64",
+            feature = "arm64-codegen",
+            target_arch = "aarch64"
+        ))]
+        pub fn build_native_from_image(
+            self,
+            image: crate::backend::native::NativeProgramImage,
+        ) -> Result<crate::Simulation<crate::backend::native::NativeBackend>, SimulatorError>
+        {
+            let mut options = self.options;
+            options.four_state = image.four_state();
+            options.emit_triggers = true;
+            let program = image.runtime_program();
+            Self::start_native_image(
+                image,
+                program,
+                Vec::new(),
+                options,
+                self.vcd_path,
+                self.injected_components,
+            )
+        }
+
         /// Compiles a timed simulation using the Wasmtime WASM backend.
+        #[cfg(feature = "wasm-runtime")]
         pub fn build_wasm(
             self,
         ) -> Result<crate::Simulation<crate::backend::wasm_runtime::WasmBackend>, SimulatorError>
@@ -3738,33 +3897,12 @@ mod host {
                 self.into_laid_out_program(layout_mode)?;
             let backend = compile(&laid_out, &options)
                 .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
-            let shadow = if !matches!(
-                options.scheduler,
-                crate::SchedulerMode::Differential | crate::SchedulerMode::DifferentialRuns
-            ) {
-                None
-            } else if !injected_components.definitions.is_empty() {
-                Some(Err("the design has external components"))
-            } else {
-                let mut shadow_options = options.clone();
-                shadow_options.trace = Default::default();
-                shadow_options.scheduler = crate::SchedulerMode::Reference;
-                let backend = compile(&laid_out, &shadow_options)?;
-                let shadow = Self::start_simulation(
-                    backend,
-                    laid_out.runtime.clone(),
-                    Vec::new(),
-                    &shadow_options,
-                    None,
-                    Default::default(),
-                )?;
-                // Host state outside the memory image, such as open files,
-                // cannot be shared with a shadow.
-                Some(match shadow.simulator.check_host_checkpoint_support() {
-                    Ok(()) => Ok(Box::new(shadow)),
-                    Err(_) => Err("the design keeps host state outside its memory image"),
-                })
-            };
+            let shadow = Self::start_shadow(
+                |shadow_options| compile(&laid_out, shadow_options),
+                &laid_out.runtime,
+                &options,
+                &injected_components,
+            )?;
             let mut simulation = Self::start_simulation(
                 backend,
                 laid_out.into_runtime(),
@@ -3777,6 +3915,121 @@ mod host {
                 simulation.set_shadow(shadow);
             }
             Ok(simulation)
+        }
+
+        /// The reference-loop shadow of a differential simulation of
+        /// `program`, with `backend` providing its own copy of the code, or
+        /// why it has none. Other scheduler modes have no shadow.
+        #[allow(clippy::type_complexity)]
+        fn start_shadow<B: crate::SimBackend>(
+            backend: impl FnOnce(&SimulatorOptions) -> Result<B, SimulatorError>,
+            program: &crate::ir::RuntimeProgram,
+            options: &SimulatorOptions,
+            injected_components: &crate::InjectedComponents,
+        ) -> Result<Option<Result<Box<crate::Simulation<B>>, &'static str>>, SimulatorError>
+        {
+            if !matches!(
+                options.scheduler,
+                crate::SchedulerMode::Differential | crate::SchedulerMode::DifferentialRuns
+            ) {
+                return Ok(None);
+            }
+            if !injected_components.definitions.is_empty() {
+                return Ok(Some(Err("the design has external components")));
+            }
+            let mut shadow_options = options.clone();
+            shadow_options.trace = Default::default();
+            shadow_options.scheduler = crate::SchedulerMode::Reference;
+            let backend = backend(&shadow_options)?;
+            let shadow = Self::start_simulation(
+                backend,
+                program.clone(),
+                Vec::new(),
+                &shadow_options,
+                None,
+                Default::default(),
+            )?;
+            // Host state outside the memory image, such as open files,
+            // cannot be shared with a shadow.
+            Ok(Some(
+                match shadow.simulator.check_host_checkpoint_support() {
+                    Ok(()) => Ok(Box::new(shadow)),
+                    Err(_) => Err("the design keeps host state outside its memory image"),
+                },
+            ))
+        }
+
+        /// Load `image` into executable memory and start a timed simulation
+        /// of `program`, its runtime metadata. A differential simulation
+        /// loads a second copy of the image for its shadow.
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        fn start_native_image(
+            image: crate::backend::native::NativeProgramImage,
+            program: crate::ir::RuntimeProgram,
+            warnings: Vec<CompilationWarning>,
+            options: SimulatorOptions,
+            vcd_path: Option<std::path::PathBuf>,
+            injected_components: crate::InjectedComponents,
+        ) -> Result<crate::Simulation<crate::backend::native::NativeBackend>, SimulatorError>
+        {
+            if let Err(error) = validate_native_vcd_layout(image.layout(), &program, &vcd_path) {
+                return Err(error.with_warnings(warnings));
+            }
+            let load = |image, options: &SimulatorOptions| {
+                // Safety: callers either produced the image in this process
+                // or loaded it from an explicitly trusted native-image
+                // artifact, and `from_image` validates its structure first.
+                unsafe {
+                    crate::backend::native::NativeBackend::from_image_with_dpi(image, &options.dpi)
+                }
+            };
+            let shadow = match Self::start_shadow(
+                |shadow_options| load(image.clone(), shadow_options),
+                &program,
+                &options,
+                &injected_components,
+            ) {
+                Ok(shadow) => shadow,
+                Err(error) => return Err(error.with_warnings(warnings)),
+            };
+            let backend = match load(image, &options) {
+                Ok(backend) => backend,
+                Err(error) => return Err(error.with_warnings(warnings)),
+            };
+            let mut simulation = Self::start_simulation(
+                backend,
+                program,
+                warnings,
+                &options,
+                vcd_path,
+                injected_components,
+            )?;
+            if let Some(shadow) = shadow {
+                simulation.set_shadow(shadow);
+            }
+            Ok(simulation)
+        }
+
+        /// A cross-compiling build cannot execute the code of a native image.
+        #[cfg(any(
+            all(feature = "arm64-codegen", not(target_arch = "aarch64")),
+            all(feature = "x86_64-codegen", not(target_arch = "x86_64"))
+        ))]
+        fn start_native_image(
+            image: crate::backend::native::NativeProgramImage,
+            program: crate::ir::RuntimeProgram,
+            warnings: Vec<CompilationWarning>,
+            options: SimulatorOptions,
+            vcd_path: Option<std::path::PathBuf>,
+            injected_components: crate::InjectedComponents,
+        ) -> Result<crate::Simulation<crate::backend::native::NativeBackend>, SimulatorError>
+        {
+            let _ = (image, program, options, vcd_path, injected_components);
+            Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                .with_warnings(warnings))
         }
 
         /// Initialize a timed simulation of `program` compiled into

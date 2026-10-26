@@ -1,6 +1,63 @@
 use super::*;
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn native_merged_optimization_preserves_large_and_wide_array_boundaries() {
+    for width in [58, 65, 129] {
+        let source = format!(
+            r#"
+            module Top(input logic [7:0] index, output logic [{top}:0] y);
+                function [{width}:0] identity(input logic [7:0] selected);
+                    logic [{top}:0] words[{top}:0];
+                    for (integer i=0; i<{width}; i=i+1) begin
+                        words[i]='0;
+                        words[i][i]=1'b1;
+                    end
+                    identity[{top}:0]=words[selected];
+                endfunction
+                assign y=identity(index);
+            endmodule
+            "#,
+            top = width - 1,
+        );
+        for four_state in [false, true] {
+            for level in [
+                celox::OptLevel::O0,
+                celox::OptLevel::O1,
+                celox::OptLevel::O2,
+            ] {
+                let mut sim = Simulator::from_sv_sources(
+                    vec![(&source, Path::new("native_array_boundaries.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .opt_level(level)
+                .build_native()
+                .unwrap();
+                let index = sim.signal("index");
+                let y = sim.signal("y");
+                for bit in 0..width {
+                    sim.modify(|io| io.set(index, bit as u32)).unwrap();
+                    assert_eq!(
+                        sim.get(y),
+                        BigUint::from(1u8) << bit,
+                        "width={width}, four_state={four_state}, level={level:?}, bit={bit}",
+                    );
+                }
+            }
+        }
+    }
+}
+
 sv_backends! {
+    fn static_function_partial_writes_preserve_last_write(sim) {
+        @case "procedural::static_function_partial_writes_preserve_last_write";
+    }
+
+    fn static_function_unpacked_scratch_bits_at_element_boundaries(sim) {
+        @case "procedural::static_function_unpacked_scratch_bits_at_element_boundaries";
+    }
+
     fn constant_functions_inside_selected_parameter_initializers(sim) {
         @case "procedural::constant_functions_inside_selected_parameter_initializers";
     }
@@ -39,6 +96,18 @@ sv_backends! {
 
     fn mixed_blocking_and_nonblocking_writes_keep_their_regions(sim) {
         @case "procedural::mixed_blocking_and_nonblocking_writes_keep_their_regions";
+    }
+
+    fn edge_processes_share_a_blocking_loop_variable(sim) {
+        @case "procedural::edge_processes_share_a_blocking_loop_variable";
+    }
+
+    fn edge_processes_of_two_clocks_share_a_blocking_variable(sim) {
+        @case "procedural::edge_processes_of_two_clocks_share_a_blocking_variable";
+    }
+
+    fn reset_processes_share_a_loop_index(sim) {
+        @case "procedural::reset_processes_share_a_loop_index";
     }
 
     fn constant_functions_size_parameters_and_ports(sim) {
@@ -91,6 +160,10 @@ sv_backends! {
 
     fn runtime_bits_stay_within_their_element(sim) {
         @case "procedural::runtime_bits_stay_within_their_element";
+    }
+
+    fn nonblocking_runtime_element_writes_apply_in_order(sim) {
+        @case "procedural::nonblocking_runtime_element_writes_apply_in_order";
     }
 
     fn declaration_initializers_define_the_initial_state(sim) {
@@ -178,5 +251,14 @@ sv_backends! {
 sv_backends! {
     fn static_function_wide_packed_storage_keeps_all_bits(sim) {
         @case "procedural::static_function_wide_packed_storage_keeps_all_bits";
+    }
+}
+
+sv_backends! {
+    fn initial_loops_without_a_static_trip_count_run_as_a_process(sim) {
+        @case "procedural::initial_loops_without_a_static_trip_count_run_as_a_process";
+    }
+    fn initial_while_loops_define_the_state(sim) {
+        @case "procedural::initial_while_loops_define_the_state";
     }
 }

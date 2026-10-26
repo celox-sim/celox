@@ -12,4 +12,5 @@ pub mod interval;
 pub mod lanes;
 pub mod memory;
 pub mod memory_ssa;
+pub mod memory_versions;
 pub mod ssa;

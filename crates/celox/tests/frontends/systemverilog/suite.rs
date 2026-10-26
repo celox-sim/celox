@@ -48,14 +48,13 @@ impl<B: SimBackend> TimedBackend<B> {
     fn capture_events(&mut self) -> Result<()> {
         let events = self.sim.drain_runtime_events();
         let error = events.iter().find_map(|event| match event {
-            RuntimeEvent::AssertFatal { message } => Some(format!(
-                "fatal assertion: {}",
-                String::from_utf8_lossy(message)
-            )),
-            RuntimeEvent::AssertContinue { message } => Some(format!(
-                "failed assertion: {}",
-                String::from_utf8_lossy(message)
-            )),
+            RuntimeEvent::Report(report) if report.severity >= celox::Severity::Error => {
+                Some(format!(
+                    "{:?}: {}",
+                    report.severity,
+                    String::from_utf8_lossy(&report.message)
+                ))
+            }
             RuntimeEvent::Missed { count } => Some(format!("{count} runtime events were missed")),
             _ => None,
         });
@@ -301,6 +300,19 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         );
         return Ok(match backend {
             "native" => Box::new(TimedBackend::new(builder.build_native()?)),
+            // The image goes through its container bytes, as an attached
+            // image does, and the simulation takes its metadata from it.
+            "native-image" => {
+                let image = builder.compile_native()?.into_program_image();
+                let image =
+                    celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes()?)?;
+                Box::new(TimedBackend::new(
+                    Simulation::from_sv_sources(Vec::new(), &design.top)
+                        .scheduler_mode(scheduler_mode())
+                        .build_native_from_image(image)?,
+                ))
+            }
+            #[cfg(feature = "cranelift")]
             "cranelift" => Box::new(TimedBackend::new(builder.build_cranelift()?)),
             "native-parallel" => Box::new(TimedBackend::new(
                 builder
@@ -308,12 +320,14 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
                     .parallel_partition(celox::ParallelPartition::Always)
                     .build_native()?,
             )),
+            #[cfg(feature = "cranelift")]
             "cranelift-parallel" => Box::new(TimedBackend::new(
                 builder
                     .threads(4)
                     .parallel_partition(celox::ParallelPartition::Always)
                     .build_cranelift()?,
             )),
+            #[cfg(feature = "wasm-runtime")]
             "wasm" => Box::new(TimedBackend::new(builder.build_wasm()?)),
             _ => return Err(format!("unknown backend: {backend}").into()),
         });
@@ -341,6 +355,20 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
     };
     Ok(match backend {
         "native" => Box::new(CeloxBackend(builder.build_native().map_err(rejected)?)),
+        "native-image" => {
+            let image = builder
+                .compile_native()
+                .map_err(rejected)?
+                .into_program_image();
+            let image =
+                celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes()?)?;
+            Box::new(CeloxBackend(
+                Simulator::from_sv_sources(Vec::new(), &design.top)
+                    .build_native_from_image(image)
+                    .map_err(rejected)?,
+            ))
+        }
+        #[cfg(feature = "cranelift")]
         "cranelift" => Box::new(CeloxBackend(builder.build_cranelift().map_err(rejected)?)),
         "native-parallel" => Box::new(CeloxBackend(
             builder
@@ -349,6 +377,7 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
                 .build_native()
                 .map_err(rejected)?,
         )),
+        #[cfg(feature = "cranelift")]
         "cranelift-parallel" => Box::new(CeloxBackend(
             builder
                 .threads(4)
@@ -356,6 +385,7 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
                 .build_cranelift()
                 .map_err(rejected)?,
         )),
+        #[cfg(feature = "wasm-runtime")]
         "wasm" => Box::new(CeloxBackend(builder.build_wasm().map_err(rejected)?)),
         _ => return Err(format!("unknown backend: {backend}").into()),
     })
@@ -363,7 +393,10 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
 
 /// Run the suite case `name` on `backend`. The SV frontend is recursive, so
 /// the case runs on a thread with room on its stack.
-pub fn run_case(name: &'static str, backend: &'static str) {
+pub fn run_case(name: &str, backend: &str) {
+    if super::vtest_exec::dispatch("sv", name, backend) {
+        return;
+    }
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)

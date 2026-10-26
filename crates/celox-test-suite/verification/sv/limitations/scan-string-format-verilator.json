@@ -1,0 +1,10 @@
+{
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "case": "scan::sscanf_string_format_expression",
+  "source": "src/sv/cases/scan.vtest",
+  "method": "The source block from the named case was passed unchanged to verilator --lint-only --top-module Top.",
+  "status": "compile_error",
+  "exit_code": 1,
+  "detail": "%Error: <case>/sscanf_format.sv:7:33: syntax error, unexpected IDENTIFIER, expecting STRING\n    7 |         count = $sscanf(source, fmt, value);\n      |                                 ^~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: <case>/sscanf_format.sv:9:46: syntax error, unexpected IDENTIFIER, expecting STRING\n    9 |         count = $sscanf(source.substr(0, 1), fmt.substr(0, 1), value);\n      |                                              ^~~\n%Error: <case>/sscanf_format.sv:11:31: syntax error, unexpected IDENTIFIER, expecting STRING\n   11 |         count = $sscanf(\"56\", fmt, value);\n      |                               ^~~\n%Error: Exiting due to 3 error(s)\n"
+}

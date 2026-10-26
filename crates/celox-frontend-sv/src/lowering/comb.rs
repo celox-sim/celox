@@ -2049,9 +2049,10 @@ impl<'p, 'a> Comb<'p, 'a> {
                 Ok(store)
             }
             // A timing control suspends a process; this lowering has none.
-            sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::Wait(_) => {
-                Err(unsupported("procedural timing control"))
-            }
+            sv::ir::Stmt::Delay { .. }
+            | sv::ir::Stmt::WaitEvent(_)
+            | sv::ir::Stmt::WaitImplicit(_)
+            | sv::ir::Stmt::Wait(_) => Err(unsupported("procedural timing control")),
             sv::ir::Stmt::Local { name, init } => {
                 let id = self
                     .m
@@ -2182,6 +2183,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 task: sv::ir::SystemTask::Readmem(format),
                 args,
                 site,
+                ..
             } => {
                 self.readmem(&mut store, frames, *format, args, site.as_ref())?;
                 Ok(store)
@@ -2202,8 +2204,20 @@ impl<'p, 'a> Comb<'p, 'a> {
             sv::ir::Stmt::SystemTask { task, .. } if self.initial => Err(unsupported(format!(
                 "system task `{task}` inside an initial block"
             ))),
-            sv::ir::Stmt::SystemTask { task, args, .. } => {
-                self.system_task(&mut store, frames, *task, args)?;
+            sv::ir::Stmt::SystemTask {
+                task,
+                args,
+                site,
+                assertion,
+            } => {
+                self.system_task(
+                    &mut store,
+                    frames,
+                    *task,
+                    args,
+                    site.as_ref(),
+                    assertion.as_ref(),
+                )?;
                 Ok(store)
             }
         }
@@ -2664,8 +2678,38 @@ impl<'p, 'a> Comb<'p, 'a> {
             continue_flag,
         });
 
-        if let sv::ir::LoopKind::For = kind
-            && let Some(canonical) = canonical_for_loop(init, condition, step)
+        let canonical = match kind {
+            sv::ir::LoopKind::For => canonical_for_loop(init, condition, step),
+            _ => None,
+        };
+        // An `initial` block runs as a process when it cannot be folded into
+        // initial state, so a loop whose trip count is not known before it
+        // runs goes there instead of being unrolled until the limit.
+        if self.initial {
+            let counted = match kind {
+                sv::ir::LoopKind::Repeat(_) => true,
+                sv::ir::LoopKind::For => canonical.as_ref().is_some_and(|canonical| {
+                    let mut written = HashSet::default();
+                    written_names(body, &mut written);
+                    !written.contains(&canonical.var)
+                }),
+                sv::ir::LoopKind::While | sv::ir::LoopKind::DoWhile => {
+                    match counted_while_loop(condition, body) {
+                        Some((counted, rest)) => {
+                            !self.loop_needs_fold(&store, frames, &counted, rest)?
+                        }
+                        None => false,
+                    }
+                }
+                sv::ir::LoopKind::Forever => false,
+            };
+            if !counted {
+                return Err(unsupported(
+                    "initial block loop without a static trip count",
+                ));
+            }
+        }
+        if let Some(canonical) = canonical
             && self.loop_needs_fold(&store, frames, &canonical, body)?
         {
             self.folding += 1;
@@ -3191,6 +3235,13 @@ impl<'p, 'a> Comb<'p, 'a> {
             .subroutine(name)
             .cloned()
             .ok_or_else(|| unsupported(format!("call of `{name}`")))?;
+        if args
+            .iter()
+            .flatten()
+            .any(|arg| !tagged_actual_guards(arg).is_empty())
+        {
+            return Err(unsupported("checked tagged union argument"));
+        }
         // Symbolic execution cannot represent state shared by invocations.
         // Fall back to Ff, including for runtime declaration initializers.
         if !subroutine.persistent_locals.is_empty() {
@@ -3448,6 +3499,8 @@ impl<'p, 'a> Comb<'p, 'a> {
         frames: &[Frame],
         task: sv::ir::SystemTask,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+        site: Option<&sv::ir::SourceSpan>,
+        assertion_site: Option<&celox_design::AssertionSite>,
     ) -> Result<(), sv::AnalyzerError> {
         let kind =
             system_task_kind(task).ok_or_else(|| unsupported(format!("system task `{task}`")))?;
@@ -3469,7 +3522,8 @@ impl<'p, 'a> Comb<'p, 'a> {
         } else {
             None
         };
-        let (template, values) = system_task_template(self.m, &kind, args);
+        let (template, mut values) = system_task_template(self.m, &kind, args);
+        prepare_time_operands(self.m, template.as_deref(), &mut values)?;
         let mut captured = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
         let mut arg_signed = Vec::with_capacity(values.len());
@@ -3520,13 +3574,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             arg_widths.push(self.width(node));
             captured.push(self.capture(node)?);
         }
-        let event_kind = match &kind {
-            SystemTaskKind::Print(kind, _) => *kind,
-            SystemTaskKind::Control(kind) => *kind,
-            SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
-            SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,
-            SystemTaskKind::Assertion(kind) => *kind,
-        };
+        let event_kind = kind.event_kind();
         let condition = self.path_condition()?;
         let guard = if let Some(passed) = assertion {
             // An assertion fires only on failure and only on the active path.
@@ -3545,10 +3593,10 @@ impl<'p, 'a> Comb<'p, 'a> {
                     Some(node)
                 }
                 // Assertion sites fire when their guard is false.
-                (SystemTaskKind::Message | SystemTaskKind::Fatal, None) => {
+                (SystemTaskKind::Message(_) | SystemTaskKind::Fatal, None) => {
                     Some(self.constant(0, 1)?)
                 }
-                (SystemTaskKind::Message | SystemTaskKind::Fatal, Some((node, sources))) => {
+                (SystemTaskKind::Message(_) | SystemTaskKind::Fatal, Some((node, sources))) => {
                     observed.extend(sources);
                     Some(slt_not(self.arena, &mut self.consts, node)?)
                 }
@@ -3563,6 +3611,15 @@ impl<'p, 'a> Comb<'p, 'a> {
         }
         self.effect_sensitivity.extend(observed.iter().copied());
         let site_id = self.site_base + self.sites.len() as u32;
+        // The action of a deferred assertion waits in the queue of its
+        // process, which lowering names by the process's activation group
+        // (IEEE 1800-2023 16.4). A deferred `$fatal` ends the simulation
+        // when it matures, not while combinational logic settles.
+        let deferred = assertion_site
+            .map(|assertion| assertion.deferral)
+            .filter(|&region| region != celox_design::AssertionDeferral::None)
+            .map(|region| celox_design::DeferredSite::Action { queue: 0, region });
+        let fatal = kind.is_fatal() && deferred.is_none();
         // Inside a run-time loop the event is emitted once per iteration by
         // the loop's runner (see `fold_loop`).
         let captured_in_loop = if let Some(effects) = &mut self.loop_effects {
@@ -3574,7 +3631,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                     SystemTaskKind::Print(..) | SystemTaskKind::Control(_)
                 ),
                 args: captured.clone(),
-                fatal_error_code: kind.is_fatal().then_some(i64::from(site_id)),
+                fatal_error_code: fatal.then_some(i64::from(site_id)),
             });
             true
         } else {
@@ -3585,6 +3642,9 @@ impl<'p, 'a> Comb<'p, 'a> {
             template,
             sizing: DisplaySizing::Ieee,
             scope: None,
+            location: report_location(site),
+            assertion: assertion_site.cloned(),
+            deferred,
             arg_widths,
             arg_signed,
             arg_is_string,

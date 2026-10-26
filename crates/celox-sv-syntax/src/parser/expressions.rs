@@ -671,6 +671,33 @@ impl Parser<'_> {
                                     self.at += 1;
                                 }
                             }
+                            // A macro can supply the digits of a based literal
+                            // (`5'd`WIDTH`), leaving them in separate tokens; a
+                            // body such as `0f` lexes as `0` and `f`, adjacent
+                            // in their spelling.
+                            if let ExprKind::Literal(value) = &mut kind
+                                && numeric
+                                && based_without_digits(value)
+                            {
+                                let mut previous: Option<crate::source::Span> = None;
+                                while let Some(next) = self.token()
+                                    && matches!(
+                                        next.kind,
+                                        TokenKind::Number | TokenKind::Identifier
+                                    )
+                                    && next.text.bytes().all(|b| {
+                                        b.is_ascii_alphanumeric() || matches!(b, b'_' | b'?')
+                                    })
+                                    && previous.is_none_or(|span| {
+                                        span.file == next.origin.spelling.file
+                                            && span.end == next.origin.spelling.start
+                                    })
+                                {
+                                    value.push_str(&next.text);
+                                    previous = Some(next.origin.spelling);
+                                    self.at += 1;
+                                }
+                            }
                             if numeric
                                 && matches!(&kind, ExprKind::Literal(value) if !super::numbers::literal(value))
                             {
@@ -1589,6 +1616,17 @@ pub(super) fn builtin(word: &str) -> bool {
             | "event"
             | "void"
     )
+}
+
+/// A sized or unsized based literal spelled up to its base, such as `5'd`.
+fn based_without_digits(value: &str) -> bool {
+    let based = value
+        .trim_start_matches(|c: char| c.is_ascii_digit() || c == '_' || c.is_ascii_whitespace());
+    let Some(base) = based.strip_prefix('\'') else {
+        return false;
+    };
+    let base = base.strip_prefix(['s', 'S']).unwrap_or(base);
+    matches!(base, "b" | "B" | "o" | "O" | "d" | "D" | "h" | "H")
 }
 
 fn constant_dimension_operands(dimension: &Dimension, pending: &mut Vec<ExprId>) {

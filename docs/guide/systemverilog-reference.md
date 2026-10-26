@@ -16,8 +16,10 @@ synthesis and is tested at the design level.
 
 | Area | Supported |
 | --- | --- |
-| Modules | ANSI ports, `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them) |
+| Modules | ANSI ports, non-ANSI ports (a header of port names and body `input` / `output` / `inout` declarations, optionally completed by a net or variable declaration of the same name), `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, implicit nets of output port connections and continuous assignment targets (`default_nettype none` disables them), hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them), `inout` ports below the top module whose net has one continuous driver on either side, such as a tristate `assign io = oe ? d : 'z;` (both sides read the driven value, or `z`) |
+| Programs | `program` declarations with ports and parameters, instantiated from modules like a module; their `initial` procedures run in the reactive region set (see [Programs](#programs)) |
 | Generate | `for` (with `genvar`), `if`, `case`; constant expressions including `**` |
+| Hierarchical references | reads of nets and variables of other instances, and procedural writes of their variables, including selects of unpacked array elements (`u.mem[i][7:0] = v`), through names that start at an instance of the module (also of a generate block or an instance array element), at the module's own name, at an enclosing module's name (upward) or at `$root`; see [Hierarchical references](#hierarchical-references) |
 | Packages | types, parameters, enums and functions, through `import p::*;`, `import p::x;` and `p::x` |
 | Interfaces | interfaces with value and type parameters, header package imports, `localparam`s, `typedef`s, variables and nets, logic (`assign`, `always_comb`, `always_ff`, generate) and functions; interface instances and instance arrays, also inside generate blocks and other interfaces; interface ports with or without a modport, generic `interface` and `interface.mp` ports, and arrays of interface ports; explicit and implicit named interface connections (`.bus(bus)` and `.bus`); modport `input` / `output` members and imported functions; access to members, parameters and functions through an instance or port (`h[i].m`, `h.P`, `h.f(...)`, `h[i].f(...)` with a constant element index) |
 
@@ -25,7 +27,7 @@ synthesis and is tested at the design level.
 
 | Area | Supported |
 | --- | --- |
-| Types | `logic`, `bit`, `reg`, packed vectors, multidimensional packed arrays with ascending or descending ranges and arbitrary constant bounds, packed structs and hard packed untagged unions, enums (with implicit values), `typedef`, unpacked arrays used as memories, signed and unsigned |
+| Types | `logic`, `bit`, `reg`, packed vectors, multidimensional packed arrays with ascending or descending ranges and arbitrary constant bounds, packed structs, hard and soft packed untagged unions, enums (with implicit values), `typedef`, unpacked arrays used as memories, signed and unsigned |
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
@@ -40,8 +42,8 @@ synthesis and is tested at the design level.
 | Continuous logic | `assign`, `wire w = expr;` |
 | Combinational processes | `always_comb`, `always @*`, blocking `always_latch`, block-local variables, sequential and dependent blocking assignments, reads of a variable before the process writes it (its previous value) |
 | Sequential processes | `always_ff @(posedge clk)`, `always @(posedge clk or negedge rst_n)` and the like, blocking and nonblocking assignments, concatenated targets, four-state clock and reset signals, one asynchronous reset shared by several clock domains, processes at both edges of one clock or reset, and one signal as the clock of some processes and the asynchronous reset of others (a timed `Simulation` runs every edge; `Simulator::tick` is the rising edge of its event only) |
-| Initial blocks | `initial` blocks and variable declaration initializers (`logic [7:0] v = 8'h5a;`, also of interface members); initializers take effect before the `initial` blocks. One whose writes have constant values, with constant `if` / `for` and `$readmemh` / `$readmemb`, defines the initial state. Any other, such as one that reads design state or calls a system task, runs as a process from time zero in a timed `Simulation`; a `Simulator` does not run processes, so building one for such a design fails with `SimulatorErrorKind::ProcessRequiresSimulation` |
-| Statements | `if` / `else`, `case`, `casez`, `casex`, `case ... inside`, `unique` / `priority`, `for`, `while`, `do ... while`, `repeat`, `forever` and `foreach` (unrolled when the trip count is constant, otherwise executed at run time), `break` / `continue` / `return`, immediate assertions |
+| Initial blocks | `initial` blocks and variable declaration initializers (`logic [7:0] v = 8'h5a;`, also of interface members); initializers take effect before the `initial` blocks. One whose writes have constant values, with constant `if`, `$readmemh` / `$readmemb`, and loops whose trip count is known before they run (`repeat`, and `for`, `while` or `do`-`while` loops that step one variable by a constant up to a fixed bound), defines the initial state. Any other, such as one that reads design state or calls a system task, runs as a process from time zero in a timed `Simulation`; a `Simulator` does not run processes, so building one for such a design fails with `SimulatorErrorKind::ProcessRequiresSimulation` |
+| Statements | `if` / `else`, `case`, `casez`, `casex`, `case ... inside`, `unique` / `priority`, `for`, `while`, `do ... while`, `repeat`, `forever` and `foreach` (unrolled when the trip count is constant, otherwise executed at run time), `break` / `continue` / `return`, immediate and deferred immediate assertions |
 | Functions | `function` and `task` with `input`, `output` and `inout` arguments, `return` or assignment to the function name, local variables and `localparam`s, selected and composite assignments; calls are inlined. Calls with constant arguments in constant expressions (parameters, ranges) are evaluated during elaboration |
 
 ### Timing controls {#timing-controls}
@@ -50,7 +52,7 @@ In a timed `Simulation`, `initial` and plain `always` processes can suspend:
 
 | Control | Supported |
 | --- | --- |
-| `#delay` | integral and real delays, `#(min:typ:max)` (the typical value) and [time literals](#time-literal-delays); an X or Z delay counts as zero |
+| `#delay` | integral and real delays, `#(min:typ:max)` (the typical value), package-scoped values such as `#pkg::D`, and [time literals](#time-literal-delays); an X or Z delay counts as zero |
 | `@(...)` | variables, `posedge` / `negedge` / `edge`, items joined by `or` or `,`, bit, part and run-time index selects, any expression including calls of pure functions, and `@*` / `@(*)`, which waits on the variables its statement reads |
 | `wait (condition)` | any condition; an X or Z condition counts as false |
 | Assignments | blocking and nonblocking, to any target a blocking assignment takes, including unpacked array elements and run-time positions; nonblocking updates take effect in the NBA region of the time slot, at the position evaluated when the assignment executes, and bits outside the target or at a position with an X or Z bit are not written |
@@ -78,8 +80,11 @@ An `initial` or ordinary `always` process can call tasks containing `#delay`,
 `@(event)` and `wait (condition)`, including through nested tasks. Calls are
 inlined into the caller's resumable state machine. A normal edge-sensitive
 `always` that calls a timed task waits for that task to return before rearming
-its event control. Functions, `always_comb` and `always_ff` cannot call a timed
-task, and `always @*` cannot yet ([#1710](https://github.com/celox-sim/celox/issues/1710)).
+its event control. An `always @*` that calls a timed task runs as a process
+too: it waits for a change of a variable its statement reads, the task's
+arguments among them but not what the task body reads, and misses changes
+while the task is suspended. Functions, `always_comb`, `always_latch` and
+`always_ff` cannot call a timed task.
 
 Automatic task arguments and locals have separate storage for each activation
 and survive suspension. Module-local static task arguments remain shared. Inputs and inouts
@@ -101,14 +106,22 @@ variable or advancing the random stream. Calls follow procedural statement order
 and short-circuit evaluation, and use the calling process's persistent random
 stream (IEEE 1800-2023 18.12).
 
-Constraints (`with`), enum variables, unpacked arrays, nets,
+Scalar enums up to 64 bits are also supported: randomization selects only their
+known declared values, including typedef aliases and signed or sparse values.
+The process random stream, short-circuit behavior, and checkpoint state apply
+to enums as well. Mixed enum and integer argument lists are supported.
+
+Constraints (`with`), enums with unsupported or unresolved domains, unpacked arrays, nets,
 constants, selects and concatenation arguments are unsupported and rejected.
 
 ### Class randomization
 
 `object.randomize()` randomizes enabled `rand` properties and returns signed
-`int` value `1`. Supported properties are 2-state, non-enum integral values up
-to 64 bits in classes without constraints. Inherited properties are included,
+`int` value `1`. Supported properties are 2-state integral values, including scalar enums, up
+to 64 bits in classes without constraints. Enum randomization selects uniformly
+from the declared values, including sparse and negative values (18.3, 18.4.1).
+Enums with unresolved or X/Z values and ranged enumerator declarations remain
+unsupported for randomization. Inherited properties are included,
 and a call through a base handle uses the dynamic object's class and its
 `pre_randomize()` / `post_randomize()` hooks. A derived hook replaces the base
 hook; call `super.pre_randomize()` or `super.post_randomize()` explicitly to
@@ -133,8 +146,14 @@ not supported even for this checker form.
 Each object has an independent random stream, seeded from its creating process.
 `object.srandom(seed)` resets it using a 32-bit seed; checkpoints preserve both
 RNG and mode state (18.13.3, 18.14.3). Random sequences are implementation-specific.
-`randc` randomization, constraints, `with`, static random properties, and random
-enum/array/object/string properties remain unsupported. A constrained dynamic
+`randc` supports 1–8-bit two-state integers and scalar enums with up to 256
+members. Each property visits every value once before starting another cycle
+(18.4.2), including inherited properties and explicit member selection.
+Disabled properties retain their cycle; checkpoints restore it. `srandom`
+reseeds the RNG without making already consumed values eligible again.
+
+Constraints, `with`, larger `randc` domains, static random properties, and random
+array/object/string properties remain unsupported. A constrained dynamic
 subclass is rejected rather than silently randomizing only its base properties.
 A call through `null` is a runtime error.
 
@@ -173,16 +192,15 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events and `->`, `fork` / `join`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
 - Timing controls in processes: `iff` qualifiers ([#1444](https://github.com/celox-sim/celox/issues/1444)),
-  package-scoped delay values
-  ([#1710](https://github.com/celox-sim/celox/issues/1710)), impure function calls in event expressions, and
+  impure function calls in event expressions, and
   `wait` or event expressions reading a static task argument.
 - Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset.
 - Inferred latches inside `always_comb` are rejected by default. Set `inferred_latch = "warn"` or `"allow"` in `celox.toml` under `[diagnostics]` to permit retained blocking assignments. Ordinary `always @*` and explicit `always_latch` do not require this option.
-- Ports and instances: non-ANSI port declarations ([#426](https://github.com/celox-sim/celox/issues/426)), `ref` ports
+- Ports and instances: non-ANSI port expressions such as `module m({a, b}, c[3:0], .p(d))` ([#1953](https://github.com/celox-sim/celox/issues/1953)), `ref` ports
   ([#427](https://github.com/celox-sim/celox/issues/427)), wildcard `.*` connections ([#442](https://github.com/celox-sim/celox/issues/442)), gate primitives ([#457](https://github.com/celox-sim/celox/issues/457)),
   `bind`.
 - Declarations: variable declaration initializers of members of an interface
-  array, ANSI port default values, tagged unions, soft packed unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
+  array, ANSI port default values, tagged unions, unpacked unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   unpacked structs and `real`.
 - Sequential processes: `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)) in event lists, and in
   `always_ff` edge operands other than a plain signal ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit
@@ -203,7 +221,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   function, a call with the wrong number of arguments, an omitted argument
   without a declared default, and a task used as a value are errors.
 - DPI-C beyond the subset described in [DPI-C imports](#dpi-c-imports), DPI
-  exports, tri-state buses and multiple drivers, hierarchical references.
+  exports, nets with several drivers (including tri-state buses) and `inout`
+  ports of the top module.
 
 ### Interface restrictions {#interface-restrictions}
 
@@ -241,6 +260,21 @@ Elements are addressed by their declared
 index: `child_signal(&[("u", 3)], "y")` and `dut.u[3]` reach `u[3]` of
 `Child u[3:2](...)`, and `InstanceHierarchy::index` holds the index. Arrays
 with a negative bound are rejected.
+
+### Hierarchical references {#hierarchical-references}
+
+A hierarchical name is resolved once against the elaborated hierarchy and
+then reads and writes the object of the instance it denotes, like a name of
+that instance: there is no run-time lookup. Only the selected element of an
+array, such as `i` in `u.mem[i]`, may vary at run time. Each instance of a
+module resolves its upward names from its own position; an upward name must
+denote the same relative object from every instance of the module.
+
+Not supported, and rejected with the name: continuous assignments to a
+variable and any driver of a net through a hierarchical name, names in port
+connections, names of tasks, functions, named blocks, parameters or
+structure members of another scope, names that start inside a generate block
+relative to it, and names of `real`, `string` or class-typed signals.
 
 ### Strings {#strings}
 
@@ -367,10 +401,27 @@ parameters; recursive specializations and nesting beyond 64 levels are rejected.
 Block-local variables have lexical scope in `always_comb` and `always_ff`.
 Locals may shadow module signals and reuse names in separate blocks or processes.
 
-### Hard packed untagged unions
+### Packed untagged unions
 
 Hard packed untagged unions share one bit vector between all members;
 every member must have the same width (IEEE 1800-2023 7.3.1).
+Soft packed unions (`union soft` or `union soft packed`) allow different member
+widths. Their size is the largest member width, each member starts at the least
+significant bit, and writing a smaller member preserves the remaining upper
+bits. Nested packed unions and structures use the same layout rules.
+
+```systemverilog
+union soft packed {
+    logic [15:0] word_value;
+    logic [7:0] byte_value;
+} data;
+// After data.word_value = 16'h1234, data.byte_value = 8'hab leaves data = 16'h12ab.
+```
+
+Whole-union operations use the declared signedness (unsigned by default).
+Mixed `bit`/`logic` unions retain four-state storage, with X/Z converted to zero
+when reading or writing a two-state member. Tagged and unpacked unions remain
+unsupported.
 
 ### Named subroutine arguments
 
@@ -511,20 +562,87 @@ simulation is suspended (`CheckpointError::Stopped`). In an `always` process, `$
 Its diagnostic level argument prints nothing. Batch hosts without an
 interactive mode, such as the VPI host, end the run at `$stop`.
 
+### Programs {#programs}
+
+A `program` (IEEE 1800-2023 Clause 24) is declared and instantiated like a
+leaf module. Its `initial` procedures run in the reactive region set: they
+start, resume after `#` delays and wake on event controls in the Reactive
+region, `#0` resumes them in the Re-Inactive region, and their nonblocking
+assignments update in the Re-NBA region (4.4.2.6–4.4.2.8, 24.3.1). The
+reactive region set runs once the active region set of a time slot is empty,
+and the design activity it creates runs in the active region set again
+(4.5), so a program reads the design after its nonblocking updates and the
+logic they feed have settled. Subroutines a program procedure calls run in
+its region (24.5). Design processes keep the compiled scheduler; program
+procedures run in the reference scheduler.
+
+When every `initial` procedure of every program has ended, the simulation
+ends with an implicit `$finish` (24.3). A program shall not contain `always`
+procedures or instances or declarations of modules, interfaces and programs;
+Celox rejects them by name.
+
+Not supported: continuous assignments in a program are evaluated with the
+design's combinational logic rather than in the Reactive region; the design's
+continuous assignments and combinational logic that a program writes drive
+settle while the reactive region set runs, as in Icarus, Verilator and xezim,
+so a program that resumes after `#0` reads their new values, whereas 4.5
+evaluates them only once the reactive region set is empty; programs
+nested in modules and anonymous programs are rejected; a program that no
+module instantiates is not an implicit top level next to the design's top
+module; `final` procedures and clocking blocks are unsupported in programs as
+everywhere.
+
 ### `$exit`
 
-`$exit` ends the initial procedures of the program block that calls it
-(24.7). Celox has no program blocks, and a call from anywhere else is
+`$exit` in a thread of a program's `initial` procedure ends every `initial`
+procedure of that program instance (24.7), and with them the simulation once
+no program procedure is left. A call from anywhere else is
 ignored, as 24.7 specifies, with a compilation warning
 (`Simulator::warnings()`) at the call. This includes a call in a constant
-function. Calls in function declarations are diagnosed even when the function
+function of a module. Calls in function declarations are diagnosed even when the function
 is unused; the diagnostic does not depend on constant evaluation executing it.
+
+### Severity tasks and reports
+
+`$info`, `$warning`, `$error` and `$fatal`, including the default `$error` of
+an `assert` or `assume` without a fail action, are reported as
+`RuntimeEvent::Report` (IEEE 1800-2023 20.10). A `Report` carries its
+severity, its message, the file and line of the call as `` `__FILE__ `` and
+`` `__LINE__ `` give them, and the scope that issued it. A report from an
+action block of an immediate assertion also names that assertion: its
+statement label, `assert`, `assume` or `cover`, and whether the pass or the
+fail action issued it. Severity tasks in subroutines the action block calls
+are not attributed. `time` is the time the drain's context gives, as the VPI
+host does at each callback, or the time step of the report while
+`Simulation::set_fail_on` is set. `Report::render` formats a report as the VPI host
+and the `celox` command print it. Only `$error` and `$fatal` fail a `celox`
+run; `$fatal` also ends the simulation with an error.
+
+### Deferred assertions
+
+The action of `assert #0`, `assume #0`, `cover #0` and their `final` forms
+waits in the deferred assertion report queue of its process (IEEE 1800-2023
+16.4). Its arguments are evaluated when the assertion executes. The process
+flushes the queue at its flush points (16.4.2):
+- a process with timing controls, each time it resumes from an event control
+  or a wait; a resume after a delay is no flush point;
+- an edge-triggered `always` or `always_ff` process, each time it runs;
+- `always_comb`, `always_latch` and an `always` lowered as combinational logic
+  (one whose only timing control is its leading event control), each time it
+  runs again.
+
+When the time slot is over, the actions still waiting are executed: those of
+`#0` ones first, then those of `final` ones. A deferred `$fatal` ends the
+simulation then. A deferred assertion as a module item is the same assertion
+in an `always_comb` (16.4.3). An action is one display or severity task
+call; a user subroutine, or more than one statement, is rejected. A
+`Simulator` call is a time slot: there, actions mature when the call settles
+combinational logic or runs a domain.
 
 ### Immediate cover
 
 Immediate cover executes its pass statement when the condition is true.
-Coverage counters and reports are not exposed. Deferred cover (`#0` / `final`)
-is rejected because its scheduling is not modeled.
+Coverage counters and reports are not exposed.
 
 ### Constant functions
 
@@ -623,7 +741,8 @@ edge-triggered `always` / `always_ff` processes, including their subroutines.
 These calls are unsupported in combinational procedures. A bare `Simulator`
 rejects edge procedures that need this timed execution.
 
-Supply ordered command-line arguments with `.plusargs(["+COUNT=12", "+TRACE"])`.
+Supply ordered command-line arguments with `.plusargs(["+COUNT=12", "+TRACE"])`,
+or as `+` arguments of [`celox run`](./cocotb.md).
 `$test$plusargs` matches a prefix; `$value$plusargs` supports integer conversions
 and `%s` into packed integral variables. The first matching argument wins, and
 an unmatched value query preserves its destination. Real conversions and dynamic
@@ -645,6 +764,13 @@ precedence in 3.14.2.3. The implementation defaults are 1 ns / 1 ps. The global
 precision includes all declared precisions and directive precisions, even in
 uninstantiated definitions (3.14.3). Selected instance arrays and generate paths
 require elaborated hierarchy lookup and are currently rejected.
+
+`%t` reports a time in the smallest time precision of the design, in a field
+of 20 columns (IEEE 1800-2023 20.4.3): `$display("%0t", $realtime)` after
+`#1.5` under `` `timescale 1ns/1ps`` prints `1500`. A design without time scales
+uses the 1 ns / 1 ps defaults, so `%t` reports picoseconds there too.
+`%t` of a `string` value, which has no time to report, is rejected, and
+`$timeformat` is not supported.
 
 `$printtimescale` displays the selected time scope in the IEEE 1800-2023
 20.4.2 form, for example `Time scale of (Top.child) is 100ns / 10ps`.

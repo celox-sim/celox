@@ -1246,3 +1246,441 @@
   (top Top)
   (assert_eq default_rows 0x34123412)
   (assert_eq explicit_rows 0xcdabcdab))
+
+
+; IEEE 1800-2023 6.20.2: an aggregate parameter member can be used in an expression.
+(case array_parameter_elements_forward_generated_values
+  (source "array_parameter_elements.sv" #"
+    module Number #(parameter logic [4:0] P=0)(output wire [4:0] y);
+      assign y=P;
+    endmodule
+    module Text #(parameter logic [63:0] P="MAC")(output wire [63:0] y);
+      assign y=P;
+    endmodule
+    module Relay #(parameter logic [4:0] N[6:7]='{0,0},
+        parameter logic [63:0] S[-2:-1]='{"D0","D1"})
+        (output wire [9:0] numbers, output wire [127:0] strings);
+      for(genvar i=6;i<=7;i++) begin:g
+        Number #(.P(N[i])) n(.y(numbers[(i-6)*5 +: 5]));
+        Text #(.P(S[i-8])) s(.y(strings[(i-6)*64 +: 64]));
+      end
+    endmodule
+    module Top(output wire [9:0] numbers, output wire [127:0] strings);
+      localparam logic [4:0] N[2]='{5'h12,5'h1b};
+      localparam logic [63:0] S[2]='{"A0","A1"};
+      Relay #(.N(N),.S(S)) relay(.numbers(numbers),.strings(strings));
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq numbers 0x372)
+  (assert_eq strings 0x00000000000041310000000000004130))
+
+(case array_parameter_elements_keep_signed_element_types
+  (source "signed_array_parameter_elements.sv" #"
+    module Sink #(parameter P=0, parameter logic signed [15:0] Q=0)
+        (output wire [31:0] value, width, output wire [15:0] sum, output wire negative);
+      assign value=P;
+      assign width=$bits(P);
+      assign sum=Q;
+      assign negative=P<0;
+    endmodule
+    module Top(output wire [31:0] value, width, output wire [15:0] sum,
+        output wire negative);
+      localparam logic signed [4:0] A[3:2]='{5'sd15,-5'sd2};
+      Sink #(.P(A[2]),.Q(A[3]-5'sd1)) sink(.value(value),.width(width),.sum(sum),.negative(negative));
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq value 0xfffffffe)
+  (assert_eq width 5)
+  (assert_eq negative 1)
+  (assert_eq sum 14))
+
+(case array_parameter_elements_select_package_multidimensional_values
+  (source "package_array_parameter_elements.sv" #"
+    package Values;
+      localparam logic [1:0][3:0] TABLE[3:2][-1:0]=
+          '{'{8'h12,8'h34},'{8'h56,8'h78}};
+    endpackage
+    module Sink #(parameter P=0)(output wire [7:0] y, output wire [31:0] width);
+      assign y=P;
+      assign width=$bits(P);
+    endmodule
+    module Top(output wire [7:0] whole, nibble, grouped,
+        output wire [31:0] whole_width, nibble_width, grouped_width);
+      import Values::*;
+      Sink #(.P(TABLE[2][0])) a(.y(whole),.width(whole_width));
+      Sink #(.P(TABLE[3][-1][1])) b(.y(nibble),.width(nibble_width));
+      Sink #(.P((Values::TABLE[3][-1]))) c(.y(grouped),.width(grouped_width));
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq whole 0x78) (assert_eq whole_width 8)
+  (assert_eq nibble 1) (assert_eq nibble_width 4)
+  (assert_eq grouped 0x12) (assert_eq grouped_width 8))
+
+(case array_parameter_elements_preserve_four_state_and_conversion
+  (four_state)
+  (source "state_array_parameter_elements.sv" #"
+    module Sink #(parameter logic [7:0] U=0, parameter logic signed [7:0] S=0,
+        parameter bit [7:0] B=0)(output wire [7:0] u,s,b);
+      assign u=U;
+      assign s=S;
+      assign b=B;
+    endmodule
+    module Top(output wire [15:0] unsigned_value, signed_value, two_state_value);
+      localparam logic [3:0] A[-1:0]='{4'b10xz,4'bz01x};
+      localparam logic signed [3:0] S[-1:0]='{4'b10xz,4'bz01x};
+      for(genvar i=-1;i<=0;i++) begin:g
+        Sink #(.U(A[i]),.S(S[i]),.B(A[i])) sink(
+          .u(unsigned_value[(0-i)*8 +: 8]),
+          .s(signed_value[(0-i)*8 +: 8]),
+          .b(two_state_value[(0-i)*8 +: 8]));
+      end
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq unsigned_value (fourstate 0x0a03 0x0309))
+  (assert_eq signed_value (fourstate 0xfa03 0x03f9))
+  (assert_eq two_state_value 0x0802))
+
+
+(case array_parameter_elements_preserve_wide_specializations
+  (source "wide_array_parameter_elements.sv" #"
+    module Sink #(parameter P=0)(output wire [128:0] value, output wire [31:0] width);
+      assign value=P;
+      assign width=$bits(P);
+    endmodule
+    module Parent #(parameter SELECT=0)
+        (output wire [128:0] value, output wire [31:0] width);
+      localparam logic [128:0] TABLE[-2:-1]='{129'h100000000000000000000000000000001,129'd2};
+      Sink #(.P(TABLE[SELECT-2])) sink(.value(value),.width(width));
+    endmodule
+    module Top(output wire [128:0] first, second, output wire [31:0] first_width, second_width);
+      Parent #(.SELECT(0)) a(.value(first),.width(first_width));
+      Parent #(.SELECT(1)) b(.value(second),.width(second_width));
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq first 0x100000000000000000000000000000001)
+  (assert_eq second 2)
+  (assert_eq first_width 129) (assert_eq second_width 129))
+
+
+(case array_parameter_elements_select_conditional_whole_arrays
+  (source "conditional_array_parameter_elements.sv" #"
+    module Sink #(parameter logic [63:0] P=0)(output wire [63:0] y);
+      assign y=P;
+    endmodule
+    module Relay #(parameter logic [63:0] A[3:2]='{0,0})(output wire [127:0] y);
+      for(genvar i=2;i<=3;i++) begin:g
+        Sink #(.P(A[i])) sink(.y(y[(3-i)*64 +: 64]));
+      end
+    endmodule
+    module Parent #(parameter SELECT=1)(output wire [127:0] y);
+      localparam logic [63:0] A[2]='{"A0","A1"};
+      localparam logic [63:0] B[2]='{"B0","B1"};
+      Relay #(.A(SELECT ? A : (SELECT==0 ? B : A))) relay(.y(y));
+    endmodule
+    module Top(output wire [127:0] first, second);
+      Parent #(.SELECT(1)) a(.y(first));
+      Parent #(.SELECT(0)) b(.y(second));
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq first 0x00000000000041310000000000004130)
+  (assert_eq second 0x00000000000042310000000000004230))
+
+(case packed_pattern_parameters_forward_whole_values
+  (source "packed_pattern_arguments.sv" #"
+    package Values;
+      localparam logic [1:0][4:0] A='{5'd3,5'd7};
+    endpackage
+    module Sink #(parameter P=0)(output wire [19:0] y,
+                                 output wire [31:0] width);
+      assign y=P;
+      assign width=$bits(P);
+    endmodule
+    module PatternSink #(parameter logic [3:0][4:0] P='{4{5'd1}})
+                        (output wire [19:0] y);
+      assign y=P;
+    endmodule
+    module Parent #(parameter N=2)(output wire [19:0] y,
+                                   output wire [31:0] width,
+                                   output wire [19:0] patterned);
+      localparam logic [N-1:0][4:0] A='{N{5'd16}};
+      Sink #(.P(A)) child(.y(y),.width(width));
+      PatternSink #(.P(A)) patterned_child(.y(patterned));
+    endmodule
+    module Top(output wire [19:0] four,two,pkg,pattern_four,pattern_two,literal_value,
+               output wire [31:0] four_width,two_width,pkg_width);
+      Parent #(.N(4)) a(four,four_width,pattern_four);
+      Parent #(.N(2)) b(two,two_width,pattern_two);
+      PatternSink #(.P(20'h54321)) direct_literal(literal_value);
+      Sink #(Values::A) c(pkg,pkg_width);
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq four 0x84210) (assert_eq four_width 20)
+  (assert_eq two 0x210) (assert_eq two_width 10)
+  (assert_eq pkg 0x67) (assert_eq pkg_width 10)
+  (assert_eq pattern_four 0x84210)
+  (assert_eq pattern_two 0x210)
+  (assert_eq literal_value 0x54321))
+
+(case packed_pattern_parameter_arguments_keep_types_and_unknown_bits
+  (four_state)
+  (source "typed_packed_pattern_arguments.sv" #"
+    module Sink #(parameter logic [15:0] P=0)(output wire [15:0] y);
+      assign y=P;
+    endmodule
+    module Top(output wire [15:0] s,u,b);
+      localparam logic signed [1:0][3:0] S='{4'b10xz,4'bz01x};
+      localparam logic [1:0][3:0] U='{4'b10xz,4'bz01x};
+      localparam bit [1:0][3:0] B='{4'b10xz,4'bz01x};
+      Sink #(.P(S)) a(s);
+      Sink #(.P(U)) c(u);
+      Sink #(.P(B)) d(b);
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq s (fourstate 0xffa3 0x0039))
+  (assert_eq u (fourstate 0x00a3 0x0039))
+  (assert_eq b 0x0082))
+
+(case packed_pattern_parameter_arguments_preserve_wide_values
+  (source "wide_packed_pattern_arguments.sv" #"
+    module Sink #(parameter P=0)(output wire [128:0] y,output wire [31:0] width);
+      assign y=P;
+      assign width=$bits(P);
+    endmodule
+    module Top(output wire [128:0] y,output wire [31:0] width);
+      localparam logic [2:0][42:0] A='{43'h40000000000,43'd2,43'd1};
+      Sink #(.P(A)) child(y,width);
+    endmodule
+  "#)
+  (top Top) (eval)
+  (assert_eq y (+ (<< 1 128) (+ (<< 2 43) 1)))
+  (assert_eq width 129))
+
+; Non-ANSI module ports (IEEE 1800-2023 23.2.2.1): a header of port names,
+; port declarations in the body, and net or variable declarations that
+; complete them (`reg [7:0] q;`, `wire signed [3:0] a;`), including a net
+; declaration assignment, connected by position and by name.
+(case non_ansi_ports_take_body_declarations
+  (source "non_ansi.sv" #"
+        module Reg(clk, rst, d, q, qn);
+            input clk, rst;
+            input [7:0] d;
+            output [7:0] q;
+            output reg [7:0] qn;
+            reg [7:0] q;
+            always @(posedge clk or posedge rst)
+                if (rst) begin q <= 8'd0; qn <= 8'hff; end
+                else begin q <= d; qn <= ~d; end
+        endmodule
+        module Add(a, b, s, neg);
+            input signed [3:0] a;
+            input [3:0] b;
+            output [4:0] s;
+            output neg;
+            wire signed [3:0] a;
+            wire [4:0] s = a + b;
+            assign neg = a < 0;
+        endmodule
+        module Top;
+            reg clk = 0, rst = 1;
+            reg [7:0] d = 8'h5a;
+            wire [7:0] q, qn;
+            wire [4:0] s;
+            wire neg;
+            Reg r(clk, rst, d, q, qn);
+            Add x(.a(4'hd), .b(4'd4), .s(s), .neg(neg));
+            always #5 clk = ~clk;
+            initial begin
+                #2 rst = 0;
+                #10 $display("%h %h %0d %b", q, qn, s, neg);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "5a a5 17 1\n"))
+
+; A child's output port depends only on the bits of its input port that
+; the child reads, so a parent may feed other bits of that output back into
+; the port without a combinational loop (#1955).
+(case child_ports_keep_the_bit_ranges_they_read
+  (source "port_bit_ranges.sv" #"
+        module Btb(input logic [7:0] ifpc_in, output logic [7:0] tar);
+            logic [3:0] tgt = 4'h9;
+            assign tar = {ifpc_in[7:4], tgt};
+        endmodule
+        module Top;
+            logic clk = 0;
+            logic [7:0] tar, ifpc_out, fetch;
+            logic [7:0] ifpc = 8'h50;
+            assign fetch = tar;
+            always @(posedge clk) ifpc <= fetch;
+            assign ifpc_out = {ifpc[7:4], fetch[3:0]};
+            Btb b(.ifpc_in(ifpc_out), .tar(tar));
+            initial begin
+                #1 $display("%h", fetch);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "59\n"))
+
+; The same through a part-select of a wider parent variable connected to the
+; input port: the bits the child reads map onto the selected range.
+(case child_ports_keep_the_bit_ranges_of_selected_connections
+  (source "port_select_ranges.sv" #"
+        module Btb(input logic [7:0] ifpc_in, output logic [7:0] tar);
+            logic [3:0] tgt = 4'h9;
+            assign tar = {ifpc_in[7:4], tgt};
+        endmodule
+        module Top;
+            logic clk = 0;
+            logic [7:0] tar, fetch;
+            logic [11:0] ifpc_out;
+            logic [7:0] ifpc = 8'h50;
+            assign fetch = tar;
+            always @(posedge clk) ifpc <= fetch;
+            assign ifpc_out = {ifpc[7:4], fetch[3:0], 4'h3};
+            Btb b(.ifpc_in(ifpc_out[11:4]), .tar(tar));
+            initial begin
+                #1 $display("%h %h", fetch, ifpc_out);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "59 593\n"))
+
+(case inout_tristate_driver_in_child_reaches_parent
+  (four_state)
+  (source "inout_child_driver.sv" #"
+    module Pad(input logic [7:0] oe, dr, inout wire [7:0] pad,
+               output wire [7:0] ext);
+      for (genvar i = 0; i < 8; i++) begin : g
+        assign ext[i] = pad[i];
+        assign pad[i] = oe[i] ? dr[i] : 1'bz;
+      end
+    endmodule
+    module Block(input logic [7:0] oe, dr, inout wire [7:0] pad,
+                 output wire [7:0] ext);
+      Pad pad_cell(.oe(oe), .dr(dr), .pad(pad), .ext(ext));
+    endmodule
+    module Top(input logic [7:0] oe, dr, output wire [7:0] ext, seen,
+               output logic floating);
+      wire [7:0] pad;
+      Block block(.oe(oe), .dr(dr), .pad(pad), .ext(ext));
+      assign seen = pad;
+      assign floating = (pad[7] === 1'bz);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set oe 0xff) (set dr 0xa5))
+  (assert_eq ext 0xa5)
+  (assert_eq seen 0xa5)
+  (assert_eq floating 0)
+  (modify (set oe 0x0f))
+  (assert_eq ext (fourstate 0x05 0xf0))
+  (assert_eq seen (fourstate 0x05 0xf0))
+  (assert_eq floating 1)
+  (modify (set oe 0))
+  (assert_eq ext (fourstate 0 0xff))
+  (assert_eq seen (fourstate 0 0xff)))
+
+(case inout_tristate_nets_read_zero_in_two_state
+  (source "inout_two_state.sv" #"
+    module Pad(input logic [7:0] oe, dr, inout wire [7:0] pad,
+               output wire [7:0] ext);
+      for (genvar i = 0; i < 8; i++) begin : g
+        assign ext[i] = pad[i];
+        assign pad[i] = oe[i] ? dr[i] : 1'bz;
+      end
+    endmodule
+    module Reader(inout wire [7:0] io, output wire [7:0] y);
+      assign y = io;
+    endmodule
+    module Top(input logic [7:0] oe, dr, input logic en, input logic [7:0] a,
+               output bit [7:0] ext, seen, read);
+      wire [7:0] pad, w;
+      Pad pad_cell(.oe(oe), .dr(dr), .pad(pad), .ext(ext));
+      assign seen = pad;
+      assign w = en ? a : 8'bz;
+      Reader reader(.io(w), .y(read));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set oe 0xff) (set dr 0x5a) (set en 1) (set a 0xc3))
+  (assert_eq ext 0x5a)
+  (assert_eq seen 0x5a)
+  (assert_eq read 0xc3)
+  (modify (set oe 0xf0) (set en 0))
+  (assert_eq ext 0x50)
+  (assert_eq seen 0x50)
+  (assert_eq read 0)
+  (modify (set oe 0))
+  (assert_eq ext 0)
+  (assert_eq seen 0))
+
+(case inout_tristate_driver_in_parent_reaches_child
+  (four_state)
+  (source "inout_parent_driver.sv" #"
+    module Reader(inout wire [3:0] io, output wire [3:0] y);
+      assign y = io;
+    endmodule
+    module Pass(inout wire [3:0] io, output wire [3:0] y);
+      Reader reader(.io(io), .y(y));
+    endmodule
+    module Top(input logic en, input logic [3:0] a,
+               output wire [3:0] direct, nested, open);
+      wire [3:0] w;
+      assign w = en ? a : 4'bz;
+      Reader reader(.io(w), .y(direct));
+      Pass pass(.io(w), .y(nested));
+      Reader unconnected(.y(open));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set en 1) (set a 0x9))
+  (assert_eq direct 0x9)
+  (assert_eq nested 0x9)
+  (assert_eq open (fourstate 0 0xf))
+  (modify (set en 0))
+  (assert_eq direct (fourstate 0 0xf))
+  (assert_eq nested (fourstate 0 0xf)))
+
+(case inout_tristate_drivers_reach_implicit_nets
+  (four_state)
+  (source "inout_implicit_net.sv" #"
+    module Pad(input logic oe, d, inout wire io);
+      assign io = oe ? d : 1'bz;
+    endmodule
+    module Source(input logic d, output wire y);
+      assign y = d;
+    endmodule
+    module Reader(inout wire io, output wire y);
+      assign y = io;
+    endmodule
+    module Top(input logic oe, d, output wire from_pad, from_source);
+      Pad pad(.oe(oe), .d(d), .io(pad_net));
+      Reader pad_reader(.io(pad_net), .y(from_pad));
+      Source source(.d(d), .y(source_net));
+      Reader source_reader(.io(source_net), .y(from_source));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set oe 1) (set d 1))
+  (assert_eq from_pad 1)
+  (assert_eq from_source 1)
+  (modify (set oe 0) (set d 0))
+  (assert_eq from_pad (fourstate 0 1))
+  (assert_eq from_source 0))

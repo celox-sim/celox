@@ -1958,3 +1958,230 @@
   (assert_eq l0 0) (assert_eq l1 0x40) (assert_eq l2 0)
   (run_until 1)
   (assert_eq s0 0) (assert_eq s1 0x42) (assert_eq s2 0))
+
+(case generated_pipeline_with_unselected_invalid_array_element
+  ; IEEE 1800-2023 7.4.5 and 11.4.11: an invalid element in the unused
+  ; conditional arm must not prevent elaboration or change the result type.
+  (source "generated_pipeline.sv" #"
+    module Asc #(parameter N=0)(input logic clk, rst, input logic [7:0] d,
+                                output logic [7:0] q);
+      if (N>0) begin : pipe
+        logic [7:0] r[3:N+2];
+        for(genvar n=0;n<N;n++) begin : stage
+          always_ff @(posedge clk)
+            if (rst) r[n+3] <= '0;
+            else r[n+3] <= n==0 ? d : r[n+2];
+        end
+        assign q=r[N+2];
+      end else assign q=d;
+    endmodule
+    module Desc #(parameter N=0)(input logic clk, rst, input logic [7:0] d,
+                                 output logic [7:0] q);
+      if (N>0) begin : pipe
+        logic [7:0] r[N+2:3];
+        for(genvar n=0;n<N;n++) begin : stage
+          always_ff @(posedge clk)
+            if (rst) r[n+3] <= '0;
+            else r[n+3] <= n==0 ? d : r[n+2];
+        end
+        assign q=r[N+2];
+      end else assign q=d;
+    endmodule
+    module Top(input logic clk, rst, input logic [7:0] d,
+               output logic [7:0] a1,a2,a4,b1,b2,b4);
+      Asc #(.N(1)) u1(clk,rst,d,a1);
+      Asc #(.N(2)) u2(clk,rst,d,a2);
+      Asc #(.N(4)) u4(clk,rst,d,a4);
+      Desc #(.N(1)) v1(clk,rst,d,b1);
+      Desc #(.N(2)) v2(clk,rst,d,b2);
+      Desc #(.N(4)) v4(clk,rst,d,b4);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set rst 1))
+  (tick clk)
+  (modify (set rst 0))
+  (for cycle (range 1 8)
+    (modify (set d (* cycle 17)))
+    (tick clk)
+    (assert_eq a1 (* cycle 17))
+    (assert_eq b1 (* cycle 17))
+    (assert_eq a2 (? (> cycle 1) (* (- cycle 1) 17) 0))
+    (assert_eq b2 (? (> cycle 1) (* (- cycle 1) 17) 0))
+    (assert_eq a4 (? (> cycle 3) (* (- cycle 3) 17) 0))
+    (assert_eq b4 (? (> cycle 3) (* (- cycle 3) 17) 0))))
+
+(case constant_invalid_unpacked_indices_read_defaults_and_ignore_writes
+  ; IEEE 1800-2023 7.4.5, Table 7-1. Invalid inner indices must never
+  ; wrap into a neighboring element, in either declaration direction.
+  (four_state)
+  (source "constant_invalid_array_indices.sv" #"
+    module Top(input logic clk, input logic [7:0] d,
+               output logic [7:0] above, below, inner, row,
+               output logic [7:0] written, written_ff,
+               output logic [128:0] wide);
+      logic [7:0] a[3:4];
+      logic [7:0] b[4:3];
+      logic [7:0] matrix[0:1][0:2];
+      logic [7:0] w[3:4], f[3:4];
+      logic [128:0] wide_array[2];
+      assign wide=wide_array[2];
+      always_comb begin
+        a[3]=d; a[4]=~d;
+        b[3]=d; b[4]=~d;
+        for (int i=0;i<2;i++) for (int j=0;j<3;j++) matrix[i][j]=d;
+        w[3]=d; w[4]=~d;
+        w[2]=8'hff; w[5]=8'hff;
+      end
+      always_ff @(posedge clk) begin
+        f[3]<=d; f[4]<=~d;
+        f[2]<=8'hff; f[5]<=8'hff;
+      end
+      assign below=a[2];
+      assign above=b[5];
+      assign inner=matrix[0][3];
+      assign row=matrix[2][0];
+      assign written=w[3]^w[4];
+      assign written_ff=f[3]^f[4];
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0x12 0xa5 0xff)
+    (modify (set d value))
+    (assert_eq below (fourstate 255 255))
+    (assert_eq above (fourstate 255 255))
+    (assert_eq inner (fourstate 255 255))
+    (assert_eq row (fourstate 255 255))
+    (let wide_mask (- (<< 1 129) 1))
+    (assert_eq wide (fourstate wide_mask wide_mask))
+    (assert_eq written 255)
+    (tick clk)
+    (assert_eq written_ff 255)))
+
+(case generated_pipeline_with_unselected_invalid_array_element_four_state
+  ; IEEE 1800-2023 7.4.5 and 11.4.11: an invalid element in the unused
+  ; conditional arm must not prevent elaboration or change the result type.
+  (four_state)
+  (source "generated_pipeline.sv" #"
+    module Asc #(parameter N=0)(input logic clk, rst, input logic [7:0] d,
+                                output logic [7:0] q);
+      if (N>0) begin : pipe
+        logic [7:0] r[3:N+2];
+        for(genvar n=0;n<N;n++) begin : stage
+          always_ff @(posedge clk)
+            if (rst) r[n+3] <= '0;
+            else r[n+3] <= n==0 ? d : r[n+2];
+        end
+        assign q=r[N+2];
+      end else assign q=d;
+    endmodule
+    module Desc #(parameter N=0)(input logic clk, rst, input logic [7:0] d,
+                                 output logic [7:0] q);
+      if (N>0) begin : pipe
+        logic [7:0] r[N+2:3];
+        for(genvar n=0;n<N;n++) begin : stage
+          always_ff @(posedge clk)
+            if (rst) r[n+3] <= '0;
+            else r[n+3] <= n==0 ? d : r[n+2];
+        end
+        assign q=r[N+2];
+      end else assign q=d;
+    endmodule
+    module Top(input logic clk, rst, input logic [7:0] d,
+               output logic [7:0] a1,a2,a4,b1,b2,b4);
+      Asc #(.N(1)) u1(clk,rst,d,a1);
+      Asc #(.N(2)) u2(clk,rst,d,a2);
+      Asc #(.N(4)) u4(clk,rst,d,a4);
+      Desc #(.N(1)) v1(clk,rst,d,b1);
+      Desc #(.N(2)) v2(clk,rst,d,b2);
+      Desc #(.N(4)) v4(clk,rst,d,b4);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set rst 1))
+  (tick clk)
+  (modify (set rst 0))
+  (for cycle (range 1 8)
+    (modify (set d (* cycle 17)))
+    (tick clk)
+    (assert_eq a1 (* cycle 17))
+    (assert_eq b1 (* cycle 17))
+    (assert_eq a2 (? (> cycle 1) (* (- cycle 1) 17) 0))
+    (assert_eq b2 (? (> cycle 1) (* (- cycle 1) 17) 0))
+    (assert_eq a4 (? (> cycle 3) (* (- cycle 3) 17) 0))
+    (assert_eq b4 (? (> cycle 3) (* (- cycle 3) 17) 0))))
+
+(case invalid_unpacked_elements_preserve_type_in_conditionals
+  ; Both conditional operands contribute width and signedness even when
+  ; a constant condition selects the other operand (11.4.11, 11.8.2).
+  (four_state)
+  (source "invalid_array_element_types.sv" #"
+    module Top(output logic [15:0] mixed_sign, both_signed,
+               output logic [31:0] width);
+      logic [15:0] u[1];
+      logic signed [15:0] s[1];
+      assign mixed_sign=1'b1 ? 8'sh80 : u[-1];
+      assign both_signed=1'b1 ? 8'sh80 : s[-1];
+      assign width=$bits(1'b1 ? 8'sh80 : u[-1]);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq mixed_sign 0x0080)
+  (assert_eq both_signed 0xff80)
+  (assert_eq width 16))
+
+(case generated_pipeline_with_explicit_generate_branches
+  ; Separate FF producers may share one array. Removing a task's staging
+  ; must preserve publication of elements computed by other tasks (10.4.2).
+  (source "generated_pipeline.sv" #"
+    module Asc #(parameter N=0)(input logic clk, rst, input logic [7:0] d,
+                                output logic [7:0] q);
+      if (N>0) begin : pipe
+        logic [7:0] r[3:N+2];
+        for(genvar n=0;n<N;n++) begin : stage
+          if (n==0) begin
+            always_ff @(posedge clk) if(rst) r[n+3]<='0; else r[n+3]<=d;
+          end else begin
+            always_ff @(posedge clk) if(rst) r[n+3]<='0; else r[n+3]<=r[n+2];
+          end
+        end
+        assign q=r[N+2];
+      end else assign q=d;
+    endmodule
+    module Desc #(parameter N=0)(input logic clk, rst, input logic [7:0] d,
+                                 output logic [7:0] q);
+      if (N>0) begin : pipe
+        logic [7:0] r[N+2:3];
+        for(genvar n=0;n<N;n++) begin : stage
+          if (n==0) begin
+            always_ff @(posedge clk) if(rst) r[n+3]<='0; else r[n+3]<=d;
+          end else begin
+            always_ff @(posedge clk) if(rst) r[n+3]<='0; else r[n+3]<=r[n+2];
+          end
+        end
+        assign q=r[N+2];
+      end else assign q=d;
+    endmodule
+    module Top(input logic clk, rst, input logic [7:0] d,
+               output logic [7:0] a1,a2,a4,b1,b2,b4);
+      Asc #(.N(1)) u1(clk,rst,d,a1);
+      Asc #(.N(2)) u2(clk,rst,d,a2);
+      Asc #(.N(4)) u4(clk,rst,d,a4);
+      Desc #(.N(1)) v1(clk,rst,d,b1);
+      Desc #(.N(2)) v2(clk,rst,d,b2);
+      Desc #(.N(4)) v4(clk,rst,d,b4);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set rst 1))
+  (tick clk)
+  (modify (set rst 0))
+  (for cycle (range 1 8)
+    (modify (set d (* cycle 17)))
+    (tick clk)
+    (assert_eq a1 (* cycle 17))
+    (assert_eq b1 (* cycle 17))
+    (assert_eq a2 (? (> cycle 1) (* (- cycle 1) 17) 0))
+    (assert_eq b2 (? (> cycle 1) (* (- cycle 1) 17) 0))
+    (assert_eq a4 (? (> cycle 3) (* (- cycle 3) 17) 0))
+    (assert_eq b4 (? (> cycle 3) (* (- cycle 3) 17) 0))))

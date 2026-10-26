@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "std_lfsr::test_lfsr_basic_shift",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "std_lfsr::test_lfsr_deterministic_cycle",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "std_lfsr::test_lfsr_enable_hold",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

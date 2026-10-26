@@ -86,16 +86,100 @@ pub struct TriggerSet<A> {
     pub resets: Vec<A>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeEventKind {
     Display,
     Write,
-    AssertContinue,
-    AssertFatal,
+    /// A message of a severity task, or of a Veryl assertion
+    /// (IEEE 1800-2023 20.10). [`Severity::Fatal`] ends the simulation with
+    /// an error.
+    Report(Severity),
     /// `$finish` executed by the design (IEEE 1800-2023 20.2).
     Finish,
     /// `$stop` executed by the design (IEEE 1800-2023 20.2).
     Stop,
+}
+
+impl RuntimeEventKind {
+    /// A report that ends the simulation with an error.
+    pub fn is_fatal(self) -> bool {
+        self == Self::Report(Severity::Fatal)
+    }
+}
+
+/// The severity of a report (IEEE 1800-2023 20.10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Severity {
+    /// `$info`: a message of no specific severity.
+    Info,
+    /// `$warning`.
+    Warning,
+    /// `$error`, and the default action of a failed `assert` or `assume`.
+    Error,
+    /// `$fatal`.
+    Fatal,
+}
+
+/// Where a report is written: the file and line of `__FILE__` and
+/// `__LINE__` at the task call (IEEE 1800-2023 20.10).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReportLocation {
+    pub file: String,
+    pub line: usize,
+}
+
+/// The assertion whose action block issues a report.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AssertionSite {
+    /// The statement label, which names the assertion within its scope
+    /// (IEEE 1800-2023 16.3).
+    pub label: Option<String>,
+    pub directive: AssertionDirective,
+    pub deferral: AssertionDeferral,
+    pub outcome: AssertionOutcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AssertionDirective {
+    Assert,
+    Assume,
+    Cover,
+}
+
+/// When an assertion reports (IEEE 1800-2023 16.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AssertionDeferral {
+    /// A simple immediate assertion: at once.
+    None,
+    /// `#0`: in the Reactive region.
+    Observed,
+    /// `final`: in the Postponed region.
+    Final,
+}
+
+/// How the host defers the events of a site (IEEE 1800-2023 16.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DeferredSite {
+    /// A flush point of a process with deferred assertions (16.4.2): the
+    /// actions its queue holds are discarded. The events of this site are
+    /// not shown.
+    FlushPoint,
+    /// The action of a deferred assertion: its event waits in the queue of
+    /// the flush-point site `queue` of the same instance, numbered like the
+    /// sites of its module, until `region` of the time slot.
+    Action {
+        queue: u32,
+        region: AssertionDeferral,
+    },
+}
+
+/// Which action block of an assertion issues a report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AssertionOutcome {
+    /// The pass action, or the statement of a `cover`.
+    Pass,
+    /// The fail action.
+    Fail,
 }
 
 /// How a runtime event site sizes its formatted arguments.
@@ -118,6 +202,15 @@ pub struct RuntimeEventSite {
     pub sizing: DisplaySizing,
     /// Fully elaborated module-instance scope that emitted this event.
     pub scope: Option<String>,
+    #[serde(default)]
+    pub location: Option<ReportLocation>,
+    /// The assertion whose action issues this report.
+    #[serde(default)]
+    pub assertion: Option<AssertionSite>,
+    /// How the host defers the events of this site, for the processes of
+    /// deferred assertions.
+    #[serde(default)]
+    pub deferred: Option<DeferredSite>,
     pub arg_widths: Vec<usize>,
     pub arg_signed: Vec<bool>,
     pub arg_is_string: Vec<bool>,
@@ -242,6 +335,71 @@ pub enum InitialStateData {
     Writes(Vec<InitialStateWriteRun>),
 }
 
+impl InitialStateData {
+    /// The written bits below `width` of `Packed` data as write runs, so a
+    /// target such as an unpacked array is written run by run instead of
+    /// being read and written back whole. A target without a mask plane
+    /// (`four_state` false) receives unknown bits as 0, as a two-state write
+    /// of the packed value does.
+    pub fn packed_write_runs(
+        value: &BigUint,
+        mask: &BigUint,
+        written_mask: &BigUint,
+        width: usize,
+        four_state: bool,
+    ) -> Vec<InitialStateWriteRun> {
+        let (value, mask, written) = (
+            value.to_u64_digits(),
+            mask.to_u64_digits(),
+            written_mask.to_u64_digits(),
+        );
+        let bit = |digits: &[u64], index: usize| {
+            digits
+                .get(index / 64)
+                .is_some_and(|digit| digit >> (index % 64) & 1 == 1)
+        };
+        let mut runs = Vec::new();
+        let mut index = 0;
+        while index < width {
+            if written
+                .get(index / 64)
+                .is_none_or(|&digit| digit >> (index % 64) == 0)
+            {
+                // No written bit in the rest of this digit.
+                index = (index / 64 + 1) * 64;
+                continue;
+            }
+            if !bit(&written, index) {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            while index < width && bit(&written, index) {
+                index += 1;
+            }
+            let bit_width = index - start;
+            let mut value_bytes = vec![0u8; bit_width.div_ceil(8)];
+            let mut mask_bytes = vec![0u8; bit_width.div_ceil(8)];
+            for offset in 0..bit_width {
+                let unknown = bit(&mask, start + offset);
+                if bit(&value, start + offset) && (four_state || !unknown) {
+                    value_bytes[offset / 8] |= 1 << (offset % 8);
+                }
+                if four_state && unknown {
+                    mask_bytes[offset / 8] |= 1 << (offset % 8);
+                }
+            }
+            runs.push(InitialStateWriteRun {
+                bit_offset: start,
+                bit_width,
+                value_bytes,
+                mask_bytes,
+            });
+        }
+        runs
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialStateValue<A> {
     pub address: A,
@@ -291,6 +449,9 @@ pub enum ProcessStatus {
     /// A synchronous host operation. The delay slot holds its family and
     /// local site index; the same process resumes after the host responds.
     HostRequest,
+    /// A program kernel called `$exit` (IEEE 1800-2023 24.7): it and every
+    /// other kernel of its program instance ([`ProcessSlots::program`]) end.
+    Exit,
 }
 
 impl ProcessStatus {
@@ -308,6 +469,7 @@ impl ProcessStatus {
             Self::Yield => 8,
             Self::Stop => 9,
             Self::HostRequest => 10,
+            Self::Exit => 11,
         }
     }
 
@@ -323,6 +485,7 @@ impl ProcessStatus {
             8 => Some(Self::Yield),
             9 => Some(Self::Stop),
             10 => Some(Self::HostRequest),
+            11 => Some(Self::Exit),
             _ => None,
         }
     }
@@ -373,6 +536,9 @@ pub struct HostRequestValue<A> {
     pub width: usize,
     pub signed: bool,
     pub is_string: bool,
+    /// The payload representation, independent of display formatting.
+    #[serde(default)]
+    pub value_kind: ValueKind,
     #[serde(default)]
     pub float_precision: Option<FloatPrecision>,
 }
@@ -380,6 +546,7 @@ pub struct HostRequestValue<A> {
 impl<A: Copy> HostRequestValue<A> {
     pub fn map<B>(&self, map: &mut impl FnMut(A) -> B) -> HostRequestValue<B> {
         HostRequestValue {
+            value_kind: self.value_kind,
             id: map(self.id),
             width: self.width,
             signed: self.signed,
@@ -465,6 +632,12 @@ pub struct ProcessSlots<A> {
     /// Every delay the kernel suspends for is a constant of at least one
     /// time unit.
     pub const_delays: bool,
+    /// For an `initial` procedure of a program instance (IEEE 1800-2023
+    /// 24.3), the status slot of that instance's first such kernel, which
+    /// every kernel of the instance names: the kernel runs in the reactive
+    /// region set (24.3.1), and `$exit` and the end of the instance's
+    /// kernels act on them together (24.7). `None` for design code.
+    pub program: Option<A>,
     pub resume: A,
     pub status: A,
     pub delay: A,
@@ -476,6 +649,7 @@ impl<A> ProcessSlots<A> {
             is_initializer: self.is_initializer,
             requires_timed_simulation: self.requires_timed_simulation,
             const_delays: self.const_delays,
+            program: self.program.map(&mut map),
             resume: map(self.resume),
             status: map(self.status),
             delay: map(self.delay),
@@ -876,6 +1050,22 @@ pub struct RuntimeSchema<A> {
     /// scheduler itself once one is generated. Present when the design has
     /// process kernels.
     pub scheduler: Option<SchedulerSchema<A>>,
+    /// Generated units that run an edge of an event with every derived
+    /// clock domain it reaches, for the events that have them.
+    pub derived_edges: Vec<DerivedEdgeUnits<A>>,
+}
+
+/// The process units that run the edges of one event together with its
+/// derived clock domains, the signal having already moved. Each reads
+/// [`SchedulerSlots::dirty`] to know whether combinational logic must
+/// settle before the domains evaluate.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DerivedEdgeUnits<A> {
+    /// The canonical event.
+    pub event: A,
+    /// Indices among the process units of the rising and the falling edge.
+    pub rising: usize,
+    pub falling: usize,
 }
 
 /// Width of [`SchedulerSlots::limit`], [`SchedulerSlots::now`],
@@ -1042,6 +1232,9 @@ pub struct SchedulerSchema<A> {
     /// The event signals a host periodic clock may drive inside the
     /// scheduler's slots, in the order of its clock slots.
     pub clocks: Vec<A>,
+    /// Per process kernel, the event signals it writes, as indices into
+    /// [`Self::events`]; empty for a kernel the scheduler does not run.
+    pub kernel_events: Vec<Vec<usize>>,
 }
 
 impl<A> SchedulerSchema<A> {
@@ -1053,6 +1246,7 @@ impl<A> SchedulerSchema<A> {
             fallback: self.fallback,
             events: self.events.into_iter().map(&mut map).collect(),
             clocks: self.clocks.into_iter().map(map).collect(),
+            kernel_events: self.kernel_events,
         }
     }
 }
@@ -1084,6 +1278,7 @@ impl<A> Default for RuntimeSchema<A> {
             active_commits: Vec::new(),
             time_slots: Vec::new(),
             scheduler: None,
+            derived_edges: Vec::new(),
         }
     }
 }
@@ -1751,6 +1946,67 @@ impl<V: fmt::Display> fmt::Display for RegionedAbsoluteAddrBase<V> {
 mod tests {
     use super::*;
 
+    /// Applying the runs to a target equals the packed merge: written bits
+    /// take the value, unwritten bits keep the target's.
+    #[test]
+    fn packed_write_runs_match_the_packed_merge() {
+        let width = 203;
+        let all: BigUint = (BigUint::from(1u8) << width) - 1u8;
+        let pattern = |seed: u64| {
+            (0..width).fold(BigUint::default(), |acc, bit| {
+                let set = (seed.wrapping_mul(bit as u64 + 1) >> 7).is_multiple_of(3);
+                if set {
+                    acc | (BigUint::from(1u8) << bit)
+                } else {
+                    acc
+                }
+            })
+        };
+        let (value, mask, current) = (pattern(0x9e37), pattern(0x51ed), pattern(0x2545));
+        let written_masks = [
+            BigUint::default(),
+            all.clone(),
+            pattern(0x7f4a) | (BigUint::from(1u8) << (width + 3)),
+            (BigUint::from(1u8) << 64) - 1u8,
+        ];
+        for written in &written_masks {
+            for four_state in [false, true] {
+                let runs =
+                    InitialStateData::packed_write_runs(&value, &mask, written, width, four_state);
+                let (mut got_value, mut got_mask) = (current.clone(), BigUint::default());
+                for run in &runs {
+                    let run_mask = ((BigUint::from(1u8) << run.bit_width) - 1u8) << run.bit_offset;
+                    let keep = &all ^ &run_mask;
+                    got_value = (got_value & &keep)
+                        | (BigUint::from_bytes_le(&run.value_bytes) << run.bit_offset);
+                    got_mask = (got_mask & &keep)
+                        | (BigUint::from_bytes_le(&run.mask_bytes) << run.bit_offset);
+                }
+                let written = written & &all;
+                let keep = &all ^ &written;
+                let (want_value, want_mask) = if four_state {
+                    ((&current & &keep) | (&value & &written), &mask & &written)
+                } else {
+                    let known = &all ^ (&mask & &all);
+                    (
+                        (&current & &keep) | (&value & &written & known),
+                        BigUint::default(),
+                    )
+                };
+                assert_eq!(
+                    (got_value, got_mask),
+                    (want_value, want_mask),
+                    "{four_state}"
+                );
+                assert!(
+                    runs.windows(2).all(|pair| {
+                        pair[0].bit_offset + pair[0].bit_width < pair[1].bit_offset
+                    })
+                );
+            }
+        }
+    }
+
     #[test]
     fn host_request_encoding_keeps_families_and_full_site_indices_distinct() {
         for kind in [
@@ -1774,11 +2030,13 @@ mod tests {
             ProcessStatus::from_code(10),
             Some(ProcessStatus::HostRequest)
         );
+        assert_eq!(ProcessStatus::from_code(11), Some(ProcessStatus::Exit));
     }
 
     #[test]
     fn host_request_mapping_relocates_operands_and_results() {
         let value = |id| HostRequestValue {
+            value_kind: ValueKind::StrRef,
             id,
             width: 17,
             signed: true,
@@ -1798,6 +2056,7 @@ mod tests {
         assert_eq!(relocated.process, 2);
         assert_eq!(relocated.args[0].width, 17);
         assert!(relocated.results[0].signed);
+        assert_eq!(relocated.args[0].value_kind, ValueKind::StrRef);
         assert_eq!(relocated.strings, site.strings);
     }
 
@@ -1866,10 +2125,13 @@ mod tests {
         let mut runtime = RuntimeSchema::default();
         runtime.runtime_errors.insert(1, error.clone());
         runtime.runtime_event_sites.push(RuntimeEventSite {
-            kind: RuntimeEventKind::AssertFatal,
+            kind: RuntimeEventKind::Report(Severity::Fatal),
             template: Some("failed".to_string()),
             sizing: DisplaySizing::Veryl,
             scope: None,
+            location: None,
+            assertion: None,
+            deferred: None,
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),

@@ -611,6 +611,17 @@ impl Flow<'_> {
                 }
                 Ok(Exits::next(written))
             }
+            // An `@*` samples what its statements read; they do not run.
+            Stmt::WaitImplicit(reads) => {
+                let mut exprs = Vec::new();
+                for stmt in reads {
+                    stmt.walk(&mut |stmt| exprs.extend(stmt_exprs(stmt)));
+                }
+                for expr in exprs {
+                    self.read(expr, written)?;
+                }
+                Ok(Exits::next(written))
+            }
         }
     }
 
@@ -749,7 +760,8 @@ pub(super) fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
         Stmt::Local { init, .. } => init.iter().collect(),
         Stmt::Delay { amount: expr, .. } | Stmt::Wait(expr) => vec![expr],
         Stmt::WaitEvent(items) => items.iter().map(|item| &item.expr).collect(),
-        Stmt::Break | Stmt::Continue => Vec::new(),
+        // The statements of an `@*` describe its reads and do not run.
+        Stmt::WaitImplicit(_) | Stmt::Break | Stmt::Continue => Vec::new(),
     }
 }
 

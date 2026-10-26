@@ -354,35 +354,20 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
     let mut replaced_indices = HashSet::default();
     let mut insertions: HashMap<usize, Vec<SIRInstruction<A>>> = HashMap::default();
 
-    // Pre-index loads by address for efficient safety checks.
-    // Each entry is (instruction_index, offset, width, is_dynamic).
-    let mut load_index: HashMap<A, Vec<(usize, Option<usize>, usize)>> = HashMap::default();
+    // Moving a store to the end of a merged run must cross neither a read
+    // nor a later overlapping write. In particular, a narrow overwrite can
+    // sit between two adjacent candidate ranges in instruction order.
+    let mut access_index: HashMap<A, Vec<(usize, Option<usize>, usize)>> = HashMap::default();
+    let mut barriers = Vec::new();
     for (idx, inst) in instructions.iter().enumerate() {
-        match inst {
-            SIRInstruction::Load(_, addr, SIROffset::Static(off), w) => {
-                load_index
-                    .entry(addr.clone())
-                    .or_default()
-                    .push((idx, Some(*off), *w));
-            }
-            SIRInstruction::Load(_, addr, SIROffset::PackedElements { bit_offset, .. }, w) => {
-                load_index
-                    .entry(addr.clone())
-                    .or_default()
-                    .push((idx, Some(*bit_offset), *w));
-            }
-            SIRInstruction::Load(
-                _,
-                addr,
-                SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. },
-                w,
-            ) => {
-                load_index
-                    .entry(addr.clone())
-                    .or_default()
-                    .push((idx, None, *w));
-            }
-            _ => {}
+        if is_memory_barrier(inst) {
+            barriers.push(idx);
+        }
+        if let Some((addr, offset, width, _)) = mem_access_info(inst) {
+            access_index
+                .entry(addr.clone())
+                .or_default()
+                .push((idx, offset, width));
         }
     }
 
@@ -446,7 +431,7 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
         }
 
         // Get loads for this address once (empty slice if none)
-        let addr_loads = load_index.get(&addr);
+        let addr_accesses = access_index.get(&addr);
 
         let mut segment_start = 0;
         while segment_start < details.len() {
@@ -491,18 +476,22 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
 
                 let insert_at_index = segment.iter().map(|s| s.index).max().unwrap();
 
-                // Safety check: ensure no conflicting load between store and insert point.
-                // Use pre-indexed loads to avoid scanning all instructions.
-                let safe = if let Some(loads) = addr_loads {
+                // Preserve the ordering of every range moved to the anchor.
+                let safe = if let Some(accesses) = addr_accesses {
                     segment.iter().all(|s| {
                         if s.index == insert_at_index {
                             return true;
                         }
-                        // Check loads to this address in range (s.index, insert_at_index]
-                        !loads.iter().any(|&(load_idx, load_off, load_w)| {
-                            if load_idx <= s.index || load_idx > insert_at_index {
-                                return false;
-                            }
+                        let first_barrier = barriers.partition_point(|&idx| idx <= s.index);
+                        if barriers
+                            .get(first_barrier)
+                            .is_some_and(|&idx| idx <= insert_at_index)
+                        {
+                            return false;
+                        }
+                        let first = accesses.partition_point(|&(idx, _, _)| idx <= s.index);
+                        let end = accesses.partition_point(|&(idx, _, _)| idx <= insert_at_index);
+                        !accesses[first..end].iter().any(|&(_, load_off, load_w)| {
                             match load_off {
                                 None => true, // dynamic offset — conservatively unsafe
                                 Some(lo) => {
@@ -1837,6 +1826,73 @@ mod tests {
 
         assert_eq!(instructions, original);
         assert_eq!(reg_counter, 1);
+    }
+
+    #[test]
+    fn store_coalescing_preserves_intervening_overlapping_writes() {
+        for intervening_offset in [
+            SIROffset::Static(3),
+            SIROffset::PackedElements {
+                bit_offset: 3,
+                element_width: 1,
+            },
+            SIROffset::Dynamic(RegisterId(2)),
+            SIROffset::Element {
+                index: RegisterId(2),
+                element_width: 2,
+                bit_offset: 1,
+                dynamic_bit_offset: None,
+            },
+        ] {
+            let mut instructions = vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(0u8)),
+                SIRInstruction::Imm(RegisterId(1), SIRValue::new(1u8)),
+                SIRInstruction::Imm(RegisterId(2), SIRValue::new(1u8)),
+                SIRInstruction::Store(7u32, SIROffset::Static(2), 2, RegisterId(0), vec![], vec![]),
+                SIRInstruction::Store(7, intervening_offset, 1, RegisterId(1), vec![], vec![]),
+                SIRInstruction::Store(7, SIROffset::Static(1), 1, RegisterId(1), vec![], vec![]),
+            ];
+            let original = instructions.clone();
+            let mut registers = [
+                (RegisterId(0), logic(2)),
+                (RegisterId(1), logic(1)),
+                (RegisterId(2), logic(32)),
+            ]
+            .into_iter()
+            .collect();
+            let mut counter = 2;
+            // Merging the writes at bits 1 and 2..3 would move the latter
+            // past the intervening write of bit 3, erasing its new value.
+            assert!(!coalesce_static_stores_with_types(
+                &mut instructions,
+                &mut registers,
+                &mut counter,
+                &HashMap::default()
+            ));
+            assert_eq!(instructions, original);
+        }
+    }
+
+    #[test]
+    fn store_coalescing_keeps_disjoint_intervening_writes_optimizable() {
+        let mut instructions = vec![
+            SIRInstruction::Imm(RegisterId(0), SIRValue::new(0u8)),
+            SIRInstruction::Imm(RegisterId(1), SIRValue::new(1u8)),
+            SIRInstruction::Store(7u32, SIROffset::Static(2), 2, RegisterId(0), vec![], vec![]),
+            SIRInstruction::Store(7, SIROffset::Static(5), 1, RegisterId(1), vec![], vec![]),
+            SIRInstruction::Store(7, SIROffset::Static(1), 1, RegisterId(1), vec![], vec![]),
+        ];
+        let mut registers = [(RegisterId(0), logic(2)), (RegisterId(1), logic(1))]
+            .into_iter()
+            .collect();
+        let mut counter = 1;
+        assert!(coalesce_static_stores_with_types(
+            &mut instructions,
+            &mut registers,
+            &mut counter,
+            &HashMap::default()
+        ));
+        verify(instructions, registers);
     }
 
     #[test]

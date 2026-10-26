@@ -11,13 +11,17 @@
     "icarus/operators.json",
     "icarus/packed_structs.json",
     "icarus/procedural.json",
+    "icarus/program.json",
     "icarus/random_plusargs.json",
     "icarus/review_regressions.json",
+    "icarus/scan.json",
     "icarus/string.json",
     "icarus/synthesizable.json",
     "icarus/system_functions.json",
+    "icarus/tagged_unions.json",
     "icarus/timing.json",
-    "icarus/types.json"
+    "icarus/types.json",
+    "icarus/unions.json"
   ],
   "exclude_stronger_than_sv": false,
   "include_ignored": false,

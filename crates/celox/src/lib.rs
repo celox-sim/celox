@@ -19,6 +19,8 @@ pub use component::{
     register_static_component_manifest,
 };
 mod debug;
+#[cfg(feature = "host-runtime")]
+mod derived_edge;
 mod edge_plans;
 pub use edge_plans::{
     EdgePlanDomain, EdgePlanEvent, EdgePlanSignal, EdgePlans, edge_plans, event_addresses,
@@ -46,7 +48,10 @@ pub use backend::SimulatorErrorCode as RuntimeErrorCode;
 pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,
 };
-pub use celox_design::{DomainKind, ElaboratedDesign, EventTopology, ProcessOrigin, RuntimeSchema};
+pub use celox_design::{
+    AssertionDeferral, AssertionDirective, AssertionOutcome, AssertionSite, DomainKind,
+    ElaboratedDesign, EventTopology, ProcessOrigin, ReportLocation, RuntimeSchema, Severity,
+};
 pub use celox_frontend_core::FrontendArtifactError;
 pub use celox_frontend_sdk as frontend_sdk;
 pub use celox_frontend_sdk::FrontendArtifact;
@@ -98,15 +103,20 @@ pub const MAX_SIMULATION_THREADS: u32 = 64;
 mod host_api {
     use crate::SimBackend;
     pub use crate::backend::tiered::TieredEventRef;
+    #[cfg(feature = "wasm-runtime")]
     pub use crate::backend::wasm_runtime::WasmBackend;
     pub use crate::backend::{
-        CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, EventRef, InterpBackend,
-        JitBackend, RegallocAlgorithm, SharedJitCode, TieredBackend, TieredExecutionStats,
-        TieredExecutionTier, TieredExecutionTiming, TieredPromotionStatus,
+        CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm,
+    };
+    #[cfg(feature = "cranelift")]
+    pub use crate::backend::{EventRef, JitBackend, SharedJitCode};
+    pub use crate::backend::{
+        InterpBackend, TieredBackend, TieredExecutionStats, TieredExecutionTier,
+        TieredExecutionTiming, TieredPromotionStatus,
     };
     pub use crate::debug::CompilationTraceResult;
     pub use crate::diagnostics::DiagnosticsOptions;
-    pub use crate::simulation::{Simulation, SimulationCheckpoint};
+    pub use crate::simulation::{Simulation, SimulationCheckpoint, SlotObserver};
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
@@ -115,7 +125,7 @@ mod host_api {
     pub use crate::simulator::NativeCompilation;
     pub use crate::simulator::{
         Checkpoint, CheckpointError, DeadStorePolicy, DumpError, InstanceHierarchy, NamedEvent,
-        NamedSignal, RuntimeEvent, RuntimeEventDrain, RuntimeFormatContext, Simulator,
+        NamedSignal, Report, RuntimeEvent, RuntimeEventDrain, RuntimeFormatContext, Simulator,
         SimulatorBuilder, SimulatorOptions, StateError, StateImage, StateMismatch, StateSchema,
         TierPromotion,
     };
@@ -164,6 +174,54 @@ mod host_api {
             mask: crate::BigUint,
         ) {
             self.write(signal, |backend| backend.set_four_state(signal, val, mask));
+        }
+    }
+
+    /// State access of a [`SlotObserver`] inside a time slot: reads see
+    /// the slot's state so far, writes are blocking writes of the host at
+    /// the slot's time.
+    pub struct SlotIo<'a, B: SimBackend = DefaultBackend> {
+        io: IOContext<'a, B>,
+        wrote: bool,
+    }
+
+    impl<'a, B: SimBackend> SlotIo<'a, B> {
+        pub(crate) fn new(io: IOContext<'a, B>) -> Self {
+            Self { io, wrote: false }
+        }
+
+        pub(crate) fn wrote(&self) -> bool {
+            self.wrote
+        }
+
+        /// The stored value, with X/Z bits as their payload.
+        pub fn get(&self, signal: crate::SignalRef) -> crate::BigUint {
+            self.io.backend.get(signal)
+        }
+
+        /// The stored payload and X/Z mask.
+        pub fn get_four_state(&self, signal: crate::SignalRef) -> (crate::BigUint, crate::BigUint) {
+            self.io.get_four_state(signal)
+        }
+
+        pub fn set<T: Copy>(&mut self, signal: crate::SignalRef, val: T) {
+            self.wrote = true;
+            self.io.set(signal, val);
+        }
+
+        pub fn set_wide(&mut self, signal: crate::SignalRef, val: crate::BigUint) {
+            self.wrote = true;
+            self.io.set_wide(signal, val);
+        }
+
+        pub fn set_four_state(
+            &mut self,
+            signal: crate::SignalRef,
+            val: crate::BigUint,
+            mask: crate::BigUint,
+        ) {
+            self.wrote = true;
+            self.io.set_four_state(signal, val, mask);
         }
     }
 

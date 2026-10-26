@@ -3,6 +3,9 @@ use std::path::Path;
 use celox::Simulator;
 use num_bigint::BigUint;
 
+#[path = "test_utils/vtest_exec.rs"]
+mod vtest_exec;
+
 // Each entry is either a suite case, `@case "group::name";`, or a test written
 // against the Celox API with `@setup` and `@build`. Either runs on every backend.
 macro_rules! sv_backends {
@@ -112,6 +115,8 @@ mod file_core;
 mod file_io;
 #[path = "frontends/systemverilog/generate.rs"]
 mod generate;
+#[path = "frontends/systemverilog/hierarchical_references.rs"]
+mod hierarchical_references;
 #[path = "frontends/systemverilog/hierarchy.rs"]
 mod hierarchy;
 #[path = "frontends/systemverilog/indexed_select.rs"]
@@ -237,3 +242,9 @@ mod floating_point;
 
 #[path = "frontends/systemverilog/real_extensions.rs"]
 mod real_extensions;
+
+#[path = "frontends/systemverilog/unions.rs"]
+mod unions;
+
+#[path = "frontends/systemverilog/tagged_unions.rs"]
+mod tagged_unions;

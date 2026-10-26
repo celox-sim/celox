@@ -2,6 +2,8 @@
 #![forbid(unsafe_code)]
 
 mod backend;
+#[cfg(feature = "runtime-cases")]
+mod runtime_cases;
 mod scalar;
 pub mod script;
 pub mod sv;
@@ -17,6 +19,8 @@ mod process;
 pub mod verification;
 #[cfg(feature = "external")]
 pub mod verilator;
+#[cfg(feature = "external")]
+pub mod xezim;
 
 pub use backend::{
     Backend, Design, Event, Factory, Instance, Signal, SignalPath, Simulator, Source,
@@ -85,6 +89,7 @@ pub enum TestTag {
     EagerAssertionMessages,
     TwoStateZeroDivision,
     TwoStateInitialization,
+    TwoStateTimeZeroSettle,
 }
 
 impl TestTag {
@@ -97,6 +102,7 @@ impl TestTag {
             Self::EagerAssertionMessages => "eager_assertion_messages",
             Self::TwoStateZeroDivision => "two_state_zero_division",
             Self::TwoStateInitialization => "two_state_initialization",
+            Self::TwoStateTimeZeroSettle => "two_state_time_zero_settle",
         }
     }
 
@@ -120,6 +126,9 @@ impl TestTag {
             }
             Self::TwoStateInitialization => {
                 "Explicitly requires the suite's zero-initialized two-state storage even for emitted four-state logic; SV default initialization depends on the declared type (IEEE 1800-2023 6.8, Table 6-7)."
+            }
+            Self::TwoStateTimeZeroSettle => {
+                "Requires two-state `always @*` and sensitivity-list processes to run once at time zero, after the initial blocks, as Verilator settles them; SV has them wait for a change (IEEE 1800-2023 9.2.2.2, 9.4.2)."
             }
         }
     }
