@@ -1,1 +1,6 @@
-Accept the two reviewed fail-to-pass fork-valid sv-tests verdicts from CI run 40319731535; all 3300 expected rows otherwise match.
+Revision history for #2146:
+
+rev 2 (content) 2026-10-26 12:22 UTC — Accept the two reviewed fail-to-pass fork-valid sv-tests verdicts from CI run 40319731535; all 3300 expected rows otherwise match.
+rev 1 (initial) 2026-10-26 12:22 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2146,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"d82671958695b1acd90b1189afae6359f97dc189","timestamp_iso":"2026-10-26T12:22:46Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"d82671958695b1acd90b1189afae6359f97dc189","new_sha":"f04025cf31eae5dff5b70918f0a5ecd5110ae5a5","timestamp_iso":"2026-10-26T12:22:46Z","reason":"Accept the two reviewed fail-to-pass fork-valid sv-tests verdicts from CI run 40319731535; all 3300 expected rows otherwise match.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/d82671958695b1acd90b1189afae6359f97dc189...f04025cf31eae5dff5b70918f0a5ecd5110ae5a5"}]} -->
