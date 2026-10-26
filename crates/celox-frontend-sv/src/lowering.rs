@@ -5230,6 +5230,7 @@ fn lower_initial_processes(
             }));
             Ok(SymbolicProcess {
                 kernel: kernel.unit,
+                frame: kernel.frame,
                 slots: kernel.slots,
                 origin: process_origin(process),
             })

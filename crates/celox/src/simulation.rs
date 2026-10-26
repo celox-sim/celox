@@ -295,6 +295,25 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         CompiledSlots::Any
     }
 
+    fn retain_process_values(&mut self, values: &[(SignalRef, celox_runtime::timing::Value)]) {
+        let slots = self.handle_slots();
+        self.process_heap_roots.clear();
+        for (signal, (value, _)) in values {
+            for &(offset, kind) in slots.iter().filter(|&&(offset, _)| {
+                offset >= signal.offset && offset < signal.offset + signal.width.div_ceil(8)
+            }) {
+                let bytes = (value >> ((offset - signal.offset) * 8)).to_bytes_le();
+                let mut raw = [0; celox_heap::HANDLE_BYTES];
+                let count = bytes.len().min(raw.len());
+                raw[..count].copy_from_slice(&bytes[..count]);
+                self.process_heap_roots.push(celox_heap::Root {
+                    kind,
+                    handle: celox_heap::Handle::from_le_bytes(raw),
+                });
+            }
+        }
+    }
+
     fn finish_timed_step(&mut self, timestamp: u64) {
         self.dirty = false;
         self.dump_unless_rewound(timestamp);
@@ -489,6 +508,9 @@ impl<B: SimBackend> Simulation<B> {
         if self.state.is_suspended() {
             return Err(CheckpointError::Stopped.into());
         }
+        if self.state.has_fork_activations() {
+            return Err(StateError::Processes);
+        }
         let mut file = self
             .simulator
             .state_schema()
@@ -542,6 +564,7 @@ impl<B: SimBackend> Simulation<B> {
             })
             .map_err(|_| CheckpointError::DesignMismatch)?;
         self.simulator.restore(&checkpoint.simulator)?;
+        self.state.retain_activation_roots(&mut self.simulator);
         self.simulator.declaration_phase = false;
         self.simulator
             .host_watch

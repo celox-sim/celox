@@ -119,6 +119,29 @@ to enums as well. Mixed enum and integer argument lists are supported.
 Constraints (`with`), enums with unsupported or unresolved domains, unpacked arrays, nets,
 constants, selects and concatenation arguments are unsupported and rejected.
 
+### Parallel processes
+
+`fork ... join`, `join_any` and `join_none` create concurrent child processes
+in `initial` / `always` procedures and tasks. `join` waits for every child;
+`join_any` waits for one child and leaves the others running; `join_none`
+continues without waiting. Children start when their parent blocks or ends,
+not at compiler or host-service yields (IEEE 1800-2023 9.3.2).
+
+Forks can be nested or executed repeatedly while earlier children remain
+alive. Automatic variables are shared with children of that activation and
+remain alive after the parent returns; re-entering their declaration allocates
+new storage. Static variables retain shared storage. Child random streams are
+seeded from the parent's stream. Execution uses the simulation scheduler, not
+one OS thread per child.
+
+Checkpoints preserve children, their locals and pending joins. Layout-independent
+state files do not yet record dynamic activations and report an error; use
+`checkpoint()` / `restore()` instead. Forks in functions or final procedures,
+`wait fork`, `disable fork`, deferred assertions in a process containing forks,
+and compound event expressions reading fork-shared automatic locals remain
+unsupported. Direct event controls on those locals and `wait` conditions are
+supported.
+
 ### Class randomization
 
 `object.randomize()` randomizes enabled `rand` properties and returns signed
@@ -195,7 +218,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, enumeration constants declared in a class, enumeration, struct and union types and named four-state or string constants as class parameter values, specializations of a parameterized class outside the package or compilation unit that declares it, and properties that are 4-state, `real`, arrays or wider than 64 bits. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
 - Behavioral and verification constructs: intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
-  named events and `->`, `fork` / `join`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
+  named events and `->`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
 - Timing controls in processes: `iff` qualifiers ([#1444](https://github.com/celox-sim/celox/issues/1444)),
   impure function calls in event expressions, and
   `wait` or event expressions reading a static task argument.
@@ -619,7 +642,7 @@ nonblocking assignment made directly in a final procedure never applies its
 queued update. Timing controls and calls to user tasks are rejected, including
 through functions. Calls to functions that schedule events after returning
 require an initial/always process context and are rejected from final
-procedures (13.4.4). `fork` / `join_none` remains unsupported.
+procedures (13.4.4). `fork` / `join_none` inside final procedures remains unsupported.
 
 ### Programs {#programs}
 

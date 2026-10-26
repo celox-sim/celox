@@ -1754,6 +1754,7 @@ fn lower_processes(
             stable_signal(address, artifact.signals().len())
         }));
         processes.push(SymbolicProcess {
+            frame: None,
             kernel,
             slots,
             origin: celox_design::ProcessOrigin {
