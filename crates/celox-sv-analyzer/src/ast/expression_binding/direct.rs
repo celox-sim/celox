@@ -801,6 +801,15 @@ pub(in crate::ast) fn bind_value(
                         )
                     }
                     ExprKind::Member { .. }
+                        if objects::class_parameter(tree, id, native, dimensions)?.is_some() =>
+                    {
+                        values.push(
+                            objects::class_parameter(tree, id, native, dimensions)?
+                                .expect("checked by the guard"),
+                        );
+                        continue;
+                    }
+                    ExprKind::Member { .. }
                         if objects::property(tree, id, native, dimensions)?.is_some() =>
                     {
                         let (property, receiver) = objects::property(tree, id, native, dimensions)?

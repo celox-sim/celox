@@ -7,7 +7,7 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 0,
-    "mismatch": 28,
+    "mismatch": 30,
     "emission_error": 0,
     "compile_error": 18,
     "runtime_error": 2,
@@ -480,6 +480,22 @@
       "detail": "timing::always_star_timed_task_calls_wait_on_folded_branch_reads at 1308:17: assert_eq y: expected 0x0, got 0x1",
       "expectation": "Simulation",
       "name": "timing::always_star_timed_task_calls_wait_on_folded_branch_reads",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Types",
+      "detail": "class::specializations_are_named_by_parameter_values at 783:3: expect_output: expected [49, 32, 49, 32, 49, 10], got [48, 32, 48, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "class::specializations_are_named_by_parameter_values",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Types",
+      "detail": "class::untyped_class_parameters_take_the_type_of_their_value at 1045:3: expect_output: expected [56, 32, 51, 50, 10], got [51, 50, 32, 51, 50, 10]",
+      "expectation": "Simulation",
+      "name": "class::untyped_class_parameters_take_the_type_of_their_value",
       "phase": "execute",
       "status": "mismatch"
     }

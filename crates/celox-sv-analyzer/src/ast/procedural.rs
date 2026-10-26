@@ -1748,6 +1748,8 @@ pub(super) fn subroutine_argument_names(
         for class in classes::item_classes(item.id, tree) {
             let _constant_functions = item.enter();
             let aliases = item.type_aliases(type_aliases);
+            // A specialization's methods see its parameters (8.25).
+            let (env, aliases) = classes::specializations::scope(tree, &class, &item.env, &aliases);
             let handle = classes::handle_type(tree, &class)
                 .ok_or_else(|| unsupported(format!("class `{class}`")))?;
             let mut constructor = false;
@@ -1772,7 +1774,7 @@ pub(super) fn subroutine_argument_names(
                 .collect::<Vec<_>>();
             // A class that cannot be laid out reports why where it is
             // lowered.
-            let layout = classes::class(tree, &class, &item.env, &aliases).ok();
+            let layout = classes::class(tree, &class, &env, &aliases).ok();
             if let Some(layout) = &layout {
                 methods.extend(layout.dispatched_methods().map(|method| {
                     (
@@ -1784,7 +1786,7 @@ pub(super) fn subroutine_argument_names(
             }
             for (name, native_id, is_static) in methods {
                 let native = tree.declarations().subroutine(native_id);
-                let mut params = subroutine_param_declarations(native, tree, &item.env, &aliases)?;
+                let mut params = subroutine_param_declarations(native, tree, &env, &aliases)?;
                 constructor |= native.kind == celox_sv_syntax::SubroutineKind::Constructor;
                 if !is_static {
                     params.insert(0, this.clone());
@@ -1799,7 +1801,7 @@ pub(super) fn subroutine_argument_names(
                     params
                         .iter()
                         .map(|(_, _, r#type, _)| {
-                            dimensions_from_type(&scoped_type(r#type.clone(), &item.env))
+                            dimensions_from_type(&scoped_type(r#type.clone(), &env))
                         })
                         .collect(),
                 );
@@ -1832,7 +1834,7 @@ pub(super) fn subroutine_argument_names(
                 shapes.insert(qualified.clone(), param_shapes);
                 names.insert(qualified, param_names);
             }
-            let handle = dimensions_from_type(&scoped_type(handle, &item.env));
+            let handle = dimensions_from_type(&scoped_type(handle, &env));
             if !constructor && !layout.is_some_and(|layout| layout.is_interface) {
                 let qualified = item.name(&classes::Class::subroutine_name(&class, "new"));
                 directions.insert(qualified.clone(), vec![ParamDirection::Input]);
@@ -2483,22 +2485,11 @@ impl BodyBuilder<'_, '_, '_> {
                     method.qualifiers.protected,
                 )?;
             }
-            let formals = base.constructor_formals(native);
-            if arguments.len() > formals {
-                return Err(unsupported(format!(
-                    "constructor of class `{}` with {} arguments",
-                    base.name,
-                    arguments.len()
-                )));
-            }
             let mut args = vec![Some(Expr::Ident(this.to_owned()))];
-            for argument in arguments {
-                if argument.name.is_some() {
-                    return Err(unsupported("named constructor argument"));
-                }
+            let (actuals, order) = base.constructor_arguments(native, arguments)?;
+            for actual in actuals {
                 args.push(
-                    argument
-                        .value
+                    actual
                         .map(|value| {
                             let mut value =
                                 expression_binding::value(value, native, self.tree, &self.dims)?;
@@ -2508,11 +2499,12 @@ impl BodyBuilder<'_, '_, '_> {
                         .transpose()?,
                 );
             }
-            args.resize(formals + 1, None);
             body.push(Stmt::Call {
                 name: classes::Class::subroutine_name(&base.name, "new"),
                 args,
-                arg_order: Vec::new(),
+                arg_order: std::iter::once(0)
+                    .chain(order.into_iter().map(|index| index + 1))
+                    .collect(),
             });
         }
         for property in class.own_properties() {
@@ -2565,11 +2557,20 @@ fn lower_class(
     state: &mut BodyState<'_>,
     item: &generate::Item,
 ) -> Converted<Vec<Subroutine>> {
+    // A specialization's methods see its parameters (IEEE 1800-2023 8.25).
+    let (declaration_env, type_aliases) =
+        classes::specializations::scope(tree, name, declaration_env, type_aliases);
+    let (item_dimensions, literals) =
+        classes::specializations::body_scope(tree, name, item_dimensions, literals);
+    let (declaration_env, type_aliases, item_dimensions, literals) =
+        (&declaration_env, &type_aliases, &item_dimensions, &literals);
     let class = match classes::class(tree, name, declaration_env, type_aliases) {
         Ok(class) => class,
         // An interface class that cannot be laid out has no subroutines; a
         // use of its handles reports why (IEEE 1800-2023 8.26).
-        Err(_) if classes::is_interface(tree, name) => return Ok(Vec::new()),
+        Err(AnalyzerError::Unsupported(_)) if classes::is_interface(tree, name) => {
+            return Ok(Vec::new());
+        }
         Err(error) => return Err(error),
     };
     let mut subroutines = Vec::new();
@@ -2862,20 +2863,29 @@ pub(super) fn initial_processes_from_scope(
                     assignments.push((
                         instances::normalize_identifier(&variable.name.spelling),
                         value,
+                        None,
                     ));
                 }
             }
         }
-        // Static class properties are initialized like variables.
+        // Static class properties are initialized like variables, in the
+        // scope of the class that declares them (IEEE 1800-2023 8.9, 8.25).
         for property in classes::item_statics(item.id, tree, &item.env, &type_aliases) {
             if let Some(value) = property.initializer {
-                assignments.push((property.variable, value));
+                assignments.push((property.variable, value, Some(property.owner)));
             }
         }
         if !assignments.is_empty() {
             let (item_dimensions, literals) = views.get(item);
             let mut body = Vec::new();
-            for (name, native) in assignments {
+            for (name, native, owner) in assignments {
+                let scoped = owner.map(|owner| {
+                    classes::specializations::body_scope(tree, &owner, item_dimensions, literals)
+                });
+                let (item_dimensions, literals) = match &scoped {
+                    Some((dimensions, literals)) => (dimensions, literals),
+                    None => (item_dimensions, &**literals),
+                };
                 if let Some(target) = selected_unpacked_shape(&name, 0, item_dimensions) {
                     let id = native;
                     array_compatibility::check_native_unpacked_assignment(
@@ -2895,12 +2905,23 @@ pub(super) fn initial_processes_from_scope(
                     tree,
                     item_dimensions,
                 )?;
-                body.push(Stmt::Assign {
+                let mut stmt = Stmt::Assign {
                     lhs,
                     rhs,
                     nonblocking: false,
-                });
+                };
+                // The parameters of the class are its own constants.
+                if scoped.is_some() {
+                    substitute_stmt_constants(
+                        &tree.state,
+                        &mut stmt,
+                        &item_dimensions.const_env,
+                        literals,
+                    );
+                }
+                body.push(stmt);
             }
+            let (_, literals) = views.get(item);
             for stmt in &mut body {
                 substitute_stmt_constants(&tree.state, stmt, &item.env, literals);
                 qualify_stmt(item, stmt);

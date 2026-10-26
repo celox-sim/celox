@@ -124,11 +124,7 @@ impl ScopeImports {
                     continue;
                 }
                 // `C::name` names a member of class `C` (IEEE 1800-2023 8.23).
-                if native
-                    .classes
-                    .iter()
-                    .any(|class| normalize_identifier(&class.name.spelling) == package)
-                {
+                if visible_class(tree, &package) {
                     continue;
                 }
                 if !nested.iter().any(|(start, end, names)| {
@@ -145,6 +141,8 @@ impl ScopeImports {
             if in_ranges(ty.tokens.start, &ranges)
                 && let celox_sv_syntax::DataTypeKind::Named(path) = &ty.kind
                 && let [package, name] = path.as_slice()
+                // `C::T` names a type of class `C` (IEEE 1800-2023 8.23).
+                && !visible_class(tree, &normalize_identifier(&package.name.spelling))
             {
                 imports.qualified.push((
                     normalize_identifier(&package.name.spelling),
@@ -163,6 +161,19 @@ impl ScopeImports {
         imports.wildcard.retain(|name| seen.insert(name.clone()));
         Ok(imports)
     }
+}
+
+/// Whether a class named `name` is declared in the current scope or in the
+/// compilation unit, where the scope sees it (IEEE 1800-2023 3.12.1).
+fn visible_class(tree: &SyntaxTree, name: &str) -> bool {
+    let native = tree.declarations();
+    let scope = tree.root_unit().ok().map(|unit| unit.tokens);
+    native.classes.iter().any(|class| {
+        normalize_identifier(&class.name.spelling) == name && {
+            let unit = super::classes::enclosing_unit(native, class.tokens).map(|unit| unit.tokens);
+            unit.is_none() || unit == scope
+        }
+    })
 }
 
 /// The names declared directly in a module or package scope: its ports and
