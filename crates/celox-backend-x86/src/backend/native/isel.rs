@@ -1480,10 +1480,6 @@ pub fn lower_execution_unit_with_diagnostics(
                     sparse_write_states.metadata_action(sir_block_id, inst_idx),
                 );
             }
-            if cfg!(debug_assertions) {
-                ctx.verify_wide_values();
-            }
-
             // Track known bit width for redundant mask elimination.
             let dst_reg = inst.defined_register();
             if let Some(dr) = dst_reg {
@@ -1563,6 +1559,12 @@ pub fn lower_execution_unit_with_diagnostics(
 
     // Extract mask_map for phi node construction (ctx borrows func fields)
     let saved_mask_map = std::mem::replace(&mut ctx.mask_map, RegMap::new(0));
+    // Each mutation validates its own entry. Scan the whole map once at
+    // the boundary rather than once per instruction, which is quadratic in
+    // large functions with many wide values.
+    if cfg!(debug_assertions) {
+        ctx.verify_wide_values();
+    }
     let saved_wide_regs = std::mem::take(&mut ctx.wide_regs);
     let saved_wide_masks = std::mem::take(&mut ctx.wide_masks);
     drop(ctx); // Release borrows on func
@@ -1757,6 +1759,11 @@ type WideMaskMap = crate::HashMap<RegisterId, Vec<(VReg, usize)>>;
 
 /// Tracks known constant values for SIR registers (for constant folding in ISel).
 type ConstMap = crate::HashMap<RegisterId, u64>;
+
+#[cfg(test)]
+thread_local! {
+    static WIDE_VALUE_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 struct ISelContext<'a> {
     vregs: &'a mut VRegAllocator,
@@ -2193,6 +2200,9 @@ impl<'a> ISelContext<'a> {
         if width <= 64 {
             self.wide_regs.remove(&reg);
         } else {
+            if cfg!(debug_assertions) {
+                self.verify_wide_value(&reg, &chunks);
+            }
             self.wide_regs.replace(reg, chunks);
         }
     }
@@ -2244,28 +2254,34 @@ impl<'a> ISelContext<'a> {
     /// this map through a direct insertion.
     fn verify_wide_values(&self) {
         for (reg, chunks) in self.wide_regs.iter() {
-            let width = self.sir_width(reg);
-            assert!(
-                width > 64,
-                "narrow SIR register r{} has a wide native representation (width={width})",
+            self.verify_wide_value(reg, chunks);
+        }
+    }
+
+    fn verify_wide_value(&self, reg: &RegisterId, chunks: &[(VReg, usize)]) {
+        #[cfg(test)]
+        WIDE_VALUE_VERIFICATIONS.with(|count| count.set(count.get() + 1));
+        let width = self.sir_width(reg);
+        assert!(
+            width > 64,
+            "narrow SIR register r{} has a wide native representation (width={width})",
+            reg.0
+        );
+        let expected_chunks = Self::num_chunks(width);
+        assert_eq!(
+            chunks.len(),
+            expected_chunks,
+            "wide SIR register r{} has {} chunks, expected {expected_chunks}",
+            reg.0,
+            chunks.len()
+        );
+        for (index, (_, chunk_width)) in chunks.iter().enumerate() {
+            let expected_width = width.saturating_sub(index * 64).min(64);
+            assert_eq!(
+                *chunk_width, expected_width,
+                "wide SIR register r{} chunk {index} has width {chunk_width}, expected {expected_width}",
                 reg.0
             );
-            let expected_chunks = Self::num_chunks(width);
-            assert_eq!(
-                chunks.len(),
-                expected_chunks,
-                "wide SIR register r{} has {} chunks, expected {expected_chunks}",
-                reg.0,
-                chunks.len()
-            );
-            for (index, (_, chunk_width)) in chunks.iter().enumerate() {
-                let expected_width = width.saturating_sub(index * 64).min(64);
-                assert_eq!(
-                    *chunk_width, expected_width,
-                    "wide SIR register r{} chunk {index} has width {chunk_width}, expected {expected_width}",
-                    reg.0
-                );
-            }
         }
     }
 
