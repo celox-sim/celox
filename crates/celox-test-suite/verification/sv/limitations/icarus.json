@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 17,
     "emission_error": 0,
-    "compile_error": 134,
+    "compile_error": 135,
     "runtime_error": 8,
     "unsupported": 0,
     "ignored": 0
@@ -1469,6 +1469,14 @@
       "detail": "Icarus build exit status: 13; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:12: error: Invalid module item.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Invalid module instantiation\n<case>/testbench.sv:11: error: Invalid module item.\n<case>/testbench.sv:12: error: Repeat timeunit found and the initial timeunit for this scope is missing.\n<case>/testbench.sv:13: error: Repeat timeprecision found and the initial timeprecision for this scope is missing.\n",
       "expectation": "Simulation",
       "name": "class::derived_classes_keep_their_declaration_scopes",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:34: syntax error\n<case>/source_0.sv:34: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::shallow_copies",
       "phase": "compile",
       "status": "compile_error"
     }

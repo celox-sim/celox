@@ -233,6 +233,35 @@ pub(in crate::ast) fn static_property(
     Ok(Some(property.variable.clone()))
 }
 
+/// The class of the handle that the static property native expression `id`
+/// names holds, `h.p` or `C::p`.
+fn static_property_class(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<String>> {
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(ungroup(id, native)).kind
+    else {
+        return Ok(None);
+    };
+    let class_name = match separator.as_str() {
+        "." => native_class(tree, *expression, native, dimensions),
+        "::" => named_class(tree, *expression, native, dimensions)?,
+        _ => None,
+    };
+    let Some(class_name) = class_name else {
+        return Ok(None);
+    };
+    Ok(class(tree, dimensions, &class_name)?
+        .static_property(&instances::normalize_identifier(&name.spelling))
+        .and_then(|property| property.r#type.class().map(str::to_owned)))
+}
+
 /// The property that native expression `id` names, `h.p` or an unqualified
 /// `p` inside a method of its class, with the receiver: the expression of
 /// the handle, or `None` for the enclosing method's `this`.
@@ -611,6 +640,29 @@ pub(in crate::ast) fn constructor(
     dimensions: &PackedDimensions,
     class_name: &str,
 ) -> Converted<Option<Expr>> {
+    // `new h` copies the properties of the object of `h` into a new object
+    // of its class; handles are copied, not the objects they refer to (IEEE
+    // 1800-2023 8.12).
+    if let ExprKind::Copy(source) = &native.expression(ungroup(id, native)).kind {
+        let source_class = match native_class(tree, *source, native, dimensions) {
+            Some(class) => Some(class),
+            None => static_property_class(tree, *source, native, dimensions)?,
+        };
+        let Some(source_class) = source_class else {
+            return Err(unsupported(
+                "shallow copy of a value that is not a class handle",
+            ));
+        };
+        if !derives_from(tree, dimensions, &source_class, class_name)? {
+            return Err(AnalyzerError::IncompatibleClassHandle {
+                context: "shallow copy".to_owned(),
+                actual: source_class,
+                target: class_name.to_owned(),
+            });
+        }
+        let handle = bind_value(*source, native, tree, dimensions, None)?;
+        return Ok(Some(classes::object_call(ObjectOp::Copy, vec![handle])));
+    }
     let (callee, arguments): (ExprId, &[celox_sv_syntax::Argument]) =
         match &native.expression(ungroup(id, native)).kind {
             ExprKind::Call {

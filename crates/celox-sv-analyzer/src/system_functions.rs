@@ -810,6 +810,9 @@ pub enum ObjectOp {
     ModePop,
     ModeSelect(u32, bool),
     ModeSelected(u32),
+    /// A new object of the class of the object in the argument, with a copy
+    /// of its properties (IEEE 1800-2023 8.12).
+    Copy,
 }
 
 impl ObjectOp {
@@ -826,7 +829,7 @@ impl ObjectOp {
             | Self::ModeSelected(_) => (32, false),
             Self::ModeGet(..) => (32, true),
             Self::Load(field) => (field.width as usize, field.signed),
-            Self::New { .. } | Self::ClassOf | Self::Store(_) => (32, false),
+            Self::New { .. } | Self::ClassOf | Self::Store(_) | Self::Copy => (32, false),
         }
     }
 }
@@ -848,6 +851,7 @@ impl fmt::Display for ObjectOp {
             Self::ModePop => "restore random modes",
             Self::ModeSelect(..) => "select random property",
             Self::ModeSelected(_) => "selected random property query",
+            Self::Copy => "shallow copy",
         })
     }
 }

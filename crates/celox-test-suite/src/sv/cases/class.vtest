@@ -1046,6 +1046,55 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "8 32\n"))
 
+(case shallow_copies
+  (source "class.sv" #"
+module Top(output bit done);
+    class Inner;
+        int v;
+    endclass
+    class Base;
+        int b = 1;
+    endclass
+    class Item extends Base;
+        int a;
+        string s;
+        Inner inner;
+        static int made;
+        static Item last;
+        function new();
+            inner = new;
+            made++;
+        endfunction
+    endclass
+    Item first;
+    Item second;
+    Item third;
+    Base base;
+    Base copy;
+    initial begin
+        first = new;
+        first.a = 12;
+        first.b = 7;
+        first.s = "hi";
+        first.inner.v = 3;
+        second = new first;
+        first.a = 13;
+        first.s = "bye";
+        first.inner.v = 4;
+        $display("%0d %0d %s %0d %0d %0d", second.a, second.b, second.s, second.inner.v, Item::made, first == second);
+        base = second;
+        copy = new base;
+        $display("%0d %0d %0d %0d", copy.b, $cast(third, copy), third.a, third == second);
+        Item::last = second;
+        third = new Item::last;
+        $display("%0d %0d %0d", third.a, third == second, Item::made);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "12 7 hi 4 1 0\n7 1 12 0\n12 0 1\n"))
+
 (case unconstrained_randomize
   (source "randomize.sv" #"
 module Top(output bit done, output int errors);

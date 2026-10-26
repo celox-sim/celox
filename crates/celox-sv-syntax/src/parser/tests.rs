@@ -2903,6 +2903,27 @@ fn class_declarations_record_names_bases_properties_and_method_qualifiers() {
 }
 
 #[test]
+fn shallow_copies_are_expressions_of_their_own() {
+    let syntax = parse(
+        "module M; class C; endclass C a, b; initial begin b = new a; end C c = new a; C d = new; endmodule",
+    );
+    let copies = syntax
+        .expressions
+        .iter()
+        .filter_map(|expression| match expression.kind {
+            ExprKind::Copy(source) => Some(source),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(copies.len(), 2);
+    for source in copies {
+        assert!(
+            matches!(&syntax.expression(source).kind, ExprKind::Name(name) if name.value() == "a")
+        );
+    }
+}
+
+#[test]
 fn class_random_qualifiers_and_constraints_are_preserved() {
     let syntax = parse(
         "class C; rand bit x; randc bit y; extern constraint limits; endclass module M; endmodule",

@@ -38,6 +38,7 @@ sv_backends! {
     fn class_parameter_defaults_bind_where_the_class_is_declared(sim) { @case "class::parameter_defaults_bind_where_the_class_is_declared"; }
     fn class_specialization_keys_follow_the_bound_parameters(sim) { @case "class::specialization_keys_follow_the_bound_parameters"; }
     fn class_derived_classes_keep_their_declaration_scopes(sim) { @case "class::derived_classes_keep_their_declaration_scopes"; }
+    fn class_shallow_copies(sim) { @case "class::shallow_copies"; }
 }
 
 sv_backends! {
@@ -82,6 +83,25 @@ sv_backends! {
                 C c;
                 initial begin
                     value = c.x;
+                    done = 1;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("null.sv"))], "Top");
+        let error = sim.run_until(0).unwrap_err().to_string();
+        assert!(error.contains("null object handle"), "{error}");
+    }
+
+    fn shallow_copies_of_null_are_runtime_errors(sim) {
+        @setup {
+            let source = r#"module Top(output bit done);
+                class C;
+                    int x;
+                endclass
+                C a;
+                C b;
+                initial begin
+                    b = new a;
                     done = 1;
                 end
             endmodule"#;
@@ -217,6 +237,8 @@ fn incompatible_class_handle_assignments_are_rejected() {
         ("i = b;", ["handle of class `B`", "class `I`"]),
         ("b = U::new;", ["handle of class `U`", "class `B`"]),
         ("d.next = b;", ["handle of class `B`", "class `D`"]),
+        ("d = new b;", ["handle of class `B`", "class `D`"]),
+        ("u = new d;", ["handle of class `D`", "class `U`"]),
         ("$cast(d.next, b);", ["`$cast` to a class property", ""]),
     ] {
         let source = format!(
