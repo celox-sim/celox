@@ -8,6 +8,7 @@ pub(in crate::ast) fn classify<'a>(
     processes: &mut Vec<InitialProcess>,
 ) -> Result<(), AnalyzerError> {
     let subroutines: Vec<_> = subroutines.collect();
+    super::final_procedures::validate(&subroutines, processes)?;
     let mut timed = HashSet::default();
     loop {
         let previous = timed.len();
@@ -132,7 +133,8 @@ pub(in crate::ast) fn classify<'a>(
                 step: Vec::new(),
                 body,
             }],
-            initializer: false,
+            kind: celox_design::ProcessKind::Regular,
+            validation_body: Vec::new(),
             synthetic: false,
             repeats: true,
         });
@@ -172,14 +174,15 @@ pub(in crate::ast) fn classify<'a>(
                 step: Vec::new(),
                 body,
             }],
-            initializer: false,
+            kind: celox_design::ProcessKind::Regular,
+            validation_body: Vec::new(),
             synthetic: false,
             repeats: true,
         });
     }
     *ff = retained;
     if processes.len() != initial_count {
-        processes.sort_by_key(|process| (!process.initializer, process.creation_order));
+        processes.sort_by_key(|process| (!process.is_initializer(), process.creation_order));
     }
     Ok(())
 }

@@ -148,7 +148,7 @@ fn take_runtime_error() -> Result<(), RuntimeErrorCode> {
     if is_non_progressing_loop_diagnostic(&message) {
         Err(RuntimeErrorCode::DetectedTrueLoop)
     } else {
-        Err(RuntimeErrorCode::Runtime {
+        Err(RuntimeErrorCode::Fatal {
             message,
             signals: Vec::new(),
         })

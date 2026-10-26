@@ -952,7 +952,7 @@ mod host {
             match err {
                 RuntimeErrorCode::DetectedTrueLoopCode(code) => {
                     if self.comb_fatal_site(code).is_some() {
-                        return RuntimeErrorCode::Runtime {
+                        return RuntimeErrorCode::Fatal {
                             message: "Fatal assertion (runtime event record overwritten)"
                                 .to_string(),
                             signals: Vec::new(),
@@ -1471,7 +1471,9 @@ mod host {
         /// process did not flush mature, `#0` before `final` (IEEE 1800-2023
         /// 16.4). A fatal one ends the simulation with an error.
         pub(crate) fn mature_deferred_assertions(&mut self) -> Result<(), RuntimeErrorCode> {
-            if !self.deferred_assertions {
+            // Terminal output draining must not execute actions left in the
+            // Observed/Postponed queues after final procedures (9.2.3).
+            if self.frozen || !self.deferred_assertions {
                 return Ok(());
             }
             self.stash_runtime_events();
@@ -1494,7 +1496,7 @@ mod host {
             }) else {
                 return Ok(());
             };
-            Err(RuntimeErrorCode::Runtime {
+            Err(RuntimeErrorCode::Fatal {
                 message: message_diagnostic(&report.message),
                 signals: Vec::new(),
             })
@@ -1585,6 +1587,9 @@ mod host {
         }
 
         fn runtime_event_write_seq(&self) -> u64 {
+            if self.program.runtime_schema.runtime_event_sites.is_empty() {
+                return 0;
+            }
             if let Some(buffer) = self.backend.runtime_event_buffer() {
                 buffer.load_atomic_u64(0, std::sync::atomic::Ordering::Acquire)
             } else {
@@ -1823,7 +1828,7 @@ mod host {
                 return Err(error);
             }
             if fatal_status {
-                return Err(RuntimeErrorCode::Runtime {
+                return Err(RuntimeErrorCode::Fatal {
                     message: "Fatal assertion (runtime event record overwritten)".to_string(),
                     signals: Vec::new(),
                 });
@@ -1836,7 +1841,9 @@ mod host {
         ) -> (Result<(), RuntimeErrorCode>, Vec<RawRuntimeEvent>) {
             // Event-drain writes use this entry directly instead of the
             // checked facade. Leave observers and runtime events untouched.
-            if self.declaration_phase {
+            // A boundary observer may have marked the state dirty immediately
+            // before freezing; draining output must not activate HDL afterwards.
+            if self.frozen || self.declaration_phase {
                 return (Ok(()), Vec::new());
             }
             if self.program.runtime_schema.runtime_event_sites.is_empty() {
@@ -1932,7 +1939,7 @@ mod host {
                 if !site.kind.is_fatal() || site.deferred.is_some() {
                     return None;
                 }
-                Some(RuntimeErrorCode::Runtime {
+                Some(RuntimeErrorCode::Fatal {
                     message: message_diagnostic(&render_runtime_event_message(
                         site,
                         args,
@@ -1943,40 +1950,62 @@ mod host {
             })
         }
 
+        /// Keep a fatal report distinct from ordinary runtime faults before its
+        /// backend status is decorated into a diagnostic.
+        fn checked_kernel_result(
+            &self,
+            result: Result<(), RuntimeErrorCode>,
+            start: u64,
+        ) -> Result<(), RuntimeErrorCode> {
+            result.map_err(|error| {
+                if self.program.runtime_schema.runtime_event_sites.is_empty() {
+                    return self.decorate_runtime_error(error);
+                }
+                self.fatal_comb_capture_error(&self.peek_backend_runtime_events_from(start))
+                    .unwrap_or_else(|| self.decorate_runtime_error(error))
+            })
+        }
+
+        pub(crate) fn run_process_checked(&mut self, index: usize) -> Result<(), RuntimeErrorCode> {
+            let start = self.runtime_event_write_seq();
+            let result = self.backend.run_process(index);
+            self.checked_kernel_result(result, start)
+        }
+
         pub(crate) fn eval_apply_ff_at_checked(
             &mut self,
             event: B::Event,
         ) -> Result<(), RuntimeErrorCode> {
-            self.backend
-                .eval_apply_ff_at(event)
-                .map_err(|e| self.decorate_runtime_error(e))
+            let start = self.runtime_event_write_seq();
+            let result = self.backend.eval_apply_ff_at(event);
+            self.checked_kernel_result(result, start)
         }
 
         pub(crate) fn eval_comb_apply_ff_at_checked(
             &mut self,
             event: B::Event,
         ) -> Result<(), RuntimeErrorCode> {
-            self.backend
-                .eval_comb_apply_ff_at(event)
-                .map_err(|e| self.decorate_runtime_error(e))
+            let start = self.runtime_event_write_seq();
+            let result = self.backend.eval_comb_apply_ff_at(event);
+            self.checked_kernel_result(result, start)
         }
 
         pub(crate) fn eval_only_ff_at_checked(
             &mut self,
             event: B::Event,
         ) -> Result<(), RuntimeErrorCode> {
-            self.backend
-                .eval_only_ff_at(event)
-                .map_err(|e| self.decorate_runtime_error(e))
+            let start = self.runtime_event_write_seq();
+            let result = self.backend.eval_only_ff_at(event);
+            self.checked_kernel_result(result, start)
         }
 
         pub(crate) fn apply_ff_at_checked(
             &mut self,
             event: B::Event,
         ) -> Result<(), RuntimeErrorCode> {
-            self.backend
-                .apply_ff_at(event)
-                .map_err(|e| self.decorate_runtime_error(e))
+            let start = self.runtime_event_write_seq();
+            let result = self.backend.apply_ff_at(event);
+            self.checked_kernel_result(result, start)
         }
 
         /// One clock period of an event's signal: its active edge, then its
@@ -3536,7 +3565,7 @@ mod host {
             assert!(sim.fatal_comb_capture_error(&events).is_none());
             assert!(sim.check_comb_backend_result(result.clone()).is_ok());
             assert!(matches!(sim.decorate_runtime_error(result.unwrap_err()),
-                RuntimeErrorCode::Runtime { message, .. } if message.contains("overwritten")));
+                RuntimeErrorCode::Fatal { message, .. } if message.contains("overwritten")));
             let drained = sim.drain_runtime_events();
             assert!(matches!(
                 drained.first(),

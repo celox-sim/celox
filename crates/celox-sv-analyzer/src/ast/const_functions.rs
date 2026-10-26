@@ -613,10 +613,10 @@ fn simulation_state_readers(functions: &[Subroutine]) -> HashMap<String, Analyze
         }
         let mut callees_in_exprs = Vec::new();
         for expr in exprs {
-            visit_expr_callees(expr, &mut |callee| callees_in_exprs.push(callee));
+            visit_expr_calls(expr, &mut |callee, _| callees_in_exprs.push(callee));
         }
         for selector in selectors {
-            visit_const_callees(selector, &mut |callee| callees_in_exprs.push(callee));
+            visit_const_calls(selector, &mut |callee, _| callees_in_exprs.push(callee));
         }
         let mut reads = None;
         for callee in callees_in_exprs {
@@ -659,91 +659,113 @@ fn simulation_state_readers(functions: &[Subroutine]) -> HashMap<String, Analyze
     }
 }
 
+/// Actual argument presence, including explicit holes in procedural calls.
+#[derive(Clone, Copy)]
+pub(in crate::ast) enum CallArguments<'a> {
+    Expressions(&'a [Option<Expr>]),
+    Constants(&'a [ConstExpr]),
+}
+
+impl CallArguments<'_> {
+    pub(in crate::ast) fn is_present(self, index: usize) -> bool {
+        match self {
+            Self::Expressions(args) => args.get(index).is_some_and(Option::is_some),
+            Self::Constants(args) => index < args.len(),
+        }
+    }
+}
+
 /// Calls in an expression, including the index expressions represented by
 /// ConstExpr. Those indices can contain runtime calls in procedural code.
-fn visit_expr_callees<'a>(expr: &'a Expr, f: &mut impl FnMut(&'a Callee)) {
+pub(in crate::ast) fn visit_expr_calls<'a>(
+    expr: &'a Expr,
+    f: &mut impl FnMut(&'a Callee, CallArguments<'a>),
+) {
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => {}
         Expr::Call { callee, args, .. } => {
-            f(callee);
+            f(callee, CallArguments::Expressions(args));
             for arg in args.iter().flatten() {
-                visit_expr_callees(arg, f);
+                visit_expr_calls(arg, f);
             }
         }
         Expr::Select { expr, msb, lsb, .. } => {
-            visit_expr_callees(expr, f);
-            visit_const_callees(msb, f);
-            visit_const_callees(lsb, f);
+            visit_expr_calls(expr, f);
+            visit_const_calls(msb, f);
+            visit_const_calls(lsb, f);
         }
-        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => visit_expr_callees(expr, f),
+        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => visit_expr_calls(expr, f),
         Expr::Concat(parts) => {
             for part in parts {
-                visit_expr_callees(part, f);
+                visit_expr_calls(part, f);
             }
         }
         Expr::RepeatConcat { count, parts } => {
-            visit_const_callees(count, f);
+            visit_const_calls(count, f);
             for part in parts {
-                visit_expr_callees(part, f);
+                visit_expr_calls(part, f);
             }
         }
         Expr::Binary { left, right, .. } => {
-            visit_expr_callees(left, f);
-            visit_expr_callees(right, f);
+            visit_expr_calls(left, f);
+            visit_expr_calls(right, f);
         }
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => {
-            visit_expr_callees(condition, f);
-            visit_expr_callees(then_expr, f);
-            visit_expr_callees(else_expr, f);
+            visit_expr_calls(condition, f);
+            visit_expr_calls(then_expr, f);
+            visit_expr_calls(else_expr, f);
         }
         Expr::Inside { expr, items } => {
-            visit_expr_callees(expr, f);
+            visit_expr_calls(expr, f);
             for item in items {
                 for expr in item.exprs() {
-                    visit_expr_callees(expr, f);
+                    visit_expr_calls(expr, f);
                 }
             }
         }
     }
 }
 
-fn visit_const_callees<'a>(expr: &'a ConstExpr, f: &mut impl FnMut(&'a Callee)) {
+pub(in crate::ast) fn visit_const_calls<'a>(
+    expr: &'a ConstExpr,
+    f: &mut impl FnMut(&'a Callee, CallArguments<'a>),
+) {
     match expr {
         ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
         ConstExpr::Function { callee, args, .. } => {
-            f(callee);
+            f(callee, CallArguments::Constants(args));
             for arg in args {
-                visit_const_callees(arg, f);
+                visit_const_calls(arg, f);
             }
         }
         ConstExpr::Select { expr, bit } => {
-            visit_const_callees(expr, f);
-            visit_const_callees(bit, f);
+            visit_const_calls(expr, f);
+            visit_const_calls(bit, f);
         }
         ConstExpr::SelectRange { expr, msb, lsb, .. } => {
-            visit_const_callees(expr, f);
-            visit_const_callees(msb, f);
-            visit_const_callees(lsb, f);
+            visit_const_calls(expr, f);
+            visit_const_calls(msb, f);
+            visit_const_calls(lsb, f);
         }
         ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
-            visit_const_callees(expr, f)
+            visit_const_calls(expr, f)
         }
         ConstExpr::Binary { left, right, .. } => {
-            visit_const_callees(left, f);
-            visit_const_callees(right, f);
+            visit_const_calls(left, f);
+            visit_const_calls(right, f);
         }
         ConstExpr::Mux {
             condition,
             then_expr,
             else_expr,
         } => {
-            visit_const_callees(condition, f);
-            visit_const_callees(then_expr, f);
-            visit_const_callees(else_expr, f);
+            visit_const_calls(condition, f);
+            visit_const_calls(then_expr, f);
+            visit_const_calls(else_expr, f);
         }
     }
 }

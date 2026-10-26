@@ -198,7 +198,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             .processes
             .iter()
             .map(|process| ProcessRefs {
-                is_initializer: process.slots.is_initializer,
+                kind: process.slots.kind,
                 program: process.slots.program.as_ref().map(resolve),
                 resume: resolve(&process.slots.resume),
                 starts_with_event_wait: process.slots.requires_timed_simulation,
@@ -312,7 +312,9 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             program_processes: processes
                 .iter()
                 .enumerate()
-                .filter(|(_, process)| process.program.is_some())
+                .filter(|(_, process)| {
+                    process.kind == celox_design::ProcessKind::Regular && process.program.is_some()
+                })
                 .map(|(index, _)| index)
                 .collect(),
             processes,

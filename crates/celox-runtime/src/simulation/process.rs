@@ -29,7 +29,12 @@ impl<B: SimBackend> SimulationState<B> {
                 self.stopped = true;
                 Ok(())
             }
-            Err(Halt::Error(error)) => Err(error),
+            Err(Halt::Error(error)) => {
+                if matches!(&error, SimulatorErrorCode::Fatal { .. }) {
+                    let _ = self.finalize_terminal(executor);
+                }
+                Err(error)
+            }
         }
     }
 

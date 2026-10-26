@@ -153,7 +153,7 @@ pub struct NbaSiteRefs {
 /// Control slots and sites of one process kernel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessRefs {
-    pub is_initializer: bool,
+    pub kind: celox_design::ProcessKind,
     /// The status slot naming the program instance of a program kernel
     /// ([`celox_design::ProcessSlots::program`]), which runs in the reactive
     /// region set.
@@ -175,7 +175,7 @@ impl ProcessRefs {
     /// A process without wait or nonblocking sites.
     pub fn new(status: SignalRef, delay: SignalRef) -> Self {
         Self {
-            is_initializer: false,
+            kind: celox_design::ProcessKind::Regular,
             program: None,
             resume: status,
             starts_with_event_wait: false,
