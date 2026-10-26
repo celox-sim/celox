@@ -88,6 +88,12 @@ pub enum ExprKind {
         expression: ExprId,
         arguments: Vec<Argument>,
     },
+    /// Array manipulation method plus its iterator predicate (IEEE 1800-2023 7.12).
+    /// The method expression retains optional iterator/index arguments.
+    ArrayMethodWith {
+        expression: ExprId,
+        predicate: ExprId,
+    },
     Parameterized {
         expression: ExprId,
         arguments: Vec<Argument>,

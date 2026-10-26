@@ -88,6 +88,11 @@ pub(super) enum Job {
         left: ExprId,
         parameterized: bool,
     },
+    ArrayMethodWith {
+        start: usize,
+        minimum: u8,
+        left: ExprId,
+    },
     Select {
         start: usize,
         minimum: u8,
@@ -367,6 +372,12 @@ impl Parser<'_> {
                     pending.extend(expressions);
                 }
                 ExprKind::Tagged { value, .. } => pending.extend(value),
+                ExprKind::ArrayMethodWith {
+                    expression,
+                    predicate,
+                } => {
+                    pending.extend([*expression, *predicate]);
+                }
                 ExprKind::Call { .. }
                 | ExprKind::Parameterized { .. }
                 | ExprKind::Type(_)
@@ -770,6 +781,45 @@ impl Parser<'_> {
                         });
                         jobs.push(Job::Arguments);
                     }
+                    "with" if self.nth(1) == "(" => {
+                        let method = match &self.expressions[left.0].kind {
+                            ExprKind::Call {
+                                expression,
+                                arguments,
+                            } => {
+                                if arguments.len() > 2
+                                    || arguments.iter().any(|argument| {
+                                        argument.name.is_some()
+                                            || argument.value.is_some_and(|id| {
+                                                !matches!(
+                                                    &self.expressions[id.0].kind,
+                                                    ExprKind::Name(_)
+                                                )
+                                            })
+                                    })
+                                {
+                                    return Err(self.error(
+                                        "array method iterator arguments must be identifiers",
+                                    ));
+                                }
+                                *expression
+                            }
+                            _ => left,
+                        };
+                        if !matches!(&self.expressions[method.0].kind,
+                            ExprKind::Member { separator, .. } if separator == ".")
+                        {
+                            return Err(self.error("with expression requires an array method"));
+                        }
+                        self.at += 1;
+                        self.expect("(")?;
+                        jobs.push(Job::ArrayMethodWith {
+                            start,
+                            minimum,
+                            left,
+                        });
+                        jobs.push(Job::Expression(0));
+                    }
                     "[" => {
                         jobs.push(Job::Select {
                             start,
@@ -1052,6 +1102,23 @@ impl Parser<'_> {
                         }
                     };
                     self.tail(&mut jobs, start, minimum, kind)?;
+                }
+                Job::ArrayMethodWith {
+                    start,
+                    minimum,
+                    left,
+                } => {
+                    let predicate = values.pop().unwrap().expression();
+                    self.expect(")")?;
+                    self.tail(
+                        &mut jobs,
+                        start,
+                        minimum,
+                        ExprKind::ArrayMethodWith {
+                            expression: left,
+                            predicate,
+                        },
+                    )?;
                 }
                 Job::Select {
                     start,

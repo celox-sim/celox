@@ -98,6 +98,7 @@ impl Parser<'_> {
         };
         match &self.expressions[id.0].kind {
             ExprKind::Call { expression, .. } => callable(*expression),
+            ExprKind::ArrayMethodWith { .. } => true,
             _ => callable(id),
         }
     }
@@ -817,6 +818,11 @@ impl Parser<'_> {
                 }
                 _ => break,
             }
+        }
+        // A parenthesis-free array method followed by `with` is a call,
+        // not a declaration whose variable happens to be named `with`.
+        if word(cursor) == "with" && word(cursor + 1) == "(" {
+            return None;
         }
         self.indices
             .get(cursor)
