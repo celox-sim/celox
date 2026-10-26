@@ -2,6 +2,7 @@
 # Keep optional backend and comparison crates out of ordinary local builds.
 default-members = ["crates/celox", "crates/celox-napi", "crates/celox-vpi"]
 members = [
+    "crates/aplite",
     "crates/celox",
     "crates/celox-analysis",
     "crates/celox-backend-cranelift",
@@ -56,6 +57,8 @@ description = "Celox HDL Simulator"
 rust-version = "1.99.1"
 
 [workspace.dependencies]
+# Aplite has its own release version; these consumers are unpublished.
+aplite = { path = "crates/aplite" }
 celox                   = { version = "=0.11.0", path = "crates/celox", default-features = false } # x-release-please-version
 celox-analysis          = { version = "=0.11.0", path = "crates/celox-analysis" } # x-release-please-version
 celox-backend-arm64     = { version = "=0.11.0", path = "crates/celox-backend-arm64" } # x-release-please-version

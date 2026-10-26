@@ -56,6 +56,7 @@ test("Rust test infrastructure skips bindings while retaining Rust checks", () =
     "crates/celox-bench-sv/src/main.rs",
     "crates/celox-vpi/src/lib.rs",
     "crates/celox-wasm/src/lib.rs",
+    "crates/aplite/src/lib.rs",
     "crates/lydite/src/lib.rs",
     "crates/lydite-ir/src/lib.rs",
     "crates/lydite-solver/src/lib.rs",
