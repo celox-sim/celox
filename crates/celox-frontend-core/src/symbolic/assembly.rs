@@ -2136,6 +2136,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         host_request_sites,
         time_slots,
         sample_shadows,
+        initial_copies,
         ..
     } = timing;
     let source_sir = SirProgram {
@@ -2391,6 +2392,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .into_iter()
         .map(|(variable, copy)| (project(variable), project(copy)))
         .collect();
+    let initial_copies: Vec<(StateAddr, StateAddr)> = initial_copies
+        .into_iter()
+        .map(|(variable, copy)| (project(variable), project(copy)))
+        .collect();
     let root_instance = expanded[&InstancePath(Vec::new())];
     let settle_partitions = settle_flags.map(|settle| {
         let mut marks: HashMap<StateAddr, BTreeSet<u32>> = HashMap::default();
@@ -2518,6 +2523,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     timing_read_roots.extend(
         sample_shadows
             .iter()
+            .chain(&initial_copies)
             .flat_map(|&(variable, copy)| [variable, copy]),
     );
     // A package variable's state object maps back to the package's own
@@ -2573,6 +2579,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             active_commits,
             time_slots,
             sample_shadows,
+            initial_copies,
             scheduler,
             derived_edges: Vec::new(),
             settle_partitions,
@@ -4126,6 +4133,7 @@ struct TimingMetadata {
     host_request_sites: Vec<HostRequestSite<AbsoluteAddr>>,
     time_slots: Vec<AbsoluteAddr>,
     sample_shadows: Vec<(AbsoluteAddr, AbsoluteAddr)>,
+    initial_copies: Vec<(AbsoluteAddr, AbsoluteAddr)>,
     nba_switches: Vec<NbaSwitch<AbsoluteAddr>>,
 }
 
@@ -4449,6 +4457,7 @@ fn relocate_timing(
         host_request_sites: Vec::new(),
         time_slots: Vec::new(),
         sample_shadows: Vec::new(),
+        initial_copies: Vec::new(),
         nba_switches: Vec::new(),
     };
     for (&instance, module) in instances {
@@ -4487,6 +4496,12 @@ fn relocate_timing(
         metadata.sample_shadows.extend(
             module
                 .sample_shadows
+                .iter()
+                .map(|&(variable, copy)| (locate(variable), locate(copy))),
+        );
+        metadata.initial_copies.extend(
+            module
+                .initial_copies
                 .iter()
                 .map(|&(variable, copy)| (locate(variable), locate(copy))),
         );

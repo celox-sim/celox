@@ -1110,6 +1110,10 @@ pub struct RuntimeSchema<A> {
     /// 16.5.1): a host copies each variable into its copy when a time slot
     /// is over, and once before the first.
     pub sample_shadows: Vec<(A, A)>,
+    /// Variables and copies that start with the variable's value, such as
+    /// the `$past` histories (IEEE 1800-2023 16.9.3): a host copies each
+    /// once before the first time slot.
+    pub initial_copies: Vec<(A, A)>,
     /// The state a compiled scheduler exchanges with the runtime, and the
     /// scheduler itself once one is generated. Present when the design has
     /// process kernels.
@@ -1365,6 +1369,7 @@ impl<A> Default for RuntimeSchema<A> {
             active_commits: Vec::new(),
             time_slots: Vec::new(),
             sample_shadows: Vec::new(),
+            initial_copies: Vec::new(),
             scheduler: None,
             derived_edges: Vec::new(),
             settle_partitions: None,

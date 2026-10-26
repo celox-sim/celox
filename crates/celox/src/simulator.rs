@@ -1112,6 +1112,7 @@ mod host {
                 finish_sites: false,
                 event_edges,
             };
+            sim.initialize_copies();
             sim.comb_observer_snapshots = sim.snapshot_all_comb_observers();
             sim
         }
@@ -1524,6 +1525,21 @@ mod host {
             self.mature_deferred_assertions()?;
             self.sample_values();
             Ok(())
+        }
+
+        /// Before the first time slot, start the `$past` histories and the
+        /// sampled copies with the values of their variables, the default
+        /// sampled values (IEEE 1800-2023 16.5.1).
+        pub(crate) fn initialize_copies(&mut self) {
+            if !self.host_slot_work && self.program.runtime_schema.initial_copies.is_empty() {
+                return;
+            }
+            for (variable, copy) in self.program.runtime_schema.initial_copies.clone() {
+                let variable = self.backend.resolve_signal(&variable);
+                let copy = self.backend.resolve_signal(&copy);
+                celox_runtime::copy_signal(&mut self.backend, variable, copy);
+            }
+            self.sample_values();
         }
 
         /// Copy each sampled variable into its copy (IEEE 1800-2023

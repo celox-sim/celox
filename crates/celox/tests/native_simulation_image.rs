@@ -284,3 +284,23 @@ endmodule
         .unwrap();
     assert_eq!(run(&mut sim), expected);
 }
+
+/// A native program instance ends no time slots, so an image with sampled
+/// values or histories fails to attach.
+#[test]
+fn a_native_program_instance_rejects_sampled_values() {
+    let source = "module Top(input bit clk, input bit a, output bit r);\n  \
+                  always_ff @(posedge clk) r <= $past(a);\nendmodule";
+    let image = celox::Simulator::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+    // SAFETY: the image was compiled from the trusted source above.
+    let Err(error) = (unsafe { NativeProgramInstance::from_image(image) }) else {
+        panic!("a native program instance ends no slots");
+    };
+    assert!(
+        error.to_string().contains("does not end time slots"),
+        "{error}"
+    );
+}

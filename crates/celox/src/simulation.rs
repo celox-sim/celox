@@ -454,8 +454,8 @@ impl<B: SimBackend> Simulation<B> {
         simulator.skip_runtime_finish();
         state.initialize_declarations(&mut simulator)?;
         // Before the first slot, a sampled value is the declared or default
-        // value (IEEE 1800-2023 16.5.1).
-        state.sample_values(&mut simulator.backend);
+        // value (IEEE 1800-2023 16.5.1), which declarations may have set.
+        simulator.initialize_copies();
         Ok(Self {
             simulator,
             state,
