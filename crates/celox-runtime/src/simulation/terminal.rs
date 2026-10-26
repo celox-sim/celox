@@ -84,7 +84,12 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 // Yield is an implementation boundary, not an HDL timing control.
                 // NBA events created by a final never run after termination (9.2.3).
-                Some(ProcessStatus::Yield | ProcessStatus::Nba | ProcessStatus::Local) => {}
+                Some(
+                    ProcessStatus::Yield
+                    | ProcessStatus::Nba
+                    | ProcessStatus::Local
+                    | ProcessStatus::DisableFork,
+                ) => {}
                 _ => {
                     return Err(SimulatorErrorCode::Runtime {
                         message: "final procedure cannot suspend for HDL timing".into(),

@@ -134,10 +134,19 @@ new storage. Static variables retain shared storage. Child random streams are
 seeded from the parent's stream. Execution uses the simulation scheduler, not
 one OS thread per child.
 
+`wait fork` waits for all live immediate children of the calling process,
+including earlier forks and children spawned by called tasks. It does not wait
+for grandchildren whose parents have already ended (9.6.1). With no live children
+it continues immediately. `disable fork` terminates all descendants, including
+those of completed children, without stopping its caller or siblings (9.6.3).
+It removes pending starts, event waits and scheduled resumptions; a subsequent
+fork can reuse their activation storage. Calls through tasks and functions keep
+the calling process's identity; `wait fork` remains forbidden in functions.
+
 Checkpoints preserve children, their locals and pending joins. Layout-independent
 state files do not yet record dynamic activations and report an error; use
 `checkpoint()` / `restore()` instead. Forks in functions or final procedures,
-`wait fork`, `disable fork`, deferred assertions in a process containing forks,
+deferred assertions in a process containing forks,
 and compound event expressions reading fork-shared automatic locals remain
 unsupported. Direct event controls on those locals and `wait` conditions are
 supported.
