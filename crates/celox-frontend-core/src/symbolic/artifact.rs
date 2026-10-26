@@ -54,6 +54,7 @@ impl<A> FfPart<A> {
 pub struct SymbolicProcess {
     pub kernel: ExecutionUnit<SymbolicRegionedAddr>,
     pub slots: ProcessSlots<SourceVarId>,
+    pub frame: Option<celox_design::ProcessFrame<SourceVarId>>,
     pub origin: celox_design::ProcessOrigin,
 }
 

@@ -205,6 +205,7 @@ impl<B: SimBackend> SimulationState<B> {
             self.charge_pass()?;
             self.step_round(executor, current_time, Vec::new(), ready, false, false)?;
         }
+        self.retain_activation_roots(executor);
         executor.try_finish_timed_step(current_time)?;
         // What the host writes after the slot is an update of its time.
         if executor.take_slot_writes() {

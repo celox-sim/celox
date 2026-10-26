@@ -3483,7 +3483,10 @@ fn rejects_unlowered_constructs() {
         Path::new("fork.sv"),
     )
     .expect_err("unlowered constructs must not be silently ignored");
-    assert!(matches!(error, AnalyzerError::Unsupported(_)), "{error:?}");
+    assert!(
+        matches!(error, AnalyzerError::TimingControlOutsideProcess { .. }),
+        "{error:?}"
+    );
 }
 
 /// Timing constructs that remain unimplemented are rejected with their
@@ -3491,7 +3494,6 @@ fn rejects_unlowered_constructs() {
 #[test]
 fn rejects_unimplemented_timing_constructs() {
     for (body, construct) in [
-        ("initial begin fork #1; join end", "fork-join block"),
         ("initial wait fork;", "wait fork statement"),
         // The `event` data type is rejected by name before its uses.
         ("event e; initial @e;", "named event"),
@@ -7203,10 +7205,8 @@ fn final_join_none_is_unsupported_rather_than_a_function_statement_violation() {
         Path::new("final_join_none.sv"),
     )
     .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "Unsupported SystemVerilog construct: fork-join block"
-    );
+    assert!(error.to_string().contains("fork-join block"), "{error}");
+    assert!(error.to_string().contains("final procedure"), "{error}");
 }
 
 #[test]

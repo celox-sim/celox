@@ -410,6 +410,7 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) declaration_startup: Option<celox_design::DeclarationStartup<AbsoluteAddr>>,
     pub(crate) processes: Vec<celox_design::ProcessSlots<AbsoluteAddr>>,
     pub(crate) process_origins: Vec<celox_design::ProcessOrigin>,
+    pub(crate) process_frames: Vec<Option<celox_design::ProcessFrame<AbsoluteAddr>>>,
     pub(crate) watches: Vec<celox_design::EventWatch<AbsoluteAddr>>,
     pub(crate) occurrence_probes: Vec<(celox_design::VarAtomBase<AbsoluteAddr>, AbsoluteAddr)>,
     pub(crate) wait_sites: Vec<celox_design::WaitSite<AbsoluteAddr>>,
@@ -582,6 +583,7 @@ impl NativeProgramImage {
                 live_signals: self.runtime_schema.live_signals.iter().copied().collect(),
                 processes: self.runtime_schema.processes.clone(),
                 process_origins: self.runtime_schema.process_origins.clone(),
+                process_frames: self.runtime_schema.process_frames.clone(),
                 watches: self.runtime_schema.watches.clone(),
                 occurrence_probes: self.runtime_schema.occurrence_probes.clone(),
                 wait_sites: self.runtime_schema.wait_sites.clone(),
@@ -702,6 +704,29 @@ impl NativeProgramImage {
                     .saturating_add(derived_units)
         {
             return Err("process kernels and their control slots disagree".into());
+        }
+        if self.runtime_schema.process_frames.len() != self.runtime_schema.processes.len() {
+            return Err("process kernels and their activation frames disagree".into());
+        }
+        for (slots, frame) in self
+            .runtime_schema
+            .processes
+            .iter()
+            .zip(&self.runtime_schema.process_frames)
+        {
+            let Some(frame) = frame else {
+                continue;
+            };
+            let mut addresses = HashSet::default();
+            if ![slots.resume, slots.status, slots.delay, frame.random]
+                .iter()
+                .all(|slot| frame.private.contains(slot))
+                || frame.private.iter().chain(&frame.locals).any(|slot| {
+                    !self.design.state_objects.contains_key(slot) || !addresses.insert(*slot)
+                })
+            {
+                return Err("invalid process activation frame storage".into());
+            }
         }
         if self.required_native_features & !KNOWN_NATIVE_FEATURES != 0 {
             return Err("native image contains unknown feature requirements".into());
@@ -2606,6 +2631,7 @@ fn compile_program(
                     .collect(),
                 processes: sir.runtime().runtime_schema.processes.clone(),
                 process_origins: sir.runtime().runtime_schema.process_origins.clone(),
+                process_frames: sir.runtime().runtime_schema.process_frames.clone(),
                 watches: sir.runtime().runtime_schema.watches.clone(),
                 occurrence_probes: sir.runtime().runtime_schema.occurrence_probes.clone(),
                 wait_sites: sir.runtime().runtime_schema.wait_sites.clone(),

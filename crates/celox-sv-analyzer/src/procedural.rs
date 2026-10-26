@@ -79,6 +79,11 @@ pub enum StmtBase<E, L> {
         step: Vec<StmtBase<E, L>>,
         body: Vec<StmtBase<E, L>>,
     },
+    /// Concurrent child processes (IEEE 1800-2023 9.3.2).
+    Fork {
+        join: celox_design::ForkJoin,
+        branches: Vec<Vec<StmtBase<E, L>>>,
+    },
     Break,
     Continue,
     Return(Option<E>),
@@ -309,6 +314,10 @@ impl<E, L> StmtBase<E, L> {
                 step: body(step, fe, fl),
                 body: body(loop_body, fe, fl),
             },
+            StmtBase::Fork { join, branches } => StmtBase::Fork {
+                join,
+                branches: branches.into_iter().map(|b| body(b, fe, fl)).collect(),
+            },
             StmtBase::Break => StmtBase::Break,
             StmtBase::Continue => StmtBase::Continue,
             StmtBase::Return(value) => StmtBase::Return(value.map(fe)),
@@ -443,6 +452,11 @@ impl<E, L> StmtBase<E, L> {
                 body(step, fe, fl, fname);
                 body(loop_body, fe, fl, fname);
             }
+            StmtBase::Fork { branches, .. } => {
+                for branch in branches {
+                    body(branch, fe, fl, fname);
+                }
+            }
             StmtBase::Break | StmtBase::Continue => {}
             StmtBase::Return(value) => {
                 if let Some(value) = value {
@@ -512,6 +526,11 @@ impl<E, L> StmtBase<E, L> {
                 visit(step);
                 visit(body);
             }
+            StmtBase::Fork { branches, .. } => {
+                for branch in branches {
+                    visit(branch);
+                }
+            }
             _ => {}
         }
     }
@@ -547,6 +566,11 @@ impl<E, L> StmtBase<E, L> {
                 visit(init);
                 visit(step);
                 visit(body);
+            }
+            StmtBase::Fork { branches, .. } => {
+                for branch in branches {
+                    visit(branch);
+                }
             }
             _ => {}
         }
