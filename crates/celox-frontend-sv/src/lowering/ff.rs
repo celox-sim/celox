@@ -2263,6 +2263,25 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok(Expr::Ident(ret_name))
     }
 
+    /// The value of `expr` now, in a temporary of its type.
+    fn keep_argument(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let signed = self.expr_signed(expr);
+        let float = floating::precision(expr, self.m.variables, self.m.name_to_id);
+        let handle = reads_string_variable(expr, self.m.variables, self.m.name_to_id);
+        let value = self.eval(expr, None)?;
+        let register = self.b.register(&value).clone();
+        let width = register.width();
+        let four_state = matches!(register, celox_sir::RegisterType::Logic { .. });
+        let (temp, name) = self.m.temp("task_argument", width, signed, four_state);
+        let variable = self.m.variables.get_mut(&temp).unwrap();
+        variable.float = float;
+        if handle {
+            variable.value_kind = celox_design::ValueKind::StrRef;
+        }
+        self.store(temp, SIROffset::Static(0), width, value);
+        Ok(sv::ir::Expr::Ident(name))
+    }
+
     fn plusargs(
         &mut self,
         function: sv::ir::SystemFunction,
@@ -3216,6 +3235,32 @@ impl<'p, 'a> Ff<'p, 'a> {
         };
         let (template, mut values) = system_task_template(self.m, &kind, args);
         prepare_time_operands(self.m, template.as_deref(), &mut values)?;
+        // Arguments are evaluated left to right. A later argument's call can
+        // change what an earlier one reads, or suspend the process (a host
+        // request) so that a value read before it would not survive the
+        // resume. So every argument before the last one with a call is
+        // evaluated whole into a temporary at its place; that one only has
+        // its calls run before its own reads, as any expression does.
+        let last_call = values.iter().rposition(
+            |value| matches!(value, sv::ir::SystemTaskArg::Expr(expr) if self.m.calls(expr)),
+        );
+        if let Some(last_call) = last_call {
+            for (index, value) in values[..=last_call].iter_mut().enumerate() {
+                let sv::ir::SystemTaskArg::Expr(expr) = value else {
+                    continue;
+                };
+                let hoisted = if self.m.calls(expr) {
+                    self.hoist(expr)?
+                } else {
+                    expr.clone()
+                };
+                *expr = if index == last_call || matches!(hoisted, sv::ir::Expr::Literal(_)) {
+                    hoisted
+                } else {
+                    self.keep_argument(&hoisted)?
+                };
+            }
+        }
         let mut regs = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
         let mut arg_signed = Vec::with_capacity(values.len());
@@ -3225,11 +3270,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         for value in &values {
             match value {
                 sv::ir::SystemTaskArg::Expr(expr) => {
-                    let expr = if self.m.calls(expr) {
-                        self.hoist(expr)?
-                    } else {
-                        expr.clone()
-                    };
+                    let expr = expr.clone();
                     let signed = self.expr_signed(&expr);
                     arg_is_handle.push(reads_string_variable(
                         &expr,
