@@ -102,6 +102,8 @@ pub(super) struct Ff<'p, 'a> {
     /// The flush-point site of a process with deferred assertions, whose
     /// queue their actions wait in.
     flush_site: Option<u32>,
+    /// A combinational process is being lowered.
+    combinational: bool,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -161,7 +163,42 @@ impl<'p, 'a> Ff<'p, 'a> {
             host_request_sites: Vec::new(),
             nba_switches: Vec::new(),
             flush_site: None,
+            combinational: false,
         }
+    }
+
+    /// The operand of `$sampled` (IEEE 1800-2023 16.9.3) with each static
+    /// variable read through its sampled copy. Automatic variables and the
+    /// lowering's own temporaries keep their current value (16.5.1). A
+    /// combinational process reruns when its inputs change, not when their
+    /// sampled values do, so it cannot read them.
+    fn sampled(
+        &mut self,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        if self.combinational {
+            return Err(unsupported("$sampled in combinational logic"));
+        }
+        let [Some(operand)] = args else {
+            return Err(unsupported("operand of `$sampled`"));
+        };
+        let operand = self.propagate(operand);
+        let mut names = HashSet::default();
+        expr_idents(&operand, &mut names);
+        let mut renames = HashMap::default();
+        for name in names {
+            let Some(id) = self.m.id(&name) else {
+                continue;
+            };
+            if self.m.is_hidden(id) {
+                continue;
+            }
+            if self.m.var(id).value_kind.is_handle() {
+                return Err(unsupported("$sampled of a string or class handle"));
+            }
+            renames.insert(name, self.m.sampled_copy(id));
+        }
+        Ok(rename_idents(&operand, &renames))
     }
 
     /// Whether `stmts`, or a subroutine they call, including in timing
@@ -779,8 +816,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
                 let mut lowered = Vec::with_capacity(args.len());
                 for arg in args {
-                    let arg = self.hoist_const(arg, calls)?;
-                    lowered.push(expr_from_const_expr(&arg).ok_or_else(|| {
+                    // $sampled must rewrite its operand before any nested
+                    // call reads it. Hoisting first hides the original inputs
+                    // behind a temporary holding their current-slot value.
+                    let arg = if matches!(
+                        callee,
+                        sv::ir::Callee::System(sv::ir::SystemFunction::Sampled)
+                    ) {
+                        arg.clone()
+                    } else {
+                        self.hoist_const(arg, calls)?
+                    };
+                    lowered.push(expr_from_const_expr_with_calls(&arg, true).ok_or_else(|| {
                         unsupported(format!("argument of `{callee}` in a select"))
                     })?);
                 }
@@ -789,8 +836,19 @@ impl<'p, 'a> Ff<'p, 'a> {
                     callee: callee.clone(),
                     args: lowered.into_iter().map(Some).collect(),
                 };
-                let sv::ir::Expr::Ident(result) = self.hoist(&call)? else {
-                    return Err(unsupported(format!("call of `{callee}` in a select")));
+                let result = match self.hoist(&call)? {
+                    sv::ir::Expr::Ident(result) => result,
+                    // A sampled operand, as `$sampled(i + 1)`: its value at
+                    // this point is the select's.
+                    hoisted @ sv::ir::Expr::Binary { .. }
+                    | hoisted @ sv::ir::Expr::Unary { .. } => {
+                        let value = self.eval(&hoisted, None)?;
+                        let width = self.b.register(&value).width();
+                        let (temp, name) = self.m.temp("select", width, false, true);
+                        self.store(temp, SIROffset::Static(0), width, value);
+                        name
+                    }
+                    _ => return Err(unsupported(format!("call of `{callee}` in a select"))),
                 };
                 let result = ConstExpr::Ident(result);
                 calls.push((expr.clone(), result.clone()));
@@ -1073,6 +1131,14 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let (_, name) = self.m.temp("tagged_member", *width, *signed, true);
                 self.assign(&sv::ir::LValue::Ident(name.clone()), value)?;
                 Expr::Ident(name)
+            }
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Sampled),
+                args,
+                ..
+            } => {
+                let operand = self.sampled(args)?;
+                self.hoist(&operand)?
             }
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fread),
@@ -4064,6 +4130,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         // `initial` blocks, like `always_comb`, as Verilator settles them.
         let runs_at_time_zero = always_comb || !self.m.four_state;
         self.direct = true;
+        self.combinational = true;
         let mut reads = self.m.implicit_reads(body, always_comb);
         reads.extend(self.m.implicit_reads(sensitivity_body, always_comb));
         for stmt in body {
@@ -6076,6 +6143,7 @@ impl Ff<'_, '_> {
                 source: None,
                 hidden: true,
                 force_control: None,
+                sampled_from: None,
                 value_kind: Default::default(),
             },
         );

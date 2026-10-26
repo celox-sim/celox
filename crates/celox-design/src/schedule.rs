@@ -46,6 +46,9 @@ pub struct ScheduleModel<A> {
     /// Objects the scheduler stores the current time into
     /// ([`RuntimeSchema::time_slots`]).
     pub time_slots: Vec<A>,
+    /// Sampled variables and their copies
+    /// ([`RuntimeSchema::sample_shadows`]).
+    pub sample_shadows: Vec<(A, A)>,
     /// The compiled scheduler, if one was generated
     /// ([`RuntimeSchema::scheduler`]).
     pub scheduler: Option<crate::SchedulerSchema<A>>,
@@ -152,6 +155,7 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
                 .any(|site| matches!(site.kind, RuntimeEventKind::Finish)),
             active_commits: schema.active_commits.clone(),
             time_slots: schema.time_slots.clone(),
+            sample_shadows: schema.sample_shadows.clone(),
             scheduler: schema.scheduler.clone(),
         }
     }

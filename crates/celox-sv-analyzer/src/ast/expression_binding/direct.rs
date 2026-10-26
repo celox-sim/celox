@@ -1787,6 +1787,12 @@ pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> 
             .functions
             .get(name)
             .is_some_and(|function| function.return_real),
+        // A sampled value has the type of its operand.
+        Expr::Call {
+            callee: Callee::System(SystemFunction::Sampled),
+            args,
+            ..
+        } => matches!(args.first(), Some(Some(operand)) if real_value(operand, dimensions)),
         Expr::Unary {
             op: UnaryOp::Plus | UnaryOp::Minus | UnaryOp::ToTwoState,
             expr,
