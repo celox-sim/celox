@@ -3014,6 +3014,23 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.wait_level(condition)?;
                 Ok(true)
             }
+            sv::ir::Stmt::WaitFork | sv::ir::Stmt::DisableFork => {
+                if self.kernel.is_none() {
+                    return if matches!(stmt, sv::ir::Stmt::DisableFork) {
+                        Ok(true)
+                    } else {
+                        Err(unsupported("fork control outside a timed process"))
+                    };
+                }
+                if matches!(stmt, sv::ir::Stmt::WaitFork) {
+                    self.with_kernel(ProcessKernelBuilder::wait_fork)
+                        .map_err(kernel_error)?;
+                } else {
+                    self.with_kernel(ProcessKernelBuilder::disable_fork)
+                        .map_err(kernel_error)?;
+                }
+                Ok(true)
+            }
             sv::ir::Stmt::Fork { join, branches } => {
                 if self.kernel.is_none() {
                     return Err(unsupported("fork outside a timed process"));
@@ -5231,7 +5248,7 @@ impl Ff<'_, '_> {
             let mut calls = Vec::new();
             for stmt in body {
                 stmt.walk(&mut |stmt| match stmt {
-                    sv::ir::Stmt::Fork { .. } => found = true,
+                    sv::ir::Stmt::Fork { .. } | sv::ir::Stmt::WaitFork => found = true,
                     sv::ir::Stmt::Call { name, .. } => calls.push(name.clone()),
                     _ => {}
                 });
@@ -6130,30 +6147,29 @@ impl Ff<'_, '_> {
                 .map(|id| (id, CounterKind::Changes))
                 .collect(),
         );
-        // The condition is lowered once per check: before the process
-        // suspends and at every resume.
-        let mut error = None;
-        let mut kernel = self.kernel.take().expect("lowering a process kernel");
-        std::mem::swap(&mut self.b, kernel.builder());
-        // The kernel is out of `self` while it builds the checks; reads go
-        // to stable state all the same.
+        // Keep the kernel available while evaluating the predicate: functions
+        // may perform synchronous process control such as disable fork.
         let direct = std::mem::replace(&mut self.direct, true);
-        let result = kernel.wait_level(site, |builder| {
-            std::mem::swap(&mut self.b, builder);
-            let truth = self.eval_truth(condition).map(|(truth, _)| truth);
-            std::mem::swap(&mut self.b, builder);
-            truth.unwrap_or_else(|e| {
-                error = Some(e);
-                let never = builder.alloc_bit(1, false);
-                builder.emit(SIRInstruction::Imm(never, SIRValue::new(0u8)));
-                never
-            })
-        });
+        let result = (|| {
+            let (holds, _) = self.eval_truth(condition)?;
+            let join = self.b.new_block();
+            let wait = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: holds,
+                true_block: (join, Vec::new()),
+                false_block: (wait, Vec::new()),
+            });
+            self.b.switch_to_block(wait);
+            self.with_kernel(|kernel| kernel.suspend_wait(site))
+                .map_err(kernel_error)?;
+            let (holds, _) = self.eval_truth(condition)?;
+            self.with_kernel(|kernel| kernel.wake_if(holds));
+            self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
+            self.b.switch_to_block(join);
+            Ok(())
+        })();
         self.direct = direct;
-        std::mem::swap(&mut self.b, kernel.builder());
-        self.kernel = Some(kernel);
-        result.map_err(kernel_error)?;
-        error.map_or(Ok(()), Err)
+        result
     }
 
     /// Declare a wait site of the process with the given terms and return
@@ -6394,7 +6410,8 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                         args: args.clone(),
                         arg_order: arg_order.clone(),
                     }),
-                    sv::ir::Stmt::SystemTask { .. }
+                    sv::ir::Stmt::DisableFork
+                    | sv::ir::Stmt::SystemTask { .. }
                     | sv::ir::Stmt::Delay { .. }
                     | sv::ir::Stmt::WaitEvent(_)
                     | sv::ir::Stmt::WaitImplicit(_)

@@ -464,6 +464,10 @@ pub enum ProcessStatus {
     Fork,
     /// Allocate a fresh automatic local cell before its declaration initializer.
     Local,
+    /// Wait for all live immediate child activations.
+    WaitFork,
+    /// Terminate all descendants of the calling activation.
+    DisableFork,
 }
 
 impl ProcessStatus {
@@ -484,6 +488,8 @@ impl ProcessStatus {
             Self::Exit => 11,
             Self::Fork => 12,
             Self::Local => 13,
+            Self::WaitFork => 14,
+            Self::DisableFork => 15,
         }
     }
 
@@ -502,6 +508,8 @@ impl ProcessStatus {
             11 => Some(Self::Exit),
             12 => Some(Self::Fork),
             13 => Some(Self::Local),
+            14 => Some(Self::WaitFork),
+            15 => Some(Self::DisableFork),
             _ => None,
         }
     }
