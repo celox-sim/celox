@@ -1,0 +1,1 @@
+Keep exhaustive sampling test-only after review of scalability; remove the production API and its README example. Defer the sparse-domain rejection experiment.
