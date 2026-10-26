@@ -399,15 +399,21 @@ pub(super) fn value(
                 ],
             )))
         }
-        ExprKind::Call {
-            expression,
-            arguments,
-        } => {
+        ExprKind::Call { .. } | ExprKind::Member { .. } => {
+            // No-argument built-in methods also permit the bare member form,
+            // e.g. q.size, q.pop_front and map.delete (clauses 7.9 and 7.10).
+            let (expression, arguments) = match &native.expression(id).kind {
+                ExprKind::Call {
+                    expression,
+                    arguments,
+                } => (*expression, arguments.as_slice()),
+                _ => (id, &[][..]),
+            };
             let ExprKind::Member {
                 expression: base,
                 separator,
                 name,
-            } = &native.expression(*expression).kind
+            } = &native.expression(expression).kind
             else {
                 return Ok(None);
             };
@@ -475,6 +481,12 @@ pub(super) fn value(
                     "arguments of container method `{}`",
                     name.spelling
                 )));
+            }
+            if dims.type_query
+                && matches!(op, ContainerOp::PopFront | ContainerOp::PopBack)
+                && target.layout.handle.is_some()
+            {
+                return Err(unsupported("type queries on nonintegral queue pop results"));
             }
             let mut args = vec![expression_binding::value(*base, native, tree, dims)?];
             for (index, arg) in arguments.iter().enumerate() {
@@ -725,5 +737,43 @@ mod tests {
         assert!(q.r#type().container.is_some(), "{:?}", q.r#type());
         let tree = crate::source_tree::parse_source("module Top; bit[7:0] a[] = new[2]; typedef bit[7:0] queue_t[$]; queue_t q; initial begin automatic bit[7:0] b[] = new[3]; q.push_back(9); a[1]=7; b[2]=8; if(a.size()==2 && b.size()==3 && q[0]==9)begin end end endmodule", Path::new("container.sv")).unwrap();
         Source::from_syntax(&tree).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod method_call_tests {
+    use super::*;
+
+    #[test]
+    fn bare_methods_keep_argument_and_void_result_checks() {
+        for statement in [
+            "q.push_back;",
+            "q.push_front;",
+            "q.insert;",
+            "map.exists;",
+            "map.first;",
+            "map.last;",
+            "map.next;",
+            "map.prev;",
+            "value = q.delete;",
+            "value = a.delete;",
+            "value = map.delete;",
+            "value = q.num;",
+            "value = $bits(strings.pop_front);",
+            "value = $dimensions(strings.pop_back());",
+            "value = $bits(objects.pop_front());",
+            "value = $dimensions(objects.pop_back);",
+        ] {
+            let source = format!(
+                "module Top; int q[$], a[], map[int], value; string strings[$];
+                 class Cell; int n; endclass Cell objects[$];
+                 initial begin {statement} end endmodule"
+            );
+            let result = crate::analyze_source(&source, Path::new("bare-container-method.sv"));
+            assert!(
+                matches!(result, Err(AnalyzerError::Unsupported(_))),
+                "{statement}: {result:?}"
+            );
+        }
     }
 }

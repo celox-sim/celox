@@ -145,11 +145,31 @@ contains 3,300 case/mode verdicts at the pinned revision. These are its only
 changed rows, with no passing case regressing: 1,201 cases pass in 2state and
 1,212 in 4state. Only these reviewed expectations are updated.
 
+Zero-argument dynamic-container methods accept omitted parentheses, including
+`size`, associative `num`, `delete`, and queue `pop_front` / `pop_back`
+(7.5.2–7.5.3, 7.9, 7.10.2). Sixteen unmodified upstream simulation cases pass
+the official runner in both state modes at the pinned revision: dynamic
+`op-delete` / `op-size`, associative `alloc`, `nonexistent`, `delete`, `num`,
+and `size`, and queue
+`bounded`, `delete`, `insert`, `max-size`, `pop_back`, `pop_front`, `push_back`,
+`push_front` and `size`. Only these 32 expectations change from `fail` to `pass`.
+The focused runner checked 36 pinned case files containing these bare
+method names (72 case/mode verdicts), with no passing candidate regressing.
+This does not establish full dynamic-container conformance.
+Shared regressions additionally cover discarded pop results, string/class
+handles, four-state values and empty-pop defaults, and unevaluated type queries
+that preserve packed result dimensions and authored bounds. The packed-result
+query regression failed on all five Celox backend configurations even after
+the initial 28 upstream checks passed. Arity and void-result rejection remain checked.
+Queue slices, queue operands in concatenations, element-reference persistence,
+warning diagnostics, and queries on nonintegral pop results remain outside
+this change's support contract.
+
 Logical implication (`->`) now passes six generated cases in both state modes.
 The binary-operator case passes elaboration; the five logical-operator cases
-execute simulations and pass their assertions. A full run at the pinned revision
-changes only these twelve verdicts, with no passing case regressing: 1,208 cases
-pass in 2state and 1,219 in 4state. Shared tests also cover short-circuiting and
+execute simulations and pass their assertions. A full run before the container
+method changes above changed only these twelve verdicts, with no passing case
+regressing: 1,208 cases pass in 2state and 1,219 in 4state. Shared tests also cover short-circuiting and
 unknown operands (IEEE 1800-2023 11.4.7).
 
 ## Running locally
