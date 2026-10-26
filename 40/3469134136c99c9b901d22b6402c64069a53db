@@ -1,1 +1,1 @@
-Rebase on the just-merged fork and process-control stack; advance image versions above master version 41.
+Make the public sampling copy helper safe for overlapping or identical valid signal views.
