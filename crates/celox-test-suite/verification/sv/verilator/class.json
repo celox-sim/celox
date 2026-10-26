@@ -50,6 +50,28 @@
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
+      "name": "class::class_declarations_bind_in_their_scopes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::class_scoped_parameters_and_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "class::classes_implementing_interface_classes",
       "phase": "execute",
       "status": "passed",
@@ -161,6 +183,17 @@
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
+      "name": "class::named_constructor_arguments",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "class::objects_properties_and_methods",
       "phase": "execute",
       "status": "passed",
@@ -192,72 +225,296 @@
     },
     {
       "category": "Types",
+      "detail": "",
       "expectation": "Simulation",
-      "name": "class::randomization_enum_alias",
+      "name": "class::parameter_defaults_bind_where_the_class_is_declared",
+      "phase": "execute",
+      "status": "passed",
       "stronger_than_sv": false,
       "tag_reasons": {},
-      "tags": [],
-      "detail": "Verilator 5.052 randomizes an enum typedef alias as its underlying 8-bit integer, producing values outside the declared set {-7, 2, 91}. Generated __VBasicRand assigns a masked VL_RANDOM_RNG_I value instead of selecting from an enum table. IEEE 1800-2023 18.3 restricts enum randomization to declared values; the direct enum and inheritance cases pass unchanged.",
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 emits duplicate srandom declarations for the inherited randc control case using both base and derived handles. The shared assertions retain cyclic state and random-mode coverage under IEEE 1800-2023 18.4.2, 18.6.2 and 18.8.",
+      "expectation": "Simulation",
       "known_issue": {
-        "id": "sv_verilator_enum_alias_randomization",
-        "category": "simulator_disagreement",
-        "phase": "execute",
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_randc_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_randc_inheritance",
         "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
-        "reason": "Verilator 5.052 randomizes an enum typedef alias as its underlying 8-bit integer, producing values outside the declared set {-7, 2, 91}. Generated __VBasicRand assigns a masked VL_RANDOM_RNG_I value instead of selecting from an enum table. IEEE 1800-2023 18.3 restricts enum randomization to declared values; the direct enum and inheritance cases pass unchanged.",
-        "upstream": [],
+        "phase": "compile",
+        "reason": "Verilator 5.052 emits duplicate srandom declarations for the inherited randc control case using both base and derived handles. The shared assertions retain cyclic state and random-mode coverage under IEEE 1800-2023 18.4.2, 18.6.2 and 18.8.",
+        "upstream": []
+      },
+      "name": "class::randomization_cyclic_controls",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::randomization_cyclic_domains",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 treats the randc enum typedef alias as its underlying integer. Generated __VBasicRand assigns the cyclic integer draw directly without an enum value table, producing undeclared values. IEEE 1800-2023 18.3 and 18.4.2 require a permutation of declared values. The direct enum and integer cycle case passes unchanged.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_randc_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_randc_enum_alias",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 treats the randc enum typedef alias as its underlying integer. Generated __VBasicRand assigns the cyclic integer draw directly without an enum value table, producing undeclared values. IEEE 1800-2023 18.3 and 18.4.2 require a permutation of declared values. The direct enum and integer cycle case passes unchanged.",
+        "upstream": []
+      },
+      "name": "class::randomization_cyclic_enum_alias",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 randomizes an enum typedef alias as its underlying 8-bit integer, producing values outside the declared set {-7, 2, 91}. Generated __VBasicRand assigns a masked VL_RANDOM_RNG_I value instead of selecting from an enum table. IEEE 1800-2023 18.3 restricts enum randomization to declared values; the direct enum and inheritance cases pass unchanged.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
         "evidence": [
           "verification/repros/sv_enum_randomization_verilator.json",
           "LIMITATIONS.md#systemverilog-suite"
-        ]
-      },
-      "phase": "skip",
-      "status": "ignored"
-    },
-    {
-      "category": "Types",
-      "expectation": "Simulation",
-      "name": "class::randomization_inheritance",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": [],
-      "detail": "Verilator 5.052 reports duplicate declarations of the built-in srandom member/function when this inherited randomization case seeds the same object through both derived and base handles. IEEE 1800-2023 18.6.2 and 18.13.3 permit dynamic class randomization and object seeding. Celox preserves the assertions for inherited hidden members and hook dispatch.",
-      "known_issue": {
-        "id": "sv_verilator_inherited_srandom",
-        "category": "simulator_compile_limitation",
-        "phase": "compile",
+        ],
+        "id": "sv_verilator_enum_alias_randomization",
         "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
-        "reason": "Verilator 5.052 reports duplicate declarations of the built-in srandom member/function when this inherited randomization case seeds the same object through both derived and base handles. IEEE 1800-2023 18.6.2 and 18.13.3 permit dynamic class randomization and object seeding. Celox preserves the assertions for inherited hidden members and hook dispatch.",
-        "upstream": [],
-        "evidence": [
-          "verification/repros/sv_randomization_control_verilator.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ]
-      },
-      "phase": "skip",
-      "status": "ignored"
-    },
-    {
-      "category": "Types",
-      "expectation": "Simulation",
-      "name": "class::randomization_mode_bit_argument",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": [],
-      "detail": "Verilator 5.052 treats rand_mode(2) as enabled for both member and object-wide setters. IEEE 1800-2023 18.8 declares a bit on_off formal, so integral 2 truncates to zero. The case records two assertion failures; generated C++ sets the mode to 1 for these calls. Celox retains the required bit conversion.",
-      "known_issue": {
-        "id": "sv_verilator_rand_mode_bit_argument",
-        "category": "simulator_disagreement",
         "phase": "execute",
-        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
-        "reason": "Verilator 5.052 treats rand_mode(2) as enabled for both member and object-wide setters. IEEE 1800-2023 18.8 declares a bit on_off formal, so integral 2 truncates to zero. The case records two assertion failures; generated C++ sets the mode to 1 for these calls. Celox retains the required bit conversion.",
-        "upstream": [],
+        "reason": "Verilator 5.052 randomizes an enum typedef alias as its underlying 8-bit integer, producing values outside the declared set {-7, 2, 91}. Generated __VBasicRand assigns a masked VL_RANDOM_RNG_I value instead of selecting from an enum table. IEEE 1800-2023 18.3 restricts enum randomization to declared values; the direct enum and inheritance cases pass unchanged.",
+        "upstream": []
+      },
+      "name": "class::randomization_enum_alias",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::randomization_enum_domain",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::randomization_enum_fill_literals",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::randomization_enum_inheritance",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 reports duplicate declarations of the built-in srandom member/function when this inherited randomization case seeds the same object through both derived and base handles. IEEE 1800-2023 18.6.2 and 18.13.3 permit dynamic class randomization and object seeding. Celox preserves the assertions for inherited hidden members and hook dispatch.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
         "evidence": [
           "verification/repros/sv_randomization_control_verilator.json",
           "LIMITATIONS.md#systemverilog-suite"
-        ]
+        ],
+        "id": "sv_verilator_inherited_srandom",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 reports duplicate declarations of the built-in srandom member/function when this inherited randomization case seeds the same object through both derived and base handles. IEEE 1800-2023 18.6.2 and 18.13.3 permit dynamic class randomization and object seeding. Celox preserves the assertions for inherited hidden members and hook dispatch.",
+        "upstream": []
       },
+      "name": "class::randomization_inheritance",
       "phase": "skip",
-      "status": "ignored"
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 treats rand_mode(2) as enabled for both member and object-wide setters. IEEE 1800-2023 18.8 declares a bit on_off formal, so integral 2 truncates to zero. The case records two assertion failures; generated C++ sets the mode to 1 for these calls. Celox retains the required bit conversion.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_randomization_control_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_rand_mode_bit_argument",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 treats rand_mode(2) as enabled for both member and object-wide setters. IEEE 1800-2023 18.8 declares a bit on_off formal, so integral 2 truncates to zero. The case records two assertion failures; generated C++ sets the mode to 1 for these calls. Celox retains the required bit conversion.",
+        "upstream": []
+      },
+      "name": "class::randomization_mode_bit_argument",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::randomization_modes_and_selection",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::randomization_pre_hook_controls_modes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::randomize_without_rand_members",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::specialization_keys_follow_the_bound_parameters",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 makes a separate specialization of a parameterized class for each way a parameter value assignment is written, so Box#(2, int)::made and Box#(.N(2), .T(int))::made read 0 after an object of Box#(.T(int), .N(2)) was constructed; the adapter-free source prints 0 1 0 where IEEE 1800-2023 8.25 requires 1 1 1, as the three assignments give the same values. Celox prints 1 1 1. Icarus rejects parameterized classes, see sv_icarus_parameterized_classes.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/class_specialization_identity_verilator.json",
+          "verification/repros/class_specialization_identity.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_class_specialization_identity",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 makes a separate specialization of a parameterized class for each way a parameter value assignment is written, so Box#(2, int)::made and Box#(.N(2), .T(int))::made read 0 after an object of Box#(.T(int), .N(2)) was constructed; the adapter-free source prints 0 1 0 where IEEE 1800-2023 8.25 requires 1 1 1, as the three assignments give the same values. Celox prints 1 1 1. Icarus rejects parameterized classes, see sv_icarus_parameterized_classes.",
+        "upstream": []
+      },
+      "name": "class::specializations_are_named_by_parameter_values",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::specializations_in_generate_blocks",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::specializations_keep_their_parameter_scopes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::specializations_of_interface_classes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::specializations_of_parameterized_classes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::specializations_with_their_own_handles",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     },
     {
       "category": "Types",
@@ -297,7 +554,7 @@
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
-      "name": "class::virtual_methods_dispatch_on_object_class",
+      "name": "class::typedefs_of_interface_classes",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -306,49 +563,49 @@
     },
     {
       "category": "Types",
-      "detail": "Verilator 5.052 emits duplicate srandom declarations for the inherited randc control case using both base and derived handles. The shared assertions retain cyclic state and random-mode coverage under IEEE 1800-2023 18.4.2, 18.6.2 and 18.8.",
+      "detail": "",
       "expectation": "Simulation",
-      "name": "class::randomization_cyclic_controls",
-      "phase": "skip",
-      "status": "ignored",
+      "name": "class::unconstrained_randomize",
+      "phase": "execute",
+      "status": "passed",
       "stronger_than_sv": false,
       "tag_reasons": {},
-      "tags": [],
-      "known_issue": {
-        "id": "sv_verilator_randc_inheritance",
-        "category": "simulator_compile_limitation",
-        "phase": "compile",
-        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
-        "reason": "Verilator 5.052 emits duplicate srandom declarations for the inherited randc control case using both base and derived handles. The shared assertions retain cyclic state and random-mode coverage under IEEE 1800-2023 18.4.2, 18.6.2 and 18.8.",
-        "upstream": [],
-        "evidence": [
-          "verification/repros/sv_randc_verilator.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ]
-      }
+      "tags": []
     },
     {
       "category": "Types",
-      "detail": "Verilator 5.052 treats the randc enum typedef alias as its underlying integer. Generated __VBasicRand assigns the cyclic integer draw directly without an enum value table, producing undeclared values. IEEE 1800-2023 18.3 and 18.4.2 require a permutation of declared values. The direct enum and integer cycle case passes unchanged.",
+      "detail": "Verilator 5.052 gives a class parameter declared without a type the 32-bit type of its default even when a specialization assigns it a sized value, so $bits(V) of Sized#(8'h1) is 32; the adapter-free source prints 32 32 where IEEE 1800-2023 6.20.2 requires 8 32, as the parameter takes the type of its final value after overrides. Celox prints 8 32. Icarus rejects parameterized classes, see sv_icarus_parameterized_classes.",
       "expectation": "Simulation",
-      "name": "class::randomization_cyclic_enum_alias",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/untyped_class_parameters_verilator.json",
+          "verification/repros/untyped_class_parameters.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_untyped_class_parameters",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 gives a class parameter declared without a type the 32-bit type of its default even when a specialization assigns it a sized value, so $bits(V) of Sized#(8'h1) is 32; the adapter-free source prints 32 32 where IEEE 1800-2023 6.20.2 requires 8 32, as the parameter takes the type of its final value after overrides. Celox prints 8 32. Icarus rejects parameterized classes, see sv_icarus_parameterized_classes.",
+        "upstream": []
+      },
+      "name": "class::untyped_class_parameters_take_the_type_of_their_value",
       "phase": "skip",
       "status": "ignored",
       "stronger_than_sv": false,
       "tag_reasons": {},
-      "tags": [],
-      "known_issue": {
-        "id": "sv_verilator_randc_enum_alias",
-        "category": "simulator_disagreement",
-        "phase": "execute",
-        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
-        "reason": "Verilator 5.052 treats the randc enum typedef alias as its underlying integer. Generated __VBasicRand assigns the cyclic integer draw directly without an enum value table, producing undeclared values. IEEE 1800-2023 18.3 and 18.4.2 require a permutation of declared values. The direct enum and integer cycle case passes unchanged.",
-        "upstream": [],
-        "evidence": [
-          "verification/repros/sv_randc_verilator.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ]
-      }
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::virtual_methods_dispatch_on_object_class",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

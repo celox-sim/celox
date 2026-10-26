@@ -614,6 +614,34 @@
     "sv_new-X11": {
       "title": "The time-0 value of a continuous assignment through a function that fills a local unpacked array in a loop is all ones",
       "standard": "IEEE 1800-2023 10.3.2, 13.4"
+    },
+    "sv_class-X3": {
+      "title": "A class value parameter with an explicit type (`logic [57:0] V`) keeps the actual's width: `C#('1)` gives 64 ones, a 64-bit actual is not truncated, and `$bits(V)` is 32",
+      "standard": "IEEE 1800-2023 6.20.2, 8.25, 23.10, 5.7.1"
+    },
+    "sv_class-X2": {
+      "title": "A type reached through the class scope operator that is a class type parameter or a typedef of one (`C#(.T(bit [2:0]))::T`, `D::t` with `typedef T t` of an inherited parameter, `PT::t` through a typedef of a specialization) gets 32 bits instead of the specialization's type",
+      "standard": "IEEE 1800-2023 8.25.1, 8.23, 8.13"
+    },
+    "sv_class-X5": {
+      "title": "A class parameter default (`class D #(int N = X)`) is evaluated at the specialization site instead of the class declaration: a generate block with its own X changes `D#()`",
+      "standard": "IEEE 1800-2023 8.25, 23.9"
+    },
+    "sv_class-X6": {
+      "title": "Matching specializations are treated as distinct (separate static members): a typedef of a type parameter (`Box#(Outer::Inner)` with Inner = byte) vs `Box#(byte)`, `logic [3:0]` vs `reg [3:0]`, and two occurrences of an x-valued argument `Four#(2'bxx)`",
+      "standard": "IEEE 1800-2023 8.25, 6.22.1, 6.11.1"
+    },
+    "sv_class-X8": {
+      "title": "In a generate loop, a procedural handle `Box#(i)` with a genvar argument gets N = 0, and `Box#(i * 10)::made` in the generate block names a different specialization than the block's `Box#(i * 10)` handle",
+      "standard": "IEEE 1800-2023 27.4, 8.25, 8.25.1"
+    },
+    "sv_class-X9": {
+      "title": "A specialization written inside a method of a parameterized class (`Inner#(N)` in `Outer#(7)`) binds the class's default N instead of the current specialization's",
+      "standard": "IEEE 1800-2023 8.25, 8.24, 23.9"
+    },
+    "sv_class-X10": {
+      "title": "In `extends Base #(expr, T)` an ordered value argument that is an operator expression (`M + 1`, `(2 + 4)`) is dropped when another argument follows; the base class gets its default",
+      "standard": "IEEE 1800-2023 8.25, 23.10.2.1"
     }
   },
   "cases": [
@@ -3840,6 +3868,93 @@
       "classification": "xezim_bug",
       "bug": "sv_new-X11",
       "note": "For index = 0 (the zero start value, so no update event) `assign y = identity(index)` keeps xezim's time-0 value 0x3ffffffffffffff instead of 0x1; identity clears words[i] and sets words[i][i] for i = 0..57 and returns words[selected]. After index changes, xezim computes the right one-hot value. Related to I0, also a wrong time-0 value of a function-valued continuous assignment. Repro: work/triage/new3/x11_time0_function_scratch_array.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "class::class_declarations_bind_in_their_scopes",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X3",
+      "note": "Wide#('1) with `class Wide #(logic [57:0] V = 0)` must give V = 58 ones (the override is converted to the declared type, '1 filling 58 bits), so v() returns 64'h03ffffffffffffff; xezim prints ffffffffffffffff even as top (it keeps the actual's width; $bits(V) is 32). As non-top dut, line 1 is also wrong: entries (Ordered::table_t = int [2]) and plain (Plain::T = int) are declared as unsigned 32-bit vectors (entries[1] is a bit-select = 1, plain = 4294967293), a further defect (in a non-top module, a variable declared with a class-scoped typedef (`Plain::T`, `Ordered::table_t`, `C#(3)::word_t`) gets an unsigned 32-bit vector type: signedness, width and unpacked dimensions of the typedef are lost). Repros: work/review5/xezim/r/c1_wide.sv, work/review5/xezim/r/c1_typedef.sv (+ .wrap.sv)."
+    },
+    {
+      "suite": "sv",
+      "name": "class::class_scoped_parameters_and_types",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X2",
+      "note": "The case is the 8.25.1 example (C#()::f(), C#(5)::f() print \"2 10\") plus C#(.T(bit [2:0]))::T y, which is 3 bits, so y = 13 reads 5. As top, xezim declares y with 32 bits (prints 13), sv_class-X2. As non-top dut, the out-of-block C::f body also reads p and C::p as 0 (\"0 0\", sv_rest-X4) and x (C#(3)::word_t = bit [3:0]) becomes 32 bits, so '1 prints 4294967295 (a further defect (in a non-top module, a variable declared with a class-scoped typedef (`Plain::T`, `Ordered::table_t`, `C#(3)::word_t`) gets an unsigned 32-bit vector type: signedness, width and unpacked dimensions of the typedef are lost)). Repros: work/review5/xezim/r/c2_typeparam.sv, work/review5/xezim/r/c2_extern.sv (+ .wrap.sv)."
+    },
+    {
+      "suite": "sv",
+      "name": "class::parameter_defaults_bind_where_the_class_is_declared",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X5",
+      "note": "Defaulted #(int N = X) is declared in Top (X = 1); the default expression is part of the class declaration, so its X resolves upward from the class (23.9) to Top's X, not to the generate block g where Defaulted#() is used and which declares its own X = 2. Expected 1; xezim prints 2 as top and as non-top."
+    },
+    {
+      "suite": "sv",
+      "name": "class::randomization_cyclic_controls",
+      "status": "mismatch",
+      "classification": "lrm_ambiguous",
+      "note": "Only the last check fails: a.calls is 40 instead of 48 because xezim runs no pre/post_randomize for each of the 8 a.randomize(null) calls (it does run them for a.randomize() with every variable rand_mode(0)). Reading 1 (the suite's, Verilator 5.052): 18.6.2 says randomize() calls the hooks, 18.6.3 exempts only a failed call, and 18.11.1 makes randomize(null) a checker like a class without random variables, so the hooks run. Reading 2 (xezim): randomize(null) only checks the constraints and randomizes nothing, so the hooks need not run; 18.11.1 does not mention them. As for randomization_modes_and_selection, whether the hooks run for the null checker form is not explicit. Repro: work/review5/xezim/r/c6_hooks.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "class::randomization_cyclic_domains",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_new-X3",
+      "note": "errors = 768 = 3 x 256: every randomize of `randc Single single_value` (enum bit [63:0] {ONLY='1}) gives 1 instead of the only constant 64'hffffffffffffffff (18.3 restricts enum random variables to the named constants, randc included); the byte, signed and E cycles all pass. Same defect as the rand fill-literal case; a constant written 64'hffffffffffffffff works. Repro: work/review5/xezim/r/c7_fill.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "class::randomization_cyclic_enum_alias",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_new-X4",
+      "note": "`randc Alias value` with `typedef E Alias` takes arbitrary 64-bit values (each randomize hits the default branch), while `randc E` cycles through NEG/MID/HIGH. 18.3 and 6.18 (an alias names the same enum type) require the enum domain. Repro: work/review5/xezim/r/c8_alias.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "class::specialization_keys_follow_the_bound_parameters",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X6",
+      "note": "Line 1: Outer#(byte) constructs Box#(Outer::Inner) with Inner = T = byte, which matches byte (6.22.1 b), so Box#(byte)::made is 1; xezim 0. Line 2: Four#(2'bxx)::made is 1 because the declaration and the reference use the same value 2'bxx (8.25 b); xezim 0. Line 3: Real#(1.0 + 2.0)::v() and Real#(3.0)::v() must return 3.0; xezim returns 0.0 for a real parameter in a static method called through the class scope (a further defect (a real class parameter reads 0.0 in a static method called through the class scope (`Real#(3.0)::v()`); instance methods see the value)). Verilator 5.052 agrees with the expected output. Repros: work/review5/xezim/r/c10_keys.sv, work/review5/xezim/r/c10b.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "class::specializations_in_generate_blocks",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X8",
+      "note": "In g[i], `automatic Box #(i) local_box` must have N = i (the genvar is a localparam of each block, 27.4), and kept (Box#(i*10)) is the same specialization as Box#(i*10)::made, so the lines are \"1 1 11\" / \"2 2 21\". xezim gives local_box.n() = 0 and made = 0 (kept.n() is right) as top and non-top; Box#(J) with `localparam J = i + 4` works for handles. Repros: work/review5/xezim/r/c11_gen.sv, work/review5/xezim/r/c11b.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "class::specializations_keep_their_parameter_scopes",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X9",
+      "note": "outer.f() builds Inner #(N) in Outer#(7)'s method, so N = 7 and v() = 700; xezim uses Outer's default N = 1 (100) as top, and 0 as non-top (out-of-block body, sv_rest-X4). Also Derived::nibble_t (typedef T, T = bit [3:0] from `extends Base #(bit [3:0])`) is declared with 32 bits so 20 is not truncated to 4 (sv_class-X2), and Counted#(logic [3:0]) and Counted#(reg [3:0]) are one specialization (6.11.1: logic and reg denote the same type) so made = 2; xezim 1 (sv_class-X6). Verilator 5.052 prints 4 700 2. Repro: work/review5/xezim/r/c12.sv (+ .wrap.sv)."
+    },
+    {
+      "suite": "sv",
+      "name": "class::specializations_of_interface_classes",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X4",
+      "note": "The out-of-block NibbleBox::get returns V + 20 = 25 truncated to 4 bits = 9. As non-top dut xezim's out-of-block body reads the class parameter V as 0 (prints 0; as top it prints 9), the same loss of class members in extern bodies as sv_rest-X4 (b), here for a parameter instead of a property. Repro: work/review5/xezim/r/c2_extern.sv (+ .wrap.sv)."
+    },
+    {
+      "suite": "sv",
+      "name": "class::specializations_of_parameterized_classes",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X10",
+      "note": "Wide #(5) extends Box #(M + 1, int), so its base is Box#(6, int): w.N = 6, base.get() = 100 + 6, kind() = 56, and super.new increments Box#(6, int)::made (1). xezim gives the base the default N = 4 (104 4 54 0) as top and non-top. The ordered argument `M + 1` (even `(2 + 4)`) is lost only in an extends clause and only when a second argument follows; `extends Box #(M + 1)`, `extends Box #(M, int)` and a variable `Box #(2 + 4, int)` work. Repros: work/review5/xezim/r/c14c.sv, work/review5/xezim/r/c14d.sv."
     }
   ]
 }

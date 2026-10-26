@@ -24,9 +24,54 @@ sv_backends! {
     fn class_inherited_methods_of_extended_interface_classes(sim) { @case "class::inherited_methods_of_extended_interface_classes"; }
     fn class_casts_of_class_handles(sim) { @case "class::casts_of_class_handles"; }
     fn class_casts_from_interface_class_handles(sim) { @case "class::casts_from_interface_class_handles"; }
+    fn class_specializations_of_parameterized_classes(sim) { @case "class::specializations_of_parameterized_classes"; }
+    fn class_specializations_are_named_by_parameter_values(sim) { @case "class::specializations_are_named_by_parameter_values"; }
+    fn class_specializations_with_their_own_handles(sim) { @case "class::specializations_with_their_own_handles"; }
+    fn class_class_scoped_parameters_and_types(sim) { @case "class::class_scoped_parameters_and_types"; }
+    fn class_specializations_of_interface_classes(sim) { @case "class::specializations_of_interface_classes"; }
+    fn class_named_constructor_arguments(sim) { @case "class::named_constructor_arguments"; }
+    fn class_typedefs_of_interface_classes(sim) { @case "class::typedefs_of_interface_classes"; }
+    fn class_specializations_in_generate_blocks(sim) { @case "class::specializations_in_generate_blocks"; }
+    fn class_specializations_keep_their_parameter_scopes(sim) { @case "class::specializations_keep_their_parameter_scopes"; }
+    fn class_untyped_class_parameters_take_the_type_of_their_value(sim) { @case "class::untyped_class_parameters_take_the_type_of_their_value"; }
+    fn class_class_declarations_bind_in_their_scopes(sim) { @case "class::class_declarations_bind_in_their_scopes"; }
+    fn class_parameter_defaults_bind_where_the_class_is_declared(sim) { @case "class::parameter_defaults_bind_where_the_class_is_declared"; }
+    fn class_specialization_keys_follow_the_bound_parameters(sim) { @case "class::specialization_keys_follow_the_bound_parameters"; }
 }
 
 sv_backends! {
+    // Actuals are evaluated in the order they are written, as for other
+    // calls with named arguments.
+    fn named_constructor_arguments_are_evaluated_in_written_order(sim) {
+        @setup {
+            let source = r#"module Top(output int x, output int y);
+                class Point;
+                    int x;
+                    int y;
+                    function new(int x = 0, int y = 0);
+                        this.x = x;
+                        this.y = y;
+                    endfunction
+                endclass
+                int count;
+                function int next();
+                    count++;
+                    return count;
+                endfunction
+                Point point;
+                initial begin
+                    point = new(.y(next()), .x(next()));
+                    x = point.x;
+                    y = point.y;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("order.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("x")), 2u32.into());
+        assert_eq!(sim.get(sim.signal("y")), 1u32.into());
+    }
+
     fn null_dereferences_are_runtime_errors(sim) {
         @setup {
             let source = r#"module Top(output int value, output bit done);
@@ -188,6 +233,86 @@ fn incompatible_class_handle_assignments_are_rejected() {
                 .build_cranelift()
         else {
             panic!("`{statement}` is rejected");
+        };
+        let error = error.to_string();
+        assert!(want.iter().all(|want| error.contains(want)), "{error}");
+    }
+}
+
+#[test]
+fn misused_parameterized_classes_are_rejected() {
+    for (items, want) in [
+        (
+            "Box #(2) two; Box #(3) three; initial begin three = new; two = three; end",
+            ["handle of class `Box#(N=3)`", "class `Box#(N=2)`"],
+        ),
+        (
+            "initial $display(Box::N);",
+            ["`Box::` outside class `Box`", "`Box#()::`"],
+        ),
+        (
+            "Box #(.M(1)) other;",
+            ["class `Box` has no parameter `M`", ""],
+        ),
+        (
+            "interface class Get #(type T = int); pure virtual function T get(); endclass
+             interface class Both extends Get#(int), Get#(bit); endclass",
+            ["interface class `Both`", "inherits `T` from both"],
+        ),
+        (
+            "class Self #(int N = 0) extends Self#(N + 1); endclass Self self;",
+            ["nested more than 64 deep", "class `Self`"],
+        ),
+        (
+            "class Sized #(parameter V = 1); endclass Sized #(8'h1) a; Sized #(32'h1) b;
+             initial begin b = new; a = b; end",
+            ["class `Sized#(V=32'd1)`", "class `Sized#(V=8'd1)`"],
+        ),
+        (
+            "Box #(.N(3), 4) mixed;",
+            ["positional parameter value after a named one", ""],
+        ),
+        (
+            "class Point; function new(int x = 0); endfunction endclass Point p;
+             initial p = new(.x(), .x(1));",
+            ["constructor argument passed twice", ""],
+        ),
+        (
+            "Box #(.N(), .N(2)) twice;",
+            ["duplicate parameter assignment `N`", ""],
+        ),
+        (
+            "class Plain; typedef int T; endclass Plain#(123)::T value;",
+            ["class `Plain`, which has no parameters", ""],
+        ),
+        (
+            "typedef enum {A, B} e_t; class Typed #(type T = int); endclass Typed#(e_t) typed;",
+            ["enumeration type as a class type parameter value", ""],
+        ),
+        (
+            "typedef struct packed { int x; } s_t; class Typed #(type T = int); endclass Typed#(s_t) typed;",
+            ["struct or union type as a class type parameter value", ""],
+        ),
+        (
+            // The class parameter hides the module's `N`, whose value must
+            // not name `Four#(1)` (#1964 tracks four-state actuals).
+            "localparam int N = 1; class Four #(logic [1:0] N = 0); endclass
+             class Shadow #(logic [1:0] N = 2'bxx); function void make(); Four#(N) four; endfunction endclass
+             Shadow#() shadow;",
+            ["class parameter value that is not constant", ""],
+        ),
+    ] {
+        let source = format!(
+            "module Top;
+                class Box #(int N = 4); endclass
+                {items}
+            endmodule"
+        );
+        let Err(error) =
+            Simulator::from_sv_sources(vec![(source.as_str(), Path::new("class.sv"))], "Top")
+                .build_cranelift()
+        else {
+            panic!("`{items}` is rejected");
         };
         let error = error.to_string();
         assert!(want.iter().all(|want| error.contains(want)), "{error}");
@@ -377,6 +502,95 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("done")), 1u8.into());
         assert_eq!(sim.get(sim.signal("errors")), 0u8.into());
     }
+}
+
+#[test]
+fn a_class_of_another_module_does_not_hide_a_package() {
+    let source = "package P; typedef bit [2:0] T; endpackage
+        module Other; class P; typedef int T; endclass endmodule
+        module Top(output int bits); P::T value; assign bits = $bits(value); endmodule";
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("bits")), 3u32.into());
+}
+
+#[test]
+fn type_arguments_keep_their_dimensions_scopes_and_class_scoped_types() {
+    let source = "module Top(output int defs, output int narrow, output int wide);
+        class Defs; typedef bit [7:0] T; endclass
+        class Box #(type T = int);
+            T value;
+            function int bits(); return $bits(value); endfunction
+        endclass
+        Box#(Defs::T) box;
+        for (genvar i = 2; i < 4; i++) begin : g
+            Box#(bit [i:0]) sized;
+            initial begin
+                sized = new;
+                if (i == 2) narrow = sized.bits(); else wide = sized.bits();
+            end
+        end
+        initial begin box = new; defs = box.bits(); end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("defs")), 8u32.into());
+    assert_eq!(sim.get(sim.signal("narrow")), 3u32.into());
+    assert_eq!(sim.get(sim.signal("wide")), 4u32.into());
+    // Arrays of strings of two sizes are two types (IEEE 1800-2023 6.22).
+    let source = "module Top;
+        class Box #(type T = int); endclass
+        typedef string A [2];
+        typedef string B [3];
+        Box#(A) a;
+        Box#(B) b;
+        initial begin b = new; a = b; end
+    endmodule";
+    let Err(error) =
+        Simulator::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top").build_cranelift()
+    else {
+        panic!("handles of two specializations are not assignment compatible");
+    };
+    assert!(error.to_string().contains("a handle of class"), "{error}");
+}
+
+#[test]
+fn specializations_tell_types_apart_and_keep_their_bases() {
+    let source = r#"module Top(output int packed_made, output int unpacked_made, output int width, output int base_n);
+  localparam int K = 2;
+  class Box #(type T = int); static int made; function new(); made++; endfunction endclass
+  typedef bit [1:0] A;
+  typedef bit B [1:0];
+  class Inner #(int N = 1); typedef bit [N:0] T; endclass
+  class Outer #(int N = 1);
+    function int w(); Inner#(N)::T v; return $bits(v); endfunction
+  endclass
+  class Base #(int N = 0); localparam int K = 1; function int n(); return N; endfunction endclass
+  class Derived extends Base#(K); endclass
+  Box#(A) a; Box#(B) b;
+  Outer#(2) o;
+  Derived d;
+  initial begin
+    a = new; b = new; o = new; d = new;
+    packed_made = Box#(A)::made;
+    unpacked_made = Box#(B)::made;
+    width = o.w();
+    base_n = d.n();
+  end
+endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    // `bit [1:0]` and `bit [1:0]` unpacked are two types (IEEE 1800-2023 6.22).
+    assert_eq!(sim.get(sim.signal("packed_made")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("unpacked_made")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("width")), 3u32.into());
+    // `extends Base#(K)` names the module's `K`, not the one `Base` declares.
+    assert_eq!(sim.get(sim.signal("base_n")), 2u32.into());
 }
 
 sv_backends! {

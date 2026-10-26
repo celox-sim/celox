@@ -90,6 +90,23 @@ from successful runs still reach the official assertion evaluator. The official
 runner timeout covers the complete invocation, including all variants.
 Elaboration/parsing cases do not execute variants.
 
+Parameterized classes update fourteen more rows: both state modes for
+`8.5--parameters`, `8.8--typed_constructor_param`,
+`8.25--parametrized_class_extend`, `8.25.1--parametrized_class_scope_resolution`
+and `8.26.3--type_access_implements` change from fail to pass. Each was
+simulated and its displayed values checked, including the parameter that
+`par_cls#()::b` reads and the base constructor argument passed by name in
+`8.8--typed_constructor_param`. The negative
+`8.26.6.2--parameter_type_conflict_unresolved` and
+`8.26.6.3--diamond_relationship_parametrized` probes now fail for the reason
+they test: an interface class inherits `T` from two different interface
+classes or specializations without declaring its own. Full official runs at the
+pinned revision report 1080 passing cases in 2state and 1091 in 4state, with no
+passing case regressing; `8.25.1--parametrized_class_invalid_scope_resolution`
+stays a passing negative case because `par_cls::b` outside the class is
+rejected. `8.5--properties_enum` keeps failing because enumeration constants
+declared in a class are not supported.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.
