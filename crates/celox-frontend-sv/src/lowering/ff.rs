@@ -9,6 +9,7 @@
 //! Expressions are lowered through SLT, which keeps their width and
 //! four-state semantics identical to the combinational lowering.
 
+mod containers;
 mod file_io;
 mod fread;
 mod objects;
@@ -807,6 +808,13 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut assigned = HashSet::default();
         let mut visited = HashSet::default();
         while let Some((callee, args)) = calls.pop() {
+            if let sv::ir::Callee::Object(op) = &callee {
+                assigned.extend(
+                    written_object_arguments(op, &args)
+                        .iter()
+                        .filter_map(|lhs| self.m.id(lhs.name())),
+                );
+            }
             let sv::ir::Callee::Subroutine(name) = callee else {
                 continue;
             };
@@ -867,6 +875,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
         while let Some((callee, args)) = calls.pop() {
+            if let sv::ir::Callee::Object(op) = &callee {
+                for lhs in written_object_arguments(op, &args) {
+                    self.record_target(&lhs, true);
+                }
+            }
             let name = match callee {
                 sv::ir::Callee::System(function) => {
                     use sv::ir::SystemFunction;
@@ -1595,7 +1608,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                 callee: sv::ir::Callee::Object(op),
                 args,
                 ..
-            } => self.object_call(op, args)?,
+            } => match &**op {
+                sv::ir::ObjectOp::Container { op, layout } => {
+                    self.container_call(*op, *layout, args)?
+                }
+                _ => self.object_call(op, args)?,
+            },
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fopen),
                 args,

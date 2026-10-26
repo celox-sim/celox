@@ -296,6 +296,10 @@ pub(in crate::ast) fn bind_value(
                         ));
                     }
                 }
+                if let Some(value) = containers::value(id, native, tree, dimensions, false)? {
+                    values.push(value);
+                    continue;
+                }
                 if let Some(call) = objects::rand_mode_call(tree, id, native, dimensions, false)? {
                     values.push(call);
                     continue;

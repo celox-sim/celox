@@ -120,7 +120,8 @@ impl Deref for AnalysisContext<'_> {
 }
 
 pub use crate::system_functions::{
-    ArrayQuery, Callee, ObjectOp, StringOp, SystemFunction, SystemTask,
+    ArrayQuery, Callee, ContainerKind, ContainerLayout, ContainerOp, ObjectOp, StringOp,
+    SystemFunction, SystemTask,
 };
 use crate::{AnalyzerError, system_functions, typecheck};
 
@@ -162,6 +163,7 @@ mod port_owners;
 mod timing;
 mod type_binding;
 pub(crate) use parameters::unbounded_parameter_marker;
+mod containers;
 mod patterns;
 mod procedural;
 mod scope;
@@ -2127,6 +2129,7 @@ pub enum PortDirection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Type {
+    container: Option<Arc<ContainerType>>,
     is_enum: bool,
     /// Resolved legal values for a scalar enum; None if its domain is unsupported.
     enum_values: Option<Vec<i128>>,
@@ -2140,7 +2143,14 @@ pub struct Type {
     /// 1800-2023 7.4.1).
     signed_element_depth: Option<usize>,
     /// The class of an object handle type.
-    class: Option<String>,
+    class: Option<Arc<str>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ContainerType {
+    key: Option<Type>,
+    layout: system_functions::ContainerLayout,
+    element: Type,
 }
 
 impl Type {
@@ -2155,6 +2165,7 @@ impl Type {
             members: Vec::new(),
             signed_element_depth: None,
             class: None,
+            container: None,
         }
     }
 
@@ -2169,6 +2180,7 @@ impl Type {
             members: Vec::new(),
             signed_element_depth: None,
             class: None,
+            container: None,
         }
     }
 
@@ -2931,6 +2943,7 @@ struct UnpackedDimension {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VariableDimensions {
+    container: Option<Arc<ContainerType>>,
     randomizable: bool,
     enum_values: Option<Vec<i128>>,
     real: bool,

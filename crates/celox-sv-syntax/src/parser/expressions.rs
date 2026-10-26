@@ -1354,6 +1354,15 @@ impl Parser<'_> {
                 }
                 Job::Concat { start, minimum } => {
                     self.expect("{")?;
+                    if self.eat("}") {
+                        self.tail(
+                            &mut jobs,
+                            start,
+                            minimum,
+                            ExprKind::Concatenation(Vec::new()),
+                        )?;
+                        continue;
+                    }
                     if matches!(self.peek(), "<<" | ">>") {
                         let operator = self.peek().to_owned();
                         self.at += 1;

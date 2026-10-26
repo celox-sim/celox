@@ -11,6 +11,7 @@ mod assertions;
 mod control;
 mod final_procedures;
 mod foreach;
+use foreach::ForeachLoop;
 mod randomization;
 pub(super) mod timed_tasks;
 mod timing;
@@ -75,7 +76,9 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
 /// The packed and unpacked shape of a declared type, as selects see it.
 pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
     VariableDimensions {
-        randomizable: !r#type.is_enum || r#type.enum_values.is_some(),
+        container: r#type.container.clone(),
+        randomizable: r#type.container.is_none()
+            && (!r#type.is_enum || r#type.enum_values.is_some()),
         enum_values: r#type.enum_values.clone(),
         real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
         string: matches!(r#type.kind(), TypeKind::String),
@@ -117,6 +120,7 @@ pub(super) fn scoped_type(mut r#type: Type, const_env: &HashMap<String, i128>) -
 /// The `int` type of a loop variable declared by `foreach`.
 pub(super) fn int_type() -> Type {
     Type {
+        container: None,
         is_enum: false,
         enum_values: None,
         kind: TypeKind::Bit,
@@ -504,6 +508,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         native: (celox_sv_syntax::ExprId, celox_sv_syntax::ExprId),
     ) -> Result<Stmt, AnalyzerError> {
         let (left, right) = native;
+        if let Some(mut stmt) =
+            containers::set(left, right, op, nonblocking, self.tree, &self.dims)?
+        {
+            if let Stmt::Eval(expr) = &mut stmt {
+                self.rename_expr(expr);
+            }
+            return Ok(stmt);
+        }
         if let Some(parts) = self.concat_lvalue(left)? {
             if op != "=" {
                 return Err(unsupported("compound assignment to a concatenation"));
@@ -1187,6 +1199,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         root: celox_sv_syntax::ExprId,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
         let native = self.tree.declarations();
+        if let Some(mut value) = containers::value(root, native, self.tree, &self.dims, true)? {
+            self.rename_expr(&mut value);
+            return Ok(vec![Stmt::Eval(value)]);
+        }
         if let celox_sv_syntax::ExprKind::Call {
             expression,
             arguments,
@@ -1555,7 +1571,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         &mut self,
         array: String,
         variables: Vec<Option<String>>,
-    ) -> Result<Vec<(String, i128, i128)>, AnalyzerError> {
+    ) -> Result<Vec<ForeachLoop>, AnalyzerError> {
         let dimensions = self
             .dims
             .get(&array)
@@ -1585,12 +1601,79 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             let right = eval_ast_const_expr(&self.tree.state, right, &self.dims.const_env)
                 .ok_or_else(|| unsupported("foreach bound"))?;
             let name = self.declare(&variable, int_type());
-            loops.push((name, left, right));
+            loops.push(ForeachLoop::Static(name, left, right));
         }
         Ok(loops)
     }
-    fn fold_foreach(loops: Vec<(String, i128, i128)>, mut body: Vec<Stmt>) -> Vec<Stmt> {
-        for (name, left, right) in loops.into_iter().rev() {
+    fn fold_foreach(loops: Vec<ForeachLoop>, mut body: Vec<Stmt>) -> Vec<Stmt> {
+        for bound in loops.into_iter().rev() {
+            let (name, left, right) = match bound {
+                ForeachLoop::Static(name, left, right) => (name, left, right),
+                ForeachLoop::Container {
+                    array,
+                    index,
+                    layout,
+                    status,
+                } => {
+                    let index_expr = Expr::Ident(index.clone());
+                    let (init, condition, step) = if let Some(status) = status {
+                        let call = |op| {
+                            containers::call(op, layout, vec![array.clone(), index_expr.clone()])
+                        };
+                        (
+                            vec![
+                                Stmt::Local {
+                                    name: index,
+                                    init: None,
+                                },
+                                Stmt::Local {
+                                    name: status.clone(),
+                                    init: Some(call(ContainerOp::First)),
+                                },
+                            ],
+                            Expr::Ident(status.clone()),
+                            vec![Stmt::Assign {
+                                lhs: LValue::Ident(status),
+                                rhs: call(ContainerOp::Next),
+                                nonblocking: false,
+                            }],
+                        )
+                    } else {
+                        (
+                            vec![Stmt::Local {
+                                name: index.clone(),
+                                init: Some(Expr::Literal("0".into())),
+                            }],
+                            Expr::Binary {
+                                left: Box::new(index_expr.clone()),
+                                op: BinaryOp::Lt,
+                                right: Box::new(containers::call(
+                                    ContainerOp::Size,
+                                    layout,
+                                    vec![array],
+                                )),
+                            },
+                            vec![Stmt::Assign {
+                                lhs: LValue::Ident(index),
+                                rhs: Expr::Binary {
+                                    left: Box::new(index_expr),
+                                    op: BinaryOp::Add,
+                                    right: Box::new(Expr::Literal("1".into())),
+                                },
+                                nonblocking: false,
+                            }],
+                        )
+                    };
+                    body = vec![Stmt::Loop {
+                        kind: LoopKind::For,
+                        init,
+                        condition: Some(condition),
+                        step,
+                        body,
+                    }];
+                    continue;
+                }
+            };
             let index = Expr::Ident(name.clone());
             let (compare, step) = if left <= right {
                 (BinaryOp::Le, BinaryOp::Add)

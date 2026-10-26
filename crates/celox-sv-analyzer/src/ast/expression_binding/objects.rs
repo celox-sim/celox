@@ -38,7 +38,11 @@ pub(in crate::ast) fn native_class(
         && let ExprKind::Name(name) = &native.expression(ungroup(*expression, native)).kind
     {
         let ty = dimensions.get(&instances::normalize_identifier(&name.spelling))?;
-        return ty.class.clone().filter(|_| !ty.unpacked.is_empty());
+        return ty
+            .container
+            .as_ref()
+            .and_then(|ty| ty.element.class().map(str::to_owned))
+            .or_else(|| ty.class.clone().filter(|_| !ty.unpacked.is_empty()));
     }
     if let ExprKind::Name(name) = &expression.kind {
         let name = instances::normalize_identifier(&name.spelling);
@@ -136,7 +140,7 @@ fn named_class(
             if let Some(aliased) = dimensions
                 .type_aliases
                 .get(&class)
-                .and_then(|ty| ty.class.clone())
+                .and_then(|ty| ty.class().map(str::to_owned))
             {
                 return Ok(Some(aliased));
             }
@@ -176,7 +180,7 @@ fn named_class(
                     .get(&classes::specializations::scope_key(&class))
             })
             .or_else(|| dimensions.type_aliases.get(&name))
-            .and_then(|ty| ty.class.clone())
+            .and_then(|ty| ty.class().map(str::to_owned))
     {
         return Ok(Some(class));
     }
