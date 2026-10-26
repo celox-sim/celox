@@ -1,1 +1,6 @@
-Update the companion PR description to reflect security-only automation rather than routine lockfile maintenance.
+Revision history for #2200:
+
+rev 2 (rebase) 2026-10-26 18:54 UTC — Update the companion PR description to reflect security-only automation rather than routine lockfile maintenance.
+rev 1 (initial) 2026-10-26 18:54 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2200,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"9a2cf904b10869efc5e09639c27920548fc98359","timestamp_iso":"2026-10-26T18:54:55Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"9a2cf904b10869efc5e09639c27920548fc98359","new_sha":"b79fb2822bf4780ca67776148560b5672e6449cf","timestamp_iso":"2026-10-26T18:54:55Z","reason":"Update the companion PR description to reflect security-only automation rather than routine lockfile maintenance.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/9a2cf904b10869efc5e09639c27920548fc98359...b79fb2822bf4780ca67776148560b5672e6449cf"}]} -->
