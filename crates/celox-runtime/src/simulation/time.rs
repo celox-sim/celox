@@ -299,7 +299,10 @@ impl<B: SimBackend> SimulationState<B> {
         if self.finished {
             return None;
         }
-        if !self.process_state.ready.is_empty() || !self.process_state.reactive.is_empty() {
+        if self.finalizing.is_some()
+            || !self.process_state.ready.is_empty()
+            || !self.process_state.reactive.is_empty()
+        {
             return Some(self.scheduler.time);
         }
         let process = self.process_wakeups.peek().map(|&Reverse((time, _))| time);

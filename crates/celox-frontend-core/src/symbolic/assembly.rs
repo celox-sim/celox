@@ -1995,7 +1995,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .collect();
     let declaration_startup = processes
         .iter()
-        .any(|process| process.slots.is_initializer)
+        .any(|process| process.slots.kind == celox_design::ProcessKind::Initializer)
         .then(|| {
             let targets: BTreeSet<_> = folded_initials.iter().map(|init| init.address).collect();
             let mut reset = targets

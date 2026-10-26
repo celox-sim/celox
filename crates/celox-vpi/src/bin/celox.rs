@@ -288,6 +288,9 @@ fn simulate_sv<B: celox::SimBackend>(
         saves.after_step(&mut simulation)?;
         steps += 1;
     }
+    let finished = simulation.finish();
+    drain_sv_output(&mut simulation, output, &mut failed)?;
+    finished.map_err(|error| error.to_string())?;
     saves.finish(&mut simulation)?;
     if failed {
         return Err("SystemVerilog testbench reported an assertion failure or $error".to_string());
@@ -1164,8 +1167,7 @@ mod tests {
     #[cfg(feature = "systemverilog")]
     #[test]
     fn sv_scheduler_limit_fails_and_preserves_scheduled_output() {
-        let source =
-            "module Top(input bit clk); always @(posedge clk) $display(\"tick\"); endmodule";
+        let source = "module Top(input bit clk); always @(posedge clk) $display(\"tick\"); final $display(\"finalized\"); endmodule";
         let mut simulation =
             celox::Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
                 .build()
@@ -1174,7 +1176,28 @@ mod tests {
         let mut output = Vec::new();
         let error = simulate_sv(simulation, 3, StateSaves::default(), &mut output).unwrap_err();
         assert!(error.contains("exceeded --max-steps 3"));
-        assert!(String::from_utf8(output).unwrap().contains("tick"));
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("tick"));
+        assert!(!output.contains("finalized"));
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn sv_batch_runs_final_output_on_quiescence_and_finish() {
+        for ending in ["", "$finish;"] {
+            let source = format!(
+                "module Top; int value; initial begin value=42; {ending} end final $display(\"final=%0d\", value); endmodule"
+            );
+            let simulation = celox::Simulation::from_sv_sources(
+                vec![(source.as_str(), Path::new("top.sv"))],
+                "Top",
+            )
+            .build()
+            .unwrap();
+            let mut output = Vec::new();
+            simulate_sv(simulation, 10, StateSaves::default(), &mut output).unwrap();
+            assert_eq!(String::from_utf8(output).unwrap(), "final=42\n");
+        }
     }
 
     /// Only `$error` and `$fatal` fail a run; every report is printed with

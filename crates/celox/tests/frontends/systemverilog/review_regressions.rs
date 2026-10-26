@@ -5487,14 +5487,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "final construct",
-            r#"
-            module Top(input logic done);
-                final assert (done);
-            endmodule
-        "#,
-        ),
-        (
             "non-ANSI port expressions",
             r#"
             module Top({y, z}); output y, z; assign y = 1'b1; assign z = 1'b0; endmodule

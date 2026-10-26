@@ -1465,6 +1465,8 @@ pub enum Body {
     /// `always`, `always_comb`, or `always_ff`.
     Always,
     Initial,
+    /// A final procedure, restricted to function statements (9.2.3).
+    Final,
     /// A function or task.
     Subroutine,
 }

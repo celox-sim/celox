@@ -113,6 +113,8 @@ mod edges;
 mod file_core;
 #[path = "frontends/systemverilog/file_io.rs"]
 mod file_io;
+#[path = "frontends/systemverilog/final.rs"]
+mod final_procedures;
 #[path = "frontends/systemverilog/generate.rs"]
 mod generate;
 #[path = "frontends/systemverilog/hierarchical_references.rs"]

@@ -295,7 +295,10 @@ fn comb_process_from_procedure(
     parameter_literals: &HashMap<String, Expr>,
     state: &mut procedural::BodyState<'_>,
 ) -> Result<Option<CombProcess>, AnalyzerError> {
-    if procedure.kind == celox_sv_syntax::ProcedureKind::Initial {
+    if matches!(
+        procedure.kind,
+        celox_sv_syntax::ProcedureKind::Initial | celox_sv_syntax::ProcedureKind::Final
+    ) {
         return Ok(None);
     }
     let Some(body) = always_comb_body(procedure, syntax_tree.declarations())? else {
