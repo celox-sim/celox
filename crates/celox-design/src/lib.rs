@@ -1072,10 +1072,11 @@ pub struct RuntimeSchema<A> {
 /// A combinational settle split into partitions that run only when state
 /// they read changed since they last ran.
 ///
-/// Byte `p` of `flags` is partition `p`'s dirty flag; the byte after the
+/// Byte `p` of `flags` is partition `p`'s dirty flag. The byte after the
 /// last partition's is the untracked byte, set once state may change
 /// without anyone setting flags (a retained raw view), after which every
-/// partition always runs.
+/// partition always runs. The next one says whether the current settle runs
+/// every partition, decided at its start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettlePartitions<A> {
     pub flags: A,
