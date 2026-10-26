@@ -10,6 +10,8 @@ edition.workspace     = true
 rust-version.workspace = true
 
 [dependencies]
+celox-heap = { workspace = true }
+
 celox-design = { workspace = true }
 celox-sv-syntax = { workspace = true }
 fxhash    = { workspace = true }

@@ -12,6 +12,7 @@ use std::rc::Rc;
 use super::*;
 use crate::system_functions::{HandleProperty, ObjectField, ObjectOp};
 
+mod constraints;
 pub(super) mod specializations;
 
 /// Bit width of a handle, see `celox_design::HANDLE_WIDTH`.
@@ -131,6 +132,7 @@ pub(super) struct Class {
     /// Bytes of an object.
     pub size: u32,
     pub has_constraints: bool,
+    pub constraints: Vec<(String, Result<Vec<celox_heap::randomization::Expr>, String>)>,
 }
 
 /// An internal unsigned packed argument of a generated method.
@@ -152,7 +154,7 @@ impl Class {
     /// Validate the supported unconstrained subset before binding a call.
     pub fn check_randomize(&self) -> Converted<()> {
         if self.has_constraints {
-            return Err(unsupported("class randomize with constraints"));
+            self.constraint_program()?;
         }
         for property in &self.properties {
             if property.randc && property.cyclic_domain_size().is_none() {
@@ -860,9 +862,29 @@ pub(super) fn class(
             method.name
         )));
     }
+    let mut constraints = base
+        .as_ref()
+        .map(|base| base.constraints.clone())
+        .unwrap_or_default();
+    for block in &declaration.constraints {
+        let block_name = block.name.spelling.clone();
+        constraints.retain(|(name, _)| *name != block_name);
+        let expressions = block
+            .expressions
+            .as_ref()
+            .ok_or_else(|| "unsupported constraint block form".to_owned())
+            .and_then(|expressions| {
+                expressions
+                    .iter()
+                    .map(|&id| constraints::bind(id, tree, &properties, env))
+                    .collect()
+            });
+        constraints.push((block_name, expressions));
+    }
     let class = Rc::new(Class {
         name: name.to_owned(),
         id: class_id(tree, name),
+        constraints,
         has_constraints: declaration.has_constraints
             || base.as_ref().is_some_and(|base| base.has_constraints),
         base: base.map(|base| base.name.clone()),
@@ -988,6 +1010,7 @@ fn interface_class(
         is_abstract: true,
         is_interface: true,
         has_constraints: false,
+        constraints: Vec::new(),
         properties: Vec::new(),
         base_properties: 0,
         statics: Vec::new(),

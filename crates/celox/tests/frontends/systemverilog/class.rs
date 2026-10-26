@@ -381,7 +381,7 @@ sv_backends! {
 }
 
 sv_backends! {
-    fn class_randomize_rejects_dynamic_base_handle(sim) {
+    fn class_randomize_rejects_unsupported_dynamic_constraints(sim) {
         @setup {
             let source = r#"module Top(output int value, hooks, result);
                 class Base;
@@ -391,7 +391,7 @@ sv_backends! {
                     function void post_randomize(); calls++; endfunction
                 endclass
                 class Derived extends Base;
-                    constraint c { x == 1; }
+                    constraint c { x dist {1 := 2}; }
                 endclass
                 Base b;
                 Derived d;
@@ -922,4 +922,13 @@ sv_backends! {
         sim.run_until(15).unwrap();
         assert_eq!(sim.get_four_state(value), expected);
     }
+}
+
+sv_backends! {
+    fn constrained_randomize_scalar(sim) { @case "class::constrained_randomize_scalar"; }
+    fn constrained_randomize_width_and_inheritance(sim) { @case "class::constrained_randomize_width_and_inheritance"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_hooks(sim) { @case "class::constrained_randomize_hooks"; }
 }

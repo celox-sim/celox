@@ -345,6 +345,16 @@ records the native-runner result; the case stays enabled on all Celox backends.
 
 ## SystemVerilog suite
 
+The scalar class-constraint cases are rejected by Icarus 13.0 because constraint
+blocks are unsupported. Verilator 5.052 passes the scalar modes and mixed-width
+inheritance cases, but calls `post_randomize` even when ordinary `randomize`
+returns failure. IEEE 1800-2023 18.6.3 requires skipping that hook. The focused
+`class::constrained_randomize_hooks` assertion stays enabled in Celox and is
+excluded only for Verilator. [Recorded diagnostics](verification/repros/sv_scalar_constraints.json)
+retain both tool limitations; reproduce with `--include-ignored --filter
+class::constrained_randomize`.
+
+
 Verilator 5.052 rejects a string variable or string method expression as the
 `$sscanf` format, requiring a literal instead. IEEE 1800-2023 21.3.4.3 permits
 string expressions here. Only `scan::sscanf_string_format_expression` is
