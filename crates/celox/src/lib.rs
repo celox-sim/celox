@@ -119,7 +119,7 @@ mod host_api {
     pub use crate::debug::CompilationTraceResult;
     pub use crate::diagnostics::DiagnosticsOptions;
     pub use crate::simulation::{
-        CheckpointFileError, Simulation, SimulationCheckpoint, SlotObserver,
+        CheckpointFileError, Simulation, SimulationCheckpoint, SlotObserver, SourceWaveformState,
     };
     #[cfg(any(
         target_arch = "x86_64",

@@ -69,7 +69,7 @@ mod host {
     };
     use num_bigint::BigUint;
 
-    #[derive(Default)]
+    #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
     pub(crate) struct SvVcdControl {
         pub path: Option<std::path::PathBuf>,
         pub started: Option<u64>,

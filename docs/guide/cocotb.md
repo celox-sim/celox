@@ -80,6 +80,71 @@ safe point while preserving pending events. For example:
 celox run test/Top.sv --top Top --backend tiered --threads 4
 ```
 
+### Signal checkpoints
+
+On Unix, `celox run` installs a `SIGUSR1` handler by default for SystemVerilog.
+After the `SIGUSR1 checkpoint ready` message, request a checkpoint with:
+
+```sh
+kill -USR1 "$sim_pid"
+celox run top.sv --top Top --restore-checkpoint "signal-${sim_pid}-1.checkpoint"
+```
+
+The signal handler only sets a flag. At the next complete simulation time step,
+the CLI saves its **system checkpoint** and continues running. Requests arriving
+before that boundary coalesce; blocking host I/O and a non-advancing time slot
+are not interrupted. Files are `signal-<PID>-<N>.checkpoint` in
+`--save-state-dir` (the current directory by default). Publication is atomic and
+never overwrites an existing file. Save failures are reported on stderr and do
+not terminate the run. Use `--no-checkpoint-on-signal` to disable the handler.
+
+The CLI container combines core execution state with its file-effect handler
+state, source-driven waveform controls, and the CLI's accumulated assertion/error
+outcome. A run that already reported a failure remains failed after resume.
+The container also retains pending scheduled-save requests, the counted signal,
+cycle count and its previous level. Resume uses that saved schedule, including
+when the original `--save-state-at*` flags are repeated or omitted; it does not
+reissue consumed requests or restart cycle numbering. `--save-state-dir` and
+signal-handler registration come from the resumed invocation. Restore builds the target with
+declaration and combinational initialization deferred, so it does not repeat
+initialization effects before installing the checkpoint.
+
+The handler keeps a disk-backed working view of files encountered by the
+run, preserving file contents, handle positions, EOF and scan lookahead across
+restore. Writes publish that working view to the requested host path immediately.
+Restore reconstructs the saved working view without undoing already delivered
+external output; subsequent writes publish the restored branch's contents.
+Closed working files retain their disk contents without retaining OS descriptors;
+operations reopen them temporarily. Active output streams retain their host
+handle until close, so renaming or unlinking a file does not redirect ordinary
+writes. After restore, output streams reconnect to their recorded paths lazily;
+OS handles themselves are not persisted. Working files are keyed by normalized paths
+(absolute paths with existing symlinks resolved). Different paths, including hard
+links to the same host file, have independent working views. The caller is
+responsible for coordinating such aliases; the CLI does not infer file identity.
+A write-only append target does not require read permission: its inaccessible existing prefix
+stays external, while appended bytes and positions are checkpointed. Resuming
+retains that prefix and replaces only the known suffix on the next write; the
+host prefix must still exist and be at least as long as when captured.
+Standard streams, named pipes and devices remain live external channels. Their already consumed input
+and delivered output are not rewound. No handler state enters the core checkpoint.
+
+Source-driven `$dumpfile`/`$dumpvars` recording resumes in a new, uniquely named
+`<original-name>.resume-<id>.vcd` beside the original file; the CLI reports its path.
+The original trace is neither truncated nor appended to. Each segment has its own
+header and starts at the restored time with the saved signal selections and
+`$dumpoff`/`$dumpon` state. `$dumplimit` retains its configured per-file limit with
+a fresh byte budget for the new segment. Later dump controls continue to work.
+Waveform configuration lives in the CLI container, not the core checkpoint.
+Rust hosts can compose `source_waveform_state()` with their core checkpoint and
+use `restore_source_waveform()` to supply their own new output file.
+
+Resume with the same sources, top, options and a compatible Celox build.
+`--restore-checkpoint` loads a trusted artifact, like a native image; do not use
+it on files from an untrusted producer. This resumes the CLI simulation, not
+VPI plugins or Python coroutines. Scheduled `.state` saves below remain the
+portable inspection format.
+
 ### Save state files during a SystemVerilog run
 
 To compare two runs or two simulators, `celox run` can save
