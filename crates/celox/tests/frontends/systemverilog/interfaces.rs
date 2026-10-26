@@ -1,6 +1,9 @@
 use super::*;
 
 sv_backends! {
+    fn defers_interface_dependent_declarations_before_binding_array_ports(sim) {
+        @case "interfaces::defers_interface_dependent_declarations_before_binding_array_ports";
+    }
     fn connects_interface_array_slices_in_declaration_order(sim) {
         @case "interfaces::connects_interface_array_slices_in_declaration_order";
     }
