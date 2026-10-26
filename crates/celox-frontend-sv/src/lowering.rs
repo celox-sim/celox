@@ -46,7 +46,7 @@ mod procedural;
 
 type RegionedVarAddr = RegionedVarAddrBase<SourceVarId>;
 type GlueBlock = GlueBlockBase<SourceVarId>;
-const MAX_SV_SPECIALIZATIONS_PER_MODULE: usize = 64;
+const MAX_SV_RECURSIVE_SPECIALIZATIONS: usize = 64;
 /// The name of a module's [`SimModule::time_slot`].
 const TIME_SLOT: &str = "$time";
 
@@ -2268,7 +2268,7 @@ fn prepare_external_hierarchy_collecting(
     names.sort();
 
     let mut module_ids = HashMap::default();
-    let mut module_specialization_counts = HashMap::default();
+    let mut specialization_parents = HashMap::default();
     let mut queue = Vec::new();
     let mut requested_roots = HashMap::default();
     for name in names {
@@ -2309,7 +2309,6 @@ fn prepare_external_hierarchy_collecting(
         }
         let module_id = ModuleId(module_ids.len());
         module_ids.insert(key.clone(), module_id);
-        module_specialization_counts.insert(name.clone(), 1usize);
         queue.push(key);
     }
 
@@ -2374,7 +2373,6 @@ fn prepare_external_hierarchy_collecting(
                 if !module_ids.contains_key(&dependency) {
                     let id = ModuleId(module_ids.len());
                     module_ids.insert(dependency.clone(), id);
-                    module_specialization_counts.insert(name.clone(), 1);
                     queue.push(dependency);
                 }
             }
@@ -2400,13 +2398,7 @@ fn prepare_external_hierarchy_collecting(
                 continue;
             }
             if !module_ids.contains_key(&child_key) {
-                let specialization_count = module_specialization_counts
-                    .entry(child_key.name.clone())
-                    .or_insert(0);
-                if *specialization_count >= MAX_SV_SPECIALIZATIONS_PER_MODULE {
-                    return Err(sv_specialization_limit_error(child_key.name.clone()).into());
-                }
-                *specialization_count += 1;
+                register_specialization_parent(&child_key, &key, &mut specialization_parents)?;
                 let child_id = ModuleId(module_ids.len());
                 module_ids.insert(child_key.clone(), child_id);
                 queue.push(child_key);
@@ -2885,8 +2877,7 @@ fn schedule_sources_collecting(
     let root_id = ModuleId(0);
     let mut module_ids = HashMap::default();
     module_ids.insert(root_key.clone(), root_id);
-    let mut module_specialization_counts = HashMap::default();
-    module_specialization_counts.insert(root_key.name.clone(), 1usize);
+    let mut specialization_parents = HashMap::default();
     let mut queue = vec![root_key.clone()];
     let mut index = 0;
     let mut elaborated = HashMap::default();
@@ -2923,13 +2914,7 @@ fn schedule_sources_collecting(
                 return Err(unsupported_sv_instance(child_key.name.clone()).into());
             }
             if !module_ids.contains_key(&child_key) {
-                let specialization_count = module_specialization_counts
-                    .entry(child_key.name.clone())
-                    .or_insert(0);
-                if *specialization_count >= MAX_SV_SPECIALIZATIONS_PER_MODULE {
-                    return Err(sv_specialization_limit_error(child_key.name.clone()).into());
-                }
-                *specialization_count += 1;
+                register_specialization_parent(&child_key, &key, &mut specialization_parents)?;
                 let child_id = ModuleId(module_ids.len());
                 module_ids.insert(child_key.clone(), child_id);
                 queue.push(child_key);
@@ -3208,6 +3193,29 @@ fn restore_interface_member_paths(module: &mut SimModule, source: &AnalyzedSvMod
             })
             .collect();
     }
+}
+
+/// Bound parameter-changing recursion along one instantiation path. Independent
+/// siblings may have any number of distinct parameter specializations. Repeated
+/// identical keys are handled by the hierarchy cycle checks.
+fn register_specialization_parent(
+    child: &LoweredSvModuleKey,
+    parent: &LoweredSvModuleKey,
+    parents: &mut HashMap<LoweredSvModuleKey, LoweredSvModuleKey>,
+) -> Result<(), ParserError> {
+    let mut ancestor = Some(parent);
+    let mut occurrences = 1usize;
+    while let Some(key) = ancestor {
+        if key.name == child.name {
+            occurrences += 1;
+            if occurrences > MAX_SV_RECURSIVE_SPECIALIZATIONS {
+                return Err(sv_specialization_limit_error(child.name.clone()));
+            }
+        }
+        ancestor = parents.get(key);
+    }
+    parents.insert(child.clone(), parent.clone());
+    Ok(())
 }
 
 fn sv_specialization_limit_error(name: String) -> ParserError {
