@@ -54,7 +54,7 @@ pub fn named(v: &Value) -> Res<&serde_json::Map<String, Value>> {
     }
     Ok(o)
 }
-pub type Env = BTreeMap<String, Term>;
+pub use aplite::Env;
 #[derive(Default)]
 pub struct Lower {
     pub rules: BTreeMap<String, u64>,

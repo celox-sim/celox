@@ -43,3 +43,7 @@ LYDITE_SOLVER=finite ../target/release/lydite audit/lemma_candidates/counter.lyd
 The Rust translation, obligation generation, kernel and selected solver are trusted;
 see the [trust boundary](docs/trust.md). Current results come from
 [CI](../.github/workflows/lydite-checks.yml), not archived reports.
+
+The in-process finite backend is [Aplite](../crates/aplite/README.md), a separately
+versioned workspace crate. Lydite retains proof construction and orchestration;
+its existing `lydite_solver::finite` API re-exports the Aplite implementation.
