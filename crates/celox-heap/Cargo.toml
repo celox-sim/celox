@@ -10,6 +10,7 @@ edition.workspace     = true
 rust-version.workspace = true
 
 [dependencies]
+serde = { workspace = true, features = ["rc"] }
 fxhash = { workspace = true }
 
 [lints]

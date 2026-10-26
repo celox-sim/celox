@@ -311,7 +311,7 @@ pub(super) fn wake_in_region(
 }
 
 /// What one term of a waiting process compares against.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Baseline {
     /// The counter's value when the wait began, and the signal's value at
     /// the last check. Only kernels and combinational process units count a
@@ -330,7 +330,7 @@ pub enum Baseline {
 }
 
 /// A process suspended at a wait.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Waiter {
     pub site: usize,
     pub baselines: Vec<Baseline>,
@@ -338,7 +338,7 @@ pub struct Waiter {
 
 /// The processes suspended at a wait, by process index. A slot keeps its
 /// storage while its process runs, so suspending again reuses it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Waiters {
     slots: Vec<Waiter>,
     waiting: Vec<bool>,

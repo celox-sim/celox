@@ -129,6 +129,65 @@ pub struct StateSchema {
 }
 
 impl StateSchema {
+    pub(crate) fn from_design<'a, B: SimBackend>(
+        backend: &B,
+        design: &crate::ir::RuntimeDesign,
+        is_comb: impl Fn(&crate::AbsoluteAddr) -> bool,
+        time_slots: impl Iterator<Item = &'a crate::AbsoluteAddr>,
+    ) -> Self {
+        let time_slots: crate::HashSet<_> = time_slots.collect();
+        // Build-specific partitioned-settle flags are recomputed on load.
+        let settle_flags = backend
+            .layout()
+            .settle
+            .as_ref()
+            .map(|settle| settle.flags_offset);
+        let mut objects: Vec<_> = backend
+            .layout()
+            .offsets
+            .keys()
+            .filter(|address| !time_slots.contains(address))
+            .filter(|address| Some(backend.layout().offsets[*address]) != settle_flags)
+            .map(|&address| (design.get_path(&address), address))
+            .collect();
+        objects.sort_unstable();
+        let mut named = Vec::with_capacity(objects.len());
+        let mut index = 0;
+        while index < objects.len() {
+            let path = &objects[index].0;
+            let end = objects[index..]
+                .iter()
+                .position(|(other, _)| other != path)
+                .map_or(objects.len(), |offset| index + offset);
+            for (ordinal, (path, address)) in objects[index..end].iter().enumerate() {
+                named.push(NamedObject {
+                    path: if end - index == 1 {
+                        path.clone()
+                    } else {
+                        format!("{path}#{ordinal}")
+                    },
+                    signal: backend.resolve_signal(address),
+                    role: if is_comb(address) {
+                        StateRole::Comb
+                    } else {
+                        StateRole::State
+                    },
+                    strings: design.state_objects.get(address).is_some_and(|metadata| {
+                        metadata.value_kind == celox_design::ValueKind::StrRef
+                    }),
+                    objects: design.state_objects.get(address).is_some_and(|metadata| {
+                        metadata.value_kind == celox_design::ValueKind::ObjRef
+                    }),
+                });
+            }
+            index = end;
+        }
+        StateSchema {
+            four_state: backend.layout().four_state,
+            objects: named,
+        }
+    }
+
     /// Save the value of every state object of `backend` as last evaluated.
     ///
     /// Fails if a variable holds a class object.
@@ -300,7 +359,9 @@ impl<B: SimBackend> Simulator<B> {
     /// Save the value of every state object, by path.
     ///
     /// Combinational values are settled first, so the file shows the values
-    /// a read would return.
+    /// a read would return. Unlike [`Self::checkpoint`], this portable format
+    /// does not include a host filesystem snapshot. File/VCD designs can be
+    /// saved for inspection, but loading them is rejected.
     pub fn save_state(&mut self) -> Result<StateFile, StateError> {
         self.prepare_save_state()?;
         self.state_schema().capture(&self.backend)
@@ -309,7 +370,6 @@ impl<B: SimBackend> Simulator<B> {
     /// Validate support and settle before a timed owner synchronizes termination.
     /// Capture must follow that synchronization, since final procedures can write state.
     pub(crate) fn prepare_save_state(&mut self) -> Result<(), StateError> {
-        self.check_host_checkpoint_support()?;
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents.into());
         }
@@ -343,6 +403,7 @@ impl<B: SimBackend> Simulator<B> {
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents.into());
         }
+        self.check_host_restore_support()?;
         // Evaluating the loaded state can still fail (an oscillating
         // combinational loop), so keep the current state to return to.
         let previous = self.checkpoint()?;
@@ -379,76 +440,16 @@ impl<B: SimBackend> Simulator<B> {
     /// Name the state objects: the hierarchical path, followed by `#n` when
     /// several objects share it.
     fn build_state_schema(&self) -> StateSchema {
-        let comb_writes = &self.program.runtime_schema.comb_writes;
-        // A timed simulation stores its time into the time slots, and a state
-        // file keeps the time in its schedule; an untimed one reads zero.
-        // A compiled scheduler's slots hold nothing between runs, and the
-        // flags of a partitioned settle describe how this build settles,
-        // not the design: loading state sets them.
-        let time_slots: crate::HashSet<_> = self
-            .program
-            .runtime_schema
-            .time_slots
-            .iter()
-            .chain(
-                self.program
-                    .runtime_schema
-                    .scheduler
-                    .iter()
-                    .flat_map(|scheduler| scheduler.slots.iter()),
-            )
-            .collect();
-        let settle_flags = self
-            .backend
-            .layout()
-            .settle
-            .as_ref()
-            .map(|settle| settle.flags_offset);
-        let mut objects: Vec<_> = self
-            .backend
-            .layout()
-            .offsets
-            .keys()
-            .filter(|address| !time_slots.contains(address))
-            .filter(|address| Some(self.backend.layout().offsets[*address]) != settle_flags)
-            .map(|&address| (self.program.get_path(&address), address))
-            .collect();
-        objects.sort_unstable();
-        let mut named = Vec::with_capacity(objects.len());
-        let mut index = 0;
-        while index < objects.len() {
-            let path = &objects[index].0;
-            let end = objects[index..]
+        let schema = &self.program.runtime_schema;
+        StateSchema::from_design(
+            &self.backend,
+            &self.program.design,
+            |address| schema.comb_writes.contains(address),
+            schema
+                .time_slots
                 .iter()
-                .position(|(other, _)| other != path)
-                .map_or(objects.len(), |offset| index + offset);
-            for (ordinal, (path, address)) in objects[index..end].iter().enumerate() {
-                named.push(NamedObject {
-                    path: if end - index == 1 {
-                        path.clone()
-                    } else {
-                        format!("{path}#{ordinal}")
-                    },
-                    signal: self.backend.resolve_signal(address),
-                    role: if comb_writes.contains(address) {
-                        StateRole::Comb
-                    } else {
-                        StateRole::State
-                    },
-                    strings: self.program.design.state_objects.get(address).is_some_and(
-                        |metadata| metadata.value_kind == celox_design::ValueKind::StrRef,
-                    ),
-                    objects: self.program.design.state_objects.get(address).is_some_and(
-                        |metadata| metadata.value_kind == celox_design::ValueKind::ObjRef,
-                    ),
-                });
-            }
-            index = end;
-        }
-        StateSchema {
-            four_state: self.backend.layout().four_state,
-            objects: named,
-        }
+                .chain(schema.scheduler.iter().flat_map(|s| s.slots.iter())),
+        )
     }
 
     /// Express a schedule by event and signal names.

@@ -11,6 +11,8 @@ use celox_runtime::{
     UnitExecutor, host_watch,
 };
 
+mod checkpoint_file;
+pub use checkpoint_file::CheckpointFileError;
 mod differential;
 mod vcd_tasks;
 
@@ -479,6 +481,8 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     /// Save the design state, simulation time, clocks and pending events.
+    /// Effect-handler state (including file I/O and VPI) is excluded. The host
+    /// system coordinates its own handler snapshots with this core checkpoint.
     pub fn checkpoint(&self) -> Result<SimulationCheckpoint<B>, CheckpointError> {
         if self.state.is_suspended() {
             return Err(CheckpointError::Stopped);
@@ -488,6 +492,27 @@ impl<B: SimBackend> Simulation<B> {
             schedule: self.state.snapshot(),
             host_writes: self.simulator.host_watch.log().to_vec(),
         })
+    }
+
+    /// File-I/O effect state owned by the embedding system, outside core checkpoints.
+    pub fn file_io(&self) -> &celox_runtime::file_io::FileIo {
+        self.simulator.file_io()
+    }
+
+    /// Install a host-prepared file-I/O handler at an execution boundary.
+    pub fn replace_file_io(&mut self, file_io: celox_runtime::file_io::FileIo) {
+        self.simulator.replace_file_io(file_io);
+    }
+
+    /// The schema used for diagnostic HDL captures, including observer callbacks.
+    pub fn state_schema(&self) -> std::sync::Arc<crate::StateSchema> {
+        self.simulator.state_schema()
+    }
+
+    /// Capture current HDL values without settling or advancing time. The file
+    /// has no schedule and cannot resume a timed simulation or a VPI session.
+    pub fn capture_state(&self) -> Result<celox_runtime::StateFile, StateError> {
+        self.state_schema().capture(&self.simulator.backend)
     }
 
     /// Save the value of every state object by path, together with the
@@ -563,7 +588,8 @@ impl<B: SimBackend> Simulation<B> {
                     .filter(|local| local.addr() == event.addr())
             })
             .map_err(|_| CheckpointError::DesignMismatch)?;
-        self.simulator.restore(&checkpoint.simulator)?;
+        self.simulator
+            .restore_checkpoint_prepared(&checkpoint.simulator)?;
         self.state.retain_activation_roots(&mut self.simulator);
         self.simulator.declaration_phase = false;
         self.simulator

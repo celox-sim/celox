@@ -253,19 +253,20 @@ impl<B: SimBackend> Simulator<B> {
                         )
                     })
                     .collect();
-                celox_runtime::file_io::FileIo::write_memory(
-                    path,
-                    site.operation == 5,
-                    words.iter().map(|(value, mask)| DisplayFormatArg {
-                        value,
-                        mask: Some(mask),
-                        width,
-                        signed: false,
-                        is_string: false,
-                        float_precision: None,
-                    }),
-                )
-                .map_err(|err| error(format!("$writemem: {err}")))?;
+                self.file_io
+                    .write_memory_with_backend(
+                        path,
+                        site.operation == 5,
+                        words.iter().map(|(value, mask)| DisplayFormatArg {
+                            value,
+                            mask: Some(mask),
+                            width,
+                            signed: false,
+                            is_string: false,
+                            float_precision: None,
+                        }),
+                    )
+                    .map_err(|err| error(format!("$writemem: {err}")))?;
             }
             _ => return Err(error("unknown file I/O request".into())),
         }

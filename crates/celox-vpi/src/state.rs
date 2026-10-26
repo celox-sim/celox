@@ -29,6 +29,8 @@ pub(crate) trait VpiState {
         self.image().signal_identity(id)
     }
 
+    fn save_state(&self) -> Result<celox::StateFile, String>;
+
     /// The stored value, without settling the design.
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint);
 
@@ -46,6 +48,10 @@ pub(crate) trait VpiState {
 }
 
 impl VpiState for NativeProgramInstance {
+    fn save_state(&self) -> Result<celox::StateFile, String> {
+        NativeProgramInstance::save_state(self).map_err(|error| error.to_string())
+    }
+
     fn image(&self) -> &NativeProgramImage {
         self.program_image()
     }
@@ -77,6 +83,7 @@ impl VpiState for NativeProgramInstance {
 /// entry points that its slot observer's callbacks call reach the state
 /// through `slot`, which the observer sets for the duration of a dispatch.
 pub(crate) struct TimedRuntime {
+    schema: std::sync::Arc<celox::StateSchema>,
     image: NativeProgramImage,
     pub(crate) simulation: Option<Simulation<NativeBackend>>,
     slot: Option<*mut SlotIo<'static, NativeBackend>>,
@@ -87,6 +94,7 @@ pub(crate) struct TimedRuntime {
 impl TimedRuntime {
     pub(crate) fn new(image: NativeProgramImage, simulation: Simulation<NativeBackend>) -> Self {
         Self {
+            schema: simulation.state_schema(),
             image,
             simulation: Some(simulation),
             slot: None,
@@ -141,6 +149,19 @@ impl TimedRuntime {
 }
 
 impl VpiState for TimedRuntime {
+    fn save_state(&self) -> Result<celox::StateFile, String> {
+        if let Some(slot) = self.slot() {
+            slot.capture_state(&self.schema)
+                .map_err(|error| error.to_string())
+        } else if let Some(simulation) = &self.simulation {
+            simulation
+                .capture_state()
+                .map_err(|error| error.to_string())
+        } else {
+            Err("VPI runtime is executing; capture at a callback boundary".into())
+        }
+    }
+
     fn image(&self) -> &NativeProgramImage {
         &self.image
     }
@@ -201,6 +222,10 @@ pub(crate) enum Runtime {
 }
 
 impl Runtime {
+    pub(crate) fn save_state(&self) -> Result<celox::StateFile, String> {
+        self.state().save_state()
+    }
+
     pub(crate) fn state(&self) -> &dyn VpiState {
         match self {
             Runtime::Untimed(instance) => instance,

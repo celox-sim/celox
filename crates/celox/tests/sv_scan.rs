@@ -73,7 +73,7 @@ backend!(wasm, build_wasm);
 backend!(native, build_native);
 
 #[test]
-fn fscanf_preserves_mismatch_lookahead_and_rejects_checkpoint() {
+fn fscanf_preserves_mismatch_lookahead_and_allows_checkpoint() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("input.txt");
     std::fs::write(&path, b"12 34Q 7").unwrap();
@@ -99,9 +99,8 @@ fn fscanf_preserves_mismatch_lookahead_and_rejects_checkpoint() {
             let signal = simulation.signal(name);
             assert_eq!(simulation.get(signal), value.into(), "{name}");
         }
-        assert!(
-            format!("{:?}", simulation.checkpoint().unwrap_err()).contains("ExternalSystemTasks")
-        );
+        simulation.checkpoint().unwrap();
+        simulation.save_state().unwrap();
     }
     let build = || Simulation::from_sv_sources(vec![(&source, Path::new("scan.sv"))], "Top");
     check(build().build_interpreter().unwrap());
@@ -151,7 +150,7 @@ fn rejected_formats_are_explicit() {
 }
 
 #[test]
-fn fscanf_on_standard_input_rejects_snapshots_before_execution() {
+fn fscanf_on_standard_input_allows_snapshots_before_execution() {
     let source = r#"module Top; int n, value;
         initial begin #1; n = $fscanf(32'h80000000, "%d", value); end
     endmodule"#;
@@ -159,6 +158,6 @@ fn fscanf_on_standard_input_rejects_snapshots_before_execution() {
         Simulation::from_sv_sources(vec![(source, Path::new("scan_stdin.sv"))], "Top")
             .build_interpreter()
             .unwrap();
-    assert!(format!("{:?}", simulation.checkpoint().unwrap_err()).contains("ExternalSystemTasks"));
-    assert!(simulation.save_state().is_err());
+    simulation.checkpoint().unwrap();
+    simulation.save_state().unwrap();
 }

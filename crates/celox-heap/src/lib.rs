@@ -35,7 +35,7 @@ pub const EMPTY_STRING: Handle = 0;
 const MIN_COLLECTION_INTERVAL: usize = 1024;
 
 /// What a handle refers to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum HandleKind {
     String,
     Object,
@@ -65,7 +65,7 @@ impl Root {
 }
 
 /// Dynamic strings and class objects referenced by [`Handle`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Heap {
     strings: HashMap<Handle, Arc<[u8]>>,
     lookup: HashMap<Arc<[u8]>, Handle>,
