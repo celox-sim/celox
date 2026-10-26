@@ -345,12 +345,49 @@ pub fn eval_const_expr_with_types(
     constants: &HashMap<String, i128>,
     types: &HashMap<String, (usize, bool)>,
 ) -> Option<i128> {
+    // Runtime select bounds often contain large inlined expressions. Reject a
+    // required runtime value before attempting literal folding at every node.
+    if requires_unbound_value(expr, constants) {
+        return None;
+    }
     // Substitution only replaces the identifiers of typed constants.
     if !has_typed_constant(expr, constants, types) {
         return eval_const_expr(expr, constants);
     }
     let expr = substitute_typed_constants(expr.clone(), constants, types);
     eval_const_expr(&expr, constants)
+}
+
+fn requires_unbound_value(expr: &ConstExpr, constants: &HashMap<String, i128>) -> bool {
+    match expr {
+        ConstExpr::Literal(_) | ConstExpr::Function { .. } => return false,
+        ConstExpr::Ident(name) => return !constants.contains_key(name),
+        _ => {}
+    }
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        match expr {
+            ConstExpr::Ident(name) if !constants.contains_key(name) => return true,
+            ConstExpr::Unary { expr, .. } | ConstExpr::Resize { expr, .. } => pending.push(expr),
+            ConstExpr::Select { expr, bit } => pending.extend([bit.as_ref(), expr.as_ref()]),
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                pending.extend([lsb.as_ref(), msb.as_ref(), expr.as_ref()]);
+            }
+            ConstExpr::Binary { left, op, right } => {
+                // A right logical operand can be skipped. The left operand is
+                // required; preserve the evaluator's short-circuiting policy.
+                if !matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) {
+                    pending.push(right);
+                }
+                pending.push(left);
+            }
+            ConstExpr::Mux { condition, .. } => pending.push(condition),
+            // Argument evaluation belongs to the callee (including checked
+            // accesses). Do not infer whether a call needs its actuals here.
+            ConstExpr::Function { .. } | ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+        }
+    }
+    false
 }
 
 /// Whether `expr` names a constant that has a type, which
@@ -714,6 +751,15 @@ fn context_binary_operands(
     right: &ConstExpr,
 ) -> Option<(IntegralLiteral, IntegralLiteral, bool)> {
     let (left_type, right_type) = integral_binary_operands(left, right)?;
+    context_binary_values(left, right, left_type, right_type)
+}
+
+fn context_binary_values(
+    left: &ConstExpr,
+    right: &ConstExpr,
+    left_type: IntegralLiteral,
+    right_type: IntegralLiteral,
+) -> Option<(IntegralLiteral, IntegralLiteral, bool)> {
     let width = left_type.width.max(right_type.width);
     let signed = left_type.signed && right_type.signed;
     // These values were already evaluated in their own expression contexts.
@@ -783,7 +829,7 @@ fn eval_literal_binary(
         );
         return eval_four_state_binary(&left, op, &right, signed);
     }
-    let (left, right, signed) = context_binary_operands(left_expr, right_expr)?;
+    let (left, right, signed) = context_binary_values(left_expr, right_expr, left, right)?;
     eval_four_state_binary(&left, op, &right, signed)
 }
 
@@ -1089,7 +1135,14 @@ fn self_determined_integral_literal(expr: &ConstExpr) -> Option<IntegralLiteral>
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static LITERAL_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral> {
+    #[cfg(test)]
+    LITERAL_EVALUATIONS.with(|count| count.set(count.get() + 1));
     match expr {
         ConstExpr::Literal(literal) => parse_integral_literal(literal),
         ConstExpr::Resize {
@@ -2014,6 +2067,115 @@ fn extension_for_leading_digit(ch: char) -> (bool, bool) {
 #[cfg(test)]
 mod literal_tests {
     use super::*;
+
+    #[test]
+    fn numeric_binary_operands_are_evaluated_once_before_type_context() {
+        let expr = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Literal("2".into())),
+            op: BinaryOp::Add,
+            right: Box::new(ConstExpr::Literal("3".into())),
+        };
+        LITERAL_EVALUATIONS.with(|count| count.set(0));
+        assert_eq!(
+            eval_const_expr_with_types(&expr, &HashMap::default(), &HashMap::default()),
+            Some(5)
+        );
+        assert_eq!(LITERAL_EVALUATIONS.with(|count| count.get()), 2);
+    }
+
+    #[test]
+    fn runtime_bounds_skip_literal_evaluation_before_substitution() {
+        let mut bound = ConstExpr::Ident("runtime_index".into());
+        for _ in 0..64 {
+            bound = ConstExpr::Resize {
+                expr: Box::new(ConstExpr::Binary {
+                    left: Box::new(bound),
+                    op: BinaryOp::Add,
+                    right: Box::new(ConstExpr::Ident("P".into())),
+                }),
+                width: 32,
+                signed: false,
+            };
+        }
+        LITERAL_EVALUATIONS.with(|count| count.set(0));
+        assert_eq!(
+            eval_const_expr_with_types(
+                &bound,
+                &HashMap::from_iter([("P".into(), 7)]),
+                &HashMap::from_iter([("P".into(), (32, false))])
+            ),
+            None
+        );
+        assert_eq!(LITERAL_EVALUATIONS.with(|count| count.get()), 0);
+    }
+
+    #[test]
+    fn runtime_bound_probe_preserves_short_circuiting_and_sampled_values() {
+        let literal = |text: &str| ConstExpr::Literal(text.into());
+        let missing = || ConstExpr::Ident("runtime_index".into());
+        let expressions = [
+            (
+                ConstExpr::Binary {
+                    left: Box::new(literal("0")),
+                    op: BinaryOp::LogicAnd,
+                    right: Box::new(missing()),
+                },
+                Some(0),
+            ),
+            (
+                ConstExpr::Binary {
+                    left: Box::new(literal("1")),
+                    op: BinaryOp::LogicOr,
+                    right: Box::new(missing()),
+                },
+                Some(1),
+            ),
+            (
+                ConstExpr::Mux {
+                    condition: Box::new(literal("1")),
+                    then_expr: Box::new(literal("13")),
+                    else_expr: Box::new(missing()),
+                },
+                Some(13),
+            ),
+            (
+                ConstExpr::Mux {
+                    condition: Box::new(literal("0")),
+                    then_expr: Box::new(missing()),
+                    else_expr: Box::new(literal("19")),
+                },
+                Some(19),
+            ),
+            (
+                ConstExpr::Mux {
+                    condition: Box::new(literal("1'bx")),
+                    then_expr: Box::new(literal("17")),
+                    else_expr: Box::new(literal("17")),
+                },
+                Some(17),
+            ),
+        ];
+        for (expr, expected) in expressions {
+            assert_eq!(
+                eval_const_expr_with_types(&expr, &HashMap::default(), &HashMap::default()),
+                expected,
+                "{expr:?}"
+            );
+        }
+        let sample = ConstExpr::Binary {
+            left: Box::new(missing()),
+            op: BinaryOp::Mul,
+            right: Box::new(ConstExpr::Ident("P".into())),
+        };
+        assert_eq!(
+            eval_const_expr_with_types(
+                &sample,
+                &HashMap::from_iter([("runtime_index".into(), 3), ("P".into(), 7)]),
+                &HashMap::from_iter([("P".into(), (32, false))])
+            ),
+            Some(21)
+        );
+    }
 
     /// Expressions without typed constants evaluate as their substituted
     /// copies do, and typed constants still take their declared type.
