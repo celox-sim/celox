@@ -1,1 +1,1 @@
-Take over the interrupted SVA stack edit, retain existing review fixes, and finish the leave-time termination review fix before rebasing onto current master.
+Rebase on merged fork/process control and advance the timestamped-report image version above its updated base.
