@@ -1911,3 +1911,94 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "5\n"))
+
+(case constrained_randomize_scalar
+  (source "constraints.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand bit [3:0] x, y;
+        int limit = 4;
+        constraint bounds { x < limit; y < 4; x + y == 5; x >= 0; y > 0; x <= 3; }
+    endclass
+    Packet p;
+    int old_x, old_y;
+    initial begin
+        p = new;
+        p.srandom(17);
+        repeat (8) begin
+            if (!p.randomize()) $fatal(1, "sat failed");
+            if (!(p.x < 4 && p.y < 4 && p.x + p.y == 5)) $fatal(1, "invalid model");
+        end
+        old_x = p.x; old_y = p.y;
+        p.limit = 1;
+        if (p.randomize()) $fatal(1, "unsat succeeded");
+        if (p.x != old_x || p.y != old_y) $fatal(1, "unsat changed fields");
+        p.limit = 4;
+        p.x = 2; p.y = 3;
+        if (!p.randomize(null)) $fatal(1, "check-only failed");
+        p.y = 0;
+        if (p.randomize(null)) $fatal(1, "check-only ignored constraints");
+        p.x.rand_mode(0);
+        if (!p.randomize() || p.x != 2 || p.y != 3) $fatal(1, "disabled rand is not state");
+        p.y = 1;
+        if (p.randomize(x)) $fatal(1, "selection should be unsat");
+        if (p.x.rand_mode() != 0 || p.y.rand_mode() != 1) $fatal(1, "failed selection leaked modes");
+        p.y = 3;
+        if (!p.randomize() || p.x != 2) $fatal(1, "modes not restored");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_width_and_inheritance
+  (source "constraint_widths.sv" #"
+module Top(output bit done);
+    class Base;
+        rand bit signed [7:0] a;
+        rand bit signed [15:0] b;
+        rand bit [31:0] c;
+        constraint values { a == -1; b == 1; c == 256; }
+        constraint sum { (a + b) == c; }
+    endclass
+    class Derived extends Base;
+        constraint values { a == -2; b == 2; c == 256; }
+    endclass
+    Base p;
+    Derived q;
+    initial begin
+        p = new;
+        if (!p.randomize()) $fatal(1, "unsigned context was lost");
+        if (p.a != -1 || p.b != 1 || p.c != 256) $fatal(1, "base values");
+        q = new;
+        p = q;
+        if (!p.randomize()) $fatal(1, "derived constraints were not dispatched");
+        if (q.a != -2 || q.b != 2 || q.c != 256) $fatal(1, "override values");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_hooks
+  (source "constraint_hooks.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand int x;
+        int limit, before_count, after_count;
+        constraint bounds { x == limit; x < 3; }
+        function void pre_randomize(); before_count++; limit = before_count; endfunction
+        function void post_randomize(); after_count++; endfunction
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        if (!p.randomize() || p.x != 1) $fatal(1, "first pre state");
+        if (!p.randomize() || p.x != 2) $fatal(1, "second pre state");
+        if (p.randomize() || p.x != 2) $fatal(1, "unsat changed fields");
+        if (p.before_count != 3 || p.after_count != 2) $fatal(1, "post called on failure");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))

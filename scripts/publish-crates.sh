@@ -18,6 +18,7 @@ fi
 crates=(
   celox-sv-syntax
   celox-design
+  celox-heap
   celox-sv-analyzer
   celox-test-suite
   celox-analysis
@@ -25,7 +26,6 @@ crates=(
   celox-frontend-sdk
   celox-macros
   celox-ts-gen
-  celox-heap
   celox-testbench
   celox-sir
   celox-state-layout

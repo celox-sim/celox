@@ -19,6 +19,7 @@ use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 pub mod containers;
 mod objects;
 pub mod ops;
+pub mod randomization;
 
 pub use objects::{Fault, NULL};
 
