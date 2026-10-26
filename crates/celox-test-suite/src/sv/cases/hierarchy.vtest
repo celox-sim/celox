@@ -1684,3 +1684,57 @@
   (modify (set oe 0) (set d 0))
   (assert_eq from_pad (fourstate 0 1))
   (assert_eq from_source 0))
+
+
+(case coalesces_repeated_net_aliases
+  (source "repeated_net_aliases.sv" #"
+    module Leaf #(parameter int W = 8)(input logic clk, input logic [W-1:0] d,
+                                     output wire logic [W-1:0] y);
+      logic [W-1:0] state;
+      always_ff @(posedge clk) state <= d;
+      assign y = state;
+      assign y = state;
+    endmodule
+    module Top(input logic clk, input logic [7:0] d,
+               output wire logic [7:0] mirror, q8, output wire logic [3:0] q4);
+      wire [7:0] data;
+      assign data = d;
+      assign data = d;
+      uwire [7:0] single_driver;
+      assign single_driver = data;
+      assign mirror = single_driver;
+      assign mirror = single_driver;
+      Leaf #(.W(8)) wide(clk, data, q8);
+      Leaf #(.W(4)) narrow(clk, data[3:0], q4);
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 0x5a 0xff 1)
+    (modify (set d value))
+    (assert_eq mirror value)
+    (tick clk)
+    (assert_eq q8 value)
+    (assert_eq q4 (trunc 4 value))))
+
+(case repeated_net_aliases_preserve_unknown_and_high_impedance_bits
+  (four_state)
+  (source "repeated_four_state_net_aliases.sv" #"
+    module Top(input logic [7:0] d, output wire logic [7:0] y);
+      wire [7:0] intermediate;
+      assign intermediate = d;
+      assign intermediate = d;
+      assign y = intermediate;
+      assign y = intermediate;
+    endmodule
+  "#)
+  (top Top)
+  (modify (set d 0x5a))
+  (assert_eq y 0x5a)
+  (modify (set d (fourstate 0xff 0xff)))
+  (assert_eq y (fourstate 0xff 0xff))
+  (modify (set d (fourstate 0 0xff)))
+  (assert_eq y (fourstate 0 0xff))
+  (modify (set d (fourstate 0x55 0xa0)))
+  (assert_eq y (fourstate 0x55 0xa0))
+  (modify (set d 0x96))
+  (assert_eq y 0x96))

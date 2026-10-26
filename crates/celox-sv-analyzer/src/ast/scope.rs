@@ -553,6 +553,7 @@ impl ScopeSymbols {
                         rename.r#type(port.r#type.clone()),
                         port.is_net,
                     )
+                    .with_unresolved_net(port.unresolved_net)
                     .with_default(port.default.clone().map(|value| rename.const_expr(value)))
                 })
                 .collect(),

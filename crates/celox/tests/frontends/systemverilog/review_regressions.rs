@@ -8937,3 +8937,40 @@ fn masked_reads_preserve_observer_sensitivity_and_real_self_dependencies() {
         );
     }
 }
+
+#[test]
+fn net_alias_coalescing_retains_distinct_and_variable_drivers() {
+    for (source, diagnostic) in [
+        (
+            "module Top(input logic a, output uwire y); assign y=a; assign y=a; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(input logic a, output wire y); uwire n; assign n=a; assign n=a; assign y=n; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(input logic a, output uwire first, y); assign first=a; assign y=a; assign y=a; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(input logic a, output logic y); assign y=a; assign y=a; endmodule",
+            "multiple variable drivers",
+        ),
+        (
+            "module Top(input logic a,b, output wire y); assign y=a; assign y=a; assign y=b; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(output wire [31:0] y); assign y=$random; assign y=$random; endmodule",
+            "multiple net drivers",
+        ),
+    ] {
+        let error =
+            Simulator::from_sv_sources(vec![(source, Path::new("alias_drivers.sv"))], "Top")
+                .build_native()
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains(diagnostic), "{error}");
+    }
+}

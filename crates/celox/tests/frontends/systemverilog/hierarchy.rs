@@ -1,6 +1,12 @@
 use super::*;
 
 sv_backends! {
+    fn coalesces_repeated_net_aliases(sim) {
+        @case "hierarchy::coalesces_repeated_net_aliases";
+    }
+    fn repeated_net_aliases_preserve_unknown_and_high_impedance_bits(sim) {
+        @case "hierarchy::repeated_net_aliases_preserve_unknown_and_high_impedance_bits";
+    }
     fn packed_pattern_parameter_arguments_preserve_wide_values(sim) {
         @case "hierarchy::packed_pattern_parameter_arguments_preserve_wide_values";
     }

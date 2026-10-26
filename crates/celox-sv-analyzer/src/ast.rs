@@ -482,6 +482,7 @@ impl Source {
                             name: signal.name.clone(),
                             r#type: signal.r#type.clone(),
                             is_net: signal.is_net,
+                            unresolved_net: false,
                             package_variable: None,
                             hierarchical: signal.paths.first().cloned(),
                         });
@@ -1805,6 +1806,7 @@ pub struct Port {
     direction: PortDirection,
     r#type: Type,
     is_net: bool,
+    unresolved_net: bool,
     default: Option<ConstExpr>,
 }
 
@@ -1814,6 +1816,7 @@ pub struct Signal {
     name: String,
     r#type: Type,
     is_net: bool,
+    unresolved_net: bool,
     /// The package variable the signal denotes, as `(package, variable)`.
     package_variable: Option<(String, String)>,
     /// The hierarchical name of the signal of another instance the signal
@@ -1827,6 +1830,7 @@ impl Signal {
             name,
             r#type,
             is_net: false,
+            unresolved_net: false,
             is_const: false,
             package_variable: None,
             hierarchical: None,
@@ -1838,6 +1842,7 @@ impl Signal {
             name,
             r#type,
             is_net: true,
+            unresolved_net: false,
             is_const: false,
             package_variable: None,
             hierarchical: None,
@@ -1869,6 +1874,16 @@ impl Signal {
     pub(crate) fn is_net(&self) -> bool {
         self.is_net
     }
+
+    /// Whether this is an unresolved, single-driver `uwire` net (6.6.2).
+    pub(crate) fn is_unresolved_net(&self) -> bool {
+        self.unresolved_net
+    }
+
+    pub(crate) fn with_unresolved_net(mut self, unresolved: bool) -> Self {
+        self.unresolved_net = unresolved;
+        self
+    }
 }
 
 impl Port {
@@ -1879,6 +1894,7 @@ impl Port {
             r#type,
             randomizable: !is_net,
             is_net,
+            unresolved_net: false,
             default: None,
         }
     }
@@ -1897,6 +1913,16 @@ impl Port {
 
     pub fn is_net(&self) -> bool {
         self.is_net
+    }
+
+    /// Whether this is an unresolved, single-driver `uwire` net (6.6.2).
+    pub(crate) fn is_unresolved_net(&self) -> bool {
+        self.unresolved_net
+    }
+
+    pub(crate) fn with_unresolved_net(mut self, unresolved: bool) -> Self {
+        self.unresolved_net = unresolved;
+        self
     }
 
     pub(crate) fn with_default(mut self, default: Option<ConstExpr>) -> Self {
