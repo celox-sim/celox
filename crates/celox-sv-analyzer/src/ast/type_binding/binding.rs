@@ -403,7 +403,7 @@ fn class_scope(
                     .get(&super::super::classes::specializations::scope_key(&class))
             })
             .or_else(|| context.type_aliases.get(&name))
-            .and_then(|ty| ty.class.clone())
+            .and_then(|ty| ty.class().map(str::to_owned))
     {
         return Ok(Some(class));
     }

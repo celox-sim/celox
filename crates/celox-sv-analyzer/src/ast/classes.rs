@@ -631,7 +631,7 @@ pub(super) fn handle(name: &str) -> Type {
         ConstExpr::Literal((HANDLE_WIDTH - 1).to_string()),
         ConstExpr::Literal("0".into()),
     ));
-    ty.class = Some(name.to_owned());
+    ty.class = Some(Arc::from(name));
     ty
 }
 
@@ -697,7 +697,7 @@ pub(super) fn class(
             let ty = match recorded {
                 Some(ty) => ty,
                 None => type_binding::procedural_type(base.data_type, native, tree, env, aliases)?
-                    .and_then(|ty| ty.class.clone())
+                    .and_then(|ty| ty.class().map(str::to_owned))
                     .ok_or_else(|| unsupported("base class type"))?,
             };
             Some(class(tree, &ty, env, aliases)?)
@@ -893,7 +893,7 @@ fn interface_name(
 ) -> Converted<String> {
     let native = tree.declarations();
     let name = type_binding::procedural_type(interface, native, tree, env, aliases)?
-        .and_then(|ty| ty.class.clone())
+        .and_then(|ty| ty.class().map(str::to_owned))
         .ok_or_else(|| unsupported("implemented interface class type"))?;
     // An interface class of another scope is known by its layout.
     let interface = match imported(tree, &name) {
@@ -1091,6 +1091,9 @@ fn field(
     env: &HashMap<String, i128>,
     offset: u32,
 ) -> Converted<ObjectField> {
+    if ty.container.is_some() {
+        return Err(unsupported("dynamic container class property"));
+    }
     let (width, signed, handle) = match ty.kind() {
         TypeKind::String => (HANDLE_WIDTH, false, Some(HandleProperty::String)),
         TypeKind::Object => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),

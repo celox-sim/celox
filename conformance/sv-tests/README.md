@@ -131,6 +131,20 @@ class with constraints is rejected. `18.5.8.1--foreach-iterative-constraints_0`,
 static random properties. Full official runs at the pinned revision report 1112
 passing cases in 2state and 1123 in 4state, with no passing case regressing.
 
+Dynamic container support updates 22 rows: both state modes of eleven chapter 7
+cases change from fail to pass. Eight cases execute simulations and their
+`:assert:` output passes: associative assignment, `exists`, `first`, `last`,
+`next`, `prev`, traversal with a byte key, and dynamic-array `new[]`. The traversal
+case declares both its key and output as `byte`; the stored key is already
+truncated before traversal, so returning 1 is correct. The integral-key and
+string-key associative declaration cases and `queues/basic` pass elaboration
+only; they do not establish runtime behavior. Queue mutations and other container
+behavior are exercised by the shared container simulation cases.
+The [reviewed CI run](https://github.com/celox-sim/celox/actions/runs/40323383639)
+contains 3,300 case/mode verdicts at the pinned revision. These are its only
+changed rows, with no passing case regressing: 1,201 cases pass in 2state and
+1,212 in 4state. Only these reviewed expectations are updated.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.

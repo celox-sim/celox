@@ -24,6 +24,7 @@ impl Ff<'_, '_> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let result = match op {
+            ObjectOp::Container { .. } => unreachable!("handled by container_call"),
             ObjectOp::New {
                 class,
                 size,
@@ -125,6 +126,7 @@ impl Ff<'_, '_> {
         self.b.emit(SIRInstruction::Slice(value, result, 0, width));
         let (temp, name) = self.m.temp("object", width, signed, false);
         let kind = match op {
+            ObjectOp::Container { .. } => unreachable!("handled by container_call"),
             ObjectOp::New { .. } | ObjectOp::Copy => Some(celox_design::ValueKind::ObjRef),
             ObjectOp::Load(field) => field.handle.map(|handle| match handle {
                 HandleProperty::String => celox_design::ValueKind::StrRef,

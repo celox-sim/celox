@@ -46,6 +46,9 @@ pub(super) fn ports_from_scope(
                 type_aliases,
             )?,
         );
+        if ty.container.is_some() {
+            return Err(unsupported("dynamic container port"));
+        }
         let default = native
             .default
             .map(|value| {
