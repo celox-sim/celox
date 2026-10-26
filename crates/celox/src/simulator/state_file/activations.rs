@@ -475,13 +475,23 @@ impl<B: SimBackend> Simulator<B> {
                 let resume = control(&slots.resume)?;
                 let status = control(&slots.status)?;
                 let delay = control(&slots.delay)?;
-                if resume >= frame.resume_count as u64 || status > u8::MAX as u64 {
+                let is_probe = |entry: u64| {
+                    frame
+                        .event_probes
+                        .iter()
+                        .any(|probe| u64::from(probe.resume) == entry)
+                };
+                if resume >= frame.resume_count as u64
+                    || is_probe(resume)
+                    || status > u8::MAX as u64
+                {
                     return Err(bad("invalid continuation or status"));
                 }
                 use celox_design::ProcessStatus;
                 let status = ProcessStatus::from_code(status as u8);
                 let valid = match status {
                     None => control(&slots.status)? == 0,
+                    Some(ProcessStatus::EventProbe) => false,
                     Some(ProcessStatus::Local) => delay < frame.locals.len() as u64,
                     Some(ProcessStatus::Fork) => {
                         let first = delay & 0xffff;
@@ -490,6 +500,7 @@ impl<B: SimBackend> Simulator<B> {
                             && first > 0
                             && count > 0
                             && first + count <= frame.resume_count as u64
+                            && !(first..first + count).any(is_probe)
                     }
                     Some(ProcessStatus::Wait | ProcessStatus::Pending) => {
                         delay

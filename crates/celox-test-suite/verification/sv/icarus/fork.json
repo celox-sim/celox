@@ -1,0 +1,48 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: sorry, complex event expressions are not yet supported in automatic tasks.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "fork::compound_event_activations_outlive_parent",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "fork::compound_event_four_state_lsb_edges",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:15: sorry, complex event expressions are not yet supported in automatic tasks.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "fork::compound_event_function_scratch_isolated",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "fork::compound_event_tracks_result_not_operands",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

@@ -242,7 +242,9 @@ impl<B: SimBackend> SimulationState<B> {
                     self.charge(*returns, Some(process))?;
                     return Ok(true);
                 }
-                None => return Err(SimulatorErrorCode::InternalError.into()),
+                Some(ProcessStatus::EventProbe) | None => {
+                    return Err(SimulatorErrorCode::InternalError.into());
+                }
             }
             Ok(false)
         }
@@ -289,7 +291,7 @@ impl<B: SimBackend> SimulationState<B> {
                 // one, the check following the settle sees them: a settle
                 // does not write what processes write.
                 if again || !self.region_ready(reactive).is_empty() {
-                    self.observe_driven(executor.backend());
+                    self.observe_driven(executor.backend_mut())?;
                 }
                 if !again {
                     break;
@@ -410,10 +412,10 @@ impl<B: SimBackend> SimulationState<B> {
                 // host's view of the state, and what the settle derived.
                 entry = false;
                 if !self.process_state.waiters.is_empty() {
-                    self.observe(executor.backend(), None);
+                    self.observe(executor.backend_mut(), None)?;
                 }
             } else {
-                self.observe_driven(executor.backend());
+                self.observe_driven(executor.backend_mut())?;
             }
             if round.reactive {
                 // The Reactive region is empty: the Re-Inactive region's
@@ -429,9 +431,9 @@ impl<B: SimBackend> SimulationState<B> {
                     self.process_state.reactive.extend(inactive);
                     continue;
                 }
-                if self.publish_re_nba(executor, round) {
+                if self.publish_re_nba(executor, round)? {
                     self.settle_pass(executor, round)?;
-                    self.observe_driven(executor.backend());
+                    self.observe_driven(executor.backend_mut())?;
                     continue;
                 }
                 return Ok(());
@@ -447,7 +449,7 @@ impl<B: SimBackend> SimulationState<B> {
                 if self.active_commit_triggered(executor.backend(), round)
                     && self.evaluate_before_inactive(executor, current_time, round)?
                 {
-                    self.observe_driven(executor.backend());
+                    self.observe_driven(executor.backend_mut())?;
                     continue;
                 }
                 return Ok(());
@@ -458,7 +460,7 @@ impl<B: SimBackend> SimulationState<B> {
                 // Their blocking results are updates of the active region:
                 // the waits they wake and the domains their edges trigger run
                 // before the inactive region (IEEE 1800-2023 4.5).
-                self.observe_driven(executor.backend());
+                self.observe_driven(executor.backend_mut())?;
                 if !self.process_state.ready.is_empty()
                     || !executor.backend().get_triggered_bits().is_empty()
                 {

@@ -285,6 +285,10 @@ test("every retained baseline accepts only its existing failures", () => {
           result.accepted_failures,
           tool === "icarus"
             ? [
+                "fork::compound_event_activations_outlive_parent",
+                "fork::compound_event_four_state_lsb_edges",
+                "fork::compound_event_function_scratch_isolated",
+                "fork::compound_event_tracks_result_not_operands",
                 "fork_control::function_join_none_automatic_values_outlive_returns",
                 "fork_control::function_join_none_calls_in_defaults_need_process_frames",
                 "fork_control::function_join_none_children_can_call_timed_tasks",
@@ -309,6 +313,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "unions::soft_wide_four_state",
               ]
             : [
+                "fork::compound_event_activations_outlive_parent",
                 "tagged_unions::conditional_struct_payload",
                 "tagged_unions::constructors_and_checked_members",
                 "tagged_unions::default_arguments",
