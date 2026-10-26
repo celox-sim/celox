@@ -1,0 +1,13 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    # Required by the schema; security updates are triggered by alerts.
+    schedule:
+      interval: daily
+    # Disable version updates, while retaining security updates.
+    open-pull-requests-limit: 0
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "chore(deps)"
