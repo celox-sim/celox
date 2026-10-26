@@ -93,6 +93,9 @@ pub(crate) trait ConstantEnvironment {
         None
     }
     fn get(&self, name: &str) -> Option<&i128>;
+    fn literal(&self, _name: &str) -> Option<&IntegralLiteral> {
+        None
+    }
 }
 
 impl ConstantEnvironment for HashMap<String, i128> {
@@ -419,6 +422,23 @@ pub(crate) fn eval_const_expr_with_types_in_env(
     eval_const_expr_in_env(&expr, constants)
 }
 
+/// An assignment supplies a size context before arithmetic is evaluated;
+/// the receiving declaration supplies its signedness only after evaluation.
+pub(crate) fn eval_const_assignment_in_env(
+    expr: &ConstExpr,
+    constants: &dyn ConstantEnvironment,
+    types: &impl Fn(&str) -> Option<(usize, bool)>,
+    width: usize,
+) -> Option<IntegralLiteral> {
+    let expr = substitute_typed_constants_with_lookup(expr.clone(), constants, types);
+    let literal = integral_literal_from_const_expr(&expr)?;
+    if literal.width >= width {
+        Some(literal)
+    } else {
+        eval_integral_in_context(&expr, width, literal.signed)
+    }
+}
+
 /// Evaluate and resize a constant expression in a case selector's comparison
 /// context without discarding X/Z masks.
 pub fn context_size_const_integral_literal(
@@ -552,12 +572,18 @@ fn substitute_typed_constants_with_lookup(
     types: &impl Fn(&str) -> Option<(usize, bool)>,
 ) -> ConstExpr {
     match expr {
-        ConstExpr::Ident(name) => match (constants.get(&name), types(&name)) {
-            (Some(value), Some((width, signed))) => {
-                ConstExpr::Literal(format_typed_constant_literal(*value, width, signed))
+        ConstExpr::Ident(name) => {
+            if let Some(literal) = constants.literal(&name) {
+                ConstExpr::Literal(format_integral_literal_binary(literal))
+            } else {
+                match (constants.get(&name), types(&name)) {
+                    (Some(value), Some((width, signed))) => {
+                        ConstExpr::Literal(format_typed_constant_literal(*value, width, signed))
+                    }
+                    _ => ConstExpr::Ident(name),
+                }
             }
-            _ => ConstExpr::Ident(name),
-        },
+        }
         ConstExpr::Literal(value) => ConstExpr::Literal(value),
         ConstExpr::SelectRange {
             expr,
@@ -1930,6 +1956,15 @@ fn parse_power_of_two_based_digits(digits: &str, bits_per_digit: usize) -> Optio
         value,
         mask,
     })
+}
+
+pub(crate) fn resize_const_integral_literal(
+    literal: IntegralLiteral,
+    width: usize,
+    signed: bool,
+) -> IntegralLiteral {
+    let extension = signed_extension(&literal, literal.signed);
+    resize_integral_literal(literal, width, signed, extension)
 }
 
 fn resize_integral_literal(
