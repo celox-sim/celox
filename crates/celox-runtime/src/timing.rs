@@ -330,7 +330,7 @@ pub fn planes_occur(kind: CounterKind, old: &[u8], new: &[u8], width: usize) -> 
 /// Mutable process scheduling state beyond the delay queue: who waits for
 /// what, the inactive and post-NBA queues, and the queued nonblocking
 /// assignments. All of it is empty in a design without process kernels.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProcessState {
     pub activations: Vec<crate::simulation::Activation>,
     pub cells: Vec<Value>,

@@ -93,7 +93,9 @@ To compare two runs or two simulators, `celox run` can save
 | `--save-state-dir DIR` | Write the files to `DIR` (default: the current directory). |
 
 A cycle that the run never reaches is an error. These options are available for
-SystemVerilog testbenches on every backend.
+SystemVerilog testbenches on every backend, including designs with file I/O or
+VCD tasks. The saved file contains HDL state; external resources are excluded
+under the [snapshot contract](checkpoints.md#external-resources).
 
 ```sh
 celox run c906.v --top tb --save-state-on tb.clk --save-state-at 1000,2000 --save-state-dir states

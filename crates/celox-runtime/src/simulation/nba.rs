@@ -279,7 +279,7 @@ pub(super) fn restore_working_image<B: SimBackend>(backend: &mut B, image: &[u8]
 }
 
 /// A nonblocking assignment waiting for the NBA region.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NbaUpdate {
     pub target: SignalRef,
     /// Bit position of the assigned range in the target.

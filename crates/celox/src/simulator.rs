@@ -1,6 +1,6 @@
 mod builder;
 #[cfg(feature = "host-runtime")]
-mod checkpoint;
+pub(crate) mod checkpoint;
 mod error;
 #[cfg(feature = "host-runtime")]
 mod heap;
@@ -130,7 +130,7 @@ mod host {
         /// may run: between the polls of concurrent testbench processes.
         pub(crate) heap_safepoints_blocked: bool,
         pub(crate) process_heap_roots: Vec<celox_heap::Root>,
-        file_io: celox_runtime::file_io::FileIo,
+        pub(super) file_io: celox_runtime::file_io::FileIo,
         pending_host_events: Arc<std::sync::Mutex<PendingRuntimeEvents>>,
         pub(crate) program: RuntimeProgram,
         /// The program's scheduling facts.
