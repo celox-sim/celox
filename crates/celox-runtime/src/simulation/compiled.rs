@@ -124,7 +124,7 @@ impl<B: SimBackend> SimulationState<B> {
         let one_slot = match executor.compiled_slots() {
             CompiledSlots::None => return None,
             CompiledSlots::One => true,
-            CompiledSlots::Any => one_slot,
+            CompiledSlots::Any => one_slot || self.one_slot_runs(),
         };
         Some(if one_slot {
             first
@@ -176,6 +176,11 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        // Designs with sampled values are limited to one slot, so `limit`
+        // is that slot's timestamp. Keep its baseline on same-time reentry.
+        if self.one_slot_runs() && limit > self.scheduler.time {
+            self.sample_values(executor.backend_mut());
+        }
         let scheduler = self
             .model
             .scheduler
@@ -418,6 +423,19 @@ impl<B: SimBackend> SimulationState<B> {
         if executor.take_slot_writes() {
             self.host_pending = true;
         }
+        // A run of one slot ends it unless work is left at its time.
+        if (self.one_slot_runs() || executor.compiled_slots() == CompiledSlots::One)
+            && !self.host_pending
+            && self.next_work_time() != Some(now)
+        {
+            self.end_time_slot(executor, now)?;
+        }
         Ok(now)
+    }
+
+    /// Whether every run of the compiled scheduler takes one slot: the
+    /// sampled copies are made before entering each later timestamp.
+    fn one_slot_runs(&self) -> bool {
+        !self.model.sample_shadows.is_empty()
     }
 }
