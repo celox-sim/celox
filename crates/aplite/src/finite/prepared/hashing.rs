@@ -10,6 +10,8 @@ use std::collections::BTreeSet;
 /// hash family. The implementation uses a deterministic SplitMix64 PRNG, not a
 /// source of cryptographic entropy. Rows may be zero or dependent: preserving
 /// those cases is essential to the family; we do not silently repair them.
+/// Prefix-preserving Gaussian elimination simplifies rows and transforms target
+/// bits together, preserving exactly the original random cells.
 ///
 /// `cell` selects a prefix of the rows and a target value for each selected row.
 /// A caller can measure differently sized cells without recompiling the formula.
@@ -20,6 +22,7 @@ pub struct HashCells {
     query: PreparedQuery,
     projection: Vec<String>,
     rows: usize,
+    transforms: Vec<Vec<usize>>,
     preparation_work: u64,
 }
 
@@ -88,17 +91,55 @@ impl HashCells {
         }
         let mut rng = seed;
         let mut predicates = Vec::new();
-        for _ in 0..rows {
+        let mut echelon: Vec<(Vec<bool>, bool, Vec<bool>, Option<usize>)> = Vec::new();
+        let mut transforms = Vec::new();
+        for index in 0..rows {
             budget.tick(1)?;
-            reserve_terms(&mut created, 1, &budget)?;
-            let mut terms = vec![boolv(next(&mut rng) & 1 != 0)];
-            for bit in &bits {
+            let mut constant = next(&mut rng) & 1 != 0;
+            let mut coefficients = Vec::new();
+            for _ in &bits {
                 budget.tick(1)?;
-                if next(&mut rng) & 1 != 0 {
+                coefficients.push(next(&mut rng) & 1 != 0);
+            }
+            budget.tick(rows as u64)?;
+            let mut transform = vec![false; rows];
+            transform[index] = true;
+            // Only earlier rows participate: every prefix remains equivalent
+            // to the same prefix of the original random affine hash family.
+            for (previous, offset, mapping, pivot) in &echelon {
+                budget.tick(1)?;
+                if pivot.is_some_and(|pivot| coefficients[pivot]) {
+                    for (bit, other) in coefficients.iter_mut().zip(previous) {
+                        budget.tick(1)?;
+                        *bit ^= other;
+                    }
+                    constant ^= offset;
+                    for (bit, other) in transform.iter_mut().zip(mapping) {
+                        budget.tick(1)?;
+                        *bit ^= other;
+                    }
+                }
+            }
+            let mut pivot = None;
+            let mut terms = Vec::new();
+            reserve_terms(&mut created, 1, &budget)?;
+            terms.push(boolv(constant));
+            for (position, (&include, bit)) in coefficients.iter().zip(&bits).enumerate() {
+                budget.tick(1)?;
+                if include {
+                    pivot.get_or_insert(position);
                     terms.push(bit.clone());
                 }
             }
             predicates.push(parity(&terms, &mut budget, &mut created)?);
+            transforms.push(
+                transform
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &bit)| bit.then_some(i))
+                    .collect(),
+            );
+            echelon.push((coefficients, constant, transform, pivot));
         }
         budget.check_time()?;
         let mut remaining = limits;
@@ -115,6 +156,7 @@ impl HashCells {
             query,
             projection: names.into_iter().collect(),
             rows,
+            transforms,
             preparation_work: budget.work,
         })
     }
@@ -138,12 +180,25 @@ impl HashCells {
                 reason: Some("hash targets exceed prepared rows or query budget".into()),
             };
         }
-        let assumptions: Vec<_> = targets
-            .iter()
-            .enumerate()
-            .map(|(predicate, &value)| Assumption { predicate, value })
-            .collect();
-        let overhead = targets.len() as u64;
+        let mut overhead = targets.len() as u64;
+        let mut assumptions = Vec::new();
+        for (predicate, mapping) in self.transforms.iter().take(targets.len()).enumerate() {
+            overhead = overhead.saturating_add(mapping.len() as u64);
+            if overhead >= limits.max_work
+                || start.elapsed().as_millis() >= u128::from(limits.timeout_ms)
+            {
+                return Cell {
+                    status: CellStatus::Unknown,
+                    models: Vec::new(),
+                    work: overhead,
+                    reason: Some("hash target transformation budget exhausted".into()),
+                };
+            }
+            let value = mapping
+                .iter()
+                .fold(false, |value, &index| value ^ targets[index]);
+            assumptions.push(Assumption { predicate, value });
+        }
         limits.max_work -= overhead;
         let timeout = limits.timeout_ms;
         let mut cell =
@@ -237,6 +292,58 @@ mod tests {
             );
         }
         assert!(signatures.len() > 1);
+    }
+
+    #[test]
+    fn elimination_preserves_every_original_affine_prefix_and_target() {
+        let context = Env::from([("x".into(), var("x".into(), Sort::Bv(3)))]);
+        for seed in 0..32 {
+            let cells = HashCells::new(&boolv(true), &context, 3, seed, Limits::default()).unwrap();
+            let mut rng = seed;
+            let original: Vec<_> = (0..3)
+                .map(|_| {
+                    let constant = next(&mut rng) & 1 != 0;
+                    let mask: Vec<_> = (0..3).map(|_| next(&mut rng) & 1 != 0).collect();
+                    (constant, mask)
+                })
+                .collect();
+            for prefix in 0..=3 {
+                for target in 0..(1 << prefix) {
+                    let targets: Vec<_> = (0..prefix).map(|i| target & (1 << i) != 0).collect();
+                    let cell = cells.cell(&targets, 8, Limits::default());
+                    assert_eq!(cell.status, CellStatus::Complete);
+                    let actual: BTreeSet<_> = cell
+                        .models
+                        .iter()
+                        .map(|model| {
+                            let Scalar::Bv { value, .. } = model["x"] else {
+                                panic!()
+                            };
+                            value
+                        })
+                        .collect();
+                    let expected: BTreeSet<_> = (0..8u64)
+                        .filter(|value| {
+                            original
+                                .iter()
+                                .zip(&targets)
+                                .all(|((constant, mask), target)| {
+                                    mask.iter().enumerate().fold(
+                                        *constant,
+                                        |parity, (i, &include)| {
+                                            parity ^ (include && value & (1 << i) != 0)
+                                        },
+                                    ) == *target
+                                })
+                        })
+                        .collect();
+                    assert_eq!(
+                        actual, expected,
+                        "seed={seed}, prefix={prefix}, target={target}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
