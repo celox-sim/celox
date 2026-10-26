@@ -1,0 +1,1 @@
+Review: p::C inside package p resolves as a type and as a constructor scope. Rebased onto master: README paragraph moved to the current corpus (1112/1123); Icarus limitation and xezim review of the new case.
