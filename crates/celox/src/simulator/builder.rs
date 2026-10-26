@@ -1706,6 +1706,9 @@ mod host {
         pub plusargs: Vec<String>,
         /// Host I/O factory; each simulator receives an independent instance.
         pub file_system: celox_runtime::file_io_backend::FileSystemFactory,
+        /// Leave timed initialization pending so a host can install a checkpoint
+        /// before any declaration or combinational effect executes.
+        pub defer_initialization: bool,
         /// The loop that runs the time slots of a [`crate::Simulation`].
         #[doc(hidden)]
         pub scheduler: crate::SchedulerMode,
@@ -2007,6 +2010,7 @@ mod host {
                 dpi: crate::DpiSymbols::default(),
                 plusargs: Vec::new(),
                 file_system: Default::default(),
+                defer_initialization: false,
                 scheduler: crate::SchedulerMode::default(),
             }
         }
@@ -3726,6 +3730,14 @@ mod host {
     }
 
     impl<'a> SimulatorBuilder<'a, crate::Simulation> {
+        /// Build without executing declaration or combinational initialization.
+        /// Use when preparing a checkpoint restore target. Without a restore,
+        /// the first simulation step performs the pending initialization.
+        pub fn defer_initialization(mut self, defer: bool) -> Self {
+            self.options.defer_initialization = defer;
+            self
+        }
+
         pub(crate) fn new(code: &'a str, top: &'a str) -> Self {
             Self {
                 sources: vec![(code, Path::new(""))],
@@ -4127,19 +4139,21 @@ mod host {
             }
             sim.apply_initial_values();
             // Runtime static declarations precede every comb activation.
-            if !sim
-                .program
-                .runtime_schema
-                .processes
-                .iter()
-                .any(|slots| slots.kind == celox_design::ProcessKind::Initializer)
+            if !options.defer_initialization
+                && !sim
+                    .program
+                    .runtime_schema
+                    .processes
+                    .iter()
+                    .any(|slots| slots.kind == celox_design::ProcessKind::Initializer)
             {
                 sim.modify(|_| {}).map_err(|error| {
                     SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
                 })?;
             }
             let warnings = std::mem::take(&mut sim.warnings);
-            match crate::Simulation::try_new(sim) {
+            match crate::Simulation::try_new_with_initialization(sim, !options.defer_initialization)
+            {
                 Ok(mut simulation) => {
                     simulation.simulator.warnings = warnings;
                     simulation.state.set_scheduler_mode(options.scheduler);

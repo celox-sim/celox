@@ -15,6 +15,8 @@ mod checkpoint_file;
 pub use checkpoint_file::CheckpointFileError;
 mod differential;
 mod vcd_tasks;
+mod waveform_state;
+pub use waveform_state::SourceWaveformState;
 
 /// Saved state of a [`Simulation`], created by [`Simulation::checkpoint`]:
 /// the design state together with simulation time, clocks and pending events.
@@ -174,6 +176,10 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
     }
     fn apply_declaration_startup(&mut self) -> Result<(), Halt> {
         self.apply_ordinary_initial_state();
+        // Runtime declarations may also run on the first deferred step. Initialize
+        // sampled copies and history defaults then (IEEE 1800-2023 16.5.1).
+        // Restoring a completed declaration phase never calls this hook.
+        self.initialize_copies();
         Ok(())
     }
 
@@ -457,7 +463,15 @@ impl<B: SimBackend> Simulation<B> {
         Self::try_new(simulator).expect("runtime static declaration initialization failed")
     }
 
-    pub(crate) fn try_new(mut simulator: Simulator<B>) -> Result<Self, RuntimeErrorCode> {
+    #[cfg(test)]
+    pub(crate) fn try_new(simulator: Simulator<B>) -> Result<Self, RuntimeErrorCode> {
+        Self::try_new_with_initialization(simulator, true)
+    }
+
+    pub(crate) fn try_new_with_initialization(
+        mut simulator: Simulator<B>,
+        initialize: bool,
+    ) -> Result<Self, RuntimeErrorCode> {
         let mut state = simulation_state(&simulator);
         simulator.host_watch = host_watch(&simulator.backend, &simulator.schedule);
         // Only a timed simulation ends at an RTL `$finish`; a bare
@@ -465,10 +479,11 @@ impl<B: SimBackend> Simulation<B> {
         simulator.finish_sites = simulator.schedule.finish_sites;
         simulator.timed = true;
         simulator.skip_runtime_finish();
-        state.initialize_declarations(&mut simulator)?;
-        // Before the first slot, a sampled value is the declared or default
-        // value (IEEE 1800-2023 16.5.1), which declarations may have set.
-        simulator.initialize_copies();
+        if initialize {
+            state.initialize_declarations(&mut simulator)?;
+            // Initialize sampled values and histories before the first slot.
+            simulator.initialize_copies();
+        }
         Ok(Self {
             simulator,
             state,
