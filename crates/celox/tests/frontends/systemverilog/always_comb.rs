@@ -51,3 +51,27 @@ sv_backends! {
         @case "always_comb::multi_store_blocks_with_covering_lists_stay_processes";
     }
 }
+
+sv_backends! {
+    fn settles_feedback_through_chained_concat(sim) {
+        @case "always_comb::settles_feedback_through_chained_concat";
+    }
+    fn settles_feedback_through_chained_mux(sim) {
+        @case "always_comb::settles_feedback_through_chained_mux";
+    }
+    fn settles_feedback_through_chained_qspi(sim) {
+        @case "always_comb::settles_feedback_through_chained_qspi";
+    }
+}
+
+sv_backends! {
+    fn settles_feedback_through_chained_concat_four_state(sim) {
+        @case "always_comb::settles_feedback_through_chained_concat_four_state";
+    }
+    fn settles_feedback_through_chained_mux_four_state(sim) {
+        @case "always_comb::settles_feedback_through_chained_mux_four_state";
+    }
+    fn settles_feedback_through_chained_qspi_four_state(sim) {
+        @case "always_comb::settles_feedback_through_chained_qspi_four_state";
+    }
+}

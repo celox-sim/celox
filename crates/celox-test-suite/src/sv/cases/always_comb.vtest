@@ -246,3 +246,140 @@
   (run_to_finish)
   (expect_output "1 1\n1 1\n0 1\n"))
 
+
+(case settles_feedback_through_chained_concat
+  (source "chained_concat.sv" #"
+    module Top(input logic a, s, output wire x, output wire [2:0] w);
+      wire [1:0] v; assign v = {a, x}; assign w = {v, 1'b0}; assign x = w[2];
+    endmodule
+  "#)
+  (top Top)
+  (modify (set s 1))
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1))
+  (assert_eq x 1)
+  (assert_eq w 6)
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+)
+
+(case settles_feedback_through_chained_mux
+  (source "chained_mux.sv" #"
+    module Top(input logic a, s, output wire x, output wire [1:0] w);
+      wire [1:0] v; assign v = {a, x}; assign w = s ? v : 2'b0; assign x = w[1];
+    endmodule
+  "#)
+  (top Top)
+  (modify (set s 1))
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1))
+  (assert_eq x 1)
+  (assert_eq w 3)
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1) (set s 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set s 1))
+  (assert_eq x 1)
+)
+
+(case settles_feedback_through_chained_qspi
+  (source "chained_qspi.sv" #"
+    module Top(input logic a, s, output wire x, output wire [2:0] w);
+      wire [1:0] v; wire [2:0] c, m; assign v = {a, x}; assign c = {v, x}; assign m = s ? c : 3'b0; assign w = m | 3'b0; assign x = w[2];
+    endmodule
+  "#)
+  (top Top)
+  (modify (set s 1))
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1))
+  (assert_eq x 1)
+  (assert_eq w 7)
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1) (set s 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set s 1))
+  (assert_eq x 1)
+)
+
+(case settles_feedback_through_chained_concat_four_state
+  (source "chained_concat.sv" #"
+    module Top(input logic a, s, output wire x, output wire [2:0] w);
+      wire [1:0] v; assign v = {a, x}; assign w = {v, 1'b0}; assign x = w[2];
+    endmodule
+  "#)
+  (top Top)
+  (four_state)
+  (modify (set s 1))
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1))
+  (assert_eq x 1)
+  (assert_eq w 6)
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+)
+
+(case settles_feedback_through_chained_mux_four_state
+  (source "chained_mux.sv" #"
+    module Top(input logic a, s, output wire x, output wire [1:0] w);
+      wire [1:0] v; assign v = {a, x}; assign w = s ? v : 2'b0; assign x = w[1];
+    endmodule
+  "#)
+  (top Top)
+  (four_state)
+  (modify (set s 1))
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1))
+  (assert_eq x 1)
+  (assert_eq w 3)
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1) (set s 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set s 1))
+  (assert_eq x 1)
+)
+
+(case settles_feedback_through_chained_qspi_four_state
+  (source "chained_qspi.sv" #"
+    module Top(input logic a, s, output wire x, output wire [2:0] w);
+      wire [1:0] v; wire [2:0] c, m; assign v = {a, x}; assign c = {v, x}; assign m = s ? c : 3'b0; assign w = m | 3'b0; assign x = w[2];
+    endmodule
+  "#)
+  (top Top)
+  (four_state)
+  (modify (set s 1))
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1))
+  (assert_eq x 1)
+  (assert_eq w 7)
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1) (set s 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set s 1))
+  (assert_eq x 1)
+)
