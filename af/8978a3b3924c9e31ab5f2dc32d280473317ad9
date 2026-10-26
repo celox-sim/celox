@@ -1,1 +1,1 @@
-Preserve each timestamp sampling baseline across host resumptions; rotate sampled copies only when time actually advances.
+Align the scheduler field documentation with the time-advance sampling boundary.
