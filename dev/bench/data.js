@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793003160678,
+  "lastUpdate": 1793003827511,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -410654,6 +410654,42 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-cc-x86_64/heliodor_suite_smp_linux_boot_2hart_execution",
             "unit": "ms",
             "value": 681888.94449
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "feba1a583c71d2c805b8820821e128c4820c5aa4",
+          "message": "fix(sv)!: defer the actions of deferred assertions in processes (#1877)",
+          "timestamp": "2026-10-25T07:13:08Z",
+          "url": "https://github.com/celox-sim/celox/commit/feba1a583c71d2c805b8820821e128c4820c5aa4"
+        },
+        "date": 1793003827511,
+        "cpu": "AMD EPYC 7763",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-native-x86_64/heliodor_suite_smp_linux_boot_2hart_compilation",
+            "unit": "ms",
+            "value": 93516.094752
+          },
+          {
+            "name": "heliodor-native-x86_64/heliodor_suite_smp_linux_boot_2hart_execution",
+            "unit": "ms",
+            "value": 560476.525302
+          },
+          {
+            "name": "heliodor-celox-jit/heliodor_suite_smp_linux_boot_2hart_execution",
+            "unit": "ms",
+            "value": 560402.714245
           }
         ]
       }
