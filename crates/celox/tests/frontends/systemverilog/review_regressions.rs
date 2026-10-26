@@ -8974,3 +8974,18 @@ fn net_alias_coalescing_retains_distinct_and_variable_drivers() {
         assert!(error.contains(diagnostic), "{error}");
     }
 }
+
+#[test]
+fn single_bit_array_driver_windows_still_reject_overlaps() {
+    for source in [
+        "module Top(input logic index, input logic a, b, output logic [0:0] q[2]);
+          always_comb begin q[0]='0; q[0][index]=a; end
+          always_comb begin q[0]='0; q[0][index]=b; end endmodule",
+        "module Top(input logic index, input logic a, b, output logic [0:0] q[2]);
+          always_comb q[index]=a;
+          always_comb q[0]=b; endmodule",
+    ] {
+        let error = cranelift_build_error(source);
+        assert!(error.contains("multiple variable drivers"), "{error}");
+    }
+}
