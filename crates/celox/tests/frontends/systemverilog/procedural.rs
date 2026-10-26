@@ -50,6 +50,16 @@ fn native_merged_optimization_preserves_large_and_wide_array_boundaries() {
 }
 
 sv_backends! {
+    fn constant_functions_evaluate_wide_address_tables(sim) {
+        @case "procedural::constant_functions_evaluate_wide_address_tables";
+    }
+    fn constant_functions_preserve_wide_arguments_and_signedness(sim) {
+        @case "procedural::constant_functions_preserve_wide_arguments_and_signedness";
+    }
+    fn constant_functions_preserve_wide_unknown_masks(sim) {
+        @case "procedural::constant_functions_preserve_wide_unknown_masks";
+    }
+
     fn static_function_partial_writes_preserve_last_write(sim) {
         @case "procedural::static_function_partial_writes_preserve_last_write";
     }
