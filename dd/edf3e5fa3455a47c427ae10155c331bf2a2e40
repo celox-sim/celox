@@ -1,6 +1,1 @@
-Revision history for #2174:
-
-rev 2 (content) 2026-10-26 18:02 UTC — Use operation identities by default and add explicit per-build legacy empty-reduction compatibility, with backend and native-image regressions
-rev 1 (initial) 2026-10-26 18:02 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2174,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"3a640ad06392d9c84115dc1805b471dac64f4dc1","timestamp_iso":"2026-10-26T18:02:51Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"3a640ad06392d9c84115dc1805b471dac64f4dc1","new_sha":"ddedf3e5fa3455a47c427ae10155c331bf2a2e40","timestamp_iso":"2026-10-26T18:02:51Z","reason":"Use operation identities by default and add explicit per-build legacy empty-reduction compatibility, with backend and native-image regressions","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/3a640ad06392d9c84115dc1805b471dac64f4dc1...ddedf3e5fa3455a47c427ae10155c331bf2a2e40"}]} -->
+Resolve conflicts with merged optional-parentheses and SV analysis optimization changes by rebasing onto current master
