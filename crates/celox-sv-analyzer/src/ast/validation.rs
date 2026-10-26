@@ -74,6 +74,7 @@ fn has_timing_control(
         if matches!(
             statement.kind,
             StatementKind::Timing { .. }
+                | StatementKind::Parallel { .. }
                 | StatementKind::Wait { .. }
                 | StatementKind::WaitFork
                 | StatementKind::WaitOrder { .. }

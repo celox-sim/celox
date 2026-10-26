@@ -2122,10 +2122,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     }
     let mut process_kernels = Vec::with_capacity(processes.len());
     let mut process_slots = Vec::with_capacity(processes.len());
+    let mut process_frames = Vec::with_capacity(processes.len());
     let mut process_origins = Vec::with_capacity(processes.len());
     for process in processes {
         process_kernels.push(process.kernel);
         process_slots.push(process.slots);
+        process_frames.push(process.frame);
         process_origins.push(process.origin);
     }
     let TimingMetadata {
@@ -2333,6 +2335,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         }
     }
 
+    let process_frames: Vec<_> = process_frames
+        .into_iter()
+        .map(|frame| frame.map(|frame| frame.map(project)))
+        .collect();
     let process_slots = process_slots
         .into_iter()
         .map(|slots| slots.map(project))
@@ -2465,6 +2471,13 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .collect();
     // The runtime counts the occurrences its own writes cause.
     timing_read_roots.extend(
+        process_frames
+            .iter()
+            .flatten()
+            .flat_map(|frame| frame.private.iter().chain(&frame.locals))
+            .copied(),
+    );
+    timing_read_roots.extend(
         occurrence_probes
             .iter()
             .flat_map(|(source, counter)| [source.id, *counter]),
@@ -2538,6 +2551,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             declaration_startup,
             dead_store_policy: Default::default(),
             live_signals: Default::default(),
+            process_frames,
             processes: process_slots,
             process_origins,
             watches,
@@ -3948,6 +3962,10 @@ fn relocate_units(
                         &extern_function_map,
                     ),
                     slots: process.slots.map(|var_id| bindings.locate(*id, var_id)),
+                    frame: process
+                        .frame
+                        .clone()
+                        .map(|frame| frame.map(|var_id| bindings.locate(*id, var_id))),
                     origin: celox_design::ProcessOrigin {
                         scope: Some(scope.clone()),
                         ..process.origin.clone()
@@ -4079,6 +4097,7 @@ fn relocate_units(
 struct RelocatedProcess {
     kernel: ExecutionUnit<RegionedAbsoluteAddr>,
     slots: ProcessSlots<AbsoluteAddr>,
+    frame: Option<celox_design::ProcessFrame<AbsoluteAddr>>,
     origin: celox_design::ProcessOrigin,
     /// The instance and the module-local index of the process.
     key: (InstanceId, usize),
@@ -4284,6 +4303,18 @@ fn select_nba_paths(
     staged: &HashSet<AbsoluteAddr>,
     processes: &mut [RelocatedProcess],
 ) {
+    let mut staged = staged.clone();
+    // Fork activations can reach one NBA site concurrently. Always queue its
+    // captured value, rather than leaving one shared pending slot per kernel.
+    for site in &timing.nba_sites {
+        if processes[site.process].frame.is_some() {
+            for switch in &timing.nba_switches {
+                if switch.value == site.value {
+                    staged.remove(&switch.switch);
+                }
+            }
+        }
+    }
     let switches: HashMap<AbsoluteAddr, NbaSwitch<AbsoluteAddr>> = timing
         .nba_switches
         .iter()
