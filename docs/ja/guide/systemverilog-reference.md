@@ -154,6 +154,7 @@ enumは宣言された値だけから均等に抽選し、飛び飛びの値や�
 | システム関数 | `$timeunit`、`$timeprecision`、`$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown`、`$isunbounded` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
 | 乱数 | `$urandom`、`$urandom_range`、`$random`、`$dist_uniform` はクロックで起動するプロセス、`always_comb`、`always @*`、`initial` とそれらから呼ぶサブルーチンで使用可能。`$urandom` の任意の整数式によるシード、`$random` のシード変数、プロセスごとに独立した乱数列 |
 | シミュレーション時刻 | `$time`、`$stime`、`$realtime` はクロックで起動するプロセス、組合せプロセス、継続代入、`initial` とそれらから呼ぶサブルーチンで使用可能 |
+| サンプル値 | `$sampled` はエッジで起動するプロセス、タイミング制御を含むプロセス、`initial` とそれらから呼ぶサブルーチンで使用可能。[サンプル値](#sampled-values) を参照 |
 | システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`、`$exit`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 実行時 I/O | `$test$plusargs`、`$value$plusargs`、`$fopen`、`$fclose`、`$fdisplay` / `$fwrite` と基数指定形、`$writememh` / `$writememb`、[VCD 制御](./vcd#systemverilog-source-controls)。時間を持つプロセスで実行 |
 | 状態 | 2 値・4 値シミュレーション |
@@ -407,6 +408,18 @@ drain のコンテキストが与える時刻で、VPI ホストはコールバ�
 の設定中は、報告が出たタイムステップの時刻です。`Report::render` は、
 VPI ホストと `celox` コマンドが表示する形に整形します。`celox` の実行を失敗にするのは `$error` と
 `$fatal` だけで、`$fatal` はさらにシミュレーションをエラーで終了します。
+
+### サンプル値 {#sampled-values}
+
+`$sampled(e)` は、タイムスロットの Preponed region での `e` の値です。前のスロットの終わりの値で、
+最初のスロットでは宣言の初期値か既定値です（IEEE 1800-2023 4.4.2.1、16.5.1）。被演算子が読む
+静的変数は、選択のインデックスや呼び出しの引数の中のものも含めて、時刻を先へ進める直前に
+更新するコピーから読みます。同じ時刻にホストへ戻って再開しても、ホストからの書き込みを含め、
+コピーは更新しません。automatic 変数は現在の値のままです。`Simulator` では呼び出し 1 回が
+タイムスロットです。組み合わせ回路（`always_comb`、`always_latch`、組み合わせ回路として扱う
+`always`、継続代入）の中の `$sampled` は拒否します。こうしたプロセスは入力が変わったときに
+再実行するもので、入力のサンプル値が変わったときではないためです。`$sampled` を使う設計では、
+コンパイル済みスケジューラを 1 スロットずつ実行します。
 
 ### 遅延付きアサーション
 
