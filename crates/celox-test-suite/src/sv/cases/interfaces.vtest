@@ -946,3 +946,39 @@
                      (<< (trunc 8 (+ value 4)) 8) (trunc 8 (+ value 5))))
     (assert_eq first (| (<< (trunc 8 (+ value 1)) 8) (trunc 8 (+ value 2))))
     (assert_eq second (| (<< (trunc 8 (+ value 3)) 8) (trunc 8 (+ value 4))))))
+
+(case defers_interface_dependent_declarations_before_binding_array_ports
+  (source "interface_array_declarations.sv" #"
+        interface Bus #(parameter int W = 8);
+            logic [W-1:0] data;
+            modport sink(input data);
+        endinterface
+        module Reader #(parameter int LEFT = 3, RIGHT = 2)(
+            Bus.sink a[LEFT:RIGHT], Bus.sink b,
+            input logic [b.W-1:0] delta, output wire [31:0] y);
+            localparam SCALAR_W = b.W;
+            localparam ARRAY_W = a[LEFT].W;
+            localparam TOTAL_W = SCALAR_W + ARRAY_W;
+            typedef logic [TOTAL_W-1:0] sum_t;
+            sum_t sum;
+            assign sum = b.data + a[LEFT].data + a[RIGHT].data + delta;
+            assign y = sum + TOTAL_W;
+        endmodule
+        module Top(input logic [7:0] value,
+                   output wire [31:0] descending, ascending);
+            Bus #(.W(8)) scalar();
+            Bus #(.W(12)) down[3:2](), up[5:6]();
+            assign scalar.data = value;
+            assign down[3].data = 12'h100;
+            assign down[2].data = 12'h200;
+            assign up[5].data = 12'h400;
+            assign up[6].data = 12'h800;
+            Reader d(down, scalar, value, descending);
+            Reader #(.LEFT(5), .RIGHT(6)) u(up, scalar, value, ascending);
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xff)
+    (modify (set value value))
+    (assert_eq descending (+ (* value 2) 0x300 20))
+    (assert_eq ascending (+ (* value 2) 0xc00 20))))
