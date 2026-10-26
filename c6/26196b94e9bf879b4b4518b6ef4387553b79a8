@@ -1,0 +1,1 @@
+Bound working-file descriptors with reopenable temporary paths, persist source waveform controls in the CLI container and resume into fresh VCD segments, remove automatic file-identity aliasing per the requested path-based contract, and sync after the base PR merged.
