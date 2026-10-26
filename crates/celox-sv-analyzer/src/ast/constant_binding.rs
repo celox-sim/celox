@@ -339,6 +339,9 @@ fn bind_in_context(
                     };
                     values.push(value);
                 }
+                ExprKind::ArrayMethodWith { .. } => {
+                    return Err(unsupported("array method with expression"));
+                }
                 _ => return Ok(None),
             },
             Job::Cast(target) => {

@@ -373,6 +373,9 @@ pub(in crate::ast) fn validate(
             ExprKind::Copy(_) => {
                 return Err(unsupported("shallow copy in skipped operand"));
             }
+            ExprKind::ArrayMethodWith { .. } => {
+                return Err(unsupported("array method with expression"));
+            }
             ExprKind::Parameterized { .. } => {
                 return Err(unsupported("parameterized value in skipped operand"));
             }
@@ -581,6 +584,9 @@ pub(in crate::ast) fn literal_widths(
         visited.push(id);
         let add = |jobs: &mut Vec<_>, id| jobs.push((id, evaluated, shape));
         match &native.expression(id).kind {
+            ExprKind::ArrayMethodWith { .. } => {
+                return Err(unsupported("array method with expression"));
+            }
             ExprKind::Literal(text) if evaluated => {
                 if let Some((prefix, _)) = text.split_once('\'')
                     && !prefix.is_empty()
@@ -1155,6 +1161,12 @@ pub(in crate::ast) fn children(
             then_expression,
             else_expression,
         } => children.extend([*condition, *then_expression, *else_expression]),
+        ExprKind::ArrayMethodWith {
+            expression,
+            predicate,
+        } => {
+            children.extend([*expression, *predicate]);
+        }
         ExprKind::Call {
             expression,
             arguments,

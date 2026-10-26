@@ -895,6 +895,9 @@ pub(in crate::ast) fn bind_value(
                     ExprKind::Concatenation(_) => {
                         return Err(unsupported("empty unpacked array concatenation"));
                     }
+                    ExprKind::ArrayMethodWith { .. } => {
+                        return Err(unsupported("array method with expression"));
+                    }
                     ExprKind::MinTypMax { .. } => return Err(unsupported("mintypmax expression")),
                     _ => return Err(unsupported("primary expression")),
                 };
