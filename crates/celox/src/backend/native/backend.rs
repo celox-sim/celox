@@ -505,6 +505,61 @@ impl NativeProgramImage {
         &self.design.events
     }
 
+    /// The storage a reflected signal shares with its aliases: its own, or
+    /// for a clock or reset its canonical event domain's.
+    pub fn signal_identity(
+        &self,
+        id: celox_runtime::ReflectionSignalId,
+    ) -> Option<super::NativeSignalIdentity> {
+        let signal = self.reflection.signal(id)?;
+        Some(if signal.domain_kind == celox_design::DomainKind::Other {
+            super::NativeSignalIdentity::State(signal.signal)
+        } else {
+            super::NativeSignalIdentity::Event(
+                self.event_topology().canonical(signal.state_address),
+            )
+        })
+    }
+
+    /// Whether the design has process kernels, which only a timed
+    /// [`crate::Simulation`] runs.
+    pub fn has_processes(&self) -> bool {
+        !self.runtime_schema.processes.is_empty()
+    }
+
+    /// The compiler-inserted override slots of a reflected signal, as
+    /// (enable, value) pairs: setting the enable makes the design read the
+    /// value instead of its drivers.
+    pub fn force_slots(
+        &self,
+        id: celox_runtime::ReflectionSignalId,
+    ) -> Vec<(SignalRef, SignalRef)> {
+        self.runtime_schema
+            .force_bindings
+            .iter()
+            .filter(|binding| binding.signal == id)
+            .map(|binding| (binding.enabled, binding.value))
+            .collect()
+    }
+
+    /// Every reflected signal stored at `identity`, in storage order.
+    pub fn signal_aliases(&self, identity: super::NativeSignalIdentity) -> Vec<SignalRef> {
+        let mut signals = self
+            .reflection
+            .signals()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, signal)| {
+                (self.signal_identity(celox_runtime::ReflectionSignalId(index as u32))
+                    == Some(identity))
+                .then_some(signal.signal)
+            })
+            .collect::<Vec<_>>();
+        signals.sort_unstable();
+        signals.dedup();
+        signals
+    }
+
     /// Reconstruct the source-independent runtime metadata retained by this
     /// image. No frontend parsing or SIR/layout work is needed on the
     /// execution side of a host-codegen workflow.

@@ -185,11 +185,26 @@ mod host_api {
     pub struct SlotIo<'a, B: SimBackend = DefaultBackend> {
         io: IOContext<'a, B>,
         wrote: bool,
+        finish_requested: bool,
     }
 
     impl<'a, B: SimBackend> SlotIo<'a, B> {
         pub(crate) fn new(io: IOContext<'a, B>) -> Self {
-            Self { io, wrote: false }
+            Self {
+                io,
+                wrote: false,
+                finish_requested: false,
+            }
+        }
+
+        /// End the simulation when this observer callback returns, before
+        /// any further scheduled work runs. Earlier host writes remain in state.
+        pub fn request_finish(&mut self) {
+            self.finish_requested = true;
+        }
+
+        pub(crate) fn finish_requested(&self) -> bool {
+            self.finish_requested
         }
 
         pub(crate) fn wrote(&self) -> bool {
