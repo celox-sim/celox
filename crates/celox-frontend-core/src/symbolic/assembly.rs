@@ -1971,7 +1971,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             data: InitialStateData::Packed {
                 value,
                 mask: BigUint::default(),
-                written_mask: (BigUint::from(1u8) << ((partitions + 1) * 8)) - 1u8,
+                written_mask: (BigUint::from(1u8) << ((partitions + 2) * 8)) - 1u8,
             },
         });
     }
@@ -2621,14 +2621,15 @@ fn settle_partitioning(
 }
 
 /// Declare the flags of a settle of `partitions` partitions, one byte each
-/// plus the untracked byte, as a hidden variable of the top module.
+/// plus the untracked and the full byte, as a hidden variable of the top
+/// module.
 fn declare_settle_flags(
     modules: &mut HashMap<ModuleId, SimModule>,
     root: ModuleId,
     var_id: SourceVarId,
     partitions: usize,
 ) {
-    let width = (partitions + 1) * 8;
+    let width = (partitions + 2) * 8;
     let variables = &mut modules.get_mut(&root).expect("top module").variables;
     variables.insert(
         var_id,

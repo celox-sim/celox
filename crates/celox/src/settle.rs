@@ -89,7 +89,7 @@ pub(crate) fn run_checked<B, E>(
     let partial = memory(backend).to_vec();
     let state = memory(backend);
     state.copy_from_slice(&before);
-    state[flags.start..flags.end - 1].fill(1);
+    state[flags.start..flags.start + settle.partitions].fill(1);
     run(backend)?;
     let full = memory(backend);
     if let Some(offset) = (celox_state_layout::STATE_HEADER_SIZE..state_end)
