@@ -72,6 +72,7 @@ pub struct Module {
     declaration_subroutines: Vec<Subroutine>,
     dpi_imports: Vec<DpiImport>,
     imported_parameters: Vec<Parameter>,
+    interface_scope_names: Vec<String>,
     program: bool,
 }
 
@@ -196,7 +197,18 @@ impl Module {
             dpi_imports: Vec::new(),
             imported_parameters: Vec::new(),
             program: false,
+            interface_scope_names: Vec::new(),
         }
+    }
+
+    /// Elaborated interface instance and port scopes, including empty interfaces.
+    pub fn interface_scope_names(&self) -> &[String] {
+        &self.interface_scope_names
+    }
+
+    pub(crate) fn with_interface_scope_names(mut self, names: Vec<String>) -> Self {
+        self.interface_scope_names = names;
+        self
     }
 
     pub(crate) fn with_program(mut self, program: bool) -> Self {
