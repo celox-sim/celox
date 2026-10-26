@@ -70,6 +70,22 @@ test("Rust test infrastructure skips bindings while retaining Rust checks", () =
   }
 });
 
+test("Aplite release metadata runs policy checks without rebuilding products", () => {
+  const metadata = [".release-please-aplite-manifest.json", "crates/aplite/CHANGELOG.md"];
+  for (const files of [metadata, ...metadata.map(path => [path])]) {
+    for (const releasePlease of [false, true])
+      assert.deepEqual(classifyFiles(files, { releasePlease }), { ...none, scripts: true });
+  }
+  for (const path of ["crates/aplite/src/lib.rs", "crates/aplite/Cargo.toml", "Cargo.lock"]) {
+    assert.deepEqual(
+      classifyFiles([...metadata, path]),
+      { ...classifyFiles([path]), scripts: true },
+      path,
+    );
+    assert.equal(classifyFiles([...metadata, path]).rust, true, path);
+  }
+});
+
 test("manifests and mixed runtime changes retain binding validation", () => {
   for (const path of [
     "Cargo.toml",

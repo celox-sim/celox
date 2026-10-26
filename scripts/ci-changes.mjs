@@ -162,6 +162,14 @@ export function classifyFiles(files, { releasePlease = false } = {}) {
       continue;
     }
 
+    // Aplite has an independent release manifest. Its release notes and
+    // manifest need repository-policy checks, not a product rebuild. Keep
+    // source, Cargo.toml and Cargo.lock changes on their normal paths below.
+    if ([".release-please-aplite-manifest.json", "crates/aplite/CHANGELOG.md"].includes(path)) {
+      affected.scripts = true;
+      continue;
+    }
+
     if (isRustOnlyPath(path)) {
       affected.rust = true;
       continue;
