@@ -1,6 +1,1 @@
-Revision history for #2149:
-
-rev 2 (content) 2026-10-26 12:32 UTC — Validate all dynamic-container cases with pinned xezim, correct the two-state runtime-query fixture type, and document remaining independent comparison mismatches
-rev 1 (initial) 2026-10-26 12:32 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2149,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"40e6528153e6dc3a2384a239b322174959862c0f","timestamp_iso":"2026-10-26T12:32:44Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"40e6528153e6dc3a2384a239b322174959862c0f","new_sha":"b139a79263a9349a53c5230467b0105d978dbb18","timestamp_iso":"2026-10-26T12:32:44Z","reason":"Validate all dynamic-container cases with pinned xezim, correct the two-state runtime-query fixture type, and document remaining independent comparison mismatches","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/40e6528153e6dc3a2384a239b322174959862c0f...b139a79263a9349a53c5230467b0105d978dbb18"}]} -->
+Address P2 receiver capture ordering: evaluate nested queue arguments before reading immutable contents and add portable regressions
