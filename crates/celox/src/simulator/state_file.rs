@@ -411,9 +411,12 @@ impl<B: SimBackend> Simulator<B> {
         // Evaluating the loaded state can still fail (an oscillating
         // combinational loop), so keep the current state to return to.
         let previous = self.checkpoint()?;
+        let previous_deferred_owners = self.deferred_owner_context();
+        self.stash_runtime_events();
         self.state_schema()
             .load(&mut self.backend, file)
             .map_err(StateError::Mismatch)?;
+        self.replace_deferred_execution();
         for address in &self.program.runtime_schema.time_slots {
             self.backend.set(
                 SignalRef {
@@ -429,7 +432,9 @@ impl<B: SimBackend> Simulator<B> {
         // observers take it as their baseline instead of reporting changes.
         if let Err(error) = self.backend.eval_comb() {
             let error = self.decorate_runtime_error(error);
-            self.restore(&previous)?;
+            let restored = self.restore(&previous);
+            self.restore_deferred_owner_context(previous_deferred_owners);
+            restored?;
             return Err(StateError::Runtime(error));
         }
         self.comb_observer_snapshots = self.snapshot_all_comb_observers();

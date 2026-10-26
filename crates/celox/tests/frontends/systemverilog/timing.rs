@@ -1362,3 +1362,32 @@ fn fork_compound_event_rejects_implicit_expression_writes() {
         );
     }
 }
+
+timed_cases! {
+    fn fork_deferred_four_state_arguments_are_captured_before_child_exit = "fork_deferred::four_state_arguments_are_captured_before_child_exit";
+    fn fork_deferred_reactive_wakeup_preserves_mature_observed_only = "fork_deferred::reactive_wakeup_preserves_mature_observed_only";
+    fn fork_deferred_sibling_wait_queues_are_independent = "fork_deferred::sibling_wait_queues_are_independent";
+    fn fork_deferred_sibling_event_queues_are_independent = "fork_deferred::sibling_event_queues_are_independent";
+    fn fork_deferred_child_flush_does_not_inherit_parent_reports = "fork_deferred::child_flush_does_not_inherit_parent_reports";
+    fn fork_deferred_disable_fork_flushes_live_children_only = "fork_deferred::disable_fork_flushes_live_children_only";
+    fn fork_deferred_reused_slot_cannot_flush_completed_reports = "fork_deferred::reused_slot_cannot_flush_completed_reports";
+    fn fork_deferred_zero_delay_is_not_a_flush_point = "fork_deferred::zero_delay_is_not_a_flush_point";
+    fn fork_deferred_repeated_static_site_keeps_completed_reports = "fork_deferred::repeated_static_site_keeps_completed_reports";
+}
+
+#[test]
+fn fork_deferred_interpreter() {
+    for name in [
+        "reactive_wakeup_preserves_mature_observed_only",
+        "four_state_arguments_are_captured_before_child_exit",
+        "sibling_wait_queues_are_independent",
+        "sibling_event_queues_are_independent",
+        "child_flush_does_not_inherit_parent_reports",
+        "disable_fork_flushes_live_children_only",
+        "reused_slot_cannot_flush_completed_reports",
+        "zero_delay_is_not_a_flush_point",
+        "repeated_static_site_keeps_completed_reports",
+    ] {
+        crate::suite::run_case(&format!("fork_deferred::{name}"), "interpreter");
+    }
+}
