@@ -373,26 +373,116 @@ impl<'a> ProcModule<'a> {
         names.iter().filter_map(|name| self.id(name)).collect()
     }
 
-    /// Whether `always @(items) body` is `always @* body`: no item has an edge
-    /// or a select, the items name exactly the variables the implicit event
-    /// expression of `body` has (IEEE 1800-2023 9.4.2.2), and the body neither
-    /// suspends nor makes a nonblocking assignment, directly or in a call.
+    /// Whether `always @(items) body` simulates like `always @* body`. The
+    /// body must neither suspend nor make a nonblocking assignment, directly
+    /// or in a call. Then either
+    /// - the items name exactly the variables the implicit event expression
+    ///   of `body` has (IEEE 1800-2023 9.4.2.2), a part-select of a whole
+    ///   variable naming it, or
+    /// - the items cover every bit `body` reads, and running `body` when
+    ///   none of those bits changed is unobservable: it has no side effects,
+    ///   reads no variable it writes, and stores each variable at most once
+    ///   per run, so it writes the values it wrote last time without
+    ///   pulsing a variable for the waiters on it (4.3, 9.4.2).
     pub fn is_implicit_event_list(
         &self,
         items: &[sv::ir::EventItem],
         body: &[sv::ir::Stmt],
     ) -> bool {
-        let mut listed = HashSet::default();
+        if self.suspends_or_defers(body) {
+            return false;
+        }
+        let mut listed: HashSet<VarAtomBase<SourceVarId>> = HashSet::default();
+        let mut exact = true;
         for item in items {
-            let sv::ir::Expr::Ident(name) = &item.expr else {
-                return false;
+            let (name, range) = match &item.expr {
+                sv::ir::Expr::Ident(name) => (name, None),
+                sv::ir::Expr::Select {
+                    expr: base,
+                    msb,
+                    lsb,
+                    ..
+                } => {
+                    let sv::ir::Expr::Ident(name) = &**base else {
+                        return false;
+                    };
+                    let Some(range) = sv::typecheck::eval_const_expr_with_types(
+                        msb,
+                        self.constants,
+                        self.parameter_types,
+                    )
+                    .zip(sv::typecheck::eval_const_expr_with_types(
+                        lsb,
+                        self.constants,
+                        self.parameter_types,
+                    ))
+                    .and_then(|(msb, lsb)| {
+                        packed_expr_select_offsets(base, msb, lsb, self.variables, self.name_to_id)
+                    }) else {
+                        return false;
+                    };
+                    (name, Some((range.0.min(range.1), range.0.max(range.1))))
+                }
+                _ => return false,
             };
             let Some(id) = self.id(name).filter(|id| !self.is_hidden(*id)) else {
                 return false;
             };
-            listed.insert(VarAtomBase::new(id, 0, self.var(id).width - 1));
+            let width = self.var(id).width;
+            let (lsb, msb) = range.unwrap_or((0, width - 1));
+            exact &= lsb == 0 && msb == width - 1;
+            listed.insert(VarAtomBase::new(id, lsb, msb));
         }
-        !self.suspends_or_defers(body) && listed == self.implicit_reads(body, false)
+        let reads = self.implicit_reads(body, false);
+        if exact && listed == reads {
+            return true;
+        }
+        if !self.is_pure(body) {
+            return false;
+        }
+        let mut written = HashSet::default();
+        written_names(body, &mut written);
+        let written: HashSet<_> = written
+            .iter()
+            .filter_map(|name| self.id(name))
+            .filter(|id| !self.is_hidden(*id))
+            .collect();
+        if reads.iter().any(|read| written.contains(&read.id)) {
+            return false;
+        }
+        if stores_twice(body, &mut HashSet::default()) {
+            return false;
+        }
+        // Longest static prefixes: constant selects keep their bits.
+        self.implicit_reads(body, true).iter().all(|read| {
+            (read.access.lsb..=read.access.msb).all(|bit| {
+                listed.iter().any(|item| {
+                    item.id == read.id && item.access.lsb <= bit && bit <= item.access.msb
+                })
+            })
+        })
+    }
+
+    /// Whether `body` has no effect but its writes: no system task, no
+    /// subroutine call, no system function that reads the simulation.
+    fn is_pure(&self, body: &[sv::ir::Stmt]) -> bool {
+        let mut pure = true;
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt.walk(&mut |stmt| {
+                pure &= !matches!(
+                    stmt,
+                    sv::ir::Stmt::SystemTask { .. }
+                        | sv::ir::Stmt::Eval(_)
+                        | sv::ir::Stmt::Call { .. }
+                        | sv::ir::Stmt::Return(_)
+                );
+                stmt_calls(stmt, &mut calls);
+            });
+        }
+        pure && calls.iter().all(|(callee, _)| {
+            matches!(callee, sv::ir::Callee::System(function) if !function.reads_simulation_state())
+        })
     }
 
     fn suspends_or_defers(&self, body: &[sv::ir::Stmt]) -> bool {
@@ -2606,6 +2696,62 @@ pub(super) fn expr_calls(expr: &sv::ir::Expr, is_callee: &dyn Fn(&sv::ir::Callee
 }
 
 /// The names written by the assignments (and through call arguments) of a
+/// Whether a run of `stmts` may store a variable twice, given the variables
+/// `written` on some path before them. Locals are not variables of the
+/// design, and a loop counts as storing twice.
+fn stores_twice(stmts: &[sv::ir::Stmt], written: &mut HashSet<String>) -> bool {
+    let mut locals = HashSet::default();
+    stores_twice_in(stmts, written, &mut locals)
+}
+
+fn stores_twice_in(
+    stmts: &[sv::ir::Stmt],
+    written: &mut HashSet<String>,
+    locals: &mut HashSet<String>,
+) -> bool {
+    for stmt in stmts {
+        match stmt {
+            sv::ir::Stmt::Local { name, .. } => {
+                locals.insert(name.clone());
+            }
+            sv::ir::Stmt::Assign { .. } | sv::ir::Stmt::AssignConcat { .. } => {
+                let mut names = HashSet::default();
+                written_names(std::slice::from_ref(stmt), &mut names);
+                for name in names {
+                    if !locals.contains(&name) && !written.insert(name) {
+                        return true;
+                    }
+                }
+            }
+            sv::ir::Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                let mut other = written.clone();
+                if stores_twice_in(then_body, written, locals)
+                    || stores_twice_in(else_body, &mut other, locals)
+                {
+                    return true;
+                }
+                written.extend(other);
+            }
+            sv::ir::Stmt::Case { items, default, .. } => {
+                let before = written.clone();
+                for body in items.iter().map(|item| &item.body).chain(default.iter()) {
+                    let mut branch = before.clone();
+                    if stores_twice_in(body, &mut branch, locals) {
+                        return true;
+                    }
+                    written.extend(branch);
+                }
+            }
+            _ => return true,
+        }
+    }
+    false
+}
+
 /// statement list.
 pub(super) fn written_names(stmts: &[sv::ir::Stmt], names: &mut HashSet<String>) {
     for stmt in stmts {
