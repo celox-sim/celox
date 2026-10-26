@@ -171,7 +171,11 @@ fn task_timing_control_is_rejected() {
         .build_cranelift()
         .expect_err("a task with a delay must be rejected")
         .to_string();
-    assert!(error.contains("Unsupported"), "{error}");
+    // IEEE 1800-2023 9.2.2.2: always_comb may not suspend.
+    assert!(
+        error.contains("timed task call in an always_comb body"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -206,4 +210,27 @@ fn dpi_imports_need_the_sv_dpi_feature() {
         .expect_err("DPI-C imports need the `sv-dpi` feature")
         .to_string();
     assert!(error.contains("sv-dpi"), "{error}");
+}
+
+sv_backends! {
+    fn continuous_assignment_targets_declare_implicit_nets(sim) {
+        @case "synthesizable::continuous_assignment_targets_declare_implicit_nets";
+    }
+}
+
+// `default_nettype none` disables implicit nets (IEEE 1800-2023 22.8), so an
+// undeclared continuous assignment target stays an error.
+#[test]
+fn default_nettype_none_rejects_undeclared_assignment_targets() {
+    let source = "`default_nettype none
+        module Top(input logic a, output logic y);
+            assign x = a;
+            assign y = x;
+        endmodule
+        `default_nettype wire";
+    let error = Simulator::from_sv_sources(vec![(source, Path::new("none.sv"))], "Top")
+        .build_cranelift()
+        .expect_err("an undeclared target under `default_nettype none` is rejected")
+        .to_string();
+    assert!(error.contains("undeclared `x`"), "{error}");
 }

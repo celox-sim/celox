@@ -159,6 +159,32 @@ sim.runUntil(10000);
 sim.runUntil(10000, { maxSteps: 500 });
 ```
 
+### 実行時イベントと報告
+
+`drainRuntimeEvents()` は、前回の呼び出し以降に設計が出したものを出した順に返します。
+`$display` と `$write` の出力、重大度タスクと失敗したアサーションの `report` イベント、
+`$finish`、`$stop` です。報告は `severity`（`"info"`、`"warning"`、`"error"`、`"fatal"`）、
+`message` のバイト列、報告した `scope`、`file`、`line` を持ちます。
+
+`setFailOn(severity)` を設定すると、その重大度以上の報告が最初に出たタイムステップの後で、
+`runUntil()`、`step()`、各種の待ちが例外を投げます。設定中は、各報告が出た時刻を `time` に
+保持します。イベントバッファがあふれて失われたイベント(`missed` イベント)は、失敗を
+含んでいた可能性があるため失敗として扱います。次の呼び出しはシミュレーションを続けます。
+
+```typescript
+sim.setFailOn("error");
+try {
+  sim.runUntil(10000);
+} catch (error) {
+  // 最初の $error の時刻で "failOn: Error: ..."
+}
+for (const event of sim.drainRuntimeEvents()) {
+  if (event.kind === "report") {
+    console.log(event.severity, event.time, new TextDecoder().decode(event.message));
+  }
+}
+```
+
 ## シミュレータオプション
 
 `Simulator` と `Simulation` の両方で以下のオプションが使えます：
@@ -261,7 +287,7 @@ const sim = Simulator.fromSource(SOURCE, "Adder", {
 
 ### HDL出力のバイト列
 
-Rustの`RuntimeEvent::{Display, Write, AssertContinue, AssertFatal}`と詳細テスト結果の
+Rustの`RuntimeEvent::{Display, Write}`と`RuntimeEvent::Report`の`message`、詳細テスト結果の
 assertionメッセージは`Vec<u8>`を返します。JavaScriptの`runTest`、
 `runTestFromProject`、`runTestWithFrontendArtifact`では`Uint8Array`です。
 `%s`と`%c`には非UTF-8やNULが含まれるため、暗黙のデコードは行いません。

@@ -44,6 +44,7 @@ pub(super) struct FunctionErrors {
 #[derive(Default)]
 pub(crate) struct State {
     functions: RefCell<ConstantFunctions>,
+    revision: generate::Revision,
     depth: Cell<usize>,
     argument_names: RefCell<(
         Arc<ConstantFunctionTable>,
@@ -53,15 +54,15 @@ pub(crate) struct State {
 
 pub(super) struct Installed {
     previous: ConstantFunctions,
+    revision: u64,
     state: std::rc::Rc<AnalysisState>,
 }
 
 impl Drop for Installed {
     fn drop(&mut self) {
-        replace(
-            &self.state.const_functions,
-            std::mem::take(&mut self.previous),
-        );
+        let functions = &self.state.const_functions;
+        replace(functions, std::mem::take(&mut self.previous));
+        functions.revision.restore(self.revision);
     }
 }
 
@@ -96,15 +97,22 @@ pub(super) fn install(
     functions: ConstantFunctions,
 ) -> Installed {
     let previous = installed(&state.const_functions);
+    let revision = state.const_functions.revision.get();
     replace(&state.const_functions, functions);
     Installed {
         previous,
+        revision,
         state: state.clone(),
     }
 }
 
 pub(super) fn replace(state: &State, functions: ConstantFunctions) {
     *state.functions.borrow_mut() = functions;
+    state.revision.change();
+}
+
+pub(super) fn revision(state: &State) -> &generate::Revision {
+    &state.revision
 }
 
 /// Why an installed function could not be converted for constant evaluation.
@@ -475,6 +483,7 @@ fn collect_module_constant_functions(
     let mut dimensions = PackedDimensions::new(HashMap::default(), const_env, type_aliases);
     dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
     dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes);
+    dimensions.subroutine_directions = Arc::new(subroutine_directions.clone());
     let mut locals = Vec::new();
     let mut counter = 0usize;
     let mut state = procedural::BodyState {
@@ -615,7 +624,10 @@ fn simulation_state_readers(functions: &[Subroutine]) -> HashMap<String, Analyze
                 Callee::System(system) if system.reads_simulation_state() => {
                     reads.get_or_insert(*system);
                 }
-                Callee::System(_) | Callee::String(_) | Callee::Object(_) => {}
+                Callee::System(_)
+                | Callee::String(_)
+                | Callee::Object(_)
+                | Callee::Checked { .. } => {}
                 Callee::Subroutine(callee) => calls.push(callee.as_str()),
             }
         }
@@ -1345,7 +1357,9 @@ impl Frame<'_> {
             // diagnostic belongs to the declaration, not to evaluation.
             Stmt::SystemTask { .. } => {}
             // A function has no timing controls (IEEE 1800-2023 13.4).
-            Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::Wait(_) => return None,
+            Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::WaitImplicit(_) | Stmt::Wait(_) => {
+                return None;
+            }
             Stmt::AssignConcat { .. } | Stmt::Call { .. } => return None,
         }
         Some(Flow::Next)

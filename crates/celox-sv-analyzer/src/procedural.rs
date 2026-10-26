@@ -16,6 +16,11 @@ pub struct SourceSpan {
     pub path: std::path::PathBuf,
     pub start: usize,
     pub end: usize,
+    /// The file and one-based line of the start as `__FILE__` and
+    /// `__LINE__` give them, after `` `line `` directives (IEEE 1800-2023
+    /// 22.12, 22.13).
+    pub logical_path: std::path::PathBuf,
+    pub line: usize,
 }
 
 /// Where a process is written, for diagnostics about the process as a
@@ -94,6 +99,9 @@ pub enum StmtBase<E, L> {
         task: SystemTask,
         args: Vec<SystemTaskArg<E>>,
         site: Option<SourceSpan>,
+        /// For a severity task in an action block of an assertion, that
+        /// assertion (IEEE 1800-2023 16.3, 20.10).
+        assertion: Option<celox_design::AssertionSite>,
     },
     /// The declaration point of a local variable: it is (re)initialized here,
     /// to `init` or to the default value of its type.
@@ -114,6 +122,12 @@ pub enum StmtBase<E, L> {
     /// `@(items)`: suspend the process until one of the events occurs
     /// (9.4.2).
     WaitEvent(Vec<EventItemBase<E>>),
+    /// `@*` (9.4.2.2): suspend the process until a variable that the
+    /// statements read changes. They are the statements the control covers,
+    /// branches that constant folding removed included, and only describe
+    /// the reads: they do not execute here, and [`StmtBase::walk`] does not
+    /// visit them.
+    WaitImplicit(Vec<StmtBase<E, L>>),
     /// `wait (condition)`: suspend the process until the condition is true
     /// (9.4.3).
     Wait(E),
@@ -308,9 +322,15 @@ impl<E, L> StmtBase<E, L> {
                 args: args.into_iter().map(|arg| arg.map(&mut *fe)).collect(),
             },
             StmtBase::Eval(expr) => StmtBase::Eval(fe(expr)),
-            StmtBase::SystemTask { task, args, site } => StmtBase::SystemTask {
+            StmtBase::SystemTask {
+                task,
+                args,
+                site,
+                assertion,
+            } => StmtBase::SystemTask {
                 task,
                 site,
+                assertion,
                 args: args
                     .into_iter()
                     .map(|arg| match arg {
@@ -343,6 +363,7 @@ impl<E, L> StmtBase<E, L> {
                     .collect(),
             ),
             StmtBase::Wait(condition) => StmtBase::Wait(fe(condition)),
+            StmtBase::WaitImplicit(reads) => StmtBase::WaitImplicit(body(reads, fe, fl)),
         }
     }
 
@@ -455,6 +476,43 @@ impl<E, L> StmtBase<E, L> {
                 }
             }
             StmtBase::Wait(condition) => fe(condition),
+            StmtBase::WaitImplicit(reads) => body(reads, fe, fl, fname),
+        }
+    }
+
+    /// Visit every statement of this tree in place, outermost first.
+    pub fn walk_mut(&mut self, f: &mut impl FnMut(&mut StmtBase<E, L>)) {
+        f(self);
+        let mut visit = |stmts: &mut [StmtBase<E, L>]| {
+            for stmt in stmts {
+                stmt.walk_mut(f);
+            }
+        };
+        match self {
+            StmtBase::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                visit(then_body);
+                visit(else_body);
+            }
+            StmtBase::Case { items, default, .. } => {
+                for item in items {
+                    visit(&mut item.body);
+                }
+                if let Some(default) = default {
+                    visit(default);
+                }
+            }
+            StmtBase::Loop {
+                init, step, body, ..
+            } => {
+                visit(init);
+                visit(step);
+                visit(body);
+            }
+            _ => {}
         }
     }
 

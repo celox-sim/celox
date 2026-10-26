@@ -1,0 +1,59 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unions::packed_mixed_state",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unions::packed_overlay at 28:5: assert_eq value: expected 0xf, got 0x0",
+      "expectation": "Simulation",
+      "name": "unions::packed_overlay",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\nParsed 2 file(s): 2 descriptions, 0 errors, 0 warnings\nerror: <case>/source_0.sv:7:74: member 'nested' of a packed union must be of a packed type, not an unpacked struct (IEEE 1800-2017 §7.2.1)\n",
+      "expectation": "Simulation",
+      "name": "unions::soft_overlay",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unions::soft_signed_ports at 146:5: assert_eq member_extended: expected 0xffff, got 0xf",
+      "expectation": "Simulation",
+      "name": "unions::soft_signed_ports",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unions::soft_wide_four_state at 111:5: assert_eq value: expected 0xaX, got 0xX",
+      "expectation": "Simulation",
+      "name": "unions::soft_wide_four_state",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

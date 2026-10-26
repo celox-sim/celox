@@ -1,6 +1,8 @@
 //! Unsupported-construct checks and bounded procedural-loop validation.
 
 use super::*;
+use crate::source_tree::{Ranges, Starts};
+use celox_sv_syntax::ExprId;
 
 /// How an `always` construct is simulated.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -131,9 +133,12 @@ fn validate_procedure(
     while let Some(id) = pending.pop() {
         let statement = native.statement(id);
         match &statement.kind {
+            // A plain `always @*` that calls a timed task runs as a process,
+            // which may assign nonblocking; timed task classification
+            // rejects the assignment in one that stays combinational.
             StatementKind::Assignment {
                 nonblocking: true, ..
-            } if kind == AlwaysKind::Comb => {
+            } if kind == AlwaysKind::Comb && procedure.kind != ProcedureKind::Always => {
                 return Err(unsupported(
                     if procedure.kind == ProcedureKind::AlwaysLatch {
                         "nonblocking assignment inside always_latch"
@@ -212,13 +217,16 @@ pub(super) fn reject_silently_ignored_constructs(
     parameter_dimensions: &ScopedMap<VariableDimensions>,
     parameter_values: &HashMap<String, Expr>,
 ) -> Converted<()> {
+    if let Ok(unit) = syntax_tree.root_unit() {
+        validate_program_structure(unit, syntax_tree.declarations())?;
+    }
     let mut dimensions =
         PackedDimensions::new(parameter_dimensions.clone(), const_env, type_aliases);
     dimensions.parameter_values = parameter_values.clone().into();
     validate_scope(None, syntax_tree, &dimensions)?;
     if syntax_tree
         .root_unit()
-        .is_ok_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Module)
+        .is_ok_and(|unit| unit.kind.is_module_like())
     {
         let active = generate::items(syntax_tree, const_env, type_aliases)?;
         let mut views = generate::ScopeViews::new(&dimensions);
@@ -233,8 +241,390 @@ pub(super) fn reject_silently_ignored_constructs(
     Ok(())
 }
 
+/// A program is a leaf: it shall not contain `always` procedures or
+/// declarations or instances of modules, interfaces or other programs (IEEE
+/// 1800-2023 24.3), generate blocks included. A program nested in a module
+/// is implicitly instantiated there, which Celox does not do.
+fn validate_program_structure(
+    unit: &celox_sv_syntax::Unit,
+    native: &celox_sv_syntax::Declarations,
+) -> Converted<()> {
+    use celox_sv_syntax::{BodyItemKind, ProcedureKind, UnitKind};
+    let program = unit.kind == UnitKind::Program;
+    let illegal = |item: String| {
+        Err(AnalyzerError::IllegalProgramItem {
+            program: instances::normalize_identifier(&unit.name.spelling),
+            item,
+        })
+    };
+    let mut pending = unit.items.iter().rev().copied().collect::<Vec<_>>();
+    while let Some(id) = pending.pop() {
+        match &native.body_item(id).kind {
+            BodyItemKind::Procedure(procedure) if program => {
+                let keyword = match native.procedure(*procedure).kind {
+                    ProcedureKind::Always => "always",
+                    ProcedureKind::AlwaysComb => "always_comb",
+                    ProcedureKind::AlwaysLatch => "always_latch",
+                    ProcedureKind::AlwaysFf => "always_ff",
+                    ProcedureKind::Initial | ProcedureKind::Final => continue,
+                };
+                return illegal(format!("`{keyword}` procedure"));
+            }
+            BodyItemKind::Instance(_) if program => return illegal("an instance".into()),
+            BodyItemKind::Unit(nested) => {
+                let nested = native.unit(*nested);
+                if program {
+                    let kind = match nested.kind {
+                        UnitKind::Module => "module",
+                        UnitKind::Interface => "interface",
+                        UnitKind::Package => "package",
+                        UnitKind::Program => "program",
+                    };
+                    return illegal(format!(
+                        "{kind} declaration `{}`",
+                        instances::normalize_identifier(&nested.name.spelling)
+                    ));
+                }
+                if nested.kind == UnitKind::Program {
+                    return Err(unsupported("program declaration nested in a module"));
+                }
+            }
+            BodyItemKind::Region(items) | BodyItemKind::Block { items, .. } => {
+                pending.extend(items.iter().rev().copied());
+            }
+            BodyItemKind::Conditional {
+                then_body,
+                otherwise,
+                ..
+            } => {
+                pending.extend(otherwise);
+                pending.push(*then_body);
+            }
+            BodyItemKind::Case { arms, .. } => {
+                pending.extend(arms.iter().rev().map(|arm| arm.body));
+            }
+            BodyItemKind::Loop { body, .. } => pending.push(*body),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn contains(outer: celox_sv_syntax::TokenRange, inner: celox_sv_syntax::TokenRange) -> bool {
     outer.start <= inner.start && inner.end <= outer.end
+}
+
+/// Whole-file facts the scope validation selects from, built once per file
+/// so each scope costs what its own token ranges contain.
+#[derive(Debug)]
+pub(crate) struct Facts {
+    /// Generate controls, whose bodies a module's own validation skips.
+    controls: Ranges,
+    /// The first token of the body item declaring each nested unit.
+    unit_starts: HashMap<celox_sv_syntax::UnitId, usize>,
+    /// Unit and port positions of every header port, in arena order.
+    ports: Vec<(usize, usize)>,
+    port_starts: Starts,
+    /// Type and dimension positions of every packed dimension.
+    packed_dimensions: Vec<(usize, usize)>,
+    packed_dimension_starts: Starts,
+    /// Dimensions of type arguments naming an alias, with that name.
+    override_dimensions: Vec<(String, celox_sv_syntax::Dimension)>,
+    override_dimension_starts: Starts,
+    /// Value parameter defaults of declarations and unit headers.
+    parameter_defaults: Ranges,
+    /// Value parameter defaults of parameter declarations.
+    declared_defaults: Vec<ExprId>,
+    declared_default_ranges: Ranges,
+    /// Procedures and subroutines.
+    procedural: Ranges,
+    /// Subroutines, void casts of discarded calls and indexed widths.
+    cast_exclusions: Ranges,
+    pub(super) callees: HashSet<ExprId>,
+    /// Token spans of the callees of calls.
+    pub(super) callee_spans: HashSet<(usize, usize)>,
+    /// Expressions that are expression statements.
+    pub(super) expression_statements: HashSet<ExprId>,
+    /// Expressions that are constant values, and the roots they are under.
+    constant_roots: Vec<ExprId>,
+    constant_nodes: HashSet<ExprId>,
+    /// Callee and first argument of every call with one.
+    first_arguments: Vec<(ExprId, ExprId)>,
+    first_argument_ranges: Ranges,
+}
+
+impl Facts {
+    fn new(native: &celox_sv_syntax::Declarations) -> Self {
+        use celox_sv_syntax::{BodyItemKind, ExprKind, ParameterKind, StatementKind};
+        let controls = Ranges::new(native.body_items.iter().filter_map(|item| {
+            matches!(
+                item.kind,
+                BodyItemKind::Conditional { .. }
+                    | BodyItemKind::Case { .. }
+                    | BodyItemKind::Loop { .. }
+            )
+            .then_some(item.tokens)
+        }));
+        let mut unit_starts = HashMap::default();
+        for item in &native.body_items {
+            if let BodyItemKind::Unit(id) = item.kind {
+                unit_starts.entry(id).or_insert(item.tokens.start);
+            }
+        }
+        let units = || native.units.iter().chain(&native.nested_units);
+        let ports = units()
+            .enumerate()
+            .flat_map(|(unit, data)| (0..data.ports.len()).map(move |port| (unit, port)))
+            .collect::<Vec<_>>();
+        let port_starts = Starts::new(
+            units()
+                .flat_map(|unit| &unit.ports)
+                .map(|port| port.tokens)
+                .enumerate(),
+        );
+        let packed_dimensions = native
+            .types
+            .iter()
+            .enumerate()
+            .flat_map(|(ty, data)| {
+                (0..data.packed_dimensions.len()).map(move |dimension| (ty, dimension))
+            })
+            .collect::<Vec<_>>();
+        let packed_dimension_starts = Starts::new(
+            native
+                .types
+                .iter()
+                .flat_map(|data| &data.packed_dimensions)
+                .map(|dimension| dimension.tokens)
+                .enumerate(),
+        );
+        let override_dimensions = native
+            .instantiations
+            .iter()
+            .flat_map(|instance| instance.parameters.iter().flatten())
+            .filter_map(|argument| argument.value)
+            .filter_map(|id| type_binding::argument_alias(id, native))
+            .flat_map(|(name, dimensions)| {
+                dimensions
+                    .into_iter()
+                    .map(move |dimension| (name.clone(), dimension))
+            })
+            .collect::<Vec<_>>();
+        let override_dimension_starts = Starts::new(
+            override_dimensions
+                .iter()
+                .map(|(_, dimension)| dimension.tokens)
+                .enumerate(),
+        );
+        let declared = || {
+            native
+                .parameter_declarations
+                .iter()
+                .flat_map(|declaration| &declaration.parameters)
+        };
+        let headers = || units().flat_map(|unit| unit.parameters.iter().flatten());
+        let parameter_defaults = Ranges::new(
+            declared()
+                .chain(headers())
+                .filter_map(parameters::ownership::default)
+                .map(|id| native.expression(id).tokens),
+        );
+        let declared_defaults = declared()
+            .filter_map(parameters::ownership::default)
+            .collect::<Vec<_>>();
+        let declared_default_ranges = Ranges::new(
+            declared_defaults
+                .iter()
+                .map(|id| native.expression(*id).tokens),
+        );
+        let procedural = Ranges::new(
+            native
+                .procedures
+                .iter()
+                .map(|procedure| procedure.tokens)
+                .chain(
+                    native
+                        .subroutines
+                        .iter()
+                        .map(|subroutine| subroutine.tokens),
+                ),
+        );
+        // Discarded calls own a void cast as statement syntax. The statement
+        // binder validates this wrapper; it is not an integral value cast.
+        let void_casts = native.statements.iter().filter_map(|statement| {
+            let StatementKind::Expression(root) = statement.kind else {
+                return None;
+            };
+            let ExprKind::Cast { target, .. } = native.expression(root).kind else {
+                return None;
+            };
+            let ExprKind::Type(id) = native.expression(target).kind else {
+                return None;
+            };
+            matches!(&native.data_type(id).kind, celox_sv_syntax::DataTypeKind::Builtin(name) if name == "void")
+                .then_some(native.expression(root).tokens)
+        });
+        let indexed_widths =
+            native
+                .expression_nodes()
+                .filter_map(|(_, expression)| match &expression.kind {
+                    ExprKind::Select { dimension, .. }
+                        if matches!(
+                            dimension.kind,
+                            celox_sv_syntax::DimensionKind::Indexed { .. }
+                        ) =>
+                    {
+                        Some(dimension.tokens)
+                    }
+                    _ => None,
+                });
+        let cast_exclusions = Ranges::new(
+            native
+                .subroutines
+                .iter()
+                .map(|subroutine| subroutine.tokens)
+                .chain(void_casts)
+                .chain(indexed_widths),
+        );
+        let callees = native
+            .expression_nodes()
+            .filter_map(|(_, expression)| match expression.kind {
+                ExprKind::Call { expression, .. } => Some(expression),
+                _ => None,
+            })
+            .collect();
+        let callee_spans = native
+            .expression_nodes()
+            .filter_map(|(_, expression)| match expression.kind {
+                ExprKind::Call { expression, .. } => {
+                    let tokens = native.expression(expression).tokens;
+                    Some((tokens.start, tokens.end))
+                }
+                _ => None,
+            })
+            .collect();
+        let expression_statements = native
+            .statements
+            .iter()
+            .filter_map(|statement| match statement.kind {
+                StatementKind::Expression(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        let mut constant_roots = declared()
+            .chain(headers())
+            .filter_map(|parameter| match parameter.kind {
+                ParameterKind::Value { default, .. } => default,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for data in &native.types {
+            for dimension in &data.packed_dimensions {
+                dimension_expressions(dimension, &mut constant_roots);
+            }
+            if let celox_sv_syntax::DataTypeKind::Enum { items, .. } = &data.kind {
+                constant_roots.extend(items.iter().filter_map(|item| item.value));
+            }
+        }
+        // Unpacked declaration bounds and expression forms retain their own
+        // constant-value operands, even inside otherwise runtime statements.
+        for unit in units() {
+            for port in &unit.ports {
+                for dimension in &port.dimensions {
+                    dimension_expressions(dimension, &mut constant_roots);
+                }
+            }
+        }
+        for declaration in &native.data_declarations {
+            if let celox_sv_syntax::DataDeclaration::Variables(declaration)
+            | celox_sv_syntax::DataDeclaration::Constructed(declaration) = declaration
+            {
+                for dimension in declaration
+                    .variables
+                    .iter()
+                    .flat_map(|variable| &variable.dimensions)
+                {
+                    dimension_expressions(dimension, &mut constant_roots);
+                }
+            }
+        }
+        for declaration in &native.net_declarations {
+            for dimension in declaration
+                .variables
+                .iter()
+                .flat_map(|variable| &variable.dimensions)
+            {
+                dimension_expressions(dimension, &mut constant_roots);
+            }
+        }
+        for (_, expression) in native.expression_nodes() {
+            match &expression.kind {
+                ExprKind::Replication { count, .. } => constant_roots.push(*count),
+                ExprKind::Select { dimension, .. } | ExprKind::StreamSelect { dimension, .. } => {
+                    match dimension.kind {
+                        celox_sv_syntax::DimensionKind::Indexed { width, .. } => {
+                            constant_roots.push(width)
+                        }
+                        celox_sv_syntax::DimensionKind::Range { left, right } => {
+                            constant_roots.extend([left, right])
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut constant = constant_roots.clone();
+        let mut constant_nodes = HashSet::default();
+        while let Some(id) = constant.pop() {
+            if constant_nodes.insert(id) {
+                constant.extend(parameters::skipped::children(id, native));
+            }
+        }
+        let first_arguments = native
+            .expression_nodes()
+            .filter_map(|(_, expression)| match &expression.kind {
+                ExprKind::Call {
+                    expression: callee,
+                    arguments,
+                } => Some((*callee, arguments.first()?.value?)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let first_argument_ranges = Ranges::new(
+            first_arguments
+                .iter()
+                .map(|(_, id)| native.expression(*id).tokens),
+        );
+        Self {
+            controls,
+            unit_starts,
+            ports,
+            port_starts,
+            packed_dimensions,
+            packed_dimension_starts,
+            override_dimensions,
+            override_dimension_starts,
+            parameter_defaults,
+            declared_defaults,
+            declared_default_ranges,
+            procedural,
+            cast_exclusions,
+            callees,
+            callee_spans,
+            expression_statements,
+            constant_roots,
+            constant_nodes,
+            first_arguments,
+            first_argument_ranges,
+        }
+    }
+
+    pub(super) fn of(tree: &SyntaxTree) -> &Self {
+        tree.spans()
+            .validation
+            .get_or_init(|| Self::new(tree.declarations()))
+    }
 }
 
 /// Validate authored native owners, excluding generate branches until their
@@ -246,11 +636,13 @@ fn validate_scope(
 ) -> Converted<()> {
     use celox_sv_syntax::{BodyItemKind, DataTypeKind, DimensionKind, ExprKind};
     let native = syntax_tree.declarations();
+    let spans = syntax_tree.spans();
+    let facts = Facts::of(syntax_tree);
     let owner = item.map(|item| item.id);
     let is_module = owner.is_none()
         && syntax_tree
             .root_unit()
-            .is_ok_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Module);
+            .is_ok_and(|unit| unit.kind.is_module_like());
     let items = owner.map_or_else(|| syntax_tree.body_membership(), |id| Ok(vec![id]))?;
     validate_body_items(&items, native, !is_module)?;
     parameters::skipped::validate_scope(owner, is_module, syntax_tree, indexed_dimensions)?;
@@ -271,12 +663,7 @@ fn validate_scope(
                         .then_some(item.tokens.start)
                 })
             }
-            crate::source_tree::ScopeHandle::Unit(id) => {
-                native.body_items.iter().find_map(|item| {
-                    matches!(item.kind, BodyItemKind::Unit(owner) if owner == id)
-                        .then_some(item.tokens.start)
-                })
-            }
+            crate::source_tree::ScopeHandle::Unit(id) => facts.unit_starts.get(&id).copied(),
         }
         .ok_or_else(|| AnalyzerError::Parse("native root authored owner is absent".into()))?;
         ranges.push(celox_sv_syntax::TokenRange {
@@ -284,46 +671,46 @@ fn validate_scope(
             end: unit.header.end,
         });
     }
+    let scope = Ranges::new(ranges.iter().copied());
+    let no_controls = Ranges::default();
     let excluded = if is_module {
-        native
-            .body_items
-            .iter()
-            .filter_map(|item| {
-                matches!(
-                    item.kind,
-                    BodyItemKind::Conditional { .. }
-                        | BodyItemKind::Case { .. }
-                        | BodyItemKind::Loop { .. }
-                )
-                .then_some(item.tokens)
-            })
-            .collect::<Vec<_>>()
+        &facts.controls
     } else {
-        Vec::new()
+        &no_controls
     };
-    let selected = |tokens| {
-        ranges.iter().any(|range| contains(*range, tokens))
-            && !excluded.iter().any(|range| contains(*range, tokens))
-    };
-    timescales::validate_queries(syntax_tree, &ranges, &excluded)?;
-    reject_constant_calls(native, &selected, syntax_tree, indexed_dimensions, item)?;
-    for unit in native.units.iter().chain(&native.nested_units) {
-        for port in &unit.ports {
-            if !selected(port.tokens) {
-                continue;
-            }
-            if port
-                .data_type
-                .is_some_and(|id| matches!(native.data_type(id).kind, DataTypeKind::Enum { .. }))
-            {
-                return Err(unsupported("enum port"));
-            }
-            if let Some(net_type) = &port.net_type {
-                validate_net_type(net_type)?;
-            }
+    let selected = |tokens| scope.contains(tokens) && !excluded.contains(tokens);
+    timescales::validate_queries(syntax_tree, &ranges, excluded)?;
+    reject_constant_calls(
+        native,
+        &selected,
+        &ranges,
+        syntax_tree,
+        indexed_dimensions,
+        item,
+    )?;
+    let units = native
+        .units
+        .iter()
+        .chain(&native.nested_units)
+        .collect::<Vec<_>>();
+    for index in facts.port_starts.within(&ranges) {
+        let (unit, port) = facts.ports[index];
+        let port = &units[unit].ports[port];
+        if !selected(port.tokens) {
+            continue;
+        }
+        if port
+            .data_type
+            .is_some_and(|id| matches!(native.data_type(id).kind, DataTypeKind::Enum { .. }))
+        {
+            return Err(unsupported("enum port"));
+        }
+        if let Some(net_type) = &port.net_type {
+            validate_net_type(net_type)?;
         }
     }
-    for net in &native.net_declarations {
+    for index in spans.net_declarations.within(&ranges) {
+        let net = &native.net_declarations[index];
         if !selected(net.tokens) {
             continue;
         }
@@ -336,7 +723,8 @@ fn validate_scope(
             return Err(unsupported("net declaration assignment"));
         }
     }
-    for item in &native.body_items {
+    for index in spans.body_items.within(&ranges) {
+        let item = &native.body_items[index];
         if !selected(item.tokens) {
             continue;
         }
@@ -375,7 +763,8 @@ fn validate_scope(
             }
         }
     }
-    for instance in &native.instantiations {
+    for index in spans.instantiations.within(&ranges) {
+        let instance = &native.instantiations[index];
         if selected(instance.tokens)
             && instance
                 .instances
@@ -391,7 +780,8 @@ fn validate_scope(
             return Err(unsupported("wildcard port connection"));
         }
     }
-    for function in &native.subroutines {
+    for index in spans.subroutines.within(&ranges) {
+        let function = &native.subroutines[index];
         if selected(function.tokens)
             && function
                 .ports
@@ -408,10 +798,11 @@ fn validate_scope(
             return Err(unsupported("ref function argument"));
         }
     }
-    for (id, data) in native
-        .type_nodes()
-        .filter(|(_, data)| selected(data.tokens))
-    {
+    for id in spans.types.within(&ranges) {
+        let data = native.data_type(id);
+        if !selected(data.tokens) {
+            continue;
+        }
         if matches!(data.kind, DataTypeKind::Struct { .. })
             && type_binding::bind(id, syntax_tree, indexed_dimensions)?.is_none()
         {
@@ -420,20 +811,22 @@ fn validate_scope(
             ));
         }
     }
-    let override_dimensions = native
-        .instantiations
-        .iter()
-        .flat_map(|instance| instance.parameters.iter().flatten())
-        .filter_map(|argument| argument.value)
-        .filter_map(|id| type_binding::argument_alias(id, native))
+    let override_dimensions = facts
+        .override_dimension_starts
+        .within(&ranges)
+        .into_iter()
+        .map(|index| &facts.override_dimensions[index])
         .filter(|(name, _)| type_aliases.contains_key(name))
-        .flat_map(|(_, dimensions)| dimensions)
-        .collect::<Vec<_>>();
-    for dimension in native
-        .types
-        .iter()
-        .flat_map(|data| &data.packed_dimensions)
-        .chain(override_dimensions.iter())
+        .map(|(_, dimension)| dimension);
+    for dimension in facts
+        .packed_dimension_starts
+        .within(&ranges)
+        .into_iter()
+        .map(|index| {
+            let (ty, dimension) = facts.packed_dimensions[index];
+            &native.types[ty].packed_dimensions[dimension]
+        })
+        .chain(override_dimensions)
         .filter(|dimension| selected(dimension.tokens))
     {
         let DimensionKind::Range { left, right } = dimension.kind else {
@@ -447,26 +840,11 @@ fn validate_scope(
             }
         }
     }
-    let parameter_ranges = native
-        .parameter_declarations
-        .iter()
-        .flat_map(|declaration| &declaration.parameters)
-        .filter_map(parameters::ownership::default)
-        .map(|id| native.expression(id).tokens)
-        .chain(
-            native
-                .units
-                .iter()
-                .chain(&native.nested_units)
-                .flat_map(|unit| unit.parameters.iter().flatten())
-                .filter_map(parameters::ownership::default)
-                .map(|id| native.expression(id).tokens),
-        )
-        .collect::<Vec<_>>();
-    for (_, expression) in native
-        .expression_nodes()
-        .filter(|(_, expression)| selected(expression.tokens))
-    {
+    for id in spans.expressions.within(&ranges) {
+        let expression = native.expression(id);
+        if !selected(expression.tokens) {
+            continue;
+        }
         match &expression.kind {
             ExprKind::MinTypMax { .. } if !native.timing_controls.iter().any(|control|
                 matches!(control.kind, celox_sv_syntax::TimingControlKind::Delay { value, .. } if contains(native.expression(value).tokens, expression.tokens))) => {
@@ -474,7 +852,7 @@ fn validate_scope(
             }
             ExprKind::Select { dimension, .. } => {
                 if let DimensionKind::Indexed { width, .. } = dimension.kind {
-                    if parameter_ranges.iter().any(|range| contains(*range, dimension.tokens)) { continue; }
+                    if facts.parameter_defaults.contains(dimension.tokens) { continue; }
                     // IEEE 1800-2023 11.5.1 permits a variable base. Its
                     // expression is bound after variable types are available;
                     // only the width requires constant validation here.
@@ -484,62 +862,9 @@ fn validate_scope(
             _ => {}
         }
     }
-    let procedural_ranges = native
-        .procedures
-        .iter()
-        .map(|procedure| procedure.tokens)
-        .chain(
-            native
-                .subroutines
-                .iter()
-                .map(|subroutine| subroutine.tokens),
-        )
-        .collect::<Vec<_>>();
-    let mut cast_exclusions = native
-        .subroutines
-        .iter()
-        .map(|subroutine| subroutine.tokens)
-        .collect::<Vec<_>>();
-    // Discarded calls own a void cast as statement syntax. The statement
-    // binder validates this wrapper; it is not an integral value cast.
-    cast_exclusions.extend(native.statements.iter().filter_map(|statement| {
-        let celox_sv_syntax::StatementKind::Expression(root) = statement.kind else {
-            return None;
-        };
-        let celox_sv_syntax::ExprKind::Cast { target, .. } = native.expression(root).kind else {
-            return None;
-        };
-        let celox_sv_syntax::ExprKind::Type(id) = native.expression(target).kind else {
-            return None;
-        };
-        matches!(&native.data_type(id).kind, celox_sv_syntax::DataTypeKind::Builtin(name) if name == "void")
-            .then_some(native.expression(root).tokens)
-    }));
-    cast_exclusions.extend(native.expression_nodes().filter_map(|(_, expression)| {
-        match &expression.kind {
-            celox_sv_syntax::ExprKind::Select { dimension, .. }
-                if matches!(
-                    dimension.kind,
-                    celox_sv_syntax::DimensionKind::Indexed { .. }
-                ) =>
-            {
-                Some(dimension.tokens)
-            }
-            _ => None,
-        }
-    }));
-    cast_exclusions.extend(
-        native
-            .parameter_declarations
-            .iter()
-            .flat_map(|declaration| &declaration.parameters)
-            .filter_map(|parameter| {
-                let root = parameters::ownership::default(parameter)?;
-                parameters::skipped::needs_selected(&syntax_tree.state, root, native)
-                    .then_some(native.expression(root).tokens)
-            }),
-    );
-    for (_, expression) in native.expression_nodes() {
+    let candidates = spans.expressions.within(&ranges);
+    for id in &candidates {
+        let expression = native.expression(*id);
         let celox_sv_syntax::ExprKind::Cast {
             target,
             expression: operand,
@@ -548,13 +873,20 @@ fn validate_scope(
             continue;
         };
         let at = expression.tokens.start;
-        if ranges
-            .iter()
-            .any(|range| range.start <= at && at < range.end)
-            && !excluded
-                .iter()
-                .chain(&cast_exclusions)
-                .any(|range| range.start <= at && at < range.end)
+        if scope.covers(at)
+            && !excluded.covers(at)
+            && !facts.cast_exclusions.covers(at)
+            && !facts
+                .declared_default_ranges
+                .covering(at)
+                .into_iter()
+                .any(|index| {
+                    parameters::skipped::needs_selected(
+                        &syntax_tree.state,
+                        facts.declared_defaults[index],
+                        native,
+                    )
+                })
         {
             expression_binding::cast_target_native(
                 target,
@@ -565,11 +897,12 @@ fn validate_scope(
             )?;
         }
     }
-    let mut native_bits = native.expression_nodes().filter_map(|(id, expression)| {
-        let celox_sv_syntax::ExprKind::Call { expression: callee, .. } = expression.kind else { return None; };
-        if !matches!(&native.expression(callee).kind, celox_sv_syntax::ExprKind::Name(name) if matches!(name.spelling.as_str(),"$bits"|"$size"|"$dimensions"|"$unpacked_dimensions"|"$left"|"$right"|"$low"|"$high"|"$increment"|"$isunbounded")) { return None; }
+    let mut native_bits = candidates.into_iter().filter(|id| {
+        let expression = native.expression(*id);
+        let celox_sv_syntax::ExprKind::Call { expression: callee, .. } = expression.kind else { return false; };
+        if !matches!(&native.expression(callee).kind, celox_sv_syntax::ExprKind::Name(name) if matches!(name.spelling.as_str(),"$bits"|"$size"|"$dimensions"|"$unpacked_dimensions"|"$left"|"$right"|"$low"|"$high"|"$increment"|"$isunbounded")) { return false; }
         let at = expression.tokens.start;
-        (ranges.iter().any(|range| range.start <= at && at < range.end) && !excluded.iter().chain(&procedural_ranges).any(|range| range.start <= at && at < range.end)).then_some(id)
+        scope.covers(at) && !excluded.covers(at) && !facts.procedural.covers(at)
     }).collect::<Vec<_>>();
     native_bits.sort_by_key(|id| native.expression(*id).tokens.start);
     for root in native_bits {
@@ -616,31 +949,18 @@ fn dimension_expressions(
 fn reject_constant_calls(
     native: &celox_sv_syntax::Declarations,
     selected: &impl Fn(celox_sv_syntax::TokenRange) -> bool,
+    ranges: &[celox_sv_syntax::TokenRange],
     tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
     item: Option<&generate::Item>,
 ) -> Converted<()> {
-    use celox_sv_syntax::{ExprKind, ParameterKind};
-    let mut constant = native
-        .parameter_declarations
-        .iter()
-        .flat_map(|declaration| &declaration.parameters)
-        .chain(
-            native
-                .units
-                .iter()
-                .chain(&native.nested_units)
-                .flat_map(|unit| unit.parameters.iter().flatten()),
-        )
-        .filter_map(|parameter| match parameter.kind {
-            ParameterKind::Value { default, .. } => default,
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    use celox_sv_syntax::ExprKind;
+    let facts = Facts::of(tree);
     // Specparams are inert timing declarations until used, but IEEE 1800-2023
     // 6.20.5 explicitly forbids using them to assign value parameters.
     let mut specparams = HashSet::default();
-    for body in &native.body_items {
+    for index in tree.spans().body_items.within(ranges) {
+        let body = &native.body_items[index];
         if !selected(body.tokens)
             || !matches!(&body.kind, celox_sv_syntax::BodyItemKind::Unconverted { category, .. } if category == "specparam")
         {
@@ -666,7 +986,7 @@ fn reject_constant_calls(
         }
     }
     if !specparams.is_empty() {
-        let mut pending = constant.clone();
+        let mut pending = facts.constant_roots.clone();
         let mut visited = HashSet::default();
         while let Some(id) = pending.pop() {
             if !visited.insert(id) || !selected(native.expression(id).tokens) {
@@ -680,97 +1000,24 @@ fn reject_constant_calls(
             pending.extend(parameters::skipped::children(id, native));
         }
     }
-    for data in &native.types {
-        for dimension in &data.packed_dimensions {
-            dimension_expressions(dimension, &mut constant);
-        }
-        if let celox_sv_syntax::DataTypeKind::Enum { items, .. } = &data.kind {
-            constant.extend(items.iter().filter_map(|item| item.value));
-        }
-    }
-    // Unpacked declaration bounds and expression forms retain their own
-    // constant-value operands, even inside otherwise runtime statements.
-    for unit in native.units.iter().chain(&native.nested_units) {
-        for port in &unit.ports {
-            for dimension in &port.dimensions {
-                dimension_expressions(dimension, &mut constant);
-            }
-        }
-    }
-    for declaration in &native.data_declarations {
-        if let celox_sv_syntax::DataDeclaration::Variables(declaration)
-        | celox_sv_syntax::DataDeclaration::Constructed(declaration) = declaration
-        {
-            for dimension in declaration
-                .variables
-                .iter()
-                .flat_map(|variable| &variable.dimensions)
-            {
-                dimension_expressions(dimension, &mut constant);
-            }
-        }
-    }
-    for declaration in &native.net_declarations {
-        for dimension in declaration
-            .variables
-            .iter()
-            .flat_map(|variable| &variable.dimensions)
-        {
-            dimension_expressions(dimension, &mut constant);
-        }
-    }
-    for (_, expression) in native.expression_nodes() {
-        match &expression.kind {
-            ExprKind::Replication { count, .. } => constant.push(*count),
-            ExprKind::Select { dimension, .. } | ExprKind::StreamSelect { dimension, .. } => {
-                match dimension.kind {
-                    celox_sv_syntax::DimensionKind::Indexed { width, .. } => constant.push(width),
-                    celox_sv_syntax::DimensionKind::Range { left, right } => {
-                        constant.extend([left, right])
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut constant_nodes = HashSet::default();
-    while let Some(id) = constant.pop() {
-        if constant_nodes.insert(id) {
-            constant.extend(parameters::skipped::children(id, native));
-        }
-    }
-    let mut unevaluated = Vec::new();
-    for (_, expression) in native.expression_nodes() {
-        let ExprKind::Call {
-            expression: callee,
-            arguments,
-        } = &expression.kind
-        else {
-            continue;
-        };
-        let Some(name) = expression_binding::native_name(&tree.state, *callee, native) else {
-            continue;
-        };
-        if SystemFunction::from_name(&name).is_some_and(SystemFunction::is_data_query)
-            && let Some(Some(id)) = arguments.first().map(|argument| argument.value)
-        {
-            unevaluated.push(native.expression(id).tokens);
-        }
-    }
-    let callees = native
-        .expression_nodes()
-        .filter_map(|(_, expression)| match expression.kind {
-            ExprKind::Call { expression, .. } => Some(expression),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
-    for (id, expression) in native.expression_nodes() {
+    // Operands of data queries, whose callee names may depend on the scope.
+    let unevaluated = |tokens| {
+        facts
+            .first_argument_ranges
+            .containing(tokens)
+            .into_iter()
+            .any(|index| {
+                expression_binding::native_name(&tree.state, facts.first_arguments[index].0, native)
+                    .is_some_and(|name| {
+                        SystemFunction::from_name(&name).is_some_and(SystemFunction::is_data_query)
+                    })
+            })
+    };
+    for id in tree.spans().expressions.within(ranges) {
+        let expression = native.expression(id);
         if !selected(expression.tokens)
-            || !constant_nodes.contains(&id)
-            || unevaluated
-                .iter()
-                .any(|range| contains(*range, expression.tokens))
+            || !facts.constant_nodes.contains(&id)
+            || unevaluated(expression.tokens)
         {
             continue;
         }
@@ -788,7 +1035,7 @@ fn reject_constant_calls(
             ExprKind::Name(name)
                 if name.spelling.starts_with('$')
                     && !matches!(name.spelling.as_str(), "$" | "$unit" | "$root")
-                    && !callees.contains(&id) =>
+                    && !facts.callees.contains(&id) =>
             {
                 (name.spelling.clone(), &[][..])
             }

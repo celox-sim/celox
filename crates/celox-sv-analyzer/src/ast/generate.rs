@@ -6,6 +6,8 @@
 use super::*;
 use celox_sv_syntax::ExprId;
 mod elaboration;
+mod memo;
+pub(super) use memo::{CallSites, Revision, memoize};
 
 mod dependency_order;
 use dependency_order::DependencyOrder;
@@ -28,14 +30,17 @@ pub(super) fn with_root_subroutines<T>(
     struct Restore {
         state: std::rc::Rc<AnalysisState>,
         previous: bool,
+        revision: u64,
     }
     impl Drop for Restore {
         fn drop(&mut self) {
             self.state.root_subroutines.set(self.previous);
+            self.state.revision.restore(self.revision);
         }
     }
     let _restore = Restore {
         state: state.clone(),
+        revision: state.revision.change(),
         previous: state.root_subroutines.replace(true),
     };
     f()
@@ -310,6 +315,10 @@ impl Item {
                 local.subroutine_param_shapes =
                     Arc::new(self.function_aliases((*dimensions.subroutine_param_shapes).clone()));
             }
+            if !dimensions.subroutine_directions.is_empty() {
+                local.subroutine_directions =
+                    Arc::new(self.function_aliases((*dimensions.subroutine_directions).clone()));
+            }
             if !dimensions.function_return_types.is_empty() {
                 local.function_return_types =
                     self.function_aliases(dimensions.function_return_types.clone());
@@ -561,6 +570,9 @@ struct Elaborator<'a, 'b> {
     items: Vec<Item>,
 }
 
+/// Elaborations of the module being analyzed, see [`memoize`].
+pub(super) type Memo = memo::State;
+
 pub(super) fn items(
     tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
@@ -588,7 +600,7 @@ pub(super) fn subroutine_items(
     )
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum LiteralUse {
     All,
     Subroutines,
@@ -596,6 +608,17 @@ enum LiteralUse {
 }
 
 fn items_with_literal_use(
+    tree: &AnalysisContext<'_>,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+    literal_use: LiteralUse,
+) -> Result<Vec<Item>, AnalyzerError> {
+    memo::items(tree, env, aliases, literal_use, || {
+        elaborate(tree, env, aliases, literal_use)
+    })
+}
+
+fn elaborate(
     tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
@@ -688,10 +711,10 @@ fn parameter_literal_references(
         ranges.push(item.tokens);
     }
     let mut references = HashSet::default();
-    for (_, expression) in native.expression_nodes() {
-        if !ranges.iter().any(|range| {
-            range.start <= expression.tokens.start && expression.tokens.end <= range.end
-        }) {
+    let scope = crate::source_tree::Ranges::new(ranges.iter().copied());
+    for id in tree.spans().expressions.within(&ranges) {
+        let expression = native.expression(id);
+        if !scope.contains(expression.tokens) {
             continue;
         }
         if let ExprKind::Name(name) | ExprKind::Member { name, .. } = &expression.kind {

@@ -53,6 +53,9 @@ pub(super) struct ProcModule<'a> {
     /// Number of extern calls lowered so far.
     pub extern_calls: usize,
     pub four_state: bool,
+    /// The module is a program (IEEE 1800-2023 24.3): its kernels honour
+    /// `$exit` (24.7).
+    pub program: bool,
     pub forceable: HashMap<SourceVarId, (SourceVarId, SourceVarId)>,
     /// Hidden variables created while lowering, for the caller to publish.
     pub created: Vec<SourceVarId>,
@@ -244,6 +247,7 @@ impl<'a> ProcModule<'a> {
             extern_functions: Vec::new(),
             extern_calls: 0,
             four_state,
+            program: module.is_program(),
             created: Vec::new(),
             temp_counter: 0,
             capture_counter: 0,
@@ -273,7 +277,9 @@ impl<'a> ProcModule<'a> {
                     continue;
                 }
                 // String operations use the simulator's heap.
-                sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => return true,
+                sv::ir::Callee::String(_)
+                | sv::ir::Callee::Object(_)
+                | sv::ir::Callee::Checked { .. } => return true,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             if let Some(subroutine) = self.subroutine(&name) {
@@ -319,6 +325,54 @@ impl<'a> ProcModule<'a> {
         false
     }
 
+    /// The variables `body` may write, directly, through the output and
+    /// inout arguments of the calls of statements and expressions, or in the
+    /// bodies of its callees. Every name of a written argument counts, and
+    /// names a callee declares itself may resolve to a variable of the module
+    /// too, so the set may be larger than the writes.
+    pub fn written_variables(&self, body: &[sv::ir::Stmt]) -> HashSet<SourceVarId> {
+        let mut names = HashSet::default();
+        let mut calls = Vec::new();
+        written_names(body, &mut names);
+        for stmt in body {
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+        }
+        let mut visited = HashSet::default();
+        while let Some((callee, args)) = calls.pop() {
+            let name = match callee {
+                sv::ir::Callee::System(function) => {
+                    for (position, arg) in args.iter().enumerate() {
+                        if function.writes_argument(position)
+                            && let Some(arg) = arg
+                        {
+                            expr_idents(arg, &mut names);
+                        }
+                    }
+                    continue;
+                }
+                sv::ir::Callee::Subroutine(name) => name,
+                _ => continue,
+            };
+            if let Some(subroutine) = self.subroutine(&name) {
+                for (param, arg) in subroutine.params.iter().zip(&args) {
+                    if param.direction.is_written()
+                        && let Some(arg) = arg
+                    {
+                        expr_idents(arg, &mut names);
+                    }
+                }
+                default_calls(subroutine, &args, &mut calls);
+                if visited.insert(name) {
+                    written_names(&subroutine.body, &mut names);
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+                    }
+                }
+            }
+        }
+        names.iter().filter_map(|name| self.id(name)).collect()
+    }
+
     /// Whether `always @(items) body` is `always @* body`: no item has an edge
     /// or a select, the items name exactly the variables the implicit event
     /// expression of `body` has (IEEE 1800-2023 9.4.2.2), and the body neither
@@ -349,6 +403,7 @@ impl<'a> ProcModule<'a> {
                 stmt,
                 sv::ir::Stmt::Delay { .. }
                     | sv::ir::Stmt::WaitEvent(_)
+                    | sv::ir::Stmt::WaitImplicit(_)
                     | sv::ir::Stmt::Wait(_)
                     | sv::ir::Stmt::Assign {
                         nonblocking: true,
@@ -952,7 +1007,9 @@ impl<'a> ProcModule<'a> {
     pub fn is_callee(&self, callee: &sv::ir::Callee) -> bool {
         match callee {
             sv::ir::Callee::System(function) => function.reads_simulation_state(),
-            sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => true,
+            sv::ir::Callee::String(_)
+            | sv::ir::Callee::Object(_)
+            | sv::ir::Callee::Checked { .. } => true,
             sv::ir::Callee::Subroutine(name) => {
                 self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
             }
@@ -1179,7 +1236,7 @@ pub(super) enum SystemTaskKind {
     /// `$finish` and `$stop`, with their event kind.
     Control(RuntimeEventKind),
     /// `$error`, `$warning`, `$info`: a message, then execution continues.
-    Message,
+    Message(Severity),
     /// `$fatal`: a message, then the simulation ends with an error.
     Fatal,
     /// Veryl's assertion calls: eagerly evaluate every argument, then report
@@ -1189,11 +1246,24 @@ pub(super) enum SystemTaskKind {
 
 impl SystemTaskKind {
     pub(super) fn is_fatal(&self) -> bool {
-        matches!(
-            self,
-            Self::Fatal | Self::Assertion(RuntimeEventKind::AssertFatal)
-        )
+        self.event_kind().is_fatal()
     }
+
+    pub(super) fn event_kind(&self) -> RuntimeEventKind {
+        match *self {
+            Self::Print(kind, _) | Self::Control(kind) | Self::Assertion(kind) => kind,
+            Self::Message(severity) => RuntimeEventKind::Report(severity),
+            Self::Fatal => RuntimeEventKind::Report(Severity::Fatal),
+        }
+    }
+}
+
+/// Where a report is written, from the span of its task call.
+pub(super) fn report_location(site: Option<&sv::ir::SourceSpan>) -> Option<ReportLocation> {
+    site.map(|site| ReportLocation {
+        file: site.logical_path.display().to_string(),
+        line: site.line,
+    })
 }
 
 /// How a task reports, for the tasks that report: `$readmemh`/`$readmemb`
@@ -1208,10 +1278,16 @@ pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKin
         SystemTask::Write(radix) => SystemTaskKind::Print(RuntimeEventKind::Write, radix.letter()),
         SystemTask::Finish => SystemTaskKind::Control(RuntimeEventKind::Finish),
         SystemTask::Stop => SystemTaskKind::Control(RuntimeEventKind::Stop),
-        SystemTask::Severity(_) => SystemTaskKind::Message,
+        SystemTask::Severity(severity) => SystemTaskKind::Message(match severity {
+            sv::ir::Severity::Error => Severity::Error,
+            sv::ir::Severity::Warning => Severity::Warning,
+            sv::ir::Severity::Info => Severity::Info,
+        }),
         SystemTask::Fatal => SystemTaskKind::Fatal,
-        SystemTask::Assert => SystemTaskKind::Assertion(RuntimeEventKind::AssertFatal),
-        SystemTask::AssertContinue => SystemTaskKind::Assertion(RuntimeEventKind::AssertContinue),
+        SystemTask::Assert => SystemTaskKind::Assertion(RuntimeEventKind::Report(Severity::Fatal)),
+        SystemTask::AssertContinue => {
+            SystemTaskKind::Assertion(RuntimeEventKind::Report(Severity::Error))
+        }
         SystemTask::Readmem(_)
         | SystemTask::Writemem(_)
         | SystemTask::Fclose
@@ -1248,6 +1324,79 @@ fn template_arguments(template: &str) -> usize {
         }
     }
     count
+}
+
+/// Prepare each value that a `%t` of `template` converts. A system task
+/// argument is self-determined (IEEE 1800-2023 11.6.1, 21.2.1), so the
+/// operand of the analyzer's scaling `value * factor` keeps its own width
+/// and signedness. A `string` value has no time value, and Celox would print
+/// its storage handle: it is rejected, as Verilator rejects it, while Icarus
+/// prints the conversion unformatted.
+pub(super) fn prepare_time_operands(
+    module: &ProcModule<'_>,
+    template: Option<&str>,
+    values: &mut [sv::ir::SystemTaskArg<sv::ir::Expr>],
+) -> Result<(), sv::AnalyzerError> {
+    let Some(template) = template else {
+        return Ok(());
+    };
+    let mut chars = template.chars().peekable();
+    let mut index = 0;
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            continue;
+        }
+        while chars
+            .next_if(|ch| matches!(ch, '-' | '+' | ' ' | '#' | '0'))
+            .is_some()
+        {}
+        while chars.next_if(char::is_ascii_digit).is_some() {}
+        if chars.next_if_eq(&'.').is_some() {
+            while chars.next_if(char::is_ascii_digit).is_some() {}
+        }
+        let Some(spec) = chars.next() else {
+            break;
+        };
+        if !"bBoOhHxXdDiIcCsStTeEfFgG".contains(spec) {
+            continue;
+        }
+        if matches!(spec, 't' | 'T')
+            && let Some(sv::ir::SystemTaskArg::Expr(expr)) = values.get_mut(index)
+        {
+            if module.expr_is_string(expr) {
+                return Err(unsupported("string operand of a %t conversion"));
+            }
+            // The analyzer scales a %t value as `value * factor`.
+            if let sv::ir::Expr::Binary {
+                left,
+                op: sv::ir::BinaryOp::Mul,
+                ..
+            } = expr
+            {
+                if module.expr_is_string(left) {
+                    return Err(unsupported("string operand of a %t conversion"));
+                }
+                if module.expr_float_precision(left).is_none()
+                    && let Some(width) = sv_expr_natural_width(
+                        &module.typed_calls(left),
+                        module.variables,
+                        module.name_to_id,
+                        module.constants,
+                        module.parameter_types,
+                    )
+                {
+                    let signed = module.expr_signed(left);
+                    **left = sv::ir::Expr::Resize {
+                        expr: left.clone(),
+                        width,
+                        signed,
+                    };
+                }
+            }
+        }
+        index += 1;
+    }
+    Ok(())
 }
 
 /// The message template and value arguments of a system task: a leading
@@ -2171,6 +2320,36 @@ pub(super) fn canonical_for_loop(
     })
 }
 
+/// The counted loop a `while` or `do`-`while` loop is when its condition
+/// compares a variable with a bound and its last statement steps that
+/// variable, as the step of a [`canonical_for_loop`] would; the loop starts
+/// from the variable's current value. Also returns the statements before
+/// the step, which must not write the variable or the bound.
+pub(super) fn counted_while_loop<'s>(
+    condition: Option<&sv::ir::Expr>,
+    body: &'s [sv::ir::Stmt],
+) -> Option<(CanonicalLoop, &'s [sv::ir::Stmt])> {
+    let (step, rest) = body.split_last()?;
+    let sv::ir::Stmt::Assign {
+        lhs: sv::ir::LValue::Ident(var),
+        ..
+    } = step
+    else {
+        return None;
+    };
+    let init = [sv::ir::Stmt::Assign {
+        lhs: sv::ir::LValue::Ident(var.clone()),
+        rhs: sv::ir::Expr::Ident(var.clone()),
+        nonblocking: false,
+    }];
+    let canonical = canonical_for_loop(&init, condition, std::slice::from_ref(step))?;
+    let mut written = HashSet::default();
+    written_names(rest, &mut written);
+    let mut bound = HashSet::default();
+    expr_idents(&canonical.end, &mut bound);
+    (!written.contains(&canonical.var) && written.is_disjoint(&bound)).then_some((canonical, rest))
+}
+
 /// The identifiers an expression reads.
 pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
     fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>) {
@@ -2450,6 +2629,22 @@ pub(super) fn written_names(stmts: &[sv::ir::Stmt], names: &mut HashSet<String>)
     }
 }
 
+/// The names a statement list of `module` writes, also through the
+/// subroutines it calls and their written arguments.
+pub(super) fn written_names_with_calls(
+    module: &sv::ir::Module,
+    stmts: &[sv::ir::Stmt],
+    names: &mut HashSet<String>,
+) {
+    super::kernel_written_names(
+        module.subroutines(),
+        stmts,
+        names,
+        &mut HashSet::default(),
+        0,
+    );
+}
+
 /// The lvalue an output argument writes back to.
 /// The variables a call of `function` writes through its arguments, such as
 /// the seed of `$random(seed)`.
@@ -2463,6 +2658,32 @@ pub(super) fn written_system_arguments(
         .filter_map(|(_, arg)| arg.as_ref().and_then(lvalue_from_expr))
         .flatten()
         .collect()
+}
+
+/// Keep checked member references writable while carrying their live tag checks
+/// separately. Callers that perform stores must execute these checks.
+pub(super) fn tagged_actual_guards(expr: &sv::ir::Expr) -> Vec<sv::ir::Expr> {
+    use sv::ir::{Callee, Expr};
+    let mut guards = Vec::new();
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        match expr {
+            Expr::Call {
+                callee: Callee::Checked { .. },
+                args,
+                ..
+            } => {
+                if let [Some(guard), Some(value)] = args.as_slice() {
+                    guards.push(guard.clone());
+                    pending.push(value);
+                }
+            }
+            Expr::Resize { expr, .. } | Expr::Select { expr, .. } => pending.push(expr),
+            Expr::Concat(parts) => pending.extend(parts.iter().rev()),
+            _ => {}
+        }
+    }
+    guards
 }
 
 pub(super) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<sv::ir::LValue>> {
@@ -2486,6 +2707,14 @@ pub(super) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<sv::ir::LValue
             Some(lvalues)
         }
         sv::ir::Expr::Resize { expr, .. } => lvalue_from_expr(expr),
+        sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Checked { .. },
+            args,
+            ..
+        } => match args.as_slice() {
+            [Some(_), Some(value)] => lvalue_from_expr(value),
+            _ => None,
+        },
         _ => None,
     }
 }

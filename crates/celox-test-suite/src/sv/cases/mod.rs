@@ -8,6 +8,14 @@ pub(super) struct Group {
 
 pub(super) const GROUPS: &[Group] = &[
     Group {
+        file: "src/sv/cases/tagged_unions.vtest",
+        text: include_str!("tagged_unions.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/unions.vtest",
+        text: include_str!("unions.vtest"),
+    },
+    Group {
         file: "src/sv/cases/real_extensions.vtest",
         text: include_str!("real_extensions.vtest"),
     },
@@ -52,6 +60,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("random_plusargs.vtest"),
     },
     Group {
+        file: "src/sv/cases/program.vtest",
+        text: include_str!("program.vtest"),
+    },
+    Group {
         file: "src/sv/cases/latch.vtest",
         text: include_str!("latch.vtest"),
     },
@@ -66,6 +78,10 @@ pub(super) const GROUPS: &[Group] = &[
     Group {
         file: "src/sv/cases/generate.vtest",
         text: include_str!("generate.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/hierarchical_references.vtest",
+        text: include_str!("hierarchical_references.vtest"),
     },
     Group {
         file: "src/sv/cases/hierarchy.vtest",

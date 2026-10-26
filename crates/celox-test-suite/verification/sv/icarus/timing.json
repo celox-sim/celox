@@ -1333,6 +1333,85 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::always_star_timed_task_calls_run_as_processes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::always_star_timed_task_calls_assign_nonblocking",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::always_star_timed_task_calls_wait_on_nested_call_defaults",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 leaves the reads of a branch that constant folding removes out of the event list of an always @*: a change of a, which the default of the call in `if (0) delayed();` reads, does not wake the process. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, so a constant-false branch still contributes. Celox's combinational and process always @* both count it.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_always_star_folded_branches",
+        "observed_version": "Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 leaves the reads of a branch that constant folding removes out of the event list of an always @*: a change of a, which the default of the call in `if (0) delayed();` reads, does not wake the process. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, so a constant-false branch still contributes. Celox's combinational and process always @* both count it.",
+        "upstream": []
+      },
+      "name": "timing::always_star_timed_task_calls_wait_on_folded_branch_reads",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 reports a syntax error for an unparenthesized package-scoped delay value such as #delays::D. IEEE 1800-2023 A.6.5 permits a ps_identifier as a delay_value. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_package_delay_value",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports a syntax error for an unparenthesized package-scoped delay value such as #delays::D. IEEE 1800-2023 A.6.5 permits a ps_identifier as a delay_value. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "timing::package_scoped_delay_values_wait_their_value",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

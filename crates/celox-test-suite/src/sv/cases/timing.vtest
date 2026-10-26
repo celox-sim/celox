@@ -171,8 +171,9 @@
   (assert_eq y 9))
 
 (case explicit_list_of_every_read_waits_for_a_change
-  ; Like `always @*`, the list waits before its first run: neither the
-  ; declaration initializers nor the write of `y` wake it (9.4.2).
+  ; In four-state mode, like `always @*`, the list waits before its first
+  ; run: neither the declaration initializers nor the write of `y` wake it
+  ; (9.4.2). Two-state mode runs it at time zero (#2021).
   (source "level_list.sv" #"
                 module Top(output logic [7:0] y);
                     logic [7:0] a = 8'd0;
@@ -187,6 +188,7 @@
                 endmodule
             "#)
   (top Top)
+  (four_state)
   (run_until 1)
   (assert_eq y 1)
   (run_until 3)
@@ -217,6 +219,8 @@
   (run_to_finish)
   (assert_eq y 9))
 
+; In four-state mode the list waits for a change; two-state mode also runs
+; it once at time zero (#2026).
 (case list_with_an_extra_signal_wakes_on_it
   (source "extra_signal.sv" #"
                 module Top;
@@ -232,6 +236,7 @@
                 endmodule
             "#)
   (top Top)
+  (four_state)
   (run_to_finish)
   (expect_output "sum=3\nsum=3\n"))
 
@@ -1211,6 +1216,128 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (run_until 7) (assert_eq count 1)
   (run_until 8) (assert_eq count 2))
 
+; A plain `always @*` that calls a timed task runs as a process (IEEE
+; 1800-2023 9.2.2.2.2): its event list is the variables its statement
+; reads, including the task's arguments but not what the task body reads
+; (9.4.2.2), and it waits for one of them to change before each run.
+(case always_star_timed_task_calls_run_as_processes
+  (source "star_tasks.sv" #"
+    module Top(output logic [7:0] y, z, w);
+      logic [7:0] a = 8'd0, b = 8'd0;
+      logic [7:0] y_r = 8'd0, z_r = 8'd0, w_r = 8'd0;
+      task automatic delayed(input logic [7:0] v);
+        #2 y_r = v;
+      endtask
+      task automatic mark(input logic [7:0] v);
+        #1 w_r = v;
+      endtask
+      always @* delayed(a);
+      always @* begin z_r = b; mark(b); end
+      initial begin
+        #3 a = 8'd5;
+        b = 8'd1;
+        #3 a = 8'd7;
+      end
+      assign y = y_r;
+      assign z = z_r;
+      assign w = w_r;
+    endmodule
+  "#)
+  (top Top)
+  (run_until 3) (assert_eq y 0) (assert_eq z 1) (assert_eq w 0)
+  (run_until 4) (assert_eq w 1) (assert_eq y 0)
+  (run_until 5) (assert_eq y 5 "the task resumes two units after a changed")
+  (run_until 7) (assert_eq y 5)
+  (run_until 8) (assert_eq y 7))
+
+; Such a process may assign nonblocking, as any `always` process may.
+(case always_star_timed_task_calls_assign_nonblocking
+  (source "star_task_nba.sv" #"
+    module Top(output logic [7:0] q);
+      logic [7:0] d = 8'd0, q_r = 8'd0;
+      task automatic pause();
+        #1;
+      endtask
+      always @* begin
+        pause();
+        q_r <= d;
+      end
+      initial #2 d = 8'd5;
+      assign q = q_r;
+    endmodule
+  "#)
+  (top Top)
+  (run_until 2) (assert_eq q 0)
+  (run_until 3) (assert_eq q 5 "the update follows the task's delay"))
+
+; The event list of such a process comes from the analysis that gives a
+; combinational `always @*` its sensitivity: it counts what the defaults of
+; omitted arguments read, of calls nested in arguments too.
+(case always_star_timed_task_calls_wait_on_nested_call_defaults
+  (source "star_nested_default.sv" #"
+    module Top(output logic [7:0] y);
+      logic [7:0] a = 8'd0, y_r = 8'd0;
+      function automatic logic [7:0] pick(input logic [7:0] v = a);
+        return v;
+      endfunction
+      task automatic delayed(input logic [7:0] v);
+        #1 y_r = v;
+      endtask
+      always @* delayed(pick());
+      initial #2 a = 8'd5;
+      assign y = y_r;
+    endmodule
+  "#)
+  (top Top)
+  (run_until 2) (assert_eq y 0)
+  (run_until 3) (assert_eq y 5 "a change of what pick's default reads wakes the process"))
+
+; It counts the reads of branches that constant folding removed, as the
+; syntactic event list does (IEEE 1800-2023 9.4.2.2).
+(case always_star_timed_task_calls_wait_on_folded_branch_reads
+  (source "star_folded_default.sv" #"
+    module Top(output logic [7:0] y);
+      logic [7:0] a = 8'd0, b = 8'd1, y_r = 8'd0;
+      task automatic delayed(input logic [7:0] v = a);
+        #1 y_r = v;
+      endtask
+      always @* begin
+        if (0) delayed();
+        delayed(b);
+      end
+      initial #2 a = 8'd5;
+      assign y = y_r;
+    endmodule
+  "#)
+  (top Top)
+  (run_until 2) (assert_eq y 0)
+  (run_until 3) (assert_eq y 1 "a change of what a folded call's default reads wakes the process"))
+
+; A package-scoped identifier is a delay value (IEEE 1800-2023 A.6.5,
+; ps_identifier), with or without parentheses.
+(case package_scoped_delay_values_wait_their_value
+  (source "package_delays.sv" #"
+    package delays;
+      parameter int D = 3;
+      localparam int E = 2;
+    endpackage
+    module Top(output int at_d, at_e, at_paren);
+      initial begin
+        at_d = 0; at_e = 0; at_paren = 0;
+        #delays::D;
+        at_d = 1;
+        #delays::E;
+        at_e = 1;
+        #(delays::D) at_paren = 1;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 2) (assert_eq at_d 0)
+  (run_until 3) (assert_eq at_d 1) (assert_eq at_e 0)
+  (run_until 5) (assert_eq at_e 1) (assert_eq at_paren 0)
+  (run_until 8) (assert_eq at_paren 1))
+
 
 (case timed_task_four_state_storage_survives_suspension
   (four_state)
@@ -1987,6 +2114,34 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (run_to_finish)
   (expect_output "y=0111 w=11 n=3\n"))
 
+; A wait on a part-select of a variable an always_comb rewrites through 0.
+; The continuous assignment updates w when y changes (IEEE 1800-2023 10.3);
+; a simulator may interleave it with the process (4.7), but Celox, like
+; Icarus and Verilator, evaluates it after the process: one event per
+; settled change of y[3:0].
+(case intermediate_combinational_writes_reach_part_select_waiters_settled
+  (source "part_select.sv" #"
+                module Top;
+                    logic [7:0] y, a = 8'h15;
+                    logic [3:0] w;
+                    logic c = 0;
+                    int n;
+                    always_comb begin y = 8'h0; if (c) y = a; end
+                    assign w = y[3:0];
+                    initial #1 forever begin @(w); n++; end
+                    initial begin
+                        #2 c = 1;
+                        #1 a = 8'h16;
+                        #1 a = 8'h26;
+                        #1 $display("y=%h w=%h n=%0d", y, w, n);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "y=26 w=6 n=2\n"))
+
 ; The counted variable is an output port that the parent connects to a
 ; concatenation.
 (case intermediate_combinational_writes_reach_concatenated_ports
@@ -2340,3 +2495,176 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (assert_eq q 0)
   (assert_eq m0 0)
   (assert_eq m1 0))
+
+(case edge_nonblocking_updates_keep_later_writes_of_other_bits
+  ; An edge process evaluates, then a zero-delay resumption writes the same
+  ; variables before the NBA region (IEEE 1800-2023 4.4.2.4). The
+  ; nonblocking updates change only the bits they assign (10.4.2): the
+  ; resumption's writes to other bits, elements and variables stay, also
+  ; where no assignment executed, and an update of the same bits wins.
+  (source "nba_window.sv" #"
+                module Top(output logic [31:0] m0, m2, m3, m5, q, r);
+                    bit clk = 1'b0;
+                    bit en = 1'b0;
+                    bit [3:0] i = 4'd0;
+                    bit [4:0] k = 5'd3;
+                    bit [31:0] mem [16];
+                    bit [31:0] q_, r_;
+                    always #5 clk = ~clk;
+                    always @(posedge clk) begin
+                        mem[i][15:8] <= 8'h44;
+                        mem[i + 2] <= 32'h11;
+                        if (en) q_ <= 32'h11;
+                        r_[k] <= 1'b1;
+                    end
+                    initial begin
+                        for (int j = 0; j < 16; j++) mem[j] = 0;
+                        q_ = 0;
+                        r_ = 0;
+                        @(posedge clk);
+                        #0;
+                        mem[0][7:0] = 8'h22;
+                        mem[2][31:24] = 8'h77;
+                        mem[3] = 32'h33;
+                        mem[5][7:0] = 8'h55;
+                        q_ = 32'h66;
+                        r_[20] = 1'b1;
+                    end
+                    assign m0 = mem[0];
+                    assign m2 = mem[2];
+                    assign m3 = mem[3];
+                    assign m5 = mem[5];
+                    assign q = q_;
+                    assign r = r_;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 6)
+  (assert_eq m0 0x4422)
+  (assert_eq m2 0x11)
+  (assert_eq m3 0x33)
+  (assert_eq m5 0x55)
+  (assert_eq q 0x66 "no nonblocking assignment to q executed")
+  (assert_eq r 0x100008))
+
+(case edge_nonblocking_updates_follow_writes_their_blocking_results_wake
+  ; The edge process's blocking result wakes a waiting process in the
+  ; active region, before the NBA region (IEEE 1800-2023 4.5). Its write
+  ; stays where no nonblocking assignment executed.
+  (source "nba_active_window.sv" #"
+                module Top(output logic [7:0] q, output logic [7:0] p);
+                    bit clk = 1'b0;
+                    bit flag = 1'b0;
+                    bit en = 1'b0;
+                    bit [7:0] q_ = 8'd0, p_ = 8'd0;
+                    always #5 clk = ~clk;
+                    always @(posedge clk) begin
+                        flag = 1'b1;
+                        if (en) q_ <= 8'h11;
+                        p_ <= 8'h44;
+                    end
+                    initial begin
+                        @(posedge flag);
+                        q_ = 8'h22;
+                        p_ = 8'h33;
+                    end
+                    assign q = q_;
+                    assign p = p_;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 6)
+  (assert_eq q 0x22)
+  (assert_eq p 0x44 "the nonblocking update is later"))
+
+(case edge_blocking_results_precede_later_process_writes
+  ; A blocking assignment of an edge process takes effect when it executes:
+  ; a zero-delay resumption that writes the variable afterwards, without
+  ; reading it, leaves its own value.
+  (source "blocking_window.sv" #"
+                module Top(output logic [7:0] t);
+                    bit clk = 1'b0;
+                    bit [7:0] t_ = 8'd0;
+                    always #5 clk = ~clk;
+                    always @(posedge clk) t_ = 8'h11;
+                    initial begin
+                        @(posedge clk);
+                        #0;
+                        t_ = 8'h22;
+                    end
+                    assign t = t_;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 6)
+  (assert_eq t 0x22))
+
+; A clock computed from a clock that one of several nonblocking updates
+; changes has its edge in that NBA region (IEEE 1800-2023 4.5, 10.4.2):
+; `rclk = clk & ren` rises with `clk` while `ren` is 1.
+(case derived_clocks_follow_several_nonblocking_updates
+  (source "derived_nba.sv" #"
+                module Top;
+                  bit clk, clk2; bit ren = 0; bit rclk; bit [7:0] e = 0;
+                  assign rclk = clk & ren;
+                  always_ff @(posedge clk) ren <= ~ren;
+                  always_ff @(posedge rclk) e <= e + 8'd1;
+                  initial begin
+                    #9 clk <= 1; #1; clk <= 0;
+                    #3 clk <= 1; clk2 <= 1; #1; clk <= 0; clk2 <= 0;
+                    #3 clk <= 1; #1; clk <= 0;
+                  end
+                  initial begin #12 $display("t12 e=%0d", e); #4 $display("t16 e=%0d", e); #4 $display("t20 e=%0d", e); $finish; end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "t12 e=1\nt16 e=2\nt20 e=3\n"))
+
+; A clock computed from a blocking result that a domain commits in the
+; active region (#1783) has its edges there.
+(case derived_clocks_follow_active_region_commits
+  (source "derived_active.sv" #"
+                module Top;
+                  bit clk, clk2, c2, en = 1;
+                  wire g = c2 & en;
+                  int cnt, w;
+                  always @(posedge clk) c2 = ~c2;
+                  initial forever begin @(c2); w++; end
+                  always_ff @(posedge g) cnt <= cnt + 1;
+                  initial begin
+                    repeat (4) begin #1 clk <= 1; clk2 <= 1; #1 clk <= 0; clk2 <= 0; end
+                    #1 $display("cnt=%0d w=%0d", cnt, w);
+                    $finish;
+                  end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "cnt=2 w=4\n"))
+
+; A domain evaluated twice before one NBA region publishes both
+; evaluations; the continuous assignment of the clock computed from its
+; output sees the final value (IEEE 1800-2023 4.7).
+(case derived_clocks_follow_superseded_publications
+  (source "derived_superseded.sv" #"
+                module Top;
+                  bit clk, c, q, en = 1;
+                  wire gq = q & en;
+                  int cnt, n;
+                  always_ff @(posedge clk) q <= c;
+                  always_ff @(posedge gq) cnt <= cnt + 1;
+                  initial forever begin @(q); n++; end
+                  initial begin
+                    #1 c = 1; clk = 1;
+                    #0 clk = 0; c = 0;
+                    #0 clk = 1;
+                    #1 clk = 0;
+                    #1 $display("cnt=%0d n=%0d q=%0d", cnt, n, q);
+                    $finish;
+                  end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "cnt=0 n=1 q=0\n"))

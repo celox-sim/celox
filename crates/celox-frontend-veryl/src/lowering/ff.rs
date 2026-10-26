@@ -9,7 +9,8 @@ use crate::{
 use bit_set::BitSet;
 use celox_design::{
     BinaryOp, BitAccess, DisplaySizing, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite,
-    SPARSE_WORKING_REGION, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
+    SPARSE_WORKING_REGION, STABLE_REGION, Severity, TriggerSet, UnaryOp, VarAtomBase,
+    WORKING_REGION,
 };
 use celox_sir::{
     BlockId, RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
@@ -552,6 +553,9 @@ impl<'a> FfParser<'a> {
             template,
             sizing: DisplaySizing::Veryl,
             scope: None,
+            location: None,
+            assertion: None,
+            deferred: None,
             arg_widths: value_args
                 .iter()
                 .map(|arg| self.get_expression_width(&arg.0))
@@ -769,8 +773,8 @@ impl<'a> FfParser<'a> {
                 let pass_bb = ir_builder.new_block();
                 let fail_bb = ir_builder.new_block();
                 let event_kind = match kind {
-                    AssertKind::Fatal => RuntimeEventKind::AssertFatal,
-                    AssertKind::Continue => RuntimeEventKind::AssertContinue,
+                    AssertKind::Fatal => RuntimeEventKind::Report(Severity::Fatal),
+                    AssertKind::Continue => RuntimeEventKind::Report(Severity::Error),
                 };
                 let site_id = self.register_runtime_event_site(event_kind, args);
                 // Assertion message arguments are observationally eager: any

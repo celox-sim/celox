@@ -5,6 +5,9 @@ use std::path::Path;
 
 // IEEE 1800-2023 6.8 initializes static declarations before initial/always
 // procedures, including initializers that require runtime evaluation.
+// `always @*` waits for a change only in four-state mode; in two-state mode it
+// runs once at time zero (#2021), so the tests of its startup guard build
+// four-state simulations.
 const RANDOM_DECLARATION: &str = r#"
 module Top;
   int a = $urandom | 1;
@@ -247,17 +250,15 @@ macro_rules! declaration_backend {
 
             #[test]
             fn runtime_declaration_does_not_wake_wildcard() {
-                for four_state in [false, true] {
-                    finishes(
-                        Simulation::from_sv_sources(
-                            vec![(RANDOM_DECLARATION, Path::new("runtime_declaration.sv"))],
-                            "Top",
-                        )
-                        .four_state(four_state)
-                        .$build()
-                        .unwrap(),
-                    );
-                }
+                finishes(
+                    Simulation::from_sv_sources(
+                        vec![(RANDOM_DECLARATION, Path::new("runtime_declaration.sv"))],
+                        "Top",
+                    )
+                    .four_state(true)
+                    .$build()
+                    .unwrap(),
+                );
             }
 
             #[test]
@@ -317,35 +318,31 @@ macro_rules! declaration_backend {
 
             #[test]
             fn host_request_declaration_finishes_before_wildcard_registration() {
-                for four_state in [false, true] {
-                    finishes(
-                        Simulation::from_sv_sources(
-                            vec![(HOST_DECLARATION, Path::new("declaration_plusargs.sv"))],
-                            "Top",
-                        )
-                        .four_state(four_state)
-                        .plusargs(["+on"])
-                        .$build()
-                        .unwrap(),
-                    );
-                }
+                finishes(
+                    Simulation::from_sv_sources(
+                        vec![(HOST_DECLARATION, Path::new("declaration_plusargs.sv"))],
+                        "Top",
+                    )
+                    .four_state(true)
+                    .plusargs(["+on"])
+                    .$build()
+                    .unwrap(),
+                );
             }
 
             #[test]
             fn host_reads_and_eval_do_not_activate_a_stopped_declaration() {
-                for four_state in [false, true] {
-                    stopped_declaration_keeps_comb_inert(
-                        Simulation::from_sv_sources(
-                            vec![(STOPPED_DECLARATION, Path::new("declaration_stop.sv"))],
-                            "Top",
-                        )
-                        .four_state(four_state)
-                        .live_signal(Vec::new(), vec!["a".into()])
-                        .live_signal(Vec::new(), vec!["q".into()])
-                        .$build()
-                        .unwrap(),
-                    );
-                }
+                stopped_declaration_keeps_comb_inert(
+                    Simulation::from_sv_sources(
+                        vec![(STOPPED_DECLARATION, Path::new("declaration_stop.sv"))],
+                        "Top",
+                    )
+                    .four_state(true)
+                    .live_signal(Vec::new(), vec!["a".into()])
+                    .live_signal(Vec::new(), vec!["q".into()])
+                    .$build()
+                    .unwrap(),
+                );
             }
 
             #[test]
@@ -391,19 +388,17 @@ macro_rules! declaration_backend {
 
             #[test]
             fn checkpoint_restores_the_armed_startup_guard() {
-                for four_state in [false, true] {
-                    restored_guard_remains_inert(
-                        Simulation::from_sv_sources(
-                            vec![(HOST_WRITES, Path::new("declaration_checkpoint.sv"))],
-                            "Top",
-                        )
-                        .four_state(four_state)
-                        .live_signal(Vec::new(), vec!["a".into()])
-                        .live_signal(Vec::new(), vec!["q".into()])
-                        .$build()
-                        .unwrap(),
-                    );
-                }
+                restored_guard_remains_inert(
+                    Simulation::from_sv_sources(
+                        vec![(HOST_WRITES, Path::new("declaration_checkpoint.sv"))],
+                        "Top",
+                    )
+                    .four_state(true)
+                    .live_signal(Vec::new(), vec!["a".into()])
+                    .live_signal(Vec::new(), vec!["q".into()])
+                    .$build()
+                    .unwrap(),
+                );
             }
         }
     };
@@ -425,18 +420,16 @@ declaration_backend!(wasm, build_wasm);
 ))]
 fn native_runtime_declaration_startup_at_o0_and_o2() {
     for level in [celox::OptLevel::O0, celox::OptLevel::O2] {
-        for four_state in [false, true] {
-            finishes(
-                Simulation::from_sv_sources(
-                    vec![(RANDOM_DECLARATION, Path::new("declaration_opt_level.sv"))],
-                    "Top",
-                )
-                .four_state(four_state)
-                .opt_level(level)
-                .build_native()
-                .unwrap(),
-            );
-        }
+        finishes(
+            Simulation::from_sv_sources(
+                vec![(RANDOM_DECLARATION, Path::new("declaration_opt_level.sv"))],
+                "Top",
+            )
+            .four_state(true)
+            .opt_level(level)
+            .build_native()
+            .unwrap(),
+        );
     }
 }
 

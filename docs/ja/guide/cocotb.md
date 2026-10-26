@@ -54,6 +54,13 @@ Verylでは完了前にtick上限に達すると失敗します。
 コンパイルや1ステップ・tick内の処理時間は制限しないため、実時間の制限が必要な場合は
 外部のタイムアウト機能を使ってください。1回の実行で言語を混在させることはできません。
 
+SVのtestbenchでは、`+`で始まる位置引数（または繰り返し指定できる`--plusarg +ARG`）はソースではなくplusargです。
+`$test$plusargs`と`$value$plusargs`はコマンドラインの順に参照します（全バックエンド対応）。
+
+```sh
+celox run tb.v --top tb +iterations=9 --plusarg +trace
+```
+
 両言語とも`--backend native|tiered|interpreter|cranelift|wasm`で実行方式を選べます（既定native）。
 tieredはインタープリターで開始し、待機中のイベントを保ちながら生成コードへ移行します。
 両言語とも`--threads N`（1〜64、既定1）で並列度を指定できます。
@@ -64,6 +71,20 @@ celox run test/Top.sv --top Top --backend tiered --threads 4
 celox run --project /path/to/veryl-project --top smoke --backend tiered --threads 4
 celox run test/Top.veryl --top Top --four-state
 celox run --project /path/to/veryl-project --top smoke --report --unlimited
+```
+
+SVのtestbenchでは、実行中に[状態ファイル](checkpoints.md#状態ファイル)を保存して
+`celox state dump`/`celox state diff`で2つの実行やシミュレーターを比較できます（全バックエンド対応）。
+`--save-state-on SIGNAL`で数える信号（`tb.clk`のような階層パス、トップモジュール名は省略可）を指定し、
+`--save-state-at N[,M...]`で保存するサイクル（1から数える）を指定します。
+サイクルは、終了時に信号が1で、直前のタイムステップの終了時には1でなかったタイムステップです。
+ファイル`<SIGNAL>-<N>.state`はそのタイムステップの全リージョンが終わった直後に書くので、ノンブロッキング代入の更新も含みます。
+`--save-state-at-time T[,U...]`は時刻T以前の処理をすべて終え、Tを越えて進む前の状態を`time-<T>.state`に保存します（単位はデザインのグローバル時間精度）。
+`--save-state-dir DIR`で出力先を指定します（既定はカレントディレクトリ）。
+実行が指定のサイクルに達しなかった場合はエラーです。
+
+```sh
+celox run c906.v --top tb --save-state-on tb.clk --save-state-at 1000,2000 --save-state-dir states
 ```
 
 Veryl用の`--report`は設定・コンパイル時間・実行時間・tiered昇格統計・結果を

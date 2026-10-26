@@ -13,26 +13,30 @@ rust-version.workspace = true
 [features]
 default = ["host-runtime"]
 host-runtime = [
-    "dep:celox-backend-cranelift",
     "dep:celox-backend-x86",
     "dep:celox-macros",
-    "dep:wasmtime",
     "dep:veryl-component-sys",
     "dep:libloading",
     "rand/thread_rng",
     "celox-sir-opt/timing",
 ]
+cranelift = ["host-runtime", "dep:celox-backend-cranelift"]
+wasm-runtime = ["host-runtime", "dep:wasmtime"]
+veryl-reference = ["host-runtime", "dep:veryl-simulator"]
+wasm-component = ["host-runtime", "dep:wasmtime"]
 systemverilog = ["dep:celox-frontend-sv"]
 # Accept SystemVerilog DPI-C imports, linked to C functions at build time.
 sv-dpi = ["systemverilog", "celox-frontend-sv/dpi"]
-arm64-codegen = ["host-runtime", "dep:celox-backend-arm64"]
+arm64-codegen = ["cranelift", "dep:celox-backend-arm64"]
 x86_64-codegen = [
-    "host-runtime",
+    "cranelift",
     "dep:celox-backend-x86",
     "celox-backend-x86/cross-codegen",
 ]
 
 [dependencies]
+veryl-simulator = { workspace = true, optional = true }
+celox-backend-common = { workspace = true }
 toml                  = { workspace = true }
 veryl-analyzer        = { workspace = true }
 veryl-metadata        = { workspace = true }
@@ -97,11 +101,11 @@ test-case  = "3"
 tempfile.workspace = true
 veryl-std = { workspace = true }
 veryl-emitter = { workspace = true }
-veryl-simulator = { workspace = true }
 vcd = "0.7"
 
 [[bench]]
 name = "vcd"
+required-features = ["cranelift"]
 harness = false
 
 [[bench]]
@@ -115,15 +119,16 @@ harness = false
 [[test]]
 name = "systemverilog"
 path = "tests/systemverilog.rs"
-required-features = ["systemverilog"]
+required-features = ["systemverilog", "cranelift", "wasm-runtime"]
 
 [[test]]
 name = "sv_dpi"
 path = "tests/sv_dpi.rs"
-required-features = ["sv-dpi"]
+required-features = ["sv-dpi", "cranelift", "wasm-runtime"]
 
 [[bench]]
 name = "compilation"
+required-features = ["cranelift"]
 harness = false
 bench = false
 
@@ -146,5 +151,185 @@ name = "frontend_binary"
 path = "examples/frontend_binary.rs"
 required-features = ["host-runtime"]
 
+[[example]]
+name = "vtest-exec"
+required-features = ["host-runtime"]
+
 [lints]
 workspace = true
+
+[[test]]
+name = "component_method"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "concurrent_initial_runtime"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "cross_validate"
+required-features = ["cranelift"]
+
+[[test]]
+name = "diagnostic_policy"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "divrem_state_modes"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "edge_api"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "four_state_explicit_edges"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "frontend_sdk"
+required-features = ["cranelift"]
+
+[[test]]
+name = "fuzz_cross_validate"
+required-features = ["cranelift"]
+
+[[test]]
+name = "issue3_repro"
+required-features = ["cranelift"]
+
+[[test]]
+name = "latch"
+required-features = ["cranelift"]
+
+[[test]]
+name = "multi_clock"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "native_boundary_hardening"
+required-features = ["cranelift"]
+
+[[test]]
+name = "native_concat_width"
+required-features = ["wasm-runtime"]
+
+[[test]]
+name = "nested_write_perf"
+required-features = ["cranelift"]
+
+[[test]]
+name = "param_override_width"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "scalar_write_widths"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "simulation_stop"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "state_file"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "sv_declaration_startup"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "sv_deferred_assertions"
+required-features = ["wasm-runtime"]
+
+[[test]]
+name = "sv_distributions"
+required-features = ["wasm-runtime"]
+
+[[test]]
+name = "sv_host_requests"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "sv_ordinary_host_requests"
+required-features = ["wasm-runtime"]
+
+[[test]]
+name = "sv_plusargs"
+required-features = ["wasm-runtime"]
+
+[[test]]
+name = "sv_real_math"
+required-features = ["wasm-runtime"]
+
+[[test]]
+name = "sv_reports"
+required-features = ["wasm-runtime"]
+
+[[test]]
+name = "sv_scan"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "sv_scan_real"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "sv_scheduled_host_requests"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "sv_scheduled_startup"
+required-features = ["wasm-runtime"]
+
+[[test]]
+name = "sv_system_actuals"
+required-features = ["wasm-runtime"]
+
+[[test]]
+name = "sv_timescale_options"
+required-features = ["wasm-runtime"]
+
+[[test]]
+name = "sv_untimed_processes"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "sv_update_events"
+required-features = ["wasm-runtime"]
+
+[[test]]
+name = "sv_vcd"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "time_precision"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "time_state_and_delays"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "unknown_shift_counts"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "vcd"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "wasm_backend"
+required-features = ["wasm-runtime"]
+
+[[test]]
+name = "wasm_regression"
+required-features = ["cranelift", "wasm-runtime"]
+
+[[test]]
+name = "veryl_reference_adapter"
+required-features = ["veryl-reference"]
+
+[[test]]
+name = "native_testbench"
+required-features = ["veryl-reference", "cranelift"]

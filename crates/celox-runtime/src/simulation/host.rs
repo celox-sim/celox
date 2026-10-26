@@ -81,6 +81,23 @@ pub trait HostBoundary: UnitExecutor {
         output
     }
 
+    /// Called in every round when its processes and scheduled values have
+    /// run and its flip-flop domains are about to evaluate: the round's
+    /// edges are in state, and no domain has committed. Returns whether the
+    /// host wrote state; the round then settles it before the domains read
+    /// it. Writes to signals a wait watches are logged as in
+    /// [`Self::take_host_writes`].
+    fn before_domains(&mut self, _timestamp: u64) -> Result<bool, Halt> {
+        Ok(false)
+    }
+
+    /// Whether the host wrote state in [`Self::try_finish_timed_step`]
+    /// since the last call. The writes are updates of that slot's time: the
+    /// next step settles them there.
+    fn take_slot_writes(&mut self) -> bool {
+        false
+    }
+
     /// Snapshot external-component inputs immediately before an event domain
     /// evaluates its sequential logic.
     fn stage_external_event(
@@ -115,6 +132,15 @@ pub trait HostBoundary: UnitExecutor {
     /// infallible hook for existing executor implementations.
     fn try_finish_timed_step(&mut self, timestamp: u64) -> Result<(), Halt> {
         self.finish_timed_step(timestamp);
+        Ok(())
+    }
+
+    /// Called after [`Self::try_finish_timed_step`] when the time slot
+    /// `timestamp` is over: no more work is due at that time. A step ends
+    /// before its slot does when a process waits for zero time. The
+    /// runtime's loop calls it; a host that has work here returns
+    /// [`CompiledSlots::None`] from [`Self::compiled_slots`].
+    fn try_end_time_slot(&mut self, _timestamp: u64) -> Result<(), Halt> {
         Ok(())
     }
 }

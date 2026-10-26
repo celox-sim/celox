@@ -63,13 +63,16 @@ enum Job {
     AssertionThen {
         condition: Expr,
         keyword: String,
+        assertion: celox_design::AssertionSite,
+        span: Option<crate::procedural::SourceSpan>,
         failure: Option<StatementId>,
         start: usize,
     },
     AssertionFinish {
         condition: Expr,
         then_body: Vec<Stmt>,
-        default_failure: Option<String>,
+        assertion: celox_design::AssertionSite,
+        default_failure: Option<(String, Option<crate::procedural::SourceSpan>)>,
         start: usize,
     },
 }
@@ -238,9 +241,36 @@ impl BodyBuilder<'_, '_, '_> {
                         failure,
                     } => {
                         let condition = self.native_assertion_condition(keyword, header)?;
+                        let celox_sv_syntax::AssertionHeader::Immediate { deferred, .. } = header
+                        else {
+                            unreachable!("matched an immediate header");
+                        };
+                        let statement = native.statement(id);
                         jobs.push(Job::AssertionThen {
                             condition,
                             keyword: keyword.clone(),
+                            assertion: celox_design::AssertionSite {
+                                label: statement
+                                    .label
+                                    .as_ref()
+                                    .map(|label| label.value().to_owned()),
+                                directive: match keyword.as_str() {
+                                    "assume" => celox_design::AssertionDirective::Assume,
+                                    "cover" => celox_design::AssertionDirective::Cover,
+                                    _ => celox_design::AssertionDirective::Assert,
+                                },
+                                deferral: match deferred {
+                                    None => celox_design::AssertionDeferral::None,
+                                    Some(celox_sv_syntax::AssertionDeferral::Zero) => {
+                                        celox_design::AssertionDeferral::Observed
+                                    }
+                                    Some(celox_sv_syntax::AssertionDeferral::Final) => {
+                                        celox_design::AssertionDeferral::Final
+                                    }
+                                },
+                                outcome: celox_design::AssertionOutcome::Fail,
+                            },
+                            span: super::source_span(statement.tokens, self.tree),
                             failure: *failure,
                             start: output.len(),
                         });
@@ -251,7 +281,19 @@ impl BodyBuilder<'_, '_, '_> {
                     StatementKind::Break => output.push(Stmt::Break),
                     StatementKind::Continue => output.push(Stmt::Continue),
                     StatementKind::Return(value) => {
-                        let value = value.map(|id| self.native_value(id)).transpose()?;
+                        let value = value
+                            .map(|id| {
+                                let mut value = expression_binding::bind_value(
+                                    id,
+                                    native,
+                                    self.tree,
+                                    &self.dims,
+                                    self.return_shape.as_ref(),
+                                )?;
+                                self.rename_expr(&mut value);
+                                Ok(value)
+                            })
+                            .transpose()?;
                         output.push(Stmt::Return(value));
                     }
                     _ => output.extend(self.native_statement_leaf(&native.statement(id).kind)?),
@@ -267,6 +309,8 @@ impl BodyBuilder<'_, '_, '_> {
                 Job::AssertionThen {
                     condition,
                     keyword,
+                    assertion,
+                    span,
                     failure,
                     start,
                 } => {
@@ -274,8 +318,9 @@ impl BodyBuilder<'_, '_, '_> {
                     jobs.push(Job::AssertionFinish {
                         condition,
                         then_body,
+                        assertion,
                         default_failure: if failure.is_none() && keyword != "cover" {
-                            Some(keyword)
+                            Some((keyword, span))
                         } else {
                             None
                         },
@@ -287,14 +332,29 @@ impl BodyBuilder<'_, '_, '_> {
                 }
                 Job::AssertionFinish {
                     condition,
-                    then_body,
+                    mut then_body,
+                    assertion,
                     default_failure,
                     start,
                 } => {
                     let mut else_body = output.split_off(start);
-                    if let Some(keyword) = default_failure {
-                        else_body = assertion_failure(&keyword);
+                    if let Some((keyword, span)) = default_failure {
+                        else_body = assertion_failure(&keyword, span);
                     }
+                    if assertion.deferral != celox_design::AssertionDeferral::None {
+                        deferred_action(&then_body)?;
+                        deferred_action(&else_body)?;
+                    }
+                    attribute_reports(
+                        &mut then_body,
+                        &assertion,
+                        celox_design::AssertionOutcome::Pass,
+                    );
+                    attribute_reports(
+                        &mut else_body,
+                        &assertion,
+                        celox_design::AssertionOutcome::Fail,
+                    );
                     output.push(Stmt::If {
                         condition,
                         then_body,

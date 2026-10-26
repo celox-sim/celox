@@ -172,19 +172,30 @@ mod tests {
     }
 
     #[test]
-    fn module_deferred_assertions_parse_but_require_execution_support() {
+    /// A deferred assertion as a module item is the same assertion in an
+    /// `always_comb` (IEEE 1800-2023 16.4.3), labeled or not.
+    fn module_deferred_assertions_are_always_comb_processes() {
         for keyword in ["assert", "assume", "cover"] {
             for deferral in ["#0", "final"] {
-                let code = format!("module M; logic a=1; {keyword} {deferral} (a!=0); endmodule");
-                let path = Path::new("module-deferred.sv");
-                parse_source(&code, path).unwrap();
-                let error = crate::analyze_source(&code, path).unwrap_err();
-                assert!(
-                    matches!(error, AnalyzerError::Unsupported(ref reason) if reason == "module deferred immediate assertion"),
-                    "{error}"
-                );
+                for label in ["", "a1: "] {
+                    let code = format!(
+                        "module M; logic a=1; {label}{keyword} {deferral} (a!=0); endmodule"
+                    );
+                    let path = Path::new("module-deferred.sv");
+                    parse_source(&code, path).unwrap();
+                    crate::analyze_source(&code, path).unwrap();
+                }
             }
         }
+    }
+
+    #[test]
+    fn public_preprocessing_and_parsing_reject_nameless_pragmas() {
+        let code = "`pragma\nmodule M; endmodule";
+        let path = Path::new("pragma.sv");
+        assert!(preprocess_source(code, path, &[], &[]).is_err());
+        assert!(parse_source(code, path).is_err());
+        assert!(crate::ParsedSource::parse(code, path).is_err());
     }
 
     #[test]

@@ -8,17 +8,9 @@ impl BodyBuilder<'_, '_, '_> {
         keyword: &str,
         header: &AssertionHeader,
     ) -> Result<Expr, AnalyzerError> {
-        let AssertionHeader::Immediate {
-            condition,
-            deferred,
-            ..
-        } = header
-        else {
+        let AssertionHeader::Immediate { condition, .. } = header else {
             return Err(unsupported("concurrent assertion"));
         };
-        if keyword == "cover" && deferred.is_some() {
-            return Err(unsupported("deferred immediate cover"));
-        }
         if !matches!(keyword, "assert" | "assume" | "cover") {
             return Err(unsupported("immediate assertion keyword"));
         }

@@ -237,9 +237,9 @@ test("truncated, cached, corrupt and incorrectly classified reports fail closed"
   }
 });
 
-test("all four retained baselines accept only their existing failures", () => {
+test("every retained baseline accepts only its existing failures", () => {
   for (const suite of ["veryl", "sv"]) {
-    for (const tool of ["verilator", "icarus"]) {
+    for (const tool of ["verilator", "icarus", "xezim"]) {
       const file = `../crates/celox-test-suite/verification/${suite === "sv" ? "sv/" : ""}${tool}.json`;
       const baseline = readVerificationReport(new URL(file, import.meta.url));
       const current = {
@@ -271,10 +271,50 @@ test("all four retained baselines accept only their existing failures", () => {
         exitStatus,
         suite,
       );
-      assert.equal(
-        result.accepted_failures.length,
-        suite === "sv" ? 0 : tool === "icarus" ? 11 : 2,
-      );
+      if (tool === "xezim") {
+        // xezim retains its reviewed failures instead of excluding them.
+        const failures = current.cases.filter(
+          (row) =>
+            !["passed", "rejected", "unsupported", "ignored"].includes(
+              row.status,
+            ),
+        ).length;
+        assert.equal(result.accepted_failures.length, failures);
+      } else if (suite === "sv") {
+        assert.deepEqual(
+          result.accepted_failures,
+          tool === "icarus"
+            ? [
+                "hierarchy::packed_pattern_parameter_arguments_keep_types_and_unknown_bits",
+                "hierarchy::packed_pattern_parameter_arguments_preserve_wide_values",
+                "hierarchy::packed_pattern_parameters_forward_whole_values",
+                "tagged_unions::casts_ports_and_registers",
+                "tagged_unions::conditional_struct_payload",
+                "tagged_unions::constructors_and_checked_members",
+                "tagged_unions::default_arguments",
+                "tagged_unions::factory_and_union_arguments",
+                "tagged_unions::nested_and_void_constructors",
+                "tagged_unions::wide_four_state_payload",
+                "tagged_unions::writable_system_arguments",
+                "tagged_unions::writable_task_arguments",
+                "unions::packed_mixed_state",
+                "unions::soft_overlay",
+                "unions::soft_signed_ports",
+                "unions::soft_wide_four_state",
+              ]
+            : [
+                "tagged_unions::conditional_struct_payload",
+                "tagged_unions::constructors_and_checked_members",
+                "tagged_unions::default_arguments",
+                "tagged_unions::factory_and_union_arguments",
+                "tagged_unions::nested_and_void_constructors",
+                "tagged_unions::writable_system_arguments",
+                "tagged_unions::writable_task_arguments",
+              ],
+        );
+      } else {
+        assert.equal(result.accepted_failures.length, tool === "icarus" ? 11 : 2);
+      }
     }
   }
 });

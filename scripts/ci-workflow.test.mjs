@@ -23,7 +23,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   assert.match(gate, /if: \$\{\{ !cancelled\(\)/);
   assert.match(
     gate,
-    /needs: \[changes, rust-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites\]/,
+    /needs: \[changes, rust-tests, rust-default-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites\]/,
   );
   assert.match(
     gate,
@@ -39,6 +39,8 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     CHANGES_RESULT: "success",
     RUST_REQUIRED: "true",
     RUST_RESULT: "success",
+    DEFAULT_REQUIRED: "true",
+    DEFAULT_RESULT: "success",
     SV_TESTS_REQUIRED: "true",
     SV_TESTS_RESULT: "success",
     ARM64_REQUIRED: "true",
@@ -50,6 +52,9 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     EXTERNAL_RESULT: "skipped",
   };
   const cases = [
+    { env: { ...success, DEFAULT_REQUIRED: "false", DEFAULT_RESULT: "skipped" }, passes: true },
+    { env: { ...success, DEFAULT_REQUIRED: "", DEFAULT_RESULT: "skipped" }, passes: false },
+    { env: { ...success, DEFAULT_REQUIRED: "false", DEFAULT_RESULT: "failure" }, passes: false },
     {
       env: { ...success, RUST_REQUIRED: "", RUST_RESULT: "skipped" },
       passes: false,
@@ -69,6 +74,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   for (const producer of [
     "CHANGES_RESULT",
     "RUST_RESULT",
+    "DEFAULT_RESULT",
     "SV_TESTS_RESULT",
     "ARM64_RESULT",
     "NATIVE_RESULT",
@@ -192,7 +198,13 @@ test("scheduled and manual validation run all paths and external suites", () => 
   assert.match(job("changes"), /QUEUE_VALIDATION: .*startsWith\(github\.head_ref, 'mergify\/merge-queue\/'\)/);
   assert.match(external, /fail-fast: false/);
   assert.match(external, /suite: \[veryl, sv\]/);
-  assert.match(external, /tool: \[verilator, icarus\]/);
+  assert.match(external, /tool: \[verilator, icarus, xezim\]/);
+  // Only the xezim jobs build xezim, through its own development shell.
+  assert.match(
+    external,
+    /VERIFY_SHELL: \$\{\{ matrix\.tool == 'xezim' && '\.#xezim' \|\| '\.' \}\}/,
+  );
+  assert.doesNotMatch(external, /nix develop --no-update-lock-file/);
   assert.match(external, /--test oracles -- --ignored/);
   // The check reads the complete results, with run counts and reuse flags;
   // a retained --report copy omits them.
@@ -248,11 +260,11 @@ test("queue CI retains the whole workspace and ordinary PRs use scoped tests", (
   // Anything but an explicit scope, including a failed detection, runs all.
   assert.match(
     rust,
-    /name: Run workspace tests with CI features\n        if: needs\.changes\.outputs\.rust_full != 'false'\n/,
+    /name: Run workspace tests with CI features\n        id: workspace-tests\n        if: needs\.changes\.outputs\.rust_full != 'false'\n/,
   );
   assert.match(
     rust,
-    /name: Run the tests this pull request can affect\n        if: needs\.changes\.outputs\.rust_full == 'false' && /,
+    /name: Run the tests this pull request can affect\n        id: scoped-tests\n        if: needs\.changes\.outputs\.rust_full == 'false' && /,
   );
   assert.match(
     job("changes"),
@@ -358,7 +370,7 @@ test("PR caches cannot evict the shared default-branch Rust caches", () => {
       /      - uses: Swatinem\/rust-cache@v2\n([\s\S]*?)(?=\n      -|\n  [a-z]|$)/g,
     ),
   ];
-  assert.equal(cacheSteps.length, 9);
+  assert.equal(cacheSteps.length, 10);
   for (const [, step] of cacheSteps) {
     assert.match(
       step,
@@ -378,12 +390,18 @@ test("cache warming shares the Rust Tests key and builds without running tests",
   assert.match(warm, /cancel-in-progress: false/);
   assert.doesNotMatch(
     warm,
-    /pull_request:|cargo nextest run|cargo test|shared-key:/,
+    /pull_request:|cargo nextest run|shared-key:/,
   );
   assert.match(warm, /steps.cache.outputs.cache-hit != 'true'/);
+  for (const text of [warm, job("rust-tests")]) {
+    assert.match(text, /key: vtest-v1/);
+    assert.match(text, /run: node scripts\/run-vtest.mjs --prepare-ci/);
+  }
+  assert.match(warm, /name: Build the optimized vtest executor to populate dependencies\n        if: steps.cache.outputs.cache-hit != 'true'/);
+  assert.match(warm, /"scripts\/run-vtest.mjs"/);
   assert.match(
     warm,
-    /cargo nextest list --locked --workspace --message-format json/,
+    /cargo nextest list --locked --workspace --exclude 'lydite\*' --message-format json/,
   );
   const features = job("rust-tests").match(/--features (\S+)/)[1];
   assert.ok(warm.includes(`--features ${features}`));
@@ -408,7 +426,7 @@ function cargoArguments(jobName, stepName, env) {
       features: (env.FEATURES ?? "").split(",").filter(Boolean),
     }]);
     const result = spawnSync("bash", ["-e", "-c", script], {
-      env: { ...process.env, ...env, BUILDS: builds, PATH: `${directory}:${process.env.PATH}` }, encoding: "utf8",
+      env: { ...process.env, CELOX_VTEST_RUNNER: "/ci/vtest-exec", ...env, BUILDS: builds, PATH: `${directory}:${process.env.PATH}` }, encoding: "utf8",
     });
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
@@ -425,7 +443,7 @@ test("scoped Cargo commands build only the selected integration targets", () => 
   };
   assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", env), [
     "nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass",
-    "-p", "celox", "--features", "celox/systemverilog",
+    "-p", "celox", "--features", "celox/systemverilog,celox-test-suite/runtime-cases",
     "--test", "flip_flop", "--test", "systemverilog", "-E", env.FILTER,
   ]);
   assert.deepEqual(cargoArguments("lint", "Lint the crates this pull request can affect", env), [
@@ -440,6 +458,43 @@ test("scoped Cargo commands build only the selected integration targets", () => 
   }), ["doc", "--locked", "--no-deps", "-p", "celox-runtime", "-p", "celox"]);
 });
 
+test("CI prepares one executor for full runs and scopes containing Celox", () => {
+  const rust = job("rust-tests");
+  const step = rust.split("      - name: Build the optimized vtest executor\n")[1]
+    .split("\n      #")[0];
+  assert.match(step, /if: needs.changes.outputs.rust_full != 'false' \|\| contains\(format\(' \{0\} ', needs.changes.outputs.rust_packages\), ' celox '\)/);
+  assert.match(step, /run: node scripts\/run-vtest.mjs --prepare-ci/);
+  assert.ok(rust.indexOf("Build the optimized vtest executor") < rust.indexOf("Run workspace tests"));
+  assert.match(rust, /cargo nextest run[^\n]*\n[^\n]*celox-test-suite\/runtime-cases/);
+  assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", {
+    PACKAGES: "celox-heap", FEATURES: "", TARGETS: "", FILTER: "package(celox-heap)",
+    CELOX_VTEST_RUNNER: "",
+  }), ["nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass",
+    "-p", "celox-heap", "-E", "package(celox-heap)"]);
+});
+
+test("CI reports each Rust run to Mergify without weakening test failures", () => {
+  const rust = job("rust-tests");
+  assert.match(rust, /CELOX_CI_REPORT_DIR: work\/ci-reports\/rust/);
+  assert.match(rust, /HAS_MERGIFY_TOKEN: \$\{\{ secrets.MERGIFY_TOKEN != '' \}\}/);
+  assert.match(rust, /run: node scripts\/ci-rust-reports.mjs reset/);
+  assert.match(rust, /name: Collect Rust test reports\n        if: success\(\) \|\| failure\(\)/);
+  assert.match(rust, /run: node scripts\/ci-rust-reports.mjs collect/);
+  assert.match(rust, /name: Run workspace tests with CI features\n        id: workspace-tests/);
+  assert.match(rust, /name: Run the tests this pull request can affect\n        id: scoped-tests/);
+  assert.doesNotMatch(rust, /continue-on-error/);
+  const upload = rust.split("      - name: Upload Rust test results to Mergify\n")[1]
+    .split("\n      #")[0];
+  assert.match(upload, /if: \(success\(\) \|\| failure\(\)\) && env.HAS_MERGIFY_TOKEN == 'true' && hashFiles\('work\/ci-reports\/rust\/\*.xml'\) != ''/);
+  assert.match(upload, /uses: mergifyio\/gha-mergify-ci@[0-9a-f]{40} # v27/);
+  assert.match(upload, /report_path: work\/ci-reports\/rust\/\*.xml/);
+  assert.match(upload, /job_name: rust-tests/);
+  assert.match(upload, /test_step_outcome: .*steps.workspace-tests.outcome.*steps.scoped-tests.outcome/);
+  assert.match(rust, /name: rust-test-results\n          path: work\/ci-reports\/rust\/\*.xml\n          retention-days: 14/);
+  const nextest = readFileSync(new URL("../.config/nextest.toml", import.meta.url), "utf8");
+  assert.match(nextest, /\[profile.ci.junit\]\npath = "junit.xml"/);
+});
+
 test("scoped checks preserve full-run fallbacks and use their own package scopes", () => {
   const lint = job("lint");
   assert.match(lint, /name: cargo clippy\n        if: .*outputs\.rust_full != 'false'/);
@@ -449,17 +504,59 @@ test("scoped checks preserve full-run fallbacks and use their own package scopes
   assert.match(lint, /name: Build the API documentation this pull request can affect\n        if: .*outputs\.rust_doc_libraries != ''/);
 });
 
-test("cocotb retains Celox features without enabling unrelated adapter features", () => {
+test("cocotb reuses the original scoped Cargo build", () => {
+  const builds = [{ packages: ["celox", "celox-vpi", "celox-test-suite"], targets: [],
+    features: ["celox/systemverilog", "celox-test-suite/icarus"] }];
   const args = cargoArguments("rust-tests", "Run cocotb VPI end-to-end test", {
-    FEATURES: "celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus",
+    RUST_FULL: "false", BUILDS: JSON.stringify(builds),
   });
-  assert.deepEqual(args, ["test", "--locked", "-p", "celox-vpi", "--features", "systemverilog", "--features", "celox/systemverilog", "--test", "cocotb_e2e",
-    "cocotb_", "--", "--ignored"]);
-  assert.match(job("rust-tests"), /name: Run cocotb VPI end-to-end test\n        if: needs.changes.outputs.rust_vpi_e2e != 'false'/);
+  assert.deepEqual(args, ["nextest", "run", "--locked", "--profile", "ci",
+    "-p", "celox", "-p", "celox-vpi", "-p", "celox-test-suite", "--features",
+    "celox/systemverilog,celox-test-suite/icarus,celox-test-suite/runtime-cases",
+    "-E", 'binary_id(celox-vpi::cocotb_e2e) & test(/^cocotb_/)', "--run-ignored", "only"]);
 });
 
-test("full Clippy validation covers every workspace crate", () => {
-  assert.match(job("lint"), /run: cargo clippy --locked --workspace --all-targets --features/);
+test("full cocotb runs reuse the workspace build and report failures before upload", () => {
+  const rust = job("rust-tests");
+  const full = rust.match(/run: >-\n\s+(cargo nextest run[^\n]*)\n\s+(--features [^\n]*)/);
+  assert.ok(full);
+  const original = `${full[1]} ${full[2]}`.replaceAll("'", "").split(/\s+/).slice(1);
+  const args = cargoArguments("rust-tests", "Run cocotb VPI end-to-end test", { RUST_FULL: "true" });
+  assert.deepEqual(args.slice(0, -4), original);
+  assert.ok(rust.indexOf("Collect Rust test reports") < rust.indexOf("Run cocotb VPI end-to-end test"));
+  assert.ok(rust.indexOf("Run cocotb VPI end-to-end test") < rust.indexOf("Retain Rust test reports"));
+  assert.match(rust, /test_step_outcome: .*steps.cocotb-tests.outcome == 'failure' && 'failure'/);
+});
+
+test("default-feature validation is parallel and mandatory when selected", () => {
+  const defaults = job("rust-default-tests");
+  assert.match(defaults, /needs: changes/);
+  assert.match(defaults, /needs.changes.result != 'success'/);
+  assert.match(defaults, /outputs.rust_full != 'false'/);
+  assert.match(defaults, /outputs.rust_libraries/);
+  assert.match(defaults, /cargo test --locked -p celox --lib/);
+  assert.match(defaults, /cargo test --locked -p celox --doc/);
+  assert.doesNotMatch(defaults, /--features|--no-default-features/);
+  assert.doesNotMatch(job("rust-tests"), /cargo test --locked -p celox --lib/);
+  assert.match(job("rust"), /DEFAULT_RESULT: .*needs.rust-default-tests.result/);
+  assert.match(job("report-full-validation"), /rust-default-tests,/);
+});
+
+test("CI retains the normal test profile and warms each platform's cache", () => {
+  const rust = job("rust-tests");
+  assert.doesNotMatch(rust, /--cargo-profile/);
+  assert.match(rust, /cargo test --locked --workspace/);
+  const warm = readFileSync(new URL("../.github/workflows/rust-cache.yml", import.meta.url), "utf8");
+  const windows = warm.split("  napi-windows:")[1];
+  assert.match(windows, /runs-on: windows-latest/);
+  assert.match(windows, /run: pnpm run build:napi/);
+  assert.match(windows, /steps.cache.outputs.cache-hit != 'true'/);
+  assert.match(windows, /if: github.ref == format/);
+  assert.match(warm, /rust-default-tests:[\s\S]*cargo test --locked -p celox --lib --no-run/);
+});
+
+test("full Clippy validation excludes the disabled bridge", () => {
+  assert.match(job("lint"), /run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features/);
 });
 
 test("upstream SV TB runs on full CI and feeds failure reporting", () => {
@@ -472,4 +569,12 @@ test("upstream SV TB runs on full CI and feeds failure reporting", () => {
   assert.match(upstream, /if: always\(\)/);
   assert.match(upstream, /retention-days: 14/);
   assert.match(job("report-full-validation"), /common-cells,/);
+});
+
+
+test("sv-tests generates the pinned main corpus before running and retains its summary", () => {
+  const sv = job("sv-tests");
+  assert.match(sv, /third_party\/tests\/easyUVM third_party\/tests\/uvm-examples/);
+  assert.ok(sv.indexOf("conformance/sv-tests/prepare.py") < sv.indexOf("conformance/sv-tests/run.py"));
+  assert.match(sv, /sv-tests-report\.summary\.json/);
 });

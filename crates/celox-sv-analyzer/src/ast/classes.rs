@@ -34,11 +34,32 @@ pub(super) struct Property {
     pub initializer: Option<celox_sv_syntax::ExprId>,
 }
 
+impl Property {
+    pub fn cyclic_domain_size(&self) -> Option<u16> {
+        if self.field.handle.is_some() {
+            return None;
+        }
+        if self.r#type.is_enum {
+            self.r#type.enum_values.as_ref().and_then(|values| {
+                (1..=256)
+                    .contains(&values.len())
+                    .then_some(values.len() as u16)
+            })
+        } else {
+            (1..=8)
+                .contains(&self.field.width)
+                .then(|| 1u16 << self.field.width)
+        }
+    }
+}
+
 /// A static property of a class: one variable of the module that declares
 /// the class, shared by all of its objects (IEEE 1800-2023 8.9).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StaticProperty {
     pub name: String,
+    pub local: bool,
+    pub protected: bool,
     /// The class that declares the property.
     pub owner: String,
     pub r#type: Type,
@@ -119,12 +140,17 @@ impl Class {
             return Err(unsupported("class randomize with constraints"));
         }
         for property in &self.properties {
-            if property.randc {
-                return Err(unsupported("class randomize with randc properties"));
-            }
-            if property.rand && (property.field.handle.is_some() || property.r#type.is_enum) {
+            if property.randc && property.cyclic_domain_size().is_none() {
                 return Err(unsupported(
-                    "class randomize requires integral non-enum rand properties",
+                    "randc requires a 1-8 bit integer or an enum with at most 256 declared values",
+                ));
+            }
+            if (property.rand || property.randc)
+                && (property.field.handle.is_some()
+                    || (property.r#type.is_enum && property.r#type.enum_values.is_none()))
+            {
+                return Err(unsupported(
+                    "class randomize requires integral rand properties with a supported enum domain",
                 ));
             }
         }
@@ -436,6 +462,8 @@ pub(super) fn class(
             if property.qualifiers.is_static {
                 statics.retain(|known| known.name != property_name);
                 statics.push(StaticProperty {
+                    local: property.qualifiers.local,
+                    protected: property.qualifiers.protected,
                     variable: Class::subroutine_name(name, &property_name),
                     name: property_name,
                     owner: name.to_owned(),

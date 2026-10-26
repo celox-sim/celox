@@ -345,6 +345,17 @@ records the native-runner result; the case stays enabled on all Celox backends.
 
 ## SystemVerilog suite
 
+Verilator 5.052 rejects a string variable or string method expression as the
+`$sscanf` format, requiring a literal instead. IEEE 1800-2023 21.3.4.3 permits
+string expressions here. Only `scan::sscanf_string_format_expression` is
+excluded for Verilator; string sources with literal formats remain enabled.
+The [direct lint observation](verification/sv/limitations/scan-string-format-verilator.json)
+retains the diagnostic against the unchanged shared source. Icarus 13.0
+compiles the dynamic-format case but crashes in `vvp`; a reduced source using
+only a format variable also crashes. This same case is excluded for Icarus,
+with the [runtime observation and reduced source](verification/sv/limitations/scan-string-format-icarus.json)
+retained separately. The literal-format case remains enabled for both tools.
+
 Named unpacked array parameter forwarding is checked against IEEE 1800-2023
 6.20.2 and 7.6. Verilator 5.052 passes the whole-array forwarding case, but
 reverses elements across opposite declaration directions and rejects a constant
@@ -407,6 +418,32 @@ both checks in Verilator and passes in Icarus 13.0, which also passes the
 unchanged shared assertions. The [retained observation](verification/repros/process_nba_positions_verilator.json)
 records both failures; `--include-ignored` retains their assertions.
 
+Verilator 5.052 schedules an `always @*` that calls a timed task differently
+from its event control in `timing::always_star_timed_task_calls_run_as_processes`:
+the call for `a = 5` at 3 ns writes `y` at 6 ns instead of 5 ns, and in
+`timing::always_star_timed_task_calls_assign_nonblocking` a nonblocking update
+after the task's 1 ns delay lands at 2 ns instead of 3 ns. A standalone
+probe also shows it rerunning the call for a change made while the task was
+suspended and for variables only the task body reads. IEEE 1800-2023 9.4.2.2
+makes the implicit event list the variables the statement reads, and 9.4.2
+waits only for changes after the event control is reached. Icarus 13.0 passes
+the unchanged shared assertions.
+
+IEEE 1800-2023 9.4.2.2 defines the event list of an `always @*` by the
+identifiers that appear in its statement, so a branch that constant folding
+removes still contributes, and Celox's combinational and process `always @*`
+count it, with the reads of the defaults of omitted arguments. Icarus 13.0
+leaves the folded branch out in
+`timing::always_star_timed_task_calls_wait_on_folded_branch_reads`. Verilator
+5.052 leaves out both the folded branch and the default of a nested call in
+`timing::always_star_timed_task_calls_wait_on_nested_call_defaults`, and runs
+the process at time zero; Icarus passes the nested-default case.
+
+Icarus 13.0 reports a syntax error for an unparenthesized package-scoped delay
+value (`#delays::D;`) in `timing::package_scoped_delay_values_wait_their_value`;
+IEEE 1800-2023 A.6.5 permits a `ps_identifier` as a `delay_value`. Verilator
+passes the case.
+
 Verilator 5.052 repeats activation of the self-reading latch in
 `latch::guarded_activation`, producing 3 where one `seed`/`en` change should
 produce 1. The [adapter-free reproduction](verification/repros/latch_activation.sv)
@@ -439,7 +476,7 @@ including its positive check that changing the argument does wake the procedures
 The [standalone comparison](verification/repros/wildcard_task_sensitivity_verilator.json)
 records both executions. Only this Verilator case is excluded for this reason.
 
-The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations.json`](verification/sv/limitations.json), with the failures observed before them in [`verification/sv/limitations/`](verification/sv/limitations). A case is excluded for a tool only when the expected value follows IEEE 1800 and the tool either cannot run the design or disagrees with the standard; where the two tools disagree with each other, the entry says so.
+The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations.json`](verification/sv/limitations.json), with the failures observed before them in [`verification/sv/limitations/`](verification/sv/limitations). A case is excluded for a tool only when the expected value follows IEEE 1800 and the tool either cannot run the design or disagrees with the standard; where the two tools disagree with each other, the entry says so. A case tagged with an expectation stronger than SV (see the [tag table](README.md)) may also be excluded for a tool whose state model cannot produce it.
 
 The interface-array connection cases cover packed distribution, unpacked
 connections and array ports, and multidimensional instance arrays (IEEE
@@ -515,6 +552,7 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_unpacked_array_patterns` | compile | icarus | 1 | Icarus 13.0 reports that an assignment pattern with unpacked array items assigned to a multidimensional unpacked array is not yet supported ("Procedural assignment of array or array slice"), so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 7.6, 10.8). |
 | `sv_icarus_display_field_width` | execute | icarus | 1 | Icarus 13.0 zero-pads a value wider than an explicit field width of %h or %o to the argument's full width (%3h of 32'h1234 prints 00001234); IEEE 1800-2023 21.2.1.2 expands the field to the value without leading zeros (1234). Verilator agrees with the expected value. |
 | `sv_verilator_constant_unknown_bits` | execute | verilator | 1 | Verilator 5.052 is two-state: unknown bits in constant system function arguments ($onehot(2'bx1)) are not kept unknown, so a generate condition differs from IEEE 1800-2023 20.9. Icarus agrees with the expected values. |
+| `sv_icarus_two_state_time_zero_settle` | execute | icarus | 2 | Icarus 13.0 simulates the emitted design in four-state SV, where `always @*` and a sensitivity-list process wait for a change (IEEE 1800-2023 9.2.2.2, 9.4.2), so an output whose inputs never change stays X. The case's two-state oracle follows Verilator 5.052, which runs these processes once at time zero after the initial blocks, as Celox's two-state mode does; a [standalone probe](verification/repros/sv_two_state_time_zero_settle.json) prints `1 ffff 1` in Verilator and `x xxxx x` in Icarus. |
 | `sv_verilator_generate_case_unknown_label` | compile | verilator | 1 | Verilator 5.052 rejects an x or ? digit in a case-generate label ("no such thing as generate casez"). Icarus passes the case. |
 | `sv_verilator_self_determined_index` | execute | verilator | 1 | Verilator 5.052 does not wrap a self-determined index expression (2'd3 + 2'd1) to its width before selecting; IEEE 1800-2023 11.5.1 and 11.6.1 make the index 0. Icarus agrees with the expected value. |
 | `sv_verilator_short_circuit_calls` | execute | verilator | 1 | Verilator 5.052 runs a function call in the right operand of && in a select index when the left operand is false, so its output argument is written; IEEE 1800-2023 11.4.7 does not evaluate that operand. Icarus cannot compile the design (sv_icarus_function_outputs). |
@@ -558,9 +596,14 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_urandom_narrow_seed` | execute | icarus | 1 | Icarus 13.0 terminates for an 8-bit $urandom seed variable with 'seed variable is less than 32 bits (8)'. IEEE 1800-2023 18.13.1 accepts any integral expression, converted to the int seed formal. A standalone signed/unsigned 8-bit seed probe compiles, then vvp exits with this width error; Verilator passes the same nonzero-seed extension checks. |
 | `sv_verilator_random_algorithm` | execute | verilator | 2 | Verilator 5.052 does not compute $random with the Annex N algorithm: seeding with 0 returns 1631467331 instead of 303379748, and an unseeded $random draws from its own RNG. IEEE 1800-2023 20.14.1 and Annex N define $random as rtl_dist_uniform(seed, LONG_MIN, LONG_MAX) so that implementations repeat the same values. A standalone probe prints the Annex N sequence in Icarus 13.0 and different values in Verilator. |
 | `sv_verilator_time_in_combinational_logic` | execute | verilator | 1 | Verilator 5.052 evaluates an always_comb that reads $time again when the clocking event of the suite testbench fires, although no variable it reads has changed: at 3 ns y is 3 instead of 0. IEEE 1800-2023 9.2.2.2.1 makes always_comb sensitive to the variables it reads, and $time (20.3.1) is none. A standalone probe prints y=0 in Icarus 13.0 and Verilator without a clocking block, and y=3 in Verilator with one. |
-| `sv_verilator_intermediate_writes` | execute | verilator | 6 | Verilator 5.052 wakes a process waiting on a variable only for the value an evaluation leaves: an always_comb or edge-triggered body that rewrites a variable 1 -> 0 -> 1, and nonblocking updates `y <= 0; y <= 1;` from 1, wake no waiter, nor does a pulse that one always_ff writes to some bits of a variable while other processes write its other bits, or a nonblocking update that rises from the final blocking value. IEEE 1800-2023 4.3 and 9.4.2 make every store an update event that triggers the waiter, and 10.4.2 applies nonblocking updates in issue order, each its own update. [Standalone probes](verification/repros/sv_intermediate_writes_verilator.json) print the spec counts in Icarus 13.0 and 1 or 0 in Verilator. |
+| `sv_verilator_intermediate_writes` | execute | verilator | 8 | Verilator 5.052 wakes a process waiting on a variable only for the value an evaluation leaves: an always_comb or edge-triggered body that rewrites a variable 1 -> 0 -> 1, and nonblocking updates `y <= 0; y <= 1;` from 1, wake no waiter, nor does a pulse that one always_ff writes to some bits of a variable while other processes write its other bits, or a nonblocking update that rises from the final blocking value. IEEE 1800-2023 4.3 and 9.4.2 make every store an update event that triggers the waiter, and 10.4.2 applies nonblocking updates in issue order, each its own update. [Standalone probes](verification/repros/sv_intermediate_writes_verilator.json) print the spec counts in Icarus 13.0 and 1 or 0 in Verilator. |
 | `sv_icarus_port_pulses` | execute | icarus | 1 | Icarus 13.0 collapses a child's output port with the parent's net, so a waiter in the parent sees each value the child's always_comb writes inside one evaluation and counts 3 instead of 1. Both are conforming: the port is a continuous assignment (IEEE 1800-2023 23.3.3), evaluated after the child's process yields, and 4.7 leaves that order open. The case asserts the settled count, which Verilator 5.052 and Celox give. The [standalone probe](verification/repros/sv_port_pulses_icarus.json) retains both outputs. |
 | `sv_verilator_active_region_waiters` | execute | verilator | 2 | Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). [Standalone probes](verification/repros/sv_active_region_waiters_verilator.json) print the spec values in Icarus 13.0 and the post-NBA values in Verilator. |
+| `sv_program_reactive_region` | execute | icarus, verilator | 10 | Verilator 5.052 and Icarus 13.0 run program procedures in the active region set: a program reads design values before the design's nonblocking updates of the time slot, its `#0` resumes before the design's, and a flip-flop clocked by a program write runs before the program's `#0` and its nonblocking update of the flip-flop's input. IEEE 1800-2023 24.3.1 schedules program procedures in the Reactive region, `#0` in the Re-Inactive region and their nonblocking updates in the Re-NBA region, and 4.5 empties the reactive region set before the active region set runs again. xezim 0.11.3 agrees with every case except the flip-flop one, where it also runs the flip-flop first. The pre-exclusion results are [Icarus](verification/sv/limitations/programs-icarus.json) and [Verilator](verification/sv/limitations/programs-verilator.json). |
+| `sv_program_completion` | execute | icarus, verilator | 2 | Neither tool ends the simulation when every program `initial` procedure has ended; IEEE 1800-2023 24.3 calls `$finish` then. xezim 0.11.3 does not either. |
+| `sv_icarus_program_exit` | execute | icarus | 1 | Icarus 13.0 does not define `$exit`; IEEE 1800-2023 24.7 ends the calling program's `initial` procedures. |
+| `sv_verilator_program_exit` | execute | verilator | 1 | Verilator 5.052 continues after `$exit` and keeps the program's other `initial` procedures (24.7). Icarus does not run the case; xezim 0.11.3 agrees with the expected output. |
+| `sv_verilator_program_items` | compile | verilator | 2 | Verilator 5.052 rejects an `always` procedure and a module instance in a program with syntax errors, which the run cannot count as language rejections. Both are illegal (IEEE 1800-2023 24.3); Icarus 13.0 rejects them with diagnostics that name the rule. |
 
 The [system-function edge-case evidence](verification/repros/system_function_edge_cases.json)
 retains the failed Icarus runs and minimal sources. Cover comparisons enable
@@ -669,6 +712,104 @@ Verilator 5.052 has two narrower exclusions, recorded in the
   The setter's formal is `bit` (18.8), so the required conversion truncates 2 to
   0. Generated C++ confirms that Verilator uses 1. The normal 0/1 mode control,
   inline member selection and pre-hook control cases pass Verilator.
+
+Enum class randomization (`sv_icarus_enum_randomization`) excludes the four
+`class::randomization_enum_*` cases from Icarus 13.0 because it cannot elaborate
+class randomization methods. [Original diagnostics](verification/repros/sv_enum_randomization_icarus.json)
+retain the failures without changing the shared assertions.
+
+Verilator 5.052 passes the direct enum and inherited enum cases, but treats a
+typedef alias of an enum as the underlying integer during randomization
+(`sv_verilator_enum_alias_randomization`). The generated randomizer assigns raw
+8-bit random values rather than selecting declared enum values, contrary to
+IEEE 1800-2023 18.3. Only `class::randomization_enum_alias` is excluded;
+[the mismatch evidence](verification/repros/sv_enum_randomization_verilator.json)
+retains its unchanged domain assertion.
+
+Scope enum randomization has two narrow tool exclusions for
+`system_functions::scope_randomize_enum_values` and
+`system_functions::scope_randomize_enum_order`. Icarus 13.0 rejects scope
+randomization calls (`sv_icarus_scope_enum_randomize`;
+[compile diagnostics](verification/repros/sv_scope_enum_randomize_icarus.json)).
+Verilator 5.052 generates `basicStdRandomization` calls using only integer widths,
+without the enum domain, and draws undeclared values (`sv_verilator_scope_enum_randomize`;
+[mismatch evidence](verification/repros/sv_scope_enum_randomize_verilator.json)).
+IEEE 1800-2023 18.3 and 18.12 require the declared enum domain. The shared
+assertions remain unchanged, including the direct-enum case without an alias.
+
+Cyclic randomization (IEEE 1800-2023 18.4.2) retains narrow external
+exclusions: Icarus 13.0 cannot elaborate the three `randomization_cyclic_*`
+cases ([diagnostics](verification/repros/sv_randc_icarus.json)). Verilator
+5.052 passes the integer and direct-enum domain case, but emits duplicate
+`srandom` declarations for the inheritance/control case and draws undeclared
+values for an enum typedef alias ([evidence](verification/repros/sv_randc_verilator.json)).
+The original cycle, mode and domain assertions remain unchanged.
+
+## SystemVerilog packed unions
+
+The `unions` shared group covers hard and soft packed untagged unions. With
+Verilator 5.052, `packed_overlay`, `soft_overlay`, and `soft_signed_ports` pass;
+the two four-state cases report `unsupported` through the existing state-mode
+check.
+
+Icarus 13.0 rejects `union soft` declarations in `soft_overlay`,
+`soft_signed_ports`, and `soft_wide_four_state` during compilation.
+`packed_overlay` passes. `packed_mixed_state` fails when reading a `bit` member
+from mixed `logic`/`bit` union storage: for `8'b1010xxxx`, it returns
+`8'b1010xxxx` instead of `8'b10100000`. A direct procedural probe reproduces
+this independently of the shared harness; writing through the `bit` member
+converts X to zero correctly. IEEE 1800-2023 7.3.1 requires conversion from
+four-state to two-state when reading a two-state member.
+
+These cases remain enabled with their original assertions and no exclusions.
+The [retained Icarus evidence](verification/sv/icarus/unions.json) records the
+three compilation failures and the read mismatch with their exact diagnostics;
+the full-suite gate accepts only those unchanged failures, never a passing
+result in their place. Reproduce with `verify-sv-verilator` or
+`verify-sv-icarus` and `--filter unions::`. Normal reports are written under
+`target/sv-verilator/` and `target/sv-icarus/`.
+
+## SystemVerilog tagged packed unions
+
+The `tagged_unions` shared group covers constructors (including `void`),
+nested tags, checked member reads and writes, conditional/short-circuit access,
+typed casts and ports, clocked copies, signed payloads and wide four-state values.
+Task/function output and inout arguments retain writable members (including
+concatenations and nested members), with live tag checks before the call and
+before copy-out. System-function destinations and seeds use the same checks.
+Whole-union output/inout actuals require the same declared union type as the
+formal; integral formals and system outputs cannot fabricate a union tag.
+Function returns and argument defaults accept context-typed `tagged` constructors;
+default expressions retain the enclosing declaration scope. Checked
+member arguments retain their runtime checks even when expression inlining
+would otherwise discard an unused formal.
+Layout and access rules follow IEEE 1800-2023 7.3.2 and 11.9. Invalid active-tag
+access is tested separately in Celox's runtime-event harness.
+
+Verilator 5.052 rejects `void` and `tagged` expressions in the seven two-state
+cases; its adapter reports the two four-state cases as unsupported. Icarus 13.0
+rejects all nine cases during parsing. The cases remain executable with their
+original assertions and no exclusions. Reviewed compilation diagnostics are
+retained in [Verilator evidence](verification/sv/verilator/tagged_unions.json)
+and [Icarus evidence](verification/sv/icarus/tagged_unions.json), with exact
+failure matching in the full-suite gate. Reproduce with `verify-sv-verilator`
+or `verify-sv-icarus` and `--filter tagged_unions::`.
+
+This implementation supports scalar packed tagged unions. Unpacked tagged
+unions, `matches`/`case matches`, and continuous or concatenation drivers of
+tagged members remain unsupported. Whole-union copies through ports and
+continuous assignments are supported. Port connections currently require a
+signal of the same declared tagged union type; constructor expressions at
+instance connections require an intermediate typed signal. Use four-state simulation to preserve
+undefined initial tags and unused payload bits.
+
+
+Whole-value equality currently compares the packed representation, including
+undefined payload padding. The review request for active-payload-only equality
+needs a specification ruling and is tracked in
+[issue #1889](https://github.com/celox-sim/celox/issues/1889); it is not yet a
+confirmed conformance defect. Equality behavior is unchanged pending that
+investigation.
 
 ## veryl-native-queue-components
 

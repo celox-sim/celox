@@ -1,6 +1,6 @@
 //! Timed-scheduler overhead benchmark for instruction-count comparisons.
 //!
-//! Usage: `sched_bench <a|ac|b1|b5|bh|d|dr> <cycles> [default|reference|compiled] [native|interp]`
+//! Usage: `sched_bench <a|ac|b1|b5|bh|d|dr> <cycles> [default|reference|compiled] [native|interp] [observe=<signal>]`
 //!
 //! Every variant clocks the same 64 registers `rK <= rK + (seed ^ K)`:
 //!
@@ -17,7 +17,9 @@
 //!
 //! The optional third argument selects the timed scheduler (hidden builder
 //! option), by default the library's; the fourth the backend, by default the
-//! host's native one.
+//! host's native one. With a fifth, `observe=<signal>`, a timed variant runs
+//! with a slot observer that counts the changes of `<signal>` at the end of
+//! every slot, as a VPI value-change callback does.
 //!
 //! The scheduler's cost per cycle is the difference of the whole-program
 //! instruction counts of two runs, which cancels compilation:
@@ -138,10 +140,18 @@ fn main() {
             Some(other) => panic!("unknown scheduler {other}: expected reference or compiled"),
         };
         let builder = celox::Simulation::from_sv_sources(sources, "Top").scheduler_mode(mode);
+        let observed = args
+            .get(5)
+            .map(|arg| arg.strip_prefix("observe=").expect("observe=<signal>"));
         if interpreter {
-            run(builder.build_interpreter().unwrap(), variant, cycles)
+            run(
+                builder.build_interpreter().unwrap(),
+                variant,
+                cycles,
+                observed,
+            )
         } else {
-            run(builder.build().unwrap(), variant, cycles)
+            run(builder.build().unwrap(), variant, cycles, observed)
         }
     };
     println!("{variant} {cycles} out={out:?}");
@@ -159,12 +169,42 @@ fn tick<B: celox::SimBackend>(mut sim: celox::Simulator<B>, cycles: u64) -> celo
     sim.get(out)
 }
 
+/// Counts the changes of one signal at the end of every slot.
+struct Changes {
+    signal: celox::SignalRef,
+    last: Option<celox::BigUint>,
+    count: std::rc::Rc<std::cell::Cell<u64>>,
+}
+
+impl<B: celox::SimBackend> celox::SlotObserver<B> for Changes {
+    fn before_domains(&mut self, _: &mut celox::SlotIo<'_, B>, _: u64) {}
+
+    fn end_of_slot(&mut self, io: &mut celox::SlotIo<'_, B>, _: u64) {
+        let value = io.get(self.signal);
+        if self.last.as_ref() != Some(&value) {
+            self.count.set(self.count.get() + 1);
+            self.last = Some(value);
+        }
+    }
+}
+
 /// The timed variants: run `cycles` clock periods.
 fn run<B: celox::SimBackend>(
     mut sim: celox::Simulation<B>,
     variant: &str,
     cycles: u64,
+    observed: Option<&str>,
 ) -> celox::BigUint {
+    let changes = std::rc::Rc::new(std::cell::Cell::new(0));
+    if let Some(path) = observed {
+        let signal = sim.signal(path);
+        let observer = Changes {
+            signal,
+            last: None,
+            count: std::rc::Rc::clone(&changes),
+        };
+        sim.observe_slots(Box::new(observer), &[signal]);
+    }
     if variant == "ac" {
         let seed = sim.signal("seed");
         sim.modify(|io| io.set(seed, 7u32)).unwrap();
@@ -179,8 +219,10 @@ fn run<B: celox::SimBackend>(
     sim.run_until(cycles * 10).unwrap();
     let stats = sim.scheduler_stats();
     println!(
-        "compiled slots {}, kernels {:?}",
-        stats.compiled_slots, stats.kernels
+        "compiled slots {}, kernels {:?}, observed changes {}",
+        stats.compiled_slots,
+        stats.kernels,
+        changes.get()
     );
     let out = sim.signal("out");
     sim.get(out)

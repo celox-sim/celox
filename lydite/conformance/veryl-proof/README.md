@@ -74,8 +74,9 @@ run-status artifact.
    Clock payloads and masks are proved unique before selecting an edge;
    four-state edges follow IEEE 1800-2023 Table 9-2, including async resets.
    General waveform timing outside the Backend's named-event API is not claimed.
-   Display/Write/AssertContinue arguments are proved and logged; console delivery
-   is outside this Backend API. Activated fatal events fail closed.
+   Display/Write arguments and those of reports below Fatal (assertion messages)
+   are proved and logged; console delivery is outside this Backend API. Activated
+   fatal events fail closed.
 6. SSA compaction is allowed only for pure definition relations, after feasibility
    and joint uniqueness of every active definition. Extra relational assumptions
    prevent compaction; nonunique free variables remain symbolic. Saved snapshots

@@ -13,6 +13,7 @@ import { withOwnedHandle } from "./handle-ownership.js";
 import type { NativeCreateSimulationFn } from "./simulation.js";
 import type { NativeCreateFn } from "./simulator.js";
 import type {
+	AssertionSite,
 	CreateResult,
 	FrontendSimulatorHandle,
 	LoopBreak,
@@ -21,6 +22,9 @@ import type {
 	NativeSimulationHandle,
 	NativeSimulatorHandle,
 	PortInfo,
+	Report,
+	RuntimeEvent,
+	Severity,
 	SignalLayout,
 	SimulatorOptions,
 	SourceFile,
@@ -63,7 +67,64 @@ export interface RawNapiSimulationHandle {
 	loadState?(bytes: Uint8Array): void;
 	clockPeriods?(): { eventId: number; period: number }[];
 	switchVcd?(path: string): void;
+	drainRuntimeEvents?(): RawRuntimeEvent[];
+	setFailOn?(severity: string | null): void;
 	dispose(): void;
+}
+
+/** A runtime event as the addon returns it: absent fields are null. */
+export interface RawRuntimeEvent {
+	kind: string;
+	message?: Uint8Array | null;
+	severity?: string | null;
+	time?: number | null;
+	scope?: string | null;
+	file?: string | null;
+	line?: number | null;
+	assertion?: {
+		label?: string | null;
+		directive: string;
+		deferral: string;
+		outcome: string;
+	} | null;
+	count?: number | null;
+}
+
+/** Convert an addon event to a `RuntimeEvent`, dropping absent fields. */
+export function runtimeEvent(raw: RawRuntimeEvent): RuntimeEvent {
+	switch (raw.kind) {
+		case "display":
+		case "write":
+			return { kind: raw.kind, message: raw.message ?? new Uint8Array() };
+		case "finish":
+		case "stop":
+			return { kind: raw.kind };
+		case "missed":
+			return { kind: "missed", count: raw.count ?? 0 };
+		case "report": {
+			const report: Report = {
+				kind: "report",
+				severity: raw.severity as Severity,
+				message: raw.message ?? new Uint8Array(),
+			};
+			if (raw.time != null) report.time = raw.time;
+			if (raw.scope != null) report.scope = raw.scope;
+			if (raw.file != null) report.file = raw.file;
+			if (raw.line != null) report.line = raw.line;
+			if (raw.assertion != null) {
+				const assertion: AssertionSite = {
+					directive: raw.assertion.directive as AssertionSite["directive"],
+					deferral: raw.assertion.deferral as AssertionSite["deferral"],
+					outcome: raw.assertion.outcome as AssertionSite["outcome"],
+				};
+				if (raw.assertion.label != null) assertion.label = raw.assertion.label;
+				report.assertion = assertion;
+			}
+			return report;
+		}
+		default:
+			throw new Error(`unknown runtime event kind \`${raw.kind}\``);
+	}
 }
 
 export interface NapiFalseLoop {
@@ -925,6 +986,14 @@ export function wrapDirectSimulationHandle(
 		...(raw.clockPeriods ? { clockPeriods: () => raw.clockPeriods!() } : {}),
 		...(raw.isFinished ? { isFinished: () => raw.isFinished!() } : {}),
 		...(raw.isStopped ? { isStopped: () => raw.isStopped!() } : {}),
+		...(raw.drainRuntimeEvents
+			? {
+					drainRuntimeEvents: () => raw.drainRuntimeEvents!().map(runtimeEvent),
+				}
+			: {}),
+		...(raw.setFailOn
+			? { setFailOn: (severity: Severity | null) => raw.setFailOn!(severity) }
+			: {}),
 	};
 }
 

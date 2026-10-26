@@ -1,0 +1,235 @@
+{
+  "cases": [
+    {
+      "category": "Regression",
+      "detail": "invalid design was accepted: review_regressions::body_parameters_are_local_with_a_parameter_port_list",
+      "expectation": "CompilationError",
+      "name": "review_regressions::body_parameters_are_local_with_a_parameter_port_list",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::covers_single_bit_bitwise_complementary_guards",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays at 484:3: assert_eq z00: expected 0x20, got 0x0",
+      "expectation": "Simulation",
+      "name": "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "review_regressions::folds_compound_four_state_case_labels at 402:7: assert_eq dynamic_y: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "review_regressions::folds_compound_four_state_case_labels",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "review_regressions::int_parameters_are_signed_in_comparisons_and_loop_bounds at 525:3: assert_eq lt_s: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "review_regressions::int_parameters_are_signed_in_comparisons_and_loop_bounds",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "review_regressions::lowers_parameter_casts_in_conditional_generate at 219:5: assert_eq comb_y: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "review_regressions::lowers_parameter_casts_in_conditional_generate",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::lowers_parameter_casts_in_loop_generate",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "review_regressions::normalizes_function_parameter_cast_dimensions at 188:5: assert_eq y: expected 0x3f, got 0x0",
+      "expectation": "Simulation",
+      "name": "review_regressions::normalizes_function_parameter_cast_dimensions",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_constant_case_selector_context",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "review_regressions::preserves_four_state_arithmetic_case_constants at 306:7: assert_eq y11: expected 0x1, got 0xX (y11)",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_arithmetic_case_constants",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "review_regressions::preserves_four_state_equality_case_selectors at 429:7: assert_eq y8: expected 0x1, got 0xX (y8)",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_equality_case_selectors",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_reduction_case_constants",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_relational_case_selectors",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "review_regressions::preserves_four_state_shift_and_bit_select_constants at 326:7: assert_eq y1: expected 0x1, got 0xX (y1)",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_shift_and_bit_select_constants",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_size_cast_dimensions_in_declarations_and_selections",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_unsigned_128_bit_enum_arithmetic",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "xezim build exit status: 1; see <case>/build.log\nParsed 2 file(s): 2 descriptions, 0 errors, 0 warnings\n<case>/source_0.sv:19:46: error: Undeclared identifier 'x'\n    19 |                         input nibble_t [2:1] x;\n       |                                              ^\n",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_use_site_dimensions_in_function_alias_types",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_use_site_dimensions_in_parameter_alias_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "review_regressions::resolves_generate_local_alias_casts_for_all_processes at 124:5: assert_eq comb_y: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "review_regressions::resolves_generate_local_alias_casts_for_all_processes",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::run_time_for_condition_uses_the_relational_operand_context",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::size_of_a_type_uses_the_dimension_argument",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

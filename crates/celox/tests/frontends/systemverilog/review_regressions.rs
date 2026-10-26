@@ -321,6 +321,48 @@ fn rejects_overlapping_always_ff_variable_drivers() {
 }
 
 #[test]
+fn rejects_loop_indices_shared_with_always_ff() {
+    // Only plain always processes may share a variable (IEEE 1800-2023
+    // 9.2.2.4); nonblocking writes from several processes stay rejected.
+    for (first, second) in [
+        ("always_ff", "always_ff"),
+        ("always_ff", "always"),
+        ("always", "always_ff"),
+    ] {
+        let error = cranelift_build_error(&format!(
+            r#"
+            module Top(input logic clk, input logic [3:0] a, b, output wire [3:0] y, z);
+                integer i;
+                logic [3:0] p, q;
+                {first} @(posedge clk) for (i = 0; i < 4; i = i + 1) p[i] <= a[i];
+                {second} @(posedge clk) for (i = 0; i < 4; i = i + 1) q[i] <= b[i];
+                assign y = p;
+                assign z = q;
+            endmodule
+            "#
+        ));
+        assert!(
+            error.contains("multiple variable drivers for `i`"),
+            "{first}/{second}: unexpected error: {error}"
+        );
+    }
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic clk, a, b, output wire y);
+            logic q;
+            always @(posedge clk) q <= a;
+            always @(posedge clk) q = b;
+            assign y = q;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multiple variable drivers for `q`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn rejects_variables_also_written_through_output_arguments() {
     // A called subroutine writes its output actual for the calling process
     // (IEEE 1800-2023 9.2.2.2), so `q` has two always_ff drivers.
@@ -947,29 +989,6 @@ fn coerces_ir_parameter_constants_to_their_declared_widths() {
 }
 
 #[test]
-fn validates_net_drivers_after_parameter_specialization() {
-    let error = cranelift_build_error(
-        r#"
-        module Driver(output logic y); assign y = 1'b1; endmodule
-        module Sink(input logic a); endmodule
-        module Child #(parameter ENABLE = 1) (output logic y);
-            wire w;
-            if (ENABLE) Driver driver(.y(w));
-            Sink sink(.a(w));
-            assign y = 1'b0;
-        endmodule
-        module Top(output logic y);
-            Child #(.ENABLE(0)) child(.y(y));
-        endmodule
-        "#,
-    );
-    assert!(
-        error.contains("undriven net declaration `w`"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
 fn applies_unsigned_coercion_to_mixed_signed_constant_comparisons() {
     let source = r#"
         module Top(output logic y);
@@ -982,23 +1001,6 @@ fn applies_unsigned_coercion_to_mixed_signed_constant_comparisons() {
             .build_cranelift()
             .unwrap();
     assert_eq!(sim.get(sim.signal("y")), 0u8.into());
-}
-
-#[test]
-fn does_not_count_child_inputs_as_net_drivers() {
-    let error = cranelift_build_error(
-        r#"
-        module Sink(input logic a, output logic y); assign y = a; endmodule
-        module Top(output logic y);
-            wire w;
-            Sink sink(.a(w), .y(y));
-        endmodule
-        "#,
-    );
-    assert!(
-        error.contains("undriven net declaration `w`"),
-        "unexpected error: {error}"
-    );
 }
 
 #[test]
@@ -1412,8 +1414,7 @@ fn rejects_runtime_selected_child_outputs_to_nets() {
         "#,
     );
     assert!(
-        error.contains("undriven net declaration `values`")
-            || error.contains("systemverilog output port lvalue connection"),
+        error.contains("systemverilog output port lvalue connection"),
         "unexpected error: {error}"
     );
 }
@@ -4184,13 +4185,30 @@ fn rejects_enum_initializers_that_do_not_fit_the_base_type() {
     let error = cranelift_build_error(
         r#"
         module Top(output logic [1:0] y);
-            typedef enum logic [1:0] { A = 3'd4 } E;
+            typedef enum logic [1:0] { A = 4 } E;
             assign y = A;
         endmodule
         "#,
     );
     assert!(
         error.contains("enum member `A` value does not fit its base type"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_enum_literals_with_mismatched_explicit_widths() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(output logic [1:0] y);
+            typedef enum logic [1:0] { A = 3'd1 } E;
+            assign y = A;
+        endmodule
+        "#,
+    );
+    // The value fits, but an explicitly sized literal must match the enum base.
+    assert!(
+        error.contains("enum member `A` sized literal width 3 differs from base width 2"),
         "unexpected error: {error}"
     );
 }
@@ -4841,6 +4859,103 @@ fn expands_function_calls_in_child_input_connections() {
 }
 
 #[test]
+fn rejects_inout_nets_with_several_drivers() {
+    // Both sides of an inout connection are one net (IEEE 1800-2023 23.3.3);
+    // resolving several drivers of it is not supported yet.
+    let pad = r#"
+        module Pad(input logic oe, inout wire io); assign io = oe ? 1'b1 : 1'bz; endmodule
+        module Pass(input logic oe, inout wire io); Pad pad(.oe(oe), .io(io)); endmodule
+    "#;
+    for top in [
+        // Two children drive the net.
+        r#"module Top(input logic a, b, output wire y);
+               wire w;
+               Pad left(.oe(a), .io(w));
+               Pad right(.oe(b), .io(w));
+               assign y = w;
+           endmodule"#,
+        // The parent and a child below a pass-through module drive the net.
+        r#"module Top(input logic a, b, output wire y);
+               wire w;
+               assign w = a ? 1'b0 : 1'bz;
+               Pass pass(.oe(b), .io(w));
+               assign y = w;
+           endmodule"#,
+        // A child output and a child inout drive the net.
+        r#"module Source(output logic y); assign y = 1'b0; endmodule
+           module Top(input logic a, output wire y);
+               wire w;
+               Source source(.y(w));
+               Pad pad(.oe(a), .io(w));
+               assign y = w;
+           endmodule"#,
+    ] {
+        let error = cranelift_build_error(&format!("{pad}{top}"));
+        assert!(error.contains("multiple net drivers for `w`"), "{error}");
+    }
+    // A driver of the net inside the child and one on the parent's side of
+    // an inout port of the child.
+    let error = cranelift_build_error(
+        r#"
+        module Pad(input logic oe, inout wire io); assign io = oe ? 1'b1 : 1'bz; endmodule
+        module Block(input logic a, b, inout wire io);
+            assign io = a ? 1'b0 : 1'bz;
+            Pad pad(.oe(b), .io(io));
+        endmodule
+        module Top(input logic a, b, output wire y);
+            wire w;
+            Block block(.a(a), .b(b), .io(w));
+            assign y = w;
+        endmodule
+    "#,
+    );
+    assert!(error.contains("multiple net drivers for `io`"), "{error}");
+}
+
+#[test]
+fn rejects_variables_and_expressions_on_inout_ports() {
+    // Only nets may be on either side of an inout port (IEEE 1800-2023
+    // 23.3.3.2).
+    let reader = r#"
+        module Reader(inout wire [3:0] io, output wire [3:0] y); assign y = io; endmodule
+        module Pad(input logic oe, inout wire [3:0] io); assign io = oe ? 4'h1 : 4'hz; endmodule
+    "#;
+    for (top, variable) in [
+        (
+            r#"module Top(input logic [3:0] a, output wire [3:0] y);
+                   logic [3:0] v;
+                   assign v = a;
+                   Reader reader(.io(v), .y(y));
+               endmodule"#,
+            Some("variable `v`"),
+        ),
+        (
+            r#"module Top(input logic oe, output logic [3:0] v);
+                   Pad pad(.oe(oe), .io(v));
+               endmodule"#,
+            Some("variable `v`"),
+        ),
+        (
+            r#"module Top(input logic [3:0] a, output wire [3:0] y);
+                   wire [3:0] w;
+                   Reader reader(.io(w[3:0] ^ a), .y(y));
+               endmodule"#,
+            None,
+        ),
+    ] {
+        let error = cranelift_build_error(&format!("{reader}{top}"));
+        assert!(
+            error.contains("inout port `io` must connect to a net"),
+            "{error}"
+        );
+        assert!(
+            variable.is_none_or(|variable| error.contains(variable)),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn rejects_local_drivers_of_implicit_child_output_nets() {
     let source = r#"
         module Source(output logic y); assign y = 1'b1; endmodule
@@ -5300,25 +5415,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "index 2 of `values` outside its declared range",
-            r#"
-            module Top(output logic y);
-                logic [7:0] values [0:1][0:2];
-                assign y = values[0][3];
-            endmodule
-        "#,
-        ),
-        (
-            "index 2 of `values` outside its declared range",
-            r#"
-            module Top(output logic y);
-                localparam J = 3;
-                logic [7:0] values [0:1][0:2];
-                assign y = values[0][J];
-            endmodule
-        "#,
-        ),
-        (
             "combinational expression",
             r#"
             module Top(input logic a, output logic y); assign y = unknown(a); endmodule
@@ -5399,9 +5495,9 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "non-ANSI module port declarations",
+            "non-ANSI port expressions",
             r#"
-            module Top(y); output y; assign y = 1'b1; endmodule
+            module Top({y, z}); output y, z; assign y = 1'b1; assign z = 1'b0; endmodule
         "#,
         ),
         (
@@ -5631,12 +5727,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "undriven net declaration `w`",
-            r#"
-            module Top(output logic y); wire w; assign y = (w === 1'bz); endmodule
-        "#,
-        ),
-        (
             "unknown or duplicate systemverilog child port connection",
             r#"
             module Child(input logic a, output logic y); assign y = a; endmodule
@@ -5669,15 +5759,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(output logic y);
                 logic [7:0] values [0:9223372036854775807][0:1];
                 assign y = values[0][0];
-            endmodule
-        "#,
-        ),
-        (
-            "index 2 of `values` outside its declared range",
-            r#"
-            module Top(output logic y);
-                logic [7:0] values [0:1][0:2];
-                assign y = values[1][3];
             endmodule
         "#,
         ),
@@ -8757,6 +8838,62 @@ fn shared_ff_memories_keep_native_sparse_next_state() {
         }
         sim.modify(|io| io.set(addr, 4095u32)).unwrap();
         assert_eq!(sim.get(q), 0x34u32.into());
+    }
+}
+
+/// An array one edge process updates only by nonblocking element writes
+/// publishes the written elements, not a seed and commit of the whole array
+/// per edge (#1855). A blocking write keeps the whole-array next state.
+#[test]
+fn nonblocking_runtime_element_writes_use_sparse_next_state() {
+    use celox_design::{SPARSE_WORKING_REGION, WORKING_REGION};
+    use celox_sir::SIRInstruction;
+
+    for (body, sparse) in [
+        ("mem[addr] <= data; mem[3][7:0] <= data[7:0];", true),
+        ("mem[addr] = data;", false),
+        ("mem[addr] <= data; mem <= '{default: 0};", false),
+    ] {
+        let source = format!(
+            r#"module Top(input bit clk, input bit [11:0] addr, input bit [31:0] data,
+                output wire [31:0] q);
+                bit [31:0] mem[4096];
+                always_ff @(posedge clk) begin {body} end
+                assign q = mem[addr];
+            endmodule"#
+        );
+        let result =
+            Simulator::from_sv_sources(vec![(source.as_str(), Path::new("nba_ram.sv"))], "Top")
+                .trace_pre_optimized_sir()
+                .build_with_trace();
+        let sim = result.res.unwrap();
+        let memory = sim.program().get_addr(&[], &["mem"]).unwrap();
+        let program = result.trace.pre_optimized_sir.unwrap();
+        let mut regions = Vec::new();
+        for instruction in program
+            .sir
+            .eval_apply_ffs
+            .values()
+            .flatten()
+            .flat_map(|unit| unit.blocks.values())
+            .flat_map(|block| &block.instructions)
+        {
+            match instruction {
+                SIRInstruction::Store(address, ..) if address.absolute_addr() == memory => {
+                    regions.push(address.region);
+                }
+                SIRInstruction::Commit(source, destination, ..)
+                    if source.absolute_addr() == memory
+                        || destination.absolute_addr() == memory =>
+                {
+                    regions.push(source.region);
+                    regions.push(destination.region);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(regions.contains(&SPARSE_WORKING_REGION), sparse, "{body}");
+        assert_eq!(regions.contains(&WORKING_REGION), !sparse, "{body}");
     }
 }
 

@@ -1,6 +1,16 @@
 use super::*;
 
 sv_backends! {
+    fn real_parameter_overrides_preserve_fractional_values(sim) {
+        @case "floating_point::real_parameter_overrides_preserve_fractional_values";
+    }
+    fn real_parameter_overrides_keep_declared_conversion_contexts(sim) {
+        @case "floating_point::real_parameter_overrides_keep_declared_conversion_contexts";
+    }
+    fn real_parameter_overrides_from_math_and_generate_scopes(sim) {
+        @case "floating_point::real_parameter_overrides_from_math_and_generate_scopes";
+    }
+
     fn real_math_runtime_functions(sim) { @case "real_math::runtime_functions"; }
     fn real_math_constant_functions(sim) { @case "real_math::constant_functions"; }
     fn real_arithmetic_and_rounding(sim) { @case "floating_point::real_arithmetic_and_rounding"; }
@@ -31,14 +41,28 @@ sv_backends! {
             endmodule
         "#; }
         @build Simulator::from_sv_sources(vec![(source, Path::new("real_comb_display.sv"))], "Top").four_state(true);
-        sim.drain_runtime_events();
+        bare(sim.drain_runtime_events());
         let enabled = sim.signal("enabled");
         let bits = sim.signal("bits");
         sim.modify(|io| { io.set(bits, 0x3ff8000000000000u64); io.set(enabled, 1u8); }).unwrap();
         assert_eq!(sim.get(sim.signal("x")), BigUint::from(0x3ff8000000000000u64));
-        let events = sim.drain_runtime_events();
+        let events = bare(sim.drain_runtime_events());
         assert_eq!(events.len(), 2, "{events:?}");
         assert!(events.contains(&celox::RuntimeEvent::Display { message: b"comb=1.50 expression=3.0".to_vec() }), "{events:?}");
-        assert!(events.contains(&celox::RuntimeEvent::AssertContinue { message: b"assert=1.50".to_vec() }), "{events:?}");
+        assert!(events.contains(&celox::RuntimeEvent::Report(celox::Report::new(celox::Severity::Error, b"assert=1.50".to_vec()))), "{events:?}");
     }
+}
+
+/// The drained events without the time, scope, location and assertion of
+/// their reports, which these tests do not check.
+fn bare(events: Vec<celox::RuntimeEvent>) -> Vec<celox::RuntimeEvent> {
+    events
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Report(report) => {
+                celox::RuntimeEvent::Report(celox::Report::new(report.severity, report.message))
+            }
+            event => event,
+        })
+        .collect()
 }

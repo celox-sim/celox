@@ -1,0 +1,243 @@
+(group program (category sequential))
+
+; Program blocks (IEEE 1800-2023 Clause 24). Their `initial` procedures,
+; event controls and delays run in the reactive region set, which runs after
+; the active region set of a time slot is empty (4.5, 24.3.1). Expected
+; outputs follow the reference algorithm of 4.5.
+
+; A program reads the design after its nonblocking updates and the
+; combinational logic they feed have settled in the same time slot.
+(case program_reads_design_after_nonblocking_updates_settle
+  (source "program_settled.sv" #"
+    module Top;
+      logic clk = 0;
+      logic [7:0] d = 0, q = 0, qq;
+      always @(posedge clk) q <= d;
+      assign qq = q + 8'd1;
+      initial begin
+        #1 d = 5; clk = 1;
+        $display("design q=%0d qq=%0d", q, qq);
+      end
+      Probe p(clk, q, qq);
+    endmodule
+    program Probe(input logic clk, input logic [7:0] q, qq);
+      initial begin
+        $display("start q=%0d qq=%0d", q, qq);
+        @(posedge clk) $display("edge q=%0d qq=%0d", q, qq);
+        $finish;
+      end
+    endprogram
+  "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "start q=0 qq=1\ndesign q=0 qq=1\nedge q=5 qq=6\n"))
+
+; A program's nonblocking assignment updates in the Re-NBA region, after the
+; design's NBA region; the design processes the update wakes run in the
+; active region set that follows.
+; Four-state, so that `always @(r)` waits for a change; two-state mode would
+; also run it once at time zero (#2026).
+(case program_nonblocking_updates_follow_design_updates
+  (source "program_renba.sv" #"
+    module Top;
+      logic clk = 0;
+      logic [7:0] count = 0, r;
+      always @(posedge clk) count <= count + 8'd1;
+      always @(r) $display("design sees r=%0d count=%0d", r, count);
+      initial begin #1 clk = 1; #1 clk = 0; #1 clk = 1; end
+      Tb t(clk, count, r);
+    endmodule
+    program Tb(input logic clk, input logic [7:0] count, output logic [7:0] r);
+      initial begin
+        r = 1;
+        repeat (2) begin
+          @(posedge clk);
+          r <= count + 8'd10;
+          $display("program count=%0d r=%0d", count, r);
+        end
+        #1 $finish;
+      end
+    endprogram
+  "#)
+  (top Top)
+  (four_state)
+  (run_to_finish)
+  (expect_output "design sees r=1 count=0\nprogram count=1 r=1\ndesign sees r=11 count=1\nprogram count=2 r=11\ndesign sees r=12 count=2\n"))
+
+; `#0` in a program resumes in the Re-Inactive region (4.4.2.7), after the
+; design's Inactive region of the same time.
+(case program_zero_delay_resumes_in_the_re_inactive_region
+  (source "program_zero.sv" #"
+    module Top;
+      logic [7:0] a = 0;
+      initial begin
+        #1 a = 1;
+        #0 $display("design inactive a=%0d", a);
+      end
+      Tb t(a);
+    endmodule
+    program Tb(input logic [7:0] a);
+      logic [7:0] seen;
+      initial begin
+        #1 seen = a;
+        $display("reactive a=%0d", a);
+        #0 $display("re-inactive a=%0d seen=%0d", a, seen);
+        $finish;
+      end
+    endprogram
+  "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "design inactive a=1\nreactive a=1\nre-inactive a=1 seen=1\n"))
+
+; Design activity a program creates waits until the reactive region set is
+; empty (4.5): a flip-flop clocked by the program's blocking write runs after
+; the program's `#0` and its Re-NBA update of the flip-flop's input.
+(case design_activity_of_a_program_waits_for_the_reactive_region_set
+  (source "program_drain.sv" #"
+    module Top;
+      logic clk;
+      logic [7:0] d, q = 0;
+      always @(posedge clk) begin
+        q <= d;
+        $display("design edge d=%0d", d);
+      end
+      Tb t(clk, d, q);
+    endmodule
+    program Tb(output logic clk, output logic [7:0] d, input logic [7:0] q);
+      initial begin
+        clk = 0;
+        d = 0;
+        #1 clk = 1;
+        d <= 7;
+        #0 $display("re-inactive q=%0d d=%0d", q, d);
+        #1 $display("q=%0d", q);
+        $finish;
+      end
+    endprogram
+  "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "re-inactive q=0 d=0\ndesign edge d=7\nq=7\n"))
+
+; An input the host drives wakes a program in the Reactive region, after
+; the nonblocking updates the same edge causes in the design.
+(case program_waits_see_host_driven_edges_after_design_updates
+  (source "program_host_edge.sv" #"
+    module Top(input logic go, output logic [7:0] seen);
+      logic [7:0] count = 0;
+      always @(posedge go) count <= count + 8'd1;
+      Tb t(go, count, seen);
+    endmodule
+    program Tb(input logic go, input logic [7:0] count, output logic [7:0] seen);
+      initial begin
+        seen = 0;
+        forever @(posedge go) seen = count;
+      end
+    endprogram
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq seen 0)
+  (modify (set go 1))
+  (run_until 2)
+  (assert_eq seen 1 "the program reads the count after its update")
+  (modify (set go 0))
+  (run_until 3)
+  (modify (set go 1))
+  (run_until 4)
+  (assert_eq seen 2))
+
+; `$exit` ends every `initial` procedure of its program (24.7). With them the
+; last program procedures have ended, which ends the simulation (24.3).
+(case program_exit_ends_its_initial_procedures
+  (source "program_exit.sv" #"
+    module Top;
+      initial #20 $display("design at 20");
+      Tb t();
+    endmodule
+    program Tb;
+      initial begin
+        #2 $display("first");
+        #2 $exit;
+        $display("not reached");
+      end
+      initial begin
+        #3 $display("second");
+        #10 $display("second not reached");
+      end
+    endprogram
+  "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "first\nsecond\n"))
+
+; The simulation ends with an implicit `$finish` once every `initial`
+; procedure of every program has ended, while design processes still run
+; (24.3).
+(case simulation_ends_when_program_procedures_end
+  (source "program_complete.sv" #"
+    module Top(output int n);
+      initial begin
+        n = 0;
+        forever #1 n++;
+      end
+      Tb t();
+    endmodule
+    program Tb;
+      initial #3 $display("done");
+    endprogram
+  "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "done\n")
+  (assert_eq n 3))
+
+; Program ports connect like module ports (24.3).
+(case program_ports_connect_to_design_nets
+  (source "program_ports.sv" #"
+    program Check(input wire a, input wire b, output logic same);
+      initial begin
+        same = a == b;
+        #1 $finish;
+      end
+    endprogram
+    module Top(output logic same);
+      wire a = 1;
+      wire b = 1;
+      Check c(a, b, same);
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq same 1))
+
+; A program shall not contain `always` procedures or instances (24.3).
+(case programs_reject_always_procedures
+  (source "program_always.sv" #"
+    program Tb(input logic clk);
+      logic seen;
+      always @(posedge clk) seen = 1;
+    endprogram
+    module Top(input logic clk);
+      Tb t(clk);
+    endmodule
+  "#)
+  (top Top)
+  (expect reject))
+
+(case programs_reject_instances
+  (source "program_instance.sv" #"
+    module Leaf(output logic y);
+      assign y = 1;
+    endmodule
+    program Tb;
+      logic y;
+      Leaf l(y);
+    endprogram
+    module Top;
+      Tb t();
+    endmodule
+  "#)
+  (top Top)
+  (expect reject))

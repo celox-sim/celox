@@ -1,6 +1,8 @@
 pub mod suite;
+#[cfg(feature = "veryl-reference")]
 pub mod veryl_sim;
 pub mod veryl_sv;
+pub mod vtest_exec;
 
 #[path = "../fixtures/veryl_std.rs"]
 #[allow(dead_code)]
@@ -152,6 +154,7 @@ macro_rules! all_backends {
             #[test]
             $(#[$meta])*
             #[allow(unused_mut, unused_variables)]
+            #[cfg(feature = "veryl-reference")]
             fn veryl() {
                 #[allow(dead_code)]
                 const FRONTEND: test_utils::Frontend = test_utils::Frontend::Veryl;
@@ -234,6 +237,7 @@ macro_rules! all_backends {
                 #[test]
                 $(#[$meta])*
                 #[allow(unused_mut, unused_variables)]
+                #[cfg(feature = "cranelift")]
                 fn cranelift() {
                     #[allow(dead_code)]
                     const FRONTEND: test_utils::Frontend = test_utils::Frontend::Veryl;
@@ -250,6 +254,7 @@ macro_rules! all_backends {
                 #[test]
                 $(#[$meta])*
                 #[allow(unused_mut, unused_variables)]
+                #[cfg(feature = "cranelift")]
                 fn cranelift_parallel() {
                     #[allow(dead_code)]
                     const FRONTEND: test_utils::Frontend = test_utils::Frontend::Veryl;
@@ -268,6 +273,7 @@ macro_rules! all_backends {
                 #[test]
                 $(#[$meta])*
                 #[allow(unused_mut, unused_variables)]
+                #[cfg(feature = "wasm-runtime")]
                 fn wasm() {
                     #[allow(dead_code)]
                     const FRONTEND: test_utils::Frontend = test_utils::Frontend::Veryl;
@@ -394,6 +400,7 @@ macro_rules! all_backends {
 
                 #[test]
                 $(#[$meta])*
+                #[cfg(feature = "cranelift")]
                 fn cranelift() {
                     test_utils::suite::run_case($case, "cranelift");
                 }
@@ -402,6 +409,7 @@ macro_rules! all_backends {
 
                 #[test]
                 $(#[$meta])*
+                #[cfg(feature = "cranelift")]
                 fn cranelift_parallel() {
                     test_utils::suite::run_case($case, "cranelift-parallel");
                 }
@@ -410,6 +418,7 @@ macro_rules! all_backends {
 
                 #[test]
                 $(#[$meta])*
+                #[cfg(feature = "wasm-runtime")]
                 fn wasm() {
                     test_utils::suite::run_case($case, "wasm");
                 }
@@ -430,6 +439,7 @@ macro_rules! all_backends {
         all_backends!(@with_ignore veryl; $ignore_list; {
             #[test]
             $(#[$meta])*
+            #[cfg(feature = "veryl-reference")]
             fn veryl() {
                 test_utils::suite::run_case($case, "veryl");
             }
@@ -457,4 +467,17 @@ macro_rules! all_backends {
             $(#[$meta])* fn $name ($sim) $body
         );
     )*};
+}
+
+#[allow(dead_code)]
+pub fn is_veryl_reference(value: &dyn std::any::Any) -> bool {
+    #[cfg(feature = "veryl-reference")]
+    {
+        value.is::<veryl_sim::VerylSimAdapter>()
+    }
+    #[cfg(not(feature = "veryl-reference"))]
+    {
+        let _ = value;
+        false
+    }
 }

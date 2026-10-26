@@ -4,6 +4,31 @@ Use the locked environment described in [docs/development.md](docs/development.m
 Cargo builds use the workspace's default `target/`, managed by mbx. Do not set an
 ad-hoc `CARGO_TARGET_DIR` or `--target-dir`.
 
+## Optional execution backends
+
+Ordinary workspace commands select Celox, NAPI and the CLI. Their default native
+and tiered runtimes do not compile Cranelift or Wasmtime. Use `--workspace`
+explicitly to include backend development and comparison crates.
+
+Enable only the backend needed for the task:
+
+- `--features celox/veryl-reference`: upstream Veryl simulator comparisons (its WASM host also depends on Wasmtime).
+- `--features celox/cranelift`: Cranelift JIT and its comparison tests.
+- `--features celox/wasm-runtime`: execute generated WASM with Wasmtime.
+- `--features celox/wasm-component`: load Veryl `.wasm` component libraries.
+
+The CLI forwards all three features; NAPI forwards `cranelift` and
+`wasm-component`. Native component libraries and browser WASM generation do
+not require Wasmtime. Published native NAPI bindings explicitly enable
+`wasm-component`; local debug builds leave it disabled. A disabled WASM component host reports the required
+feature when a `.wasm` library is requested.
+
+Common test matrices use the enabled backends. Binaries that directly compare
+optional backends declare required features. To run the complete Celox suite,
+use `cargo test -p celox --features systemverilog,cranelift,wasm-runtime,wasm-component,veryl-reference`.
+CI explicitly enables these features to retain backend coverage.
+Host cross-codegen features also enable Cranelift for their fallback runtime.
+
 ## Select checks from the change
 
 Before running checks, identify the behavior that changed and the code that
@@ -40,6 +65,66 @@ Use the actual affected case or group as the filter. For SystemVerilog cases,
 use the `verify-sv-verilator` and `verify-sv-icarus` binaries. Missing tools,
 empty selections, compilation failures, and simulator errors are not passes.
 
+For repeated local vtest runs, use the optimized shared executor:
+
+```sh
+node scripts/run-vtest.mjs --test counter
+CELOX_TEST_FEATURES=cranelift,wasm-runtime node scripts/run-vtest.mjs --test systemverilog -E 'test(operators::)'
+```
+
+This builds `vtest-exec` with the `vtest` Cargo profile (`opt-level = 1`,
+development assertions and overflow checks enabled), then runs the existing
+Celox test registrations with nextest. Both builds enable `systemverilog` and
+`celox-test-suite/runtime-cases`. Cases execute in the shared binary, while
+Rust API tests execute normally. Existing test names, filters, backend omissions,
+ignored cases and nextest's parallel scheduling/timeouts are preserved. Additional
+arguments are passed to `cargo nextest run`; use `--run-ignored all` to include
+ignored registrations deliberately.
+
+With `runtime-cases`, `.vtest` bodies are read from disk instead of embedded in
+Rust binaries, so edits to an existing case do not require recompilation. Adding
+a test registration or changing Rust still requires a build. Both local commands
+and CI build the optimized executor separately from ordinary test binaries.
+CI keeps the normal test profile and existing dependency cache: sharing a Cargo
+profile alone does not share artifacts when the executor and workspace resolve
+different dependency features. Ordinary Cargo test commands retain the embedded,
+in-process path. CI's Rust Tests job prepares the executor once and uses it for
+full workspace runs and scoped runs that include Celox. Scopes without Celox
+skip that build. The default-branch cache warmer builds both executor and test
+dependencies under the same cache key; preparation failures fail the test job.
+Cocotb runs through nextest with the exact packages, features and targets of its
+original build, selecting
+only the ignored `cocotb_` cases; an empty selection fails. Its reports are kept
+separately and uploaded with the regular test results.
+
+Default-feature library and documentation tests run in a separate parallel job
+with no extra features. The required Rust gate still requires this job whenever
+Celox libraries or the full workspace are selected, and on detection failure.
+The cache warmer also primes this job and Windows NAPI dependencies on master
+using their CI job IDs, environments and build commands. Windows builds still
+need a first cache fill after a toolchain or dependency change.
+
+The CI nextest profile also emits JUnit results. The Rust Tests job preserves
+each scoped invocation separately under `work/ci-reports/rust/`, retains the XML
+as the `rust-test-results` artifact for 14 days, and uploads it to Mergify CI
+Insights when the repository's `MERGIFY_TOKEN` secret is available. The secret
+must be a Mergify application key with `ci` scope, and CI Insights must be enabled
+for the repository. Tests keep their normal failure status; reporting does not
+enable retries or quarantine. Forks without the secret still run tests and retain
+the artifact. `cargo test`/doctest invocations are not part of this nextest report.
+
+For debugging a single case after building, the executor also accepts
+`<veryl|sv> <group::case> <backend>` directly, for example:
+
+```sh
+target/vtest/examples/vtest-exec veryl counter::test_counter_n4_basic native
+```
+
+Direct invocations do not apply registration-level ignores. `CELOX_VTEST_ROOT`
+can point to an alternative corpus root containing `veryl/cases` and `sv/cases`;
+otherwise the executor uses the suite's source directory from its build checkout.
+The script sets that root and `CELOX_VTEST_RUNNER` for its test invocation only.
+
 External results are reused locally by default, including between worktrees,
 when the case, verifier and tool fingerprints match. New/changed cases and
 prior failures run again; `--fresh` forces execution. A Celox implementation
@@ -52,6 +137,33 @@ without a baseline refresh. Retained failure evidence changes only after review
 of a changed failure; proof contracts change when executable coverage changes.
 See the [runner documentation](crates/celox-test-suite/README.md#independent-verification).
 Daily CI uses `--fresh` and runs the complete corpus afresh.
+
+## Compilation scaling in CodSpeed
+
+Normal PR and merge-queue CI retains small nested-write semantic regressions on
+interpreter, native and Cranelift backends in both two-state and four-state modes,
+wide-value latch checks, and a small sorter compilation smoke test.
+The 257/512-bit per-bit graph cases and sorter sizes 4/8/16/32 are measured by
+`benches/compilation.rs` in the existing daily/manual CodSpeed workflow.
+Compilation benchmarks use CodSpeed walltime measurement on its ARM64 Graviton
+Macro Runner: CPU simulation made
+a single 512-bit case take tens of minutes. The benchmark step has a 15-minute
+timeout and the complete job a 60-minute limit; a timeout is reported as failure.
+The organization runner group must allow this public repository to use CodSpeed
+Macro Runners. Simulation and walltime measurements have separate baselines.
+Nested-write benchmarks reuse the same semantic assertions as the small tests.
+Scaling cases use one iteration without per-case warmups or adaptive sampling;
+a small counter warms process-global analyzer state before measurement.
+Sorter sizes are separate CodSpeed measurements; performance comparisons replace
+process-time ratio assertions in ordinary tests. Failures use the existing
+CodSpeed reporting workflow.
+
+Build and run them with the same CodSpeed harness as CI:
+
+```sh
+cargo codspeed build --locked --measurement-mode walltime -p celox --bench compilation
+cargo codspeed run --measurement-mode walltime -p celox --bench compilation
+```
 
 ## Finish validation
 
@@ -213,32 +325,31 @@ Job selection:
 
 Lydite has its own test cadence (`scripts/ci-lydite-changes.mjs`):
 
-- Lydite sources and fixtures run its core and bridge lanes. The core lane owns
-  the proof-engine Rust tests, editor and standalone Veryl conformance. The
-  bridge lane (`bridge` job) runs replay and proof-backed Veryl/symbolic corpus
-  gates against the in-tree Celox exporter in one job sharing a release build.
-- The bridge takes about an hour of runner time, so Celox changes do not run it
-  on PRs or queue drafts even when Cargo's dependency graph reaches
-  `lydite-celox`. The daily and manual runs on `master` (scheduled) and
-  `develop` (dispatched by `nightly.yml`) enable every lane and report failures
-  in the issue "Lydite validation is failing on <branch>", closed by the next
-  passing run. NAPI/JS changes, upstream private tests and Markdown do not
-  reach Lydite.
+- Lydite core sources and fixtures select proof-engine Rust tests, editor and
+  standalone Veryl conformance. Celox bridge/replay/proof-corpus CI is disabled
+  for PRs, merge queues, scheduled runs and manual workflow dispatches.
+  `lydite-celox` remains available for explicit local development, but normal
+  CI does not build, lint, document or test it. The routine pre-push Cargo
+  check also excludes it.
+- Daily and manual core runs on `master` and `develop` report failures in the
+  issue "Lydite validation is failing on <branch>". Celox and bridge-crate
+  changes do not select core gates.
 - Version-only Release Please diffs, including their queue drafts, skip Lydite.
 - PR workflows come from the PR's merge ref, so branches based on an older base
   still carry the earlier `lydite.yml`, which selected every lane. That
   workflow file stays disabled in repository settings; `lydite-checks.yml`
   replaces it. Re-enable nothing under the old path.
 - Shared dependency/toolchain configuration runs the core lane; an unreadable
-  diff or dependency graph runs both lanes. The graph includes optional, build
+  diff or dependency graph runs the core lane. The graph includes optional, build
   and dev edges. A `Cargo.lock` diff selects a lane only when a changed lock
   entry is in that lane's lockfile dependency closure, so adding a dependency
   to a Celox crate does not run Lydite. The Nix flake and `ci.yml` do not
   select Lydite; its jobs use neither. Celox's `conformance/sv-tests/` corpus
   also skips Lydite; Lydite's fixtures live under `lydite/conformance/`.
 - Ordinary `ci.yml` tests exclude `lydite*`, including daily and release runs;
-  formatting/lint/build checks remain there. The dedicated workflow tests the
-  selected Lydite packages, including doctests, and installs its solver.
+  lint and API documentation also exclude `lydite-celox`. The dedicated
+  workflow tests only core Lydite packages, including doctests, and installs
+  its solver. Cache warming excludes `lydite*`.
 - `Lydite checks` accepts skipped lanes only when change detection explicitly
   excludes them, and fails on selected-job failures or cancellations. Repository
   branch protection must require this check to make it a merge gate.
@@ -292,7 +403,7 @@ Local validation uses the behavior-based matrix above.
 | Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs do not run this workflow; its tooling tests run in `Lint & Format` with the other script tests. |
 | Every daily/manual full CI run | Run the pinned upstream `common_cells` Gray code SV TB through `celox run --project`, plus an assertion negative control. Logs are retained for 14 days and failures feed the Full CI issue. See [the reproduction instructions](conformance/common-cells/README.md). |
 | Every full CI run | Run every shared Veryl and SystemVerilog case against both Verilator and Icarus, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
-| Affected pull requests and merge groups; daily at 03:41 UTC (12:41 JST); on demand | `lydite-checks.yml` owns Lydite Rust tests, proof, conformance, editor, and mutation gates. Unrelated changes skip these jobs, and Celox changes skip the bridge. Daily and manual runs enable all lanes and report failures in an issue. |
+| Affected pull requests and merge groups; daily at 03:41 UTC (12:41 JST); on demand | `lydite-checks.yml` owns Lydite Rust tests, proof, conformance, editor, and mutation gates. Unrelated changes skip these jobs. Bridge gates are disabled; daily and manual runs enable only core lanes and report failures in an issue. |
 | On demand | Dispatch `ci.yml` on the desired branch to run full CI and external comparisons, regardless of its diff. |
 | Pull requests that cut a release | A `master` pull request or legacy merge group whose diff changes `.release-please-manifest.json` (only the release pull request does there; syncing it into `develop` is not a release) runs full CI and the external comparisons. `Rust Test & NAPI Build` then requires the comparisons to pass, so a release cannot merge after only change-based checks. Daily and manual full runs do not gate on the comparisons; their failures reach the full CI issue below. A `master` pull request or legacy merge group whose diff cannot be determined is treated the same way. |
 

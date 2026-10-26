@@ -285,6 +285,13 @@ pub(super) fn query_actual_is_writable(expression: &Expr, dimensions: &PackedDim
                     .const_env
                     .contains_key(&parameters::unbounded_parameter_marker(name))
         }
+        Expr::Call {
+            callee: Callee::Checked { .. },
+            args,
+            ..
+        } => {
+            matches!(args.as_slice(), [Some(_), Some(value)] if query_actual_is_writable(value, dimensions))
+        }
         Expr::Select { expr, .. } => query_actual_is_writable(expr, dimensions),
         Expr::Concat(parts) => {
             !parts.is_empty()

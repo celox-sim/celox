@@ -77,3 +77,52 @@
   (top Top)
   (run_until 0)
   (assert_eq ok 1))
+
+; IEEE 1800-2023 13.4.1 and 21.3.4.3: discarding the return value
+; does not discard assignments performed by a scan.
+(case sscanf_string_inputs_and_discarded_return
+  (source "sscanf_discard.sv" #"
+    module Top(output logic ok);
+      string source = "1234";
+      int value, keep, count;
+      initial begin
+        $sscanf(source, "%d", value);
+        ok = value == 1234;
+        source = "42";
+        count = $sscanf(source.substr(0, 1), "%d", value);
+        ok &= count == 1 && value == 42;
+        $sscanf("78", "%d", value);
+        ok &= value == 78;
+        source = "";
+        count = $sscanf(source, "%d", value);
+        ok &= count == -1 && value == 78;
+        keep = 77;
+        $sscanf("bad", "%d", keep);
+        ok &= keep == 77;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1))
+
+; 21.3.4.3 also permits a string expression as the format.
+(case sscanf_string_format_expression
+  (source "sscanf_format.sv" #"
+    module Top(output logic ok);
+      string source = "42";
+      string fmt = "%d";
+      int value, count;
+      initial begin
+        count = $sscanf(source, fmt, value);
+        ok = count == 1 && value == 42;
+        count = $sscanf(source.substr(0, 1), fmt.substr(0, 1), value);
+        ok &= count == 1 && value == 42;
+        count = $sscanf("56", fmt, value);
+        ok &= count == 1 && value == 56;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1))

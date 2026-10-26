@@ -8,11 +8,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
-use celox_analysis::memory::{MemoryEffect, MemoryLocation, effects_may_alias};
-use celox_analysis::memory_ssa::{
-    self, ClobberWalker, MemoryAccess, MemoryAccessEvent, MemoryAccessGraph, MemoryAccessId,
-    MemoryClobber, MemoryPointMap,
+use celox_analysis::memory::{MemoryEffect, effects_may_alias};
+use celox_analysis::memory_versions::{
+    self, MemoryVersion, MemoryVersionEvent, MemoryVersions, RangeWrite, VersionId, VersionSegment,
 };
 
 use crate::HashMap;
@@ -42,21 +43,190 @@ enum SnapshotAccess {
     Phi(BlockId),
 }
 
+/// Reaching version of the bytes `start..end` of one state load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct SnapshotSegment {
+    start: i64,
+    end: i64,
+    access: SnapshotAccess,
+}
+
+/// Inputs of the per-byte MemoryPhi of `block` over bytes `start..end`, one
+/// per CFG predecessor in predecessor order.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SnapshotPhi {
     block: BlockId,
+    start: i64,
+    end: i64,
     inputs: Box<[(BlockId, SnapshotAccess)]>,
 }
 
-/// Stable, query-specific clobber graph for one physical state load.
+/// Every per-byte MemoryPhi equation of one function, interned once: the
+/// pieces of each block's phi ranges that have one input tuple, sorted by
+/// block and byte range.  Snapshots reference this table instead of copying
+/// the equations they reach, so a function's certificates take memory linear
+/// in its roots plus its phi pieces.
+#[derive(Debug, Default)]
+struct PhiTable {
+    pieces: BTreeMap<BlockId, Vec<SnapshotPhi>>,
+}
+
+impl PhiTable {
+    fn from_pieces(pieces: Vec<SnapshotPhi>) -> Self {
+        let mut table = Self::default();
+        for piece in pieces {
+            table.pieces.entry(piece.block).or_default().push(piece);
+        }
+        for pieces in table.pieces.values_mut() {
+            pieces.sort_by_key(|piece| piece.start);
+        }
+        table
+    }
+
+    /// Pieces of `block`'s phi equations overlapping `start..end`, in
+    /// address order and clipped to that range.
+    fn runs(
+        &self,
+        block: BlockId,
+        start: i64,
+        end: i64,
+    ) -> impl Iterator<Item = (i64, i64, &[(BlockId, SnapshotAccess)])> + '_ {
+        let pieces = self.pieces.get(&block).map_or(&[][..], Vec::as_slice);
+        let first = pieces.partition_point(|piece| piece.end <= start);
+        pieces[first..]
+            .iter()
+            .take_while(move |piece| piece.start < end)
+            .map(move |piece| {
+                (
+                    piece.start.max(start),
+                    piece.end.min(end),
+                    piece.inputs.as_ref(),
+                )
+            })
+    }
+}
+
+/// Stable certificate of the memory state one physical state load observes:
+/// the reaching version of every byte, as the per-byte minimal SSA of
+/// [`celox_analysis::memory_versions`] defines it, plus the phi equations
+/// those versions depend on.
 ///
-/// The root alone is sufficient for comparisons inside one immutable graph.
-/// Phi equations are retained so final-MIR verification also detects changed
-/// incoming definitions at a join with the same block identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Two snapshots are equal exactly when every byte has the same reaching
+/// version and the same reachable phi equations at both points, so the
+/// certificate is a canonical function of the memory state.  Phi equations
+/// are retained so final-MIR verification also detects changed incoming
+/// definitions at a join with the same block identity.  Within one function
+/// the equations are determined by the root, so equal roots share one
+/// allocation and compare by pointer.
+#[derive(Clone)]
 pub(super) struct MemorySnapshot {
-    root: SnapshotAccess,
-    phis: Box<[SnapshotPhi]>,
+    /// Maximal runs of equal versions covering exactly the load's bytes.
+    root: Rc<[SnapshotSegment]>,
+    phis: Rc<PhiTable>,
+}
+
+impl PartialEq for MemorySnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        if Rc::ptr_eq(&self.phis, &other.phis) {
+            return Rc::ptr_eq(&self.root, &other.root) || self.root == other.root;
+        }
+        first_snapshot_difference(self, other, &BTreeMap::new(), &BTreeMap::new()).is_none()
+    }
+}
+
+impl Eq for MemorySnapshot {}
+
+impl Hash for MemorySnapshot {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.root.hash(state);
+    }
+}
+
+impl fmt::Debug for MemorySnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MemorySnapshot")
+            .field("root", &self.root)
+            .field("phis", &self.reachable_phis())
+            .finish()
+    }
+}
+
+impl MemorySnapshot {
+    #[cfg(test)]
+    fn new(root: Vec<SnapshotSegment>, phis: Vec<SnapshotPhi>) -> Self {
+        Self {
+            root: root.into(),
+            phis: Rc::new(PhiTable::from_pieces(phis)),
+        }
+    }
+
+    /// Bytes this snapshot covers.
+    fn span(&self) -> Option<(i64, i64)> {
+        Some((self.root.first()?.start, self.root.last()?.end))
+    }
+
+    fn root_at(&self, byte: i64) -> Option<SnapshotAccess> {
+        self.root
+            .iter()
+            .find(|segment| segment.start <= byte && byte < segment.end)
+            .map(|segment| segment.access)
+    }
+
+    /// Phi equation pieces of `block` over `start..end`.
+    fn phi_runs(
+        &self,
+        block: BlockId,
+        start: i64,
+        end: i64,
+    ) -> impl Iterator<Item = (i64, i64, &[(BlockId, SnapshotAccess)])> + '_ {
+        self.phis.runs(block, start, end)
+    }
+
+    /// The phi equation pieces reachable from the root.
+    fn reachable_phis(&self) -> Vec<SnapshotPhi> {
+        let mut referenced = BTreeMap::<BlockId, BTreeMap<i64, i64>>::new();
+        let mut pending = self
+            .root
+            .iter()
+            .filter_map(|segment| match segment.access {
+                SnapshotAccess::Phi(block) => Some((block, segment.start, segment.end)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut added = Vec::new();
+        while let Some((block, start, end)) = pending.pop() {
+            added.clear();
+            insert_byte_range(referenced.entry(block).or_default(), start, end, &mut added);
+            for &(start, end) in &added {
+                for (start, end, inputs) in self.phi_runs(block, start, end) {
+                    pending.extend(inputs.iter().filter_map(|&(_, access)| match access {
+                        SnapshotAccess::Phi(block) => Some((block, start, end)),
+                        _ => None,
+                    }));
+                }
+            }
+        }
+        let mut phis = Vec::new();
+        for (block, ranges) in referenced {
+            for (start, end) in ranges {
+                phis.extend(
+                    self.phi_runs(block, start, end)
+                        .map(|(start, end, inputs)| SnapshotPhi {
+                            block,
+                            start,
+                            end,
+                            inputs: inputs.into(),
+                        }),
+                );
+            }
+        }
+        phis
+    }
+
+    #[cfg(test)]
+    fn segments(&self) -> &[SnapshotSegment] {
+        &self.root
+    }
 }
 
 /// Provenance for one CFG factoring introduced after reload planning.
@@ -83,9 +253,16 @@ impl StateRecipe {
     pub(super) fn live_on_entry_for_test(load: StateLoad) -> Self {
         Self {
             load,
-            snapshot: MemorySnapshot {
-                root: SnapshotAccess::LiveOnEntry,
-                phis: Box::default(),
+            snapshot: {
+                let bytes = load.bytes().unwrap();
+                MemorySnapshot::new(
+                    vec![SnapshotSegment {
+                        start: bytes.start,
+                        end: bytes.end,
+                        access: SnapshotAccess::LiveOnEntry,
+                    }],
+                    Vec::new(),
+                )
             },
             observed_bits: StateBitRange::from_load(load).unwrap(),
         }
@@ -1198,29 +1375,23 @@ enum RecipeBase {
     State(VReg),
 }
 
-type MemoryProgramPoint = (usize, usize);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct MemoryDefinition {
     block: BlockId,
     ordinal: usize,
-    write_index: usize,
-    write_end: usize,
 }
 
-/// Reload-specific adapter around the shared access graph. MIR effects and
-/// stable write identities stay here; neither is part of `celox-analysis`.
+/// Reload-specific adapter around the per-byte memory versions.  MIR effects
+/// and stable write identities stay here; neither is part of
+/// `celox-analysis`.
 #[derive(Debug)]
 struct ReloadMemorySsa {
-    graph: MemoryAccessGraph<MemoryDefinition>,
-    points: MemoryPointMap<MemoryProgramPoint>,
-    // Keep effects contiguous: the clobber walker repeatedly visits writes
-    // across the graph, so a separate heap allocation per definition turns
-    // each alias check into another unrelated pointer chase.
-    writes: Vec<MemoryEffect<MemoryObject>>,
+    versions: MemoryVersions<MemoryDefinition>,
     block_ids: Vec<BlockId>,
-    walker: ClobberWalker,
-    clobber_cache: HashMap<(StateLoad, MemoryAccessId), MemoryAccessId>,
+    phis: Rc<PhiTable>,
+    /// Interned certificates keyed by their root segments.
+    snapshots: HashMap<Box<[SnapshotSegment]>, MemorySnapshot>,
+    segments: Vec<VersionSegment<MemoryDefinition>>,
 }
 
 impl ReloadMemorySsa {
@@ -1229,7 +1400,7 @@ impl ReloadMemorySsa {
         block: usize,
         load: StateLoad,
     ) -> Result<MemorySnapshot, ReloadRecipeError> {
-        let access = self.points.block_entry(block).ok_or_else(|| {
+        let version = self.versions.block_entry(block).ok_or_else(|| {
             ReloadRecipeError::new(
                 "RELOAD_RECIPE.MEMORY_BLOCK_ENTRY",
                 self.block_ids.get(block).copied(),
@@ -1238,12 +1409,13 @@ impl ReloadMemorySsa {
                 "MemorySSA has no block-entry coordinate",
             )
         })?;
-        self.snapshot_at(access, load)
+        self.snapshot_at(version, load)
     }
 
+    /// Certificate of the bytes of `load` in memory state `at`.
     fn snapshot_at(
         &mut self,
-        start: MemoryAccessId,
+        at: VersionId,
         load: StateLoad,
     ) -> Result<MemorySnapshot, ReloadRecipeError> {
         let bytes = load.bytes().ok_or_else(|| {
@@ -1255,160 +1427,156 @@ impl ReloadMemorySsa {
                 "state load byte range overflows i64",
             )
         })?;
-        let byte_len = usize::try_from(bytes.end - bytes.start).map_err(|_| {
-            ReloadRecipeError::new(
-                "RELOAD_RECIPE.STATE_RANGE",
-                None,
-                None,
-                None,
-                "state load byte range is not representable as usize",
-            )
-        })?;
-        let query = MemoryEffect::Exact(MemoryLocation {
-            object: MemoryObject::SimState,
-            offset: bytes.start,
-            byte_len,
-        });
-        let graph = &self.graph;
-        let writes = &self.writes;
-        let block_ids = &self.block_ids;
-        let clobber_cache = &mut self.clobber_cache;
-        let oracle = |definition: &MemoryDefinition, query: &MemoryEffect<MemoryObject>| {
-            writes
-                .get(definition.write_index..definition.write_end)
-                .is_some_and(|effects| {
-                    effects
-                        .iter()
-                        .copied()
-                        .any(|write| effects_may_alias(write, *query))
-                })
-        };
-        let mut clobber_query = self.walker.query(graph, &query, &oracle);
-        let mut clobber_access = |start| {
-            if let Some(&access) = clobber_cache.get(&(load, start)) {
-                return Ok(access);
-            }
-            match clobber_query.clobber(start) {
-                Some(MemoryClobber::Access(access)) => {
-                    clobber_cache.insert((load, start), access);
-                    Ok(access)
-                }
-                Some(MemoryClobber::Indeterminate) => Err(ReloadRecipeError::new(
-                    "RELOAD_RECIPE.CLOBBER_CYCLE",
-                    None,
-                    None,
-                    None,
-                    "query-specific clobber graph is an unresolved closed cycle",
-                )),
-                None => Err(ReloadRecipeError::new(
+        self.segments.clear();
+        self.versions
+            .segments(at, bytes.start, bytes.end, &mut self.segments)
+            .ok_or_else(|| {
+                ReloadRecipeError::new(
                     "RELOAD_RECIPE.CLOBBER_ACCESS",
                     None,
                     None,
                     None,
-                    "clobber query starts outside the MemorySSA graph",
-                )),
-            }
-        };
-        let root_access = clobber_access(start)?;
-        let root = Self::stable_access(graph, block_ids, root_access)?;
-
-        // Capture the query-specific phi equations reachable from the root.
-        // This is the stable certificate used after MIR reconstruction.
-        let mut pending = BTreeMap::<BlockId, MemoryAccessId>::new();
-        if let SnapshotAccess::Phi(block) = root {
-            pending.insert(block, root_access);
-        }
-        let mut phis = BTreeMap::<BlockId, SnapshotPhi>::new();
-        while let Some((block, access)) = pending.pop_first() {
-            if phis.contains_key(&block) {
-                continue;
-            }
-            let MemoryAccess::Phi {
-                block: dense_block,
-                inputs,
-            } = graph.access(access).ok_or_else(|| {
-                ReloadRecipeError::new(
-                    "RELOAD_RECIPE.SNAPSHOT_ACCESS",
-                    Some(block),
-                    None,
-                    None,
-                    "snapshot phi references an invalid MemorySSA access",
-                )
-            })?
-            else {
-                return Err(ReloadRecipeError::new(
-                    "RELOAD_RECIPE.SNAPSHOT_PHI",
-                    Some(block),
-                    None,
-                    None,
-                    "snapshot phi identity does not name a MemoryPhi",
-                ));
-            };
-            let inputs = inputs.to_vec();
-            let actual_block = block_ids.get(dense_block).copied().ok_or_else(|| {
-                ReloadRecipeError::new(
-                    "RELOAD_RECIPE.SNAPSHOT_BLOCK",
-                    Some(block),
-                    None,
-                    None,
-                    "MemoryPhi block is outside the MIR block table",
+                    "snapshot query starts outside the MemorySSA graph",
                 )
             })?;
-            if actual_block != block {
-                return Err(ReloadRecipeError::new(
-                    "RELOAD_RECIPE.SNAPSHOT_PHI_IDENTITY",
-                    Some(block),
-                    None,
-                    None,
-                    "stable and dense MemoryPhi identities disagree",
-                ));
+        let mut root = Vec::with_capacity(self.segments.len());
+        for segment in &self.segments {
+            root.push(SnapshotSegment {
+                start: segment.start,
+                end: segment.end,
+                access: Self::stable_access(&self.block_ids, segment.version)?,
+            });
+        }
+        if let Some(snapshot) = self.snapshots.get(root.as_slice()) {
+            return Ok(snapshot.clone());
+        }
+        let snapshot = MemorySnapshot {
+            root: root.clone().into(),
+            phis: Rc::clone(&self.phis),
+        };
+        self.snapshots
+            .insert(root.into_boxed_slice(), snapshot.clone());
+        Ok(snapshot)
+    }
+
+    /// Every per-byte phi equation of the function, as pieces with one input
+    /// tuple each.
+    fn build_phi_table(
+        versions: &MemoryVersions<MemoryDefinition>,
+        block_ids: &[BlockId],
+    ) -> Result<PhiTable, ReloadRecipeError> {
+        let mut pieces = Vec::new();
+        let mut per_predecessor =
+            Vec::<(BlockId, usize, Vec<VersionSegment<MemoryDefinition>>)>::new();
+        for (block, &block_id) in block_ids.iter().enumerate() {
+            let ranges = versions.phi_ranges(block);
+            if ranges.is_empty() {
+                continue;
             }
-            let mut stable_inputs = Vec::with_capacity(inputs.len());
-            for (predecessor, input) in inputs {
-                let predecessor = block_ids.get(predecessor).copied().ok_or_else(|| {
+            per_predecessor.clear();
+            for &predecessor in versions.predecessors(block) {
+                let predecessor_id = block_ids.get(predecessor).copied().ok_or_else(|| {
                     ReloadRecipeError::new(
                         "RELOAD_RECIPE.SNAPSHOT_PREDECESSOR",
-                        Some(block),
+                        Some(block_id),
                         None,
                         None,
                         "MemoryPhi predecessor is outside the MIR block table",
                     )
                 })?;
-                let input_access = clobber_access(input)?;
-                let input = Self::stable_access(graph, block_ids, input_access)?;
-                if let SnapshotAccess::Phi(input_block) = input {
-                    pending.entry(input_block).or_insert(input_access);
-                }
-                stable_inputs.push((predecessor, input));
+                per_predecessor.push((predecessor_id, predecessor, Vec::new()));
             }
-            stable_inputs.sort_unstable_by_key(|&(predecessor, input)| (predecessor, input));
-            phis.insert(
-                block,
-                SnapshotPhi {
-                    block,
-                    inputs: stable_inputs.into_boxed_slice(),
-                },
-            );
+            per_predecessor.sort_by_key(|(predecessor, _, _)| *predecessor);
+            for (start, end) in ranges {
+                for (predecessor_id, predecessor, segments) in &mut per_predecessor {
+                    let exit = versions.block_exit(*predecessor).ok_or_else(|| {
+                        ReloadRecipeError::new(
+                            "RELOAD_RECIPE.MEMORY_BLOCK_EXIT",
+                            Some(*predecessor_id),
+                            None,
+                            None,
+                            "MemorySSA has no block-exit coordinate",
+                        )
+                    })?;
+                    segments.clear();
+                    versions
+                        .segments(exit, start, end, segments)
+                        .ok_or_else(|| {
+                            ReloadRecipeError::new(
+                                "RELOAD_RECIPE.SNAPSHOT_INPUT",
+                                Some(block_id),
+                                None,
+                                None,
+                                "MemoryPhi input state is outside the MemorySSA graph",
+                            )
+                        })?;
+                }
+                // Sweep the common refinement of every predecessor's runs and
+                // merge adjacent pieces with equal input tuples.
+                let mut cursors = vec![0usize; per_predecessor.len()];
+                let mut position = start;
+                while position < end {
+                    let mut next = end;
+                    let mut tuple = Vec::with_capacity(per_predecessor.len());
+                    for (index, (predecessor, _, segments)) in per_predecessor.iter().enumerate() {
+                        while segments
+                            .get(cursors[index])
+                            .is_some_and(|segment| segment.end <= position)
+                        {
+                            cursors[index] += 1;
+                        }
+                        let segment = segments.get(cursors[index]).ok_or_else(|| {
+                            ReloadRecipeError::new(
+                                "RELOAD_RECIPE.SNAPSHOT_INPUT",
+                                Some(block_id),
+                                None,
+                                None,
+                                "MemoryPhi input does not cover the phi's bytes",
+                            )
+                        })?;
+                        next = next.min(segment.end);
+                        tuple.push((
+                            *predecessor,
+                            Self::stable_access(block_ids, segment.version)?,
+                        ));
+                    }
+                    match pieces.last_mut() {
+                        Some(SnapshotPhi {
+                            block: last_block,
+                            end: last_end,
+                            inputs: last_inputs,
+                            ..
+                        }) if *last_block == block_id
+                            && *last_end == position
+                            && **last_inputs == *tuple =>
+                        {
+                            *last_end = next;
+                        }
+                        _ => pieces.push(SnapshotPhi {
+                            block: block_id,
+                            start: position,
+                            end: next,
+                            inputs: tuple.into_boxed_slice(),
+                        }),
+                    }
+                    position = next;
+                }
+            }
         }
-
-        Ok(MemorySnapshot {
-            root,
-            phis: phis.into_values().collect::<Vec<_>>().into_boxed_slice(),
-        })
+        Ok(PhiTable::from_pieces(pieces))
     }
 
     fn stable_access(
-        graph: &MemoryAccessGraph<MemoryDefinition>,
         block_ids: &[BlockId],
-        access: MemoryAccessId,
+        version: MemoryVersion<MemoryDefinition>,
     ) -> Result<SnapshotAccess, ReloadRecipeError> {
-        match graph.access(access) {
-            Some(MemoryAccess::LiveOnEntry) => Ok(SnapshotAccess::LiveOnEntry),
-            Some(MemoryAccess::Definition { definition, .. }) => Ok(SnapshotAccess::Write {
+        match version {
+            MemoryVersion::LiveOnEntry => Ok(SnapshotAccess::LiveOnEntry),
+            MemoryVersion::Definition(definition) => Ok(SnapshotAccess::Write {
                 block: definition.block,
                 ordinal: definition.ordinal,
             }),
-            Some(MemoryAccess::Phi { block, .. }) => block_ids
+            MemoryVersion::Phi { block } => block_ids
                 .get(block)
                 .copied()
                 .map(SnapshotAccess::Phi)
@@ -1421,15 +1589,41 @@ impl ReloadMemorySsa {
                         "MemoryPhi block is outside the MIR block table",
                     )
                 }),
-            None => Err(ReloadRecipeError::new(
-                "RELOAD_RECIPE.SNAPSHOT_ACCESS",
-                None,
-                None,
-                None,
-                "clobber identity is outside the MemorySSA graph",
-            )),
         }
     }
+}
+
+/// Insert `start..end` into a set of disjoint sorted byte ranges, appending
+/// the parts that were not yet covered to `added`.
+fn insert_byte_range(
+    set: &mut BTreeMap<i64, i64>,
+    start: i64,
+    end: i64,
+    added: &mut Vec<(i64, i64)>,
+) {
+    let mut overlapping = set
+        .range(..=end)
+        .rev()
+        .take_while(|&(_, &existing_end)| existing_end >= start)
+        .map(|(&existing_start, &existing_end)| (existing_start, existing_end))
+        .collect::<Vec<_>>();
+    overlapping.reverse();
+    let mut cursor = start;
+    let mut new_start = start;
+    let mut new_end = end;
+    for (existing_start, existing_end) in overlapping {
+        if existing_start > cursor {
+            added.push((cursor, existing_start));
+        }
+        cursor = cursor.max(existing_end);
+        new_start = new_start.min(existing_start);
+        new_end = new_end.max(existing_end);
+        set.remove(&existing_start);
+    }
+    if cursor < end {
+        added.push((cursor, end));
+    }
+    set.insert(new_start, new_end);
 }
 
 fn analyze_unverified_with_queries(
@@ -2156,34 +2350,41 @@ fn build_reload_memory_ssa(
     func: &MFunction,
     cfg: &NormalizedCfg,
 ) -> Result<ReloadMemorySsa, ReloadRecipeError> {
-    let mut events = vec![
-        Vec::<MemoryAccessEvent<MemoryDefinition, MemoryProgramPoint>>::new();
-        func.blocks.len()
-    ];
-    let mut writes = Vec::<MemoryEffect<MemoryObject>>::new();
+    let mut events = vec![Vec::<MemoryVersionEvent<MemoryDefinition>>::new(); func.blocks.len()];
+    let mut writes = Vec::<RangeWrite>::new();
     let sim_state = MemoryEffect::UnknownObject(MemoryObject::SimState);
 
     for (block, mir_block) in func.blocks.iter().enumerate() {
         let mut write_ordinal = 0usize;
         for (instruction, inst) in mir_block.insts.iter().enumerate() {
-            let write_index = writes.len();
+            let write_start = writes.len();
             for effect in analysis_effects(&memory_effect::writes(inst))
                 .filter(|effect| effects_may_alias(*effect, sim_state))
             {
-                if let MemoryEffect::Exact(location) = effect
-                    && (location.byte_len == 0 || location.end().is_none())
-                {
-                    return Err(ReloadRecipeError::new(
-                        "RELOAD_RECIPE.MEMORY_RANGE",
-                        Some(mir_block.id),
-                        Some(instruction),
-                        None,
-                        "MIR SimState write has an empty or overflowing range",
-                    ));
-                }
-                writes.push(effect);
+                let write = match effect {
+                    MemoryEffect::Exact(location) => {
+                        let end = location
+                            .end()
+                            .filter(|_| location.byte_len != 0)
+                            .ok_or_else(|| {
+                                ReloadRecipeError::new(
+                                    "RELOAD_RECIPE.MEMORY_RANGE",
+                                    Some(mir_block.id),
+                                    Some(instruction),
+                                    None,
+                                    "MIR SimState write has an empty or overflowing range",
+                                )
+                            })?;
+                        RangeWrite::Exact {
+                            start: location.offset,
+                            end,
+                        }
+                    }
+                    MemoryEffect::UnknownObject(_) | MemoryEffect::UnknownAll => RangeWrite::All,
+                };
+                writes.push(write);
             }
-            let definition = if writes.len() == write_index {
+            let definition = if writes.len() == write_start {
                 None
             } else {
                 let ordinal = write_ordinal;
@@ -2196,22 +2397,20 @@ fn build_reload_memory_ssa(
                         "per-block MemorySSA write ordinal exceeds addressable MIR size",
                     )
                 })?;
-                let definition = MemoryDefinition {
+                Some(MemoryDefinition {
                     block: mir_block.id,
                     ordinal,
-                    write_index,
-                    write_end: writes.len(),
-                };
-                Some(definition)
+                })
             };
-            events[block].push(MemoryAccessEvent {
-                point: (block, instruction),
+            events[block].push(MemoryVersionEvent {
                 definition,
+                write_start,
+                write_end: writes.len(),
             });
         }
     }
 
-    let (graph, points) = memory_ssa::build(cfg, &events).map_err(|error| {
+    let versions = memory_versions::build(cfg, &events, &writes).map_err(|error| {
         ReloadRecipeError::new(
             error.rule,
             error
@@ -2222,13 +2421,14 @@ fn build_reload_memory_ssa(
             error.message,
         )
     })?;
+    let block_ids = func.blocks.iter().map(|block| block.id).collect::<Vec<_>>();
+    let phis = ReloadMemorySsa::build_phi_table(&versions, &block_ids)?;
     Ok(ReloadMemorySsa {
-        graph,
-        points,
-        writes,
-        block_ids: func.blocks.iter().map(|block| block.id).collect(),
-        walker: ClobberWalker::new(),
-        clobber_cache: HashMap::default(),
+        versions,
+        block_ids,
+        phis: Rc::new(phis),
+        snapshots: HashMap::default(),
+        segments: Vec::new(),
     })
 }
 
@@ -2427,9 +2627,9 @@ fn rename_memory_ssa(
         }
 
         for (instruction, inst) in func.blocks[block].insts.iter().enumerate() {
-            let memory_point = memory_ssa
-                .points
-                .event((block, instruction))
+            let (point_before, point_after) = memory_ssa
+                .versions
+                .event(block, instruction)
                 .ok_or_else(|| {
                     ReloadRecipeError::new(
                         "RELOAD_RECIPE.MEMORY_POINT",
@@ -2451,7 +2651,7 @@ fn rename_memory_ssa(
                         recipes,
                         pure_recipes,
                         &current_homes,
-                        memory_point.before,
+                        point_before,
                         memory_ssa,
                     )? {
                         point_recipes.insert(point, recipe);
@@ -2462,7 +2662,7 @@ fn rename_memory_ssa(
                             value,
                             canonical_bits,
                             &current_fragments,
-                            memory_point.before,
+                            point_before,
                             memory_ssa,
                         )?
                     {
@@ -2482,7 +2682,7 @@ fn rename_memory_ssa(
                         recipes,
                         pure_recipes,
                         &current_homes,
-                        memory_point.before,
+                        point_before,
                         memory_ssa,
                     )? {
                         point_recipes.insert(point, recipe);
@@ -2492,7 +2692,7 @@ fn rename_memory_ssa(
                             value,
                             canonical_bits,
                             &current_fragments,
-                            memory_point.before,
+                            point_before,
                             memory_ssa,
                         )?
                     {
@@ -2507,7 +2707,7 @@ fn rename_memory_ssa(
             {
                 recipes[definition.0 as usize] = ReloadRecipe::StateVersion(StateRecipe {
                     load,
-                    snapshot: memory_ssa.snapshot_at(memory_point.before, load)?,
+                    snapshot: memory_ssa.snapshot_at(point_before, load)?,
                     observed_bits: StateBitRange::from_load(load).ok_or_else(|| {
                         ReloadRecipeError::new(
                             "RELOAD_RECIPE.STATE_RANGE",
@@ -2537,7 +2737,7 @@ fn rename_memory_ssa(
                 for value in candidates {
                     for home in &current_homes[&value] {
                         if !home.state.observed_bits.overlaps(written_bits)
-                            && memory_ssa.snapshot_at(memory_point.before, home.state.load)?
+                            && memory_ssa.snapshot_at(point_before, home.state.load)?
                                 == home.state.snapshot
                         {
                             preserved_homes.push((value, home.clone()));
@@ -2557,7 +2757,7 @@ fn rename_memory_ssa(
                 for value in fragment_candidates {
                     for fragment in &current_fragments[&value] {
                         if !fragment.state.observed_bits.overlaps(written_bits)
-                            && memory_ssa.snapshot_at(memory_point.before, fragment.state.load)?
+                            && memory_ssa.snapshot_at(point_before, fragment.state.load)?
                                 == fragment.state.snapshot
                         {
                             preserved_fragments.push((value, fragment.clone()));
@@ -2567,7 +2767,7 @@ fn rename_memory_ssa(
             }
 
             for (value, mut home) in preserved_homes {
-                let snapshot = memory_ssa.snapshot_at(memory_point.after, home.state.load)?;
+                let snapshot = memory_ssa.snapshot_at(point_after, home.state.load)?;
                 if snapshot == home.state.snapshot {
                     continue;
                 }
@@ -2578,7 +2778,7 @@ fn rename_memory_ssa(
             }
 
             for (value, mut fragment) in preserved_fragments {
-                let snapshot = memory_ssa.snapshot_at(memory_point.after, fragment.state.load)?;
+                let snapshot = memory_ssa.snapshot_at(point_after, fragment.state.load)?;
                 if snapshot == fragment.state.snapshot {
                     continue;
                 }
@@ -2593,7 +2793,7 @@ fn rename_memory_ssa(
                     let stored = StoreHome {
                         state: StateRecipe {
                             load: home.load,
-                            snapshot: memory_ssa.snapshot_at(memory_point.after, home.load)?,
+                            snapshot: memory_ssa.snapshot_at(point_after, home.load)?,
                             observed_bits: home.observed_bits,
                         },
                         steps: home.steps.clone(),
@@ -2607,7 +2807,7 @@ fn rename_memory_ssa(
                 let stored = StateFragmentHome {
                     state: StateRecipe {
                         load: fragment.load,
-                        snapshot: memory_ssa.snapshot_at(memory_point.after, fragment.load)?,
+                        snapshot: memory_ssa.snapshot_at(point_after, fragment.load)?,
                         observed_bits: fragment.observed_bits,
                     },
                     value_bit_offset: fragment.value_bit_offset,
@@ -2623,7 +2823,7 @@ fn rename_memory_ssa(
             }
         }
 
-        let block_exit = memory_ssa.points.block_exit(block).ok_or_else(|| {
+        let block_exit = memory_ssa.versions.block_exit(block).ok_or_else(|| {
             ReloadRecipeError::new(
                 "RELOAD_RECIPE.MEMORY_BLOCK_EXIT",
                 Some(block_id),
@@ -3056,26 +3256,41 @@ fn stable_memory_snapshot_matches(
     .is_none()
 }
 
+/// First pair of differing accesses over the covered range.
+///
+/// Both snapshots describe, for every byte, a tree of versions rooted at the
+/// byte's reaching version.  The walk compares those trees run by run,
+/// splitting a run wherever either side's segments or phi pieces do, mapping
+/// final write ordinals back to the stable ordinal space and inlining
+/// MemoryPhis of validated reconstruction factorings.
 fn first_snapshot_difference(
     expected: &MemorySnapshot,
     actual: &MemorySnapshot,
     inserted_state_writes: &BTreeMap<BlockId, Vec<usize>>,
     memory_phi_factorings: &BTreeMap<BlockId, &MemoryPhiFactoring>,
 ) -> Option<(SnapshotAccess, SnapshotAccess)> {
-    let expected_phis = expected
-        .phis
-        .iter()
-        .map(|phi| (phi.block, phi))
-        .collect::<BTreeMap<_, _>>();
-    let actual_phis = actual
-        .phis
-        .iter()
-        .map(|phi| (phi.block, phi))
-        .collect::<BTreeMap<_, _>>();
-    let mut pending = vec![(expected.root, actual.root)];
+    let expected_span = expected.span();
+    if expected_span != actual.span() {
+        return Some((
+            expected.root_at(expected_span?.0)?,
+            actual
+                .root_at(actual.span()?.0)
+                .unwrap_or(SnapshotAccess::LiveOnEntry),
+        ));
+    }
+    let mut pending = Vec::new();
+    for expected_segment in expected.root.iter() {
+        for actual_segment in actual.root.iter() {
+            let start = expected_segment.start.max(actual_segment.start);
+            let end = expected_segment.end.min(actual_segment.end);
+            if start < end {
+                pending.push((expected_segment.access, actual_segment.access, start, end));
+            }
+        }
+    }
     let mut visited = BTreeSet::new();
-    while let Some((expected_access, actual_access)) = pending.pop() {
-        if !visited.insert((expected_access, actual_access)) {
+    while let Some((expected_access, actual_access, start, end)) = pending.pop() {
+        if !visited.insert((expected_access, actual_access, start, end)) {
             continue;
         }
         match (expected_access, actual_access) {
@@ -3107,31 +3322,61 @@ fn first_snapshot_difference(
             (SnapshotAccess::Phi(expected_block), SnapshotAccess::Phi(actual_block))
                 if expected_block == actual_block =>
             {
-                let (Some(expected_phi), Some(actual_phi)) = (
-                    expected_phis.get(&expected_block),
-                    actual_phis.get(&actual_block),
-                ) else {
-                    return Some((expected_access, actual_access));
-                };
-                let Some(actual_inputs) = expand_factored_snapshot_inputs(
-                    actual_phi,
-                    &actual_phis,
-                    memory_phi_factorings,
-                ) else {
-                    return Some((expected_access, actual_access));
-                };
-                if expected_phi.inputs.len() != actual_inputs.len() {
-                    return Some((expected_access, actual_access));
-                }
-                for (
-                    &(expected_predecessor, expected_input),
-                    &(actual_predecessor, actual_input),
-                ) in expected_phi.inputs.iter().zip(actual_inputs.iter())
+                let mut covered = start;
+                for (run_start, run_end, expected_inputs) in
+                    expected.phi_runs(expected_block, start, end)
                 {
-                    if expected_predecessor != actual_predecessor {
+                    if run_start != covered {
                         return Some((expected_access, actual_access));
                     }
-                    pending.push((expected_input, actual_input));
+                    covered = run_end;
+                    let mut actual_covered = run_start;
+                    for (piece_start, piece_end, actual_inputs) in
+                        actual.phi_runs(actual_block, run_start, run_end)
+                    {
+                        if piece_start != actual_covered {
+                            return Some((expected_access, actual_access));
+                        }
+                        actual_covered = piece_end;
+                        let mut active = BTreeSet::new();
+                        let Some(expansions) = expand_factored_snapshot_inputs(
+                            actual,
+                            actual_block,
+                            actual_inputs,
+                            piece_start,
+                            piece_end,
+                            memory_phi_factorings,
+                            &mut active,
+                        ) else {
+                            return Some((expected_access, actual_access));
+                        };
+                        for (expansion_start, expansion_end, actual_inputs) in expansions {
+                            if expected_inputs.len() != actual_inputs.len() {
+                                return Some((expected_access, actual_access));
+                            }
+                            for (
+                                &(expected_predecessor, expected_input),
+                                &(actual_predecessor, actual_input),
+                            ) in expected_inputs.iter().zip(actual_inputs.iter())
+                            {
+                                if expected_predecessor != actual_predecessor {
+                                    return Some((expected_access, actual_access));
+                                }
+                                pending.push((
+                                    expected_input,
+                                    actual_input,
+                                    expansion_start,
+                                    expansion_end,
+                                ));
+                            }
+                        }
+                    }
+                    if actual_covered != run_end {
+                        return Some((expected_access, actual_access));
+                    }
+                }
+                if covered != end {
+                    return Some((expected_access, actual_access));
                 }
             }
             _ => return Some((expected_access, actual_access)),
@@ -3140,95 +3385,102 @@ fn first_snapshot_difference(
     None
 }
 
-#[derive(Debug, Clone, Copy)]
-enum SnapshotInputFrame {
-    Enter {
-        parent: BlockId,
-        predecessor: BlockId,
-        access: SnapshotAccess,
-    },
-    Exit(BlockId),
-}
-
-/// Inline only MemoryPhis backed by a validated reconstruction factoring.
-/// Ordinary MemoryPhis remain structural proof nodes, so changing an original
-/// incoming write or swapping two original paths is still rejected.
+/// Input tuples of the MemoryPhi of `parent` over `start..end` with every
+/// MemoryPhi backed by a validated reconstruction factoring inlined, as
+/// `(start, end, inputs)` runs sorted by predecessor.  Ordinary MemoryPhis
+/// remain structural proof nodes, so changing an original incoming write or
+/// swapping two original paths is still rejected.  `active` holds the
+/// factored blocks on the current inlining path and rejects cycles.
 fn expand_factored_snapshot_inputs(
-    root: &SnapshotPhi,
-    actual_phis: &BTreeMap<BlockId, &SnapshotPhi>,
+    actual: &MemorySnapshot,
+    parent: BlockId,
+    inputs: &[(BlockId, SnapshotAccess)],
+    start: i64,
+    end: i64,
     factorings: &BTreeMap<BlockId, &MemoryPhiFactoring>,
-) -> Option<Vec<(BlockId, SnapshotAccess)>> {
-    let mut frames = root
-        .inputs
-        .iter()
-        .rev()
-        .map(|&(predecessor, access)| SnapshotInputFrame::Enter {
-            parent: root.block,
-            predecessor,
-            access,
-        })
-        .collect::<Vec<_>>();
-    let mut active = BTreeSet::new();
-    let mut expanded = Vec::new();
-    while let Some(frame) = frames.pop() {
-        match frame {
-            SnapshotInputFrame::Enter {
-                parent,
-                predecessor,
-                access,
-            } => {
-                let Some(factoring) = factorings.get(&predecessor) else {
-                    expanded.push((predecessor, access));
-                    continue;
-                };
-                if factoring.successor != parent || !active.insert(predecessor) {
-                    return None;
-                }
-                frames.push(SnapshotInputFrame::Exit(predecessor));
-                let inputs = match access {
-                    SnapshotAccess::Phi(phi_block) if phi_block == predecessor => {
-                        let phi = actual_phis.get(&phi_block)?;
-                        if phi
-                            .inputs
-                            .iter()
-                            .map(|&(input_predecessor, _)| input_predecessor)
-                            .ne(factoring.predecessors.iter().copied())
+    active: &mut BTreeSet<BlockId>,
+) -> Option<Vec<(i64, i64, Vec<(BlockId, SnapshotAccess)>)>> {
+    let mut partials = vec![(start, end, Vec::new())];
+    for &(predecessor, access) in inputs {
+        let Some(factoring) = factorings.get(&predecessor) else {
+            for (_, _, partial) in &mut partials {
+                partial.push((predecessor, access));
+            }
+            continue;
+        };
+        if factoring.successor != parent || !active.insert(predecessor) {
+            return None;
+        }
+        let mut next = Vec::new();
+        for (partial_start, partial_end, partial) in partials {
+            let expansions = match access {
+                SnapshotAccess::Phi(phi_block) if phi_block == predecessor => {
+                    let mut expansions = Vec::new();
+                    let mut covered = partial_start;
+                    for (run_start, run_end, phi_inputs) in
+                        actual.phi_runs(phi_block, partial_start, partial_end)
+                    {
+                        if run_start != covered
+                            || phi_inputs
+                                .iter()
+                                .map(|&(input_predecessor, _)| input_predecessor)
+                                .ne(factoring.predecessors.iter().copied())
                         {
                             return None;
                         }
-                        phi.inputs.to_vec()
+                        covered = run_end;
+                        expansions.extend(expand_factored_snapshot_inputs(
+                            actual,
+                            predecessor,
+                            phi_inputs,
+                            run_start,
+                            run_end,
+                            factorings,
+                            active,
+                        )?);
                     }
-                    // MemorySSA folds a phi whose incoming clobbers are all
-                    // equal. The validated write-free factoring still proves
-                    // that the shared edge block represents every recorded
-                    // predecessor. The carried access may itself be an
-                    // existing MemoryPhi from before the factoring; replicate
-                    // that version over the original edges instead of
-                    // mistaking it for the folded synthetic phi.
-                    access => factoring
+                    if covered != partial_end {
+                        return None;
+                    }
+                    expansions
+                }
+                // A byte whose incoming versions all agree has no phi at the
+                // factored block.  The validated write-free factoring still
+                // proves that the shared edge block represents every recorded
+                // predecessor.  The carried access may itself be an existing
+                // MemoryPhi from before the factoring; replicate that version
+                // over the original edges instead of mistaking it for a
+                // folded synthetic phi.
+                access => {
+                    let replicated = factoring
                         .predecessors
                         .iter()
-                        .copied()
-                        .map(|predecessor| (predecessor, access))
-                        .collect(),
-                };
-                frames.extend(inputs.iter().rev().map(|&(predecessor, access)| {
-                    SnapshotInputFrame::Enter {
-                        parent: factoring.block,
+                        .map(|&predecessor| (predecessor, access))
+                        .collect::<Vec<_>>();
+                    expand_factored_snapshot_inputs(
+                        actual,
                         predecessor,
-                        access,
-                    }
-                }));
-            }
-            SnapshotInputFrame::Exit(block) => {
-                if !active.remove(&block) {
-                    return None;
+                        &replicated,
+                        partial_start,
+                        partial_end,
+                        factorings,
+                        active,
+                    )?
                 }
+            };
+            for (expansion_start, expansion_end, expansion) in expansions {
+                let mut combined = partial.clone();
+                combined.extend(expansion);
+                next.push((expansion_start, expansion_end, combined));
             }
         }
+        active.remove(&predecessor);
+        partials = next;
     }
-    expanded.sort_unstable_by_key(|&(predecessor, access)| (predecessor, access));
-    Some(expanded)
+    for (_, _, partial) in &mut partials {
+        partial.sort_unstable_by_key(|&(predecessor, access)| (predecessor, access));
+    }
+    Some(partials)
 }
 
 fn describe_expected_snapshot_write(
@@ -3292,7 +3544,7 @@ fn available_recipe(
     recipes: &[ReloadRecipe],
     pure_recipes: &[PureRecipe],
     current_homes: &BTreeMap<VReg, Vec<StoreHome>>,
-    at: MemoryAccessId,
+    at: VersionId,
     memory_ssa: &mut ReloadMemorySsa,
 ) -> Result<Option<ResolvedRecipe>, ReloadRecipeError> {
     let mut current_value = value;
@@ -3383,7 +3635,7 @@ fn available_store_home(
     value: VReg,
     reverse_steps: &[PureStep],
     current_homes: &BTreeMap<VReg, Vec<StoreHome>>,
-    at: MemoryAccessId,
+    at: VersionId,
     memory_ssa: &mut ReloadMemorySsa,
 ) -> Result<Option<ResolvedRecipe>, ReloadRecipeError> {
     let Some(homes) = current_homes.get(&value) else {
@@ -3426,7 +3678,7 @@ fn available_fragment_recipe(
     value: VReg,
     canonical_bits: &[u8],
     current_fragments: &BTreeMap<VReg, Vec<StateFragmentHome>>,
-    at: MemoryAccessId,
+    at: VersionId,
     memory_ssa: &mut ReloadMemorySsa,
 ) -> Result<Option<CompositeStateRecipe>, ReloadRecipeError> {
     let Some(&required_bits) = canonical_bits.get(value.0 as usize) else {
@@ -4632,7 +4884,7 @@ mod tests {
         let cfg = super::super::cfg::normalize(&mut func).unwrap();
         let mut memory = build_reload_memory_ssa(&func, &cfg).unwrap();
         for instruction in 0..4 {
-            let point = memory.points.event((0, instruction)).unwrap().after;
+            let point = memory.versions.event(0, instruction).unwrap().1;
             for offset in 0..320 {
                 let ordinal = if instruction >= 3 && (104..112).contains(&offset) {
                     Some(2)
@@ -4662,8 +4914,13 @@ mod tests {
                         },
                     )
                     .unwrap();
-                assert_eq!(actual.root, expected, "i{instruction} byte {offset}");
-                assert!(actual.phis.is_empty());
+                assert_eq!(
+                    actual.root_at(i64::from(offset)),
+                    Some(expected),
+                    "i{instruction} byte {offset}"
+                );
+                assert_eq!(actual.segments().len(), 1);
+                assert!(actual.reachable_phis().is_empty());
             }
         }
     }
@@ -5396,37 +5653,36 @@ mod tests {
             block: BlockId(block),
             ordinal: 0,
         };
-        let expected = MemorySnapshot {
-            root: SnapshotAccess::Phi(BlockId(10)),
-            phis: vec![SnapshotPhi {
-                block: BlockId(10),
-                inputs: vec![
-                    (BlockId(1), write(1)),
-                    (BlockId(2), write(2)),
-                    (BlockId(3), write(3)),
-                ]
-                .into_boxed_slice(),
+        let whole = |access| {
+            vec![SnapshotSegment {
+                start: 0,
+                end: 8,
+                access,
             }]
-            .into_boxed_slice(),
         };
-        let actual = MemorySnapshot {
-            root: SnapshotAccess::Phi(BlockId(10)),
-            phis: vec![
-                SnapshotPhi {
-                    block: BlockId(10),
-                    inputs: vec![
-                        (BlockId(3), write(3)),
-                        (BlockId(20), SnapshotAccess::Phi(BlockId(20))),
-                    ]
-                    .into_boxed_slice(),
-                },
-                SnapshotPhi {
-                    block: BlockId(20),
-                    inputs: vec![(BlockId(1), write(1)), (BlockId(2), write(2))].into_boxed_slice(),
-                },
-            ]
-            .into_boxed_slice(),
+        let phi = |block, inputs: Vec<(u32, SnapshotAccess)>| SnapshotPhi {
+            block: BlockId(block),
+            start: 0,
+            end: 8,
+            inputs: inputs
+                .into_iter()
+                .map(|(predecessor, access)| (BlockId(predecessor), access))
+                .collect(),
         };
+        let expected = MemorySnapshot::new(
+            whole(SnapshotAccess::Phi(BlockId(10))),
+            vec![phi(10, vec![(1, write(1)), (2, write(2)), (3, write(3))])],
+        );
+        let actual = MemorySnapshot::new(
+            whole(SnapshotAccess::Phi(BlockId(10))),
+            vec![
+                phi(
+                    10,
+                    vec![(3, write(3)), (20, SnapshotAccess::Phi(BlockId(20)))],
+                ),
+                phi(20, vec![(1, write(1)), (2, write(2))]),
+            ],
+        );
         let inserted_writes = BTreeMap::new();
         assert!(!stable_memory_snapshot_matches(
             &expected,
@@ -5448,27 +5704,14 @@ mod tests {
             &factorings,
         ));
 
-        let folded_expected = MemorySnapshot {
-            root: SnapshotAccess::Phi(BlockId(10)),
-            phis: vec![SnapshotPhi {
-                block: BlockId(10),
-                inputs: vec![
-                    (BlockId(1), write(1)),
-                    (BlockId(2), write(1)),
-                    (BlockId(3), write(3)),
-                ]
-                .into_boxed_slice(),
-            }]
-            .into_boxed_slice(),
-        };
-        let folded_actual = MemorySnapshot {
-            root: SnapshotAccess::Phi(BlockId(10)),
-            phis: vec![SnapshotPhi {
-                block: BlockId(10),
-                inputs: vec![(BlockId(3), write(3)), (BlockId(20), write(1))].into_boxed_slice(),
-            }]
-            .into_boxed_slice(),
-        };
+        let folded_expected = MemorySnapshot::new(
+            whole(SnapshotAccess::Phi(BlockId(10))),
+            vec![phi(10, vec![(1, write(1)), (2, write(1)), (3, write(3))])],
+        );
+        let folded_actual = MemorySnapshot::new(
+            whole(SnapshotAccess::Phi(BlockId(10))),
+            vec![phi(10, vec![(3, write(3)), (20, write(1))])],
+        );
         assert!(stable_memory_snapshot_matches(
             &folded_expected,
             &folded_actual,
@@ -5477,42 +5720,21 @@ mod tests {
         ));
 
         let carried_phi = SnapshotAccess::Phi(BlockId(30));
-        let carried_phi_equation = SnapshotPhi {
-            block: BlockId(30),
-            inputs: vec![
-                (BlockId(4), SnapshotAccess::LiveOnEntry),
-                (BlockId(5), write(5)),
-            ]
-            .into_boxed_slice(),
-        };
-        let carried_expected = MemorySnapshot {
-            root: SnapshotAccess::Phi(BlockId(10)),
-            phis: vec![
-                SnapshotPhi {
-                    block: BlockId(10),
-                    inputs: vec![
-                        (BlockId(1), carried_phi),
-                        (BlockId(2), carried_phi),
-                        (BlockId(3), write(3)),
-                    ]
-                    .into_boxed_slice(),
-                },
+        let carried_phi_equation = phi(30, vec![(4, SnapshotAccess::LiveOnEntry), (5, write(5))]);
+        let carried_expected = MemorySnapshot::new(
+            whole(SnapshotAccess::Phi(BlockId(10))),
+            vec![
+                phi(10, vec![(1, carried_phi), (2, carried_phi), (3, write(3))]),
                 carried_phi_equation.clone(),
-            ]
-            .into_boxed_slice(),
-        };
-        let carried_actual = MemorySnapshot {
-            root: SnapshotAccess::Phi(BlockId(10)),
-            phis: vec![
-                SnapshotPhi {
-                    block: BlockId(10),
-                    inputs: vec![(BlockId(3), write(3)), (BlockId(20), carried_phi)]
-                        .into_boxed_slice(),
-                },
+            ],
+        );
+        let carried_actual = MemorySnapshot::new(
+            whole(SnapshotAccess::Phi(BlockId(10))),
+            vec![
+                phi(10, vec![(3, write(3)), (20, carried_phi)]),
                 carried_phi_equation,
-            ]
-            .into_boxed_slice(),
-        };
+            ],
+        );
         assert!(stable_memory_snapshot_matches(
             &carried_expected,
             &carried_actual,
@@ -5520,14 +5742,97 @@ mod tests {
             &factorings,
         ));
 
-        let mut changed = actual.clone();
-        changed.phis[1].inputs[1].1 = write(4);
+        let changed = MemorySnapshot::new(
+            whole(SnapshotAccess::Phi(BlockId(10))),
+            vec![
+                phi(
+                    10,
+                    vec![(3, write(3)), (20, SnapshotAccess::Phi(BlockId(20)))],
+                ),
+                phi(20, vec![(1, write(1)), (2, write(4))]),
+            ],
+        );
         assert!(!stable_memory_snapshot_matches(
             &expected,
             &changed,
             &inserted_writes,
             &factorings,
         ));
+
+        // A factored block whose phi equation is split into pieces inlines
+        // piece by piece; a changed input in one piece is still rejected.
+        let split_factored = |second: SnapshotAccess| {
+            MemorySnapshot::new(
+                whole(SnapshotAccess::Phi(BlockId(10))),
+                vec![
+                    phi(
+                        10,
+                        vec![(3, write(3)), (20, SnapshotAccess::Phi(BlockId(20)))],
+                    ),
+                    SnapshotPhi {
+                        block: BlockId(20),
+                        start: 0,
+                        end: 4,
+                        inputs: vec![(BlockId(1), write(1)), (BlockId(2), write(2))]
+                            .into_boxed_slice(),
+                    },
+                    SnapshotPhi {
+                        block: BlockId(20),
+                        start: 4,
+                        end: 8,
+                        inputs: vec![(BlockId(1), write(1)), (BlockId(2), second)]
+                            .into_boxed_slice(),
+                    },
+                ],
+            )
+        };
+        assert!(stable_memory_snapshot_matches(
+            &expected,
+            &split_factored(write(2)),
+            &inserted_writes,
+            &factorings,
+        ));
+        assert_eq!(
+            first_snapshot_difference(
+                &expected,
+                &split_factored(write(4)),
+                &inserted_writes,
+                &factorings
+            ),
+            Some((write(2), write(4)))
+        );
+
+        // Per-byte certificates: a difference confined to one byte of the
+        // range is still a difference.
+        let split_actual = MemorySnapshot::new(
+            vec![
+                SnapshotSegment {
+                    start: 0,
+                    end: 4,
+                    access: SnapshotAccess::Phi(BlockId(10)),
+                },
+                SnapshotSegment {
+                    start: 4,
+                    end: 8,
+                    access: write(3),
+                },
+            ],
+            vec![SnapshotPhi {
+                block: BlockId(10),
+                start: 0,
+                end: 4,
+                inputs: vec![
+                    (BlockId(1), write(1)),
+                    (BlockId(2), write(2)),
+                    (BlockId(3), write(3)),
+                ]
+                .into_boxed_slice(),
+            }],
+        );
+        assert_eq!(
+            first_snapshot_difference(&expected, &split_actual, &inserted_writes, &factorings),
+            Some((SnapshotAccess::Phi(BlockId(10)), write(3)))
+        );
     }
 
     #[test]
@@ -5586,16 +5891,15 @@ mod tests {
 
         let (func, cfg, analysis) = analyze_function(func);
         let expected = analysis.resolved_recipe(values[3]).unwrap().unwrap();
-        assert!(matches!(
-            &expected.base,
-            ResolvedBase::State(StateRecipe {
-                snapshot: MemorySnapshot {
-                    root: SnapshotAccess::Phi(BlockId(3)),
-                    ..
-                },
-                ..
-            })
-        ));
+        let ResolvedBase::State(StateRecipe { snapshot, .. }) = &expected.base else {
+            panic!("a join load has a state recipe")
+        };
+        assert!(
+            snapshot
+                .segments()
+                .iter()
+                .all(|segment| segment.access == SnapshotAccess::Phi(BlockId(3)))
+        );
 
         let mut final_func = func.clone();
         let left = final_func

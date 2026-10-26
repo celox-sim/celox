@@ -1,5 +1,5 @@
 #![cfg(feature = "external")]
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const STATUSES: [&str; 9] = [
     "passed",
@@ -31,7 +31,11 @@ fn retained_reports_are_valid_historical_evidence_for_the_live_catalogue() {
     let catalogue: BTreeSet<_> = celox_test_suite::veryl::cases()
         .map(|case| case.name)
         .collect();
-    for file in ["verification/verilator.json", "verification/icarus.json"] {
+    for file in [
+        "verification/verilator.json",
+        "verification/icarus.json",
+        "verification/xezim.json",
+    ] {
         let report = celox_test_suite::verification::read_report(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file),
         )
@@ -122,11 +126,11 @@ fn retained_reports_are_valid_historical_evidence_for_the_live_catalogue() {
 }
 
 #[test]
-fn systemverilog_retained_reports_explain_every_recorded_exclusion() {
+fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
     let catalogue: BTreeSet<_> = celox_test_suite::sv::cases()
         .map(|case| case.name)
         .collect();
-    for tool in ["verilator", "icarus"] {
+    for tool in ["verilator", "icarus", "xezim"] {
         let report = celox_test_suite::verification::read_report(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join(format!("verification/sv/{tool}.json")),
@@ -159,8 +163,8 @@ fn systemverilog_retained_reports_explain_every_recorded_exclusion() {
             let name = row["name"].as_str().unwrap();
             let case = celox_test_suite::sv::case(name).unwrap();
             let status = row["status"].as_str().unwrap();
-            // Every case passes, is rejected as expected, needs four-state
-            // simulation the tool lacks, or has a reviewed exclusion.
+            // Reviewed failures stay executable and retain their diagnostics;
+            // they are distinct from exclusions and passing cases.
             match status {
                 "passed" => {
                     assert_eq!(case.expectation, celox_test_suite::Expectation::Simulation)
@@ -186,6 +190,80 @@ fn systemverilog_retained_reports_explain_every_recorded_exclusion() {
                         );
                     }
                 }
+                // xezim_retained_failures_match_their_review accounts for
+                // each one.
+                "mismatch" | "compile_error" | "runtime_error" | "unexpected_accept"
+                    if tool == "xezim" =>
+                {
+                    assert!(!row["detail"].as_str().unwrap().is_empty(), "{name}");
+                    assert!(row.get("known_issue").is_none(), "{name}");
+                    let (phase, expectation) = match status {
+                        "compile_error" => ("compile", celox_test_suite::Expectation::Simulation),
+                        "unexpected_accept" => {
+                            ("execute", celox_test_suite::Expectation::CompilationError)
+                        }
+                        _ => ("execute", celox_test_suite::Expectation::Simulation),
+                    };
+                    assert_eq!(row["phase"], phase, "{name}");
+                    assert_eq!(case.expectation, expectation, "{name}");
+                }
+                "compile_error" | "mismatch" => {
+                    let (expected_status, phase, diagnostic) = match (tool, name) {
+                        (
+                            "verilator",
+                            "tagged_unions::conditional_struct_payload"
+                            | "tagged_unions::constructors_and_checked_members"
+                            | "tagged_unions::writable_system_arguments"
+                            | "tagged_unions::writable_task_arguments"
+                            | "tagged_unions::default_arguments"
+                            | "tagged_unions::factory_and_union_arguments"
+                            | "tagged_unions::nested_and_void_constructors",
+                        ) => ("compile_error", "compile", "Unsupported: tagged union"),
+                        (
+                            "icarus",
+                            "tagged_unions::casts_ports_and_registers"
+                            | "tagged_unions::conditional_struct_payload"
+                            | "tagged_unions::constructors_and_checked_members"
+                            | "tagged_unions::writable_system_arguments"
+                            | "tagged_unions::writable_task_arguments"
+                            | "tagged_unions::default_arguments"
+                            | "tagged_unions::factory_and_union_arguments"
+                            | "tagged_unions::nested_and_void_constructors"
+                            | "tagged_unions::wide_four_state_payload",
+                        ) => ("compile_error", "compile", "syntax error"),
+                        ("icarus", "unions::packed_mixed_state") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq two: expected 0xa0, got 0xaX",
+                        ),
+                        (
+                            "icarus",
+                            "unions::soft_overlay"
+                            | "unions::soft_signed_ports"
+                            | "unions::soft_wide_four_state",
+                        ) => ("compile_error", "compile", "syntax error"),
+                        (
+                            "icarus",
+                            "hierarchy::packed_pattern_parameter_arguments_keep_types_and_unknown_bits"
+                            | "hierarchy::packed_pattern_parameter_arguments_preserve_wide_values"
+                            | "hierarchy::packed_pattern_parameters_forward_whole_values",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "packed array parameters are not supported yet",
+                        ),
+                        _ => panic!("unreviewed failure: {tool} {name}: {status}"),
+                    };
+                    assert_eq!(status, expected_status, "{name}");
+                    assert_eq!(row["phase"], phase, "{name}");
+                    assert!(
+                        row["detail"].as_str().unwrap().contains(diagnostic),
+                        "{name}"
+                    );
+                    assert_eq!(case.expectation, celox_test_suite::Expectation::Simulation);
+                    assert!(row.get("known_issue").is_none(), "{name}");
+                    assert!(celox_test_suite::sv::verification::known_issue(tool, name).is_none());
+                }
                 _ => panic!("{tool} {name}: {status}"),
             }
         }
@@ -209,4 +287,86 @@ fn partial_word_sar_discrepancy_remains_an_executed_failure() {
     assert_eq!(row["phase"], "execute");
     assert!(row["detail"].as_str().unwrap().contains("assert_eq c63_64"));
     assert!(celox_test_suite::veryl::verification::known_issue("verilator", name).is_none());
+}
+
+/// xezim retains its failures as executed evidence instead of exclusions.
+/// Each one is reviewed against IEEE 1800-2023, and a xezim defect names the
+/// reported bug it reproduces.
+#[test]
+fn xezim_retained_failures_match_their_review() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let review: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("verification/xezim-review.json")).unwrap(),
+    )
+    .unwrap();
+    let bugs = review["bugs"].as_object().unwrap();
+    for bug in bugs.values() {
+        assert!(!bug["title"].as_str().unwrap().is_empty());
+        assert!(
+            bug["standard"]
+                .as_str()
+                .unwrap()
+                .starts_with("IEEE 1800-2023 ")
+        );
+    }
+    let mut cited = BTreeSet::new();
+    for (suite, file) in [
+        ("veryl", "verification/xezim.json"),
+        ("sv", "verification/sv/xezim.json"),
+    ] {
+        let report = celox_test_suite::verification::read_report(&root.join(file)).unwrap();
+        let failures: BTreeMap<_, _> = report["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                !matches!(
+                    row["status"].as_str(),
+                    // The statuses check-external-suite-report.mjs counts as
+                    // successes.
+                    Some("passed" | "rejected" | "unsupported" | "ignored")
+                )
+            })
+            .map(|row| {
+                (
+                    row["name"].as_str().unwrap(),
+                    row["status"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        let mut reviewed = BTreeMap::new();
+        for case in review["cases"].as_array().unwrap() {
+            if case["suite"] != suite {
+                continue;
+            }
+            let name = case["name"].as_str().unwrap();
+            assert!(!case["note"].as_str().unwrap().is_empty(), "{name}");
+            let classification = case["classification"].as_str().unwrap();
+            assert!(
+                matches!(
+                    classification,
+                    "xezim_bug"
+                        | "suite_issue"
+                        | "lrm_ambiguous"
+                        | "lrm_permitted_race"
+                        | "adapter_two_state_init"
+                        | "adapter_two_state_semantics"
+                ),
+                "{name}: {classification}"
+            );
+            let bug = case.get("bug").and_then(|bug| bug.as_str());
+            assert_eq!(classification == "xezim_bug", bug.is_some(), "{name}");
+            if let Some(bug) = bug {
+                assert!(bugs.contains_key(bug), "{name}: unknown bug {bug}");
+                cited.insert(bug);
+            }
+            let status = case["status"].as_str().unwrap();
+            assert!(reviewed.insert(name, status).is_none(), "duplicate {name}");
+        }
+        assert_eq!(
+            failures, reviewed,
+            "{suite}: unreviewed or stale xezim results"
+        );
+    }
+    assert_eq!(cited.len(), bugs.len(), "every listed bug has a case");
 }

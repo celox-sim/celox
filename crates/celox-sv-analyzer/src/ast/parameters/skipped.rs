@@ -407,7 +407,12 @@ fn pattern_items(
     let plan = bound_patterns::prepare_native(root, tree, dims, Some(shape))?;
     let wrong = || unsupported("assignment pattern items do not match the target shape");
     if shape.unpacked.is_empty() && shape.packed.len() <= 1 && !shape.members.is_empty() {
-        if shape.members.len() > 1 && shape.members.iter().all(|member| member.offset() == 0) {
+        if shape
+            .members
+            .iter()
+            .any(packed_structs::PackedMember::is_tagged)
+            || (shape.members.len() > 1 && shape.members.iter().all(|member| member.offset() == 0))
+        {
             return Err(unsupported("assignment pattern for a packed union"));
         }
         let mut values = Vec::new();
@@ -502,6 +507,7 @@ fn pattern_items(
             count as i128 - 1,
             VariableDimensions {
                 randomizable: true,
+                enum_values: None,
                 real: false,
                 string: false,
                 class: None,

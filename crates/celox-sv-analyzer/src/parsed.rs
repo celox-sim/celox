@@ -22,6 +22,14 @@ pub struct ParsedSource {
     warnings: HashMap<String, Vec<ir::AnalyzerWarning>>,
 }
 
+/// What a module analysis lowers.
+#[derive(Clone, Copy)]
+enum ModuleAnalysis<'a> {
+    /// The whole module, with the signals its hierarchical names denote.
+    Full(&'a [ast::HierarchicalSignal]),
+    DeclarationsOnly,
+}
+
 impl ParsedSource {
     pub fn parse(code: &str, path: &Path) -> Result<Self, AnalyzerError> {
         let tree = source_tree::parse_source(code, path)?;
@@ -53,7 +61,9 @@ impl ParsedSource {
             .filter(|unit| {
                 matches!(
                     unit.kind,
-                    celox_sv_syntax::UnitKind::Module | celox_sv_syntax::UnitKind::Interface
+                    celox_sv_syntax::UnitKind::Module
+                        | celox_sv_syntax::UnitKind::Program
+                        | celox_sv_syntax::UnitKind::Interface
                 ) && !unit.external
                     && unit.port_style != celox_sv_syntax::PortStyle::Wildcard
             })
@@ -118,7 +128,9 @@ impl ParsedSource {
                     };
                     if !matches!(
                         unit.kind,
-                        celox_sv_syntax::UnitKind::Module | celox_sv_syntax::UnitKind::Interface
+                        celox_sv_syntax::UnitKind::Module
+                            | celox_sv_syntax::UnitKind::Program
+                            | celox_sv_syntax::UnitKind::Interface
                     ) {
                         continue;
                     }
@@ -205,7 +217,124 @@ impl ParsedSource {
             pattern_overrides,
             interfaces,
             packages,
+            ModuleAnalysis::Full(&[]),
         )
+    }
+
+    /// [`Self::analyze_module`] for a module whose hierarchical names
+    /// denote `hierarchical`, signals of other instances.
+    #[allow(clippy::too_many_arguments)]
+    pub fn analyze_module_with_hierarchy(
+        &self,
+        module_name: &str,
+        overrides: &HashMap<String, ir::ConstExpr>,
+        type_overrides: &[(String, ast::Type)],
+        pattern_overrides: &[(String, ast::BoundPattern)],
+        interfaces: &ModuleInterfaces,
+        packages: &Packages,
+        hierarchical: &[ast::HierarchicalSignal],
+    ) -> Result<Ir, AnalyzerError> {
+        self.analyze_module_with_packages(
+            module_name,
+            overrides,
+            type_overrides,
+            pattern_overrides,
+            interfaces,
+            packages,
+            ModuleAnalysis::Full(hierarchical),
+        )
+    }
+
+    /// The declarations and instances of a specialization, without its
+    /// procedures, for elaborating the hierarchy below a module before its
+    /// hierarchical names are resolved.
+    pub fn analyze_module_hierarchy(
+        &self,
+        module_name: &str,
+        overrides: &HashMap<String, ir::ConstExpr>,
+        type_overrides: &[(String, ast::Type)],
+        pattern_overrides: &[(String, ast::BoundPattern)],
+        interfaces: &ModuleInterfaces,
+        packages: &Packages,
+    ) -> Result<Ir, AnalyzerError> {
+        self.analyze_module_with_packages(
+            module_name,
+            overrides,
+            type_overrides,
+            pattern_overrides,
+            interfaces,
+            packages,
+            ModuleAnalysis::DeclarationsOnly,
+        )
+    }
+
+    /// The dotted names `a.b.c` written in module `module_name`, the
+    /// candidates for hierarchical names (IEEE 1800-2023 23.6), as their
+    /// normalized components. A constant decimal index of a component other
+    /// than the last stays part of it, as in `u[1]`. Callers decide which
+    /// names denote another instance's signal. A specialization of a module
+    /// with generic interface ports is scanned in its authored module.
+    pub fn hierarchical_names(&self, module_name: &str, packages: &Packages) -> Vec<Vec<String>> {
+        use celox_sv_syntax::TokenKind;
+        let original = packages.authored_module_name(module_name);
+        let mut names = Vec::new();
+        for scope in self.index.scopes(original) {
+            let Ok(unit) = scope.root_unit() else {
+                continue;
+            };
+            let tokens = &scope.declarations().tokens;
+            let significant: Vec<_> = tokens[unit.tokens.range()]
+                .iter()
+                .filter(|token| !token.is_trivia())
+                .collect();
+            let is_name = |index: usize| {
+                significant.get(index).is_some_and(|token| {
+                    matches!(
+                        token.kind,
+                        TokenKind::Identifier | TokenKind::EscapedIdentifier
+                    ) || (token.kind == TokenKind::SystemIdentifier && token.text == "$root")
+                })
+            };
+            let text = |index: usize| significant.get(index).map(|token| token.text.as_str());
+            for start in 0..significant.len() {
+                if !is_name(start)
+                    || start
+                        .checked_sub(1)
+                        .and_then(text)
+                        .is_some_and(|previous| previous == "." || previous == "::")
+                {
+                    continue;
+                }
+                let mut components = vec![ast::normalize_identifier(&significant[start].text)];
+                let mut at = start + 1;
+                loop {
+                    if text(at) == Some("[")
+                        && significant
+                            .get(at + 1)
+                            .is_some_and(|token| token.kind == TokenKind::Number)
+                        && text(at + 2) == Some("]")
+                        && text(at + 3) == Some(".")
+                        && let Ok(index) = text(at + 1).unwrap().replace('_', "").parse::<u64>()
+                    {
+                        components
+                            .last_mut()
+                            .unwrap()
+                            .push_str(&format!("[{index}]"));
+                        at += 3;
+                    }
+                    if text(at) == Some(".") && is_name(at + 1) {
+                        components.push(ast::normalize_identifier(&significant[at + 1].text));
+                        at += 2;
+                    } else {
+                        break;
+                    }
+                }
+                if components.len() > 1 && !names.contains(&components) {
+                    names.push(components);
+                }
+            }
+        }
+        names
     }
 
     /// Inspect declaration shapes without lowering procedures or tasks.
@@ -231,6 +360,7 @@ impl ParsedSource {
                 values: &overrides,
                 types: &[],
                 patterns: &[],
+                hierarchical: &[],
             },
             &ModuleInterfaces::default(),
             packages,
@@ -247,7 +377,15 @@ impl ParsedSource {
         interfaces: &ModuleInterfaces,
     ) -> Result<Ir, AnalyzerError> {
         let packages = Self::analyze_packages(&[self])?;
-        self.analyze_module_with_packages(module_name, overrides, &[], &[], interfaces, &packages)
+        self.analyze_module_with_packages(
+            module_name,
+            overrides,
+            &[],
+            &[],
+            interfaces,
+            &packages,
+            ModuleAnalysis::Full(&[]),
+        )
     }
 
     fn validate_module_namespace(
@@ -270,6 +408,7 @@ impl ParsedSource {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn analyze_module_with_packages(
         &self,
         module_name: &str,
@@ -278,16 +417,13 @@ impl ParsedSource {
         pattern_overrides: &[(String, ast::BoundPattern)],
         interfaces: &ModuleInterfaces,
         packages: &Packages,
+        analysis: ModuleAnalysis<'_>,
     ) -> Result<Ir, AnalyzerError> {
         let overrides = overrides
             .iter()
             .map(|(name, value)| (name.clone(), value.clone().into()))
             .collect();
-        let original = packages
-            .interface_plan
-            .modules
-            .get(module_name)
-            .map_or(module_name, |plan| plan.original.as_str());
+        let original = packages.authored_module_name(module_name);
         let warnings = self.warnings.get(original).cloned().unwrap_or_default();
         let ir = (|| {
             self.validate_module_namespace(original, packages)?;
@@ -297,10 +433,14 @@ impl ParsedSource {
                 &self.index,
                 module_name,
                 ast::ModuleParameterBindings {
-                    declarations_only: false,
+                    declarations_only: matches!(analysis, ModuleAnalysis::DeclarationsOnly),
                     values: &overrides,
                     types: type_overrides,
                     patterns: pattern_overrides,
+                    hierarchical: match analysis {
+                        ModuleAnalysis::Full(hierarchical) => hierarchical,
+                        ModuleAnalysis::DeclarationsOnly => &[],
+                    },
                 },
                 interfaces,
                 packages,
@@ -600,7 +740,7 @@ mod tests {
             module \escaped.name (output logic y); assign y = 1'b0; endmodule
             module Duplicate; endmodule
             module Duplicate; endmodule
-            module Legacy(y); output y; endmodule
+            module Legacy({y}); output y; endmodule
         "#,
             Path::new("index.sv"),
         )

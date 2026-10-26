@@ -127,7 +127,9 @@ impl NativeExecutionTiming {
 #[derive(Clone, Copy)]
 pub struct NativeEventRef {
     pub func: NativeSimFunc,
-    pub comb_apply_func: NativeSimFunc,
+    /// The event's combined comb-then-FF function, or `None` when the tick
+    /// runs the shared comb function and then `func`.
+    pub comb_apply_func: Option<NativeSimFunc>,
     pub addr: AbsoluteAddr,
     pub id: usize,
 }
@@ -136,7 +138,10 @@ impl std::fmt::Debug for NativeEventRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeEventRef")
             .field("func", &(self.func as usize))
-            .field("comb_apply_func", &(self.comb_apply_func as usize))
+            .field(
+                "comb_apply_func",
+                &self.comb_apply_func.map(|func| func as usize),
+            )
             .field("addr", &self.addr)
             .field("id", &self.id)
             .finish()
@@ -247,7 +252,10 @@ impl SharedNativeCode {
         let materialize = |event: NativeEventImageRef| -> Result<NativeEventRef, SimulatorError> {
             Ok(NativeEventRef {
                 func: native_function_at(&jit_image, event.func_offset)?,
-                comb_apply_func: native_function_at(&jit_image, event.comb_apply_offset)?,
+                comb_apply_func: event
+                    .comb_apply_offset
+                    .map(|offset| native_function_at(&jit_image, offset))
+                    .transpose()?,
                 addr: event.addr,
                 id: event.id,
             })
@@ -355,7 +363,7 @@ pub struct NativeCodeEntry {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct NativeEventImageRef {
     func_offset: usize,
-    comb_apply_offset: usize,
+    comb_apply_offset: Option<usize>,
     addr: AbsoluteAddr,
     id: usize,
 }
@@ -410,6 +418,7 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) active_commits: Vec<AbsoluteAddr>,
     pub(crate) time_slots: Vec<AbsoluteAddr>,
     pub(crate) scheduler: Option<celox_design::SchedulerSchema<AbsoluteAddr>>,
+    pub(crate) derived_edges: Vec<celox_design::DerivedEdgeUnits<AbsoluteAddr>>,
 }
 
 /// Pointer-free native compiler artifact which can be attached to the
@@ -526,6 +535,7 @@ impl NativeProgramImage {
                 active_commits: self.runtime_schema.active_commits.clone(),
                 time_slots: self.runtime_schema.time_slots.clone(),
                 scheduler: self.runtime_schema.scheduler.clone(),
+                derived_edges: self.runtime_schema.derived_edges.clone(),
             },
             testbench: self.testbench.clone(),
         }
@@ -621,12 +631,19 @@ impl NativeProgramImage {
                     usize::MAX
                 }
             });
-        if self.process_offsets.len()
-            != self
-                .runtime_schema
-                .processes
-                .len()
-                .saturating_add(scheduler_units)
+        // The derived-edge units follow the kernels and the scheduler.
+        let derived_units = 2 * self.runtime_schema.derived_edges.len();
+        let derived_in_range = self.runtime_schema.derived_edges.iter().all(|units| {
+            units.rising < self.process_offsets.len() && units.falling < self.process_offsets.len()
+        });
+        if !derived_in_range
+            || self.process_offsets.len()
+                != self
+                    .runtime_schema
+                    .processes
+                    .len()
+                    .saturating_add(scheduler_units)
+                    .saturating_add(derived_units)
         {
             return Err("process kernels and their control slots disagree".into());
         }
@@ -656,7 +673,9 @@ impl NativeProgramImage {
             .chain(self.id_to_event.iter())
         {
             if !entry_offsets.contains(&event.func_offset)
-                || !entry_offsets.contains(&event.comb_apply_offset)
+                || event
+                    .comb_apply_offset
+                    .is_some_and(|offset| !entry_offsets.contains(&offset))
             {
                 return Err(format!(
                     "event {} references a missing image entry",
@@ -812,11 +831,24 @@ pub(crate) struct NativeCodegenTrace {
     pub state_layout: String,
 }
 
+/// Optimization context of a merged native function. Diagnostic labels do
+/// not describe whether pending values can be produced outside this function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NativeMergeKind {
+    /// A complete sequential group of execution units.
+    Complete,
+    /// Combinational settling followed by an FF event in the same function.
+    FusedCombAndFf,
+    /// One task of a partitioned kernel; other tasks may define pending state.
+    Partial,
+}
+
 fn prepare_merged_sir(
     units: &[&crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
     layout: &MemoryLayout,
     four_state: bool,
     label: &str,
+    merge_kind: NativeMergeKind,
     first_ff_unit: Option<usize>,
     diagnostics: &crate::optimizer::SirDiagnostics,
     cancel: Option<&CompileCancel>,
@@ -891,7 +923,7 @@ fn prepare_merged_sir(
         }
     }
     report_phase("comb_state_dse");
-    if label == "eval_comb_apply_ff"
+    if merge_kind == NativeMergeKind::FusedCombAndFf
         && crate::optimizer::sir::promote_fused_comb_static_slots(&mut sir_eu).map_err(
             |source| {
                 codegen_err(CodegenError::Optimization {
@@ -905,10 +937,17 @@ fn prepare_merged_sir(
         verify(&sir_eu, "after final fused comb StateSSA promotion")?;
     }
     report_phase("comb_state_ssa");
-    crate::optimizer::sir::pass_eliminate_working_round_trip::eliminate_working_round_trip(
-        &mut sir_eu,
-        &boundaries,
-    );
+    match merge_kind {
+        NativeMergeKind::Partial => {
+            crate::optimizer::sir::pass_eliminate_working_round_trip::eliminate_partial_working_round_trip(&mut sir_eu);
+        }
+        NativeMergeKind::Complete | NativeMergeKind::FusedCombAndFf => {
+            crate::optimizer::sir::pass_eliminate_working_round_trip::eliminate_working_round_trip(
+                &mut sir_eu,
+                &boundaries,
+            );
+        }
+    }
     verify(&sir_eu, "after x86 direct working rewrite")?;
     if cancelled(cancel) {
         return Err(cancelled_error());
@@ -928,7 +967,7 @@ fn prepare_merged_sir(
         &mut sir_eu,
         layout,
         four_state,
-        label == "eval_comb_apply_ff",
+        merge_kind == NativeMergeKind::FusedCombAndFf,
         diagnostics,
         || cancelled(cancel),
     )
@@ -963,6 +1002,7 @@ fn compile_units(
         layout,
         four_state,
         label,
+        NativeMergeKind::Complete,
         None,
         x86_options,
         capture_trace,
@@ -976,6 +1016,7 @@ pub(super) fn compile_unit_refs(
     layout: &MemoryLayout,
     four_state: bool,
     label: &str,
+    merge_kind: NativeMergeKind,
     first_ff_unit: Option<usize>,
     x86_options: &crate::backend::X86BackendOptions,
     capture_trace: bool,
@@ -987,6 +1028,7 @@ pub(super) fn compile_unit_refs(
         layout,
         four_state,
         label,
+        merge_kind,
         first_ff_unit,
         x86_options,
         capture_trace,
@@ -1005,6 +1047,7 @@ pub(super) fn compile_unit_refs_inspected(
     layout: &MemoryLayout,
     four_state: bool,
     label: &str,
+    merge_kind: NativeMergeKind,
     first_ff_unit: Option<usize>,
     x86_options: &crate::backend::X86BackendOptions,
     capture_trace: bool,
@@ -1094,6 +1137,7 @@ pub(super) fn compile_unit_refs_inspected(
         layout,
         four_state,
         label,
+        merge_kind,
         first_ff_unit,
         diagnostics,
         cancel,
@@ -1279,63 +1323,126 @@ pub(super) fn native_function_at(
 struct NativeCompileTask<'a> {
     units: Vec<&'a crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
     label: &'static str,
+    merge_kind: NativeMergeKind,
     first_ff_unit: Option<usize>,
     bindings: Vec<String>,
 }
 
 type NativeTaskBindings = HashMap<(&'static str, AbsoluteAddr), usize>;
 
+type NativeUnit = crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>;
+
+/// Classes of structurally equal execution units. Each distinct unit is
+/// hashed once and compared only against the units of its hash, so tasks
+/// whose unit lists share whole programs, such as every unfused comb-apply
+/// task starting with all of `eval_comb`, are told apart by their class
+/// lists instead of by comparing the programs again for each trigger.
+#[derive(Default)]
+struct NativeUnitClasses<'a> {
+    by_unit: HashMap<*const NativeUnit, usize>,
+    by_hash: HashMap<u64, Vec<(&'a NativeUnit, usize)>>,
+    count: usize,
+}
+
+impl<'a> NativeUnitClasses<'a> {
+    fn class(&mut self, unit: &'a NativeUnit) -> usize {
+        if let Some(class) = self.by_unit.get(&std::ptr::from_ref(unit)) {
+            return *class;
+        }
+        let bucket = self.by_hash.entry(native_unit_hash(unit)).or_default();
+        let class = match bucket.iter().find(|(other, _)| *other == unit) {
+            Some((_, class)) => *class,
+            None => {
+                let class = self.count;
+                self.count += 1;
+                bucket.push((unit, class));
+                class
+            }
+        };
+        self.by_unit.insert(std::ptr::from_ref(unit), class);
+        class
+    }
+
+    fn classes(&mut self, units: &[&'a NativeUnit]) -> Vec<usize> {
+        units.iter().map(|unit| self.class(unit)).collect()
+    }
+}
+
+/// A hash of `unit` that equal units share, independent of the iteration
+/// order of its maps.
+fn native_unit_hash(unit: &NativeUnit) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = fxhash::FxHasher::default();
+    unit.entry_block_id.hash(&mut hasher);
+    let mut blocks = unit.blocks.iter().collect::<Vec<_>>();
+    blocks.sort_unstable_by_key(|(id, _)| **id);
+    for (id, block) in blocks {
+        id.hash(&mut hasher);
+        block.id.hash(&mut hasher);
+        block.params.hash(&mut hasher);
+        block.instructions.hash(&mut hasher);
+        block.terminator.hash(&mut hasher);
+    }
+    let mut registers = unit.register_map.iter().collect::<Vec<_>>();
+    registers.sort_unstable_by_key(|(id, _)| **id);
+    registers.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn collect_ff_compile_tasks(
     sir: &LaidOutProgram,
 ) -> (Vec<NativeCompileTask<'_>>, NativeTaskBindings) {
     let mut tasks = Vec::new();
     let mut task_bindings = HashMap::default();
-    collect_ff_compile_tasks_from(
-        sir,
-        &sir.sir.eval_apply_ffs,
-        "eval_apply_ff",
-        &mut tasks,
-        &mut task_bindings,
-    );
-    collect_ff_compile_tasks_from(
-        sir,
-        &sir.sir.eval_only_ffs,
-        "eval_only_ff",
-        &mut tasks,
-        &mut task_bindings,
-    );
-    collect_ff_compile_tasks_from(
-        sir,
-        &sir.sir.apply_ffs,
-        "apply_ff",
-        &mut tasks,
-        &mut task_bindings,
-    );
-    collect_comb_apply_compile_tasks(sir, &mut tasks, &mut task_bindings);
+    let mut classes = NativeUnitClasses::default();
+    // Edge tasks of every label share one index: a task is reused for any
+    // edge trigger with equal units.
+    let mut ff_tasks = HashMap::default();
+    for (ff_map, label) in [
+        (&sir.sir.eval_apply_ffs, "eval_apply_ff"),
+        (&sir.sir.eval_only_ffs, "eval_only_ff"),
+        (&sir.sir.apply_ffs, "apply_ff"),
+    ] {
+        collect_ff_compile_tasks_from(
+            sir,
+            ff_map,
+            label,
+            &mut classes,
+            &mut ff_tasks,
+            &mut tasks,
+            &mut task_bindings,
+        );
+    }
+    collect_comb_apply_compile_tasks(sir, &mut classes, &mut tasks, &mut task_bindings);
     (tasks, task_bindings)
 }
 
 fn collect_comb_apply_compile_tasks<'a>(
     sir: &'a LaidOutProgram,
+    classes: &mut NativeUnitClasses<'a>,
     tasks: &mut Vec<NativeCompileTask<'a>>,
     task_bindings: &mut NativeTaskBindings,
 ) {
     const LABEL: &str = "eval_comb_apply_ff";
-    for (addr, ff_units) in &sir.sir.eval_apply_ffs {
-        let fused_units = sir.sir.eval_comb_apply_ffs.get(addr);
-        let (unit_refs, first_ff_unit) = if let Some(fused_units) = fused_units {
-            (fused_units.iter().collect::<Vec<_>>(), None)
-        } else {
-            let mut unit_refs = sir.sir.eval_comb.iter().collect::<Vec<_>>();
-            let first_ff_unit =
-                (!unit_refs.is_empty() && !ff_units.is_empty()).then_some(unit_refs.len());
-            unit_refs.extend(ff_units);
-            (unit_refs, first_ff_unit)
+    let mut comb_tasks = HashMap::<(Option<usize>, Vec<usize>), usize>::default();
+    for addr in sir.sir.eval_apply_ffs.keys() {
+        // A shared tick calls the comb and FF functions compiled anyway.
+        let (unit_refs, first_ff_unit) = match sir.sir.comb_apply(addr) {
+            Some(celox_sir::CombApply::Fused(fused_units)) => {
+                (fused_units.iter().collect::<Vec<_>>(), None)
+            }
+            Some(celox_sir::CombApply::Merged { comb, ff }) => {
+                let mut unit_refs = comb.iter().collect::<Vec<_>>();
+                let first_ff_unit =
+                    (!unit_refs.is_empty() && !ff.is_empty()).then_some(unit_refs.len());
+                unit_refs.extend(ff);
+                (unit_refs, first_ff_unit)
+            }
+            Some(celox_sir::CombApply::Shared) | None => continue,
         };
         let binding = format!("{LABEL} trigger={}", sir.get_path(addr));
-        let index = if let Some(index) = tasks.iter().position(|task| {
-            task.label == LABEL && task.first_ff_unit == first_ff_unit && task.units == unit_refs
-        }) {
+        let key = (first_ff_unit, classes.classes(&unit_refs));
+        let index = if let Some(&index) = comb_tasks.get(&key) {
             tasks[index].bindings.push(binding);
             index
         } else {
@@ -1343,9 +1450,11 @@ fn collect_comb_apply_compile_tasks<'a>(
             tasks.push(NativeCompileTask {
                 units: unit_refs,
                 label: LABEL,
+                merge_kind: NativeMergeKind::FusedCombAndFf,
                 first_ff_unit,
                 bindings: vec![binding],
             });
+            comb_tasks.insert(key, index);
             index
         };
         task_bindings.insert((LABEL, *addr), index);
@@ -1359,13 +1468,16 @@ fn collect_ff_compile_tasks_from<'a>(
         Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
     >,
     label: &'static str,
+    classes: &mut NativeUnitClasses<'a>,
+    ff_tasks: &mut HashMap<Vec<usize>, usize>,
     tasks: &mut Vec<NativeCompileTask<'a>>,
     task_bindings: &mut NativeTaskBindings,
 ) {
     for (addr, units) in ff_map {
         let unit_refs = units.iter().collect::<Vec<_>>();
         let binding = format!("{label} trigger={}", sir.get_path(addr));
-        let index = if let Some(index) = tasks.iter().position(|task| task.units == unit_refs) {
+        let key = classes.classes(&unit_refs);
+        let index = if let Some(&index) = ff_tasks.get(&key) {
             tasks[index].bindings.push(binding);
             index
         } else {
@@ -1373,9 +1485,11 @@ fn collect_ff_compile_tasks_from<'a>(
             tasks.push(NativeCompileTask {
                 units: unit_refs,
                 label,
+                merge_kind: NativeMergeKind::Complete,
                 first_ff_unit: None,
                 bindings: vec![binding],
             });
+            ff_tasks.insert(key, index);
             index
         };
         task_bindings.insert((label, *addr), index);
@@ -2031,6 +2145,7 @@ fn compile_program(
                 layout,
                 options.four_state,
                 task.label,
+                task.merge_kind,
                 task.first_ff_unit,
                 &options.x86_options,
                 capture_trace,
@@ -2081,6 +2196,7 @@ fn compile_program(
                                 layout,
                                 four_state,
                                 task.label,
+                                task.merge_kind,
                                 task.first_ff_unit,
                                 x86_options,
                                 capture_trace,
@@ -2140,6 +2256,7 @@ fn compile_program(
                 layout,
                 options.four_state,
                 &format!("eval_comb_unit[{index}]"),
+                NativeMergeKind::Complete,
                 None,
                 &options.x86_options,
                 false,
@@ -2162,6 +2279,7 @@ fn compile_program(
                 layout,
                 options.four_state,
                 &format!("process[{index}]"),
+                NativeMergeKind::Complete,
                 None,
                 &options.x86_options,
                 false,
@@ -2297,12 +2415,10 @@ fn compile_program(
 
             let task_id = task_bindings[&(label, *addr)];
             let func_offset = compiled_ff_cache[&task_id];
-            let comb_apply_offset = comb_apply_label
-                .map(|label| {
-                    let task_id = task_bindings[&(label, *addr)];
-                    compiled_ff_cache[&task_id]
-                })
-                .unwrap_or(func_offset);
+            let comb_apply_offset = comb_apply_label.and_then(|label| {
+                let task_id = task_bindings.get(&(label, *addr))?;
+                Some(compiled_ff_cache[task_id])
+            });
 
             let (id, is_new_id) = if let Some(&id) = addr_to_id.get(&canonical) {
                 (id, false)
@@ -2446,6 +2562,7 @@ fn compile_program(
                 active_commits: sir.runtime().runtime_schema.active_commits.clone(),
                 time_slots: sir.runtime().runtime_schema.time_slots.clone(),
                 scheduler: sir.runtime().runtime_schema.scheduler.clone(),
+                derived_edges: sir.runtime().runtime_schema.derived_edges.clone(),
             },
             layout: layout.clone(),
             native_memory_size,
@@ -2747,6 +2864,21 @@ impl NativeBackend {
                     value,
                     mask,
                     written_mask,
+                } if signal.array_layout.is_some() => {
+                    // An unpacked array is written element by element.
+                    let runs = InitialStateData::packed_write_runs(
+                        value,
+                        mask,
+                        written_mask,
+                        signal.width,
+                        self.compiled.options.four_state && signal.is_4state,
+                    );
+                    self.apply_initial_memory_writes(signal, &runs);
+                }
+                InitialStateData::Packed {
+                    value,
+                    mask,
+                    written_mask,
                 } => {
                     let width_mask = if signal.width == 0 {
                         BigUint::default()
@@ -2914,16 +3046,7 @@ impl NativeBackend {
         };
 
         let plane_offset = signal.offset + usize::from(mask_plane) * array.plane_size;
-        let element_bytes = get_byte_size(array.element_width);
-        let element_mask = (BigUint::from(1u8) << array.element_width) - BigUint::from(1u8);
-        let mut value = BigUint::from(0u8);
-        for element in 0..array.element_count {
-            let start = plane_offset + element * array.element_stride;
-            let element_value =
-                BigUint::from_bytes_le(&bytes[start..start + element_bytes]) & &element_mask;
-            value |= element_value << (element * array.element_width);
-        }
-        value
+        array.gather(&bytes[plane_offset..plane_offset + array.element_extent()])
     }
 
     fn write_signal_plane(&mut self, signal: SignalRef, mask_plane: bool, value: &BigUint) {
@@ -2942,17 +3065,11 @@ impl NativeBackend {
         };
 
         let plane_offset = signal.offset + usize::from(mask_plane) * array.plane_size;
-        let element_bytes = get_byte_size(array.element_width);
-        let element_mask = (BigUint::from(1u8) << array.element_width) - BigUint::from(1u8);
-        let bytes = self.mem_bytes_mut();
-        bytes[plane_offset..plane_offset + array.element_count * array.element_stride].fill(0);
-        for element in 0..array.element_count {
-            let element_value = (value >> (element * array.element_width)) & &element_mask;
-            let value_bytes = element_value.to_bytes_le();
-            let copy_len = value_bytes.len().min(element_bytes);
-            let start = plane_offset + element * array.element_stride;
-            bytes[start..start + copy_len].copy_from_slice(&value_bytes[..copy_len]);
-        }
+        // A handle on part of an array keeps the whole array's plane size,
+        // which locates the mask plane: only its own elements are written.
+        let plane = &mut self.mem_bytes_mut()[plane_offset..plane_offset + array.element_extent()];
+        plane.fill(0);
+        array.scatter(plane, value);
     }
 
     /// Run one lane-partitioned kernel on the lane workers.
@@ -3141,6 +3258,10 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn eval_comb_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
+        let Some(comb_apply_func) = event.comb_apply_func else {
+            self.eval_comb()?;
+            return self.eval_apply_ff_at(event);
+        };
         // Partitioned phases compete with the fused sequential function,
         // which shares state between its combinational and FF parts.
         if self.lane_fused_kernel(event) {
@@ -3159,7 +3280,7 @@ impl super::super::SimBackend for NativeBackend {
                 super::super::lanes::LaneKernelSlot::Fused(event.id),
                 selection,
                 |backend| backend.run_lane_kernel(kernels.lanes, kernel),
-                |backend| backend.call_func_timed(event.comb_apply_func),
+                |backend| backend.call_func_timed(comb_apply_func),
             );
         }
         if self.lane_comb_kernel() || self.lane_event_kernel(event) {
@@ -3173,10 +3294,10 @@ impl super::super::SimBackend for NativeBackend {
                     backend.eval_comb()?;
                     backend.eval_apply_ff_at(event)
                 },
-                |backend| backend.call_func_timed(event.comb_apply_func),
+                |backend| backend.call_func_timed(comb_apply_func),
             );
         }
-        self.call_func_timed(event.comb_apply_func)
+        self.call_func_timed(comb_apply_func)
     }
 
     fn eval_comb_apply_ff_many_at(
@@ -3188,14 +3309,22 @@ impl super::super::SimBackend for NativeBackend {
             .lane_selectors
             .decided(super::super::lanes::LaneKernelSlot::Fused(event.id))
             == Some(celox_runtime::parallel::KernelChoice::Sequential);
-        if (self.lane_comb_kernel() || self.lane_event_kernel(event)) && !fused_sequential {
-            if count == 0 {
-                return (0, Ok(()));
+        let comb_apply_func = match event.comb_apply_func {
+            Some(func)
+                if !(self.lane_comb_kernel() || self.lane_event_kernel(event))
+                    || fused_sequential =>
+            {
+                func
             }
-            return (1, self.eval_comb_apply_ff_at(event));
-        }
+            _ => {
+                if count == 0 {
+                    return (0, Ok(()));
+                }
+                return (1, self.eval_comb_apply_ff_at(event));
+            }
+        };
         if self.compiled.options.native_tick_loop {
-            let (executed, result) = self.call_func_many_timed(event.comb_apply_func, count);
+            let (executed, result) = self.call_func_many_timed(comb_apply_func, count);
             if fused_sequential {
                 self.lane_selectors.advance(
                     super::super::lanes::LaneKernelSlot::Fused(event.id),
@@ -3210,7 +3339,7 @@ impl super::super::SimBackend for NativeBackend {
                 self.lane_selectors
                     .advance(super::super::lanes::LaneKernelSlot::Fused(event.id), 1);
             }
-            (1, self.call_func_timed(event.comb_apply_func))
+            (1, self.call_func_timed(comb_apply_func))
         }
     }
 
@@ -3426,6 +3555,13 @@ impl super::super::SimBackend for NativeBackend {
         }
     }
 
+    fn comb_capture_event_enabled(&self) -> Vec<bool> {
+        self.comb_capture_enabled
+            .iter()
+            .map(|&enabled| enabled != 0)
+            .collect()
+    }
+
     fn stable_region_size(&self) -> usize {
         self.compiled.layout.total_size
     }
@@ -3472,5 +3608,86 @@ impl super::super::SimBackend for NativeBackend {
         let offset = self.compiled.layout.triggered_bits_offset;
         let size = self.compiled.layout.triggered_bits_total_size;
         celox_runtime::backend::triggered_bits_from_bytes(&self.mem_bytes()[offset..offset + size])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{
+        BasicBlock, BlockId, RegisterId, RegisterType, SIRInstruction, SIRTerminator, SIRValue,
+    };
+
+    /// A unit of `blocks` blocks loading `value`, with its maps filled in
+    /// forward or reverse order.
+    fn unit(blocks: usize, value: u8, width: usize, reverse: bool) -> NativeUnit {
+        let mut ids = (0..blocks).collect::<Vec<_>>();
+        if reverse {
+            ids.reverse();
+        }
+        NativeUnit {
+            entry_block_id: BlockId(0),
+            blocks: ids
+                .iter()
+                .map(|&id| {
+                    let terminator = if id + 1 < blocks {
+                        SIRTerminator::Jump(BlockId(id + 1), vec![])
+                    } else {
+                        SIRTerminator::Return
+                    };
+                    let block = BasicBlock {
+                        id: BlockId(id),
+                        params: vec![],
+                        instructions: vec![SIRInstruction::Imm(
+                            RegisterId(id),
+                            SIRValue::new(value),
+                        )],
+                        terminator,
+                    };
+                    (BlockId(id), block)
+                })
+                .collect(),
+            register_map: ids
+                .iter()
+                .map(|&id| (RegisterId(id), RegisterType::Logic { width }))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn unit_classes_match_deep_comparison() {
+        let mut pool = Vec::new();
+        for blocks in 1..4 {
+            for value in 0..2 {
+                for width in [1, 8] {
+                    for reverse in [false, true] {
+                        pool.push(unit(blocks, value, width, reverse));
+                    }
+                }
+            }
+        }
+        let units = pool.iter().collect::<Vec<_>>();
+        // Lists of up to two units, repeating the same references as the
+        // shared prefix of comb-apply tasks does.
+        let lists = std::iter::once(Vec::new())
+            .chain(units.iter().map(|unit| vec![*unit]))
+            .chain(
+                units
+                    .iter()
+                    .flat_map(|a| units.iter().map(move |b| vec![*a, *b])),
+            )
+            .collect::<Vec<_>>();
+        let mut classes = NativeUnitClasses::default();
+        let keys = lists
+            .iter()
+            .map(|list| classes.classes(list))
+            .collect::<Vec<_>>();
+        for (a, key_a) in lists.iter().zip(&keys) {
+            for (b, key_b) in lists.iter().zip(&keys) {
+                assert_eq!(a == b, key_a == key_b, "{a:?} {b:?}");
+            }
+        }
+        // The pool has equal units with differently ordered maps.
+        assert!(classes.count < pool.len());
     }
 }

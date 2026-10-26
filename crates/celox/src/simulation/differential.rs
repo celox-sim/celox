@@ -454,7 +454,8 @@ mod tests {
 
     /// A compiled kernel's `$finish` leaves the state the reference leaves:
     /// a kernel due in the same slot that did not run yet is still ready,
-    /// and a state file taken afterwards is the same.
+    /// combinational logic holds the last slot's settle, and a state file
+    /// taken afterwards is the same.
     #[test]
     fn compiled_slots_end_at_a_kernel_finish_as_the_reference_does() {
         let clock = "always #5 clk = ~clk;";
@@ -462,12 +463,13 @@ mod tests {
             for order in [[finish, clock], [clock, finish]] {
                 let source = format!(
                     "`timescale 1ns/1ns
-                    module Top(output logic [7:0] count);
+                    module Top(output logic [7:0] count, output logic [7:0] twice);
                         logic clk = 1'b0;
                         {}
                         {}
                         initial count = 8'd0;
                         always_ff @(posedge clk) count <= count + 8'd1;
+                        assign twice = count * 8'd2;
                     endmodule",
                     order[0], order[1]
                 );
@@ -800,10 +802,12 @@ mod tests {
                 &expected,
                 &format!("{mode:?}"),
             );
+            #[cfg(feature = "cranelift")]
             let cranelift = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
                 .scheduler_mode(mode)
                 .build_cranelift()
                 .unwrap();
+            #[cfg(feature = "cranelift")]
             check(cranelift, runs, &expected, &format!("cranelift {mode:?}"));
         }
     }
@@ -962,17 +966,18 @@ mod tests {
 
     /// The next edge of a host clock that overflows the simulation time
     /// fails the run as the reference's, after the clocks before it in the
-    /// slot re-armed.
+    /// slot re-armed and the slot settled.
     #[test]
     fn host_clock_overflow_fails_as_the_reference() {
         let source = r#"
             `timescale 1ns/1ns
-            module Top(input logic a, input logic b, output logic [7:0] n);
+            module Top(input logic a, input logic b, output logic [7:0] n, output logic [7:0] y);
                 logic [7:0] ra = 8'd0;
                 logic [7:0] rb = 8'd0;
                 initial begin n = 8'd0; forever @(posedge b) n = n + 8'd1; end
                 always_ff @(posedge a) ra <= ra + n;
                 always_ff @(posedge b) rb <= rb + ra;
+                assign y = ra ^ rb;
             endmodule
         "#;
         let run = |mode: SchedulerMode| {
@@ -1059,6 +1064,306 @@ mod tests {
                 (400, &[]),
             ],
         );
+    }
+
+    /// Settles wait for their readers, which see what they see in the
+    /// reference: a domain whose next state combinational logic computes,
+    /// a kernel that samples a combinational output after a delay, one that
+    /// samples it at an edge, in the pass after the clock's kernel changed
+    /// it, and the host between runs.
+    #[test]
+    fn deferred_settles_reach_their_readers() {
+        for reader in [
+            "",
+            "always #3 seen = y;",
+            "initial forever @(negedge clk) seen = y + stim;",
+        ] {
+            let source = format!(
+                "`timescale 1ns/1ns
+                module Top(input logic [7:0] k, output logic [7:0] y);
+                    logic clk = 1'b0;
+                    logic [7:0] stim = 8'd0;
+                    logic [7:0] r = 8'd0;
+                    logic [7:0] q = 8'd0;
+                    logic [7:0] seen = 8'd0;
+                    logic [7:0] t = 8'd0;
+                    logic [7:0] nxt;
+                    always #5 begin t = t + 8'd1; clk = ~clk; end
+                    always #7 stim = stim + 8'd1;
+                    {reader}
+                    always_comb nxt = r + stim + k;
+                    always_ff @(posedge clk) r <= nxt;
+                    always_ff @(posedge clk) q <= q + stim;
+                    assign y = r ^ q ^ seen ^ t;
+                endmodule"
+            );
+            host_driven_agrees(
+                &source,
+                &[
+                    (100, &[Host::Set("k", 1)]),
+                    (200, &[Host::Set("k", 5)]),
+                    (300, &[]),
+                ],
+            );
+        }
+    }
+
+    /// Combinational logic that keeps state between settles (a latch, the
+    /// snapshots an `always @*` waits on) settles where the reference
+    /// does: every activation in between counts, though no reader observes
+    /// it before the run ends.
+    #[test]
+    fn stateful_combinational_logic_settles_every_activation() {
+        let opened = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [7:0] n);
+                logic [7:0] d = 8'd0;
+                logic en = 1'b0;
+                logic [7:0] q = 8'd0;
+                initial begin
+                    #5 d = 8'd7; en = 1'b1;
+                    #5 en = 1'b0;
+                    #5 d = 8'd9;
+                end
+                always_latch if (en) q = d;
+                assign n = q;
+            endmodule
+        "#;
+        agrees_with_the_reference(opened, 30);
+        for process in [
+            "always_latch if (g) l = d;",
+            "always @* if (g) l = d;",
+            "always @* l = d + 8'd1;",
+        ] {
+            let source = format!(
+                "`timescale 1ns/1ns
+                module Top(output logic [7:0] n);
+                    logic clk = 1'b0;
+                    logic [7:0] d = 8'd0;
+                    logic g = 1'b1;
+                    logic [7:0] l;
+                    always #5 begin clk = ~clk; d = d + 8'd1; end
+                    always_ff @(posedge clk) g <= ~g;
+                    {process}
+                    assign n = l;
+                endmodule"
+            );
+            agrees_with_the_reference(&source, 30);
+            agrees_with_the_reference(&source, 300);
+        }
+    }
+
+    /// Clocks derived from the clock a kernel drives run in compiled slots:
+    /// gated by a kernel's enable, gated by an enable the clock's own domain
+    /// raises, inverted, moved back by the commit after the clock's edge
+    /// moved it, divided by a register, a divided clock gated by a kernel's
+    /// enable that changes with the clock's edge (it runs after the commit),
+    /// and divided twice.
+    #[test]
+    fn derived_clocks_run_in_compiled_slots() {
+        for derived in [
+            "assign dclk = clk & en;",
+            "assign dclk = clk & ren;",
+            "assign dclk = ~clk;",
+            "logic tog = 1'b1; always_ff @(posedge clk) tog <= ~tog; assign dclk = clk ^ tog;",
+            "always_ff @(posedge clk) dclk <= ~dclk;",
+            "logic div = 1'b0; always_ff @(posedge clk) div <= ~div; assign dclk = div & en;",
+            "logic half = 1'b0; always_ff @(posedge clk) half <= ~half; \
+             always_ff @(posedge half) dclk <= ~dclk;",
+        ] {
+            let source = format!(
+                "`timescale 1ns/1ns
+                module Top(output logic [7:0] y);
+                    logic clk = 1'b0;
+                    logic en = 1'b0;
+                    logic ren = 1'b0;
+                    logic dclk;
+                    logic [7:0] a = 8'd0;
+                    logic [7:0] b = 8'd0;
+                    always #5 clk = ~clk;
+                    initial forever begin #17 en = ~en; end
+                    always_ff @(posedge clk) begin a <= a + 8'd1; ren <= a[1]; end
+                    {derived}
+                    always_ff @(posedge dclk) b <= b + a;
+                    assign y = a ^ b;
+                endmodule"
+            );
+            host_driven_agrees(&source, &[(100, &[]), (333, &[])]);
+        }
+    }
+
+    /// A host clock gated by a kernel's enable, or divided, in a design
+    /// with and without kernels.
+    #[test]
+    fn derived_host_clocks_run_in_compiled_slots() {
+        for (kernel, derived) in [
+            (
+                "initial forever begin #17 en = ~en; end",
+                "assign dclk = clk & en;",
+            ),
+            ("", "always_ff @(posedge clk) dclk <= ~dclk;"),
+            ("", "assign dclk = clk & k[0];"),
+        ] {
+            let source = format!(
+                "`timescale 1ns/1ns
+                module Top(input logic clk, input logic [7:0] k, output logic [7:0] y);
+                    logic en = 1'b0;
+                    logic dclk;
+                    logic [7:0] a = 8'd0;
+                    logic [7:0] b = 8'd0;
+                    {kernel}
+                    always_ff @(posedge clk) a <= a + k;
+                    {derived}
+                    always_ff @(posedge dclk) b <= b + a;
+                    assign y = a ^ b;
+                endmodule"
+            );
+            host_driven_agrees(
+                &source,
+                &[
+                    (100, &[Host::Set("k", 3), Host::Clock("clk", 10, 5)]),
+                    (200, &[Host::Set("k", 2)]),
+                    (300, &[]),
+                ],
+            );
+        }
+    }
+
+    /// A host clock input the host set once and no clock drives keeps its
+    /// level through compiled slots: a gate on it judges from that level,
+    /// not from an unrecorded one.
+    #[test]
+    fn derived_clocks_of_an_unclocked_host_input_keep_its_level() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(input logic clk, output logic [7:0] y);
+                logic en = 1'b0;
+                logic dclk;
+                logic [7:0] a = 8'd0;
+                logic [7:0] b = 8'd0;
+                initial forever #17 en = ~en;
+                assign dclk = clk & en;
+                always_ff @(posedge clk) a <= a + 8'd1;
+                always_ff @(posedge dclk) b <= b + 8'd1;
+                assign y = a ^ b;
+            endmodule
+        "#;
+        host_driven_agrees(source, &[(100, &[Host::Set("clk", 1)]), (200, &[])]);
+    }
+
+    /// A gate a waiting kernel writes changes after the pass that judged
+    /// its clock: the reference judges it again only after the commit, so
+    /// the design keeps the reference loop.
+    #[test]
+    fn gates_written_by_waiting_kernels_keep_the_reference_loop() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [7:0] y);
+                logic clk = 1'b0;
+                logic en = 1'b0;
+                logic gclk;
+                logic [7:0] a = 8'd0;
+                logic [7:0] b = 8'd0;
+                always #5 clk = ~clk;
+                initial forever @(posedge clk) en = ~en;
+                assign gclk = clk & en;
+                always_ff @(posedge clk) a <= a + 8'd1;
+                always_ff @(posedge gclk) b <= a;
+                assign y = a ^ b;
+            endmodule
+        "#;
+        let mut reference = build_in(source, SchedulerMode::Reference);
+        reference.run_until(200).unwrap();
+        let expected = reference.save_state().unwrap();
+        for mode in MODES {
+            let mut sim = build_in(source, mode);
+            sim.run_until(200).unwrap();
+            assert_eq!(sim.save_state().unwrap(), expected, "{mode:?}");
+        }
+        let gate = crate::KernelSchedule::Reference(
+            "a waiting kernel writes what combinational logic of a gated clock reads".into(),
+        );
+        let kernels = build_in(source, SchedulerMode::Compiled)
+            .scheduler_stats()
+            .kernels;
+        assert!(kernels.iter().all(|kernel| *kernel == gate), "{kernels:?}");
+    }
+
+    /// A domain whose next state combinational logic computes runs its
+    /// fused units with a settle pending: they compute what it reads.
+    #[test]
+    fn fused_domains_compute_what_they_read() {
+        let source = r#"
+            module Top (
+                clk: input clock,
+                k  : input logic<8>,
+                y  : output logic<8>,
+            ) {
+                var r  : logic<8>;
+                var nxt: logic<8>;
+                always_comb {
+                    nxt = r + k;
+                }
+                always_ff (clk) {
+                    r = nxt;
+                }
+                assign y = r ^ k;
+            }
+        "#;
+        let run = |mode: SchedulerMode| {
+            let mut sim = Simulation::builder(source, "Top")
+                .scheduler_mode(mode)
+                .build()
+                .unwrap();
+            sim.add_clock("clk", 10, 5);
+            let k = sim.signal("k");
+            let mut states = Vec::new();
+            for (end, value) in [(100, 1u8), (200, 5), (300, 9)] {
+                sim.modify(|io| io.set(k, value)).unwrap();
+                sim.run_until(end).unwrap();
+                states.push(sim.save_state().unwrap());
+            }
+            (states, sim.scheduler_stats().compiled_slots)
+        };
+        let (expected, _) = run(SchedulerMode::Reference);
+        for mode in MODES {
+            let (states, compiled) = run(mode);
+            assert_eq!(states, expected, "{mode:?}");
+            assert!(compiled > 0, "{mode:?}");
+        }
+    }
+
+    /// A `$fatal` in a domain ends the run with combinational logic as the
+    /// slot's settle before the domain left it.
+    #[test]
+    fn compiled_slots_fail_in_a_domain_as_the_reference() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [7:0] y);
+                logic clk = 1'b0;
+                logic [7:0] r = 8'd0;
+                always #5 clk = ~clk;
+                always_ff @(posedge clk) begin
+                    r <= r + 8'd1;
+                    if (r == 8'd6) $fatal(1, "stop");
+                end
+                assign y = r * 8'd3;
+            endmodule
+        "#;
+        let run = |mode: SchedulerMode| {
+            let mut sim = build_in(source, mode);
+            let result = sim.run_until(1000).map_err(|error| error.to_string());
+            (result, sim.time(), sim.save_state().unwrap(), sim)
+        };
+        let (result, time, state, _) = run(SchedulerMode::Reference);
+        assert!(result.is_err(), "{result:?}");
+        for mode in MODES {
+            let (mode_result, mode_time, mode_state, sim) = run(mode);
+            assert_eq!(mode_result, result, "{mode:?}");
+            assert_eq!(mode_time, time, "{mode:?}");
+            assert_eq!(mode_state, state, "{mode:?}");
+            assert!(sim.scheduler_stats().compiled_slots > 0, "{mode:?}");
+        }
     }
 
     /// A design without process kernels runs its host clocks in compiled
@@ -1158,16 +1463,18 @@ mod tests {
 
     /// A compiled run of several slots that fails in a later one: the
     /// shadow catches up to that slot and fails the same way, so every mode
-    /// reports the reference's error and leaves its state.
+    /// reports the reference's error and leaves its state, combinational
+    /// outputs as the last slot settled them.
     #[test]
     fn compiled_runs_that_fail_after_several_slots_agree() {
         let source = r#"
             `timescale 1fs/1fs
-            module Top(output logic [7:0] x);
+            module Top(output logic [7:0] x, output logic [7:0] y);
                 logic clk = 1'b0;
                 logic [7:0] r = 8'd0;
                 always #5 clk = ~clk;
                 always_ff @(posedge clk) r <= r + 8'd1;
+                assign y = r + x;
                 initial begin
                     x = 8'd0;
                     #30 x = 8'd1;

@@ -105,3 +105,66 @@
   (modify (set a 10))
   (assert_eq y 15)
   (assert_eq z 5))
+
+; In two-state mode, `always @*` and a sensitivity list run once at time
+; zero, after the initial blocks, as Verilator settles them: C906's memory
+; enable would otherwise start as a real 0, a write enable (#2021). IEEE
+; 1800-2023 9.2.2.2 has them wait for a change, which four-state mode keeps.
+(case two_state_sensitivity_lists_run_at_time_zero
+  (tags two_state_time_zero_settle)
+  (source "time_zero.sv" #"
+        module Top;
+            localparam logic [1:0] READ = 2'd1;
+            logic [1:0] cur_state;
+            logic wvalid, wready;
+            logic [15:0] wstrb;
+            logic cen;
+            logic [15:0] wen;
+            logic [3:0] st = 4'd2;
+            logic hit;
+            always @(cur_state or wvalid or wready or wstrb[15:0]) begin
+                if (cur_state == READ) begin
+                    cen = 1'b0;
+                    wen = 16'hffff;
+                end else if (wvalid && wready) begin
+                    cen = 1'b0;
+                    wen = ~wstrb;
+                end else begin
+                    cen = 1'b1;
+                    wen = 16'hffff;
+                end
+            end
+            always @* hit = (st == 4'd2);
+            initial begin
+                #1 $display("%b %h %b", cen, wen, hit);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "1 ffff 1\n"))
+
+; Two-state mode also runs a sensitivity list that does not name exactly the
+; reads of its statement once at time zero, after the initial blocks, and then
+; waits at it, as Verilator settles it (#2026): `y` lists a variable it does
+; not read, and `z` reads `b` without listing it.
+(case two_state_other_sensitivity_lists_run_at_time_zero
+  (tags two_state_time_zero_settle)
+  (source "time_zero_lists.sv" #"
+        module Top;
+            logic [3:0] a, b;
+            logic [3:0] y, z;
+            always @(a or b) y = a + 4'd1;
+            always @(a) z = a + b + 4'd2;
+            initial begin
+                b = 4'd5;
+                #1 $display("%0d %0d", y, z);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "1 7\n"))
+

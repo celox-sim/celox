@@ -70,6 +70,143 @@
   (assert_eq x 7)
   (assert_eq r 2))
 
+; Plain always processes may share a variable, such as a loop index; the last
+; write determines its value (IEEE 1800-2023 6.5, 9.2.2.4). A process reads its
+; own preceding blocking writes. Which process of one edge runs first is not
+; defined, so the assertions avoid reads that depend on it.
+(case edge_processes_share_a_blocking_loop_variable
+  (source "shared_index.sv" #"
+                module Top(input logic clk, input logic en, input logic [7:0] x, input logic [7:0] y,
+                           output logic [7:0] a, output logic [7:0] b,
+                           output integer last_a, output integer last_b, output integer prev,
+                           output integer i_q);
+                    integer i;
+                    logic [7:0] ra = 8'd0;
+                    logic [7:0] rb = 8'd0;
+                    always @(posedge clk) begin
+                        for (i = 0; i < 8; i = i + 1) ra[i] <= x[7 - i];
+                        last_a <= i;
+                    end
+                    always @(posedge clk) begin
+                        prev <= i;
+                        if (en) begin
+                            for (i = 0; i < 4; i = i + 1) rb[i] <= y[i];
+                            last_b <= i;
+                        end
+                    end
+                    assign a = ra;
+                    assign b = rb;
+                    assign i_q = i;
+                endmodule
+            "#)
+  (top Top)
+  (modify (set en 0) (set x 0x01) (set y 0xff))
+  (tick clk)
+  (assert_eq a 0x80)
+  (assert_eq b 0)
+  (assert_eq last_a 8)
+  (assert_eq i_q 8)
+  (tick clk)
+  (assert_eq prev 8 "a read before the process writes sees the earlier write")
+  (modify (set en 1) (set x 0x80))
+  (tick clk)
+  (assert_eq a 0x01)
+  (assert_eq b 0x0f)
+  (assert_eq last_a 8)
+  (assert_eq last_b 4 "a read after the loop sees the process's own write")
+  (assert_eq prev 8)
+  (modify (set en 0) (set y 0x05))
+  (tick clk)
+  (assert_eq i_q 8 "the write stays when the other process does not write")
+  (assert_eq b 0x0f)
+  (tick clk)
+  (assert_eq prev 8)
+  (assert_eq i_q 8))
+
+; Processes of different clocks share a variable. A write at one edge is
+; visible to a process of a later edge, and survives a coincident edge whose
+; process does not write the variable.
+(case edge_processes_of_two_clocks_share_a_blocking_variable
+  (source "shared_clocks.sv" #"
+                module Top(input logic ca, input logic cb, input logic en,
+                           output integer qa, output integer qb, output integer i_q);
+                    integer i;
+                    integer sa = 0;
+                    integer sb = 0;
+                    always @(posedge ca) begin
+                        for (i = 0; i < 3; i = i + 1) sa = sa + i;
+                        qa <= i + sa;
+                    end
+                    always @(posedge cb) begin
+                        qb <= i;
+                        if (en) for (i = 0; i < 5; i = i + 1) sb = sb + i;
+                    end
+                    assign i_q = i;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 0)
+  (modify (set ca 0) (set cb 0) (set en 1))
+  (modify (set ca 1))
+  (run_until 1)
+  (assert_eq qa 6)
+  (assert_eq i_q 3)
+  (modify (set ca 0) (set cb 1))
+  (run_until 2)
+  (assert_eq qb 3 "a later edge sees the other process's write")
+  (assert_eq i_q 5)
+  (modify (set cb 0) (set en 0))
+  (modify (set ca 1) (set cb 1))
+  (run_until 3)
+  (assert_eq qa 9)
+  (assert_eq i_q 3 "a coincident process that does not write keeps the write")
+  (modify (set ca 0) (set cb 0))
+  (modify (set cb 1))
+  (run_until 4)
+  (assert_eq qb 3)
+  (assert_eq i_q 3))
+
+; The loop index of two asynchronously reset processes (from the C906
+; aq_biu_req_arbiter), which select bits of separate registers.
+(case reset_processes_share_a_loop_index
+  (source "shared_reset_index.sv" #"
+                module Top(input logic clk, input logic rst_b, input logic we,
+                           input logic [2:0] ptr, input logic sel, input logic hit,
+                           output logic [7:0] fifo, output logic [7:0] apb);
+                    reg [7:0] wsel_fifo;
+                    reg [7:0] apbif_sel;
+                    integer i;
+                    always @(posedge clk or negedge rst_b)
+                        if (!rst_b)
+                            for (i = 0; i < 8; i = i + 1) wsel_fifo[i] <= 1'b0;
+                        else
+                            for (i = 0; i < 8; i = i + 1)
+                                if (we & ptr == i) wsel_fifo[i] <= sel;
+                                else wsel_fifo[i] <= wsel_fifo[i];
+                    always @(posedge clk or negedge rst_b)
+                        if (!rst_b)
+                            for (i = 0; i < 8; i = i + 1) apbif_sel[i] <= 1'b0;
+                        else
+                            for (i = 0; i < 8; i = i + 1)
+                                if (we & ptr == i) apbif_sel[i] <= hit;
+                                else apbif_sel[i] <= apbif_sel[i];
+                    assign fifo = wsel_fifo;
+                    assign apb = apbif_sel;
+                endmodule
+            "#)
+  (top Top)
+  (modify (set rst_b 1) (set we 0) (set ptr 0) (set sel 0) (set hit 0))
+  (modify (set rst_b 0))
+  (modify (set rst_b 1))
+  (assert_eq fifo 0)
+  (assert_eq apb 0)
+  (for (write position s h f a)
+    (list (1 3 1 0 0x08 0x00) (1 5 0 1 0x08 0x20) (0 1 1 1 0x08 0x20) (1 3 0 1 0x00 0x28))
+    (modify (set we write) (set ptr position) (set sel s) (set hit h))
+    (tick clk)
+    (assert_eq fifo f)
+    (assert_eq apb a)))
+
 (case constant_functions_size_parameters_and_ports
   (source "constant_functions.sv" #"
                 module Child #(parameter int unsigned ENTRIES = 2,
@@ -142,6 +279,65 @@
     (modify (set index i))
     (assert_eq y (+ (* i 3) 1))
     (assert_eq z 0x5a)))
+
+; An initial block whose loops have no static trip count (a condition on
+; another variable than the one the step assigns, `while`, `do`-`while`) runs
+; as a process instead of being unrolled into initial state (#1992).
+(case initial_loops_without_a_static_trip_count_run_as_a_process
+  (source "initial_loops.sv" #"
+                module Ram;
+                    logic [7:0] mem [16];
+                endmodule
+                module Top;
+                    Ram r0(), r1();
+                    logic [31:0] src [32];
+                    logic [7:0] w [8];
+                    integer i, j, n;
+                    initial begin
+                        for (n = 0; n < 32; n = n + 1) src[n] = 32'h01010101 * n;
+                        i = 0;
+                        for (j = 0; i < 16; i = j / 2) begin
+                            r0.mem[i] = src[j][15:8];
+                            j = j + 1;
+                            r1.mem[i] = src[j][31:24];
+                            j = j + 1;
+                        end
+                        n = 0;
+                        while (n < 8) begin
+                            w[n] = 8'(n * 5);
+                            n = n + 1;
+                        end
+                        do n = n - 3; while (n > 0);
+                        #1 $display("%0d %0d %h %h %h %h %h %0d", i, j, r0.mem[0], r0.mem[15],
+                                 r1.mem[0], r1.mem[15], w[7], n);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "16 32 00 1e 01 1f 23 -1\n"))
+
+; The state such an initial block writes is visible like folded initial state.
+(case initial_while_loops_define_the_state
+  (source "initial_while.sv" #"
+                module Top(input logic [1:0] index, output logic [7:0] y);
+                    logic [7:0] mem [4];
+                    int n;
+                    initial begin
+                        n = 0;
+                        while (n < 4) begin
+                            mem[n] = 8'(n * 3 + 1);
+                            n++;
+                        end
+                    end
+                    assign y = mem[index];
+                endmodule
+            "#)
+  (top Top)
+  (for i (range 0 4)
+    (modify (set index i))
+    (assert_eq y (+ (* i 3) 1))))
 
 (case loop_initializer_widens_by_its_own_signedness
   (source "loop_start.sv" #"
@@ -478,6 +674,53 @@
     (assert_eq next 0)
     (assert_eq picked (? (< i 8) 0 (fourstate 1 1)))))
 
+(case nonblocking_runtime_element_writes_apply_in_order
+  ; Nonblocking writes to run-time elements of one array apply after the
+  ; process in statement order: reads see the old values, the last write to
+  ; an element wins, also through different index expressions, and a later
+  ; part-select write merges into an earlier whole element write (IEEE
+  ; 1800-2023 10.4.2). Elements next to written ones keep their values.
+  (source "nba_runtime_elements.sv" #"
+                module Top(input logic clk, input logic we, input logic [3:0] a, b,
+                           input logic [3:0] c, input logic [31:0] d,
+                           input logic [3:0] ra, rb,
+                           output logic [31:0] qa, qb, old);
+                    logic [31:0] mem [16];
+                    initial for (int i = 0; i < 16; i++) mem[i] = i;
+                    always_ff @(posedge clk) begin
+                        old <= mem[a];
+                        if (we) begin
+                            mem[a] <= d;
+                            mem[b] <= mem[a] + 32'd1;
+                            mem[a][7:0] <= 8'h5a;
+                        end
+                        mem[c] <= 32'hffff_ffff;
+                    end
+                    assign qa = mem[ra];
+                    assign qb = mem[rb];
+                endmodule
+            "#)
+  (top Top)
+  (for (w x y z v r s ea eb eo)
+       (list (1 2 5 11 0x1000 2 5 0x105a 3 2)
+             (1 7 7 6 0x2000 7 6 0x5a 0xffffffff 7)
+             (0 2 0 11 0 3 4 3 4 0x105a)
+             (1 4 5 11 0xabcd0000 4 5 0xabcd005a 5 4)
+             (1 4 0 4 1 4 0 0xffffffff 0xabcd005b 0xabcd005a)
+             (0 0 0 11 0 2 11 0x105a 0xffffffff 0xabcd005b))
+    (modify
+      (set we w)
+      (set a x)
+      (set b y)
+      (set c z)
+      (set d v)
+      (set ra r)
+      (set rb s))
+    (tick clk)
+    (assert_eq qa ea)
+    (assert_eq qb eb)
+    (assert_eq old eo)))
+
 (case declaration_initializers_define_the_initial_state
   (source "initializers.sv" #"
                 module Top(input logic clk, input logic [1:0] index,
@@ -760,6 +1003,47 @@
   (set a 2)
   (eval)
   (assert_eq y 2))
+
+(case static_function_unpacked_scratch_bits_at_element_boundaries
+  (source "scratch_bits.sv" #"
+    module Top(input logic [5:0] index, output logic [57:0] y);
+      function [58:0] identity(input logic [5:0] selected);
+        logic [57:0] words[57:0];
+        for (integer i=0; i<58; i=i+1) begin
+          words[i]='0;
+          words[i][i]=1'b1;
+        end
+        // The high result bit retains its value, so the function executes
+        // through the procedural path rather than symbolic substitution.
+        identity[57:0]=words[selected];
+      endfunction
+      assign y=identity(index);
+    endmodule
+  "#)
+  (top Top)
+  (for bit (range 0 58)
+    (modify (set index bit))
+    (assert_eq y (<< 1 bit))))
+
+(case static_function_partial_writes_preserve_last_write
+  (source "partial_writes.sv" #"
+    module Top(input logic d, output wire [2:0] y);
+      function [4:0] update(input logic value);
+        update[3:2]='0;
+        update[3]=value;
+        update[1]=1'b1;
+      endfunction
+      wire [4:0] result=update(d);
+      assign y=result[3:1];
+    endmodule
+  "#)
+  (top Top)
+  (modify (set d 1))
+  (assert_eq y 5)
+  (modify (set d 0))
+  (assert_eq y 1)
+  (modify (set d 1))
+  (assert_eq y 5))
 
 (case constant_functions_preserve_concat_operand_widths
   (source "constant_concat.sv" #"

@@ -23,6 +23,38 @@ class AggregateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runner.official_verdict(stderr, log, "a.sv")
 
+    def test_dashboard_summary_excludes_skips_and_counts_tags_without_double_counting_cases(self):
+        rows = [
+            {"group": "main", "state_mode": "2state", "mode": "simulation", "result": "pass", "tags": "a b a"},
+            {"group": "main", "state_mode": "2state", "mode": "elaboration", "result": "fail", "tags": "b"},
+            {"group": "main", "state_mode": "2state", "mode": "", "result": "skip", "tags": "c"},
+            {"group": "main", "state_mode": "4state", "mode": "simulation", "result": "pass", "tags": "a"},
+            {"group": "cores", "state_mode": "2state", "mode": "elaboration", "result": "fail", "tags": "core"},
+        ]
+        summary = runner.summarize(rows)
+        main = summary["main"]["2state"]
+        self.assertEqual((main["passed"], main["executed"], main["skipped"]), (1, 2, 1))
+        self.assertEqual(main["pass_percent"], 50)
+        self.assertEqual((main["tags_passed"], main["tags_tested"]), (1, 2))
+        self.assertEqual(main["by_tag"], {"a": {"passed": 1, "executed": 1},
+                                         "b": {"passed": 1, "executed": 2}})
+        self.assertEqual(summary["main"]["4state"]["pass_percent"], 100)
+        self.assertEqual(summary["cores"]["2state"]["pass_percent"], 0)
+        expanded = runner.summarize(rows, {"meta": {"a", "b"}, "chained": {"meta"}})["main"]["2state"]
+        self.assertEqual(expanded["tags_tested"], 4)
+        self.assertEqual(expanded["by_tag"]["meta"], {"passed": 1, "executed": 2})
+        self.assertEqual(expanded["by_tag"]["chained"], {"passed": 1, "executed": 2})
+
+    def test_reads_upstream_meta_tags_and_rejects_malformed_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "meta-tags.conf"
+            path.write_text("# comment\nmeta\ta b\nchained\tmeta\thttps://example.com\n")
+            self.assertEqual(runner.read_meta_tags(path), {"meta": {"a", "b"}, "chained": {"meta"}})
+            path.write_text("meta without a tab\n")
+            with self.assertRaises(ValueError):
+                runner.read_meta_tags(path)
+
+
     def test_jobs_require_a_positive_integer(self):
         self.assertEqual(runner.positive_int("4"), 4)
         for value in ("0", "-1", "invalid"):
@@ -54,6 +86,7 @@ class OfficialRunnerTests(unittest.TestCase):
         self.tests.mkdir()
         (self.root / "conf/runners").mkdir(parents=True)
         (self.root / "conf/runners/libs.json").write_text("{}")
+        (self.root / "conf/meta-tags.conf").write_text("# no meta-tags in fixtures\n")
         (self.root / "tools").symlink_to(Path(os.environ["SV_TESTS_ROOT"]).resolve() / "tools", target_is_directory=True)
         self.driver = self.root / "driver"
         self.driver.write_text('''#!/usr/bin/env python3
@@ -89,7 +122,10 @@ sys.exit(code)
         row = self.case(":type: parsing\n")
         self.assertEqual((row["mode"], row["result"]), ("parsing", "pass"))
         self.assertEqual(self.case(":type: parsing\n:should_fail_because: syntax\n", "// EXIT: 1")["result"], "pass")
-        self.assertEqual(self.case(":type: preprocessing\n")["result"], "skip")
+        row = self.case(":type: preprocessing\n")
+        self.assertEqual((row["mode"], row["result"]), ("preprocessing", "pass"))
+        self.assertEqual(self.case(":type: preprocessing\n", "// EXIT: 1")["result"], "fail")
+        self.assertEqual(self.case(":type: preprocessing\n:should_fail_because: invalid\n", "// EXIT: 1")["result"], "pass")
         self.assertEqual(self.case(":compatible-runners: other\n")["result"], "skip")
         # The source has no module. Its diagnostic still reaches official judgement.
         row = self.case(body="// OUTPUT: no module diagnostic\n// EXIT: 1")
@@ -113,16 +149,25 @@ sys.exit(code)
         self.assertIn(str(self.root / "third_party/lib"), args)
         self.assertEqual(args[-3:], ["--", str(self.root / "third_party/lib/pkg.sv"), str(self.tests / "extra.sv")])
 
-    def test_missing_environment_and_unsupported_variants_are_not_negative_passes(self):
+    def test_missing_environment_is_not_a_negative_pass(self):
         with self.assertRaisesRegex(ValueError, "infrastructure"):
             self.case(":files: tests/missing.sv\n:should_fail_because: invalid\n")
-        with self.assertRaisesRegex(ValueError, "infrastructure"):
-            self.case(":type: simulation\n:simvariants: +case=1\n")
         (self.root / "conf/runners/libs.json").write_text(json.dumps({
             "uvm": {"files": ["missing.sv"], "incdirs": []},
         }))
         with self.assertRaisesRegex(ValueError, "missing sv-tests library"):
             runner.preflight(self.root, self.driver)
+
+    def test_variants_are_forwarded_separately_only_for_simulation(self):
+        for mode in ("simulation", "elaboration"):
+            row = self.case(f":type: {mode}\n:simvariants: case=1 case=2\n")
+            log = Path(row["log"]).read_text()
+            args = json.loads(next(line[6:] for line in log.splitlines() if line.startswith("ARGS: ")))
+            if mode == "simulation":
+                indices = [i for i, arg in enumerate(args) if arg == "--simvariant"]
+                self.assertEqual([args[i + 1] for i in indices], ["case=1", "case=2"])
+            else:
+                self.assertNotIn("--simvariant", args)
 
     def test_official_timeout(self):
         row = self.case(":type: simulation\n:timeout: 1\n", "// SLEEP")
