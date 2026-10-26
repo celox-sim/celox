@@ -1086,6 +1086,99 @@
   (assert_eq a 255)
   (assert_eq b 15))
 
+(case wide_constant_functions_inside_conditional_parameter_initializers
+  ; IEEE 1800-2023 13.4.3 and 11.4.11: a packed return is assembled
+  ; before its value and declared type participate in the conditional.
+  (source "wide_constant_functions.sv" #"
+    module Layout #(parameter N=4)(output logic [N*32-1:0] selected, direct);
+      localparam [N*32-1:0] WIDTHS={N{32'd24}};
+      function automatic [N-1:0][31:0] offsets(input int unused);
+        logic [31:0] base, size, mask;
+        int width;
+        offsets='0;
+        base='0;
+        for (int i=0; i<N; i++) begin
+          width=WIDTHS[i*32 +: 32];
+          mask={32{1'b1}}>>(32-width);
+          size=mask+1;
+          if (width>0) begin
+            if ((base&mask)!=0) base=base+size-(base&mask);
+            offsets[i]=base;
+            base=base+size;
+          end
+        end
+      endfunction
+      localparam [N*32-1:0] VALUE=1'b0 ? (N*32)'(0) : offsets(0);
+      localparam [N*32-1:0] DIRECT=offsets(0);
+      assign selected=VALUE;
+      assign direct=DIRECT;
+    endmodule
+    module Top(output logic [127:0] selected4, direct4,
+               output logic [95:0] selected3, direct3);
+      Layout #(.N(4)) four(selected4, direct4);
+      Layout #(.N(3)) three(selected3, direct3);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq selected4 0x03000000020000000100000000000000)
+  (assert_eq direct4 0x03000000020000000100000000000000)
+  (assert_eq selected3 0x020000000100000000000000)
+  (assert_eq direct3 0x020000000100000000000000))
+
+(case constant_function_assignments_at_127_and_128_bit_boundaries
+  (source "constant_function_boundaries.sv" #"
+    module Top(output logic [127:0] full, boundary_value, sign_extended, zero_extended,
+               output logic [127:0] fill_return, fill_local);
+      function automatic [127:0] fill(input int unused);
+        fill[127:0]=128'hfedcba98765432100123456789abcdef;
+      endfunction
+      function automatic [127:0] boundary(input int unused);
+        boundary='1;
+        boundary[127]=0;
+        boundary[126]=1;
+        boundary[7:0]=8'ha5;
+      endfunction
+      function automatic signed [126:0] signed_value(input int unused);
+        signed_value='0;
+        signed_value[126]=1;
+        signed_value[7:0]=8'ha5;
+        if (signed_value<0) signed_value[8]=1;
+      endfunction
+      function automatic [126:0] unsigned_value(input int unused);
+        unsigned_value='1;
+        unsigned_value[126:0]='0;
+        unsigned_value[126]=1;
+        unsigned_value[7:0]=8'ha5;
+        if (unsigned_value<0) unsigned_value[8]=1;
+      endfunction
+      function automatic [127:0] return_fill(input int unused);
+        return '1;
+      endfunction
+      function automatic [127:0] local_fill(input int unused);
+        logic [127:0] value='1;
+        return value;
+      endfunction
+      localparam [127:0] RF=return_fill(0), LF=local_fill(0);
+      assign fill_return=RF;
+      assign fill_local=LF;
+      localparam [127:0] F=1'b0 ? 128'(0) : fill(0);
+      localparam [127:0] E=1'b0 ? 128'(0) : boundary(0);
+      localparam signed [126:0] S=1'b0 ? 127'(0) : signed_value(0);
+      localparam [126:0] U=1'b0 ? 127'(0) : unsigned_value(0);
+      assign full=F;
+      assign boundary_value=E;
+      assign sign_extended=S;
+      assign zero_extended=U;
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq full 0xfedcba98765432100123456789abcdef)
+  (assert_eq boundary_value 0x7fffffffffffffffffffffffffffffa5)
+  (assert_eq sign_extended 0xc00000000000000000000000000001a5)
+  (assert_eq zero_extended 0x400000000000000000000000000000a5)
+  (assert_eq fill_return 0xffffffffffffffffffffffffffffffff)
+  (assert_eq fill_local 0xffffffffffffffffffffffffffffffff))
+
 (case static_function_locals_share_storage_between_calls
   (source "static_functions.sv" #"
     module Top(input logic clk, output int first, second, paired);

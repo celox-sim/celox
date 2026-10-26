@@ -953,15 +953,15 @@ struct Frame<'a> {
 
 /// `value` as a `width`-bit value of the given signedness.
 fn fit(value: i128, width: usize, signed: bool) -> i128 {
-    if width == 0 || width >= 127 {
+    if width == 0 || width >= 128 {
         return value;
     }
-    let modulus = 1i128 << width;
-    let truncated = value.rem_euclid(modulus);
-    if signed && truncated >= modulus / 2 {
-        truncated - modulus
+    let mask = (1u128 << width) - 1;
+    let truncated = (value as u128) & mask;
+    if signed && truncated & (1u128 << (width - 1)) != 0 {
+        (truncated | !mask) as i128
     } else {
-        truncated
+        truncated as i128
     }
 }
 
@@ -1028,6 +1028,19 @@ impl Frame<'_> {
             return crate::typecheck::integral_literal_as_i128(&literal, literal.signed);
         }
         self.eval_lowered(&lowered)
+    }
+
+    /// A bare unbased fill is assignment-sized, rather than a 32-bit value.
+    /// Fill the interpreter's storage; `assign`/`set` narrows it to the target.
+    fn assignment_value(&mut self, expr: &Expr) -> Option<i128> {
+        if let Expr::Literal(text) = expr
+            && text.trim_start().starts_with('\'')
+            && let Some(text) = resize_unbased_fill_literal_for_cast(text, 128, false)
+        {
+            let literal = typecheck::parse_integral_literal(&text)?;
+            return typecheck::integral_literal_as_i128(&literal, false);
+        }
+        self.eval(expr)
     }
 
     fn truth(&mut self, expr: &Expr) -> Option<bool> {
@@ -1210,14 +1223,21 @@ impl Frame<'_> {
                 let msb = self.eval_lowered(&msb.clone().into())?;
                 let lsb = self.eval_lowered(&lsb.clone().into())?;
                 let (high, low) = (msb.max(lsb), msb.min(lsb));
-                let width = u32::try_from(high - low).ok()? + 1;
+                let width = u32::try_from(high.checked_sub(low)?).ok()?.checked_add(1)?;
                 let low = u32::try_from(low).ok()?;
-                if low + width >= 127 {
+                if low.checked_add(width)? > 128 {
                     return None;
                 }
-                let mask = ((1i128 << width) - 1) << low;
-                let old = *self.get(name)?;
-                self.set(name, (old & !mask) | ((value << low) & mask));
+                let mask = if width == 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << width) - 1
+                } << low;
+                let old = *self.get(name)? as u128;
+                self.set(
+                    name,
+                    ((old & !mask) | (((value as u128) << low) & mask)) as i128,
+                );
             }
         }
         Some(())
@@ -1226,7 +1246,7 @@ impl Frame<'_> {
     fn stmt(&mut self, stmt: &Stmt) -> Option<Flow> {
         match stmt {
             Stmt::Assign { lhs, rhs, .. } => {
-                let value = self.eval(rhs)?;
+                let value = self.assignment_value(rhs)?;
                 self.assign(lhs, value)?;
             }
             Stmt::Local { name, init } => {
@@ -1240,7 +1260,7 @@ impl Frame<'_> {
                     .cloned()?;
                 self.declare(name, &r#type)?;
                 let value = match init {
-                    Some(init) => self.eval(init)?,
+                    Some(init) => self.assignment_value(init)?,
                     None => 0,
                 };
                 self.set(name, value);
@@ -1342,7 +1362,7 @@ impl Frame<'_> {
             Stmt::Continue => return Some(Flow::Continue),
             Stmt::Return(value) => {
                 let value = match value {
-                    Some(value) => Some(self.eval(value)?),
+                    Some(value) => Some(self.assignment_value(value)?),
                     None => None,
                 };
                 return Some(Flow::Return(value));

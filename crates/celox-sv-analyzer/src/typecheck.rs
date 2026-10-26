@@ -1289,9 +1289,8 @@ pub(crate) fn integral_literal_as_i128(literal: &IntegralLiteral, signed: bool) 
     if !signed || literal.width == 0 || value & (1u128 << (literal.width - 1)) == 0 {
         return i128::try_from(value).ok();
     }
-    i128::try_from(value)
-        .ok()
-        .and_then(|value| value.checked_sub(1i128 << literal.width))
+    // Extend the sign as a bit pattern: 2^127 is not a positive i128.
+    Some((value | (u128::MAX << literal.width)) as i128)
 }
 
 fn eval_integral_unary(op: UnaryOp, mut literal: IntegralLiteral) -> IntegralLiteral {
@@ -2899,6 +2898,26 @@ mod literal_tests {
             };
 
             assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(expected));
+        }
+    }
+    #[test]
+    fn signed_127_bit_literals_extend_without_overflow() {
+        for (text, signed, expected) in [
+            (
+                "127'sh40000000000000000000000000000000",
+                true,
+                -(1i128 << 126),
+            ),
+            ("127'sh7fffffffffffffffffffffffffffffff", true, -1),
+            ("127'h7fffffffffffffffffffffffffffffff", false, i128::MAX),
+            ("128'h80000000000000000000000000000000", false, i128::MIN),
+        ] {
+            let literal = parse_integral_literal(text).unwrap();
+            assert_eq!(
+                integral_literal_as_i128(&literal, signed),
+                Some(expected),
+                "{text}"
+            );
         }
     }
 }
