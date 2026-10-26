@@ -842,6 +842,7 @@ dependencies = [
  "celox",
  "celox-design",
  "celox-frontend-veryl",
+ "celox-runtime",
  "celox-sv-analyzer",
  "clap",
  "fxhash",
