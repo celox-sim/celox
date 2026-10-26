@@ -386,3 +386,98 @@ module Top(output bit [2:0] flags);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq flags 7))
+
+(case optional_parentheses
+  (source "optional_parentheses.sv" #"
+module Top(output bit [14:0] flags);
+    int a[], q[$], numbers[int], words[string], value;
+    string strings[$], text;
+    class Cell; int n; endclass
+    Cell objects[$], original, popped;
+    initial begin
+        flags[0] = a.size == 0 && q.size == 0 && numbers.num == 0 && words.size == 0;
+        a = new[3];
+        flags[1] = a.size == 3 && a.size() == a.size;
+        a.delete;
+        flags[2] = a.size == 0;
+        q = {2, 3, 4}; value = q.pop_front;
+        flags[3] = value == 2 && q.size == 2 && q[0] == 3;
+        value = q.pop_back;
+        flags[4] = value == 4 && q.size == 1;
+        q.pop_front;
+        flags[5] = q.size == 0;
+        q = {5, 6}; void'(q.pop_front); void'(q.pop_back());
+        flags[6] = q.size == 0;
+        q = {1, 2}; q.push_back(q.pop_front);
+        flags[7] = q.size == 2 && q[0] == 2 && q[1] == 1;
+        q.delete;
+        flags[8] = q.size == 0;
+        numbers[-1] = 10; numbers[5] = 20;
+        flags[9] = numbers.size == 2 && numbers.num == 2;
+        words["first"] = 10; words["second"] = 20; words.delete("first");
+        flags[10] = words.size == 1 && words.num == 1 && words["second"] == 20;
+        numbers.delete; words.delete; q.size;
+        flags[11] = numbers.num == 0 && words.size == 0;
+        strings = {"first", "last"}; text = strings.pop_front;
+        flags[12] = text == "first" && strings.size == 1;
+        text = strings.pop_back;
+        flags[13] = text == "last" && strings.size == 0;
+        original = new; original.n = 9; objects.push_back(original); popped = objects.pop_front;
+        flags[14] = popped == original && popped.n == 9 && objects.size == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 32767))
+
+(case optional_parentheses_queries
+  (source "optional_parentheses.sv" #"
+module Top(output bit [3:0] flags);
+    logic [3:0] q[$];
+    int a[], map[int];
+    initial begin
+        q = {4'h5, 4'h6};
+        flags[0] = $bits(q.pop_front) == 4 && $size(q.pop_back) == 4 && q.size == 2;
+        flags[1] = $bits(a.size) == 32 && $bits(map.num) == 32;
+        flags[2] = $dimensions(q.pop_front) == 1 && $unpacked_dimensions(q.pop_back) == 0 && q.size == 2;
+        flags[3] = q.pop_back == 6 && q.pop_front == 5 && q.size == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 15))
+
+(case optional_parentheses_four_state
+  (source "optional_parentheses.sv" #"
+module Top(output bit [3:0] flags);
+    logic [3:0] q[$], value;
+    initial begin
+        q = {4'b1xz0, 4'bz01x};
+        value = q.pop_front;
+        flags[0] = value === 4'b1xz0 && q.size == 1;
+        value = q.pop_back;
+        flags[1] = value === 4'bz01x && q.size == 0;
+        value = q.pop_front;
+        flags[2] = value === 4'bxxxx && q.size == 0;
+        q = {4'bxzxz}; void'(q.pop_back);
+        flags[3] = q.size == 0;
+    end
+endmodule
+"#)
+  (four_state)
+  (top Top) (run_until 0) (assert_eq flags 15))
+
+(case optional_parentheses_packed_result
+  (source "optional_parentheses.sv" #"
+module Top(output bit [4:0] flags);
+    logic [2:1][7:4] q[$];
+    initial begin
+        q = {8'h12, 8'h34};
+        flags[0] = $bits(q.pop_front) == 8 && $bits(q.pop_back()) == 8;
+        flags[1] = $dimensions(q.pop_front) == 2 && $dimensions(q.pop_back()) == 2;
+        flags[2] = $size(q.pop_front, 1) == 2 && $size(q.pop_back(), 2) == 4;
+        flags[3] = $left(q.pop_front, 1) == 2 && $right(q.pop_back(), 1) == 1
+            && $left(q.pop_front(), 2) == 7 && $right(q.pop_back, 2) == 4;
+        flags[4] = q.size == 2 && q.pop_back == 8'h34 && q.pop_front == 8'h12 && q.size == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 31))
