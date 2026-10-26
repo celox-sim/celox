@@ -1,0 +1,1 @@
+Address P2 review 4377676848: retain fork scope around constant-folded child sensitivity statements; preserve rejection of blocking function branches.
