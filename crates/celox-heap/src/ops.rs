@@ -83,6 +83,8 @@ pub const OBJECT_MODE_SELECTED: u64 = 61;
 pub const OBJECT_RANDOM_CYCLIC: u64 = 62;
 /// `copy(object)`: a new object with a copy of the properties of `object`.
 pub const OBJECT_COPY: u64 = 63;
+/// Solve the scalar constraint program in string b for object a; c selects check-only.
+pub const OBJECT_RANDOMIZE: u64 = 64;
 
 /// The opcode word of `op` with parameter `parameter`.
 pub const fn encode(op: u64, parameter: u64) -> u64 {
@@ -193,6 +195,20 @@ impl Heap {
                 0
             }
             OBJECT_CLASS => self.class_of(a as Handle).into(),
+            OBJECT_RANDOMIZE => {
+                match serde_json::from_slice::<crate::randomization::Program>(
+                    self.string(b as Handle),
+                ) {
+                    Ok(program) => u64::from(self.randomize_object(a as Handle, &program, c != 0)),
+                    Err(error) => {
+                        self.fault
+                            .get_or_insert(crate::Fault::ConstraintRandomization(
+                                error.to_string(),
+                            ));
+                        0
+                    }
+                }
+            }
             OBJECT_RANDOM => self.random_object(a as Handle),
             OBJECT_RANDOM_CYCLIC => self.random_cyclic_object(a as Handle, parameter as u32, b),
             OBJECT_SEED => {
