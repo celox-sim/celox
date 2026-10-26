@@ -1,0 +1,6 @@
+Revision history for #2170:
+
+rev 2 (content) 2026-10-26 16:49 UTC — Keep exhaustive sampling test-only after review of scalability; remove the production API and its README example. Defer the sparse-domain rejection experiment.
+rev 1 (initial) 2026-10-26 16:49 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2170,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"a5477b23f4cb8d16c6178edec70276258a8e83b2","timestamp_iso":"2026-10-26T16:49:18Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"a5477b23f4cb8d16c6178edec70276258a8e83b2","new_sha":"61d1fca75086e0710e3c14f4baf53a6e93e8b74e","timestamp_iso":"2026-10-26T16:49:18Z","reason":"Keep exhaustive sampling test-only after review of scalability; remove the production API and its README example. Defer the sparse-domain rejection experiment.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/a5477b23f4cb8d16c6178edec70276258a8e83b2...61d1fca75086e0710e3c14f4baf53a6e93e8b74e"}]} -->
