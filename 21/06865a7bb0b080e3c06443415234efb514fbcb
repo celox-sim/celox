@@ -1,0 +1,1 @@
+Validate static-local, four-state history, and deferred assertion cases on an explicitly selected Cranelift backend.
