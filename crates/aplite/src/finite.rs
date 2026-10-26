@@ -1759,7 +1759,28 @@ fn solve_scalar(formula: &Term, context: &Env, limits: Limits, search_hint: Sear
         solve_plain(formula, context, limits, search_hint)
     }
 }
+/// Find a scalar satisfying assignment using seed-selected initial SAT phases.
+///
+/// The seed changes search preferences, never the formula. This is a reproducible
+/// search heuristic, not uniform model sampling. Reproducibility requires the
+/// same solver version, input and sufficient budgets; wall-clock timeouts can
+/// interrupt different prefixes. Arrays are unsupported by this entry point and
+/// return `Unknown`. Existing proof-oriented entry points are unchanged.
+pub fn solve_seeded(formula: &Term, context: &Env, limits: Limits, seed: u64) -> Outcome {
+    solve_plain_with_seed(formula, context, limits, SearchHint::Sat, Some(seed))
+}
+
 fn solve_plain(formula: &Term, context: &Env, limits: Limits, search_hint: SearchHint) -> Outcome {
+    solve_plain_with_seed(formula, context, limits, search_hint, None)
+}
+
+fn solve_plain_with_seed(
+    formula: &Term,
+    context: &Env,
+    limits: Limits,
+    search_hint: SearchHint,
+    seed: Option<u64>,
+) -> Outcome {
     let mut outcome = Outcome {
         search_hint,
         search_strategy: SearchStrategy::NotStarted,
@@ -1781,6 +1802,11 @@ fn solve_plain(formula: &Term, context: &Env, limits: Limits, search_hint: Searc
     let mut blast = Blast::new();
     let compile = (|| -> Res<()> {
         budget.tick(1)?;
+        if seed.is_some()
+            && (formula.contains_memory() || context.values().any(Term::contains_memory))
+        {
+            return Err("seeded search supports scalar formulas and contexts only".into());
+        }
         if budget.limits.max_variables < 1 || budget.limits.max_clauses < 1 {
             return Err("finite solver initial CNF budget exhausted".into());
         }
@@ -1838,7 +1864,13 @@ fn solve_plain(formula: &Term, context: &Env, limits: Limits, search_hint: Searc
         outcome.stats.work = budget.work;
         return outcome;
     }
-    let choices = match split_choices(formula, &blast, &mut budget) {
+    // A seeded query uses one CDCL search so decomposition cannot reset its
+    // preferences or bias the result toward the first syntactic alternative.
+    let choices = match if seed.is_some() {
+        Ok(Vec::new())
+    } else {
+        split_choices(formula, &blast, &mut budget)
+    } {
         Ok(choices) => choices,
         Err(reason) => {
             outcome.reason = Some(reason);
@@ -1859,6 +1891,19 @@ fn solve_plain(formula: &Term, context: &Env, limits: Limits, search_hint: Searc
         SearchStrategy::CounterexampleProbeFair
     };
     let result = (|| -> Res<Verdict> {
+        if let Some(mut state) = seed {
+            // SplitMix64 gives a local, fully specified stream (including seed
+            // zero). No process RNG, global state or platform-dependent hashing.
+            for phase in sat.phase.iter_mut().skip(1) {
+                budget.tick(1)?;
+                state = state.wrapping_add(0x9e3779b97f4a7c15);
+                let mut value = state;
+                value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+                value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+                value ^= value >> 31;
+                *phase = value >> 63 != 0;
+            }
+        }
         let mut probe_verdict = None;
         if !choices.is_empty() && search_hint == SearchHint::Sat {
             // Probe the original query for a quick witness, scaled to its CNF
