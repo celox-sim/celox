@@ -1,0 +1,1 @@
+Fix #2194 CI dependency-scope exclusions and publication ordering after Aplite and heap become runtime dependencies; validate all repository scripts.
