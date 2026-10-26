@@ -356,10 +356,18 @@ VCD output and the TypeScript API.
 Dynamic arrays (`T a[]`) support `new[n]`, `new[n](a)`, `size()` and
 `delete()` (IEEE 1800-2023 7.5). Queues (`T q[$]`, `T q[$:N]`) support
 `size`, `insert`, `delete`, `push_front`, `push_back`, `pop_front` and
-`pop_back`, with parentheses. Queue indices may use `$` and `$+1`.
+`pop_back`. Queue indices may use `$` and `$+1`.
 Associative arrays support integral keys up to 64 bits or `string` keys,
 `num` / `size`, `exists`, `delete`, and `first` / `last` / `next` / `prev`
 (7.8–7.10). Traversal leaves its index unchanged when no key is found.
+
+The empty parentheses on zero-argument container methods are optional:
+`a.size`, `q.pop_front`, `map.num` and `map.delete` have the same behavior as
+their parenthesized forms. A bare `delete` clears the container. Queue pop
+results may be discarded with `void'(...)`; type queries such as
+`$bits(q.pop_front)` inspect the result without removing an element.
+Integral pop result queries preserve the element's packed dimensions and
+declared bounds. Queries on string- or class-valued pop results remain unsupported.
 
 Elements may be packed integral values up to 64 bits, strings or class
 handles. Positional assignment patterns and element concatenations construct
