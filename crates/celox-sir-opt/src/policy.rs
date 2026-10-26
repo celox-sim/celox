@@ -30,7 +30,8 @@ impl OptLevel {
     pub fn default_enabled(self, pass: SirPass) -> bool {
         match self {
             OptLevel::O0 => matches!(pass, SirPass::TailCallSplit),
-            OptLevel::O1 | OptLevel::O2 => true,
+            // Opt-in until it pays off on its own (#2013).
+            OptLevel::O1 | OptLevel::O2 => !matches!(pass, SirPass::PartitionedSettle),
         }
     }
 
@@ -122,6 +123,10 @@ define_sir_passes! {
     /// clock's domain once more, so disabling it trades tick speed for build
     /// time.
     DerivedEdgeUnits => "derived_edge_units",
+    /// Split the combinational settle of designs with many event domains
+    /// into partitions that run only when state they read changed. Not a
+    /// SIR transform: the frontend consumes it. Off unless enabled.
+    PartitionedSettle => "partitioned_settle",
 }
 /// Diagnostics and additional verification for the SIR optimizer.
 ///
@@ -167,7 +172,19 @@ pub struct OptimizeOptions {
     max_native_memory_width: usize,
     parallel_lanes: u32,
     parallel_partition: ParallelPartition,
+    settle_partition: SettlePartition,
     pub diagnostics: SirDiagnostics,
+}
+
+/// How the compiler decides whether to partition the combinational settle
+/// ([`SirPass::PartitionedSettle`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettlePartition {
+    /// Partition designs with many event domains and a large program.
+    #[default]
+    Estimated,
+    /// Partition every program as finely as possible. For tests.
+    Always,
 }
 
 /// How the compiler decides whether a phase gets a lane-partitioned kernel.
@@ -202,6 +219,7 @@ impl OptimizeOptions {
             },
             parallel_lanes: 1,
             parallel_partition: ParallelPartition::Estimated,
+            settle_partition: SettlePartition::Estimated,
             diagnostics: SirDiagnostics::default(),
         }
     }
@@ -273,6 +291,15 @@ impl OptimizeOptions {
         self.parallel_partition
     }
 
+    pub fn with_settle_partition(mut self, partition: SettlePartition) -> Self {
+        self.settle_partition = partition;
+        self
+    }
+
+    pub fn settle_partition(&self) -> SettlePartition {
+        self.settle_partition
+    }
+
     /// Query whether a specific pass is active.
     pub fn is_enabled(&self, pass: SirPass) -> bool {
         if self.enabled.contains(&pass) {
@@ -285,10 +312,13 @@ impl OptimizeOptions {
     }
 
     /// Returns true if any SIR transform is enabled: any pass other than
-    /// the TailCallSplit and DerivedEdgeUnits selectors.
+    /// the TailCallSplit, DerivedEdgeUnits and PartitionedSettle selectors.
     pub fn any_enabled(&self) -> bool {
         SirPass::ALL.iter().any(|&p| {
-            !matches!(p, SirPass::TailCallSplit | SirPass::DerivedEdgeUnits) && self.is_enabled(p)
+            !matches!(
+                p,
+                SirPass::TailCallSplit | SirPass::DerivedEdgeUnits | SirPass::PartitionedSettle
+            ) && self.is_enabled(p)
         })
     }
 

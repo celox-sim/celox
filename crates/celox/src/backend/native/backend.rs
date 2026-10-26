@@ -536,6 +536,7 @@ impl NativeProgramImage {
                 time_slots: self.runtime_schema.time_slots.clone(),
                 scheduler: self.runtime_schema.scheduler.clone(),
                 derived_edges: self.runtime_schema.derived_edges.clone(),
+                settle_partitions: None,
             },
             testbench: self.testbench.clone(),
         }
@@ -2589,6 +2590,9 @@ pub struct NativeBackend {
     /// Boxed so the address in the state header survives moves.
     heap: Box<celox_heap::Heap>,
     execution_timing: Option<NativeExecutionTiming>,
+    /// Whether generated calls go through [`Self::call_func_slow`]: timing
+    /// is on, or settles are cross-checked.
+    slow_calls: bool,
     /// Worker threads for lane-partitioned kernels, started on first use.
     lane_pool: Option<celox_runtime::parallel::LanePool>,
     /// Per-kernel choice between partitioned and sequential code.
@@ -2807,6 +2811,7 @@ impl NativeBackend {
             }
         }
 
+        let slow_calls = shared.layout.settle_check();
         let mut backend = Self {
             compiled: shared,
             memory,
@@ -2814,6 +2819,7 @@ impl NativeBackend {
             comb_capture_enabled,
             heap: Default::default(),
             execution_timing: None,
+            slow_calls,
             lane_pool: None,
             lane_selectors: Default::default(),
         };
@@ -2836,6 +2842,7 @@ impl NativeBackend {
         comb_capture_enabled: Vec<u8>,
         heap: Box<celox_heap::Heap>,
     ) -> Self {
+        let slow_calls = shared.layout.settle_check();
         let mut backend = Self {
             compiled: shared,
             memory,
@@ -2843,6 +2850,7 @@ impl NativeBackend {
             comb_capture_enabled,
             heap,
             execution_timing: None,
+            slow_calls,
             lane_pool: None,
             lane_selectors: Default::default(),
         };
@@ -2948,6 +2956,7 @@ impl NativeBackend {
     /// Start a fresh opt-in measurement of generated native function calls.
     pub fn start_execution_timing(&mut self) {
         self.execution_timing = Some(NativeExecutionTiming::default());
+        self.slow_calls = true;
     }
 
     /// Total capacity of the live image in `u64` words.
@@ -2967,10 +2976,12 @@ impl NativeBackend {
             self.memory.resize_zeroed_within_capacity(mem_size_words);
         }
         self.compiled = shared;
+        self.slow_calls = self.execution_timing.is_some() || self.compiled.layout.settle_check();
     }
 
     /// Stop timing and return the accumulated generated-code interval.
     pub fn finish_execution_timing(&mut self) -> Option<NativeExecutionTiming> {
+        self.slow_calls = self.compiled.layout.settle_check();
         self.execution_timing.take()
     }
 
@@ -3145,6 +3156,29 @@ impl NativeBackend {
     }
 
     fn call_func_timed(&mut self, func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
+        if !self.slow_calls {
+            return Self::call_func(self.memory.as_mut_slice(), func);
+        }
+        self.call_func_slow(func)
+    }
+
+    #[cold]
+    fn call_func_slow(&mut self, func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
+        if func as usize == self.compiled.comb_func as usize && self.compiled.layout.settle_check()
+        {
+            let compiled = Arc::clone(&self.compiled);
+            return crate::settle::run_checked(
+                self,
+                compiled.layout.settle.as_ref().expect("checked settle"),
+                compiled.layout.total_size,
+                |backend| backend.memory.as_mut_bytes(),
+                |backend| backend.call_func_measured(func),
+            );
+        }
+        self.call_func_measured(func)
+    }
+
+    fn call_func_measured(&mut self, func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
         let Some(_) = self.execution_timing else {
             return Self::call_func(self.memory.as_mut_slice(), func);
         };
@@ -3514,10 +3548,12 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
-        (
+        let view = (
             self.memory.expose_mut_ptr().cast(),
             self.memory.len_words() * 8,
-        )
+        );
+        self.mark_settle_untracked();
+        view
     }
 
     fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
@@ -3526,6 +3562,10 @@ impl super::super::SimBackend for NativeBackend {
 
     fn write_memory(&mut self, offset: usize, bytes: &[u8]) {
         self.memory.write_bytes(offset, bytes);
+        self.mark_settle_range(offset, bytes.len());
+        if !self.memory.vcd_tracking_enabled() {
+            self.mark_settle_untracked();
+        }
     }
 
     fn vcd_tracking_enabled(&self) -> bool {

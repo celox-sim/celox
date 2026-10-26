@@ -1077,8 +1077,24 @@ mod tests {
             generated_dirty = stale(generated_dirty, outcome);
             assert_eq!(generated_dirty, walked_dirty, "step {step}");
             let (left, right) = (state(&generated.backend), state(&walked.backend));
-            if let Some(offset) = left.iter().zip(&right).position(|(a, b)| a != b) {
-                let offset = offset + celox_state_layout::STATE_HEADER_SIZE;
+            // The settle's partition flags hold only what is left to
+            // recompute.
+            let flags = walked
+                .backend
+                .layout()
+                .settle
+                .as_ref()
+                .map(|settle| settle.flags());
+            if let Some(offset) = left
+                .iter()
+                .zip(&right)
+                .enumerate()
+                .map(|(offset, pair)| (offset + celox_state_layout::STATE_HEADER_SIZE, pair))
+                .find(|(offset, (a, b))| {
+                    a != b && !flags.as_ref().is_some_and(|flags| flags.contains(offset))
+                })
+                .map(|(offset, _)| offset)
+            {
                 let name = walked
                     .named_signals()
                     .into_iter()

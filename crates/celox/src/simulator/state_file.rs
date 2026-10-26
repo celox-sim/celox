@@ -376,7 +376,9 @@ impl<B: SimBackend> Simulator<B> {
         let comb_writes = &self.program.runtime_schema.comb_writes;
         // A timed simulation stores its time into the time slots, and a state
         // file keeps the time in its schedule; an untimed one reads zero.
-        // A compiled scheduler's slots hold nothing between runs.
+        // A compiled scheduler's slots hold nothing between runs, and the
+        // flags of a partitioned settle describe how this build settles,
+        // not the design: loading state sets them.
         let time_slots: crate::HashSet<_> = self
             .program
             .runtime_schema
@@ -390,12 +392,19 @@ impl<B: SimBackend> Simulator<B> {
                     .flat_map(|scheduler| scheduler.slots.iter()),
             )
             .collect();
+        let settle_flags = self
+            .backend
+            .layout()
+            .settle
+            .as_ref()
+            .map(|settle| settle.flags_offset);
         let mut objects: Vec<_> = self
             .backend
             .layout()
             .offsets
             .keys()
             .filter(|address| !time_slots.contains(address))
+            .filter(|address| Some(self.backend.layout().offsets[*address]) != settle_flags)
             .map(|&address| (self.program.get_path(&address), address))
             .collect();
         objects.sort_unstable();
