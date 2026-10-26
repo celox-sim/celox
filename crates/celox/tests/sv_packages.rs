@@ -739,7 +739,7 @@ fn rejects_unsupported_package_state() {
 }
 
 #[test]
-fn veryl_instances_of_one_initializer_are_several_drivers() {
+fn veryl_instances_may_initialize_one_package_variable() {
     let sv = "package p; logic [7:0] shared; endpackage
         module W(input logic [7:0] a); initial p::shared = 8'd1; endmodule";
     let veryl = r#"
@@ -753,12 +753,42 @@ module Top (
     assign y = a;
 }
 "#;
-    let error = Simulator::builder(veryl, "Top")
+    // Initial blocks of several instances may write one package variable,
+    // as any processes may write a variable (IEEE 1800-2023 6.5).
+    Simulator::builder(veryl, "Top")
         .with_sv_sources(vec![(sv, std::path::Path::new("initial.sv"))])
         .build()
-        .expect_err("two instances initializing one package variable");
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn veryl_instances_do_not_share_a_package_variable_from_always_ff() {
+    // `always_ff` must be the only writer of its variables (IEEE 1800-2023
+    // 9.2.2.4), also when a host request runs it as a process and a Veryl
+    // module instantiates it twice. Nonblocking writes of processes are not
+    // seen by the assembly check yet (#1969).
+    let sv = r#"package p; logic [7:0] shared; endpackage
+        module W(input logic clk, input logic [7:0] a);
+            always_ff @(posedge clk) begin p::shared = a; $fwrite(1, "host"); end
+        endmodule"#;
+    let veryl = r#"
+module Top (
+    clk: input clock,
+    y: output logic<8>,
+) {
+    var a: logic<8>;
+    assign a = 8'd7;
+    inst w1: $sv::W (clk, a);
+    inst w2: $sv::W (clk, a);
+    assign y = a;
+}
+"#;
+    let error = celox::Simulation::builder(veryl, "Top")
+        .with_sv_sources(vec![(sv, std::path::Path::new("always_ff.sv"))])
+        .build()
+        .expect_err("two always_ff instances writing one package variable");
     assert!(
-        format!("{error:?}").contains("multiple drivers of package variable `p::shared`"),
+        format!("{error:?}").contains("multiple drivers of package variable"),
         "{error:?}"
     );
 }
@@ -1580,4 +1610,84 @@ fn nested_generate_block_imports_restore_the_module_binding() {
             "{body}"
         );
     }
+}
+
+#[test]
+fn ordinary_processes_do_not_share_a_package_variable_with_always_ff() {
+    // `always_ff` must be the only writer of its variables (IEEE 1800-2023
+    // 9.2.2.4), also when another instance writes it from an `always`.
+    let error = celox::Simulation::from_sv_sources(
+        vec![(
+            "package p; logic q; endpackage
+             module F(input logic clk, input logic d); always_ff @(posedge clk) p::q <= d; endmodule
+             module T; always #1 p::q = 0; endmodule
+             module Top(input logic clk); F f(.clk(clk), .d(1'b1)); T t(); endmodule",
+            std::path::Path::new("exclusive.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .expect_err("an always and an always_ff writing one package variable");
+    assert!(
+        format!("{error:?}").contains("multiple drivers of package variable `p::q`"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn initial_blocks_do_not_share_a_package_variable_with_always_ff() {
+    // An initial block is another process too (IEEE 1800-2023 9.2.2.4),
+    // also when the always_ff runs as a process for its host request.
+    let error = celox::Simulation::from_sv_sources(
+        vec![(
+            r#"package p; logic q; endpackage
+             module F(input logic clk); always_ff @(posedge clk) begin p::q <= 1; $display("host"); end endmodule
+             module I; initial p::q = 0; endmodule
+             module Top(input logic clk); F f(.clk(clk)); I i(); endmodule"#,
+            std::path::Path::new("initial.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .expect_err("an initial block and an always_ff writing one package variable");
+    assert!(
+        format!("{error:?}").contains("multiple drivers of package variable `p::q`"),
+        "{error:?}"
+    );
+    // An ordinary edge procedure has no such restriction.
+    celox::Simulation::from_sv_sources(
+        vec![(
+            "package p; logic q; endpackage
+             module F(input logic clk); always @(posedge clk) p::q <= 1; endmodule
+             module I; initial p::q = 0; endmodule
+             module Top(input logic clk); F f(.clk(clk)); I i(); endmodule",
+            std::path::Path::new("ordinary.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn restricted_processes_may_share_disjoint_package_slices() {
+    // An `always_ff` run as a process writes only the bits it assigns, so
+    // an initial block may write the other bits (IEEE 1800-2023 9.2.2.4).
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(
+            r#"`timescale 1ns/1ns
+             package p; logic [7:0] q; endpackage
+             module Top(input logic clk, input logic [3:0] d, output logic [7:0] y);
+                 initial begin #1 p::q[7:4] = 4'h5; end
+                 always_ff @(posedge clk) begin p::q[3:0] = d; $fwrite(1, "host"); end
+                 assign y = p::q;
+             endmodule"#,
+            std::path::Path::new("slices.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .unwrap_or_else(|error| panic!("{error}"));
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("y")) >> 4u32, 5u32.into());
 }

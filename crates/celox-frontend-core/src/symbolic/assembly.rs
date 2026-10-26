@@ -375,9 +375,10 @@ impl PackageBindings {
     }
 }
 
-/// Reject a package variable that two flip-flop processes write, that the
-/// initial writes of two instances write, or that a continuous driver and
-/// any other process write. Instances of one module are separate drivers.
+/// Reject a package variable that two flip-flop processes write, that a
+/// continuous driver and any other process write, or that an `always_ff`,
+/// `always_comb` or `always_latch` run as a process and any other process
+/// write. Instances of one module are separate drivers.
 /// Overlapping continuous drivers are rejected by the scheduler.
 fn check_package_variable_drivers(
     bindings: &PackageBindings,
@@ -455,6 +456,9 @@ fn check_package_variable_drivers(
     // values, and initial processes. The package's own declaration
     // initializers are not drivers.
     let mut initial_writes: Vec<((InstanceId, usize), AbsoluteAddr, BitAccess)> = Vec::new();
+    // The writes of processes that must be the only writers of what they
+    // write (IEEE 1800-2023 9.2.2.2 to 9.2.2.4).
+    let mut restricted_writes: Vec<((InstanceId, usize), AbsoluteAddr, BitAccess)> = Vec::new();
     for (&instance, module_id) in instance_modules {
         let module = &modules[module_id];
         if package_instances.contains_key(module_id) {
@@ -485,17 +489,34 @@ fn check_package_variable_drivers(
             }
         }
         for (index, process) in module.processes.iter().enumerate() {
+            let restricted = matches!(
+                process.origin.construct.as_str(),
+                "always_ff" | "always_comb" | "always_latch"
+            );
             for block in process.kernel.blocks.values() {
                 for instruction in &block.instructions {
-                    let (SIRInstruction::Store(address, ..)
-                    | SIRInstruction::Commit(_, address, ..)) = instruction
+                    let (SIRInstruction::Store(address, offset, bits, ..)
+                    | SIRInstruction::Commit(_, address, offset, bits, _)) = instruction
                     else {
                         continue;
                     };
                     let address = bindings.locate(instance, address.var_id);
                     if packages.contains(&address) {
-                        let access = BitAccess::new(0, width(&address).saturating_sub(1));
+                        // The bits the store writes, as for flip-flop
+                        // writes, so disjoint writers are not rejected.
+                        let access = offset
+                            .constant_bit_offset()
+                            .zip(bits.checked_sub(1))
+                            .and_then(|(lsb, tail)| {
+                                Some(BitAccess::new(lsb, lsb.checked_add(tail)?))
+                            })
+                            .unwrap_or_else(|| {
+                                BitAccess::new(0, width(&address).saturating_sub(1))
+                            });
                         initial_writes.push(((instance, index), address, access));
+                        if restricted {
+                            restricted_writes.push(((instance, index), address, access));
+                        }
                     }
                 }
             }
@@ -518,12 +539,28 @@ fn check_package_variable_drivers(
                         .then_some(*address)
                 })
         };
-    // Two flip-flop processes, or initial writes of two instances, race.
+    // Two flip-flop processes race. Initial writes and processes of several
+    // instances may write one package variable, as any processes may write
+    // a variable (IEEE 1800-2023 6.5).
     if let Some(address) = conflict(&ff_writes, &|left, right| left != right) {
         return Err(error(&address));
     }
-    if let Some(address) = conflict(&initial_writes, &|left, right| left.0 != right.0) {
-        return Err(error(&address));
+    // A restricted process overlaps every write of another process.
+    for (writer, address, access) in &restricted_writes {
+        let overlaps = |(other, other_address, other_access): &(
+            (InstanceId, usize),
+            AbsoluteAddr,
+            BitAccess,
+        )| {
+            other_address == address && other_access.overlaps(access) && other != writer
+        };
+        if initial_writes.iter().any(overlaps)
+            || ff_writes.iter().any(|(_, other_address, other_access)| {
+                other_address == address && other_access.overlaps(access)
+            })
+        {
+            return Err(error(address));
+        }
     }
     // A continuous driver overlaps every other write.
     for path in comb_blocks {
