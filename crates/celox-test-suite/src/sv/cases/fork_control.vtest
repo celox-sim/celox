@@ -1,0 +1,219 @@
+(group fork_control (category sequential))
+
+; IEEE 1800-2023 9.6.1 and 9.6.3: immediate-child waits vs descendant cancellation.
+(case no_children_does_not_suspend
+ (source "empty.sv" #"module Top(output int q);
+ initial begin q=0; wait fork; disable fork; q=1; end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 1))
+
+(case wait_in_task_includes_earlier_forks
+ (source "wait_task.sv" #"module Top(output bit [3:0] q);
+ task await_children;
+  fork begin #2; q[1]=1; end join_none
+  wait fork;
+  q[3]=1;
+ endtask
+ initial begin
+  fork begin #3; q[0]=1; end join_none
+  fork begin #1; q[2]=1; end join_any
+  await_children();
+ end
+endmodule"#)
+ (top Top) (run_until 2) (assert_eq q 4)
+ (run_until 3) (assert_eq q 15))
+
+(case wait_excludes_descendants_of_completed_children
+ (source "wait_immediate.sv" #"module Top(output bit [2:0] q);
+ initial begin
+  fork
+   begin fork begin #4; q[0]=1; end join_none end
+   begin #1; q[1]=1; end
+  join_none
+  wait fork; q[2]=1;
+ end
+endmodule"#)
+ (top Top) (run_until 1) (assert_eq q 6)
+ (run_until 4) (assert_eq q 7))
+
+(case disable_before_children_start
+ (source "disable_pending.sv" #"module Top(output int q);
+ initial begin
+  q=0;
+  fork begin q=99; #1; q=100; end join_none
+  disable fork;
+  wait fork;
+  q=1;
+ end
+endmodule"#)
+ (top Top) (run_until 3) (assert_eq q 1))
+
+(case disable_after_join_any_cancels_waiters_and_delays
+ (source "disable_waiters.sv" #"module Top(output bit [4:0] q);
+ bit trigger;
+ initial begin
+  fork
+   begin #1; q[0]=1; end
+   begin #4; q[1]=1; end
+   begin @(posedge trigger); q[2]=1; end
+   begin wait(trigger); q[3]=1; end
+  join_any
+  disable fork;
+  wait fork;
+  q[4]=1;
+  #1; trigger=1;
+ end
+endmodule"#)
+ (top Top) (run_until 5) (assert_eq q 17))
+
+(case disable_reaches_through_completed_parents
+ (source "disable_descendants.sv" #"module Top(output bit [1:0] q);
+ initial begin
+  fork begin
+   fork begin #4; q[0]=1; end join_none
+  end join_none
+  wait fork;
+  #1;
+  disable fork;
+  q[1]=1;
+ end
+endmodule"#)
+ (top Top) (run_until 5) (assert_eq q 2))
+
+(case disable_does_not_kill_siblings_or_caller
+ (source "disable_scope.sv" #"module Top(output bit [2:0] q);
+ initial begin
+  fork
+   begin
+    fork begin #3; q[0]=1; end join_none
+    #1; disable fork; wait fork; q[1]=1;
+   end
+   begin #2; q[2]=1; end
+  join
+ end
+endmodule"#)
+ (top Top) (run_until 4) (assert_eq q 6))
+
+(case disable_removes_nested_join_waits
+ (source "disable_nested_join.sv" #"module Top(output bit [3:0] q);
+ initial begin
+  fork begin
+   fork begin #3; q[0]=1; end begin #4; q[1]=1; end join
+   q[2]=1;
+  end join_none
+  #1; disable fork;
+  wait fork; q[3]=1;
+ end
+endmodule"#)
+ (top Top) (run_until 5) (assert_eq q 8))
+
+(case cancelled_ids_can_be_reused_without_stale_wakeups
+ (source "disable_reuse.sv" #"module Top(output int q);
+ int n=20;
+ initial begin
+  q=0;
+  for (int i=0; i<n; i++) begin
+   fork begin #3; q=1000; end join_none
+   #1; disable fork;
+   fork begin #5; q=q+1; end join_none
+   wait fork;
+  end
+ end
+endmodule"#)
+ (top Top) (run_until 130) (assert_eq q 20))
+
+(case program_waits_then_cancels_in_reactive_region
+ (source "program_fork_control.sv" #"module Top(output bit [2:0] q);
+ Tb tb(q);
+endmodule
+program Tb(output bit [2:0] q);
+ initial begin
+  q=0;
+  fork begin #1; q[0]=1; end join_none
+  wait fork;
+  fork begin #3; q[1]=1; end join_none
+  disable fork; q[2]=1;
+  #10;
+ end
+endprogram"#)
+ (top Top) (run_until 5) (assert_eq q 5))
+
+(case function_disable_uses_calling_process
+ (source "function_disable.sv" #"module Top(output int q);
+ function int cancel();
+  disable fork;
+  return 1;
+ endfunction
+ initial begin
+  q=0;
+  fork begin #3; q=99; end join_none
+  #1; q=cancel();
+  wait fork;
+ end
+endmodule"#)
+ (top Top) (run_until 5) (assert_eq q 1))
+
+(case four_state_values_survive_wait_and_cancellation
+ (four_state)
+ (source "four_state_control.sv" #"module Top(output logic [3:0] q);
+ initial begin
+  q=0;
+  fork begin #1; q=4'b10xz; end join_none
+  wait fork;
+  fork begin #2; q=0; end join_none
+  disable fork;
+ end
+endmodule"#)
+ (top Top) (run_until 4) (assert_eq q (fourstate 10 3)))
+
+(case wait_predicate_preserves_cancellation
+ (source "wait_cancel.sv" #"module Top(output int q);
+ function int cancel();
+  disable fork;
+  return 1;
+ endfunction
+ initial begin
+  q=0;
+  fork begin #3; q=99; end join_none
+  #1; wait(cancel()); q=1;
+ end
+endmodule"#)
+ (top Top) (run_until 5) (assert_eq q 1))
+
+(case wait_predicate_repeats_effects_on_each_wakeup
+ (source "wait_cancel_resume.sv" #"module Top(output int q, output bit [2:0] seen);
+ int gate=0;
+ function int cancel(input int value);
+  seen=seen | (1 << value);
+  disable fork;
+  return value==2;
+ endfunction
+ initial begin
+  seen=0; q=0;
+  fork begin #4; q=99; end join_none
+  wait(cancel(gate)); q=1;
+ end
+ initial begin #1; gate=1; #1; gate=2; end
+endmodule"#)
+ (top Top) (run_until 5) (assert_eq q 1) (assert_eq seen 7))
+
+(case event_driven_caller_propagates_wait_fork_through_tasks
+ (source "event_wait_fork.sv" #"module Top(input bit clk, output int q);
+ task await_children; wait fork; endtask
+ task wrapper; await_children(); endtask
+ always @(posedge clk) begin wrapper(); q=q+1; end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 0)
+ (modify (set clk 1)) (run_until 1) (assert_eq q 1)
+ (modify (set clk 0)) (run_until 2)
+ (modify (set clk 1)) (run_until 3) (assert_eq q 2))
+
+(case event_driven_caller_spawns_untimed_children
+ (source "event_spawn.sv" #"module Top(input bit clk, output int q);
+ task spawn; fork q=q+1; join_none endtask
+ always @(posedge clk) spawn();
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 0)
+ (modify (set clk 1)) (run_until 1) (assert_eq q 1)
+ (modify (set clk 0)) (run_until 2)
+ (modify (set clk 1)) (run_until 3) (assert_eq q 2))

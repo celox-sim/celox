@@ -477,8 +477,6 @@ fn unimplemented_timing_features_are_rejected() {
             "intra-assignment timing control",
             88,
         ),
-        ("initial wait fork;", "wait fork statement", 88),
-        ("initial disable fork;", "disable fork statement", 88),
         (
             "bit a; task t(input bit x); wait (a ^ x); endtask initial t(0);",
             "wait condition reading a static task argument",
@@ -1184,3 +1182,31 @@ timed_cases! {
 }
 
 timed_cases! { fn fork_four_state_automatic_values_survive_fork_suspension = "fork::four_state_automatic_values_survive_fork_suspension"; }
+
+timed_cases! {
+    fn fork_control_no_children_does_not_suspend = "fork_control::no_children_does_not_suspend";
+    fn fork_control_wait_in_task_includes_earlier_forks = "fork_control::wait_in_task_includes_earlier_forks";
+    fn fork_control_wait_excludes_descendants_of_completed_children = "fork_control::wait_excludes_descendants_of_completed_children";
+    fn fork_control_disable_before_children_start = "fork_control::disable_before_children_start";
+    fn fork_control_disable_after_join_any_cancels_waiters_and_delays = "fork_control::disable_after_join_any_cancels_waiters_and_delays";
+    fn fork_control_disable_reaches_through_completed_parents = "fork_control::disable_reaches_through_completed_parents";
+    fn fork_control_disable_does_not_kill_siblings_or_caller = "fork_control::disable_does_not_kill_siblings_or_caller";
+    fn fork_control_disable_removes_nested_join_waits = "fork_control::disable_removes_nested_join_waits";
+    fn fork_control_cancelled_ids_can_be_reused_without_stale_wakeups = "fork_control::cancelled_ids_can_be_reused_without_stale_wakeups";
+    fn fork_control_program_waits_then_cancels_in_reactive_region = "fork_control::program_waits_then_cancels_in_reactive_region";
+}
+
+timed_cases! {
+    fn fork_control_function_disable_uses_calling_process = "fork_control::function_disable_uses_calling_process";
+}
+
+timed_cases! {
+    fn fork_control_four_state_values_survive_wait_and_cancellation = "fork_control::four_state_values_survive_wait_and_cancellation";
+}
+
+timed_cases! {
+    fn fork_control_review_wait_predicate_preserves_cancellation = "fork_control::wait_predicate_preserves_cancellation";
+    fn fork_control_review_wait_predicate_repeats_effects_on_each_wakeup = "fork_control::wait_predicate_repeats_effects_on_each_wakeup";
+    fn fork_control_review_event_driven_caller_propagates_wait_fork_through_tasks = "fork_control::event_driven_caller_propagates_wait_fork_through_tasks";
+    fn fork_control_review_event_driven_caller_spawns_untimed_children = "fork_control::event_driven_caller_spawns_untimed_children";
+}

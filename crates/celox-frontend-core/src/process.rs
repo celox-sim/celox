@@ -60,8 +60,8 @@ pub struct ProcessKernelBuilder {
     slots: ProcessSlots<SourceVarId>,
     /// The block each resume point continues in; point 0 is the start.
     resume_blocks: Vec<BlockId>,
-    /// The wait site whose resume point is being lowered.
-    wait_site: Option<u32>,
+    /// The wait site and predicate entry resume point being lowered.
+    wait_site: Option<(u32, usize)>,
     /// The runtime event site the process reports at its flush points
     /// (see [`Self::flush_deferred_at`]).
     flush_site: Option<u32>,
@@ -217,6 +217,19 @@ impl ProcessKernelBuilder {
         Ok((children, self.builder.current_block()))
     }
 
+    /// Wait for the calling process's immediate children (IEEE 1800-2023 9.6.1).
+    pub fn wait_fork(&mut self) -> Result<(), ProcessKernelError> {
+        self.slots.const_delays = false;
+        self.slots.requires_timed_simulation = true;
+        self.suspend(ProcessStatus::WaitFork)
+    }
+
+    /// Cancel descendants without suspending HDL execution (9.6.3).
+    pub fn disable_fork(&mut self) -> Result<(), ProcessKernelError> {
+        self.slots.const_delays = false;
+        self.suspend(ProcessStatus::DisableFork)
+    }
+
     pub fn local(&mut self, slot: usize) -> Result<(), ProcessKernelError> {
         self.store_delay_constant(slot as u64);
         self.suspend(ProcessStatus::Local)
@@ -245,7 +258,7 @@ impl ProcessKernelBuilder {
     pub fn suspend_wait(&mut self, site: u32) -> Result<(), ProcessKernelError> {
         self.store_delay_constant(u64::from(site));
         self.suspend(ProcessStatus::Wait)?;
-        self.wait_site = Some(site);
+        self.wait_site = Some((site, self.resume_blocks.len() - 1));
         Ok(())
     }
 
@@ -254,7 +267,7 @@ impl ProcessKernelBuilder {
     /// that the wait is still pending and return to the same resume point.
     /// The continuation block is open afterwards.
     pub fn wake_if(&mut self, condition: RegisterId) {
-        let site = self.wait_site.take().expect("wake_if follows suspend_wait");
+        let (site, resume) = self.wait_site.take().expect("wake_if follows suspend_wait");
         let woken = self.builder.new_block();
         let pending = self.builder.new_block();
         self.builder.seal_block(SIRTerminator::Branch {
@@ -263,6 +276,9 @@ impl ProcessKernelBuilder {
             false_block: (pending, Vec::new()),
         });
         self.builder.switch_to_block(pending);
+        // Predicate evaluation may itself yield to the runtime (for example,
+        // disable fork). A later wakeup must evaluate the whole predicate.
+        self.store_constant(self.slots.resume, PROCESS_RESUME_WIDTH, resume as u64);
         self.store_delay_constant(u64::from(site));
         self.end(ProcessStatus::Pending);
         self.builder.switch_to_block(woken);

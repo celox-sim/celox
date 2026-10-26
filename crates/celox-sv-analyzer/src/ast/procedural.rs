@@ -968,7 +968,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 _ => self.subroutine_call_statement(*id),
             },
             StatementKind::Assertion { .. } => Err(unsupported("concurrent assertion")),
-            StatementKind::WaitFork => Err(unsupported("wait fork statement")),
+            StatementKind::WaitFork => {
+                self.allow_timing("wait fork statement")?;
+                Ok(vec![Stmt::WaitFork])
+            }
             StatementKind::WaitOrder { .. } => Err(unsupported("wait order statement")),
             StatementKind::EventTrigger(_) => Err(unsupported("event trigger")),
             StatementKind::ProceduralAssign(_) | StatementKind::ProceduralRelease(_) => {
@@ -985,11 +988,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     .filter(|token| !token.is_trivia())
                     .find(|token| token.text != "disable")
                     .is_some_and(|token| token.text == "fork");
-                Err(unsupported(if disables_fork {
-                    "disable fork statement"
+                if disables_fork {
+                    Ok(vec![Stmt::DisableFork])
                 } else {
-                    "disable statement"
-                }))
+                    Err(unsupported("disable statement"))
+                }
             }
             StatementKind::Parallel { .. } => Err(unsupported("fork-join block")),
             _ => Err(unsupported("procedural statement")),

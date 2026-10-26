@@ -1402,7 +1402,11 @@ impl Frame<'_> {
             Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::WaitImplicit(_) | Stmt::Wait(_) => {
                 return None;
             }
-            Stmt::Fork { .. } | Stmt::AssignConcat { .. } | Stmt::Call { .. } => return None,
+            Stmt::Fork { .. }
+            | Stmt::WaitFork
+            | Stmt::DisableFork
+            | Stmt::AssignConcat { .. }
+            | Stmt::Call { .. } => return None,
         }
         Some(Flow::Next)
     }
