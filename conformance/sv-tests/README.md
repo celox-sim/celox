@@ -145,6 +145,13 @@ contains 3,300 case/mode verdicts at the pinned revision. These are its only
 changed rows, with no passing case regressing: 1,201 cases pass in 2state and
 1,212 in 4state. Only these reviewed expectations are updated.
 
+Logical implication (`->`) now passes six generated cases in both state modes.
+The binary-operator case passes elaboration; the five logical-operator cases
+execute simulations and pass their assertions. A full run at the pinned revision
+changes only these twelve verdicts, with no passing case regressing: 1,208 cases
+pass in 2state and 1,219 in 4state. Shared tests also cover short-circuiting and
+unknown operands (IEEE 1800-2023 11.4.7).
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.
