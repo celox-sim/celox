@@ -259,10 +259,12 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
     }
 
     fn before_domains(&mut self, timestamp: u64) -> Result<bool, Halt> {
-        Ok(!self.frozen
-            && self.show_slot(timestamp, |observer, io, time| {
-                observer.before_domains(io, time)
-            }))
+        if self.frozen {
+            return Ok(false);
+        }
+        self.show_slot(timestamp, |observer, io, time| {
+            observer.before_domains(io, time)
+        })
     }
 
     fn take_slot_writes(&mut self) -> bool {
@@ -323,7 +325,7 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         if !self.frozen {
             self.slot_writes |= self.show_slot(timestamp, |observer, io, time| {
                 observer.end_of_slot(io, time)
-            });
+            })?;
         }
         Ok(())
     }
@@ -336,9 +338,9 @@ impl<B: SimBackend> Simulator<B> {
         &mut self,
         time: u64,
         show: impl FnOnce(&mut dyn SlotObserver<B>, &mut crate::SlotIo<'_, B>, u64),
-    ) -> bool {
+    ) -> Result<bool, Halt> {
         let Some(observer) = self.slot_observer.as_deref_mut() else {
-            return false;
+            return Ok(false);
         };
         let mut io = crate::SlotIo::new(crate::IOContext {
             backend: &mut self.backend,
@@ -347,7 +349,10 @@ impl<B: SimBackend> Simulator<B> {
         show(observer, &mut io, time);
         let wrote = io.wrote();
         self.dirty |= wrote;
-        wrote
+        if io.finish_requested() {
+            return Err(Halt::Finish);
+        }
+        Ok(wrote)
     }
 }
 

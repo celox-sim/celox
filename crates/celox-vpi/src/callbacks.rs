@@ -575,6 +575,11 @@ fn in_slot(io: &mut celox::SlotIo<'_, celox::NativeBackend>, time: u64, regions:
     super::with_timed_mut(|timed| unsafe { timed.enter_slot(io) });
     regions();
     super::with_timed_mut(super::TimedRuntime::leave_slot);
+    // vpiFinish takes effect when the application callback returns
+    // (IEEE 1800-2023 38.4), before the scheduler runs more DUT work.
+    if finish_requested() {
+        io.request_finish();
+    }
 }
 
 /// Run `step` on the timed simulation, out of the session while it runs so
@@ -664,7 +669,10 @@ pub(super) fn run_timed() -> bool {
             && with_host(|host| borrow_cell(&host.callbacks, |state| state.read_only_at))
                 != Some(time)
         {
-            with_simulation(|simulation| simulation.eval_comb());
+            timed_step(|simulation| simulation.eval_comb());
+            if finish_requested() {
+                break;
+            }
             take_timed_writes();
             if let Regions::Done = settled_regions() {
                 break;

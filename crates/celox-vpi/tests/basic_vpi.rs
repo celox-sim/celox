@@ -3512,6 +3512,8 @@ fn a_finish_inside_a_time_step_ends_a_timed_run() {
     assert!(run_callbacks_result().unwrap());
     assert_eq!(celox_vpi_current_time(), 5);
     assert_eq!(FINISH_EVENTS.load(Ordering::SeqCst), 3);
+    // The callback ends the run before the triggered domain can commit.
+    assert_eq!(unsafe { read_int(c"Top.count") }, 0);
     clear_runtime();
 }
 
@@ -3829,4 +3831,71 @@ fn a_finish_from_a_timer_stops_before_the_designs_slot() {
     assert_eq!(celox_vpi_current_time(), 5);
     assert_eq!(FLAG_AT_END.load(Ordering::SeqCst), 0);
     clear_runtime();
+}
+
+#[cfg(feature = "systemverilog")]
+unsafe extern "C" fn write_plain_data_input(_data: *mut VpiCbData) -> i32 {
+    // Safety: VPI calls on the session's thread.
+    assert!(unsafe { try_write_x() });
+    0
+}
+
+#[cfg(feature = "systemverilog")]
+fn settle_plain_data_input(action: &str) -> Result<bool, String> {
+    let source = format!(
+        r#"`timescale 1ns/1ns
+        module Top(input logic x, output logic y);
+            assign y = x;
+            always_comb if (x) begin {action} end
+            initial #10 $finish;
+        endmodule"#
+    );
+    let image = celox::Simulation::from_sv_sources(
+        vec![(source.as_str(), std::path::Path::new("fallback_settle.sv"))],
+        "Top",
+    )
+    .compile_native()
+    .unwrap()
+    .into_program_image();
+    let simulation = celox::Simulation::from_sv_sources(Vec::new(), "")
+        .build_native_from_image(image.clone())
+        .unwrap();
+    let _session = install_timed_runtime(image, simulation).unwrap();
+    let mut delay = VpiTime {
+        type_: VPI_SIM_TIME,
+        low: 5,
+        ..VpiTime::default()
+    };
+    let timer = VpiCbData {
+        reason: CB_AFTER_DELAY,
+        cb_rtn: Some(write_plain_data_input),
+        obj: ptr::null_mut(),
+        time: &mut delay,
+        value: ptr::null_mut(),
+        index: 0,
+        user_data: ptr::null_mut(),
+    };
+    // Safety: registration copies live callback data on the session's thread.
+    unsafe {
+        assert!(!vpi_register_cb(&timer).is_null());
+    }
+    let result = run_callbacks_result();
+    assert_eq!(celox_vpi_current_time(), 5);
+    clear_runtime();
+    result
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn a_plain_input_settle_finishes_cleanly() {
+    let _serial = lock_vpi();
+    assert!(settle_plain_data_input("$finish;").unwrap());
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn a_plain_input_settle_reports_fatal_errors() {
+    let _serial = lock_vpi();
+    let error = settle_plain_data_input("$fatal(1, \"fallback failure\");").unwrap_err();
+    assert!(error.contains("fallback failure"), "{error}");
 }
