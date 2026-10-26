@@ -511,6 +511,7 @@ fn lowers_shared_selector_roots_to_cached_indexed_table_loads() {
 
     let layout = MemoryLayout {
         trace: None,
+        settle: None,
         four_state: false,
         mode: MemoryLayoutMode::Packed,
         unpacked_arrays: HashMap::default(),

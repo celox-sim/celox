@@ -1426,6 +1426,7 @@ mod tests {
             .collect();
         MemoryLayout {
             trace: None,
+            settle: None,
             four_state: false,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),

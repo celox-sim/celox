@@ -11,7 +11,9 @@ use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 
+mod settle;
 mod trace;
+pub use settle::{SettleLayout, SettleObject};
 pub use trace::{TRACE_GROUP_BYTES, TraceLayout};
 
 pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
@@ -191,6 +193,9 @@ pub trait LayoutSource<A> {
 pub struct MemoryLayout<A> {
     /// Present only in builds that record waveforms.
     pub trace: Option<TraceLayout>,
+    /// Present when the combinational settle is partitioned.
+    #[serde(default)]
+    pub settle: Option<SettleLayout>,
     pub four_state: bool,
     pub mode: MemoryLayoutMode,
     /// Stable region offsets. Includes all declared state objects.
@@ -336,6 +341,15 @@ fn place_region<A: Copy + Eq + Hash>(
         place_run(&mut current, run);
     }
     align_up(current + LANE_SEGMENT_GUARD, LANE_SEGMENT_ALIGN)
+}
+
+impl<A> MemoryLayout<A> {
+    /// Whether each settle runs a second time to cross-check its partitions
+    /// ([`SettleLayout::check`]).
+    #[inline]
+    pub fn settle_check(&self) -> bool {
+        self.settle.as_ref().is_some_and(|settle| settle.check)
+    }
 }
 
 impl<A> MemoryLayout<A>
@@ -553,6 +567,7 @@ where
 
         Self {
             trace: None,
+            settle: None,
             four_state,
             mode,
             offsets,

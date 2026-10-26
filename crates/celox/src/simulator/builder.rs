@@ -1686,6 +1686,9 @@ mod host {
         /// Emit the additional combinational entries needed to reapply foreign
         /// force overrides between procedural store boundaries.
         pub native_force_support: bool,
+        /// Cross-check every partitioned settle against one that runs every
+        /// partition (see [`SimulatorBuilder::settle_check`]).
+        pub settle_check: bool,
         /// Explicit hierarchical observation and native force targets.
         pub signal_access: crate::SignalAccessOptions,
         /// Dead store elimination policy.
@@ -1991,6 +1994,7 @@ mod host {
                 emit_triggers: false,
                 #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
                 derived_edge_units: None,
+                settle_check: false,
                 native_force_support: false,
                 signal_access: crate::SignalAccessOptions::default(),
                 dead_store_policy: DeadStorePolicy::Off,
@@ -2221,9 +2225,11 @@ mod host {
         pub fn opt_level(mut self, level: crate::optimizer::OptLevel) -> Self {
             let lanes = self.options.optimize_options.parallel_lanes();
             let partition = self.options.optimize_options.parallel_partition();
+            let settle = self.options.optimize_options.settle_partition();
             self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level)
                 .with_parallel_lanes(lanes)
-                .with_parallel_partition(partition);
+                .with_parallel_partition(partition)
+                .with_settle_partition(settle);
             self.options.cranelift_options =
                 crate::backend::CraneliftOptions::for_speed_optimization(
                     level != crate::optimizer::OptLevel::O0,
@@ -2258,13 +2264,15 @@ mod host {
         pub fn optimize(mut self, enable: bool) -> Self {
             let lanes = self.options.optimize_options.parallel_lanes();
             let partition = self.options.optimize_options.parallel_partition();
+            let settle = self.options.optimize_options.settle_partition();
             self.options.optimize_options = if enable {
                 crate::optimizer::OptimizeOptions::all()
             } else {
                 crate::optimizer::OptimizeOptions::none()
             }
             .with_parallel_lanes(lanes)
-            .with_parallel_partition(partition);
+            .with_parallel_partition(partition)
+            .with_settle_partition(settle);
             self
         }
 
@@ -2284,9 +2292,15 @@ mod host {
             } else {
                 self.options.optimize_options.parallel_partition()
             };
+            let settle = if options.settle_partition() == crate::SettlePartition::Always {
+                crate::SettlePartition::Always
+            } else {
+                self.options.optimize_options.settle_partition()
+            };
             self.options.optimize_options = options
                 .with_parallel_lanes(lanes)
-                .with_parallel_partition(partition);
+                .with_parallel_partition(partition)
+                .with_settle_partition(settle);
             self
         }
 
@@ -2325,6 +2339,34 @@ mod host {
                 .optimize_options
                 .clone()
                 .with_parallel_partition(partition);
+            self
+        }
+
+        /// Debug cross-check of a partitioned settle: the native and
+        /// Cranelift backends run each settle a second time from the same
+        /// state with every partition flagged, and panic at the first state
+        /// byte the two runs leave differently. Slow; for testing the
+        /// partitioning. Effects of the partitions that run in both passes,
+        /// such as runtime events, happen twice.
+        pub fn settle_check(mut self, enable: bool) -> Self {
+            self.options.settle_check = enable;
+            self
+        }
+
+        /// Cut the combinational settle into partitions that run only when
+        /// state they read changed ([`crate::SirPass::PartitionedSettle`]).
+        ///
+        /// [`crate::SettlePartition::Estimated`] partitions a large settle of
+        /// a design with several clock events;
+        /// [`crate::SettlePartition::Always`] partitions every settle it can,
+        /// for testing.
+        pub fn settle_partition(mut self, partition: crate::SettlePartition) -> Self {
+            self.options.optimize_options = self
+                .options
+                .optimize_options
+                .clone()
+                .enable(crate::optimizer::SirPass::PartitionedSettle)
+                .with_settle_partition(partition);
             self
         }
 
@@ -2902,6 +2944,8 @@ mod host {
                 }
             }
 
+            // Units generated from here on write state the settle may read.
+            let first_generated_process = laid_out.sir.processes.len();
             // A timed simulation runs the slots of kernels that only delay
             // in a compiled scheduler, generated from the final units.
             #[cfg(feature = "host-runtime")]
@@ -2922,6 +2966,8 @@ mod host {
             if let Some(sink) = &self.options.derived_edge_units {
                 crate::derived_edge::attach_test_units(&mut laid_out, sink);
             }
+            crate::settle::instrument_processes_from(&mut laid_out, first_generated_process, false);
+            laid_out.set_settle_check(self.options.settle_check);
 
             // Link DPI-C imports before code generation, so a missing C
             // function fails the build early; the backends reuse the result.

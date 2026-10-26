@@ -2420,6 +2420,37 @@ pub struct ScheduleResult<Addr> {
     /// comb/FF schedule. These Stores are semantic state updates rather than
     /// disposable comb publications.
     pub direct_ff_writes: Vec<VarAtomBase<Addr>>,
+    /// The partitions of a partitioned settle, in schedule order; empty when
+    /// the schedule runs as one pass.
+    pub partitions: Vec<SettlePartition<Addr>>,
+}
+
+/// Request to split a combinational schedule into partitions that run only
+/// when state they read changed since they last ran.
+///
+/// Byte `p` of `flags`, a two-state object, is partition `p`'s dirty flag:
+/// the settle runs the partition only when it is not zero, and clears it.
+/// A partition that runs sets the flags of the partitions reading what it
+/// writes; every other writer of state a partition reads must set its flag
+/// too ([`SettlePartition::reads`]).
+#[derive(Clone, Copy, Debug)]
+pub struct SettlePartitioning<Addr> {
+    pub flags: Addr,
+    /// Approximate expression nodes per partition.
+    pub target_cost: usize,
+}
+
+/// One partition of a partitioned settle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettlePartition<Addr> {
+    /// The state objects the partition reads. A change to any of them must
+    /// set the partition's flag before the next settle.
+    pub reads: Vec<Addr>,
+    /// The state objects the partition writes.
+    pub writes: Vec<Addr>,
+    /// Whether the partition runs on every settle, because it has effects
+    /// beyond its stores.
+    pub pinned: bool,
 }
 
 pub trait ClockFfLowering<Addr> {
@@ -3464,6 +3495,333 @@ const UNROLL_THRESHOLD: usize = 32;
 /// compatibility matrix for a long run of independent roots.
 const MAX_JOINT_FOLD_ROOTS: usize = 16;
 
+/// One partition of a settle plan.
+struct PlannedPartition<Addr> {
+    reads: Vec<Addr>,
+    writes: Vec<Addr>,
+    /// The partitions whose flags it sets when it runs: those reading what
+    /// it writes, itself included when it reads the previous value of its
+    /// own writes.
+    marks: Vec<usize>,
+    pinned: bool,
+}
+
+/// The partitions of a settle, each a contiguous run of scheduled work.
+struct PartitionPlan<Addr> {
+    /// The first scheduled work of each partition.
+    first_work: Vec<usize>,
+    partitions: Vec<PlannedPartition<Addr>>,
+}
+
+/// The paths of one piece of scheduled combinational work.
+fn work_paths(work: &ScheduledWork) -> &[usize] {
+    match work {
+        ScheduledWork::CombPath(path) => std::slice::from_ref(path),
+        ScheduledWork::CombScc(paths) | ScheduledWork::GuardedComb { paths, .. } => paths,
+        ScheduledWork::Ff(_) => &[],
+    }
+}
+
+/// The approximate lowering cost of a path: its distinct expression nodes,
+/// or a process unit's instructions.
+pub fn path_cost<Addr: Clone + Eq + Hash>(
+    arena: &SLTNodeArena<Addr>,
+    path: &LogicPath<Addr>,
+) -> usize {
+    if let LogicPathTarget::Process { unit, .. } = &path.target {
+        return unit
+            .blocks
+            .values()
+            .map(|block| block.instructions.len() + 1)
+            .sum();
+    }
+    let mut seen = HashSet::default();
+    let mut stack = vec![path.expr];
+    let mut cost = 0;
+    while let Some(node) = stack.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        cost += 1;
+        match arena.get(node) {
+            SLTNode::Binary(lhs, _, rhs) => stack.extend([*lhs, *rhs]),
+            SLTNode::Unary(_, operand)
+            | SLTNode::Slice { expr: operand, .. }
+            | SLTNode::Capture { expr: operand, .. } => stack.push(*operand),
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => stack.extend([*cond, *then_expr, *else_expr]),
+            SLTNode::Concat(parts) => stack.extend(parts.iter().map(|(part, _)| *part)),
+            // A loop's cost scales with its trip count; count it as large.
+            SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => cost += 64,
+            SLTNode::Input { .. } | SLTNode::Constant(..) => {}
+        }
+    }
+    cost
+}
+
+/// Whether a path's expression captures a value at an evaluation position.
+fn path_has_capture<Addr: Clone + Eq + Hash>(
+    arena: &SLTNodeArena<Addr>,
+    path: &LogicPath<Addr>,
+) -> bool {
+    if matches!(path.target, LogicPathTarget::CombCaptureEvent { .. }) {
+        return true;
+    }
+    let mut seen = HashSet::default();
+    let mut stack = vec![path.expr];
+    while let Some(node) = stack.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        match arena.get(node) {
+            SLTNode::Capture { .. } => return true,
+            SLTNode::Binary(lhs, _, rhs) => stack.extend([*lhs, *rhs]),
+            SLTNode::Unary(_, operand) | SLTNode::Slice { expr: operand, .. } => {
+                stack.push(*operand)
+            }
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => stack.extend([*cond, *then_expr, *else_expr]),
+            SLTNode::Concat(parts) => stack.extend(parts.iter().map(|(part, _)| *part)),
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whether a path does more than store its value: comb capture events,
+/// activation of capture sites, and process units with runtime events or
+/// extern calls. A partition holding one runs on every settle.
+fn path_has_effects<Addr: Clone + Eq + Hash>(path: &LogicPath<Addr>) -> bool {
+    if !path.comb_capture_enable_sites.is_empty() || path.comb_capture_enable_always {
+        return true;
+    }
+    match &path.target {
+        LogicPathTarget::CombCaptureEvent { .. } => true,
+        LogicPathTarget::Process { unit, .. } => unit.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| match instruction {
+                    SIRInstruction::RuntimeEvent { .. }
+                    | SIRInstruction::CombCaptureEvent { .. }
+                    | SIRInstruction::CombCaptureEnableIfChanged { .. }
+                    | SIRInstruction::ExternCall { .. } => true,
+                    SIRInstruction::Store(.., capture_sites) => !capture_sites.is_empty(),
+                    _ => false,
+                })
+        }),
+        LogicPathTarget::Var(_) => false,
+    }
+}
+
+/// Cut a combinational schedule into partitions of about
+/// `partitioning.target_cost`, or `None` when it would be one.
+fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    prepared: &PreparedSchedule<Addr>,
+    arena: &SLTNodeArena<Addr>,
+    var_widths: &HashMap<Addr, usize>,
+    partitioning: SettlePartitioning<Addr>,
+) -> Option<(PartitionPlan<Addr>, Addr)> {
+    let input = &prepared.input;
+    // A captured value or a pre-lowered node is materialized at one place
+    // and reused at a later one through the lowering cache, which a
+    // partition boundary between them would clear.
+    if input
+        .iter()
+        .any(|path| !path.pre_lower_nodes.is_empty() || path_has_capture(arena, path))
+    {
+        return None;
+    }
+    // Whole-variable copies, by target.
+    let mut copy_source: HashMap<Addr, Addr> = HashMap::default();
+    for work in &prepared.scheduled_work {
+        if let ScheduledWork::CombPath(path) = work
+            && let Some((target, source)) = whole_variable_copy(arena, &input[*path], var_widths)
+        {
+            copy_source.insert(target, source);
+        }
+    }
+    let mut first_work = Vec::new();
+    let mut cost = 0;
+    for (index, work) in prepared.scheduled_work.iter().enumerate() {
+        if first_work.is_empty() || cost >= partitioning.target_cost {
+            first_work.push(index);
+            cost = 0;
+        }
+        cost += work_paths(work)
+            .iter()
+            .map(|&path| path_cost(arena, &input[path]))
+            .sum::<usize>();
+    }
+    if first_work.len() < 2 {
+        return None;
+    }
+    let mut partition_of_work = vec![0; prepared.scheduled_work.len()];
+    for (partition, &first) in first_work.iter().enumerate() {
+        let end = first_work
+            .get(partition + 1)
+            .copied()
+            .unwrap_or(prepared.scheduled_work.len());
+        partition_of_work[first..end].fill(partition);
+    }
+    let count = first_work.len();
+    let mut reads = vec![BTreeSet::new(); count];
+    let mut writes = vec![BTreeSet::new(); count];
+    let mut previous = vec![BTreeSet::new(); count];
+    let mut pinned = vec![false; count];
+    for (index, work) in prepared.scheduled_work.iter().enumerate() {
+        let partition = partition_of_work[index];
+        for &path_index in work_paths(work) {
+            let path = &input[path_index];
+            pinned[partition] |= path_has_effects(path);
+            let atoms = path
+                .sources
+                .iter()
+                .chain(&path.address_sources)
+                .chain(&path.previous_sources);
+            reads[partition].extend(atoms.map(|atom| atom.id));
+            // A process's activation guard reads its occurrence counters and
+            // startup slots as well.
+            if let LogicPathTarget::Process {
+                sensitivity_counters,
+                startup,
+                unit,
+                ..
+            } = &path.target
+            {
+                // The unit may read more than its listed sources, such as
+                // force controls. It runs at its process's first projection
+                // and writes every output there.
+                for block in unit.blocks.values() {
+                    for instruction in &block.instructions {
+                        match instruction {
+                            SIRInstruction::Load(_, address, ..) => {
+                                reads[partition].insert(*address);
+                            }
+                            SIRInstruction::Store(address, ..) => {
+                                writes[partition].insert(*address);
+                            }
+                            SIRInstruction::Commit(source, target, ..) => {
+                                reads[partition].insert(*source);
+                                writes[partition].insert(*target);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                for (atom, counter) in sensitivity_counters {
+                    reads[partition].extend([atom.id, *counter]);
+                }
+                if let Some(startup) = startup {
+                    reads[partition].insert(startup.initialized);
+                    for (atom, slot) in &startup.inputs {
+                        reads[partition].extend([atom.id, *slot]);
+                    }
+                    for (counter, slot) in &startup.counters {
+                        reads[partition].extend([*counter, *slot]);
+                    }
+                }
+            }
+            previous[partition].extend(path.previous_sources.iter().map(|atom| atom.id));
+            if let Some(target) = path.target.var() {
+                writes[partition].insert(target.id);
+            }
+        }
+    }
+    // Reading a copy's target reads its source: the copy may become an
+    // alias of its source, whose changes then reach the target without the
+    // copy running.
+    for read in &mut reads {
+        let mut sources = Vec::new();
+        for &addr in read.iter() {
+            let mut current = addr;
+            let mut steps = 0;
+            while let Some(&source) = copy_source.get(&current) {
+                sources.push(source);
+                current = source;
+                steps += 1;
+                if steps > copy_source.len() {
+                    break;
+                }
+            }
+        }
+        read.extend(sources);
+    }
+    let mut readers: HashMap<Addr, Vec<usize>> = HashMap::default();
+    for (partition, read) in reads.iter().enumerate() {
+        for &addr in read {
+            readers.entry(addr).or_default().push(partition);
+        }
+    }
+    let partitions = (0..count)
+        .map(|partition| {
+            let mut marks = BTreeSet::new();
+            for addr in &writes[partition] {
+                for &reader in readers.get(addr).into_iter().flatten() {
+                    if reader != partition || previous[partition].contains(addr) {
+                        marks.insert(reader);
+                    }
+                }
+            }
+            PlannedPartition {
+                reads: reads[partition].iter().copied().collect(),
+                writes: writes[partition].iter().copied().collect(),
+                marks: marks.into_iter().collect(),
+                pinned: pinned[partition],
+            }
+        })
+        .collect();
+    Some((
+        PartitionPlan {
+            first_work,
+            partitions,
+        },
+        partitioning.flags,
+    ))
+}
+
+/// The `(target, source)` of a path that copies one whole variable into
+/// another of the same width.
+fn whole_variable_copy<Addr: Clone + Eq + Hash + Copy>(
+    arena: &SLTNodeArena<Addr>,
+    path: &LogicPath<Addr>,
+    var_widths: &HashMap<Addr, usize>,
+) -> Option<(Addr, Addr)> {
+    if !path.transparent_copy || !path.previous_sources.is_empty() {
+        return None;
+    }
+    let target = match &path.target {
+        LogicPathTarget::Var(target) => target,
+        _ => return None,
+    };
+    let width = *var_widths.get(&target.id)?;
+    if target.access.lsb != 0 || target.access.msb + 1 != width {
+        return None;
+    }
+    match arena.get(path.expr) {
+        SLTNode::Input {
+            variable,
+            index,
+            access,
+            ..
+        } if index.is_empty()
+            && access.lsb == 0
+            && access.msb + 1 == width
+            && var_widths.get(variable) == Some(&width)
+            && *variable != target.id =>
+        {
+            Some((target.id, *variable))
+        }
+        _ => None,
+    }
+}
+
 /// Lowering state for one sequence of scheduled work emitted through one SIR
 /// builder. Register numbers and the expression cache are local to it.
 struct WorkLowering<'a, Addr: Clone + Eq + Hash> {
@@ -3478,6 +3836,11 @@ struct WorkLowering<'a, Addr: Clone + Eq + Hash> {
     /// The processes whose unit an acyclic projection has run (see
     /// [`Self::lower`]).
     run_processes: HashSet<Addr>,
+    /// Inside a partition of a partitioned settle, which units must not
+    /// split.
+    in_partition: bool,
+    /// Where a guarded partition continues when it is skipped.
+    partition_merge: Option<BlockId>,
 }
 
 impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a, Addr> {
@@ -3492,7 +3855,100 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             pending_fold_indices: Vec::new(),
             pending_fold_roots: HashSet::default(),
             run_processes: HashSet::default(),
+            in_partition: false,
+            partition_merge: None,
         }
+    }
+
+    /// Open partition `index`: run it only when its flag or the untracked
+    /// byte (`untracked`) is set, and clear its flag. Values computed before
+    /// it may be reused inside, but not the other way round, so the
+    /// expression cache starts over.
+    fn begin_partition(
+        &mut self,
+        flags: Addr,
+        index: usize,
+        untracked: usize,
+        partition: &PlannedPartition<Addr>,
+    ) {
+        self.flush_pending_folds();
+        if self.context.split_large_units && self.builder.block_count() >= EU_BLOCK_LIMIT {
+            if let Some(eu) = self.builder.flush_eu() {
+                self.execution_units.push(eu);
+            }
+        }
+        self.lower_cache.clear();
+        self.in_partition = true;
+        let offset = SIROffset::Static(index * 8);
+        if !partition.pinned {
+            let own = self.builder.alloc_bit(8, false);
+            self.builder
+                .emit(SIRInstruction::Load(own, flags, offset.clone(), 8));
+            let all = self.builder.alloc_bit(8, false);
+            self.builder.emit(SIRInstruction::Load(
+                all,
+                flags,
+                SIROffset::Static(untracked * 8),
+                8,
+            ));
+            let flag = self.builder.alloc_bit(8, false);
+            self.builder
+                .emit(SIRInstruction::Binary(flag, own, BinaryOp::Or, all));
+            let zero = self.builder.alloc_bit(8, false);
+            self.builder
+                .emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
+            let dirty = self.builder.alloc_bit(1, false);
+            self.builder
+                .emit(SIRInstruction::Binary(dirty, flag, BinaryOp::Ne, zero));
+            let body = self.builder.new_block();
+            let merge = self.builder.new_block();
+            self.builder.seal_block(SIRTerminator::Branch {
+                cond: dirty,
+                true_block: (body, Vec::new()),
+                false_block: (merge, Vec::new()),
+            });
+            self.builder.switch_to_block(body);
+            self.partition_merge = Some(merge);
+        }
+        let clean = self.builder.alloc_bit(8, false);
+        self.builder
+            .emit(SIRInstruction::Imm(clean, SIRValue::new(0u64)));
+        self.builder.emit(SIRInstruction::Store(
+            flags,
+            offset,
+            8,
+            clean,
+            Vec::new(),
+            Vec::new(),
+        ));
+    }
+
+    /// Close a partition: set the flags of the partitions reading what it
+    /// wrote, then join the path that skipped it.
+    fn end_partition(&mut self, flags: Addr, partition: &PlannedPartition<Addr>) {
+        self.flush_pending_folds();
+        if !partition.marks.is_empty() {
+            let one = self.builder.alloc_bit(8, false);
+            self.builder
+                .emit(SIRInstruction::Imm(one, SIRValue::new(1u64)));
+            for &reader in &partition.marks {
+                self.builder.emit(SIRInstruction::Store(
+                    flags,
+                    SIROffset::Static(reader * 8),
+                    8,
+                    one,
+                    Vec::new(),
+                    Vec::new(),
+                ));
+            }
+        }
+        if let Some(merge) = self.partition_merge.take() {
+            self.builder
+                .seal_block(SIRTerminator::Jump(merge, Vec::new()));
+            self.builder.switch_to_block(merge);
+        }
+        self.lower_cache.clear();
+        self.in_partition = false;
     }
 
     /// Lower the buffered run of exact grouped-fold paths.
@@ -3854,7 +4310,10 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             }
         } else {
             // DAG Part — flush before emitting if the EU has grown too large
-            if context.split_large_units && self.builder.block_count() >= EU_BLOCK_LIMIT {
+            if context.split_large_units
+                && !self.in_partition
+                && self.builder.block_count() >= EU_BLOCK_LIMIT
+            {
                 self.flush_pending_folds();
                 if let Some(eu) = self.builder.flush_eu() {
                     self.execution_units.push(eu);
@@ -3932,6 +4391,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     unpacked_element_widths: &HashMap<Addr, usize>,
     first_runtime_error_code: i64,
     mut ff: Option<&mut dyn ClockFfLowering<Addr, Error = E>>,
+    partitioning: Option<SettlePartitioning<Addr>>,
 ) -> Result<ScheduleResult<Addr>, ClockSortError<Addr, E>> {
     let prepared = prepare_schedule(
         input,
@@ -3972,13 +4432,36 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     }
     let mut runtime_errors: HashMap<i64, RuntimeErrorInfo<Addr>> = HashMap::default();
     let mut next_runtime_error_code = first_runtime_error_code;
-    for work in &prepared.scheduled_work {
+    let plan = partitioning
+        .filter(|_| ff.is_none())
+        .and_then(|partitioning| {
+            plan_settle_partitions(&prepared, arena, var_widths, partitioning)
+        });
+    for (index, work) in prepared.scheduled_work.iter().enumerate() {
+        if let Some((plan, flags)) = &plan {
+            if let Some(partition) = plan.first_work.iter().position(|&first| first == index) {
+                if partition > 0 {
+                    lowering.end_partition(*flags, &plan.partitions[partition - 1]);
+                }
+                lowering.begin_partition(
+                    *flags,
+                    partition,
+                    plan.partitions.len(),
+                    &plan.partitions[partition],
+                );
+            }
+        }
         lowering.lower(
             work,
             ff.as_deref_mut(),
             &mut runtime_errors,
             &mut next_runtime_error_code,
         )?;
+    }
+    if let Some((plan, flags)) = &plan
+        && let Some(last) = plan.partitions.last()
+    {
+        lowering.end_partition(*flags, last);
     }
     // Flush the final exact grouped-fold run after the SCC loop.
     lowering.flush_pending_folds();
@@ -3991,6 +4474,18 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         execution_units: lowering.finish(),
         runtime_errors,
         direct_ff_writes,
+        partitions: plan
+            .map(|(plan, _)| {
+                plan.partitions
+                    .into_iter()
+                    .map(|partition| SettlePartition {
+                        reads: partition.reads,
+                        writes: partition.writes,
+                        pinned: partition.pinned,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -4013,6 +4508,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         var_widths,
         &HashMap::default(),
         first_runtime_error_code,
+        None,
     )
 }
 
@@ -4025,6 +4521,7 @@ pub fn sort_with_unpacked_element_widths<Addr: Clone + Eq + Ord + Hash + Debug +
     var_widths: &HashMap<Addr, usize>,
     unpacked_element_widths: &HashMap<Addr, usize>,
     first_runtime_error_code: i64,
+    partitioning: Option<SettlePartitioning<Addr>>,
 ) -> Result<ScheduleResult<Addr>, SchedulerError<Addr>> {
     match sort_impl::<Addr, std::convert::Infallible>(
         input,
@@ -4036,6 +4533,7 @@ pub fn sort_with_unpacked_element_widths<Addr: Clone + Eq + Ord + Hash + Debug +
         unpacked_element_widths,
         first_runtime_error_code,
         None,
+        partitioning,
     ) {
         Ok(result) => Ok(result),
         Err(ClockSortError::Scheduler(error)) => Err(error),
@@ -4066,6 +4564,7 @@ pub fn sort_clock<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         unpacked_element_widths,
         first_runtime_error_code,
         Some(ff),
+        None,
     )
 }
 
@@ -4085,7 +4584,7 @@ mod tests {
         LogicPath, LogicPathTarget, SLTForFoldGroupState, SLTNode, SLTNodeArena, SLTToSIRLowerer,
     };
     use celox_design::{BinaryOp, BitAccess, VarAtomBase};
-    use celox_sir::{SIRBuilder, SIRInstruction, SIRTerminator};
+    use celox_sir::{SIRBuilder, SIRInstruction, SIROffset, SIRTerminator};
 
     #[test]
     fn deep_input_dependencies_use_heap_and_preserve_inverse_index() {
@@ -4627,6 +5126,105 @@ mod tests {
         add_acyclic_ff_write_order_edges(&mut adj, [(1, 0), (1, 2)]);
 
         assert_eq!(adj, vec![vec![1], vec![2], Vec::new()]);
+    }
+
+    fn partitioned_sort(
+        paths: Vec<LogicPath<u32>>,
+        arena: &SLTNodeArena<u32>,
+    ) -> super::ScheduleResult<u32> {
+        let widths = (10..14).map(|id| (id, 8)).collect();
+        super::sort_with_unpacked_element_widths(
+            paths,
+            arena,
+            &crate::HashSet::default(),
+            &crate::HashMap::default(),
+            false,
+            &widths,
+            &crate::HashMap::default(),
+            1,
+            Some(super::SettlePartitioning {
+                flags: 99,
+                target_cost: 1,
+            }),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn settle_partitions_follow_schedule_and_guard_on_their_flags() {
+        let mut arena = SLTNodeArena::new();
+        let paths = vec![
+            simple_path(&mut arena, 13, Some(12)),
+            simple_path(&mut arena, 12, Some(11)),
+            simple_path(&mut arena, 11, Some(10)),
+        ];
+        let result = partitioned_sort(paths, &arena);
+        let plan = result
+            .partitions
+            .iter()
+            .map(|partition| (partition.reads.clone(), partition.writes.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            plan,
+            vec![
+                (vec![10], vec![11]),
+                (vec![11], vec![12]),
+                (vec![12], vec![13]),
+            ]
+        );
+        assert!(result.partitions.iter().all(|partition| !partition.pinned));
+        // Each partition loads its own flag and the untracked-writes flag
+        // after them; a partition sets its reader's.
+        let mut loaded = Vec::new();
+        let mut stored = Vec::new();
+        for unit in &result.execution_units {
+            for block in unit.blocks.values() {
+                for instruction in &block.instructions {
+                    match instruction {
+                        SIRInstruction::Load(_, 99, SIROffset::Static(byte), 8) => {
+                            loaded.push(*byte)
+                        }
+                        SIRInstruction::Store(99, SIROffset::Static(byte), 8, ..) => {
+                            stored.push(*byte)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        loaded.sort_unstable();
+        stored.sort_unstable();
+        assert_eq!(loaded, vec![0, 8, 16, 24, 24, 24]);
+        // The clears of all three flags, and the marks of partitions 1 and 2.
+        assert_eq!(stored, vec![0, 8, 8, 16, 16]);
+    }
+
+    #[test]
+    fn settle_copy_readers_read_the_copied_source() {
+        let mut arena = SLTNodeArena::new();
+        let mut copy = simple_path(&mut arena, 12, Some(11));
+        copy.transparent_copy = true;
+        let paths = vec![
+            simple_path(&mut arena, 13, Some(12)),
+            copy,
+            simple_path(&mut arena, 11, Some(10)),
+        ];
+        let result = partitioned_sort(paths, &arena);
+        let plan = result
+            .partitions
+            .iter()
+            .map(|partition| (partition.reads.clone(), partition.writes.clone()))
+            .collect::<Vec<_>>();
+        // The copy is guarded like other work, and its reader reads the
+        // copied source too.
+        assert_eq!(
+            plan,
+            vec![
+                (vec![10], vec![11]),
+                (vec![11], vec![12]),
+                (vec![11, 12], vec![13]),
+            ]
+        );
     }
 
     #[test]

@@ -44,6 +44,14 @@ struct StoreCandidate {
 struct GlobalIdentityFacts {
     accesses: HashMap<AbsoluteAddr, AddressFacts>,
     stores: Vec<StoreCandidate>,
+    /// In a partitioned settle, where each address is loaded and the
+    /// immediate dominators of every unit (see [`reads_follow_store`]).
+    settle_loads: Option<SettleLoads>,
+}
+
+struct SettleLoads {
+    sites: HashMap<AbsoluteAddr, Vec<(usize, BlockId, usize)>>,
+    immediate_dominators: Vec<HashMap<BlockId, BlockId>>,
 }
 
 /// Analyze all combinational units before selecting any whole-program address
@@ -69,13 +77,25 @@ pub(in crate::optimizer) fn optimize_program_identity_stores(
     );
     blocked_aliases.extend(program.design.initial_state.iter().map(|init| init.address));
 
+    let settle_flags = settle_flags(program);
     optimize_eval_comb_identity_stores(
         &mut program.sir.eval_comb,
         &metadata,
         &blocked_aliases,
         program.layout_requirements.state_aliases(),
         four_state,
+        settle_flags,
     )
+}
+
+/// The flags of a partitioned settle, whose guards skip a partition only
+/// when it would store what memory already holds.
+fn settle_flags(program: &OptimizationContext) -> Option<AbsoluteAddr> {
+    program
+        .runtime_schema
+        .settle_partitions
+        .as_ref()
+        .map(|settle| settle.flags)
 }
 
 fn address_metadata(program: &OptimizationContext) -> HashMap<AbsoluteAddr, AddressMetadata> {
@@ -101,8 +121,9 @@ fn optimize_eval_comb_identity_stores(
     blocked_aliases: &HashSet<AbsoluteAddr>,
     existing_aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     four_state: bool,
+    settle_flags: Option<AbsoluteAddr>,
 ) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
-    let facts = collect_global_facts(units, metadata, four_state);
+    let facts = collect_global_facts(units, metadata, four_state, settle_flags);
     let aliases = select_aliases(
         &facts,
         metadata,
@@ -129,20 +150,36 @@ pub(crate) fn retain_final_identity_aliases(program: &mut OptimizationContext, f
     let aliases = program.layout_requirements.state_aliases().clone();
     let mut valid = aliases.keys().copied().collect::<HashSet<_>>();
 
+    let settle_flags = settle_flags(program);
     retain_aliases_valid_for_units(
         &program.sir.eval_comb,
         &aliases,
         &metadata,
         four_state,
+        settle_flags,
         &mut valid,
     );
     for units in program.sir.eval_comb_apply_ffs.values() {
-        retain_aliases_valid_for_units(units, &aliases, &metadata, four_state, &mut valid);
+        retain_aliases_valid_for_units(
+            units,
+            &aliases,
+            &metadata,
+            four_state,
+            settle_flags,
+            &mut valid,
+        );
     }
     // The lane-partitioned combinational kernel is one more projection of the
     // same comb logic, lowered and optimized independently.
     with_parallel_comb_units(program, |units| {
-        retain_aliases_valid_for_units(units, &aliases, &metadata, four_state, &mut valid);
+        retain_aliases_valid_for_units(
+            units,
+            &aliases,
+            &metadata,
+            four_state,
+            settle_flags,
+            &mut valid,
+        );
     });
     program
         .layout_requirements
@@ -190,17 +227,31 @@ pub(crate) fn remove_final_identity_alias_stores(
         return;
     }
     let metadata = address_metadata(program);
+    let settle_flags = settle_flags(program);
     remove_proven_alias_stores(
         &mut program.sir.eval_comb,
         validated_aliases,
         &metadata,
         four_state,
+        settle_flags,
     );
     for units in program.sir.eval_comb_apply_ffs.values_mut() {
-        remove_proven_alias_stores(units, validated_aliases, &metadata, four_state);
+        remove_proven_alias_stores(
+            units,
+            validated_aliases,
+            &metadata,
+            four_state,
+            settle_flags,
+        );
     }
     with_parallel_comb_units(program, |units| {
-        remove_proven_alias_stores(units, validated_aliases, &metadata, four_state);
+        remove_proven_alias_stores(
+            units,
+            validated_aliases,
+            &metadata,
+            four_state,
+            settle_flags,
+        );
     });
 }
 
@@ -263,9 +314,10 @@ fn retain_aliases_valid_for_units(
     aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
     four_state: bool,
+    settle_flags: Option<AbsoluteAddr>,
     valid: &mut HashSet<AbsoluteAddr>,
 ) {
-    let facts = collect_global_facts(units, metadata, four_state);
+    let facts = collect_global_facts(units, metadata, four_state, settle_flags);
     valid.retain(|alias| {
         aliases
             .get(alias)
@@ -316,8 +368,9 @@ fn remove_proven_alias_stores(
     aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
     four_state: bool,
+    settle_flags: Option<AbsoluteAddr>,
 ) {
-    let facts = collect_global_facts(units, metadata, four_state);
+    let facts = collect_global_facts(units, metadata, four_state, settle_flags);
     let mut sites = aliases
         .iter()
         .filter_map(|(&alias, &canonical)| proven_alias_store(&facts, alias, canonical).flatten())
@@ -373,7 +426,7 @@ fn analyze_eval_comb_aliases(
 ) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
     // Phase 1: collect every read/write and every syntactic store candidate.
     // No alias decision is made while the scan is incomplete.
-    let facts = collect_global_facts(units, metadata, four_state);
+    let facts = collect_global_facts(units, metadata, four_state, None);
 
     // Phase 2: require the completed global facts for both identity and
     // duplicate-store proofs.
@@ -390,9 +443,14 @@ fn collect_global_facts(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
     four_state: bool,
+    settle_flags: Option<AbsoluteAddr>,
 ) -> GlobalIdentityFacts {
     let mut accesses = HashMap::<AbsoluteAddr, AddressFacts>::default();
     let mut stores = Vec::new();
+    let mut settle_loads = settle_flags.map(|_| SettleLoads {
+        sites: HashMap::default(),
+        immediate_dominators: units.iter().map(immediate_dominators).collect(),
+    });
 
     for (eu_index, eu) in units.iter().enumerate() {
         let mut defs = HashMap::default();
@@ -408,7 +466,7 @@ fn collect_global_facts(
         // each candidate applies a sparse decrement map rather than cloning
         // this whole table.
         let use_counts = register_use_counts(eu);
-        let must_execute = must_execute_blocks(eu);
+        let must_execute = must_execute_blocks(eu, settle_flags);
 
         for block in eu.blocks.values() {
             for (instruction_index, inst) in block.instructions.iter().enumerate() {
@@ -417,6 +475,13 @@ fn collect_global_facts(
                         increment_saturating(
                             &mut accesses.entry(address.absolute_addr()).or_default().reads,
                         );
+                        if let Some(loads) = &mut settle_loads {
+                            loads
+                                .sites
+                                .entry(address.absolute_addr())
+                                .or_default()
+                                .push((eu_index, block.id, instruction_index));
+                        }
                     }
                     SIRInstruction::Store(
                         address,
@@ -477,6 +542,14 @@ fn collect_global_facts(
                         increment_saturating(
                             &mut accesses.entry(source.absolute_addr()).or_default().reads,
                         );
+                        if let Some(loads) = &mut settle_loads {
+                            // A commit reads its source outside any proof here.
+                            loads
+                                .sites
+                                .entry(source.absolute_addr())
+                                .or_default()
+                                .push((usize::MAX, block.id, instruction_index));
+                        }
                         increment_saturating(
                             &mut accesses
                                 .entry(destination.absolute_addr())
@@ -498,7 +571,108 @@ fn collect_global_facts(
             store.address,
         )
     });
-    GlobalIdentityFacts { accesses, stores }
+    GlobalIdentityFacts {
+        accesses,
+        stores,
+        settle_loads,
+    }
+}
+
+/// Whether every read of `store`'s address comes after the store: later in
+/// its block, in a block it dominates, or in a later unit, which the
+/// topological order runs after it. Then an alias reads what the store
+/// would have written.
+///
+/// Only a partitioned settle relaxes the unread rule this way: there a
+/// reader in a later partition loads a copy's target from memory, where the
+/// single pass forwards the stored register.
+fn reads_follow_store(facts: &GlobalIdentityFacts, store: &StoreCandidate) -> bool {
+    let Some(loads) = &facts.settle_loads else {
+        return false;
+    };
+    let address = store.address.absolute_addr();
+    let Some(sites) = loads.sites.get(&address) else {
+        return true;
+    };
+    sites.iter().all(|&(eu_index, block, instruction_index)| {
+        if eu_index == usize::MAX {
+            return false;
+        }
+        if eu_index != store.eu_index {
+            return eu_index > store.eu_index;
+        }
+        if block == store.block {
+            return instruction_index > store.instruction_index;
+        }
+        let dominators = &loads.immediate_dominators[eu_index];
+        let mut current = block;
+        while let Some(&parent) = dominators.get(&current) {
+            if parent == store.block {
+                return true;
+            }
+            if parent == current {
+                return false;
+            }
+            current = parent;
+        }
+        false
+    })
+}
+
+/// The immediate dominator of every block of `eu` reachable from its entry;
+/// the entry is its own.
+fn immediate_dominators(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<BlockId, BlockId> {
+    let blocks = reverse_postorder_with(eu, &terminator_successors);
+    let indices = blocks
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, block)| (block, index))
+        .collect::<HashMap<_, _>>();
+    let mut predecessors = vec![Vec::new(); blocks.len()];
+    for (index, block_id) in blocks.iter().enumerate() {
+        if let Some(block) = eu.blocks.get(block_id) {
+            for successor in terminator_successors(&block.terminator) {
+                if let Some(&successor_index) = indices.get(&successor) {
+                    predecessors[successor_index].push(index);
+                }
+            }
+        }
+    }
+    let mut immediate_dominator = vec![None; blocks.len()];
+    if blocks.is_empty() {
+        return HashMap::default();
+    }
+    immediate_dominator[0] = Some(0);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in 1..blocks.len() {
+            let mut defined = predecessors[block]
+                .iter()
+                .copied()
+                .filter(|&predecessor| immediate_dominator[predecessor].is_some());
+            let Some(mut new_dominator) = defined.next() else {
+                continue;
+            };
+            for predecessor in defined {
+                if let Some(intersection) =
+                    intersect_dominators(predecessor, new_dominator, &immediate_dominator)
+                {
+                    new_dominator = intersection;
+                }
+            }
+            if immediate_dominator[block] != Some(new_dominator) {
+                immediate_dominator[block] = Some(new_dominator);
+                changed = true;
+            }
+        }
+    }
+    immediate_dominator
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, dominator)| Some((blocks[index], blocks[dominator?])))
+        .collect()
 }
 
 fn identity_commit_is_profitable(
@@ -645,7 +819,12 @@ fn select_aliases(
             || !store.effects_are_removable
             || blocked_aliases.contains(&alias)
             || existing_aliases.contains_key(&alias)
-            || !is_unique_unread_alias(alias, &facts.accesses)
+            || !(is_unique_unread_alias(alias, &facts.accesses)
+                || (facts
+                    .accesses
+                    .get(&alias)
+                    .is_some_and(|access| access.writes == 1)
+                    && reads_follow_store(facts, store)))
             || facts
                 .accesses
                 .get(&canonical)
@@ -910,8 +1089,35 @@ fn ff_referenced_addresses(program: &OptimizationContext) -> HashSet<AbsoluteAdd
 /// Return the blocks that every terminating path from the entry executes.
 /// This is the ancestor chain of the nearest common dominator of all reachable
 /// Return/Error blocks.
-fn must_execute_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashSet<BlockId> {
-    let blocks = reverse_postorder(eu);
+///
+/// A partitioned settle skips a partition only when its stores would write
+/// what memory already holds, so for an identity copy the partition counts
+/// as executed: its guard (a branch into a block that stores to
+/// `settle_flags`) is treated as always taken.
+fn must_execute_blocks(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    settle_flags: Option<AbsoluteAddr>,
+) -> HashSet<BlockId> {
+    let successors = |terminator: &SIRTerminator| {
+        if let (
+            Some(flags),
+            SIRTerminator::Branch {
+                true_block: (body, _),
+                ..
+            },
+        ) = (settle_flags, terminator)
+            && eu.blocks.get(body).is_some_and(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(instruction, SIRInstruction::Store(address, ..)
+                        if address.region == STABLE_REGION && address.absolute_addr() == flags)
+                })
+            })
+        {
+            return vec![*body];
+        }
+        terminator_successors(terminator)
+    };
+    let blocks = reverse_postorder_with(eu, &successors);
     if blocks.is_empty() {
         return HashSet::default();
     }
@@ -927,7 +1133,7 @@ fn must_execute_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashSet<Bloc
         let Some(block) = eu.blocks.get(&block_id) else {
             return HashSet::default();
         };
-        let successors = terminator_successors(&block.terminator);
+        let successors = successors(&block.terminator);
         if successors.is_empty() {
             terminals.push(index);
         }
@@ -1010,7 +1216,10 @@ fn intersect_dominators(
     Some(lhs)
 }
 
-fn reverse_postorder(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<BlockId> {
+fn reverse_postorder_with(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    successors_of: &dyn Fn(&SIRTerminator) -> Vec<BlockId>,
+) -> Vec<BlockId> {
     if !eu.blocks.contains_key(&eu.entry_block_id) {
         return Vec::new();
     }
@@ -1029,7 +1238,7 @@ fn reverse_postorder(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<BlockId> {
             return Vec::new();
         };
         stack.push((block_id, true));
-        let mut successors = terminator_successors(&block.terminator);
+        let mut successors = successors_of(&block.terminator);
         successors.reverse();
         stack.extend(successors.into_iter().map(|successor| (successor, false)));
     }
@@ -1429,6 +1638,7 @@ mod tests {
             &HashSet::default(),
             existing_aliases,
             four_state,
+            None,
         )
     }
 
@@ -2349,7 +2559,7 @@ mod tests {
             .collect();
         let metadata = metadata(&[(source, 8), (destination, 8)]);
 
-        remove_proven_alias_stores(&mut units, &aliases, &metadata, false);
+        remove_proven_alias_stores(&mut units, &aliases, &metadata, false, None);
 
         assert_eq!(
             units[0].blocks[&BlockId(0)].instructions,
@@ -2374,7 +2584,7 @@ mod tests {
             &[(0, 8)],
         )];
         let metadata = metadata(&[(source, 8), (destination, 8)]);
-        let facts = collect_global_facts(&units, &metadata, false);
+        let facts = collect_global_facts(&units, &metadata, false, None);
 
         assert!(
             proven_alias_store(&facts, destination.absolute_addr(), source.absolute_addr())

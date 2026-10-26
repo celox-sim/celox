@@ -912,7 +912,18 @@ impl JitBackend {
                 |backend| backend.run_sim_func(comb_func),
             );
         }
-        self.run_sim_func(self.comb_func)
+        let comb_func = self.comb_func;
+        if self.shared.layout.settle_check() {
+            let shared = Arc::clone(&self.shared);
+            return crate::settle::run_checked(
+                self,
+                shared.layout.settle.as_ref().expect("checked settle"),
+                shared.layout.total_size,
+                |backend| backend.memory.as_mut_bytes(),
+                |backend| backend.run_sim_func(comb_func),
+            );
+        }
+        self.run_sim_func(comb_func)
     }
 
     /// Resolves an `AbsoluteAddr` into a performance-optimized [`SignalRef`].
@@ -1230,7 +1241,9 @@ impl JitBackend {
     /// Returns a mutable raw pointer to the JIT memory and its total size in bytes.
     pub fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         let size = self.shared.layout.merged_total_size;
-        (self.memory.expose_mut_ptr() as *mut u8, size)
+        let view = (self.memory.expose_mut_ptr() as *mut u8, size);
+        celox_runtime::backend::SimBackend::mark_settle_untracked(self);
+        view
     }
 
     pub fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
@@ -1415,6 +1428,10 @@ impl super::SimBackend for JitBackend {
 
     fn write_memory(&mut self, offset: usize, bytes: &[u8]) {
         self.memory.write_bytes(offset, bytes);
+        self.mark_settle_range(offset, bytes.len());
+        if !self.memory.vcd_tracking_enabled() {
+            self.mark_settle_untracked();
+        }
     }
 
     fn vcd_tracking_enabled(&self) -> bool {
