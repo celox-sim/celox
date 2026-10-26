@@ -238,6 +238,9 @@ pub(crate) fn hierarchical_destination_reference(
         var_path: destination.var_path.clone(),
         index: destination.index.clone(),
         select: destination.select.clone(),
+        // Celox resolves the source shape from the target variable, and a
+        // destination never selects an array range, so its shape is not kept.
+        array: Default::default(),
         comptime: destination.comptime.clone(),
     }
 }
@@ -383,7 +386,7 @@ pub(crate) fn hierarchical_reference_bits(
 
     let mut base = 0usize;
     let mut consumed = 0usize;
-    for (dimension, expression) in reference.index.0.iter().enumerate() {
+    for (dimension, expression) in reference.index.indices.iter().enumerate() {
         let Some(&dimension_stride) = strides.get(dimension) else {
             return Err(invalid("too many unpacked array indices"));
         };
@@ -553,6 +556,8 @@ fn variable_access_width(
     index: &VarIndex,
     select: &VarSelect,
 ) -> Option<usize> {
+    let folded = crate::bitaccess::fold_array_range(index, select).ok()?;
+    let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
     let array_total = info
         .array_dims
         .iter()
@@ -560,7 +565,7 @@ fn variable_access_width(
     if array_total == 0 || !info.width.is_multiple_of(array_total) {
         return None;
     }
-    let consumed = index.0.len();
+    let consumed = index.indices.len();
     if consumed > info.array_dims.len() {
         return None;
     }
@@ -731,7 +736,7 @@ fn collect_statement_reads(
                     reads.push(TestbenchRead::Hierarchical(Box::new(
                         hierarchical_destination_reference(destination),
                     )));
-                    for index in &destination.index.0 {
+                    for index in destination.index.expressions() {
                         collect_expression_reads(index, funcs, active_functions, reads);
                     }
                     collect_select_reads(&destination.select, funcs, active_functions, reads);
@@ -809,6 +814,11 @@ fn collect_statement_reads(
                             collect_expression_reads(&arg.0, funcs, active_functions, reads);
                         }
                     }
+                    TbMethod::Queue { value, .. } => {
+                        if let Some(value) = value {
+                            collect_expression_reads(value, funcs, active_functions, reads);
+                        }
+                    }
                     TbMethod::RandomSeed { value } => {
                         collect_expression_reads(value, funcs, active_functions, reads);
                     }
@@ -830,7 +840,7 @@ fn collect_target_reads(
     active_functions: &mut FxHashSet<VarId>,
     reads: &mut Vec<TestbenchRead>,
 ) {
-    for expr in &target.index.0 {
+    for expr in target.index.expressions() {
         collect_expression_reads(expr, funcs, active_functions, reads);
     }
     collect_select_reads(&target.select, funcs, active_functions, reads);
@@ -838,7 +848,8 @@ fn collect_target_reads(
     // The native selected-target path reads the complete root signal before
     // merging the new slice.  Model that read as a DSE root; a whole-root
     // assignment does not need this extra liveness edge.
-    if !target.index.0.is_empty() || !target.select.0.is_empty() || target.select.1.is_some() {
+    if !target.index.indices.is_empty() || !target.select.0.is_empty() || target.select.1.is_some()
+    {
         reads.push(TestbenchRead::Root(target.id));
     }
 }
@@ -871,7 +882,7 @@ fn collect_expression_reads(
         Expression::Term(factor) => match factor.as_ref() {
             Factor::Variable(var_id, index, select, _) => {
                 reads.push(TestbenchRead::Root(*var_id));
-                for expr in &index.0 {
+                for expr in index.expressions() {
                     collect_expression_reads(expr, funcs, active_functions, reads);
                 }
                 collect_select_reads(select, funcs, active_functions, reads);
@@ -884,12 +895,15 @@ fn collect_expression_reads(
             }
             Factor::HierVariable(reference) => {
                 reads.push(TestbenchRead::Hierarchical(reference.clone()));
-                for expr in &reference.index.0 {
+                for expr in reference.index.expressions() {
                     collect_expression_reads(expr, funcs, active_functions, reads);
                 }
                 collect_select_reads(&reference.select, funcs, active_functions, reads);
             }
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => {}
         },
         Expression::Unary(_, inner, _) => {
             collect_expression_reads(inner, funcs, active_functions, reads);
@@ -996,7 +1010,7 @@ fn collect_function_call_reads(
     }
     for destinations in call.outputs.values() {
         for dst in destinations {
-            for expr in &dst.index.0 {
+            for expr in dst.index.expressions() {
                 collect_expression_reads(expr, funcs, active_functions, reads);
             }
             collect_select_reads(&dst.select, funcs, active_functions, reads);
@@ -1068,6 +1082,7 @@ fn lower_testbench_operator(op: VerylOp) -> Op {
 }
 
 struct ExprCompiler<'a> {
+    reset_type: veryl_metadata::ResetType,
     lookup: &'a FrontendLookup,
     id_map: &'a VerylIdMap,
     functions: &'a HashMap<VarId, Function>,
@@ -1492,6 +1507,10 @@ impl ExprCompiler<'_> {
                     unreachable!("unresolved non-constant testbench variable {var_id:?}");
                 }
             }
+            Factor::ResetValue(kind, polarity, _) => {
+                let value = crate::config::reset_value(*kind, *polarity, self.reset_type);
+                ops.push(TbOpcode::ConstU64(value as u64));
+            }
             Factor::Value(comptime) => {
                 if let Ok(val) = comptime.get_value() {
                     self.emit_constant_value(val, ops);
@@ -1696,7 +1715,7 @@ impl ExprCompiler<'_> {
         ops: &mut Vec<UnboundTbOpcode>,
     ) {
         // No index or select → whole variable
-        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+        if index.indices.is_empty() && select.0.is_empty() && select.1.is_none() {
             self.emit_load_at(address, 0, info.width, ops);
             return;
         }
@@ -1719,7 +1738,7 @@ impl ExprCompiler<'_> {
         let mut static_bit_offset: usize = 0;
         let mut dynamic_terms = 0usize;
 
-        for (i, idx_expr) in index.0.iter().enumerate() {
+        for (i, idx_expr) in index.indices.iter().enumerate() {
             if i >= info.array_dims.len() {
                 break;
             }
@@ -1738,12 +1757,12 @@ impl ExprCompiler<'_> {
             }
         }
 
-        let accessed_width = if index.0.len() >= info.array_dims.len() {
+        let accessed_width = if index.indices.len() >= info.array_dims.len() {
             element_width
-        } else if index.0.is_empty() {
+        } else if index.indices.is_empty() {
             info.width
         } else {
-            strides_bits[index.0.len() - 1]
+            strides_bits[index.indices.len() - 1]
         };
 
         let (select_offset, selected_width) =
@@ -2064,7 +2083,9 @@ impl ExprCompiler<'_> {
         select: &VarSelect,
     ) -> Option<TestbenchTarget<SemanticSignal<StateAddr>, ExprBytecode<StateLocation<StateAddr>>>>
     {
-        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+        let folded = crate::bitaccess::fold_array_range(index, select).ok()?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
+        if index.indices.is_empty() && select.0.is_empty() && select.1.is_none() {
             return Some(TestbenchTarget {
                 signal,
                 selection: None,
@@ -2084,7 +2105,7 @@ impl ExprCompiler<'_> {
         }
 
         let mut offset_ops = vec![TbOpcode::ConstU64(0)];
-        for (i, index) in index.0.iter().enumerate() {
+        for (i, index) in index.indices.iter().enumerate() {
             let stride = *strides_bits.get(i)?;
             Self::append_offset_term(&mut offset_ops, |ops| {
                 if let Some(index) = Self::try_const_usize(index) {
@@ -2097,12 +2118,12 @@ impl ExprCompiler<'_> {
             });
         }
 
-        let accessed_width = if index.0.len() >= info.array_dims.len() {
+        let accessed_width = if index.indices.len() >= info.array_dims.len() {
             element_width
-        } else if index.0.is_empty() {
+        } else if index.indices.is_empty() {
             info.width
         } else {
-            *strides_bits.get(index.0.len() - 1)?
+            *strides_bits.get(index.indices.len() - 1)?
         };
         let (select_ops, select_width) = if select.is_empty() {
             (vec![TbOpcode::ConstU64(0)], accessed_width)
@@ -2161,7 +2182,9 @@ impl ExprCompiler<'_> {
         index: &VarIndex,
         select: &VarSelect,
     ) -> Result<(), ParserError> {
-        for (dimension, index) in index.0.iter().enumerate() {
+        let folded = crate::bitaccess::fold_array_range(index, select)?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
+        for (dimension, index) in index.indices.iter().enumerate() {
             let Some(&size) = info.array_dims.get(dimension) else {
                 return Err(ParserError::illegal_context(
                     "testbench selected destination",
@@ -2675,6 +2698,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     | TbMethod::FileWrite { .. }
                     | TbMethod::FileClose
                     | TbMethod::FileFlush
+                    | TbMethod::Queue { .. }
                     | TbMethod::Component { .. }
                     | TbMethod::RandomSeed { .. }
                     | TbMethod::RandomGet { .. }
@@ -2718,6 +2742,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
     fn convert(&mut self, stmts: &[Statement]) -> Vec<Vec<SemanticStatement<StateAddr>>> {
         let base_instance = self.testbench_source.base_instance(self.lookup);
         let ec = ExprCompiler {
+            reset_type: self.testbench_source.reset_type,
             lookup: self.lookup,
             id_map: &self.testbench_source.id_map,
             constant_strings: &self.testbench_source.constant_strings,
@@ -2748,6 +2773,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             .iter()
             .map(|component| {
                 let ec = ExprCompiler {
+                    reset_type: self.testbench_source.reset_type,
                     lookup: self.lookup,
                     id_map: &self.testbench_source.id_map,
                     constant_strings: &self.testbench_source.constant_strings,
@@ -3163,6 +3189,77 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     ret,
                 })
             }
+            TbMethod::Queue {
+                op,
+                value,
+                width,
+                signed,
+                four_state,
+                capacity,
+            } => {
+                use celox_testbench::QueueOp as Q;
+                use veryl_analyzer::ir::QueueOp as V;
+                let op = match op {
+                    V::PushBack => Q::PushBack,
+                    V::PushFront => Q::PushFront,
+                    V::PopFront => Q::PopFront,
+                    V::PopBack => Q::PopBack,
+                    V::DropFront => Q::DropFront,
+                    V::DropBack => Q::DropBack,
+                    V::Front => Q::Front,
+                    V::Back => Q::Back,
+                    V::Clear => Q::Clear,
+                    V::Size => Q::Size,
+                    V::IsEmpty => Q::IsEmpty,
+                    V::IsFull => Q::IsFull,
+                };
+                let mut value_mask = num_bigint::BigUint::default();
+                let mut value_width = *width as usize;
+                let mut value_signed = false;
+                let mut value_target = None;
+                let compiled_value = value.as_ref().map(|value| {
+                    value_width = ec.natural_width(value);
+                    value_signed = expression_signed(value);
+                    let is_literal = matches!(value, Expression::Term(f) if matches!(f.as_ref(), Factor::Value(_)));
+                    if (value.comptime().is_const || is_literal)
+                        && let Some((bits, mask, w, signed)) = crate::bitaccess::celox_value_from_comptime_in_context(value.comptime(), Some(*width as usize))
+                    {
+                        value_mask = mask; value_width = w; value_signed = signed;
+                        return ExprBytecode::new(vec![TbOpcode::ConstWide(bits)]);
+                    }
+                    if let Expression::Term(factor) = value {
+                        let input = match factor.as_ref() {
+                            Factor::Variable(id, index, select, _) => Some(VerylComponentInputBinding::Root { id: *id, index: index.clone(), select: select.clone() }),
+                            Factor::HierVariable(reference) => Some(VerylComponentInputBinding::Hierarchical(reference.clone())),
+                            _ => None,
+                        };
+                        value_target = input.as_ref().and_then(|input| ec.resolve_component_input_target(input));
+                    }
+                    // Bytecode evaluates in the element's width context. Only
+                    // direct signal reads still need source-width resizing.
+                    if value_target.is_none() {
+                        value_width = *width as usize;
+                    }
+                    ec.compile_with_width(value, *width as usize)
+                });
+                Some(GenericTestbenchStatement::Queue {
+                    handle: self.resource_name(tb.inst),
+                    op,
+                    value: compiled_value,
+                    value_target,
+                    value_mask,
+                    value_width,
+                    value_signed,
+                    width: *width,
+                    signed: *signed,
+                    four_state: *four_state,
+                    capacity: *capacity,
+                    ret: match tb.ret.as_deref() {
+                        Some(dst) => Some(ec.resolve_target(dst)?),
+                        None => None,
+                    },
+                })
+            }
             TbMethod::Component { method, args } => {
                 let ret = match tb.ret.as_deref() {
                     Some(dst) => Some(ec.resolve_target(dst)?),
@@ -3257,7 +3354,7 @@ fn extract_source_location(
 }
 
 fn has_selected_testbench_destination(destination: &veryl_analyzer::ir::AssignDestination) -> bool {
-    !destination.index.0.is_empty()
+    !destination.index.indices.is_empty()
         || !destination.select.0.is_empty()
         || destination.select.1.is_some()
 }
@@ -3270,7 +3367,7 @@ fn reject_selected_destinations_in_expression_statements(
             Statement::Assign(statement) => {
                 if statement.dst.iter().any(has_selected_testbench_destination)
                     || statement.hier_dst.as_ref().is_some_and(|destination| {
-                        !destination.index.0.is_empty()
+                        !destination.index.indices.is_empty()
                             || !destination.select.0.is_empty()
                             || destination.select.1.is_some()
                     })
@@ -3391,7 +3488,9 @@ fn validate_testbench_expression(
             _ => None,
         };
         if let Some((info, index, select)) = access
-            && (index.0.len() > info.array_dims.len() || !select.0.is_empty() || select.1.is_some())
+            && (index.indices.len() > info.array_dims.len()
+                || !select.0.is_empty()
+                || select.1.is_some())
         {
             return Err(ParserError::illegal_context(
                 "string character selection",
@@ -3403,7 +3502,11 @@ fn validate_testbench_expression(
     match expression {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::HierVariable(reference) => {
-                for expression in reference.index.0.iter().chain(reference.select.0.iter()) {
+                for expression in reference
+                    .index
+                    .expressions()
+                    .chain(reference.select.0.iter())
+                {
                     validate_testbench_expression(expression, lookup, source, active_functions)?;
                 }
                 if let Some((_, expression)) = &reference.select.1 {
@@ -3412,7 +3515,7 @@ fn validate_testbench_expression(
                 Ok(())
             }
             Factor::Variable(_, index, select, _) => {
-                for expression in index.0.iter().chain(select.0.iter()) {
+                for expression in index.expressions().chain(select.0.iter()) {
                     validate_testbench_expression(expression, lookup, source, active_functions)?;
                 }
                 if let Some((_, expression)) = &select.1 {
@@ -3453,7 +3556,10 @@ fn validate_testbench_expression(
                     ))
                 }
             }
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => Ok(()),
         },
         Expression::Unary(_, inner, _) => {
             if inner.comptime().r#type.is_string() {
@@ -3705,6 +3811,25 @@ fn validate_testbench_statements(
                             )?;
                         }
                     }
+                    TbMethod::Queue { value, .. } => {
+                        if let Some(value) = value {
+                            // The expression VM is two-state. Direct queue values use
+                            // a separate mask source; reject expressions that would
+                            // silently discard X/Z before entering the queue.
+                            let direct = matches!(value, Expression::Term(factor) if matches!(factor.as_ref(), Factor::Value(_) | Factor::Variable(..) | Factor::HierVariable(_)));
+                            if !value.comptime().r#type.is_2state()
+                                && !value.comptime().is_const
+                                && !direct
+                            {
+                                return Err(ParserError::illegal_context(
+                                    "four-state queue argument expression",
+                                    "runtime four-state queue arguments require a direct variable or selection; compound four-state expressions are not supported by the testbench expression VM",
+                                    Some(&value.comptime().token),
+                                ));
+                            }
+                            validate_testbench_expression(value, lookup, source, active_functions)?;
+                        }
+                    }
                     TbMethod::RandomSeed { value } => {
                         validate_testbench_expression(value, lookup, source, active_functions)?;
                     }
@@ -3771,8 +3896,7 @@ fn validate_testbench_hierarchical_destination(
 ) -> Result<(), ParserError> {
     for expression in destination
         .index
-        .0
-        .iter()
+        .expressions()
         .chain(destination.select.0.iter())
     {
         validate_testbench_expression(expression, lookup, source, active_functions)?;
@@ -3785,6 +3909,7 @@ fn validate_testbench_hierarchical_destination(
         resolve_hierarchical_reference_from(lookup, source.base_instance(lookup), &reference)?;
     ExprCompiler::validate_target_bounds_parts(info, &destination.index, &destination.select)?;
     let compiler = ExprCompiler {
+        reset_type: source.reset_type,
         lookup,
         id_map: &source.id_map,
         constant_strings: &source.constant_strings,
@@ -3807,7 +3932,7 @@ fn validate_testbench_destination(
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
-    for expression in &destination.index.0 {
+    for expression in destination.index.expressions() {
         validate_testbench_expression(expression, lookup, source, active_functions)?;
     }
     for expression in &destination.select.0 {
@@ -3817,6 +3942,7 @@ fn validate_testbench_destination(
         validate_testbench_expression(expression, lookup, source, active_functions)?;
     }
     ExprCompiler {
+        reset_type: source.reset_type,
         lookup,
         id_map: &source.id_map,
         constant_strings: &source.constant_strings,
@@ -3910,6 +4036,7 @@ mod tests {
             var_path,
             index: VarIndex::default(),
             select: VarSelect::default(),
+            array: Default::default(),
             comptime: Comptime::default(),
         }
     }
@@ -4016,6 +4143,7 @@ mod tests {
         let lookup = lookup_with_child(dut, q);
         let source = VerylTestbenchSource::default();
         let compiler = ExprCompiler {
+            reset_type: source.reset_type,
             lookup: &lookup,
             id_map: &source.id_map,
             constant_strings: &source.constant_strings,
@@ -4036,6 +4164,7 @@ mod tests {
         let lookup = lookup_with_child(dut, q);
         let source = VerylTestbenchSource::default();
         let compiler = ExprCompiler {
+            reset_type: source.reset_type,
             lookup: &lookup,
             id_map: &source.id_map,
             constant_strings: &source.constant_strings,

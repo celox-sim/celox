@@ -1551,6 +1551,21 @@ fn collect_statement_effects(
                         effects.mark_unknown("component method may write connected output state");
                     }
                 }
+                TbMethod::Queue { value, .. } => {
+                    effects.observable = true;
+                    if let Some(value) = value {
+                        effects.append(collect_expression_effects(value, module, active_functions));
+                    }
+                    if let Some(destination) = call.ret.as_deref() {
+                        collect_destination_effects(
+                            destination,
+                            module,
+                            active_functions,
+                            &mut effects,
+                            from_ff,
+                        );
+                    }
+                }
                 TbMethod::RandomSeed { value } => {
                     effects.observable = true;
                     effects.append(collect_expression_effects(value, module, active_functions));
@@ -1633,7 +1648,7 @@ fn collect_expression_effects(
                 );
                 effects.hierarchical_reads.push((**reference).clone());
             }
-            Factor::Value(_) | Factor::Anonymous(_) => {}
+            Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) => {}
         },
         Expression::Unary(_, expression, _) => {
             effects.append(collect_expression_effects(
@@ -1854,7 +1869,7 @@ fn collect_index_select_effects(
     active_functions: &mut HashSet<VarId>,
     effects: &mut Effects,
 ) {
-    for expression in &index.0 {
+    for expression in index.expressions() {
         effects.append(collect_expression_effects(
             expression,
             module,
@@ -1952,6 +1967,8 @@ mod tests {
             variables: HashMap::default(),
             functions: HashMap::default(),
             interface_members: HashMap::default(),
+            interface_assignments: Default::default(),
+            interface_assignment_processes: Default::default(),
             declarations: vec![Declaration::new_comb(vec![statement])],
             suppress_unassigned: false,
             per_decl_refs: HashMap::default(),
@@ -2017,6 +2034,8 @@ mod tests {
             variables: [(bound_id, variable)].into_iter().collect(),
             functions: HashMap::default(),
             interface_members: HashMap::default(),
+            interface_assignments: Default::default(),
+            interface_assignment_processes: Default::default(),
             declarations: vec![Declaration::new_comb(vec![statement])],
             suppress_unassigned: false,
             per_decl_refs: HashMap::default(),
@@ -2049,6 +2068,7 @@ mod tests {
                 var_path: VarPath(vec![StrId::default()]),
                 index: VarIndex::default(),
                 select: VarSelect::default(),
+                array: Default::default(),
                 comptime: Comptime::default(),
             },
         ))));
@@ -2074,6 +2094,8 @@ mod tests {
             variables: HashMap::default(),
             functions: HashMap::default(),
             interface_members: HashMap::default(),
+            interface_assignments: Default::default(),
+            interface_assignment_processes: Default::default(),
             declarations: vec![Declaration::new_comb(vec![statement])],
             suppress_unassigned: false,
             per_decl_refs: HashMap::default(),
@@ -2154,6 +2176,8 @@ mod tests {
             variables: [(bound_id, variable)].into_iter().collect(),
             functions: HashMap::default(),
             interface_members: HashMap::default(),
+            interface_assignments: Default::default(),
+            interface_assignment_processes: Default::default(),
             declarations: vec![Declaration::new_comb(vec![statement])],
             suppress_unassigned: true,
             per_decl_refs: HashMap::default(),

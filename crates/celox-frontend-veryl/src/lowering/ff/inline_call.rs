@@ -125,8 +125,7 @@ impl<'a> FfParser<'a> {
         visiting: &mut HashSet<VarId>,
     ) -> bool {
         dst.index
-            .0
-            .iter()
+            .expressions()
             .chain(dst.select.0.iter())
             .chain(dst.select.1.iter().map(|(_, expr)| expr))
             .any(|expr| self.expression_requires_inline(expr, visiting))
@@ -178,15 +177,13 @@ impl<'a> FfParser<'a> {
         match expr {
             Expression::Term(factor) => match factor.as_ref() {
                 Factor::Variable(_, index, select, _) => index
-                    .0
-                    .iter()
+                    .expressions()
                     .chain(select.0.iter())
                     .chain(select.1.iter().map(|(_, expr)| expr))
                     .any(|expr| self.expression_requires_inline(expr, visiting)),
                 Factor::HierVariable(reference) => reference
                     .index
-                    .0
-                    .iter()
+                    .expressions()
                     .chain(reference.select.0.iter())
                     .chain(reference.select.1.iter().map(|(_, expr)| expr))
                     .any(|expr| self.expression_requires_inline(expr, visiting)),
@@ -194,7 +191,10 @@ impl<'a> FfParser<'a> {
                 Factor::SystemFunctionCall(call) => {
                     self.system_call_requires_inline(call, visiting)
                 }
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => false,
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 self.expression_requires_inline(lhs, visiting)
@@ -427,7 +427,8 @@ impl<'a> FfParser<'a> {
             && let Factor::Variable(var_id, index, select, comptime) = factor.as_ref()
             && select.0.is_empty()
             && select.1.is_none()
-            && index.0.len() < self.module.variables[var_id].r#type.array.iter().count()
+            && !index.is_range()
+            && index.indices.len() < self.module.variables[var_id].r#type.array.iter().count()
         {
             let mut elements = Vec::with_capacity(element_count);
             for element in 0..element_count {
@@ -439,7 +440,7 @@ impl<'a> FfParser<'a> {
                     remainder /= dim;
                 }
                 for position in suffix.into_iter().rev() {
-                    element_index.0.push(Expression::create_value(
+                    element_index.push(Expression::create_value(
                         veryl_analyzer::value::Value::new(position as u64, 32, false),
                         comptime.token,
                     ));
@@ -606,8 +607,7 @@ fn collect_destination_variables(dst: &AssignDestination, out: &mut HashSet<VarI
     out.insert(dst.id);
     for expr in dst
         .index
-        .0
-        .iter()
+        .expressions()
         .chain(dst.select.0.iter())
         .chain(dst.select.1.iter().map(|(_, expr)| expr))
     {
@@ -651,8 +651,7 @@ fn collect_expression_variables(expr: &Expression, out: &mut HashSet<VarId>) {
             Factor::Variable(id, index, select, _) => {
                 out.insert(*id);
                 for expr in index
-                    .0
-                    .iter()
+                    .expressions()
                     .chain(select.0.iter())
                     .chain(select.1.iter().map(|(_, expr)| expr))
                 {
@@ -663,6 +662,7 @@ fn collect_expression_variables(expr: &Expression, out: &mut HashSet<VarId>) {
             Factor::SystemFunctionCall(call) => collect_system_call_variables(call, out),
             Factor::HierVariable(_)
             | Factor::Value(_)
+            | Factor::ResetValue(..)
             | Factor::Anonymous(_)
             | Factor::Unknown(_) => {}
         },
