@@ -14,7 +14,9 @@ use std::{
 
 mod control;
 mod lookup;
+mod prepared;
 mod readonly;
+pub use prepared::{Assumption, PreparedQuery};
 pub use readonly::ArrayModel;
 
 type Lit = i32;
@@ -1394,6 +1396,18 @@ impl Sat {
             conflicts: 0,
         }
     }
+    fn seed_phases(&mut self, mut state: u64, budget: &mut Budget) -> Res<()> {
+        // SplitMix64 is local and deterministic, including seed zero.
+        for phase in self.phase.iter_mut().skip(1) {
+            budget.tick(1)?;
+            state = state.wrapping_add(0x9e3779b97f4a7c15);
+            let mut value = state;
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+            *phase = (value ^ (value >> 31)) >> 63 != 0;
+        }
+        Ok(())
+    }
     fn enqueue(&mut self, p: Lit, reason: Option<usize>) -> bool {
         let v = p.unsigned_abs() as usize;
         if self.values[v] != 0 {
@@ -1552,6 +1566,14 @@ impl Sat {
         Ok((learned, backtrack))
     }
     fn run_slice(&mut self, b: &mut Budget, quantum: u64) -> Res<Search> {
+        self.run_slice_assuming(b, quantum, &[])
+    }
+    fn run_slice_assuming(
+        &mut self,
+        b: &mut Budget,
+        quantum: u64,
+        assumptions: &[Lit],
+    ) -> Res<Search> {
         let stop_work = b.work.saturating_add(quantum.max(1));
         if !self.initialized {
             for id in 0..self.clauses.len() {
@@ -1598,6 +1620,22 @@ impl Sat {
                     return Err("finite SAT asserting clause invariant violated".into());
                 }
             } else {
+                // Reapply assumptions after every backjump. Each has its own
+                // level, including already-implied ones, so the level indexes
+                // remain stable. An assumption falsified by propagation proves
+                // only this query UNSAT, not the permanent clause database.
+                if self.starts.len() < assumptions.len() {
+                    b.tick(1)?;
+                    let p = assumptions[self.starts.len()];
+                    if truth(&self.values, p) < 0 {
+                        return Ok(Search::Complete(Verdict::Unsat));
+                    }
+                    self.starts.push(self.trail.len());
+                    if truth(&self.values, p) == 0 {
+                        self.enqueue(p, None);
+                    }
+                    continue;
+                }
                 let v = loop {
                     let Some(v) = self.order.pop(&self.activity, b)? else {
                         #[cfg(test)]
@@ -1774,6 +1812,100 @@ fn solve_plain(formula: &Term, context: &Env, limits: Limits, search_hint: Searc
     solve_plain_with_seed(formula, context, limits, search_hint, None)
 }
 
+fn replay_model(
+    formula: &Term,
+    context: &Env,
+    blast: &Blast,
+    sat: &Sat,
+    budget: &mut Budget,
+) -> Res<(BTreeMap<String, Scalar>, BTreeMap<String, Scalar>)> {
+    // Validate every original CNF clause as well as the source-level witness.
+    for clause in &sat.clauses {
+        budget.tick(clause.len() as u64)?;
+        if !clause.iter().any(|&p| truth(&sat.values, p) > 0) {
+            return Err("finite SAT assignment failed CNF validation".into());
+        }
+    }
+    let mut assignments = BTreeMap::new();
+    for (n, bits) in &blast.inputs {
+        let value = match bits.sort {
+            Sort::Bool => Scalar::Bool(truth(&sat.values, bits.bits[0]) > 0),
+            Sort::Bv(width) => Scalar::Bv {
+                width,
+                value: bits.bits.iter().enumerate().fold(0u64, |v, (i, &p)| {
+                    v | ((truth(&sat.values, p) > 0) as u64) << i
+                }),
+            },
+            _ => unreachable!(),
+        };
+        assignments.insert(n.clone(), value);
+    }
+    let mut memo = HashMap::new();
+    if evaluate(formula, &assignments, &mut memo, budget, 0)? != Scalar::Bool(true) {
+        return Err("finite SAT assignment failed original-formula validation".into());
+    }
+    let mut values = BTreeMap::new();
+    for (label, term) in context {
+        values.insert(
+            label.clone(),
+            evaluate(term, &assignments, &mut memo, budget, 0)?,
+        );
+    }
+    budget.check_time()?;
+    Ok((assignments, values))
+}
+
+fn compile_scalar(
+    blast: &mut Blast,
+    formula: &Term,
+    context: &Env,
+    budget: &mut Budget,
+    scalar_only: bool,
+) -> Res<()> {
+    budget.tick(1)?;
+    if scalar_only && (formula.contains_memory() || context.values().any(Term::contains_memory)) {
+        return Err("scalar search supports scalar formulas and contexts only".into());
+    }
+    if budget.limits.max_variables < 1 || budget.limits.max_clauses < 1 {
+        return Err("finite solver initial CNF budget exhausted".into());
+    }
+    if formula.0.sort != Sort::Bool {
+        return Err("finite formula must have Bool sort".into());
+    }
+    // Rewriting can bypass source nodes. Validate every original formula
+    // and context signature first, including dead branches and Sat hints.
+    blast.lookup.source_nodes = lookup::validate_source(formula, context, budget)?;
+    blast.aliases.collect(formula, budget)?;
+    let root = blast.term(formula, budget, 0)?;
+    for term in context.values() {
+        blast.term(term, budget, 0)?;
+    }
+    // Exact normalization may erase the last occurrence of a variable.
+    // Materialize missing ORIGINAL inputs after normal blasting, preserving
+    // the existing search order while keeping original SAT replay complete.
+    let mut source = vec![formula];
+    source.extend(context.values());
+    let mut seen = HashSet::new();
+    let mut variables = BTreeMap::new();
+    while let Some(term) = source.pop() {
+        budget.tick(1)?;
+        if !seen.insert(term.clone()) {
+            continue;
+        }
+        if let Some(name) = term.0.op.strip_prefix('@') {
+            if !blast.inputs.contains_key(name) {
+                variables.insert(name.to_string(), term.clone());
+            }
+        }
+        source.extend(&term.0.args);
+    }
+    for term in variables.values() {
+        blast.term(term, budget, 0)?;
+    }
+    blast.clause(vec![root.bits[0]], budget)?;
+    Ok(())
+}
+
 fn solve_plain_with_seed(
     formula: &Term,
     context: &Env,
@@ -1800,52 +1932,7 @@ fn solve_plain_with_seed(
         time_check_in: 0,
     };
     let mut blast = Blast::new();
-    let compile = (|| -> Res<()> {
-        budget.tick(1)?;
-        if seed.is_some()
-            && (formula.contains_memory() || context.values().any(Term::contains_memory))
-        {
-            return Err("seeded search supports scalar formulas and contexts only".into());
-        }
-        if budget.limits.max_variables < 1 || budget.limits.max_clauses < 1 {
-            return Err("finite solver initial CNF budget exhausted".into());
-        }
-        if formula.0.sort != Sort::Bool {
-            return Err("finite formula must have Bool sort".into());
-        }
-        // Rewriting can bypass source nodes. Validate every original formula
-        // and context signature first, including dead branches and Sat hints.
-        blast.lookup.source_nodes = lookup::validate_source(formula, context, &mut budget)?;
-        blast.aliases.collect(formula, &mut budget)?;
-        let root = blast.term(formula, &mut budget, 0)?;
-        for term in context.values() {
-            blast.term(term, &mut budget, 0)?;
-        }
-        // Exact normalization may erase the last occurrence of a variable.
-        // Materialize missing ORIGINAL inputs after normal blasting, preserving
-        // the existing search order while keeping original SAT replay complete.
-        let mut source = vec![formula];
-        source.extend(context.values());
-        let mut seen = HashSet::new();
-        let mut variables = BTreeMap::new();
-        while let Some(term) = source.pop() {
-            budget.tick(1)?;
-            if !seen.insert(term.clone()) {
-                continue;
-            }
-            if let Some(name) = term.0.op.strip_prefix('@') {
-                if !blast.inputs.contains_key(name) {
-                    variables.insert(name.to_string(), term.clone());
-                }
-            }
-            source.extend(&term.0.args);
-        }
-        for term in variables.values() {
-            blast.term(term, &mut budget, 0)?;
-        }
-        blast.clause(vec![root.bits[0]], &mut budget)?;
-        Ok(())
-    })();
+    let compile = compile_scalar(&mut blast, formula, context, &mut budget, seed.is_some());
     outcome.stats.asserted_definitions = blast.aliases.definitions.len();
     outcome.stats.guarded_equalities = blast.aliases.guarded.len();
     outcome.stats.guarded_rewrites = blast.guarded_rewrites;
@@ -1891,18 +1978,8 @@ fn solve_plain_with_seed(
         SearchStrategy::CounterexampleProbeFair
     };
     let result = (|| -> Res<Verdict> {
-        if let Some(mut state) = seed {
-            // SplitMix64 gives a local, fully specified stream (including seed
-            // zero). No process RNG, global state or platform-dependent hashing.
-            for phase in sat.phase.iter_mut().skip(1) {
-                budget.tick(1)?;
-                state = state.wrapping_add(0x9e3779b97f4a7c15);
-                let mut value = state;
-                value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-                value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
-                value ^= value >> 31;
-                *phase = value >> 63 != 0;
-            }
+        if let Some(seed) = seed {
+            sat.seed_phases(seed, &mut budget)?;
         }
         let mut probe_verdict = None;
         if !choices.is_empty() && search_hint == SearchHint::Sat {
@@ -2100,39 +2177,7 @@ fn solve_plain_with_seed(
         if verdict != Verdict::Sat {
             return Ok(verdict);
         }
-        // Validate every original CNF clause as well as the source-level witness.
-        for clause in &sat.clauses {
-            budget.tick(clause.len() as u64)?;
-            if !clause.iter().any(|&p| truth(&sat.values, p) > 0) {
-                return Err("finite SAT assignment failed CNF validation".into());
-            }
-        }
-        let mut assignments = BTreeMap::new();
-        for (n, bits) in &blast.inputs {
-            let value = match bits.sort {
-                Sort::Bool => Scalar::Bool(truth(&sat.values, bits.bits[0]) > 0),
-                Sort::Bv(width) => Scalar::Bv {
-                    width,
-                    value: bits.bits.iter().enumerate().fold(0u64, |v, (i, &p)| {
-                        v | ((truth(&sat.values, p) > 0) as u64) << i
-                    }),
-                },
-                _ => unreachable!(),
-            };
-            assignments.insert(n.clone(), value);
-        }
-        let mut memo = HashMap::new();
-        if evaluate(formula, &assignments, &mut memo, &mut budget, 0)? != Scalar::Bool(true) {
-            return Err("finite SAT assignment failed original-formula validation".into());
-        }
-        let mut values = BTreeMap::new();
-        for (label, term) in context {
-            values.insert(
-                label.clone(),
-                evaluate(term, &assignments, &mut memo, &mut budget, 0)?,
-            );
-        }
-        budget.check_time()?;
+        let (assignments, values) = replay_model(formula, context, &blast, &sat, &mut budget)?;
         outcome.assignments = assignments;
         outcome.context_values = values;
         outcome.original_formula_validated = true;
