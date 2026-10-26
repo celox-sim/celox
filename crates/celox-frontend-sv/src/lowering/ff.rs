@@ -69,6 +69,8 @@ pub(super) struct Ff<'p, 'a> {
     /// Loop variables of unrolled loops and their literal values.
     overlay: HashMap<String, (String, i128)>,
     active_calls: Vec<String>,
+    // Detached children have their own function timing context.
+    timing_call_boundary: usize,
     element_widths: HashMap<Addr, usize>,
     unrolled: usize,
     /// Read-modify-write views of a variable's working value: alias -> var.
@@ -171,6 +173,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             functions: Vec::new(),
             overlay: HashMap::default(),
             active_calls: Vec::new(),
+            timing_call_boundary: 0,
             element_widths,
             unrolled: 0,
             aliases: HashMap::default(),
@@ -3464,11 +3467,15 @@ impl<'p, 'a> Ff<'p, 'a> {
                 | sv::ir::Stmt::WaitImplicit(_)
                 | sv::ir::Stmt::Wait(_)
         ) && (self.kernel.is_none()
-            || self.active_calls.iter().any(|name| {
-                self.m
-                    .subroutine(name)
-                    .is_some_and(|subroutine| !subroutine.is_task)
-            }))
+            || self
+                .active_calls
+                .iter()
+                .skip(self.timing_call_boundary)
+                .any(|name| {
+                    self.m
+                        .subroutine(name)
+                        .is_some_and(|subroutine| !subroutine.is_task)
+                }))
         {
             return Err(unsupported("timed task call outside a suspendable process"));
         }
@@ -3546,12 +3553,15 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let loops = std::mem::take(&mut self.loops);
                 let functions = std::mem::take(&mut self.functions);
                 let overlay = std::mem::take(&mut self.overlay);
+                let timing_boundary = self.timing_call_boundary;
+                self.timing_call_boundary = self.active_calls.len();
                 for (entry, branch) in entries.into_iter().zip(branches) {
                     self.b.switch_to_block(entry);
                     if self.exec_block(branch)? {
                         self.with_kernel(ProcessKernelBuilder::complete);
                     }
                 }
+                self.timing_call_boundary = timing_boundary;
                 self.loops = loops;
                 self.functions = functions;
                 self.overlay = overlay;
@@ -4383,7 +4393,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         // another process can enter the same task while this one is suspended.
         // Static formals/locals deliberately keep their module-wide addresses.
         let mut activation = Vec::new();
-        if self.kernel.is_some() && subroutine.is_task {
+        if self.kernel.is_some() && (subroutine.is_task || self.forked) {
             for name in &subroutine.automatic_locals {
                 let original = self
                     .m
@@ -4551,10 +4561,17 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.assign_concat(&parts, &sv::ir::Expr::Ident(formal))?;
             }
         }
+        let result = subroutine.return_var.as_ref().map(|name| {
+            if activation.iter().any(|(local, _)| local == name) {
+                self.m.var(self.m.id(name).unwrap()).path[0].clone()
+            } else {
+                name.clone()
+            }
+        });
         for (name, original) in activation {
             self.m.name_to_id.insert(name, original);
         }
-        Ok(subroutine.return_var.clone())
+        Ok(result)
     }
 
     // -------------------------------------------------------------- process
@@ -5761,24 +5778,56 @@ impl Ff<'_, '_> {
             m: &ProcModule<'_>,
             body: &[sv::ir::Stmt],
             visited: &mut HashSet<String>,
+            defaults: &mut HashSet<(String, usize)>,
         ) -> bool {
             let mut found = false;
             let mut calls = Vec::new();
             for stmt in body {
-                stmt.walk(&mut |stmt| match stmt {
-                    sv::ir::Stmt::Fork { .. } | sv::ir::Stmt::WaitFork => found = true,
-                    sv::ir::Stmt::Call { name, .. } => calls.push(name.clone()),
-                    _ => {}
+                stmt.walk(&mut |stmt| {
+                    found |= matches!(stmt, sv::ir::Stmt::Fork { .. } | sv::ir::Stmt::WaitFork);
+                    stmt_calls(stmt, &mut calls);
+                    match stmt {
+                        sv::ir::Stmt::Wait(condition) => collect_calls(condition, &mut calls),
+                        sv::ir::Stmt::WaitEvent(items) => {
+                            for item in items {
+                                collect_calls(&item.expr, &mut calls);
+                            }
+                        }
+                        sv::ir::Stmt::Delay { amount, .. } => collect_calls(amount, &mut calls),
+                        _ => {}
+                    }
                 });
             }
-            found
-                || calls.into_iter().any(|name| {
-                    visited.insert(name.clone())
-                        && m.subroutine(&name)
-                            .is_some_and(|sub| has_fork(m, &sub.body, visited))
-                })
+            if found {
+                return true;
+            }
+            while let Some((callee, args)) = calls.pop() {
+                let sv::ir::Callee::Subroutine(name) = callee else {
+                    continue;
+                };
+                let Some(subroutine) = m.subroutine(&name) else {
+                    continue;
+                };
+                for (position, param) in subroutine.params.iter().enumerate() {
+                    if matches!(args.get(position), None | Some(None))
+                        && let Some(default) = &param.default
+                        && defaults.insert((name.clone(), position))
+                    {
+                        collect_calls(default, &mut calls);
+                    }
+                }
+                if visited.insert(name) && has_fork(m, &subroutine.body, visited, defaults) {
+                    return true;
+                }
+            }
+            false
         }
-        self.forked = has_fork(self.m, body, &mut HashSet::default());
+        self.forked = has_fork(
+            self.m,
+            body,
+            &mut HashSet::default(),
+            &mut HashSet::default(),
+        );
         // Forks reached through inlined tasks also need per-activation random state.
         if self.forked {
             self.urandom_state();

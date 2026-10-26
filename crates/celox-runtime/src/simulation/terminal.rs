@@ -70,6 +70,14 @@ impl<B: SimBackend> SimulationState<B> {
                 Some(ProcessStatus::Done) => self.finalizing = Some(index + 1),
                 Some(ProcessStatus::Finish) => return Err(Halt::Finish),
                 Some(ProcessStatus::Stop) => return Err(Halt::Stop),
+                Some(ProcessStatus::Fork)
+                    if executor.backend().get_as::<u64>(process.delay) >> 32 == 2 =>
+                {
+                    // A join_none child cannot start until its parent blocks or
+                    // terminates (9.3.2). All finals share one nonblocking process,
+                    // and no queued events run afterward (9.2.3). Resume only the
+                    // parent; the kernel already recorded its continuation.
+                }
                 Some(ProcessStatus::HostRequest) => {
                     let encoded: u64 = executor.backend().get_as(process.delay);
                     let (kind, site) = HostRequestKind::decode(encoded)

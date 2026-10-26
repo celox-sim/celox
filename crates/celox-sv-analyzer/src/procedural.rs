@@ -542,10 +542,22 @@ impl<E, L> StmtBase<E, L> {
 
     /// Visit every statement of this tree, outermost first.
     pub fn walk<'a>(&'a self, f: &mut impl FnMut(&'a StmtBase<E, L>)) {
+        self.walk_scoped(f, true);
+    }
+
+    /// Visit every statement except detached fork children.
+    pub(crate) fn walk_without_detached_children<'a>(
+        &'a self,
+        f: &mut impl FnMut(&'a StmtBase<E, L>),
+    ) {
+        self.walk_scoped(f, false);
+    }
+
+    fn walk_scoped<'a>(&'a self, f: &mut impl FnMut(&'a StmtBase<E, L>), detached: bool) {
         f(self);
         let mut visit = |stmts: &'a [StmtBase<E, L>]| {
             for stmt in stmts {
-                stmt.walk(f);
+                stmt.walk_scoped(f, detached);
             }
         };
         match self {
@@ -572,6 +584,10 @@ impl<E, L> StmtBase<E, L> {
                 visit(step);
                 visit(body);
             }
+            StmtBase::Fork {
+                join: celox_design::ForkJoin::None,
+                ..
+            } if !detached => {}
             StmtBase::Fork { branches, .. } => {
                 for branch in branches {
                     visit(branch);
