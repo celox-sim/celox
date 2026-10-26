@@ -1,0 +1,1 @@
+Resolve native image version conflict after dynamic-container format 45 landed; preserve container support and use format 46 for fork activation metadata.
