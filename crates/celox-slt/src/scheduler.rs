@@ -3499,12 +3499,27 @@ const MAX_JOINT_FOLD_ROOTS: usize = 16;
 struct PlannedPartition<Addr> {
     reads: Vec<Addr>,
     writes: Vec<Addr>,
-    /// The partitions whose flags it sets when it runs: those reading what
-    /// it writes, itself included when it reads the previous value of its
-    /// own writes.
+    /// The partitions whose flags it sets whenever it runs: the readers of
+    /// what it writes whose width is unknown.
     marks: Vec<usize>,
+    /// What it writes that other partitions read, itself included when it
+    /// reads the previous value of its own writes. It sets the readers'
+    /// flags only when it changes the value.
+    watched: Vec<WatchedChunk<Addr>>,
     pinned: bool,
 }
+
+/// A chunk of an object a partition writes, compared before and after the
+/// partition runs.
+struct WatchedChunk<Addr> {
+    object: Addr,
+    offset: SIROffset,
+    width: usize,
+    readers: Vec<usize>,
+}
+
+/// The widest chunk of a written object compared at once.
+const MAX_WATCHED_WIDTH: usize = 4096;
 
 /// The partitions of a settle, each a contiguous run of scheduled work.
 struct PartitionPlan<Addr> {
@@ -3626,6 +3641,7 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
     prepared: &PreparedSchedule<Addr>,
     arena: &SLTNodeArena<Addr>,
     var_widths: &HashMap<Addr, usize>,
+    unpacked_element_widths: &HashMap<Addr, usize>,
     partitioning: SettlePartitioning<Addr>,
 ) -> Option<(PartitionPlan<Addr>, Addr)> {
     let input = &prepared.input;
@@ -3762,17 +3778,48 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
     let partitions = (0..count)
         .map(|partition| {
             let mut marks = BTreeSet::new();
+            let mut watched = Vec::new();
             for addr in &writes[partition] {
-                for &reader in readers.get(addr).into_iter().flatten() {
-                    if reader != partition || previous[partition].contains(addr) {
-                        marks.insert(reader);
-                    }
+                let targets: Vec<usize> = readers
+                    .get(addr)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .filter(|&reader| reader != partition || previous[partition].contains(addr))
+                    .collect();
+                if targets.is_empty() {
+                    continue;
+                }
+                let Some(&width) = var_widths.get(addr) else {
+                    marks.extend(targets);
+                    continue;
+                };
+                // Compare an unpacked array in whole elements.
+                let element = unpacked_element_widths
+                    .get(addr)
+                    .copied()
+                    .filter(|&element| element != 0 && width.is_multiple_of(element))
+                    .unwrap_or(1);
+                let step = (MAX_WATCHED_WIDTH / element).max(1) * element;
+                for lsb in (0..width).step_by(step) {
+                    let chunk = (width - lsb).min(step);
+                    watched.push(WatchedChunk {
+                        object: *addr,
+                        offset: static_access_offset(
+                            addr,
+                            BitAccess::new(lsb, lsb + chunk - 1),
+                            unpacked_element_widths,
+                        ),
+                        width: chunk,
+                        readers: targets.clone(),
+                    });
                 }
             }
             PlannedPartition {
                 reads: reads[partition].iter().copied().collect(),
                 writes: writes[partition].iter().copied().collect(),
                 marks: marks.into_iter().collect(),
+                watched,
                 pinned: pinned[partition],
             }
         })
@@ -3841,6 +3888,8 @@ struct WorkLowering<'a, Addr: Clone + Eq + Hash> {
     in_partition: bool,
     /// Where a guarded partition continues when it is skipped.
     partition_merge: Option<BlockId>,
+    /// The open partition's watched chunks before it ran.
+    partition_old: Vec<RegisterId>,
 }
 
 impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a, Addr> {
@@ -3857,6 +3906,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             run_processes: HashSet::default(),
             in_partition: false,
             partition_merge: None,
+            partition_old: Vec::new(),
         }
     }
 
@@ -3921,12 +3971,62 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             Vec::new(),
             Vec::new(),
         ));
+        self.partition_old.clear();
+        for chunk in &partition.watched {
+            let old = self.builder.alloc_logic(chunk.width);
+            self.builder.emit(SIRInstruction::Load(
+                old,
+                chunk.object,
+                chunk.offset.clone(),
+                chunk.width,
+            ));
+            self.partition_old.push(old);
+        }
     }
 
     /// Close a partition: set the flags of the partitions reading what it
-    /// wrote, then join the path that skipped it.
+    /// changed, then join the path that skipped it.
     fn end_partition(&mut self, flags: Addr, partition: &PlannedPartition<Addr>) {
         self.flush_pending_folds();
+        if !partition.watched.is_empty() {
+            let one = self.builder.alloc_bit(8, false);
+            self.builder
+                .emit(SIRInstruction::Imm(one, SIRValue::new(1u64)));
+            let old = std::mem::take(&mut self.partition_old);
+            for (chunk, old) in partition.watched.iter().zip(old) {
+                let new = self.builder.alloc_logic(chunk.width);
+                self.builder.emit(SIRInstruction::Load(
+                    new,
+                    chunk.object,
+                    chunk.offset.clone(),
+                    chunk.width,
+                ));
+                // Both planes: an X turning into a known value is a change.
+                let changed = self.builder.alloc_bit(1, false);
+                self.builder
+                    .emit(SIRInstruction::Binary(changed, old, BinaryOp::NeCase, new));
+                for &reader in &chunk.readers {
+                    let flag = self.builder.alloc_bit(8, false);
+                    self.builder.emit(SIRInstruction::Load(
+                        flag,
+                        flags,
+                        SIROffset::Static(reader * 8),
+                        8,
+                    ));
+                    let marked = self.builder.alloc_bit(8, false);
+                    self.builder
+                        .emit(SIRInstruction::Mux(marked, changed, one, flag));
+                    self.builder.emit(SIRInstruction::Store(
+                        flags,
+                        SIROffset::Static(reader * 8),
+                        8,
+                        marked,
+                        Vec::new(),
+                        Vec::new(),
+                    ));
+                }
+            }
+        }
         if !partition.marks.is_empty() {
             let one = self.builder.alloc_bit(8, false);
             self.builder
@@ -4435,7 +4535,13 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     let plan = partitioning
         .filter(|_| ff.is_none())
         .and_then(|partitioning| {
-            plan_settle_partitions(&prepared, arena, var_widths, partitioning)
+            plan_settle_partitions(
+                &prepared,
+                arena,
+                var_widths,
+                unpacked_element_widths,
+                partitioning,
+            )
         });
     for (index, work) in prepared.scheduled_work.iter().enumerate() {
         if let Some((plan, flags)) = &plan {
@@ -5174,9 +5280,10 @@ mod tests {
         );
         assert!(result.partitions.iter().all(|partition| !partition.pinned));
         // Each partition loads its own flag and the untracked-writes flag
-        // after them; a partition sets its reader's.
+        // after them, and sets its reader's when it changed what it wrote.
         let mut loaded = Vec::new();
         let mut stored = Vec::new();
+        let mut compares = 0;
         for unit in &result.execution_units {
             for block in unit.blocks.values() {
                 for instruction in &block.instructions {
@@ -5187,6 +5294,7 @@ mod tests {
                         SIRInstruction::Store(99, SIROffset::Static(byte), 8, ..) => {
                             stored.push(*byte)
                         }
+                        SIRInstruction::Binary(_, _, BinaryOp::NeCase, _) => compares += 1,
                         _ => {}
                     }
                 }
@@ -5194,9 +5302,13 @@ mod tests {
         }
         loaded.sort_unstable();
         stored.sort_unstable();
-        assert_eq!(loaded, vec![0, 8, 16, 24, 24, 24]);
+        // Guards of 0, 8 and 16, the untracked byte for each, and the
+        // readers' flags of partitions 1 and 2 before a conditional mark.
+        assert_eq!(loaded, vec![0, 8, 8, 16, 16, 24, 24, 24]);
         // The clears of all three flags, and the marks of partitions 1 and 2.
         assert_eq!(stored, vec![0, 8, 8, 16, 16]);
+        // 11 and 12 are compared before their readers are marked.
+        assert_eq!(compares, 2);
     }
 
     #[test]
