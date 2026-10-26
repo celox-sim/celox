@@ -104,6 +104,9 @@ impl Heap {
     pub fn call(&mut self, code: u64, a: u64, b: u64, c: u64) -> u64 {
         let parameter = code >> 8;
         match code & 0xff {
+            op @ crate::containers::NEW..=crate::containers::CASE_EQUAL => {
+                self.container_call(op, parameter, a, b, c)
+            }
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {
                 let lower = |handle| {
