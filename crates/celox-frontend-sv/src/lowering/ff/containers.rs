@@ -37,6 +37,9 @@ impl Ff<'_, '_> {
             string_key,
         );
         let code = |opcode| encode(opcode, parameter);
+        if op.reduction().is_some() {
+            return self.container_reduction(op, layout, &args[0], parameter);
+        }
         let zero = self.constant64(0);
         let (width, signed) = op.result_type(layout);
         let element_result = matches!(op, Get | PopFront | PopBack);
@@ -295,6 +298,110 @@ impl Ff<'_, '_> {
             self.b.emit(SIRInstruction::Slice(narrow, result, 0, width));
             self.store(temp, SIROffset::Static(0), width, narrow);
         }
+        Ok(sv::ir::Expr::Ident(name))
+    }
+
+    fn container_reduction(
+        &mut self,
+        op: ContainerOp,
+        layout: ContainerLayout,
+        receiver: &sv::ir::Expr,
+        parameter: u64,
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let width = layout.width as usize;
+        let four_state = !layout.two_state && self.m.four_state;
+        let alloc = |b: &mut SIRBuilder<Addr>| {
+            if four_state {
+                b.alloc_logic(width)
+            } else {
+                b.alloc_bit(width, layout.signed)
+            }
+        };
+        let code = |opcode| encode(opcode, parameter);
+        // Keep one immutable snapshot of the receiver throughout the traversal.
+        let handle = self.handle(receiver)?;
+        let zero = self.constant64(0);
+        let one = self.constant64(1);
+        let length = self.heap_call(code(heap::LEN), &[handle]);
+        let associative = matches!(layout.kind, ContainerKind::Associative { .. });
+        let first = if associative {
+            self.heap_call(code(heap::FIRST), &[handle, zero])
+        } else {
+            zero
+        };
+        let seed = alloc(&mut self.b);
+        let identity = match op {
+            ContainerOp::ReduceProduct => BigUint::from(1u8),
+            ContainerOp::ReduceAnd => (BigUint::from(1u8) << width) - BigUint::from(1u8),
+            _ => BigUint::zero(),
+        };
+        self.b
+            .emit(SIRInstruction::Imm(seed, SIRValue::new(identity)));
+        let remaining = self.b.alloc_bit(64, false);
+        let key = self.b.alloc_bit(64, false);
+        let accumulator = alloc(&mut self.b);
+        let header = self.b.new_block_with(vec![remaining, key, accumulator]);
+        let body = self.b.new_block();
+        let result = alloc(&mut self.b);
+        let exit = self.b.new_block_with(vec![result]);
+        self.b
+            .seal_block(SIRTerminator::Jump(header, vec![length, first, seed]));
+        self.b.switch_to_block(header);
+        let more = self.b.alloc_bit(1, false);
+        self.b
+            .emit(SIRInstruction::Binary(more, remaining, BinaryOp::Ne, zero));
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: more,
+            true_block: (body, Vec::new()),
+            false_block: (exit, vec![accumulator]),
+        });
+        self.b.switch_to_block(body);
+        let raw = self.heap_call(code(heap::GET), &[handle, key, zero]);
+        let mask = self.heap_call(code(heap::GET_MASK), &[handle, key, zero]);
+        let element = self.container_join(raw, mask, width, four_state);
+        let combined = alloc(&mut self.b);
+        let binary = match op {
+            ContainerOp::ReduceSum => BinaryOp::Add,
+            ContainerOp::ReduceProduct => BinaryOp::Mul,
+            ContainerOp::ReduceAnd => BinaryOp::And,
+            ContainerOp::ReduceOr => BinaryOp::Or,
+            ContainerOp::ReduceXor => BinaryOp::Xor,
+            _ => unreachable!("reduction method"),
+        };
+        self.b.emit(SIRInstruction::Binary(
+            combined,
+            accumulator,
+            binary,
+            element,
+        ));
+        let next = if associative {
+            self.heap_call(code(heap::NEXT), &[handle, key])
+        } else {
+            let next = self.b.alloc_bit(64, false);
+            self.b
+                .emit(SIRInstruction::Binary(next, key, BinaryOp::Add, one));
+            next
+        };
+        let fewer = self.b.alloc_bit(64, false);
+        self.b
+            .emit(SIRInstruction::Binary(fewer, remaining, BinaryOp::Sub, one));
+        self.b
+            .seal_block(SIRTerminator::Jump(header, vec![fewer, next, combined]));
+        self.b.switch_to_block(exit);
+        // Empty reductions return zero, including product and bitwise AND.
+        let empty = self.b.alloc_bit(1, false);
+        self.b
+            .emit(SIRInstruction::Binary(empty, length, BinaryOp::Eq, zero));
+        let value = alloc(&mut self.b);
+        let empty_value = alloc(&mut self.b);
+        self.b
+            .emit(SIRInstruction::Imm(empty_value, SIRValue::new(0u8)));
+        self.b
+            .emit(SIRInstruction::Mux(value, empty, empty_value, result));
+        let (temp, name) = self
+            .m
+            .temp("array_reduction", width, layout.signed, four_state);
+        self.store(temp, SIROffset::Static(0), width, value);
         Ok(sv::ir::Expr::Ident(name))
     }
 

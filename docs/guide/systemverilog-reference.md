@@ -377,8 +377,16 @@ portable state files require a checkpoint instead. Strings and class objects
 held in elements remain reachable during heap collection. Array assignment
 copies elements while class handles retain their usual reference semantics.
 
+Integral fixed arrays, dynamic arrays, queues and associative arrays support
+`sum`, `product`, `and`, `or` and `xor`, with or without empty parentheses
+(IEEE 1800-2023 7.12.3). The result retains the element width and signedness,
+including overflow at that width, and propagates four-state unknowns.
+Empty containers reduce to zero. Fixed arrays may have elements wider than
+64 bits. These methods currently require a one-dimensional array variable;
+`with` expressions and iterator arguments remain unsupported.
+
 Multidimensional containers, elements wider than 64 bits, real elements,
-wildcard or class keys, slices, array manipulation methods, keyed patterns,
+wildcard or class keys, slices, array locator and ordering methods, keyed patterns,
 container operands within concatenations, compound or nonblocking element
 assignments, container ports / subroutine parameters / class properties and
 const containers remain unsupported. A `new[]` initializer currently requires
