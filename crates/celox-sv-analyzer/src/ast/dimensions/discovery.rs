@@ -551,22 +551,17 @@ fn class_signatures(
     );
     Ok(())
 }
-/// Publish the signatures of the methods of every class in the source, of
-/// each specialization of a parameterized class that the current module
+/// Publish the signatures of the methods of every class the current scope
+/// declares, of each specialization of a parameterized class that the scope
 /// names (IEEE 1800-2023 8.25).
 pub(in crate::ast) fn all_class_signatures(
     tree: &AnalysisContext<'_>,
     context: &mut PackedDimensions,
 ) {
     classes::specializations::collect(tree, context);
-    for class in &tree.declarations().classes {
-        let generic = name(&class.name);
-        let names = if class.parameter_ports.is_some() {
-            classes::specializations::of(tree, &generic)
-        } else {
-            vec![generic]
-        };
-        for class_name in names {
+    // The classes of other scopes keep the signatures their scopes publish.
+    for class in classes::scope_declarations(tree) {
+        for class_name in classes::specializations_of(tree, class) {
             let _ = class_signatures(class, &class_name, tree, context);
         }
     }

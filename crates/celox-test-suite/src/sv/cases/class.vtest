@@ -1595,6 +1595,109 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
 
+(case classes_of_packages
+  (source "class.sv" #"
+package shapes;
+    parameter int SCALE = 10;
+    typedef bit [7:0] byte_t;
+    virtual class Shape;
+        byte_t id;
+        static int made;
+        function new(byte_t id);
+            this.id = id;
+            made++;
+        endfunction
+        pure virtual function int area();
+        function int scaled();
+            return area() * SCALE;
+        endfunction
+    endclass
+    class Square extends Shape;
+        int side;
+        function new(int side);
+            super.new(8'd1);
+            this.side = side;
+        endfunction
+        virtual function int area();
+            return side * side;
+        endfunction
+    endclass
+    interface class Named;
+        pure virtual function int name_id();
+    endclass
+    function automatic Shape make(int side);
+        Square square = new(side);
+        return square;
+    endfunction
+    function automatic int ask(Named named);
+        return named.name_id() + 100;
+    endfunction
+endpackage
+module Top(output bit done);
+    import shapes::Shape;
+    import shapes::Square;
+    class Rect extends shapes::Shape implements shapes::Named;
+        int w;
+        int h;
+        function new(int w, int h);
+            super.new(8'd2);
+            this.w = w;
+            this.h = h;
+        endfunction
+        virtual function int area();
+            return w * h;
+        endfunction
+        virtual function int name_id();
+            return 7;
+        endfunction
+    endclass
+    Shape shape;
+    Square square;
+    Rect rect;
+    initial begin
+        shape = shapes::make(3);
+        rect = new(2, 5);
+        $display("%0d %0d %0d %0d", shape.area(), shape.scaled(), shape.id, $cast(square, shape));
+        shape = rect;
+        $display("%0d %0d %0d %0d", shape.area(), rect.scaled(), shapes::ask(rect), shapes::Shape::made);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "9 90 1 1\n10 100 107 2\n"))
+
+(case classes_of_the_compilation_unit
+  (source "class.sv" #"
+class Counter;
+    static int total;
+    int n;
+    function void bump();
+        n++;
+        total++;
+    endfunction
+endclass
+module Child(output int seen);
+    Counter counter;
+    initial begin
+        counter = new;
+        counter.bump();
+        counter.bump();
+        seen = counter.n;
+    end
+endmodule
+module Top(output bit done);
+    int seen;
+    Child child(.seen(seen));
+    initial begin
+        #1 $display("%0d %0d", seen, Counter::total);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq done 1)
+  (expect_output "2 2\n"))
+
 (case class_declarations_bind_in_their_scopes
   (source "class.sv" #"
 module Top(output bit done);
@@ -1784,3 +1887,27 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "3\n"))
+
+(case package_classes_by_their_qualified_names
+  (source "class.sv" #"
+package p;
+    class C;
+        int v = 5;
+    endclass
+    function automatic C make();
+        p::C h;
+        h = p::C::new;
+        return h;
+    endfunction
+endpackage
+module Top(output bit done);
+    initial begin
+        p::C h;
+        h = p::make();
+        $display("%0d", h.v);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "5\n"))
