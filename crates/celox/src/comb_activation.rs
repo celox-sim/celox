@@ -39,7 +39,7 @@ pub(crate) struct ObserverReads {
 }
 
 /// The values one observer's reads returned.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ObserverSnapshot {
     words: Vec<u64>,
     wide: Vec<(BigUint, BigUint)>,

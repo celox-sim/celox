@@ -389,6 +389,17 @@ pub struct VpiSession {
 }
 
 impl VpiSession {
+    /// Capture the last evaluated HDL values without dispatching callbacks.
+    ///
+    /// VPI callbacks, pending writes, forces and plugin memory are not saved.
+    /// The returned file is for inspection/diff or HDL-only initialization;
+    /// it cannot resume a VPI session. Call between dispatch runs or from a
+    /// read-only synchronization callback for settled values. Other callback
+    /// phases capture exactly the values currently visible to VPI reads.
+    pub fn save_state(&self) -> Result<celox::StateFile, String> {
+        capture_host_state(&self.host)
+    }
+
     // The C loader has no Rust caller to retain a guard. Transfer its lifetime
     // to the explicit celox_vpi_clear_runtime/clear_runtime boundary instead.
     fn detach(mut self) {
@@ -655,6 +666,45 @@ fn install(runtime: Runtime) -> Result<VpiSession, String> {
         host,
         registered: true,
     })
+}
+
+fn capture_host_state(host: &VpiHost) -> Result<celox::StateFile, String> {
+    let runtime = host
+        .runtime
+        .try_borrow()
+        .map_err(|_| "VPI runtime is executing; capture at a callback boundary")?;
+    runtime
+        .as_ref()
+        .ok_or("VPI runtime is unavailable")?
+        .save_state()
+        .map_err(|error| error.to_string())
+}
+
+/// Write a diagnostic HDL state file for the active VPI session.
+///
+/// Returns 1 on success, 0 for an unavailable/busy runtime, invalid UTF-8 path,
+/// unsupported state value, or I/O failure. Uses the capture contract of
+/// [`VpiSession::save_state`]. Existing files at `path` are overwritten.
+///
+/// # Safety
+/// `path` must be null or point to a readable NUL-terminated UTF-8 string
+/// for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn celox_vpi_save_state(path: *const c_char) -> i32 {
+    if path.is_null() {
+        return 0;
+    }
+    // Safety: the caller supplies a readable C string.
+    let Ok(path) = unsafe { CStr::from_ptr(path) }.to_str() else {
+        return 0;
+    };
+    let Ok(state) = with_host(capture_host_state) else {
+        return 0;
+    };
+    let Ok(file) = std::fs::File::create(path) else {
+        return 0;
+    };
+    i32::from(state.write_to(file).is_ok())
 }
 
 /// Unregister the current thread's host. During callback dispatch this requests

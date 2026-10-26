@@ -8,7 +8,7 @@ use crate::{
 };
 use celox_design::ForkJoin;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Activation {
     pub kernel: usize,
     pub parent: Option<usize>,

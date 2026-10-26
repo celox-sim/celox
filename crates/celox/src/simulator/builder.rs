@@ -1704,6 +1704,8 @@ mod host {
         pub dpi: crate::DpiSymbols,
         /// Ordered command-line arguments for SystemVerilog plusargs queries.
         pub plusargs: Vec<String>,
+        /// Host I/O factory; each simulator receives an independent instance.
+        pub file_system: celox_runtime::file_io_backend::FileSystemFactory,
         /// The loop that runs the time slots of a [`crate::Simulation`].
         #[doc(hidden)]
         pub scheduler: crate::SchedulerMode,
@@ -1798,6 +1800,7 @@ mod host {
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+        sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
         if let Err(error) = validate_native_vcd_layout(sim.layout(), &sim.program, &vcd_path) {
             return Err(error.with_warnings(std::mem::take(&mut sim.warnings)));
         }
@@ -2003,6 +2006,7 @@ mod host {
                 allow_inferred_latches: false,
                 dpi: crate::DpiSymbols::default(),
                 plusargs: Vec::new(),
+                file_system: Default::default(),
                 scheduler: crate::SchedulerMode::default(),
             }
         }
@@ -2159,6 +2163,21 @@ mod host {
             sink: crate::derived_edge::TestEdgeUnits,
         ) -> Self {
             self.options.derived_edge_units = Some(sink);
+            self
+        }
+
+        /// Supply the host filesystem for runtime file tasks. The factory is
+        /// invoked before declaration initialization for each simulator.
+        /// Snapshot behavior is defined by the returned [`crate::FileSystem`].
+        pub fn file_system(
+            mut self,
+            factory: impl Fn() -> Box<dyn celox_runtime::file_io_backend::FileSystem>
+            + Send
+            + Sync
+            + 'static,
+        ) -> Self {
+            self.options.file_system =
+                celox_runtime::file_io_backend::FileSystemFactory::new(factory);
             self
         }
 
@@ -3049,6 +3068,7 @@ mod host {
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -3103,6 +3123,7 @@ mod host {
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -3160,6 +3181,7 @@ mod host {
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -3231,6 +3253,7 @@ mod host {
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -3445,6 +3468,7 @@ mod host {
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -3663,6 +3687,8 @@ mod host {
                     .set_injected(self.injected_components.clone());
                 sim.diagnostics = self.options.diagnostics.clone();
                 sim.plusargs = celox_runtime::plusargs::Plusargs(self.options.plusargs.clone());
+                sim.file_io =
+                    celox_runtime::file_io::FileIo::new(self.options.file_system.create());
                 sim.apply_initial_values();
                 sim.modify(|_| {}).map_err(|error| {
                     SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
@@ -3989,12 +4015,10 @@ mod host {
             )?;
             // Host state outside the memory image, such as open files,
             // cannot be shared with a shadow.
-            Ok(Some(
-                match shadow.simulator.check_host_checkpoint_support() {
-                    Ok(()) => Ok(Box::new(shadow)),
-                    Err(_) => Err("the design keeps host state outside its memory image"),
-                },
-            ))
+            Ok(Some(match shadow.simulator.check_host_restore_support() {
+                Ok(()) => Ok(Box::new(shadow)),
+                Err(_) => Err("the design keeps host state outside its memory image"),
+            }))
         }
 
         /// Load `image` into executable memory and start a timed simulation
@@ -4087,6 +4111,7 @@ mod host {
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(

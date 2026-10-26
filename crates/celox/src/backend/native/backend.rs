@@ -491,6 +491,11 @@ impl NativeProgramImage {
         &self.reflection
     }
 
+    /// Design metadata used to name saved state objects.
+    pub(crate) fn state_design(&self) -> &crate::ir::RuntimeDesign {
+        &self.design
+    }
+
     /// Source-independent runtime diagnostics and combinational observers.
     pub(crate) fn runtime_schema(&self) -> &NativeRuntimeSchema {
         &self.runtime_schema

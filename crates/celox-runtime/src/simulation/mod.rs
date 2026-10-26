@@ -24,7 +24,7 @@ use celox_design::CounterKind;
 pub(crate) use batch::{edge_level, event_level};
 pub use host::{CompiledSlots, HostBoundary, HostWatch, SimulationExecutor, UnitExecutor};
 pub use nba::NbaUpdate;
-pub use persist::{ScheduleKey, ScheduleParts, SimulationSnapshot};
+pub use persist::{PersistedSimulationSnapshot, ScheduleKey, ScheduleParts, SimulationSnapshot};
 pub use stats::{KernelSchedule, SchedulerMode, SchedulerStats};
 pub use wait::{Baseline, Waiter, Waiters};
 

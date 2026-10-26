@@ -126,6 +126,27 @@ impl NativeProgramInstance {
         unsafe { Self::from_image(appended.image) }
     }
 
+    /// Capture HDL values as last evaluated, without executing code or callbacks.
+    ///
+    /// This diagnostic state file excludes VPI callbacks, pending writes, force
+    /// registrations, plugin memory and time scheduling. It has no schedule and
+    /// is not a resumable VPI session. Signal values include currently applied
+    /// forces; output already emitted is not withdrawn.
+    pub fn save_state(&self) -> Result<celox_runtime::StateFile, crate::StateError> {
+        let image = self.shared.program_image();
+        let schema = image.runtime_schema();
+        crate::StateSchema::from_design(
+            &self.backend,
+            image.state_design(),
+            |address| schema.comb_writes.contains(address),
+            schema
+                .time_slots
+                .iter()
+                .chain(schema.scheduler.iter().flat_map(|s| s.slots.iter())),
+        )
+        .capture(&self.backend)
+    }
+
     /// Physical duration of one tick in the attached design.
     pub fn time_precision(&self) -> celox_design::TimePrecision {
         self.shared.program_image().time_precision()

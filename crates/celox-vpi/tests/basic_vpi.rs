@@ -157,6 +157,55 @@ fn trusted_instance(image: celox::NativeProgramImage) -> NativeProgramInstance {
     unsafe { NativeProgramInstance::from_image(image) }.unwrap()
 }
 
+#[test]
+fn vpi_state_capture_matches_simulator_and_preserves_visible_values() {
+    let _serial = lock_vpi();
+    let mut simulator = Simulator::builder(DESIGN, "Top")
+        .four_state(true)
+        .build()
+        .unwrap();
+    let expected = simulator.save_state().unwrap();
+    let instance = trusted_instance(simulator.shared_code().program_image().clone());
+    assert_eq!(instance.save_state().unwrap(), expected);
+    let session = install_runtime(instance).unwrap();
+    let before = session.save_state().unwrap();
+    unsafe {
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        assert!(!a.is_null());
+        let value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 42 },
+        };
+        vpi_put_value(a, &value, ptr::null(), VPI_NO_DELAY);
+        let saved = session.save_state().unwrap();
+        assert_ne!(saved, before);
+        assert!(saved.schedule.is_none());
+        let a = saved
+            .objects
+            .iter()
+            .find(|object| object.path == "a")
+            .unwrap();
+        assert_eq!(a.value, [42]);
+        let mut bytes = Vec::new();
+        saved.write_to(&mut bytes).unwrap();
+        assert_eq!(
+            celox::StateFile::read_from(bytes.as_slice()).unwrap(),
+            saved
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vpi.state");
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(celox_vpi_save_state(c_path.as_ptr()), 1);
+        assert_eq!(
+            celox::StateFile::read_from(std::fs::File::open(path).unwrap()).unwrap(),
+            saved
+        );
+        assert_eq!(celox_vpi_save_state(ptr::null()), 0);
+        // Capturing neither consumes events nor changes HDL values.
+        assert_eq!(session.save_state().unwrap(), saved);
+    }
+}
+
 const DESIGN: &str = r#"
     module Child (
         i: input logic<8>,
@@ -3898,4 +3947,77 @@ fn a_plain_input_settle_reports_fatal_errors() {
     let _serial = lock_vpi();
     let error = settle_plain_data_input("$fatal(1, \"fallback failure\");").unwrap_err();
     assert!(error.contains("fallback failure"), "{error}");
+}
+
+#[cfg(feature = "systemverilog")]
+static TIMED_CAPTURE_STATUS: AtomicI32 = AtomicI32::new(0);
+
+#[cfg(feature = "systemverilog")]
+unsafe extern "C" fn capture_timed_read_only(data: *mut VpiCbData) -> i32 {
+    // Safety: the test keeps its CString alive until callback dispatch returns.
+    let result = unsafe { celox_vpi_save_state((*data).user_data) };
+    TIMED_CAPTURE_STATUS.store(result, Ordering::SeqCst);
+    0
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn timed_vpi_capture_reads_the_active_slot_without_advancing_it() {
+    let _serial = lock_vpi();
+    let source = "module Top(output int count); initial begin count=7; #1 count=9; #1 $finish; end endmodule";
+    let image = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("capture.sv"))],
+        "Top",
+    )
+    .compile_native()
+    .unwrap()
+    .into_program_image();
+    let simulation = celox::Simulation::from_sv_sources(Vec::new(), "")
+        .build_native_from_image(image.clone())
+        .unwrap();
+    let session = install_timed_runtime(image, simulation).unwrap();
+    assert!(session.save_state().unwrap().schedule.is_none());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("timed.state");
+    let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    let mut time = VpiTime {
+        type_: VPI_SIM_TIME,
+        ..VpiTime::default()
+    };
+    let callback = VpiCbData {
+        reason: CB_READ_ONLY_SYNCH,
+        cb_rtn: Some(capture_timed_read_only),
+        obj: ptr::null_mut(),
+        time: &mut time,
+        value: ptr::null_mut(),
+        index: 0,
+        user_data: c_path.as_ptr().cast_mut(),
+    };
+    TIMED_CAPTURE_STATUS.store(0, Ordering::SeqCst);
+    unsafe {
+        assert!(!vpi_register_cb(&callback).is_null());
+    }
+    assert!(run_callbacks_result().unwrap());
+    assert_eq!(TIMED_CAPTURE_STATUS.load(Ordering::SeqCst), 1);
+    let saved = celox::StateFile::read_from(std::fs::File::open(path).unwrap()).unwrap();
+    assert!(saved.schedule.is_none());
+    assert_eq!(
+        saved
+            .objects
+            .iter()
+            .find(|o| o.path == "count")
+            .unwrap()
+            .value,
+        [7, 0, 0, 0]
+    );
+    let final_state = session.save_state().unwrap();
+    assert_eq!(
+        final_state
+            .objects
+            .iter()
+            .find(|o| o.path == "count")
+            .unwrap()
+            .value,
+        [9, 0, 0, 0]
+    );
 }
