@@ -1,6 +1,11 @@
 use super::*;
 
 sv_backends! {
+    fn array_reduction_type_queries(sim) { @case "containers::array_reduction_type_queries"; }
+    fn array_reduction_fixed(sim) { @case "containers::array_reduction_fixed"; }
+    fn array_reduction_dynamic_queue(sim) { @case "containers::array_reduction_dynamic_queue"; }
+    fn array_reduction_associative(sim) { @case "containers::array_reduction_associative"; }
+    fn array_reduction_four_state(sim) { @case "containers::array_reduction_four_state"; }
     fn queue_argument_side_effects(sim) { @case "containers::queue_argument_side_effects"; }
     fn queue_argument_four_state(sim) { @case "containers::queue_argument_four_state"; }
     fn string_associative_foreach(sim) { @case "containers::string_associative_foreach"; }

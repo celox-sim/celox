@@ -690,6 +690,10 @@ pub(in crate::ast) fn shape(
     while let Some(job) = jobs.pop() {
         match job {
             Job::Enter(id) => {
+                if let Some((_, shape)) = array_reductions::bind(id, native, tree, context)? {
+                    values.push(shape);
+                    continue;
+                }
                 if let Some((name, dimensions)) = type_binding::argument_alias(id, native)
                     && dimensions.is_empty()
                 {

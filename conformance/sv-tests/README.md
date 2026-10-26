@@ -145,6 +145,17 @@ contains 3,300 case/mode verdicts at the pinned revision. These are its only
 changed rows, with no passing case regressing: 1,201 cases pass in 2state and
 1,212 in 4state. Only these reviewed expectations are updated.
 
+Integral array reductions (7.12.3) support `sum`, `product`, `and`, `or` and
+`xor`, with or without empty parentheses. The five unmodified
+`chapter-7/arrays/unpacked/reduction-methods` simulation cases pass the
+official runner in both state modes at the pinned revision. Only those ten
+reviewed expectations change from `fail` to `pass`; this is a focused run,
+not a new full-corpus measurement. Shared regressions also exercise fixed
+arrays, queues, integral- and string-indexed associative arrays, element-width
+overflow, signed results, packed type queries and four-state propagation.
+Empty containers reduce to zero. `with` expressions, iterator arguments and
+multidimensional unpacked receivers remain unsupported.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.
