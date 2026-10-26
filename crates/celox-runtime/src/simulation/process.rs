@@ -196,6 +196,11 @@ impl<B: SimBackend> SimulationState<B> {
                     self.charge(*returns, Some(process))?;
                     return self.fork_activation(executor.backend_mut(), process, encoded);
                 }
+                Some(ProcessStatus::WaitFork) => return Ok(self.wait_for_children(process)),
+                Some(ProcessStatus::DisableFork) => {
+                    self.disable_children(process);
+                    return Ok(true);
+                }
                 Some(ProcessStatus::Local) => {
                     let index = delay() as usize;
                     self.allocate_local(process, index)?;

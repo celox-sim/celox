@@ -192,9 +192,12 @@ fn suspends(body: &[Stmt], timed: &HashSet<String>) -> bool {
     for statement in body {
         statement.walk(&mut |statement| {
             result |= match statement {
-                Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::WaitImplicit(_) | Stmt::Wait(_) => {
-                    true
-                }
+                Stmt::Delay { .. }
+                | Stmt::WaitEvent(_)
+                | Stmt::WaitImplicit(_)
+                | Stmt::Wait(_)
+                | Stmt::WaitFork
+                | Stmt::Fork { .. } => true,
                 Stmt::Call { name, .. } => timed.contains(name),
                 _ => false,
             };

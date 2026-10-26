@@ -3494,7 +3494,6 @@ fn rejects_unlowered_constructs() {
 #[test]
 fn rejects_unimplemented_timing_constructs() {
     for (body, construct) in [
-        ("initial wait fork;", "wait fork statement"),
         // The `event` data type is rejected by name before its uses.
         ("event e; initial @e;", "named event"),
         ("event e; initial ->e;", "named event"),
@@ -3511,7 +3510,6 @@ fn rejects_unimplemented_timing_constructs() {
             "intra-assignment timing control",
         ),
         ("initial begin : b disable b; end", "disable statement"),
-        ("initial disable fork;", "disable fork statement"),
         (
             "logic a, y; always_latch y <= a;",
             "nonblocking assignment inside always_latch",

@@ -133,6 +133,8 @@ pub enum StmtBase<E, L> {
     /// the reads: they do not execute here, and [`StmtBase::walk`] does not
     /// visit them.
     WaitImplicit(Vec<StmtBase<E, L>>),
+    WaitFork,
+    DisableFork,
     /// `wait (condition)`: suspend the process until the condition is true
     /// (9.4.3).
     Wait(E),
@@ -371,6 +373,8 @@ impl<E, L> StmtBase<E, L> {
                     })
                     .collect(),
             ),
+            StmtBase::WaitFork => StmtBase::WaitFork,
+            StmtBase::DisableFork => StmtBase::DisableFork,
             StmtBase::Wait(condition) => StmtBase::Wait(fe(condition)),
             StmtBase::WaitImplicit(reads) => StmtBase::WaitImplicit(body(reads, fe, fl)),
         }
@@ -489,6 +493,7 @@ impl<E, L> StmtBase<E, L> {
                     fe(&mut item.expr);
                 }
             }
+            StmtBase::WaitFork | StmtBase::DisableFork => {}
             StmtBase::Wait(condition) => fe(condition),
             StmtBase::WaitImplicit(reads) => body(reads, fe, fl, fname),
         }

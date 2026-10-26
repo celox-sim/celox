@@ -196,6 +196,64 @@ impl<B: SimBackend> SimulationState<B> {
         }
     }
 
+    /// Only immediate, still-live children participate, even when an already
+    /// completed child left running descendants (IEEE 1800-2023 9.6.1).
+    pub(super) fn wait_for_children(&mut self, process: usize) -> bool {
+        let children: Vec<_> = self
+            .process_state
+            .activations
+            .iter()
+            .enumerate()
+            .filter_map(|(id, activation)| {
+                (activation.live && activation.parent == Some(process)).then_some(id)
+            })
+            .collect();
+        if children.is_empty() {
+            return true;
+        }
+        self.process_state.activations[process].join = Some((ForkJoin::All, children));
+        false
+    }
+
+    /// Follow ancestry through completed parents too (IEEE 1800-2023 9.6.3).
+    /// Remove scheduler entries before releasing IDs for reuse.
+    pub(super) fn disable_children(&mut self, process: usize) {
+        if self.process_state.activations.is_empty() {
+            return;
+        }
+        let mut cancelled = vec![false; self.process_state.activations.len()];
+        let mut pending = vec![process];
+        while let Some(parent) = pending.pop() {
+            for (id, activation) in self.process_state.activations.iter().enumerate() {
+                if activation.parent == Some(parent) && !cancelled[id] {
+                    cancelled[id] = true;
+                    pending.push(id);
+                }
+            }
+        }
+        let state = &mut self.process_state;
+        for (id, activation) in state.activations.iter_mut().enumerate() {
+            activation.pending.retain(|&child| !cancelled[child]);
+            if cancelled[id] {
+                activation.live = false;
+                activation.join = None;
+                state.waiters.remove(id);
+                state.ready.remove(&id);
+                state.reactive.remove(&id);
+                state.inactive.remove(&id);
+                state.re_inactive.remove(&id);
+            }
+        }
+        self.process_wakeups
+            .retain(|std::cmp::Reverse((_, id))| !cancelled[*id]);
+        // Already captured NBA values are independent scheduler work.
+        for (id, &cancelled) in cancelled.iter().enumerate() {
+            if cancelled {
+                self.retire_activation(id);
+            }
+        }
+    }
+
     pub(super) fn end_activation(&mut self, process: usize) {
         if self.process_state.activations.is_empty()
             || self.model.processes[process].frame.is_none()
