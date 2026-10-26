@@ -642,6 +642,10 @@
     "sv_class-X10": {
       "title": "In `extends Base #(expr, T)` an ordered value argument that is an operator expression (`M + 1`, `(2 + 4)`) is dropped when another argument follows; the base class gets its default",
       "standard": "IEEE 1800-2023 8.25, 23.10.2.1"
+    },
+    "sv_class-X4": {
+      "title": "A typedef inside a class declared in a generate block does not see the generate block's localparams (`typedef bit [K-1:0] T` uses the module-level K, or none)",
+      "standard": "IEEE 1800-2023 23.9, 27.5"
     }
   },
   "cases": [
@@ -3955,6 +3959,14 @@
       "classification": "xezim_bug",
       "bug": "sv_class-X10",
       "note": "Wide #(5) extends Box #(M + 1, int), so its base is Box#(6, int): w.N = 6, base.get() = 100 + 6, kind() = 56, and super.new increments Box#(6, int)::made (1). xezim gives the base the default N = 4 (104 4 54 0) as top and non-top. The ordered argument `M + 1` (even `(2 + 4)`) is lost only in an extends clause and only when a second argument follows; `extends Box #(M + 1)`, `extends Box #(M, int)` and a variable `Box #(2 + 4, int)` work. Repros: work/review5/xezim/r/c14c.sv, work/review5/xezim/r/c14d.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "class::derived_classes_keep_their_declaration_scopes",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X4",
+      "note": "Derived is declared in generate block g, whose localparam K = 3 hides the module's K = 2; `typedef bit [K-1:0] T` must use K = 3 (23.9: names resolve from the declaration scope upward), so $bits = 3. xezim prints 1 (as top and non-top); in a reduction with another class it uses the module K (2). It does not depend on `extends`: a plain class in g behaves the same, while a static function in the same class returns K = 3. Repro: work/review5/xezim/r/c3c.sv, work/review5/xezim/r/c3_genscope.sv."
     }
   ]
 }

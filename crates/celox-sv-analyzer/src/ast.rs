@@ -38,6 +38,9 @@ pub(super) struct AnalysisState {
     /// its parameter defaults and body see (IEEE 1800-2023 8.25).
     class_declaration_scopes:
         std::cell::RefCell<HashMap<String, (HashMap<String, i128>, HashMap<String, Type>)>>,
+    /// The classes declared in a generate block that elaboration repeats,
+    /// which would be a class of their own in each repetition (27.4).
+    class_declarations_repeated: std::cell::RefCell<HashSet<String>>,
     /// Set once the class methods of the scope being analyzed have their
     /// signatures, after which a new specialization would have none.
     class_specializations_frozen: std::cell::Cell<bool>,
