@@ -1,0 +1,6 @@
+Revision history for #2116:
+
+rev 2 (content) 2026-10-26 07:11 UTC — Fix both P2 review findings: preserve process-control effects in wait predicates and classify wait fork/fork task calls as requiring process kernels. Restore the predicate entry point after false reevaluations; add four regression cases.
+rev 1 (initial) 2026-10-26 07:11 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2116,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"f60c2b38dfb05ec20908bb58d95b146dee8ea139","timestamp_iso":"2026-10-26T07:11:34Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"f60c2b38dfb05ec20908bb58d95b146dee8ea139","new_sha":"afa4716ea308d097e7a0dd9a318b23f4e7107eeb","timestamp_iso":"2026-10-26T07:11:34Z","reason":"Fix both P2 review findings: preserve process-control effects in wait predicates and classify wait fork/fork task calls as requiring process kernels. Restore the predicate entry point after false reevaluations; add four regression cases.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/f60c2b38dfb05ec20908bb58d95b146dee8ea139...afa4716ea308d097e7a0dd9a318b23f4e7107eeb"}]} -->
