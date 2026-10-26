@@ -1,0 +1,1 @@
+Resolve PR2154 conflicts after master merged detached-function forks, container changes and CLI checkpoints; preserve deferred ownership and retained report union.
