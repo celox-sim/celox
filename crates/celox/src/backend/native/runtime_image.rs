@@ -61,7 +61,9 @@ impl NativeProgramInstance {
     /// validation is structural and does not authenticate executable code.
     ///
     /// An image with process kernels, which only a timed
-    /// [`crate::Simulation`] runs, fails to attach.
+    /// [`crate::Simulation`] runs, fails to attach. So does one with sampled
+    /// value copies, `$past` histories or deferred assertions, whose time
+    /// slots a [`crate::Simulator`] or [`crate::Simulation`] ends.
     pub unsafe fn from_image(image: NativeProgramImage) -> Result<Self, NativeProgramLoadError> {
         if image.has_processes() {
             let origin = image
@@ -72,6 +74,24 @@ impl NativeProgramInstance {
                 .unwrap_or_default();
             return Err(NativeProgramLoadError::Attach(SimulatorError::new(
                 crate::SimulatorErrorKind::ProcessRequiresSimulation(origin),
+            )));
+        }
+        let schema = image.runtime_schema();
+        if !schema.sample_shadows.is_empty()
+            || !schema.initial_copies.is_empty()
+            || schema
+                .runtime_event_sites
+                .iter()
+                .any(|site| site.deferred.is_some())
+        {
+            return Err(NativeProgramLoadError::Attach(SimulatorError::new(
+                crate::SimulatorErrorKind::Runtime(crate::RuntimeErrorCode::Runtime {
+                    message: "a native program instance does not end time slots: sampled \
+                              values, `$past` and deferred assertions need a `Simulator` or \
+                              `Simulation`"
+                        .to_string(),
+                    signals: Vec::new(),
+                }),
             )));
         }
         // Safety: upheld by this constructor's caller.

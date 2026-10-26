@@ -63,6 +63,15 @@ pub enum SystemFunction {
     /// `$sampled` (IEEE 1800-2023 16.9.3): the value of its operand in the
     /// Preponed region of the time slot.
     Sampled,
+    /// `$past` (16.9.3): the sampled value of its operand at an earlier tick
+    /// of the clock.
+    Past,
+    /// `$rose`, `$fell`, `$stable` and `$changed` (16.9.3): the sampled value
+    /// of the operand against its sampled value at the previous tick.
+    Rose,
+    Fell,
+    Stable,
+    Changed,
     /// `$bits` (20.6.2).
     Bits,
     /// `$isunbounded` (20.6.3).
@@ -257,6 +266,11 @@ impl SystemFunction {
             Self::Signed => "$signed",
             Self::Unsigned => "$unsigned",
             Self::Sampled => "$sampled",
+            Self::Past => "$past",
+            Self::Rose => "$rose",
+            Self::Fell => "$fell",
+            Self::Stable => "$stable",
+            Self::Changed => "$changed",
             Self::Bits => "$bits",
             Self::Isunbounded => "$isunbounded",
             Self::Dimensions => "$dimensions",
@@ -361,7 +375,15 @@ impl SystemFunction {
         self.is_effectful()
             || matches!(
                 self,
-                Self::Time | Self::Stime | Self::Realtime | Self::Sampled
+                Self::Time
+                    | Self::Stime
+                    | Self::Realtime
+                    | Self::Sampled
+                    | Self::Past
+                    | Self::Rose
+                    | Self::Fell
+                    | Self::Stable
+                    | Self::Changed
             )
     }
 
@@ -421,7 +443,14 @@ impl SystemFunction {
             | Self::Countones
             | Self::ScopeRandomize
             | Self::ScopeRandomizeEnum => Some((32, true)),
-            Self::Onehot | Self::Onehot0 | Self::Isunknown | Self::Isunbounded => Some((1, false)),
+            Self::Onehot
+            | Self::Onehot0
+            | Self::Isunknown
+            | Self::Isunbounded
+            | Self::Rose
+            | Self::Fell
+            | Self::Stable
+            | Self::Changed => Some((1, false)),
             Self::Random
             | Self::DistUniform
             | Self::DistNormal
@@ -449,6 +478,7 @@ impl SystemFunction {
             Self::Signed
             | Self::Unsigned
             | Self::Sampled
+            | Self::Past
             | Self::Bits
             | Self::Dimensions
             | Self::UnpackedDimensions
@@ -1151,11 +1181,11 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$assertcontrol", Task),
     // 20.12 Sampled value system functions
     function(SystemFunction::Sampled, 1, Some(1)),
-    unsupported("$rose", Function),
-    unsupported("$fell", Function),
-    unsupported("$stable", Function),
-    unsupported("$changed", Function),
-    unsupported("$past", Function),
+    function(SystemFunction::Rose, 1, Some(1)),
+    function(SystemFunction::Fell, 1, Some(1)),
+    function(SystemFunction::Stable, 1, Some(1)),
+    function(SystemFunction::Changed, 1, Some(1)),
+    function(SystemFunction::Past, 1, Some(3)),
     unsupported("$past_gclk", Function),
     unsupported("$rose_gclk", Function),
     unsupported("$fell_gclk", Function),
@@ -1563,11 +1593,13 @@ pub fn check_call(
         });
     }
     // Functions require values, except the optional addressing operands of
-    // `$fread` (21.3.4.4). Tasks such as `$display(a,,b)` may omit operands.
+    // `$fread` (21.3.4.4) and the number of ticks of `$past` (16.9.3). Tasks
+    // such as `$display(a,,b)` may omit operands.
     if tf.kind != Task
         && let Some(position) = args.iter().enumerate().position(|(position, arg)| {
             *arg == Arg::Omitted
                 && !(checked == SystemCall::Function(SystemFunction::Fread) && position >= 2)
+                && !(checked == SystemCall::Function(SystemFunction::Past) && position == 1)
         })
     {
         return Err(AnalyzerError::InvalidSystemTfCall {

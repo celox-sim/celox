@@ -90,6 +90,9 @@ struct SvVariable {
     /// The variable whose sampled value this hidden copy holds
     /// (`SimModule::sample_shadows`).
     sampled_from: Option<SourceVarId>,
+    /// The variable whose past sampled values this hidden register holds;
+    /// it starts with the variable's value (`SimModule::initial_copies`).
+    history_of: Option<SourceVarId>,
 }
 
 /// Whether `expr` reads a string variable: after its calls are hoisted, a
@@ -130,13 +133,15 @@ impl SvVariable {
 
     /// A hidden variable other than the time slot, whose value the lowered
     /// code computes. The time slot and the sampled copies are state the
-    /// scheduler writes, and an event expression's variables are state its
-    /// process and its continuous assignment share.
+    /// scheduler writes, `$past` histories are state their process keeps,
+    /// and an event expression's variables are state its process and its
+    /// continuous assignment share.
     fn is_scratch(&self) -> bool {
         self.hidden
             && self.path != [TIME_SLOT]
             && self.force_control.is_none()
             && self.sampled_from.is_none()
+            && self.history_of.is_none()
             && !self.path[0].starts_with(EVENT_PREFIX)
     }
 }
@@ -2203,6 +2208,7 @@ fn prepare_external_hierarchy_collecting(
                         hidden: !variable.module_affiliated,
                         force_control: None,
                         sampled_from: None,
+                        history_of: None,
                     },
                 )
             })
@@ -3635,6 +3641,7 @@ fn lower_module_with_overrides(
             hidden: false,
             force_control: None,
             sampled_from: None,
+            history_of: None,
         };
         name_to_id.insert(port.name().to_string(), id);
         port_order.push(id);
@@ -3720,6 +3727,7 @@ fn lower_module_with_overrides(
             hidden: false,
             force_control: None,
             sampled_from: None,
+            history_of: None,
         };
         name_to_id.insert(signal.name().to_string(), id);
         // The package's object, or the other instance's, has its own
@@ -3801,6 +3809,7 @@ fn lower_module_with_overrides(
                 hidden: false,
                 force_control: None,
                 sampled_from: None,
+                history_of: None,
             },
         );
     }
@@ -4014,6 +4023,7 @@ fn lower_module_with_overrides(
             host_request_sites,
             time_slot: name_to_id.get(TIME_SLOT).copied(),
             sample_shadows: Vec::new(),
+            initial_copies: Vec::new(),
         },
         variables,
         port_order,
@@ -4808,6 +4818,12 @@ pub(crate) fn attach_instance_glue(
         .collect();
     sample_shadows.sort_by_key(|&(variable, copy)| (variable.0, copy.0));
     module.sample_shadows = sample_shadows;
+    let mut initial_copies: Vec<_> = parent_variables
+        .iter()
+        .filter_map(|(&copy, variable)| variable.history_of.map(|variable| (variable, copy)))
+        .collect();
+    initial_copies.sort_by_key(|&(variable, copy)| (variable.0, copy.0));
+    module.initial_copies = initial_copies;
     for (instance, child_id, child, connections) in resolved_instances {
         let glue = build_instance_glue(
             &parent_variables,
@@ -5203,6 +5219,7 @@ fn lower_initial_processes(
                         hidden: true,
                         force_control: None,
                         sampled_from: None,
+                        history_of: None,
                     },
                 );
                 id
@@ -5848,6 +5865,7 @@ fn ensure_parent_output_signals(
             hidden: false,
             force_control: None,
             sampled_from: None,
+            history_of: None,
         };
         parent
             .variables
@@ -7731,6 +7749,11 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         | SystemFunction::Signed
         | SystemFunction::Unsigned
         | SystemFunction::Sampled
+        | SystemFunction::Past
+        | SystemFunction::Rose
+        | SystemFunction::Fell
+        | SystemFunction::Stable
+        | SystemFunction::Changed
         | SystemFunction::Bits
         | SystemFunction::Size
         | SystemFunction::Dimensions
@@ -9721,6 +9744,7 @@ fn lower_ff_processes(
             .with_shared_variables(shared_variables)
             .with_sparse_candidates(&edge_memories)
             .with_window_writes(&window_writes)
+            .with_inferred_clock(trigger_set.resets.is_empty())
             .lower_process(process.body())?;
         repeated_writes.extend(repeated_ff_writes(&eval_only, &staged));
         // A process without writes still runs for its runtime events and
