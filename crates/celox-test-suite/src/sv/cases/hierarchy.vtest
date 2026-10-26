@@ -1738,3 +1738,25 @@
   (assert_eq y (fourstate 0x55 0xa0))
   (modify (set d 0x96))
   (assert_eq y 0x96))
+
+(case many_sibling_parameter_specializations
+  (source "sibling_specializations.sv" #"
+    module Leaf #(parameter ID=0)(input wire [7:0] x, output wire [7:0] q);
+      assign q=x ^ 8'(ID);
+    endmodule
+    module Top(input wire [7:0] x, output wire [7:0] first, last);
+      wire [7:0] lanes[65];
+      for (genvar n=0; n<65; n=n+1) begin : siblings
+        Leaf #(.ID(n)) u(.x(x), .q(lanes[n]));
+      end
+      assign first=lanes[0];
+      assign last=lanes[64];
+    endmodule
+  "#)
+  (top Top)
+  (modify (set x 60))
+  (assert_eq first 60)
+  (assert_eq last 124)
+  (modify (set x 255))
+  (assert_eq first 255)
+  (assert_eq last 191))
