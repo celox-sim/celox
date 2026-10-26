@@ -313,8 +313,11 @@ test("normal CI and standalone core conformance never build the bridge", () => {
 });
 
 // The extracted solver is tested directly as well as through its proof consumers.
-test("Aplite runs its own tests in the Lydite lane", () => {
+test("Aplite changes test both proof and simulation consumers", () => {
   const workflow = readFileSync(new URL("../.github/workflows/lydite-checks.yml", import.meta.url), "utf8");
   assert.match(workflow, /cargo test --locked .* -p aplite/);
-  assert.deepEqual(celoxRustTestScope(["crates/aplite/src/finite.rs"], packages).packages ?? [], []);
+  const selected = celoxRustTestScope(["crates/aplite/src/finite.rs"], packages).packages;
+  for (const name of ["aplite", "celox-heap", "celox", "celox-napi"])
+    assert.ok(selected.includes(name), name);
+  assert.ok(selected.every(name => !isLydite(name)));
 });

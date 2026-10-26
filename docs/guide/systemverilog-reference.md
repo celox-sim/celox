@@ -200,8 +200,8 @@ including supported properties not declared `rand`. Names are resolved in the
 receiver's class, not the caller's scope; expressions and inaccessible members
 are rejected. The temporary modes are installed before the pre-hook and restored
 after the post-hook; hooks can inspect and change them. `randomize(null)` runs
-the hooks without drawing or assigning random values (18.11). Constraints are
-not supported even for this checker form.
+the pre-hook and checks constraints without drawing or assigning random values;
+the post-hook runs only on success (18.11).
 
 Each object has an independent random stream, seeded from its creating process.
 `object.srandom(seed)` resets it using a 32-bit seed; checkpoints preserve both
@@ -212,9 +212,21 @@ members. Each property visits every value once before starting another cycle
 Disabled properties retain their cycle; checkpoints restore it. `srandom`
 reseeds the RNG without making already consumed values eligible again.
 
-Constraints, `with`, larger `randc` domains, static random properties, and random
-array/object/string properties remain unsupported. A constrained dynamic
-subclass is rejected rather than silently randomizing only its base properties.
+Named constraint blocks support 1–64-bit two-state scalar integer properties,
+comparisons, logical and bitwise operations, addition, subtraction and multiplication.
+Inherited blocks apply, and a derived block with the same name replaces its base
+block. Disabled and unselected properties are state inputs read after the pre-hook.
+Aplite searches for a satisfying assignment using the object's seed, then updates
+all selected properties together. Proved infeasibility returns `0`, preserves the
+properties and skips the post-hook (18.6.3). Resource exhaustion is a runtime error.
+This initial seeded-search policy does not guarantee a uniform distribution;
+distribution improvements are tracked in [#2187](https://github.com/celox-sim/celox/issues/2187).
+
+Constrained enums and `randc`, `inside`, conditional/foreach/soft constraints,
+`dist`, `solve before`, constraint modes, external/static blocks, typed parameters
+in constraints, and inline `with` remain unsupported. Larger unconstrained `randc`
+domains, static random properties and random array/object/string properties also
+remain unsupported. Unsupported dynamic subclasses are rejected before draws.
 A call through `null` is a runtime error.
 
 ### Time literal delays {#time-literal-delays}

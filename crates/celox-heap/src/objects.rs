@@ -49,6 +49,7 @@ impl Object {
 /// reports once control returns to it.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Fault {
+    ConstraintRandomization(String),
     NegativeArraySize,
     ContainerAllocationLimit,
     /// A property access or method call through `null` or a handle of no
@@ -61,6 +62,9 @@ pub enum Fault {
 impl std::fmt::Display for Fault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ConstraintRandomization(reason) => {
+                write!(f, "constraint randomization failed: {reason}")
+            }
             Self::NegativeArraySize => f.write_str("negative dynamic array size"),
             Self::ContainerAllocationLimit => {
                 f.write_str("dynamic container allocation limit exceeded")

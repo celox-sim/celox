@@ -2578,5 +2578,41 @@
         "scan::sscanf_string_format_expression"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_scalar_constraints",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (devel)",
+    "reason": "Icarus rejects constraint declarations before elaboration. IEEE 1800-2023 18.5 defines these blocks. Celox retains all assertions; Verilator passes the scalar and width/inheritance cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_scalar_constraints.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::constrained_randomize_scalar",
+        "class::constrained_randomize_width_and_inheritance",
+        "class::constrained_randomize_hooks"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_post_randomize_unsat",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator invokes post_randomize unconditionally after an UNSAT ordinary randomize call. Generated C++ calls the post hook after constraint.next without testing its return. IEEE 1800-2023 18.6.3 requires skipping the post hook on failure. The case keeps its assertion and tests that pre_randomize updates state before solving.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_scalar_constraints.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "class::constrained_randomize_hooks"
+      ]
+    }
   }
 ]
