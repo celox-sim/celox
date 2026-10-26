@@ -24,7 +24,15 @@ original query and requested context. UNSAT trusts the Rust implementation;
 there is no independently checked UNSAT certificate. The expression constructors
 are a low-level IR, not a SystemVerilog parser or a complete typed input validator.
 The scalar backend uses words up to 64 bits; callers may encode wider values in
-chunks. The solver does not sample models randomly or promise uniform sampling.
+chunks. `solve_seeded` selects initial SAT phases using a caller-owned seed for scalar
+Boolean/bit-vector queries. The same input and seed reproduce the search within
+a solver version, provided budgets permit completion. It returns only replayed
+models and preserves `Unknown` on unsupported input or exhausted budgets. Arrays
+remain available through `solve`/`solve_with_hint`, not `solve_seeded`.
+
+Seeded search is not uniform model sampling: it must not be used to claim the
+legal-combination distribution required by SystemVerilog randomization. Weighted
+sampling, `solve before`, and cyclic randomization require a separate policy.
 
 The crate has no dependency on Celox, lydite, Z3, or an external executable.
 Lydite retains its proof-obligation generation, proof orchestration, structural
@@ -41,3 +49,11 @@ cache and lint configuration. Its explicit package version, changelog and
 Run `cargo test --locked -p aplite` and the lydite consumer tests after changes.
 The Lydite CI lane also tests Aplite directly. See [RELEASING.md](RELEASING.md)
 for its independent release process.
+
+```rust
+use aplite::{Env, Limits, Sort, Verdict, boolv, solve_seeded, var};
+let context = Env::from([("data".into(), var("data".into(), Sort::Bv(32)))]);
+let result = solve_seeded(&boolv(true), &context, Limits::default(), 42);
+assert_eq!(result.verdict, Verdict::Sat);
+assert!(result.original_formula_validated);
+```
