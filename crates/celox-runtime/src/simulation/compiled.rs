@@ -412,6 +412,7 @@ impl<B: SimBackend> SimulationState<B> {
                 return Err(SimulatorErrorCode::InternalError.into());
             }
         }
+        self.retain_activation_roots(executor);
         executor.try_finish_timed_step(now)?;
         // What the host writes after the slot is an update of its time.
         if executor.take_slot_writes() {

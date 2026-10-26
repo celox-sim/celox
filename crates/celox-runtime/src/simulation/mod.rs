@@ -1,6 +1,8 @@
 //! The timed scheduler: time slots, rounds, the process phase and the
 //! batch step of designs without processes.
 
+mod activation;
+pub use activation::Activation;
 mod batch;
 mod compiled;
 mod edges;
@@ -136,8 +138,9 @@ pub struct SimulationState<B: SimBackend> {
     /// The design keeps unknown bits, so edges follow the four-state rows
     /// of IEEE 1800-2023 Table 9-2.
     four_state: bool,
-    /// The design's scheduling facts, which never change.
+    /// Scheduling facts, including descriptors for dynamically spawned processes.
     model: ResolvedSchedule<B>,
+    kernel_count: usize,
     process_wakeups: BinaryHeap<ProcessWakeup>,
     process_state: ProcessState,
     declaration_processes: Vec<usize>,
@@ -210,6 +213,7 @@ impl<B: SimBackend> SimulationState<B> {
                 .filter(|&index| model.processes[index].kind != celox_design::ProcessKind::Final)
                 .map(|process| Reverse((0, process)))
                 .collect(),
+            kernel_count: model.processes.len(),
             model,
             process_state,
             declaration_processes,
@@ -407,6 +411,11 @@ impl<B: SimBackend> SimulationState<B> {
         self.host_pending
     }
 
+    /// Whether runtime-owned activation storage needs a same-design checkpoint.
+    pub fn has_fork_activations(&self) -> bool {
+        !self.process_state.activations.is_empty()
+    }
+
     /// Set whether the next step settles host changes at the current time
     /// first, as when copying another simulation's state.
     #[doc(hidden)]
@@ -424,6 +433,7 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        self.retain_activation_roots(executor);
         match executor.try_finish_timed_step(time) {
             Ok(()) => Ok(()),
             Err(Halt::Error(error)) => {

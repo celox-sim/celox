@@ -63,6 +63,7 @@ pub struct CountedModel<A> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessModel<A> {
     pub slots: ProcessSlots<A>,
+    pub frame: Option<crate::ProcessFrame<A>>,
     pub waits: Vec<Vec<TermModel<A>>>,
     pub nbas: Vec<NbaSite<A>>,
     pub host_requests: Vec<crate::HostRequestSite<A>>,
@@ -101,7 +102,9 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
         let mut processes: Vec<ProcessModel<A>> = schema
             .processes
             .iter()
-            .map(|slots| ProcessModel {
+            .enumerate()
+            .map(|(index, slots)| ProcessModel {
+                frame: schema.process_frames.get(index).cloned().flatten(),
                 slots: *slots,
                 waits: Vec::new(),
                 nbas: Vec::new(),

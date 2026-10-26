@@ -412,6 +412,14 @@ pub struct RuntimeErrorInfo<A> {
     pub signals: Vec<A>,
 }
 
+/// When a parent resumes after creating concurrent children (IEEE 1800-2023 9.3.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ForkJoin {
+    All,
+    Any,
+    None,
+}
+
 /// How a process kernel returned control to the runtime, as stored in its
 /// [`ProcessSlots::status`] slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -452,6 +460,10 @@ pub enum ProcessStatus {
     /// A program kernel called `$exit` (IEEE 1800-2023 24.7): it and every
     /// other kernel of its program instance ([`ProcessSlots::program`]) end.
     Exit,
+    /// Create child activations. The delay slot encodes their entry points and join mode.
+    Fork,
+    /// Allocate a fresh automatic local cell before its declaration initializer.
+    Local,
 }
 
 impl ProcessStatus {
@@ -470,6 +482,8 @@ impl ProcessStatus {
             Self::Stop => 9,
             Self::HostRequest => 10,
             Self::Exit => 11,
+            Self::Fork => 12,
+            Self::Local => 13,
         }
     }
 
@@ -486,6 +500,8 @@ impl ProcessStatus {
             9 => Some(Self::Stop),
             10 => Some(Self::HostRequest),
             11 => Some(Self::Exit),
+            12 => Some(Self::Fork),
+            13 => Some(Self::Local),
             _ => None,
         }
     }
@@ -625,6 +641,29 @@ pub enum ProcessKind {
     Regular,
     /// A final procedure runs only when simulation ends (IEEE 1800-2023 9.2.3).
     Final,
+}
+
+/// Storage switched when several activations execute the same kernel.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessFrame<A> {
+    /// Compiler temporaries and control slots private to each activation.
+    pub private: Vec<A>,
+    /// Automatic locals shared with children until the declaration is re-entered.
+    pub locals: Vec<A>,
+    pub random: A,
+    pub seed: u32,
+    pub starts_with_event_wait: bool,
+}
+impl<A> ProcessFrame<A> {
+    pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessFrame<B> {
+        ProcessFrame {
+            private: self.private.into_iter().map(&mut map).collect(),
+            locals: self.locals.into_iter().map(&mut map).collect(),
+            random: map(self.random),
+            seed: self.seed,
+            starts_with_event_wait: self.starts_with_event_wait,
+        }
+    }
 }
 
 /// State through which one process kernel exchanges control with the runtime.
@@ -1034,6 +1073,7 @@ pub struct RuntimeSchema<A> {
     pub processes: Vec<ProcessSlots<A>>,
     /// Source procedures of the process kernels, in kernel order.
     pub process_origins: Vec<ProcessOrigin>,
+    pub process_frames: Vec<Option<ProcessFrame<A>>>,
     /// Counted signals and their occurrence counters.
     pub watches: Vec<EventWatch<A>>,
     /// Bit ranges whose changes bump an occurrence counter: the sensitivity
@@ -1302,6 +1342,7 @@ impl<A> Default for RuntimeSchema<A> {
             live_signals: HashSet::default(),
             processes: Vec::new(),
             process_origins: Vec::new(),
+            process_frames: Vec::new(),
             watches: Vec::new(),
             occurrence_probes: Vec::new(),
             wait_sites: Vec::new(),
