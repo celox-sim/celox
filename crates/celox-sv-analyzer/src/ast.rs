@@ -2416,6 +2416,12 @@ pub struct CombProcess {
 }
 
 impl CombProcess {
+    /// Where an `always` procedure is written, for diagnostics about it as
+    /// a process.
+    pub fn process_site(&self) -> Option<&crate::procedural::ProcessSite> {
+        self.process_site.as_ref()
+    }
+
     pub fn site(&self) -> Option<&crate::procedural::SourceSpan> {
         self.site.as_ref()
     }

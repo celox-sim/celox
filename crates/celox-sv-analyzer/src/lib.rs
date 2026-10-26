@@ -48,6 +48,12 @@ pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AnalysisOptions {
     pub allow_mixed_timescales: bool,
+    /// Treat a variable that only several `always @*` blocks write, each
+    /// before it reads it, and that nothing else reads, as a temporary of
+    /// each block, instead of a variable whose writes wake the other blocks
+    /// (IEEE 1800-2023 9.4.2.2). Off by default; see the
+    /// `shared_always_temporary` diagnostic.
+    pub shared_always_temporaries: bool,
     /// Default unit/precision exponents; precision also bounds global resolution.
     pub default_timescale: Option<(i32, i32)>,
 }

@@ -270,3 +270,135 @@ sv_backends! {
         @case "procedural::initial_while_loops_define_the_state";
     }
 }
+
+/// Two `always @*` blocks that use a module-level variable as their loop
+/// index (#2129). Each block's writes to `j` wake the other, which reads it
+/// (IEEE 1800-2023 9.4.2.2), so the blocks never settle.
+const SHARED_INDEX: &str = r#"`timescale 1ns/1ns
+module top;
+  reg [3:0] a = 4'b0000;
+  reg [3:0] b = 4'b0000;
+  reg any_a, any_b;
+  integer j;
+  always @(*) begin
+    any_a = 1'b0;
+    for (j = 0; j < 4; j = j + 1) any_a = any_a | a[j];
+  end
+  always @(*) begin
+    any_b = 1'b0;
+    for (j = 0; j < 4; j = j + 1) any_b = any_b | b[j];
+  end
+  initial begin
+    #1 a = 4'b0100;
+    #1 b = 4'b0010;
+    #1 $display("%b %b", any_a, any_b);
+    $finish;
+  end
+endmodule
+"#;
+
+fn shared_index(
+    source: &str,
+    level: Option<celox::DiagnosticLevel>,
+) -> Result<celox::Simulation, celox::SimulatorError> {
+    let mut policy = celox::DiagnosticPolicy::default();
+    if let Some(level) = level {
+        policy.set("shared_always_temporary", level);
+    }
+    celox::Simulation::from_sv_sources(vec![(source, Path::new("shared.sv"))], "top")
+        .diagnostic_policy(policy)
+        .build()
+}
+
+fn display_lines(sim: &mut celox::Simulation) -> Vec<String> {
+    sim.drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => {
+                Some(String::from_utf8_lossy(&message).into_owned())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The time the blocks keep waking each other, and both blocks.
+fn assert_does_not_settle(mut sim: celox::Simulation) {
+    let error = sim.run_until(10).unwrap_err().to_string();
+    assert!(error.contains("does not settle"), "{error}");
+    assert!(error.contains("shared.sv:7:"), "{error}");
+    assert!(error.contains("shared.sv:11:"), "{error}");
+}
+
+#[test]
+fn level_blocks_sharing_a_loop_index_do_not_settle() {
+    assert_does_not_settle(shared_index(SHARED_INDEX, None).unwrap());
+}
+
+#[test]
+fn shared_always_temporary_runs_each_block_with_its_own_index() {
+    // Icarus 13 prints `1 1`: it does not wake a block on the other's writes.
+    for four_state in [false, true] {
+        let mut policy = celox::DiagnosticPolicy::default();
+        policy.set("shared_always_temporary", celox::DiagnosticLevel::Allow);
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(SHARED_INDEX, Path::new("shared.sv"))], "top")
+                .four_state(four_state)
+                .diagnostic_policy(policy)
+                .build()
+                .unwrap();
+        assert!(sim.warnings().is_empty());
+        sim.run_until(10).unwrap();
+        assert_eq!(display_lines(&mut sim), ["1 1"], "four_state={four_state}");
+    }
+    let sim = shared_index(SHARED_INDEX, Some(celox::DiagnosticLevel::Warn)).unwrap();
+    let warnings: Vec<String> = sim.warnings().iter().map(ToString::to_string).collect();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("`j`"), "{warnings:?}");
+    assert!(warnings[0].contains("shared.sv:7"), "{warnings:?}");
+    assert!(warnings[0].contains("shared.sv:11"), "{warnings:?}");
+}
+
+#[test]
+fn shared_always_temporary_keeps_the_standard_when_it_would_show() {
+    let allow = Some(celox::DiagnosticLevel::Allow);
+    for (what, source) in [
+        (
+            "another reader",
+            SHARED_INDEX.replace("  initial begin\n", "  wire [31:0] q = j;\n  initial begin\n"),
+        ),
+        (
+            "a read before the write",
+            SHARED_INDEX.replace(
+                "    any_b = 1'b0;\n",
+                "    any_b = j[0];\n",
+            ),
+        ),
+        (
+            "a hierarchical reader",
+            SHARED_INDEX.replace("module top;", "module dut;").replace(
+                "endmodule\n",
+                "endmodule\nmodule top;\n  dut d();\n  initial #5 $display(\"%0d\", d.j);\nendmodule\n",
+            ),
+        ),
+    ] {
+        let sim = shared_index(&source, allow).unwrap();
+        assert!(sim.warnings().is_empty(), "{what}");
+        assert_does_not_settle(sim);
+    }
+}
+
+#[test]
+fn always_comb_blocks_may_not_share_a_variable() {
+    let source = SHARED_INDEX.replace("always @(*)", "always_comb");
+    let error = match shared_index(&source, Some(celox::DiagnosticLevel::Allow)) {
+        Ok(_) => panic!("always_comb restricts a variable to one process"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("multiple variable drivers for `j`"),
+        "{error}"
+    );
+    assert!(error.contains("shared.sv:7"), "{error}");
+    assert!(error.contains("shared.sv:11"), "{error}");
+}

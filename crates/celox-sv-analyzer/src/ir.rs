@@ -136,6 +136,77 @@ impl Module {
         self
     }
 
+    /// Run selected `always @*` processes, by index among
+    /// [`Self::comb_processes`], as ordinary processes that wait on their
+    /// implicit event expression (IEEE 1800-2023 9.4.2.2) before each run of
+    /// their statement.
+    pub fn run_comb_processes_as_processes(
+        mut self,
+        mut select: impl FnMut(usize, &CombProcess) -> bool,
+    ) -> Self {
+        let mut retained = Vec::new();
+        for (index, process) in std::mem::take(&mut self.comb_processes)
+            .into_iter()
+            .enumerate()
+        {
+            if process.kind != CombProcessKind::AlwaysStar || !select(index, &process) {
+                retained.push(process);
+                continue;
+            }
+            // The reads of branches that constant folding removed count too.
+            let reads = process
+                .body
+                .iter()
+                .chain(&process.sensitivity_body)
+                .cloned()
+                .collect();
+            let mut body = vec![Stmt::WaitImplicit(reads)];
+            body.extend(process.body);
+            self.initial_processes.push(InitialProcess {
+                creation_order: process.creation_order,
+                site: process.process_site,
+                scheduled_edge: false,
+                condition: process.condition,
+                body: vec![Stmt::Loop {
+                    kind: LoopKind::Forever,
+                    init: Vec::new(),
+                    condition: None,
+                    step: Vec::new(),
+                    body,
+                }],
+                kind: celox_design::ProcessKind::Regular,
+                synthetic: false,
+                repeats: true,
+            });
+        }
+        self.comb_processes = retained;
+        self.initial_processes
+            .sort_by_key(|process| (!process.is_initializer(), process.creation_order));
+        self
+    }
+
+    /// Rewrite the statements of the combinational processes, by index
+    /// among [`Self::comb_processes`]: their bodies, and the statements that
+    /// only describe their implicit sensitivity (`true`; see
+    /// [`CombProcess::sensitivity_body`]).
+    pub fn map_comb_process_bodies(
+        mut self,
+        mut rewrite: impl FnMut(usize, Vec<Stmt>, bool) -> Vec<Stmt>,
+    ) -> Self {
+        for (index, process) in self.comb_processes.iter_mut().enumerate() {
+            process.body = rewrite(index, std::mem::take(&mut process.body), false);
+            process.sensitivity_body =
+                rewrite(index, std::mem::take(&mut process.sensitivity_body), true);
+        }
+        self
+    }
+
+    /// Declare a variable local to a procedural block (see [`Self::locals`]).
+    pub fn add_local(mut self, local: LocalVariable) -> Self {
+        self.locals.push(local);
+        self
+    }
+
     /// Represent selected [`InitialProcess::level_sensitive`] processes as
     /// `always @*`. The caller selects a process only when its list is the
     /// implicit event expression of its statement (IEEE 1800-2023 9.4.2.2).
@@ -1036,6 +1107,9 @@ impl LValue {
 pub struct CombProcess {
     creation_order: usize,
     site: Option<SourceSpan>,
+    /// Where an `always` procedure is written, for diagnostics about it as
+    /// a process.
+    process_site: Option<ProcessSite>,
     kind: CombProcessKind,
     condition: Option<ConstExpr>,
     assignments: Vec<Assignment>,
@@ -1046,6 +1120,11 @@ pub struct CombProcess {
 impl CombProcess {
     pub fn site(&self) -> Option<&SourceSpan> {
         self.site.as_ref()
+    }
+
+    /// Where an `always` procedure is written, as a process.
+    pub fn process_site(&self) -> Option<&ProcessSite> {
+        self.process_site.as_ref()
     }
 
     /// Reads removed from executable branches still affect implicit sensitivity.
@@ -1067,6 +1146,7 @@ impl CombProcess {
         Self {
             creation_order: 0,
             site: None,
+            process_site: None,
             sensitivity_body: Vec::new(),
             kind,
             condition,
@@ -1567,6 +1647,7 @@ impl From<ast::CombProcess> for CombProcess {
         );
         result.creation_order = process.creation_order();
         result.site = process.site().cloned();
+        result.process_site = process.process_site().cloned();
         result.sensitivity_body = process
             .sensitivity_body()
             .iter()
