@@ -46,6 +46,29 @@
     },
     {
       "category": "Operators",
+      "detail": "IEEE 1800-2023 11.4.7 requires each logical equivalence operand to be evaluated exactly once. Verilator 5.052 evaluates the left function twice in the standalone reproduction and emits SIDEEFFECT warnings; Icarus 13.0 evaluates both functions once.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_logical_equivalence_once.sv",
+          "src/sv/cases/operators.vtest"
+        ],
+        "id": "sv_verilator_logical_equivalence_side_effects",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "IEEE 1800-2023 11.4.7 requires each logical equivalence operand to be evaluated exactly once. Verilator 5.052 evaluates the left function twice in the standalone reproduction and emits SIDEEFFECT warnings; Icarus 13.0 evaluates both functions once.",
+        "upstream": []
+      },
+      "name": "operators::logical_equivalence_evaluates_operands_once",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
       "detail": "",
       "expectation": "Simulation",
       "name": "operators::negates_wide_systemverilog_values",
