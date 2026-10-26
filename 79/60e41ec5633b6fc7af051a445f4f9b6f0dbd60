@@ -1,0 +1,1 @@
+Address review: defer restore-target initialization, retain CLI failure outcome, preserve write-only append prefixes, and share hard-linked working files across snapshots.
