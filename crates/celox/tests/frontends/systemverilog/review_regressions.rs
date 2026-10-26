@@ -8989,3 +8989,27 @@ fn single_bit_array_driver_windows_still_reject_overlaps() {
         assert!(error.contains("multiple variable drivers"), "{error}");
     }
 }
+
+#[test]
+fn mixed_hierarchies_accept_many_sibling_specializations() {
+    let veryl = "module Top(x: input logic<8>, y: output logic<8>) { inst tree: $sv::Root(x, y); }";
+    let sv = "module Leaf #(parameter ID=0)(input wire [7:0] x, output wire [7:0] y);
+        assign y=x ^ 8'(ID); endmodule
+        module Root(input wire [7:0] x, output wire [7:0] y);
+        wire [7:0] lanes[65];
+        for(genvar n=0;n<65;n=n+1) begin: g
+            Leaf #(.ID(n)) u(.x(x),.y(lanes[n]));
+        end
+        assign y=lanes[64]; endmodule";
+    let mut sim = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("siblings.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(x, 60u8)).unwrap();
+    assert_eq!(sim.get(y), BigUint::from(124u8));
+}
