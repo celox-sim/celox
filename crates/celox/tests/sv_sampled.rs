@@ -150,6 +150,22 @@ endmodule"#;
                 assert_eq!((value(&mut sim, "q"), value(&mut sim, "w")), (12, 4));
             }
 
+            /// The copy of an array holds all of it.
+            #[test]
+            fn arrays_are_sampled_whole() {
+                let mut sim = simulation(
+                    "  bit [2:0] mem [0:3];\n  bit [1:0] i;\n  \
+                     int u;\n  \
+                     always_ff @(posedge clk) mem[i] <= 3'd5;\n  \
+                     always_ff @(posedge clk) u <= $sampled(mem[i]);\n  \
+                     initial begin i = 3; #1 clk = 1; #1 clk = 0; #1 clk = 1; end",
+                );
+                sim.run_until(1).unwrap();
+                assert_eq!(value(&mut sim, "u"), 0);
+                sim.run_until(3).unwrap();
+                assert_eq!(value(&mut sim, "u"), 5);
+            }
+
             /// Automatic variables keep their current value; the operand may
             /// be any expression.
             #[test]

@@ -104,6 +104,24 @@ pub(super) struct Ff<'p, 'a> {
     flush_site: Option<u32>,
     /// A combinational process is being lowered.
     combinational: bool,
+    /// The process has the one clock that sampled value functions infer
+    /// (IEEE 1800-2023 16.14.6): an edge-triggered process with a single
+    /// event, which runs at each tick of it.
+    inferred_clock: bool,
+    /// The `$past` histories of the process.
+    history: Vec<History>,
+}
+
+/// The sampled values of variable `name` at the previous ticks of the clock
+/// of a process: `chain[k - 1]` holds the value `k` ticks ago, counting
+/// only the ticks at which the gate held.
+struct History {
+    name: String,
+    gate: Option<sv::ir::Expr>,
+    /// The hidden variable that holds the gate's value at the tick, before
+    /// the body runs.
+    gate_value: Option<String>,
+    chain: Vec<String>,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -164,7 +182,16 @@ impl<'p, 'a> Ff<'p, 'a> {
             nba_switches: Vec::new(),
             flush_site: None,
             combinational: false,
+            inferred_clock: false,
+            history: Vec::new(),
         }
+    }
+
+    /// Lower an edge-triggered process whose single event is the clock of
+    /// its sampled value functions.
+    pub fn with_inferred_clock(mut self, inferred: bool) -> Self {
+        self.inferred_clock = inferred;
+        self
     }
 
     /// The operand of `$sampled` (IEEE 1800-2023 16.9.3) with each static
@@ -182,6 +209,26 @@ impl<'p, 'a> Ff<'p, 'a> {
         let [Some(operand)] = args else {
             return Err(unsupported("operand of `$sampled`"));
         };
+        // A sampled value function in the operand would read the sampled
+        // copies instead of its history.
+        let mut nested = Vec::new();
+        collect_calls(operand, &mut nested);
+        if nested.iter().any(|(callee, _)| {
+            matches!(
+                callee,
+                sv::ir::Callee::System(
+                    sv::ir::SystemFunction::Past
+                        | sv::ir::SystemFunction::Rose
+                        | sv::ir::SystemFunction::Fell
+                        | sv::ir::SystemFunction::Stable
+                        | sv::ir::SystemFunction::Changed
+                )
+            )
+        }) {
+            return Err(unsupported(
+                "`$sampled` of an operand that calls a sampled value function",
+            ));
+        }
         let operand = self.propagate(operand);
         let mut names = HashSet::default();
         expr_idents(&operand, &mut names);
@@ -199,6 +246,262 @@ impl<'p, 'a> Ff<'p, 'a> {
             renames.insert(name, self.m.sampled_copy(id));
         }
         Ok(rename_idents(&operand, &renames))
+    }
+
+    /// Declare the `$past` histories that the sampled value functions of
+    /// `body` read, as nonblocking targets of the process.
+    fn declare_history(&mut self, body: &[sv::ir::Stmt]) -> Result<(), sv::AnalyzerError> {
+        use sv::ir::SystemFunction;
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+        }
+        for (callee, args) in calls {
+            let sv::ir::Callee::System(
+                function @ (SystemFunction::Past
+                | SystemFunction::Rose
+                | SystemFunction::Fell
+                | SystemFunction::Stable
+                | SystemFunction::Changed),
+            ) = callee
+            else {
+                continue;
+            };
+            if !self.inferred_clock {
+                return Err(unsupported(format!(
+                    "`{function}` outside an edge-triggered process with one event, whose clock it infers"
+                )));
+            }
+            let (depth, gate) = past_depth_and_gate(function, &args)?;
+            let Some(Some(operand)) = args.first() else {
+                return Err(unsupported(format!("operand of `{function}`")));
+            };
+            // The history of a nested call would need its own chain.
+            let mut nested = Vec::new();
+            collect_calls(operand, &mut nested);
+            if nested.iter().any(|(callee, _)| {
+                matches!(
+                    callee,
+                    sv::ir::Callee::System(
+                        SystemFunction::Past
+                            | SystemFunction::Rose
+                            | SystemFunction::Fell
+                            | SystemFunction::Stable
+                            | SystemFunction::Changed
+                    )
+                )
+            }) {
+                return Err(unsupported(format!(
+                    "`{function}` of an operand that calls a sampled value function other than `$sampled`"
+                )));
+            }
+            // The histories hold variables: the result of a call, which can
+            // read the time or state the operand does not name, has none.
+            if nested.iter().any(|(callee, _)| {
+                !matches!(callee, sv::ir::Callee::System(SystemFunction::Sampled))
+            }) {
+                return Err(unsupported(format!(
+                    "`{function}` of an operand that calls a function"
+                )));
+            }
+            let mut names = HashSet::default();
+            expr_idents(operand, &mut names);
+            let mut names: Vec<_> = names.into_iter().collect();
+            names.sort();
+            for name in names {
+                let Some(id) = self.m.id(&name) else {
+                    continue;
+                };
+                if self.m.is_hidden(id) {
+                    continue;
+                }
+                if self.m.var(id).value_kind.is_handle() {
+                    return Err(unsupported(format!(
+                        "`{function}` of a string or class handle"
+                    )));
+                }
+                // A history moves one tick back with one nonblocking copy
+                // of the variable, which an unpacked array has no form of.
+                if !self.m.var(id).array_dims.is_empty() {
+                    return Err(unsupported(format!("`{function}` of an unpacked array")));
+                }
+                let index = match self
+                    .history
+                    .iter()
+                    .position(|history| history.name == name && history.gate == gate)
+                {
+                    Some(index) => index,
+                    None => {
+                        self.history.push(History {
+                            name: name.clone(),
+                            gate: gate.clone(),
+                            gate_value: None,
+                            chain: Vec::new(),
+                        });
+                        self.history.len() - 1
+                    }
+                };
+                while self.history[index].chain.len() < depth {
+                    let register = self.m.history_copy(id);
+                    // A hidden variable is no target of its own: the
+                    // history is state the process commits at each tick.
+                    self.record_target(&sv::ir::LValue::Ident(register.clone()), false);
+                    let copy = self.m.id(&register).expect("a new history register");
+                    let width = self.m.var(copy).width;
+                    self.targets.push((copy, BitAccess::new(0, width - 1)));
+                    self.history[index].chain.push(register);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The operand of `$past` (IEEE 1800-2023 16.9.3) evaluated over the
+    /// sampled values of its variables `depth` ticks ago.
+    fn past(
+        &self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let (depth, gate) = past_depth_and_gate(function, args)?;
+        let Some(Some(operand)) = args.first() else {
+            return Err(unsupported(format!("operand of `{function}`")));
+        };
+        let operand = self.propagate(operand);
+        let mut names = HashSet::default();
+        expr_idents(&operand, &mut names);
+        let mut renames = HashMap::default();
+        for name in names {
+            if self.m.id(&name).is_none_or(|id| self.m.is_hidden(id)) {
+                continue;
+            }
+            // `declare_history` declared the histories of the process body;
+            // a call elsewhere, as in a subroutine, has no clock.
+            let history = self
+                .history
+                .iter()
+                .find(|history| {
+                    history.name == name && history.gate == gate && history.chain.len() >= depth
+                })
+                .ok_or_else(|| {
+                    unsupported(format!(
+                        "`{function}` outside an edge-triggered process with one event, whose clock it infers"
+                    ))
+                })?;
+            renames.insert(name, history.chain[depth - 1].clone());
+        }
+        Ok(rename_idents(&operand, &renames))
+    }
+
+    /// `$rose`, `$fell`, `$stable` or `$changed` (IEEE 1800-2023 16.9.3): the
+    /// sampled value of the operand against its value at the previous tick,
+    /// with case equality for integral values and numeric equality for reals.
+    /// A change from or to X counts. `$rose` and
+    /// `$fell` look at the least significant bit.
+    fn value_change(
+        &mut self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr, SystemFunction};
+        let current = self.sampled(args)?;
+        let past = self.past(function, args)?;
+        // Resolve nested $sampled calls before inspecting the operand's type.
+        let current = self.hoist(&current)?;
+        let past = self.hoist(&past)?;
+        let real = floating::precision(&current, self.m.variables, self.m.name_to_id).is_some();
+        let binary = |left: Expr, op, right: Expr| Expr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let bit = |value: Expr| binary(value, BinaryOp::BitAnd, Expr::Literal("1'b1".into()));
+        let literal = |text: &str| Expr::Literal(text.into());
+        Ok(match function {
+            SystemFunction::Rose | SystemFunction::Fell => {
+                let level = if function == SystemFunction::Rose {
+                    "1'b1"
+                } else {
+                    "1'b0"
+                };
+                binary(
+                    binary(bit(past), BinaryOp::NeCase, literal(level)),
+                    BinaryOp::LogicAnd,
+                    binary(bit(current), BinaryOp::EqCase, literal(level)),
+                )
+            }
+            SystemFunction::Stable => binary(
+                current,
+                if real { BinaryOp::Eq } else { BinaryOp::EqCase },
+                past,
+            ),
+            _ => binary(
+                current,
+                if real { BinaryOp::Ne } else { BinaryOp::NeCase },
+                past,
+            ),
+        })
+    }
+
+    /// The `$past` updates at the end of an evaluation, a tick of the
+    /// process's clock: each history moves one tick back and takes the
+    /// sampled value, where its gate holds at the tick.
+    fn update_history(&mut self) -> Result<bool, sv::AnalyzerError> {
+        use sv::ir::{Expr, LValue, Stmt};
+        let sampled = |expr: Expr| Expr::Call {
+            callee: sv::ir::Callee::System(sv::ir::SystemFunction::Sampled),
+            args: vec![Some(expr)],
+            arg_order: Vec::new(),
+        };
+        let mut stmts = Vec::new();
+        for history in &self.history {
+            let mut updates: Vec<Stmt> = history
+                .chain
+                .windows(2)
+                .map(|pair| Stmt::Assign {
+                    lhs: LValue::Ident(pair[1].clone()),
+                    rhs: Expr::Ident(pair[0].clone()),
+                    nonblocking: true,
+                })
+                .collect();
+            updates.push(Stmt::Assign {
+                lhs: LValue::Ident(history.chain[0].clone()),
+                rhs: sampled(Expr::Ident(history.name.clone())),
+                nonblocking: true,
+            });
+            match &history.gate_value {
+                None => stmts.extend(updates),
+                Some(gate) => stmts.push(Stmt::If {
+                    condition: Expr::Ident(gate.clone()),
+                    then_body: updates,
+                    else_body: Vec::new(),
+                }),
+            }
+        }
+        self.exec_block(&stmts)
+    }
+
+    /// Evaluate the gate of each `$past` history before the body runs. The
+    /// gate is the `iff` of the clocking event, which is evaluated at the
+    /// tick (IEEE 1800-2023 9.4.2.3), not after the body's assignments.
+    fn capture_history_gates(&mut self) -> Result<(), sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        for index in 0..self.history.len() {
+            let Some(gate) = self.history[index].gate.clone() else {
+                continue;
+            };
+            // Its truth, which keeps an unknown gate unknown, as `if` reads it.
+            let truth = Expr::Binary {
+                left: Box::new(gate),
+                op: BinaryOp::Ne,
+                right: Box::new(Expr::Literal("1'b0".into())),
+            };
+            let value = self.eval(&truth, Some((1, false)))?;
+            let (temp, name) = self.m.temp("gate", 1, false, true);
+            self.store(temp, SIROffset::Static(0), 1, value);
+            self.history[index].gate_value = Some(name);
+        }
+        Ok(())
     }
 
     /// Whether `stmts`, or a subroutine they call, including in timing
@@ -816,12 +1119,19 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
                 let mut lowered = Vec::with_capacity(args.len());
                 for arg in args {
-                    // $sampled must rewrite its operand before any nested
-                    // call reads it. Hoisting first hides the original inputs
-                    // behind a temporary holding their current-slot value.
+                    // Sampled/history functions must resolve their operands
+                    // before nested calls hide the original inputs behind
+                    // temporaries holding current-slot values.
                     let arg = if matches!(
                         callee,
-                        sv::ir::Callee::System(sv::ir::SystemFunction::Sampled)
+                        sv::ir::Callee::System(
+                            sv::ir::SystemFunction::Sampled
+                                | sv::ir::SystemFunction::Past
+                                | sv::ir::SystemFunction::Rose
+                                | sv::ir::SystemFunction::Fell
+                                | sv::ir::SystemFunction::Stable
+                                | sv::ir::SystemFunction::Changed
+                        )
                     ) {
                         arg.clone()
                     } else {
@@ -838,17 +1148,16 @@ impl<'p, 'a> Ff<'p, 'a> {
                 };
                 let result = match self.hoist(&call)? {
                     sv::ir::Expr::Ident(result) => result,
-                    // A sampled operand, as `$sampled(i + 1)`: its value at
-                    // this point is the select's.
-                    hoisted @ sv::ir::Expr::Binary { .. }
-                    | hoisted @ sv::ir::Expr::Unary { .. } => {
+                    // A sampled/history operand can retain any expression
+                    // shape (including a resize inserted for the index).
+                    // Evaluate it only after its references are resolved.
+                    hoisted => {
                         let value = self.eval(&hoisted, None)?;
                         let width = self.b.register(&value).width();
                         let (temp, name) = self.m.temp("select", width, false, true);
                         self.store(temp, SIROffset::Static(0), width, value);
                         name
                     }
-                    _ => return Err(unsupported(format!("call of `{callee}` in a select"))),
                 };
                 let result = ConstExpr::Ident(result);
                 calls.push((expr.clone(), result.clone()));
@@ -1139,6 +1448,28 @@ impl<'p, 'a> Ff<'p, 'a> {
             } => {
                 let operand = self.sampled(args)?;
                 self.hoist(&operand)?
+            }
+            Expr::Call {
+                callee: sv::ir::Callee::System(function @ sv::ir::SystemFunction::Past),
+                args,
+                ..
+            } => {
+                let operand = self.past(*function, args)?;
+                self.hoist(&operand)?
+            }
+            Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
+                        function @ (sv::ir::SystemFunction::Rose
+                        | sv::ir::SystemFunction::Fell
+                        | sv::ir::SystemFunction::Stable
+                        | sv::ir::SystemFunction::Changed),
+                    ),
+                args,
+                ..
+            } => {
+                let change = self.value_change(*function, args)?;
+                self.hoist(&change)?
             }
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fread),
@@ -4443,6 +4774,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         mut self,
         body: &[sv::ir::Stmt],
     ) -> Result<FfProcessUnits, sv::AnalyzerError> {
+        self.declare_history(body)?;
         let mut visited = HashSet::default();
         self.scan(body, &mut visited);
         // A variable only this process's nonblocking assignments write here,
@@ -4622,7 +4954,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                 args: Vec::new(),
             });
         }
-        if self.exec_block(&body)? {
+        self.capture_history_gates()?;
+        if self.exec_block(&body)? && self.update_history()? {
             self.b.seal_block(SIRTerminator::Return);
         }
         let mut eval = seal_drained(self.b);
@@ -6144,6 +6477,7 @@ impl Ff<'_, '_> {
                 hidden: true,
                 force_control: None,
                 sampled_from: None,
+                history_of: None,
                 value_kind: Default::default(),
             },
         );
@@ -6922,4 +7256,30 @@ fn force_reads(expr: &sv::ir::Expr, m: &ProcModule<'_>) -> sv::ir::Expr {
                 .collect(),
         },
     }
+}
+
+/// The depth and the gate of a `$past` call, or of the comparison a
+/// value change function makes with the previous tick.
+fn past_depth_and_gate(
+    function: sv::ir::SystemFunction,
+    args: &[Option<sv::ir::Expr>],
+) -> Result<(usize, Option<sv::ir::Expr>), sv::AnalyzerError> {
+    if function != sv::ir::SystemFunction::Past {
+        return Ok((1, None));
+    }
+    let depth = match args.get(1) {
+        None | Some(None) => 1,
+        Some(Some(depth)) => {
+            let mut depth = depth;
+            while let sv::ir::Expr::Resize { expr, .. } = depth {
+                depth = expr;
+            }
+            literal_usize(depth)
+                .filter(|&depth| depth >= 1)
+                .ok_or_else(|| {
+                    unsupported("number of ticks of `$past` other than a positive constant")
+                })?
+        }
+    };
+    Ok((depth, args.get(2).cloned().flatten()))
 }

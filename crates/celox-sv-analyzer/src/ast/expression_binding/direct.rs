@@ -1265,6 +1265,15 @@ pub(in crate::ast) fn bind_value(
                                     arg_order: Vec::new(),
                                 }
                             } else {
+                                let mut operands = operands;
+                                // An omitted number of ticks of `$past` is
+                                // one (IEEE 1800-2023 16.9.3); the gate stays
+                                // the third argument.
+                                if function == SystemFunction::Past
+                                    && args.get(1).is_some_and(Option::is_none)
+                                {
+                                    operands.insert(1, Expr::Literal("1".into()));
+                                }
                                 expressions::numeric_system_function(
                                     &tree.state,
                                     function,
@@ -1789,7 +1798,7 @@ pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> 
             .is_some_and(|function| function.return_real),
         // A sampled value has the type of its operand.
         Expr::Call {
-            callee: Callee::System(SystemFunction::Sampled),
+            callee: Callee::System(SystemFunction::Sampled | SystemFunction::Past),
             args,
             ..
         } => matches!(args.first(), Some(Some(operand)) if real_value(operand, dimensions)),
