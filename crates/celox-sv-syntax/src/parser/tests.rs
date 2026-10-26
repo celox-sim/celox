@@ -3043,3 +3043,14 @@ fn malformed_array_method_with_is_rejected() {
         );
     }
 }
+
+#[test]
+fn constraints_retain_simple_expressions_and_mark_other_forms() {
+    let tree = parse(
+        "class C; rand int x; constraint a { x > 0; x < 3; } constraint b { if (x) x == 1; } endclass",
+    );
+    let blocks = &tree.classes[0].constraints;
+    assert_eq!(blocks[0].name.spelling, "a");
+    assert_eq!(blocks[0].expressions.as_ref().unwrap().len(), 2);
+    assert!(blocks[1].expressions.is_none());
+}
