@@ -278,7 +278,10 @@ impl<B: SimBackend> SimulationState<B> {
                 Ok(Some(self.scheduler.time))
             }
             // The time slot goes on when the simulation continues.
-            Err(Halt::Stop) => Ok(Some(self.scheduler.time)),
+            Err(Halt::Stop) => {
+                self.stopped = true;
+                Ok(Some(self.scheduler.time))
+            }
             Err(Halt::Error(error)) => {
                 if matches!(&error, SimulatorErrorCode::Fatal { .. }) {
                     let _ = self.finalize_terminal(executor);
@@ -342,6 +345,12 @@ impl<B: SimBackend> SimulationState<B> {
             } else {
                 None
             };
+            if compiled.is_some()
+                && next_time > self.scheduler.time
+                && !self.leave_time(executor)?
+            {
+                return Ok(false);
+            }
             observer.before_step(self, executor);
             let result = match compiled {
                 Some(limit) => self.run_compiled(executor, limit),
@@ -356,8 +365,40 @@ impl<B: SimBackend> SimulationState<B> {
         if self.finished {
             return Ok(false);
         }
+        if end > self.scheduler.time && !self.leave_time(executor)? {
+            return Ok(false);
+        }
         self.advance_time(executor.backend_mut(), end);
         Ok(true)
+    }
+
+    /// The host's work before a run leaves the current time
+    /// ([`HostBoundary::try_leave_time`]). Returns `false` when it stopped
+    /// or finished the simulation.
+    fn leave_time<E>(&mut self, executor: &mut E) -> Result<bool, SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        match executor.try_leave_time(self.scheduler.time) {
+            Ok(()) => Ok(true),
+            Err(Halt::Stop) => {
+                self.stopped = true;
+                Ok(false)
+            }
+            Err(Halt::Finish) => {
+                self.finalize_terminal(executor)?;
+                Ok(false)
+            }
+            Err(Halt::Error(error)) => {
+                if matches!(&error, SimulatorErrorCode::Fatal { .. }) {
+                    let _ = self.finalize_terminal(executor);
+                    return Err(error);
+                }
+                let _ = self.finish_timed_boundary(executor, self.scheduler.time);
+                let _ = executor.flush_output();
+                Err(error)
+            }
+        }
     }
 
     /// Select the loop that runs time slots.
