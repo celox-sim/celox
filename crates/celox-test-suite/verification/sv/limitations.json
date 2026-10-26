@@ -2055,7 +2055,8 @@
         "class::untyped_class_parameters_take_the_type_of_their_value",
         "class::class_declarations_bind_in_their_scopes",
         "class::parameter_defaults_bind_where_the_class_is_declared",
-        "class::specialization_keys_follow_the_bound_parameters"
+        "class::specialization_keys_follow_the_bound_parameters",
+        "class::derived_classes_keep_their_declaration_scopes"
       ]
     }
   },

@@ -37,6 +37,7 @@ sv_backends! {
     fn class_class_declarations_bind_in_their_scopes(sim) { @case "class::class_declarations_bind_in_their_scopes"; }
     fn class_parameter_defaults_bind_where_the_class_is_declared(sim) { @case "class::parameter_defaults_bind_where_the_class_is_declared"; }
     fn class_specialization_keys_follow_the_bound_parameters(sim) { @case "class::specialization_keys_follow_the_bound_parameters"; }
+    fn class_derived_classes_keep_their_declaration_scopes(sim) { @case "class::derived_classes_keep_their_declaration_scopes"; }
 }
 
 sv_backends! {
@@ -292,6 +293,15 @@ fn misused_parameterized_classes_are_rejected() {
         (
             "typedef struct packed { int x; } s_t; class Typed #(type T = int); endclass Typed#(s_t) typed;",
             ["struct or union type as a class type parameter value", ""],
+        ),
+        (
+            // Each iteration would declare a class of its own (#2064).
+            "for (genvar i = 0; i < 2; i++) begin : g
+                 localparam int K = i + 1;
+                 class C #(int N = K); endclass
+                 initial $display(\"%0d\", C#()::N);
+             end",
+            ["class `C` declared in a loop generate block", ""],
         ),
         (
             // The class parameter hides the module's `N`, whose value must
