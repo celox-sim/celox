@@ -1,0 +1,1 @@
+Address P2 receiver capture ordering: evaluate nested queue arguments before reading immutable contents and add portable regressions
