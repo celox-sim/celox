@@ -64,6 +64,39 @@ pub(super) fn port_type(
     bind(id, tree, &context)
 }
 
+/// Whether the range of the port declaration of a non-ANSI port, which its
+/// net or variable declaration repeats in other words, has the bounds of the
+/// port's type (IEEE 1800-2023 23.2.2.1).
+pub(super) fn declared_port_range_matches(
+    port: &celox_sv_syntax::Port,
+    ty: &Type,
+    tree: &AnalysisContext<'_>,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Converted<bool> {
+    let Some(id) = port.declared_type else {
+        return Ok(true);
+    };
+    let context = PackedDimensions::new(HashMap::default(), env, aliases);
+    let data = tree.declarations().data_type(id);
+    let declared = binding::packed_ranges(&data.packed_dimensions, tree, &context)?;
+    let bounds = |range: &PackedRange| {
+        constants::eval_ast_const_expr(&tree.state, range.left(), env).zip(
+            constants::eval_ast_const_expr(&tree.state, range.right(), env),
+        )
+    };
+    Ok(declared.len() == ty.packed_ranges.len()
+        && declared
+            .iter()
+            .zip(&ty.packed_ranges)
+            .all(
+                |(declared, range)| match (bounds(declared), bounds(range)) {
+                    (Some(declared), Some(range)) => declared == range,
+                    _ => declared == range,
+                },
+            ))
+}
+
 /// Formal/return implicit types use scalar logic rather than an unsized local.
 pub(super) fn implicit_subroutine_type(
     id: TypeId,

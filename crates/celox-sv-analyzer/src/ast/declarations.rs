@@ -34,6 +34,19 @@ pub(super) fn ports_from_scope(
             None if native.data_type.is_none() => inherited_type.clone(),
             None => return Err(unsupported("unsupported port data type")),
         };
+        if !type_binding::declared_port_range_matches(
+            native,
+            &base,
+            syntax_tree,
+            const_env,
+            type_aliases,
+        )? {
+            return Err(AnalyzerError::Parse(format!(
+                "the ranges of a non-ANSI port declaration and its net or variable \
+                 declaration of `{}` differ",
+                native_port_name(native)?
+            )));
+        }
         inherited_direction = direction;
         inherited_type = base.clone();
         let ty = type_with_unpacked_ranges(

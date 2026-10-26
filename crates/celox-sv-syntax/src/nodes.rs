@@ -311,6 +311,11 @@ pub struct Port {
     pub data_type: Option<TypeId>,
     pub dimensions: Vec<Dimension>,
     pub default: Option<ExprId>,
+    /// The type of the port declaration of a non-ANSI port whose net or
+    /// variable declaration repeats its range in other words. The ranges
+    /// must have the same bounds (IEEE 1800-2023 23.2.2.1), which takes
+    /// parameter values to check.
+    pub declared_type: Option<TypeId>,
     pub tokens: TokenRange,
 }
 

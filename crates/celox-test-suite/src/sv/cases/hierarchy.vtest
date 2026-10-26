@@ -1684,3 +1684,30 @@
   (modify (set oe 0) (set d 0))
   (assert_eq from_pad (fourstate 0 1))
   (assert_eq from_source 0))
+
+; The range of a non-ANSI port declaration and of the net declaration that
+; completes it must be identical (IEEE 1800-2023 23.2.2.1): the bounds, not
+; the spelling, as in E902's `cr_clic_busif` (#2126).
+(case non_ansi_port_ranges_compare_bounds
+  (source "non_ansi_ranges.sv" #"
+        `define EXT_INT_NUM 64
+        `define CLIC_INTNUM `EXT_INT_NUM+16
+        module child(o);
+            parameter N = `CLIC_INTNUM;
+            output [79:0] o;
+            wire [N-1:0] o;
+            assign o = {N{1'b1}};
+        endmodule
+        module Top;
+            wire [79:0] o;
+            child c(o);
+            initial begin
+                #1 $display("%h", o);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "ffffffffffffffffffff\n"))
+
