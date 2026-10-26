@@ -1,4 +1,7 @@
 sv_backends! {
+    fn logical_implication_short_circuit(sim) { @case "operators::logical_implication_short_circuit"; }
+    fn logical_implication_unknown(sim) { @case "operators::logical_implication_unknown"; }
+    fn logical_implication(sim) { @case "operators::logical_implication"; }
     fn casts_preserve_guarded_division_signedness(sim) {
         @case "operators::casts_preserve_guarded_division_signedness";
     }

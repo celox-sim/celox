@@ -1782,3 +1782,70 @@ endmodule
   (assert_eq hit 0)
   (assert_eq field_minus_one 0xffffffff)
   (assert_eq q 0xab))
+
+(case logical_implication
+  ; IEEE 1800-2023 11.4.7: implication short-circuits for a false antecedent.
+  (source "logical_implication.sv" #"
+        module Top(input logic [3:0] a, input logic b, output logic y,
+                   output logic hit, output logic constant_result);
+            localparam bit C = 2 -> 0;
+            function automatic logic mark();
+                hit = 1;
+                return b;
+            endfunction
+            always_comb begin
+                hit = 0;
+                y = a -> mark();
+            end
+            assign constant_result = C;
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 2) (set b 0))
+  (assert_eq y 0)
+  (assert_eq hit 1)
+  (assert_eq constant_result 0)
+  (set a 0)
+  (assert_eq y 1)
+  (modify (set a 2) (set b 1))
+  (assert_eq y 1))
+
+(case logical_implication_unknown
+  (four_state)
+  (source "logical_implication_unknown.sv" #"
+        module Top(input logic a, input logic b, output logic y, output logic hit);
+            function automatic logic mark();
+                hit = 1;
+                return b;
+            endfunction
+            always_comb begin
+                hit = 0;
+                y = a -> mark();
+            end
+        endmodule
+    "#)
+  (top Top)
+  (set a (fourstate 1 1))
+  (set b 0)
+  (assert_eq y (fourstate 1 1))
+  (assert_eq hit 1)
+  (set b 1)
+  (assert_eq y 1)
+  (assert_eq hit 1))
+
+(case logical_implication_short_circuit
+  (source "logical_implication_short_circuit.sv" #"
+        module Top(output logic hit, output logic y);
+            function automatic logic mark();
+                hit = 1;
+                return 0;
+            endfunction
+            initial begin
+                hit = 0;
+                y = 1'b0 -> mark();
+            end
+        endmodule
+    "#)
+  (top Top)
+  (assert_eq hit 0)
+  (assert_eq y 1))
