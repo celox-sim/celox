@@ -2962,3 +2962,84 @@ fn non_ansi_port_declarations_fold_into_the_header() {
     assert!(unit.net_declarations.is_empty());
     assert_eq!(unit.items.len(), 1);
 }
+
+#[test]
+fn array_method_with_expressions_parse_in_values_and_statements() {
+    parse(
+        "module M; int a[3], q[$]; initial begin
+         q = a.find(i) with ((i > 0) && check(i));
+         q = a.find with (item inside {[1:3]}).unique;
+         a.sort() with (item);
+         a.rsort with (-item);
+         q = a.find(i, position) with (position() == 1);
+         q = a.find(, position) with (position() == 1);
+         void'(a.find() with (item > 0));
+         q = a.find with (item > 0)[0];
+         end endmodule",
+    );
+}
+
+#[test]
+fn array_method_with_preserves_iterator_predicate_and_chaining() {
+    let syntax = parse("module M; initial q = a.find(i) with (i > 0).unique; endmodule");
+    let (id, expression, predicate) = syntax
+        .expressions
+        .iter()
+        .enumerate()
+        .find_map(|(id, node)| {
+            if let ExprKind::ArrayMethodWith {
+                expression,
+                predicate,
+            } = node.kind
+            {
+                Some((ExprId(id), expression, predicate))
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let ExprKind::Call {
+        expression: method,
+        arguments,
+    } = &syntax.expression(expression).kind
+    else {
+        panic!()
+    };
+    assert!(
+        matches!(&syntax.expression(*method).kind, ExprKind::Member { name, .. } if name.spelling == "find")
+    );
+    assert!(
+        matches!(&syntax.expression(arguments[0].value.unwrap()).kind, ExprKind::Name(name) if name.spelling == "i")
+    );
+    assert!(
+        matches!(&syntax.expression(predicate).kind, ExprKind::Binary { operator, .. } if operator == ">")
+    );
+    assert_eq!(
+        syntax.token_text(syntax.expression(id).tokens),
+        "a.find(i) with (i > 0)"
+    );
+    assert!(syntax.expressions.iter().any(|node| matches!(&node.kind, ExprKind::Member { expression, name, .. } if *expression == id && name.spelling == "unique")));
+}
+
+#[test]
+fn malformed_array_method_with_is_rejected() {
+    for expression in [
+        "a.find with ()",
+        "a.find with (item > 0",
+        "f() with (item)",
+        "a.find(1) with (item)",
+        "a.find(i,j,k) with (item)",
+        "a.find(.i(x)) with (item)",
+        "a.find with (item) with (item)",
+        "a.find with { item > 0; }",
+    ] {
+        assert!(
+            Declarations::parse(
+                &format!("module M; initial q = {expression}; endmodule"),
+                Path::new("invalid.sv")
+            )
+            .is_err(),
+            "{expression}"
+        );
+    }
+}
