@@ -497,3 +497,73 @@ fn independent_evaluators_keep_their_function_bindings() {
     assert_eq!(eval_call("read", &[], &second_env), Some(11));
     assert_eq!(eval_call("read", &[], &first_env), Some(7));
 }
+
+#[test]
+fn partial_return_assignments_reach_the_127_and_128_bit_boundaries() {
+    let constants = HashMap::default();
+    for (width, signed, expected) in [
+        (127, false, (1i128 << 126) | 0xa5),
+        (127, true, -(1i128 << 126) + 0xa5),
+        (128, false, i128::MIN | 0xa5),
+        (128, true, i128::MIN | 0xa5),
+    ] {
+        let select = |msb: usize, lsb: usize| LValue::Select {
+            name: "wide".into(),
+            msb: ConstExpr::Literal(msb.to_string()),
+            lsb: ConstExpr::Literal(lsb.to_string()),
+            signed: false,
+            array_slice_width: None,
+            array_slice_reversed: false,
+            is_2state: false,
+        };
+        let mut function = function(
+            "wide",
+            vec![],
+            vec![
+                Stmt::Assign {
+                    lhs: select(7, 0),
+                    rhs: literal("8'ha5"),
+                    nonblocking: false,
+                },
+                Stmt::Assign {
+                    lhs: select(width - 1, width - 1),
+                    rhs: literal("1'b1"),
+                    nonblocking: false,
+                },
+            ],
+        );
+        function.return_var = Some(("wide".into(), fixed_ty(width, signed)));
+        assert_eq!(
+            call(&function, &[], &constants),
+            Some(expected),
+            "width={width}, signed={signed}"
+        );
+    }
+}
+
+#[test]
+fn full_width_return_assignments_keep_all_128_bits() {
+    let constants = HashMap::default();
+    let mut function = function(
+        "wide",
+        vec![],
+        vec![Stmt::Assign {
+            lhs: LValue::Select {
+                name: "wide".into(),
+                msb: ConstExpr::Literal("127".into()),
+                lsb: ConstExpr::Literal("0".into()),
+                signed: false,
+                array_slice_width: None,
+                array_slice_reversed: false,
+                is_2state: false,
+            },
+            rhs: literal("128'hfedcba98765432100123456789abcdef"),
+            nonblocking: false,
+        }],
+    );
+    function.return_var = Some(("wide".into(), fixed_ty(128, false)));
+    assert_eq!(
+        call(&function, &[], &constants),
+        Some(0xfedcba98765432100123456789abcdefu128 as i128)
+    );
+}
