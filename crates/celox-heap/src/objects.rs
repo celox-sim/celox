@@ -49,6 +49,8 @@ impl Object {
 /// reports once control returns to it.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Fault {
+    NegativeArraySize,
+    ContainerAllocationLimit,
     /// A property access or method call through `null` or a handle of no
     /// live object (IEEE 1800-2023 8.4).
     NullDereference,
@@ -59,6 +61,10 @@ pub enum Fault {
 impl std::fmt::Display for Fault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NegativeArraySize => f.write_str("negative dynamic array size"),
+            Self::ContainerAllocationLimit => {
+                f.write_str("dynamic container allocation limit exceeded")
+            }
             Self::NullDereference => f.write_str("null object handle dereferenced"),
             Self::RandomizationClassMismatch => {
                 f.write_str("class randomization through a base handle is unsupported")
