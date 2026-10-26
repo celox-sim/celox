@@ -117,3 +117,46 @@ a cell and then uniformly picking one of its models generally biases results
 when cells have different sizes. A sampling policy must control cell sizing and
 acceptance separately. The exhaustive reservoir sampler remains a test-only reference.
 Rows may be dependent or constant; hash construction preserves those cases.
+
+## Approximate sample batches
+
+`Sampler` connects count estimation, cell acceptance and model selection using
+the two-stage policy of [UniGen2, algorithms 1 and 2](https://people.eecs.berkeley.edu/~sseshia/pubdir/tacas15.pdf).
+It uses fixed kappa=0.638 (pivot 27, accepted cell sizes 11..63), estimates the
+number of XOR rows, then tries that count and its two predecessors with fresh
+hash families. An accepted cell yields 11 distinct randomly selected models.
+A bounded initial probe handles at most 64 total models directly, returning one
+random model per call; a larger space is never fully enumerated.
+
+```rust
+use aplite::{Env, Limits, Sampler, Sort, Verdict, boolv, var};
+let projection = Env::from([("data".into(), var("data".into(), Sort::Bv(8)))]);
+let mut sampler = Sampler::new(&boolv(true), &projection, 7, Limits::default()).unwrap();
+let batch = sampler.sample_batch(Limits::default());
+match batch.verdict {
+    Verdict::Sat => assert!(!batch.models.is_empty()),
+    Verdict::Unsat => panic!("this unconstrained query is satisfiable"),
+    Verdict::Unknown => assert!(batch.models.is_empty()),
+}
+```
+
+Preparation caches the formula/projection snapshot and estimated count parameters.
+Each fresh hash family currently builds its own encoding; searches within its cell
+reuse that encoding and local learned clauses. Gaussian elimination simplifies
+XOR rows and transforms target bits together, preserving every original cell and
+prefix. This avoids sending a dense redundant linear system directly to CDCL.
+
+This is **approximate sampling**, not a claim of exact uniformity or independent
+samples. The paper's ideal-randomness guarantees are not a certification of this
+seeded, resource-bounded implementation. Its fixed tolerance is broad (epsilon
+approximately 16.09); empirical frequency tests do not establish a tighter bound.
+A failed estimate or an unsuccessful three-cell attempt is reported as an error
+or `Unknown`, never a heuristic sample or an UNSAT verdict. A complete empty
+initial probe is the only source of UNSAT. There is no automatic fallback.
+
+One budget covers preparation and a separate budget covers each complete batch
+request. Unknown returns no partial batch. Work after an unreported preparation
+failure is conservatively charged to the remaining work limit. Changing state
+variables or constraints requires a new sampler. Weighted distributions,
+`solve before`, `randc`, and SystemVerilog frontend/runtime integration are not
+implemented by this API.

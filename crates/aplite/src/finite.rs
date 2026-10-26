@@ -16,7 +16,7 @@ mod control;
 mod lookup;
 mod prepared;
 mod readonly;
-pub use prepared::{Assumption, Cell, CellStatus, HashCells, PreparedQuery};
+pub use prepared::{Assumption, Cell, CellStatus, HashCells, PreparedQuery, SampleBatch, Sampler};
 pub use readonly::ArrayModel;
 
 type Lit = i32;
