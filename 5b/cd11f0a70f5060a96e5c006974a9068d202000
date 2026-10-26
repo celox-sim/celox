@@ -1,0 +1,7 @@
+Revision history for #2184:
+
+rev 3 (rebase) 2026-10-26 18:10 UTC
+rev 2 (content) 2026-10-26 17:48 UTC — Fix #2184 CI rustdoc bare URL warning; validate documentation with warnings denied.
+rev 1 (initial) 2026-10-26 17:48 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2184,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"e8ba69cdbb1f5aaa022f1e2e4b40be1ab3ebbbc1","timestamp_iso":"2026-10-26T17:48:16Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"e8ba69cdbb1f5aaa022f1e2e4b40be1ab3ebbbc1","new_sha":"461d96bd0a562ad446a87e02aa7ddfb285cff359","timestamp_iso":"2026-10-26T17:48:16Z","reason":"Fix #2184 CI rustdoc bare URL warning; validate documentation with warnings denied.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/e8ba69cdbb1f5aaa022f1e2e4b40be1ab3ebbbc1...461d96bd0a562ad446a87e02aa7ddfb285cff359"},{"number":3,"change_type":"rebase","old_sha":"461d96bd0a562ad446a87e02aa7ddfb285cff359","new_sha":"7c9ef1c2556121c02ed2431b0849d4f71cb9fc86","timestamp_iso":"2026-10-26T18:10:38Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/461d96bd0a562ad446a87e02aa7ddfb285cff359...7c9ef1c2556121c02ed2431b0849d4f71cb9fc86"}]} -->
