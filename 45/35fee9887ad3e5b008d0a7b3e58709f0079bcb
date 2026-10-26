@@ -1,1 +1,1 @@
-Fix CI regressions and audit fatal termination across direct simulation APIs before rebasing merged dependencies
+Fix four CI regressions and missing fatal finalization through dump/try_dump and end-of-run waveform evaluation; validate default/feature libraries, VCD, reference adapter, final API and JS
