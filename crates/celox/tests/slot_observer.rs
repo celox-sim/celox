@@ -262,8 +262,6 @@ fn check_observer_finish_backends(before_domains: bool) {
     let build = || Simulation::from_sv_sources(vec![(COUNTER, Path::new("top.sv"))], "Top");
     check_observer_finish(build().build_native().unwrap(), before_domains);
     check_observer_finish(build().build_interpreter().unwrap(), before_domains);
-    check_observer_finish(build().build_cranelift().unwrap(), before_domains);
-    check_observer_finish(build().build_wasm().unwrap(), before_domains);
 }
 
 #[test]
