@@ -62,6 +62,14 @@ sv_backends! {
         @case "procedural::constant_functions_inside_selected_parameter_initializers";
     }
 
+    fn wide_constant_functions_inside_conditional_parameter_initializers(sim) {
+        @case "procedural::wide_constant_functions_inside_conditional_parameter_initializers";
+    }
+
+    fn constant_function_assignments_at_127_and_128_bit_boundaries(sim) {
+        @case "procedural::constant_function_assignments_at_127_and_128_bit_boundaries";
+    }
+
     fn constant_functions_preserve_concat_operand_widths(sim) {
         @case "procedural::constant_functions_preserve_concat_operand_widths";
     }
