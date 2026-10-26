@@ -57,3 +57,32 @@ let result = solve_seeded(&boolv(true), &context, Limits::default(), 42);
 assert_eq!(result.verdict, Verdict::Sat);
 assert!(result.original_formula_validated);
 ```
+
+## Reusable constraints and temporary assumptions
+
+`PreparedQuery` validates and bit-blasts a fixed scalar formula, context and list
+of Boolean predicates once. Each solve can assert either polarity of any of those
+predicates. Their definitions are compiled, but unused predicates do not constrain
+the answer. Successful searches reuse their SAT database and learned clauses.
+UNSAT or interrupted searches discard mutable search state and retain the compiled
+encoding, so failed assumptions cannot contaminate the next call.
+
+```rust
+use aplite::{Assumption, Env, Limits, PreparedQuery, Sort, Verdict, boolv, bv, eq, var};
+let x = var("x".into(), Sort::Bv(32));
+let context = Env::from([("x".into(), x.clone())]);
+let predicates = [eq(x, bv(32, 7))];
+let mut query = PreparedQuery::new(&boolv(true), &context, &predicates, Limits::default()).unwrap();
+for value in [true, false] {
+    let result = query.solve(&[Assumption { predicate: 0, value }], Limits::default(), 42);
+    assert_eq!(result.verdict, Verdict::Sat);
+    assert!(result.original_formula_validated);
+}
+```
+
+Preparation and each solve have separate budgets; `preparation_work()` reports
+the setup work and each outcome reports its solve work. Reproducibility includes
+the query history because learning and search activity are retained. Unknown
+includes invalid predicate indexes and exhausted budgets, and is not Unsat.
+This API supplies reusable solving for future distribution policies; it does not
+implement uniform sampling, variable ordering, or SystemVerilog `randomize()`.
