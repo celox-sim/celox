@@ -198,6 +198,106 @@ macro_rules! past {
                 assert_eq!(value(&mut sim, "p1"), 5);
             }
 
+            /// With an asynchronous reset the body reads the reset, so the
+            /// clock is inferred (IEEE 1800-2023 16.14.6); a run for the
+            /// reset is no tick. `a` is 0, 1, 2 at the ticks 1, 3, 5, and the
+            /// reset pulses low at 4: had that run shifted the history,
+            /// `$past(a, 2)` would be 1 at 5.
+            #[test]
+            fn an_asynchronous_reset_is_no_tick() {
+                let mut sim = simulation(
+                    "  bit rst = 1;\n  \
+                     always_ff @(posedge clk or negedge rst)\n    \
+                     if (!rst) p2 <= p2 + 1; else p1 <= $past(a, 2);\n  \
+                     initial begin #2 a = 1; #2 a = 2; rst = 0; #0 rst = 1; end",
+                );
+                sim.run_until(5).unwrap();
+                assert_eq!((value(&mut sim, "p1"), value(&mut sim, "p2")), (0, 1));
+                sim.run_until(7).unwrap();
+                assert_eq!(value(&mut sim, "p1"), 1);
+            }
+
+            /// Multi-event processes count all four-state clock edges
+            /// (IEEE 1800-2023 Table 9-2), including transitions into X/Z.
+            #[test]
+            fn four_state_clock_edges_advance_history() {
+                for (edge, old, new) in [
+                    ("posedge", "0", "1"),
+                    ("posedge", "0", "x"),
+                    ("posedge", "0", "z"),
+                    ("posedge", "x", "1"),
+                    ("posedge", "z", "1"),
+                    ("negedge", "1", "0"),
+                    ("negedge", "1", "x"),
+                    ("negedge", "1", "z"),
+                    ("negedge", "x", "0"),
+                    ("negedge", "z", "0"),
+                ] {
+                    let source = format!(r#"`timescale 1ns/1ns
+module Top;
+  logic clk = 1'b{old};
+  bit rst = 1;
+  bit [7:0] a, p;
+  always_ff @({edge} clk or negedge rst)
+    if (!rst) p <= 0; else p <= $past(a);
+  initial begin
+    a = 11;
+    #1 clk = 1'b{new};
+    #1 a = 22; clk = 1'b{old};
+    #1 clk = 1'b{new};
+  end
+endmodule"#);
+                    let mut sim = celox::Simulation::from_sv_sources(
+                        vec![(source.as_str(), Path::new("past.sv"))], "Top",
+                    ).four_state(true).$backend().unwrap();
+                    sim.run_until(3).unwrap();
+                    assert_eq!(value(&mut sim, "p"), 11, "{edge} {old}->{new}");
+                }
+            }
+
+            /// A function called by a clocked process infers its clock.
+            #[test]
+            fn subroutines_infer_the_clock_of_their_caller() {
+                let mut sim = simulation(
+                    "  function bit [7:0] previous();\n    \
+                     return $past(a);\n  \
+                     endfunction\n  \
+                     always @(posedge clk) p1 <= previous();\n  \
+                     initial begin #2 a = 1; #2 a = 2; #2 a = 3; end",
+                );
+                sim.run_until(7).unwrap();
+                assert_eq!(value(&mut sim, "p1"), 2);
+            }
+
+            /// So does the default of an omitted argument.
+            #[test]
+            fn argument_defaults_infer_the_clock_of_their_caller() {
+                let mut sim = simulation(
+                    "  function bit [7:0] pass(bit [7:0] v = $past(a));\n    \
+                     return v;\n  \
+                     endfunction\n  \
+                     always @(posedge clk) p1 <= pass();\n  \
+                     initial begin #2 a = 1; #2 a = 2; #2 a = 3; end",
+                );
+                sim.run_until(7).unwrap();
+                assert_eq!(value(&mut sim, "p1"), 2);
+            }
+
+            /// A subroutine's history is as deep as its own calls need, also
+            /// beyond the caller's.
+            #[test]
+            fn subroutines_declare_their_own_history() {
+                let mut sim = simulation(
+                    "  function bit [7:0] deeper();\n    \
+                     return $past(a, 2);\n  \
+                     endfunction\n  \
+                     always @(posedge clk) begin p1 <= $past(a); p2 <= deeper(); end\n  \
+                     initial begin #2 a = 1; #2 a = 2; #2 a = 3; end",
+                );
+                sim.run_until(7).unwrap();
+                assert_eq!((value(&mut sim, "p1"), value(&mut sim, "p2")), (2, 1));
+            }
+
             /// Without one clock to infer, the functions are rejected.
             #[test]
             fn a_clock_must_be_inferable() {
@@ -305,18 +405,25 @@ fn operands_histories_cannot_hold_are_rejected() {
             "`$sampled` of an operand that calls a sampled value function",
         ),
         (
-            "function bit deeper(); return $past(a, 2); endfunction\n  \
-             always_ff @(posedge clk) begin r <= $past(a); s <= deeper(); end",
-            "whose clock it infers",
+            "function automatic bit gated(bit enable); return $past(a, 1, enable); endfunction\n  \
+             always_ff @(posedge clk) r <= gated(1'b1);",
+            "gate that reads the subroutine's arguments",
+        ),
+        (
+            "function bit [7:0] previous(); return $past(a); endfunction\n  \
+             always_ff @(posedge clk) r <= $past(previous());",
+            "calls a function",
         ),
     ] {
         let source = format!(
             "module Top(input bit clk, input bit a, output bit r, output bit s, output time t);\n  {body}\nendmodule"
         );
-        let error =
+        let Err(error) =
             celox::Simulator::from_sv_sources(vec![(source.as_str(), Path::new("past.sv"))], "Top")
                 .build()
-                .unwrap_err();
+        else {
+            panic!("{body} builds");
+        };
         assert!(error.to_string().contains(message), "{body}: {error}");
     }
 }
