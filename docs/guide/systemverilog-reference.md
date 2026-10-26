@@ -60,9 +60,14 @@ In a timed `Simulation`, `initial` and plain `always` processes can suspend:
 An `always` whose sensitivity list names exactly the variables its statement
 reads, as `@*` would (IEEE 1800-2023 9.4.2.2), simulates like `always @*` in
 both `Simulator` and `Simulation`: `always @(a or b) y = a + b;` or
-`always @(b, a) y = a + b;`. The statement must not contain a timing control
-or a nonblocking assignment. Any other sensitivity list without edges runs as
-a process: `always @(a) y = a + b;` leaves `y` unchanged when only `b`
+`always @(b, a) y = a + b;`. So does a list that covers every bit the
+statement reads through part-selects, such as `always @(x[2:0]) y = x[2:0] + 1;`,
+when running the statement more often cannot be observed: it calls no
+subroutine or system task, reads no variable it writes, and stores each
+variable at most once per run, so an extra run writes the same values without
+pulsing a variable for its waiters (IEEE 1800-2023 4.3, 9.4.2). The statement
+must not contain a timing control or a nonblocking assignment. Any other
+sensitivity list without edges runs as a process: `always @(a) y = a + b;` leaves `y` unchanged when only `b`
 changes. So does a list that, as `always @*`, would close a combinational
 loop with other logic. So does an edge-sensitive `always`
 that does not have the shape of a flip-flop: one with an edge of a select or

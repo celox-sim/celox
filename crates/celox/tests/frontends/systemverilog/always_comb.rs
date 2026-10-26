@@ -39,3 +39,15 @@ sv_backends! {
         @case "always_comb::two_state_other_sensitivity_lists_run_at_time_zero";
     }
 }
+
+sv_backends! {
+    fn covering_sensitivity_lists_settle_like_a_wildcard(sim) {
+        @case "always_comb::covering_sensitivity_lists_settle_like_a_wildcard";
+    }
+    fn covering_sensitivity_lists_settle_like_a_wildcard_in_four_state(sim) {
+        @case "always_comb::covering_sensitivity_lists_settle_like_a_wildcard_in_four_state";
+    }
+    fn multi_store_blocks_with_covering_lists_stay_processes(sim) {
+        @case "always_comb::multi_store_blocks_with_covering_lists_stay_processes";
+    }
+}
