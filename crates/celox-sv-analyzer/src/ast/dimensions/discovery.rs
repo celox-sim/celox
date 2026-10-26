@@ -138,10 +138,7 @@ fn type_with_dimensions(
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
 ) -> Converted<Type> {
-    Ok(types::type_with_unpacked_ranges(
-        ty,
-        constant_binding::bind_unpacked_ranges(dimensions, tree, context)?,
-    ))
+    containers::with_dimensions(ty, dimensions, tree, context)
 }
 fn shape(context: &mut PackedDimensions, name: String, ty: &Type, local: bool) {
     let value = procedural::dimensions_from_type(ty);
@@ -1000,6 +997,6 @@ mod tests {
             width(&tree.state, context.get("ordinary").unwrap(), &context),
             Some(32)
         );
-        assert!(context.get("dyn").is_none());
+        assert!(context.get("dyn").unwrap().container.is_some());
     }
 }

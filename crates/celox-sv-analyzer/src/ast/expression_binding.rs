@@ -44,6 +44,9 @@ pub(super) fn expression(
         LValue::Ident(name) => dimensions.get(name),
         _ => None,
     };
+    if let Some(target) = shape.and_then(|shape| shape.container.as_deref()) {
+        return containers::assignment(root, tree, dimensions, target);
+    }
     // `new` creates an object of the class of the variable or of the
     // element of an array of handles (IEEE 1800-2023 8.7).
     let class = match lhs {

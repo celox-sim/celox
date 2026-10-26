@@ -1,0 +1,388 @@
+(group containers (category types))
+
+(case dynamic_resize_and_copy
+  (source "containers.sv" #"
+module Top(output bit [7:0] flags);
+    bit [31:0] a[], b[];
+    initial begin
+        flags[0] = a.size() == 0;
+        a = new[3];
+        a[0] = 11; a[1] = 22; a[2] = 33;
+        b = a;
+        a[0] = 99;
+        flags[1] = b[0] == 11;
+        a = new[5](a);
+        flags[2] = a.size() == 5 && a[0] == 99 && a[2] == 33 && a[4] == 0;
+        a = new[1](b);
+        flags[3] = a.size() == 1 && a[0] == 11;
+        a[-1] = 9; a[3] = 8;
+        flags[4] = a[0] == 11 && a[-1] == 0 && a[3] == 0;
+        a.delete();
+        flags[5] = a.size() == 0 && b.size() == 3;
+        a = '{4, 5, 6};
+        flags[6] = a.size() == 3 && a[2] == 6;
+        a = new[0];
+        flags[7] = a.size() == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 255))
+
+(case queue_methods
+  (source "containers.sv" #"
+module Top(output bit [7:0] flags);
+    int q[$], copy_q[$];
+    int value;
+    initial begin
+        flags[0] = q.size() == 0;
+        q.push_back(20); q.push_front(10); q.push_back(30);
+        q.insert(1, 15);
+        flags[1] = q.size() == 4 && q[0] == 10 && q[1] == 15 && q[$] == 30;
+        copy_q = q;
+        value = q.pop_front();
+        flags[2] = value == 10 && q[0] == 15;
+        value = q.pop_back();
+        flags[3] = value == 30 && q.size() == 2;
+        q.delete(0);
+        flags[4] = q.size() == 1 && q[0] == 20 && copy_q.size() == 4;
+        q[$+1] = 40;
+        flags[5] = q.size() == 2 && q[$] == 40;
+        q = {3, 4, 5};
+        flags[6] = q.size() == 3 && q[1] == 4;
+        q.delete();
+        flags[7] = q.size() == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 255))
+
+(case queue_argument_side_effects
+  (source "containers.sv" #"
+module Top(output bit [7:0] flags);
+    int q[$], bounded[$:1], value;
+    string strings[$];
+    initial begin
+        q = {1, 2};
+        q.push_back(q.pop_front());
+        flags[0] = q.size() == 2 && q[0] == 2 && q[1] == 1;
+        q = {1, 2};
+        q.push_front(q.pop_back());
+        flags[1] = q.size() == 2 && q[0] == 2 && q[1] == 1;
+        q = {1, 2, 3};
+        q.insert(1, q.pop_back());
+        flags[2] = q.size() == 3 && q[0] == 1 && q[1] == 3 && q[2] == 2;
+        q = {1, 10, 20};
+        q.insert(q.pop_front(), 7);
+        flags[3] = q.size() == 3 && q[0] == 10 && q[1] == 7 && q[2] == 20;
+        q = {1, 10, 20};
+        q.delete(q.pop_front());
+        flags[4] = q.size() == 1 && q[0] == 10;
+        q = {1, 10, 20};
+        value = q[q.pop_front()];
+        flags[5] = value == 20 && q.size() == 2 && q[0] == 10;
+        bounded = {1, 2};
+        bounded.push_back(bounded.pop_front());
+        flags[6] = bounded.size() == 2 && bounded[0] == 2 && bounded[1] == 1;
+        strings = {"first", "last"};
+        strings.push_back(strings.pop_front());
+        flags[7] = strings.size() == 2 && strings[0] == "last" && strings[1] == "first";
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 255))
+
+(case queue_argument_four_state
+  (source "containers.sv" #"
+module Top(output bit done);
+    logic [7:0] q[$];
+    initial begin
+        q = {8'b10xz01zx, 8'bz10x01xz};
+        q.push_back(q.pop_front());
+        done = q.size() == 2 && q[0] === 8'bz10x01xz && q[1] === 8'b10xz01zx;
+    end
+endmodule
+"#)
+  (four_state)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case associative_integer_keys
+  (source "containers.sv" #"
+module Top(output bit [7:0] flags);
+    int a[int], b[int];
+    int key, ok;
+    initial begin
+        flags[0] = a.num() == 0 && !a.exists(3);
+        a[3] = 30; a[-2] = 20; a[8] = 80;
+        flags[1] = a.num() == 3 && a.exists(-2) && a[3] == 30;
+        ok = a.first(key);
+        flags[2] = ok == 1 && key == -2;
+        ok = a.next(key);
+        flags[3] = ok == 1 && key == 3;
+        ok = a.last(key);
+        flags[4] = ok == 1 && key == 8;
+        ok = a.prev(key);
+        flags[5] = ok == 1 && key == 3;
+        b = a; a.delete(3);
+        flags[6] = !a.exists(3) && b[3] == 30;
+        a.delete(); key = 77; ok = a.first(key);
+        flags[7] = a.num() == 0 && ok == 0 && key == 77;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 255))
+
+(case associative_string_keys
+  (source "containers.sv" #"
+module Top(output bit [3:0] flags);
+    int a[string];
+    string key;
+    int ok;
+    initial begin
+        a["beta"] = 2; a["alpha"] = 1; a["gamma"] = 3;
+        flags[0] = a.num() == 3 && a["alpha"] == 1 && a.exists("beta");
+        ok = a.first(key);
+        flags[1] = ok && key == "alpha";
+        ok = a.next(key);
+        flags[2] = ok && key == "beta";
+        ok = a.last(key); ok = a.next(key);
+        flags[3] = !ok && key == "gamma";
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 15))
+
+(case four_state_elements_and_indices
+  (source "containers.sv" #"
+module Top(output bit [7:0] flags);
+    logic [7:0] a[], q[$];
+    integer aa[integer];
+    logic [31:0] bad;
+    int value;
+    initial begin
+        bad = 'x;
+        a = new[2];
+        flags[0] = a[0] === 8'hxx;
+        a[0] = 8'b10xz01zx;
+        flags[1] = a[0] === 8'b10xz01zx;
+        a[bad] = 0;
+        flags[2] = a[0] === 8'b10xz01zx && a[bad] === 8'hxx;
+        q.push_back(8'bz10x01xz);
+        flags[3] = q.pop_front() === 8'bz10x01xz;
+        flags[4] = q.pop_back() === 8'hxx && q.size() == 0;
+        aa[7] = 42; aa[bad] = 99;
+        flags[5] = aa.num() == 1 && !aa.exists(bad) && aa[bad] === 'x;
+        flags[6] = a[-1] === 8'hxx && aa[9] === 'x;
+        a = new[3](a);
+        flags[7] = a[0] === 8'b10xz01zx && a[2] === 8'hxx;
+    end
+endmodule
+"#)
+  (four_state)
+  (top Top) (run_until 0) (assert_eq flags 255))
+
+(case declaration_initializers_and_locals
+  (source "containers.sv" #"
+module Top(output bit done);
+    bit [7:0] a[] = new[2];
+    typedef bit [7:0] queue_t[$];
+    queue_t q;
+    initial begin
+        automatic bit [7:0] b[] = new[3];
+        q.push_back(9);
+        a[1] = 7; b[2] = 8;
+        done = a.size() == 2 && a[1] == 7 && b.size() == 3 && b[2] == 8 && q[0] == 9;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case foreach_and_control_flow
+  (source "containers.sv" #"
+module Top(output bit [3:0] flags);
+    int a[], q[$], aa[int];
+    int sum;
+    initial begin
+        a = '{10, 20, 30};
+        sum = 0;
+        foreach (a[i]) sum += a[i];
+        flags[0] = sum == 60;
+        q = {2, 4, 6};
+        sum = 0;
+        foreach (q[i]) begin
+            if (i == 1) continue;
+            sum += q[i];
+        end
+        flags[1] = sum == 8;
+        aa[-3] = 30; aa[0] = 10; aa[4] = 40;
+        sum = 0;
+        foreach (aa[key]) begin
+            sum += key + aa[key];
+            if (key == 0) break;
+        end
+        flags[2] = sum == 37;
+        a.delete(); sum = 0;
+        foreach (a[i]) sum += 1;
+        flags[3] = sum == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 15))
+
+(case string_elements_and_gc
+  (source "containers.sv" #"
+module Top(output bit [3:0] flags);
+    string a[], q[$], aa[int], value;
+    int i;
+    initial begin
+        a = new[2]; a[0] = "kept";
+        q.push_back(a[0]); aa[7] = "mapped";
+        for (i = 0; i < 1100; i++) begin
+            value.itoa(i);
+            #1;
+        end
+        flags[0] = a[0] == "kept" && a[1] == "";
+        value = q.pop_front();
+        flags[1] = value == "kept" && q.size() == 0;
+        flags[2] = aa[7] == "mapped" && aa[8] == "";
+        value = q.pop_front();
+        flags[3] = value == "";
+    end
+endmodule
+"#)
+  (top Top) (run_until 1100) (assert_eq flags 15))
+
+(case bounded_queue_and_equality
+  (source "containers.sv" #"
+module Top(output bit [7:0] flags);
+    int q[$:2], a[], b[], unbounded[$];
+    initial begin
+        q = {1, 2, 3, 4};
+        flags[0] = q.size() == 3 && q[$] == 3;
+        q.push_back(9);
+        flags[1] = q.size() == 3 && q[$] == 3;
+        q.push_front(9);
+        flags[2] = q[0] == 9 && q[2] == 2;
+        q.insert(1, 8);
+        flags[3] = q[0] == 9 && q[1] == 8 && q[2] == 1;
+        unbounded = {9, 8, 1};
+        a = unbounded; b = a;
+        flags[4] = a == b && unbounded == q;
+        a[0] = 77;
+        flags[5] = a != b && a !== b;
+        q.delete(); q.insert(-1, 4); q.delete(3);
+        flags[6] = q.size() == 0;
+        a = {}; b = {};
+        flags[7] = a === b;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 255))
+
+(case four_state_container_equality
+  (source "containers.sv" #"
+module Top(output bit [3:0] flags);
+    logic [3:0] a[], b[];
+    initial begin
+        a = '{4'b10xz}; b = a;
+        flags[0] = a === b;
+        flags[1] = (a == b) === 1'bx;
+        b[0] = 4'b11xz;
+        flags[2] = (a == b) === 1'b0;
+        a = {}; b = {};
+        flags[3] = (a == b) === 1'b1;
+    end
+endmodule
+"#)
+  (four_state)
+  (top Top) (run_until 0) (assert_eq flags 15))
+
+(case equal_updates_preserve_event_waits
+  (source "containers.sv" #"
+module Top(output bit done);
+    int q[$], a[], count, before_count;
+    initial begin
+        q = {1}; a = '{2};
+        #1 before_count = count;
+        q[0] = 1; a[0] = 2;
+        #1 q = {1}; a = '{2};
+        #1 done = count == before_count;
+    end
+    always @(q or a) count = count + 1;
+endmodule
+"#)
+  (top Top) (run_until 3) (assert_eq done 1))
+
+(case runtime_queries_and_traversal_conversion
+  (source "containers.sv" #"
+module Top(output bit [7:0] flags);
+    bit [31:0] a[];
+    int q[$], aa[int];
+    byte key;
+    int status;
+    initial begin
+        flags[0] = $size(a) == 0 && $right(a) == -1 && $left(a) == 0;
+        a = new[3]; q = {1, 2};
+        flags[1] = $size(a) == 3 && $high(q) == 1 && $low(q) == 0;
+        flags[2] = $increment(a) == -1 && $dimensions(a) == 2 && $unpacked_dimensions(a) == 1;
+        aa[1000] = 7;
+        status = aa.first(key);
+        flags[3] = status == -1 && key == -24;
+        flags[4] = $size(aa) == 1;
+        a[64'h100000000] = 99;
+        flags[5] = a[0] == 0 && a[64'h100000000] == 0;
+        q[$] = 8;
+        flags[6] = q[1] == 8 && q.size() == 2;
+        flags[7] = aa.exists(1000) && aa.num() == 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 255))
+
+(case object_elements_keep_handle_semantics
+  (source "containers.sv" #"
+module Top(output bit [3:0] flags);
+    class Cell;
+        int value;
+    endclass
+    Cell q[$], a[], original, copy_handle;
+    initial begin
+        original = new; original.value = 7;
+        q.push_back(original); a = new[1]; a[0] = original;
+        copy_handle = q[0]; copy_handle.value = 9;
+        flags[0] = original.value == 9;
+        copy_handle = a[0];
+        flags[1] = copy_handle == original && copy_handle.value == 9;
+        copy_handle = q.pop_front();
+        flags[2] = copy_handle == original && q.size() == 0;
+        a = new[2](a); copy_handle = a[1];
+        flags[3] = copy_handle == null && $dimensions(a) == 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 15))
+
+(case string_associative_foreach
+  (source "containers.sv" #"
+module Top(output bit [2:0] flags);
+    int entries[string];
+    string visited;
+    int total;
+    initial begin
+        entries["beta"] = 2;
+        entries["alpha"] = 1;
+        entries["gamma"] = 3;
+        visited = "";
+        total = 0;
+        foreach (entries[key]) begin
+            visited = {visited, key};
+            total += entries[key];
+        end
+        flags[0] = total == 6;
+        flags[1] = visited == "alphabetagamma";
+        entries.delete();
+        foreach (entries[key]) total += 100;
+        flags[2] = total == 6;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 7))

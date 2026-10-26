@@ -871,13 +871,37 @@ impl Parser<'_> {
             origin: token.origin,
         };
         self.at += 1;
-        if self.eat("[") {
-            self.expression(0)?;
+        if self.peek() == "[" {
+            let callee = self.node(start, ExprKind::Name(name))?;
+            let dimension_start = self.at;
+            self.expect("[")?;
+            let size = self.expression(0)?;
             self.expect("]")?;
+            let array = self.node(
+                start,
+                ExprKind::Select {
+                    expression: callee,
+                    dimension: Box::new(Dimension {
+                        kind: DimensionKind::Index(size),
+                        tokens: self.range(dimension_start),
+                    }),
+                },
+            )?;
             if self.eat("(") {
-                self.expression(0)?;
+                let value = self.expression(0)?;
                 self.expect(")")?;
+                return self.node(
+                    start,
+                    ExprKind::Call {
+                        expression: array,
+                        arguments: vec![Argument {
+                            name: None,
+                            value: Some(value),
+                        }],
+                    },
+                );
             }
+            return Ok(array);
         } else if self.peek() == "(" {
             // A class constructor call keeps its arguments (8.7).
             let callee = self.node(start, ExprKind::Name(name))?;

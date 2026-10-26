@@ -63,7 +63,7 @@ enum Job {
         start: usize,
     },
     Foreach {
-        loops: Vec<(String, i128, i128)>,
+        loops: Vec<ForeachLoop>,
         start: usize,
     },
     /// The end of the statement an `@*` controls, which starts at `start`

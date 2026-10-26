@@ -44,7 +44,9 @@ pub enum StateError {
     #[error("state files do not support dynamic testbench strings; use a checkpoint instead")]
     TestbenchStrings,
     /// A variable holds a class object, which state files cannot record.
-    #[error("state files do not record class objects; `{0}` holds one, use a checkpoint instead")]
+    #[error(
+        "state files do not record class objects or dynamic containers; `{0}` holds one, use a checkpoint instead"
+    )]
     Objects(String),
 }
 

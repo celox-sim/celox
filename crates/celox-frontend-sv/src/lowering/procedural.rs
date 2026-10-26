@@ -101,8 +101,11 @@ impl<'a> ProcModule<'a> {
             sv::ir::Expr::Call {
                 callee: sv::ir::Callee::Object(op),
                 ..
-            } => matches!(**op, sv::ir::ObjectOp::Load(field)
-                if field.handle == Some(sv::ir::HandleProperty::String)),
+            } => {
+                matches!(**op, sv::ir::ObjectOp::Load(field)
+                if field.handle == Some(sv::ir::HandleProperty::String))
+                    || matches!(**op, sv::ir::ObjectOp::Container { op: sv::ir::ContainerOp::Get | sv::ir::ContainerOp::PopFront | sv::ir::ContainerOp::PopBack, layout } if layout.handle == Some(sv::ir::HandleProperty::String))
+            }
             sv::ir::Expr::Call {
                 callee: sv::ir::Callee::Subroutine(name),
                 ..
@@ -2838,6 +2841,19 @@ pub(super) fn written_system_arguments(
     args.iter()
         .enumerate()
         .filter(|(position, _)| function.writes_argument(*position))
+        .filter_map(|(_, arg)| arg.as_ref().and_then(lvalue_from_expr))
+        .flatten()
+        .collect()
+}
+
+/// State writes performed by heap container calls.
+pub(super) fn written_object_arguments(
+    op: &sv::ir::ObjectOp,
+    args: &[Option<sv::ir::Expr>],
+) -> Vec<sv::ir::LValue> {
+    args.iter()
+        .enumerate()
+        .filter(|(position, _)| op.writes_argument(*position))
         .filter_map(|(_, arg)| arg.as_ref().and_then(lvalue_from_expr))
         .flatten()
         .collect()

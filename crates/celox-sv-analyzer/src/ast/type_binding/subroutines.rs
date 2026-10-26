@@ -56,6 +56,9 @@ pub(in crate::ast) fn subroutine_formals(
         previous_type = Some(ty.clone());
         let unpacked = constant_binding::bind_unpacked_ranges(&port.dimensions, tree, context)?;
         ty = type_with_unpacked_ranges(ty, unpacked);
+        if ty.container.is_some() {
+            return Err(unsupported("dynamic container subroutine parameter"));
+        }
         result.push((
             instances::normalize_identifier(&name.spelling),
             direction,

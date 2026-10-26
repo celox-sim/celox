@@ -821,11 +821,85 @@ impl ObjectField {
     }
 }
 
+/// Storage and conversion contract for a one-dimensional value container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContainerLayout {
+    pub kind: ContainerKind,
+    pub width: u32,
+    pub signed: bool,
+    pub two_state: bool,
+    pub handle: Option<HandleProperty>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContainerKind {
+    Dynamic,
+    Queue {
+        capacity: u32,
+    },
+    Associative {
+        key_width: u32,
+        signed: bool,
+        string: bool,
+    },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContainerOp {
+    Equal,
+    CaseEqual,
+    New,
+    Literal,
+    Convert,
+    Size,
+    Get,
+    Set,
+    Clear,
+    Delete,
+    Insert,
+    PushFront,
+    PushBack,
+    PopFront,
+    PopBack,
+    Exists,
+    First,
+    Last,
+    Next,
+    Prev,
+}
+impl ContainerOp {
+    pub fn mutates(self) -> bool {
+        matches!(
+            self,
+            Self::Set
+                | Self::Clear
+                | Self::Delete
+                | Self::Insert
+                | Self::PushFront
+                | Self::PushBack
+                | Self::PopFront
+                | Self::PopBack
+        )
+    }
+    pub fn result_type(self, layout: ContainerLayout) -> (usize, bool) {
+        match self {
+            Self::Equal | Self::CaseEqual => (1, false),
+            Self::Get | Self::PopFront | Self::PopBack => (layout.width as usize, layout.signed),
+            Self::Size | Self::Exists | Self::First | Self::Last | Self::Next | Self::Prev => {
+                (32, true)
+            }
+            _ => (32, false),
+        }
+    }
+}
+
 /// An operation on class objects (IEEE 1800-2023 clause 8). The analyzer
 /// lays out each class and writes the layout into the operation, so the
 /// frontend needs no class table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ObjectOp {
+    Container {
+        op: ContainerOp,
+        layout: ContainerLayout,
+    },
     /// A new object of `class` with `size` zeroed bytes, whose handle
     /// properties are at the given offsets.
     New {
@@ -864,9 +938,22 @@ pub enum ObjectOp {
 }
 
 impl ObjectOp {
+    /// Memory arguments changed by a container operation, including traversal's ref index.
+    pub fn writes_argument(&self, position: usize) -> bool {
+        match self {
+            Self::Container { op, .. } if op.mutates() => position == 0,
+            Self::Container {
+                op: ContainerOp::First | ContainerOp::Last | ContainerOp::Next | ContainerOp::Prev,
+                ..
+            } => position == 1,
+            _ => false,
+        }
+    }
+
     /// The width and signedness of the result.
     pub fn result_type(&self) -> (usize, bool) {
         match self {
+            Self::Container { op, layout } => op.result_type(*layout),
             Self::Random | Self::RandomCyclic { .. } => (64, false),
             Self::Seed
             | Self::Check(_)
@@ -885,6 +972,7 @@ impl ObjectOp {
 impl fmt::Display for ObjectOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Container { .. } => "container operation",
             Self::New { .. } => "new",
             Self::Load(_) => "property read",
             Self::Store(_) => "property write",

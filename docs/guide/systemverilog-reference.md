@@ -31,6 +31,7 @@ synthesis and is tested at the design level.
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
+| Dynamic containers | one-dimensional dynamic arrays, queues (including bounded queues), and associative arrays with integral or string keys; element access, value assignment, equality, `foreach` and built-in container methods. See [dynamic containers](#dynamic-containers) |
 | Strings | `string` variables, function arguments and results: assignment of strings, string literals and casts (`string'(x)`), `==`, `!=` and ordering comparisons, concatenation and replication (with a run-time count), character reads and writes (`s[i]`), and the methods `len`, `getc`, `putc`, `toupper`, `tolower`, `compare`, `icompare`, `substr`, `atoi` / `atohex` / `atooct` / `atobin` and `itoa` / `hextoa` / `octtoa` / `bintoa`; `%s` and format-less display of string values. See [strings](#strings) |
 | Classes | classes declared in a module, a package or the compilation unit: properties of 2-state integral types up to 64 bits, `string` and class handle types, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes and method calls through interface class handles; `$cast` of class handles, as a function and as a task; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles; parameterized classes with value and type parameters, parameters read through a handle or `C#(...)::`, typedefs of classes and interface classes and `C::T`; named constructor arguments; shallow copies (`new h`). See [classes](#classes) |
 | Parameters | integral parameters and overrides preserving widths beyond 128 bits and X/Z values, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
@@ -327,6 +328,45 @@ bytes from the most significant one.
 Not yet supported: `$sformat` / `$sformatf`, `atoreal` / `realtoa`, string
 arguments of `$value$plusargs`, file I/O and DPI-C, and string values in VPI,
 VCD output and the TypeScript API.
+
+### Dynamic containers
+
+Dynamic arrays (`T a[]`) support `new[n]`, `new[n](a)`, `size()` and
+`delete()` (IEEE 1800-2023 7.5). Queues (`T q[$]`, `T q[$:N]`) support
+`size`, `insert`, `delete`, `push_front`, `push_back`, `pop_front` and
+`pop_back`, with parentheses. Queue indices may use `$` and `$+1`.
+Associative arrays support integral keys up to 64 bits or `string` keys,
+`num` / `size`, `exists`, `delete`, and `first` / `last` / `next` / `prev`
+(7.8–7.10). Traversal leaves its index unchanged when no key is found.
+
+Elements may be packed integral values up to 64 bits, strings or class
+handles. Positional assignment patterns and element concatenations construct
+sequences; assignments between dynamic arrays and queues copy values and
+respect the destination queue's bound. Associative assignment requires the
+same key type. Equality (`==`, `!=`, `===`, `!==`) between equivalent container types compares contents,
+including X/Z for four-state elements. `foreach` visits sequence positions
+or associative keys in order. Range errors read the element type's default
+and ignore writes; unknown indices never create associative entries.
+
+Containers work in procedural code as module variables or locals. Automatic
+local initializers and module declaration initializers may allocate with
+`new[]`. Checkpoints, including serialized checkpoints, preserve contents;
+portable state files require a checkpoint instead. Strings and class objects
+held in elements remain reachable during heap collection. Array assignment
+copies elements while class handles retain their usual reference semantics.
+
+Multidimensional containers, elements wider than 64 bits, real elements,
+wildcard or class keys, slices, array manipulation methods, keyed patterns,
+container operands within concatenations, compound or nonblocking element
+assignments, container ports / subroutine parameters / class properties and
+const containers remain unsupported. A `new[]` initializer currently requires
+another compatible dynamic array or queue; fixed-size arrays are unsupported.
+Static local initializers retain the existing constant-initializer restriction.
+`$size` queries the current outer dimension. Sequence `$left`, `$right`,
+`$low`, `$high`, `$increment`, and dimension counts are also supported.
+Queries of element dimensions and associative bounds remain unsupported.
+For string-indexed associative arrays, use the `size()` method. Native images
+and serialized checkpoints from earlier container versions must be regenerated.
 
 ### Classes {#classes}
 
