@@ -7463,6 +7463,90 @@ struct DynamicPackedWrite {
     window: Option<BitAccess>,
 }
 
+/// Recover a constant outer element for a checked dynamic bit select of a
+/// one-bit packed element. Its only valid inner index is its declared bound.
+/// An arbitrary dynamic unpacked element permits more than one index and must
+/// retain its dynamic element addressing.
+fn single_bit_select_window(
+    lsb: &sv::ir::ConstExpr,
+    width: usize,
+    constants: &HashMap<String, i128>,
+    types: &HashMap<String, (usize, bool)>,
+) -> Option<BitAccess> {
+    use sv::ir::{BinaryOp, ConstExpr};
+    fn selected<'a>(
+        mut expr: &'a ConstExpr,
+        constants: &HashMap<String, i128>,
+        types: &HashMap<String, (usize, bool)>,
+    ) -> &'a ConstExpr {
+        while let ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } = expr
+        {
+            match sv::typecheck::eval_const_expr_with_types(condition, constants, types) {
+                Some(0) => expr = else_expr,
+                Some(_) => expr = then_expr,
+                None => break,
+            }
+        }
+        expr
+    }
+    let (base, offset) = split_dynamic_array_offset(lsb, constants, types)?;
+    let ConstExpr::Mux {
+        condition,
+        then_expr,
+        else_expr,
+    } = selected(base, constants, types)
+    else {
+        return None;
+    };
+    let ConstExpr::Binary {
+        left,
+        op: BinaryOp::LogicAnd,
+        right,
+    } = selected(condition, constants, types)
+    else {
+        return None;
+    };
+    let bound = |expr, expected| {
+        let ConstExpr::Binary { left, op, right } = selected(expr, constants, types) else {
+            return None;
+        };
+        let ConstExpr::Ident(name) = left.as_ref() else {
+            return None;
+        };
+        if *op != expected {
+            return None;
+        }
+        Some((
+            name,
+            sv::typecheck::eval_const_expr_with_types(right, constants, types)?,
+        ))
+    };
+    let lower = bound(left, BinaryOp::Ge)?;
+    let upper = bound(right, BinaryOp::Le)?;
+    if lower != upper {
+        return None;
+    }
+    let invalid = sv::typecheck::eval_const_expr_with_types(else_expr, constants, types)?
+        .checked_add(offset)?;
+    let width = i128::try_from(width).ok()?;
+    if (0..width).contains(&invalid) {
+        return None;
+    }
+    let mut checked_index = constants.clone();
+    checked_index.insert(lower.0.clone(), lower.1);
+    let position = sv::typecheck::eval_const_expr_with_types(then_expr, &checked_index, types)?
+        .checked_add(offset)?;
+    if !(0..width).contains(&position) {
+        return None;
+    }
+    let position = usize::try_from(position).ok()?;
+    Some(BitAccess::new(position, position))
+}
+
 /// For a run-time select inside one element of an unpacked array, such as
 /// `mem[1][i]`, the bits of that element: the constant part of the flattened
 /// position names the element, and the run-time part moves within it.
@@ -7473,9 +7557,13 @@ fn runtime_select_window(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<BitAccess> {
-    // One-bit elements have no bits within an element, and their run-time
-    // index has no stride to recognize.
-    if element_width <= 1 || element_width == width {
+    // A checked bit select inside a one-bit element can only write its zero
+    // bit. Preserve the constant outer element in both driver analysis and
+    // lowering; an arbitrary run-time array index remains unconstrained.
+    if element_width == 1 {
+        return single_bit_select_window(lsb, width, constants, parameter_types);
+    }
+    if element_width == 0 || element_width == width {
         return None;
     }
     let (base, offset) = split_dynamic_array_offset(lsb, constants, parameter_types)?;
@@ -9232,6 +9320,14 @@ fn dynamic_array_element_subselection(
     if !is_dynamic {
         return None;
     }
+    // This is a dynamic bit inside one constant one-bit element, rather
+    // than a dynamic element of the whole array. Let the packed lowering
+    // retain the checked element window.
+    if packed_element_width == 1
+        && single_bit_select_window(lsb, variable.width, constants, parameter_types).is_some()
+    {
+        return None;
+    }
     let (msb_base, msb_offset) = split_dynamic_array_offset(msb, constants, parameter_types)?;
     let (lsb_base, lsb_offset) = split_dynamic_array_offset(lsb, constants, parameter_types)?;
     if msb_base != lsb_base {
@@ -9364,6 +9460,14 @@ fn dynamic_array_element_lvalue(
         .is_none()
         || sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types).is_none();
     if !is_dynamic {
+        return None;
+    }
+    // This is a dynamic bit inside one constant one-bit element, rather
+    // than a dynamic element of the whole array. Let the packed lowering
+    // retain the checked element window.
+    if packed_element_width == 1
+        && single_bit_select_window(lsb, variable.width, constants, parameter_types).is_some()
+    {
         return None;
     }
     let (msb_base, msb_offset) = split_dynamic_array_offset(msb, constants, parameter_types)?;
