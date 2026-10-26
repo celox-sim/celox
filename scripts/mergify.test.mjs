@@ -198,14 +198,14 @@ test("lightweight queue priority requires actual skipped product checks and succ
 
 test("emergency labels authorize normal admission and outrank lightweight checks", () => {
   const priorities = queueConfig.split("priority_rules:\n")[1].split("queue_rules:\n")[0];
-  const emergency = priorities.split("  - name: Lightweight validated changes first")[0];
+  const emergency = priorities.split("  - name: Priority merges without interruption")[0];
   assert.match(emergency, /name: Emergency merges first/);
   assert.match(emergency, /conditions:\n      - label = merge-urgent/);
   assert.match(emergency, /priority: 10000/);
   assert.match(emergency, /allow_checks_interruption: true/);
   const admission = queueConfig.split("pull_request_rules:\n")[1];
   const authorize = admission.split("  - name: Queue explicitly requested merges")[0];
-  assert.match(authorize, /label = merge-urgent/);
+  assert.match(authorize, /- or:\n          - label = merge-urgent\n          - label = merge-priority/);
   assert.match(authorize, /actions:\n      label:\n        add:\n          - merge-ready/);
   for (const guard of ["-label = release:hold", "-label = dequeued", "-draft", "-conflict"])
     assert.ok(authorize.includes(`      - ${guard}`), guard);
@@ -213,4 +213,18 @@ test("emergency labels authorize normal admission and outrank lightweight checks
   assert.match(authorize, /base ~= \^stack\//);
   assert.match(authorize, /Depends-On:/);
   assert.doesNotMatch(authorize, /queue:|merge:|remove:/);
+});
+
+
+test("priority requests pass waiting work without interrupting running checks", () => {
+  const rules = queueConfig.split("priority_rules:\n")[1].split("queue_rules:\n")[0]
+    .split(/^  - name: /m).slice(1);
+  assert.equal(rules.length, 3);
+  assert.match(rules[0], /^Emergency merges first/);
+  assert.match(rules[1], /^Priority merges without interruption/);
+  assert.match(rules[1], /conditions:\n      - label = merge-priority/);
+  assert.match(rules[1], /priority: 9000/);
+  assert.match(rules[1], /allow_checks_interruption: false/);
+  assert.doesNotMatch(rules[1], /check-success|check-skipped/);
+  assert.match(rules[2], /^Lightweight validated changes first/);
 });
