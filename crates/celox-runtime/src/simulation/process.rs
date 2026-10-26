@@ -127,8 +127,29 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        let kernel = self.restore_activation(executor.backend_mut(), process);
+        let result = self.run_activation(executor, current_time, process, kernel, returns);
+        self.save_activation(executor.backend(), process);
+        if matches!(result, Ok(false)) {
+            self.release_children(process);
+        }
+        self.retire_activation(process);
+        result
+    }
+
+    fn run_activation<E>(
+        &mut self,
+        executor: &mut E,
+        current_time: u64,
+        process: usize,
+        kernel: usize,
+        returns: &mut u64,
+    ) -> Result<bool, Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
         {
-            executor.run_process(process)?;
+            executor.run_process(kernel)?;
             let status: u8 = executor
                 .backend()
                 .get_as(self.model.processes[process].status);
@@ -155,6 +176,7 @@ impl<B: SimBackend> SimulationState<B> {
                     }
                 }
                 Some(ProcessStatus::Done) => {
+                    self.end_activation(process);
                     if self.model.processes[process].program.is_some() {
                         self.program_kernel_ended(executor.backend())?;
                     }
@@ -167,6 +189,17 @@ impl<B: SimBackend> SimulationState<B> {
                 Some(ProcessStatus::Wait | ProcessStatus::Pending) => {
                     let site = delay() as usize;
                     self.register_waiter(executor.backend(), process, site)?;
+                }
+                Some(ProcessStatus::Fork) => {
+                    let encoded = delay();
+                    *returns += 1;
+                    self.charge(*returns, Some(process))?;
+                    return self.fork_activation(executor.backend_mut(), process, encoded);
+                }
+                Some(ProcessStatus::Local) => {
+                    let index = delay() as usize;
+                    self.allocate_local(process, index)?;
+                    return Ok(true);
                 }
                 Some(ProcessStatus::Nba) => {
                     let site = delay() as usize;
@@ -278,12 +311,17 @@ impl<B: SimBackend> SimulationState<B> {
         let program = self.model.processes[process]
             .program
             .ok_or(SimulatorErrorCode::InternalError)?;
-        for &index in &self.model.program_processes {
+        for index in 0..self.model.processes.len() {
             let refs = &self.model.processes[index];
             if refs.program != Some(program) {
                 continue;
             }
             backend.set(refs.status, ProcessStatus::Done.code());
+            if let Some(activation) = self.process_state.activations.get_mut(index) {
+                activation.live = false;
+                activation.pending.clear();
+                activation.join = None;
+            }
             let state = &mut self.process_state;
             state.waiters.remove(index);
             state.ready.remove(&index);
@@ -302,11 +340,16 @@ impl<B: SimBackend> SimulationState<B> {
     /// ends with an implicit `$finish` (IEEE 1800-2023 24.3).
     fn program_kernel_ended(&self, backend: &B) -> Result<(), Halt> {
         let done = ProcessStatus::Done.code();
-        let all_done = self
-            .model
-            .program_processes
-            .iter()
-            .all(|&process| backend.get_as::<u8>(self.model.processes[process].status) == done);
+        let all_done = self.model.program_processes.iter().all(|&process| {
+            self.process_state
+                .activations
+                .get(process)
+                .filter(|_| self.model.processes[process].frame.is_some())
+                .map_or_else(
+                    || backend.get_as::<u8>(self.model.processes[process].status) == done,
+                    |activation| !activation.live,
+                )
+        });
         if all_done { Err(Halt::Finish) } else { Ok(()) }
     }
 

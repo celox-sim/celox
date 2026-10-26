@@ -21,6 +21,19 @@ struct CaseState {
 enum Job {
     Enter(StatementId),
     EndScope,
+    ForkNext {
+        items: Vec<StatementId>,
+        index: usize,
+        join: celox_design::ForkJoin,
+        branches: Vec<Vec<Stmt>>,
+    },
+    ForkBranch {
+        items: Vec<StatementId>,
+        index: usize,
+        join: celox_design::ForkJoin,
+        branches: Vec<Vec<Stmt>>,
+        start: usize,
+    },
     IfNext(IfState),
     IfBranch {
         state: IfState,
@@ -118,10 +131,80 @@ impl BodyBuilder<'_, '_, '_> {
         let mut output = Vec::new();
         while let Some(job) = jobs.pop() {
             match job {
+                Job::ForkNext {
+                    items,
+                    index,
+                    join,
+                    branches,
+                } => {
+                    if let Some(&id) = items.get(index) {
+                        if let StatementKind::Declaration(declaration) = &native.statement(id).kind
+                        {
+                            output.extend(self.block_item_declaration(declaration)?);
+                            jobs.push(Job::ForkNext {
+                                items,
+                                index: index + 1,
+                                join,
+                                branches,
+                            });
+                        } else {
+                            jobs.push(Job::ForkBranch {
+                                items,
+                                index,
+                                join,
+                                branches,
+                                start: output.len(),
+                            });
+                            jobs.push(Job::Enter(id));
+                        }
+                    } else {
+                        self.pop_scope();
+                        output.push(Stmt::Fork { join, branches });
+                    }
+                }
+                Job::ForkBranch {
+                    items,
+                    index,
+                    join,
+                    mut branches,
+                    start,
+                } => {
+                    let branch = output.split_off(start);
+                    let mut returns = false;
+                    for stmt in &branch {
+                        stmt.walk(&mut |s| returns |= matches!(s, Stmt::Return(_)));
+                    }
+                    if returns {
+                        return Err(unsupported("return from a fork-join block"));
+                    }
+                    branches.push(branch);
+                    jobs.push(Job::ForkNext {
+                        items,
+                        index: index + 1,
+                        join,
+                        branches,
+                    });
+                }
                 Job::Enter(id) => match &native.statement(id).kind {
                     StatementKind::Empty => {}
                     StatementKind::Declaration(declaration) => {
                         output.extend(self.block_item_declaration(declaration)?)
+                    }
+                    StatementKind::Parallel { items, join, .. } => {
+                        self.allow_timing("fork-join block")?;
+                        self.push_scope();
+                        let join = match join.as_str() {
+                            "join" => celox_design::ForkJoin::All,
+                            "join_any" => celox_design::ForkJoin::Any,
+                            "join_none" => celox_design::ForkJoin::None,
+                            _ => return Err(disagreement()),
+                        };
+                        jobs.push(Job::ForkNext {
+                            items: items.clone(),
+                            index: 0,
+                            join,
+                            branches: Vec::new(),
+                        });
                     }
                     StatementKind::Block { items, .. } => {
                         self.push_scope();

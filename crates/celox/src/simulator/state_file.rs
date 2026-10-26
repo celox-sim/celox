@@ -36,9 +36,8 @@ pub enum StateError {
     MissingSchedule,
     #[error("evaluating combinational logic failed: {0}")]
     Runtime(RuntimeErrorCode),
-    /// Not returned: state files record suspended processes. Kept so that
-    /// matching code keeps compiling.
-    #[error("the state of the simulation's processes could not be recorded")]
+    /// Dynamic fork activations have storage outside the named state objects.
+    #[error("state files do not record dynamic fork activations; use a checkpoint instead")]
     Processes,
     /// Not returned: state files record strings by their contents. Kept so
     /// that matching code keeps compiling.

@@ -61,6 +61,7 @@ impl<B: SimBackend> SimulationState<B> {
             .clone_from(&snapshot.last_clock_unknown);
         self.process_wakeups.clone_from(&snapshot.process_wakeups);
         self.process_state.clone_from(&snapshot.process_state);
+        self.rebuild_activation_models();
         self.declarations_pending = snapshot.declarations_pending;
         self.host_pending = snapshot.host_pending;
         self.finished = snapshot.finished;
@@ -192,6 +193,7 @@ impl<B: SimBackend> SimulationState<B> {
             .map(|(process, time)| Reverse((time, process)))
             .collect();
         self.process_state = parts.process_state;
+        self.rebuild_activation_models();
         self.declarations_pending = self.process_wakeups.iter().any(|Reverse((_, index))| {
             self.model.processes[*index].kind == celox_design::ProcessKind::Initializer
         }) || self.process_state.ready.iter().any(|&index| {
@@ -298,6 +300,8 @@ impl<B: SimBackend> SimulationState<B> {
             re_inactive: state.re_inactive.iter().copied().collect(),
             re_nba_queue: state.re_nba_queue.clone(),
             domain_counters: state.domain_counters.clone(),
+            activations: state.activations.clone(),
+            cells: state.cells.clone(),
             declarations_pending: self.declarations_pending,
             host_pending: self.host_pending,
             finished: self.finished,
@@ -328,6 +332,8 @@ pub struct ScheduleKey {
     pub re_inactive: Vec<usize>,
     pub re_nba_queue: Vec<super::NbaUpdate>,
     pub domain_counters: Vec<[u32; 3]>,
+    pub activations: Vec<super::Activation>,
+    pub cells: Vec<crate::timing::Value>,
     pub declarations_pending: bool,
     pub host_pending: bool,
     pub finished: bool,
