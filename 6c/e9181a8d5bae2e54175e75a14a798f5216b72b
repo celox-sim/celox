@@ -1,0 +1,7 @@
+Revision history for #2112:
+
+rev 3 (rebase) 2026-10-26 07:11 UTC — Rebase the remaining fork stack after dependency #2088 merged into master.
+rev 2 (content) 2026-10-26 06:40 UTC — Accept exactly 12 reviewed fail-to-pass verdicts from CI run 40278499596 for the newly supported fork blocks; no regressions in the 3300-mode run.
+rev 1 (initial) 2026-10-26 06:40 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2112,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"edc5dde0707009fbb4ebbabc8f9ce2e398675d16","timestamp_iso":"2026-10-26T06:40:17Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"edc5dde0707009fbb4ebbabc8f9ce2e398675d16","new_sha":"34807b30c73d94f42503f0e15e734539faaa3447","timestamp_iso":"2026-10-26T06:40:17Z","reason":"Accept exactly 12 reviewed fail-to-pass verdicts from CI run 40278499596 for the newly supported fork blocks; no regressions in the 3300-mode run.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/edc5dde0707009fbb4ebbabc8f9ce2e398675d16...34807b30c73d94f42503f0e15e734539faaa3447"},{"number":3,"change_type":"rebase","old_sha":"34807b30c73d94f42503f0e15e734539faaa3447","new_sha":"6b7252fa636f15904de13d6ed490b62f58d736fd","timestamp_iso":"2026-10-26T07:11:34Z","reason":"Rebase the remaining fork stack after dependency #2088 merged into master.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/34807b30c73d94f42503f0e15e734539faaa3447...6b7252fa636f15904de13d6ed490b62f58d736fd"}]} -->
