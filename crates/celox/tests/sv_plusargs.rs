@@ -302,12 +302,34 @@ module Top;
 endmodule
 "#;
 
+/// Arguments are evaluated left to right: a later argument's call does not
+/// change what an earlier argument read (Icarus prints `3 1 5 7`).
+const ORDERED: &str = r#"
+module Top;
+  int i;
+  function automatic int f();
+    return 0;
+  endfunction
+  function automatic int g();
+    i = 7;
+    return 5;
+  endfunction
+  initial begin
+    i = 3;
+    $display("%0d %0d %0d %0d", i + f(), $test$plusargs("verbose"), g(), i);
+  end
+endmodule
+"#;
+
 macro_rules! display_plusargs {
     ($name:ident, $backend:ident) => {
+        display_plusargs!($name, $backend, DISPLAYED, "3 1 1 7");
+    };
+    ($name:ident, $backend:ident, $source:expr, $expected:literal) => {
         #[test]
         fn $name() {
             let mut sim = celox::Simulation::from_sv_sources(
-                vec![(DISPLAYED, Path::new("displayed.sv"))],
+                vec![($source, Path::new("displayed.sv"))],
                 "Top",
             )
             .plusargs(["+verbose", "+v=7"])
@@ -324,7 +346,7 @@ macro_rules! display_plusargs {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(lines, ["3 1 1 7"]);
+            assert_eq!(lines, [$expected]);
         }
     };
 }
@@ -332,3 +354,12 @@ display_plusargs!(display_of_plusargs_interpreter, build_interpreter);
 display_plusargs!(display_of_plusargs_compiled, build);
 #[cfg(target_arch = "x86_64")]
 display_plusargs!(display_of_plusargs_native, build_native);
+display_plusargs!(
+    ordered_arguments_interpreter,
+    build_interpreter,
+    ORDERED,
+    "3 1 5 7"
+);
+display_plusargs!(ordered_arguments_compiled, build, ORDERED, "3 1 5 7");
+#[cfg(target_arch = "x86_64")]
+display_plusargs!(ordered_arguments_native, build_native, ORDERED, "3 1 5 7");

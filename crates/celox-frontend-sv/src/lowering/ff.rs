@@ -3230,21 +3230,29 @@ impl<'p, 'a> Ff<'p, 'a> {
         };
         let (template, mut values) = system_task_template(self.m, &kind, args);
         prepare_time_operands(self.m, template.as_deref(), &mut values)?;
-        // Arguments are evaluated left to right. A call can suspend the
-        // process (a host request), and a value read before it would not
-        // survive the resume, so an argument read before a later call is
-        // kept in a temporary.
+        // Arguments are evaluated left to right. A later argument's call can
+        // change what an earlier one reads, or suspend the process (a host
+        // request) so that a value read before it would not survive the
+        // resume. So every argument before the last one with a call is
+        // evaluated whole into a temporary at its place; that one only has
+        // its calls run before its own reads, as any expression does.
         let last_call = values.iter().rposition(
             |value| matches!(value, sv::ir::SystemTaskArg::Expr(expr) if self.m.calls(expr)),
         );
-        for value in &mut values[..last_call.map_or(0, |last| last + 1)] {
-            if let sv::ir::SystemTaskArg::Expr(expr) = value {
-                *expr = if self.m.calls(expr) {
-                    self.hoist(expr)?
-                } else if matches!(expr, sv::ir::Expr::Literal(_)) {
+        if let Some(last_call) = last_call {
+            for (index, value) in values[..=last_call].iter_mut().enumerate() {
+                let sv::ir::SystemTaskArg::Expr(expr) = value else {
                     continue;
+                };
+                let hoisted = if self.m.calls(expr) {
+                    self.hoist(expr)?
                 } else {
-                    self.keep_argument(expr)?
+                    expr.clone()
+                };
+                *expr = if index == last_call || matches!(hoisted, sv::ir::Expr::Literal(_)) {
+                    hoisted
+                } else {
+                    self.keep_argument(&hoisted)?
                 };
             }
         }
