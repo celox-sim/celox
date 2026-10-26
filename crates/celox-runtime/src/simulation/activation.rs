@@ -377,3 +377,62 @@ pub(super) fn activation_value<'a>(
         .position(|&slot| slot == signal)
         .and_then(|index| activation.private.get(index))
 }
+
+/// Evaluate one pure dispatch entry without exposing another activation's
+/// frame or committing any probe temporary back into its persistent state.
+pub(super) fn event_probe<B: SimBackend>(
+    backend: &mut B,
+    refs: &crate::timing::ProcessRefs,
+    activation: &Activation,
+    cells: &[Value],
+    probe: &celox_design::ProcessEventProbe<SignalRef>,
+) -> Result<Value, Halt> {
+    let frame = refs
+        .frame
+        .as_ref()
+        .ok_or(SimulatorErrorCode::InternalError)?;
+    let mut slots: Vec<_> = frame
+        .private
+        .iter()
+        .chain(&frame.locals)
+        .chain(&probe.scratch)
+        .copied()
+        .collect();
+    slots.extend([refs.resume, refs.status, refs.delay, probe.result]);
+    let mut saved = Vec::new();
+    for slot in slots {
+        if !saved.iter().any(|(old, _)| *old == slot) {
+            saved.push((slot, read(backend, slot)));
+        }
+    }
+    for (&slot, value) in frame.private.iter().zip(&activation.private) {
+        write(backend, slot, value);
+    }
+    for (&slot, cell) in frame.locals.iter().zip(&activation.locals) {
+        if let Some(cell) = cell {
+            write(backend, slot, &cells[*cell]);
+        }
+    }
+    backend.set(refs.resume, probe.resume);
+    let result = backend
+        .run_process(activation.kernel)
+        .map_err(Halt::from)
+        .and_then(|()| {
+            let status: u8 = backend.get_as(refs.status);
+            if status != celox_design::ProcessStatus::EventProbe.code() {
+                return Err(SimulatorErrorCode::Runtime {
+                    message: "event-expression probe did not return through its pure entry".into(),
+                    signals: Vec::new(),
+                }
+                .into());
+            }
+            Ok(read(backend, probe.result))
+        });
+    for (slot, value) in saved {
+        write(backend, slot, &value);
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests;

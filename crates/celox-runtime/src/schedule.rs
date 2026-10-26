@@ -227,7 +227,13 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                                     signal,
                                     kind: term.kind,
                                     counter: counter_of(signal, term.kind),
-                                    driven: term.driven,
+                                    driven: term.driven
+                                        || process.frame.as_ref().is_some_and(|frame| {
+                                            frame
+                                                .event_probes
+                                                .iter()
+                                                .any(|probe| probe.result == term.signal)
+                                        }),
                                 }
                             })
                             .collect()

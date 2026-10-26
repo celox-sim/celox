@@ -473,6 +473,8 @@ pub enum ProcessStatus {
     WaitFork,
     /// Terminate all descendants of the calling activation.
     DisableFork,
+    /// A side-effect-free event-expression probe completed; no HDL continuation ran.
+    EventProbe,
 }
 
 impl ProcessStatus {
@@ -495,6 +497,7 @@ impl ProcessStatus {
             Self::Local => 13,
             Self::WaitFork => 14,
             Self::DisableFork => 15,
+            Self::EventProbe => 16,
         }
     }
 
@@ -515,6 +518,7 @@ impl ProcessStatus {
             13 => Some(Self::Local),
             14 => Some(Self::WaitFork),
             15 => Some(Self::DisableFork),
+            16 => Some(Self::EventProbe),
             _ => None,
         }
     }
@@ -656,6 +660,16 @@ pub enum ProcessKind {
     Final,
 }
 
+/// A pure expression evaluated with the storage of one waiting activation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessEventProbe<A> {
+    pub result: A,
+    pub resume: u32,
+    pub inputs: Vec<A>,
+    /// Exclusive probe storage for all lowered stores, including function scratch.
+    pub scratch: Vec<A>,
+}
+
 /// Storage switched when several activations execute the same kernel.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessFrame<A> {
@@ -668,6 +682,7 @@ pub struct ProcessFrame<A> {
     pub random: A,
     pub seed: u32,
     pub starts_with_event_wait: bool,
+    pub event_probes: Vec<ProcessEventProbe<A>>,
 }
 impl<A> ProcessFrame<A> {
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessFrame<B> {
@@ -678,6 +693,16 @@ impl<A> ProcessFrame<A> {
             random: map(self.random),
             seed: self.seed,
             starts_with_event_wait: self.starts_with_event_wait,
+            event_probes: self
+                .event_probes
+                .into_iter()
+                .map(|probe| ProcessEventProbe {
+                    result: map(probe.result),
+                    resume: probe.resume,
+                    inputs: probe.inputs.into_iter().map(&mut map).collect(),
+                    scratch: probe.scratch.into_iter().map(&mut map).collect(),
+                })
+                .collect(),
         }
     }
 }

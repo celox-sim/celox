@@ -146,13 +146,26 @@ the calling process's identity; `wait fork` remains forbidden in functions.
 
 Checkpoints and layout-independent state files preserve children, their locals,
 random streams and pending joins. State files also preserve strings held only
-by suspended children or shared automatic locals. Non-null class objects or
-dynamic containers and nonempty string/object values in pending NBA writes, host
-writes or event-wait baselines remain unsupported in activation state files; use
-`checkpoint()` / `restore()` for those states. Deferred assertions in a process
-containing forks and compound event expressions reading fork-shared automatic locals remain
-unsupported. Direct event controls on those locals and `wait` conditions are
-supported.
+by suspended children or shared automatic locals. Non-null class objects or dynamic containers and
+nonempty string/object values in pending NBA writes, host writes or event-wait
+baselines remain unsupported in activation state files; use
+`checkpoint()` / `restore()` for those states. Deferred assertions in a process containing forks remain unsupported.
+
+Direct event controls, `wait` conditions, and compound event expressions over
+fork-shared automatic locals are supported. Compound expressions may use constants
+and pure local functions. Each activation compares its own expression result,
+including X/Z transitions and the least-significant bit for edge controls
+(IEEE 1800-2023 9.4.2). Blocking assignments, loop steps, and output/inout copy-out
+from statement calls expose intermediate results without switching the writer or
+starting pending `join_none` children. These baselines survive checkpoints and
+portable state files.
+
+Mixed global/static dependencies, foreign calls, and functions retaining scratch
+state are rejected in this compound-expression path. An implicit write to a watched
+automatic operand from a function expression, a seed/plusargs result, or a system
+task such as `$readmemh` is also rejected; these paths do not yet expose safe
+per-update observation boundaries. Function default arguments are inspected
+conservatively, including defaults replaced by supplied arguments.
 
 Functions may use `fork ... join_none` when called from an `initial` or plain
 `always` process. Their detached children may call tasks and suspend; automatic
@@ -603,7 +616,9 @@ unsupported, including when the inference option is enabled.
   After `b = 1; a = 1;`, `a ^ b` has not changed, and a pulse
   `a = 1; a = 0;` wakes `@(a)` but not `@(a ^ b)`; write `#0` between the
   writes to make the pulse visible. IEEE 1800-2023 4.7 permits this order;
-  Icarus evaluates the expression at each write.
+  Icarus evaluates the expression at each write. Compound waits on fork-shared
+  automatic cells instead observe each supported blocking assignment or statement
+  call copy-out, as described above.
 - A waiter sees every value that one evaluation of `always_comb`,
   `always @*`, an edge-triggered `always` or `always_ff` writes, including
   one that a later write overwrites: with `a` at 1, `y = 0; if (a) y = 1;`

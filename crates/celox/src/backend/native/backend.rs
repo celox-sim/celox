@@ -738,6 +738,23 @@ impl NativeProgramImage {
             {
                 return Err("invalid process activation frame storage".into());
             }
+            let mut entries = HashSet::default();
+            for probe in &frame.event_probes {
+                if probe.resume == 0
+                    || probe.resume as usize >= frame.resume_count
+                    || !entries.insert(probe.resume)
+                    || !frame.private.contains(&probe.result)
+                    || !probe.scratch.contains(&probe.result)
+                    || probe
+                        .scratch
+                        .iter()
+                        .any(|slot| !frame.private.contains(slot))
+                    || probe.inputs.iter().any(|slot| !frame.locals.contains(slot))
+                    || probe.inputs.iter().collect::<HashSet<_>>().len() != probe.inputs.len()
+                {
+                    return Err("invalid process event-expression probe".into());
+                }
+            }
         }
         if self.required_native_features & !KNOWN_NATIVE_FEATURES != 0 {
             return Err("native image contains unknown feature requirements".into());
