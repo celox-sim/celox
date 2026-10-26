@@ -215,3 +215,61 @@ fn a_differential_simulation_stops_checking_an_observed_simulation() {
     assert_eq!(stats.checked_steps, 0);
     assert!(stats.unchecked.is_some());
 }
+
+struct FinishAtFive {
+    before_domains: bool,
+    write: SignalRef,
+}
+
+impl<B: SimBackend> SlotObserver<B> for FinishAtFive {
+    fn before_domains(&mut self, io: &mut SlotIo<'_, B>, time: u64) {
+        if self.before_domains && time == 5 {
+            io.set(self.write, 55u8);
+            io.request_finish();
+        }
+    }
+
+    fn end_of_slot(&mut self, io: &mut SlotIo<'_, B>, time: u64) {
+        if !self.before_domains && time == 5 {
+            io.set(self.write, 55u8);
+            io.request_finish();
+        }
+    }
+}
+
+fn check_observer_finish<B: SimBackend + 'static>(mut sim: Simulation<B>, before_domains: bool) {
+    let clk = sim.signal("clk");
+    let written = sim.signal("d");
+    sim.observe_slots(
+        Box::new(FinishAtFive {
+            before_domains,
+            write: written,
+        }),
+        &[clk],
+    );
+    sim.run_until(40).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.time(), 5);
+    assert_eq!(sim.get(sim.signal("q")), u8::from(!before_domains).into());
+    assert_eq!(sim.get(sim.signal("ticks")), 0u8.into());
+    assert_eq!(sim.get(written), 55u8.into());
+    sim.run_until(100).unwrap();
+    assert_eq!(sim.time(), 5);
+    assert_eq!(sim.get(sim.signal("q")), u8::from(!before_domains).into());
+}
+
+fn check_observer_finish_backends(before_domains: bool) {
+    let build = || Simulation::from_sv_sources(vec![(COUNTER, Path::new("top.sv"))], "Top");
+    check_observer_finish(build().build_native().unwrap(), before_domains);
+    check_observer_finish(build().build_interpreter().unwrap(), before_domains);
+}
+
+#[test]
+fn an_observer_can_finish_before_domains_commit() {
+    check_observer_finish_backends(true);
+}
+
+#[test]
+fn an_observer_can_finish_at_the_end_of_a_slot() {
+    check_observer_finish_backends(false);
+}

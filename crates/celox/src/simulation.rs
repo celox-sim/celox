@@ -257,10 +257,12 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
     }
 
     fn before_domains(&mut self, timestamp: u64) -> Result<bool, Halt> {
-        Ok(!self.frozen
-            && self.show_slot(timestamp, |observer, io, time| {
-                observer.before_domains(io, time)
-            }))
+        if self.frozen {
+            return Ok(false);
+        }
+        self.show_slot(timestamp, |observer, io, time| {
+            observer.before_domains(io, time)
+        })
     }
 
     fn take_slot_writes(&mut self) -> bool {
@@ -321,7 +323,7 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         if !self.frozen {
             self.slot_writes |= self.show_slot(timestamp, |observer, io, time| {
                 observer.end_of_slot(io, time)
-            });
+            })?;
         }
         Ok(())
     }
@@ -334,9 +336,9 @@ impl<B: SimBackend> Simulator<B> {
         &mut self,
         time: u64,
         show: impl FnOnce(&mut dyn SlotObserver<B>, &mut crate::SlotIo<'_, B>, u64),
-    ) -> bool {
+    ) -> Result<bool, Halt> {
         let Some(observer) = self.slot_observer.as_deref_mut() else {
-            return false;
+            return Ok(false);
         };
         let mut io = crate::SlotIo::new(crate::IOContext {
             backend: &mut self.backend,
@@ -345,7 +347,10 @@ impl<B: SimBackend> Simulator<B> {
         show(observer, &mut io, time);
         let wrote = io.wrote();
         self.dirty |= wrote;
-        wrote
+        if io.finish_requested() {
+            return Err(Halt::Finish);
+        }
+        Ok(wrote)
     }
 }
 
@@ -627,6 +632,12 @@ impl<B: SimBackend> Simulation<B> {
         value
     }
 
+    /// The stored four-state `(value, mask)` of `signal`, without settling
+    /// combinational logic first: what host writes and the last settle left.
+    pub fn peek_four_state(&self, signal: SignalRef) -> (num_bigint::BigUint, num_bigint::BigUint) {
+        self.simulator.backend.get_four_state(signal)
+    }
+
     /// Modifies internal state via a callback and re-stabilizes combinational logic.
     ///
     /// A write that changes an event signal, and any write while a process
@@ -665,6 +676,11 @@ impl<B: SimBackend> Simulation<B> {
         if self.shadow.take().is_some() {
             self.unchecked = Some("a slot observer writes state the shadow does not see");
         }
+    }
+
+    /// Replace the signals the observer of [`Self::observe_slots`] watches.
+    pub fn set_observed_signals(&mut self, signals: &[SignalRef]) {
+        self.state.set_observed_signals(signals.iter().copied());
     }
 
     /// Stop showing the time slots to the observer of

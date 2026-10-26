@@ -495,9 +495,6 @@ fn top_parameters_merge_common_target_and_cli_without_editing_sv() {
         fs::read_to_string(root.path().join("top.sv")).unwrap(),
         source
     );
-    // A VPI image runs no process.
-    let untimed = "module Top #(parameter W=8, parameter V=1, parameter NEXT=V+1) (output logic [W-1:0] y); assign y=NEXT; endmodule";
-    fs::write(root.path().join("top.sv"), untimed).unwrap();
     success(&invoke(
         root.path(),
         &[
@@ -511,21 +508,14 @@ fn top_parameters_merge_common_target_and_cli_without_editing_sv() {
             "sim",
         ],
     ));
-    let bytes = fs::read(root.path().join("sim")).unwrap();
-    let image = celox::NativeProgramImage::discover_appended(&bytes)
-        .unwrap()
-        .unwrap()
-        .image;
-    // Safety: the CLI just compiled this test's source.
-    let sim = unsafe { celox::NativeProgramInstance::from_image(image) }.unwrap();
-    let signal = sim.signal_ref("Top.y").unwrap();
+    let mut sim = attached_simulation(&root.path().join("sim"));
+    let signal = sim.signal("y");
     assert_eq!(signal.width, 16);
-    assert_eq!(celox::SimBackend::get_as::<u16>(sim.backend(), signal), 0);
+    assert_eq!(sim.get(signal), 0u8.into());
     assert_eq!(
         fs::read_to_string(root.path().join("top.sv")).unwrap(),
-        untimed
+        source
     );
-    fs::write(root.path().join("top.sv"), source).unwrap();
     let output = invoke(root.path(), &["run", "--target", "wide", "-GMISSING=1"]);
     assert!(!output.status.success());
     assert!(
@@ -653,26 +643,13 @@ fn sv_parameter_literals_preserve_types_across_project_target_and_cli() {
         fs::read_to_string(root.path().join("top.sv")).unwrap(),
         source
     );
-    // A VPI image runs no process.
-    let (design, _) = source.split_once("initial").unwrap();
-    let source = format!("{design}endmodule\n");
-    fs::write(root.path().join("top.sv"), &source).unwrap();
     success(&invoke(
         root.path(),
         &[&["vpi", "build"][..], &args, &["-o", "sim"]].concat(),
     ));
-    let bytes = fs::read(root.path().join("sim")).unwrap();
-    let image = celox::NativeProgramImage::discover_appended(&bytes)
-        .unwrap()
-        .unwrap()
-        .image;
-    // Safety: the CLI compiled this test's source into the image above.
-    let instance = unsafe { celox::NativeProgramInstance::from_image(image) }.unwrap();
-    let matched = instance.signal_ref("Top.matched").unwrap();
-    assert_eq!(
-        celox::SimBackend::get_as::<u8>(instance.backend(), matched),
-        1
-    );
+    let mut sim = attached_simulation(&root.path().join("sim"));
+    let matched = sim.signal("matched");
+    assert_eq!(sim.get(matched), 1u8.into());
     assert_eq!(
         fs::read_to_string(root.path().join("top.sv")).unwrap(),
         source
@@ -688,13 +665,6 @@ fn state_mode_merges_project_target_and_cli_for_run_and_native_build() {
             logic[3:0] uninitialized;
             assign y=uninitialized;
             initial begin #1; $display("value=%b",y); $finish; end
-        endmodule
-    "#;
-    // A VPI image runs no process.
-    let untimed = r#"
-        module Top(output logic[3:0] y);
-            logic[3:0] uninitialized;
-            assign y=uninitialized;
         endmodule
     "#;
     fs::write(
@@ -716,23 +686,13 @@ fn state_mode_merges_project_target_and_cli_for_run_and_native_build() {
         let run = invoke(root.path(), &[&["run"][..], &args].concat());
         success(&run);
         assert_eq!(String::from_utf8(run.stdout).unwrap(), expected);
-        fs::write(root.path().join("top.sv"), untimed).unwrap();
         success(&invoke(
             root.path(),
             &[&["vpi", "build"][..], &args, &["-o", "sim"]].concat(),
         ));
-        let bytes = fs::read(root.path().join("sim")).unwrap();
-        let image = celox::NativeProgramImage::discover_appended(&bytes)
-            .unwrap()
-            .unwrap()
-            .image;
-        // Safety: the CLI compiled this test's source into this image.
-        let instance = unsafe { celox::NativeProgramInstance::from_image(image) }.unwrap();
-        assert_eq!(instance.four_state(), is_four);
-        let (value, mask) = celox::SimBackend::get_four_state(
-            instance.backend(),
-            instance.signal_ref("Top.y").unwrap(),
-        );
+        let mut sim = attached_simulation(&root.path().join("sim"));
+        let y = sim.signal("y");
+        let (value, mask) = sim.get_four_state(y);
         assert_eq!(
             mask.to_u64_digits(),
             if is_four { vec![15] } else { vec![] }
@@ -906,4 +866,19 @@ timescale = "1ns/1fs"
     )
     .unwrap();
     rejected(&invoke(root.path(), &["run"]), "invalid timescale");
+}
+
+/// The timed simulation of the design an executable built by `vpi build`
+/// carries, for a design with processes.
+#[cfg(feature = "systemverilog")]
+fn attached_simulation(executable: &Path) -> celox::Simulation<celox::NativeBackend> {
+    let bytes = fs::read(executable).unwrap();
+    let image = celox::NativeProgramImage::discover_appended(&bytes)
+        .unwrap()
+        .unwrap()
+        .image;
+    assert!(image.has_processes());
+    celox::Simulation::from_sv_sources(Vec::new(), "")
+        .build_native_from_image(image)
+        .unwrap()
 }
