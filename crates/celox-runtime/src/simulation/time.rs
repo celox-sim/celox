@@ -128,6 +128,9 @@ impl<B: SimBackend> SimulationState<B> {
             if current_time > limit {
                 return Ok(settled);
             }
+            if current_time > self.scheduler.time {
+                executor.try_leave_time(self.scheduler.time)?;
+            }
             // Host writes alone: settle them, then go on to the next time.
             let host_only = self.host_pending && self.next_work_time() != Some(current_time);
             self.run_time(executor, current_time)?;

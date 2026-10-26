@@ -104,6 +104,7 @@ impl<B: SimBackend> Simulator<B> {
                     location: None,
                     assertion: None,
                     deferred: None,
+                    timestamp_arg: false,
                     arg_widths: Vec::new(),
                     arg_signed: Vec::new(),
                     arg_is_string: Vec::new(),

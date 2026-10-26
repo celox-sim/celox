@@ -167,6 +167,8 @@ mod host {
         /// Deferred assertions or sampled copies have work when a host
         /// call's time slot is over.
         pub(crate) host_slot_work: bool,
+        /// Some report site reads the time it issues its report at.
+        pub(crate) timestamped_reports: bool,
         /// Identity of the state layout, computed on first checkpoint use.
         pub(super) checkpoint_fingerprint: std::sync::OnceLock<u64>,
         /// State objects as state files name them, built on first use.
@@ -304,6 +306,7 @@ mod host {
     }
 
     pub struct RuntimeEventDrain {
+        timed: bool,
         buffer: Arc<RuntimeEventBuffer>,
         layout: MemoryLayout,
         sites: Vec<RuntimeEventSite>,
@@ -334,6 +337,7 @@ mod host {
             events
                 .into_iter()
                 .filter_map(|raw| render_raw_runtime_event(raw, &self.sites, ctx))
+                .map(|event| untimed_report(event, self.timed, ctx))
                 .collect()
         }
     }
@@ -631,6 +635,7 @@ mod host {
         args: &[RuntimeEventArgValue],
         ctx: RuntimeFormatContext<'_>,
     ) -> Vec<u8> {
+        let args = formatted_args(site, args);
         let Some(template) = site.template.as_deref() else {
             let default_spec = match site.kind {
                 // Veryl prints arguments without a format string in hexadecimal.
@@ -751,11 +756,48 @@ mod host {
         }
     }
 
+    /// Without a scheduler the simulation has no time: a report has the
+    /// time the host gives, not the one its site read.
+    fn untimed_report(
+        event: RuntimeEvent,
+        timed: bool,
+        ctx: RuntimeFormatContext<'_>,
+    ) -> RuntimeEvent {
+        match event {
+            RuntimeEvent::Report(report) if !timed => RuntimeEvent::Report(Report {
+                time: ctx.tb_time,
+                ..report
+            }),
+            event => event,
+        }
+    }
+
+    /// The arguments of an event that its message formats: all but the
+    /// time of a timestamped site.
+    fn formatted_args<'a>(
+        site: &RuntimeEventSite,
+        args: &'a [RuntimeEventArgValue],
+    ) -> &'a [RuntimeEventArgValue] {
+        match (site.timestamp_arg, args.split_last()) {
+            (true, Some((_, args))) => args,
+            _ => args,
+        }
+    }
+
     fn render_runtime_event(
         site: &RuntimeEventSite,
         args: &[RuntimeEventArgValue],
         ctx: RuntimeFormatContext<'_>,
     ) -> RuntimeEvent {
+        // The time the site issued the event, unless the host gives one.
+        let issued = site
+            .timestamp_arg
+            .then(|| args.last().and_then(|time| time.values.first().copied()))
+            .flatten();
+        let ctx = RuntimeFormatContext {
+            tb_time: ctx.tb_time.or(issued),
+            ..ctx
+        };
         let message = render_runtime_event_message(site, args, ctx);
         match site.kind {
             RuntimeEventKind::Display => RuntimeEvent::Display { message },
@@ -1025,6 +1067,7 @@ mod host {
                 &program.runtime_schema.comb_observers,
             );
             let sites = &program.runtime_schema.runtime_event_sites;
+            let timestamped_reports = sites.iter().any(|site| site.timestamp_arg);
             let deferred_sites = if sites.iter().any(|site| site.deferred.is_some()) {
                 sites
                     .iter()
@@ -1084,6 +1127,7 @@ mod host {
                 comb_deferred_groups,
                 timed: false,
                 host_slot_work: !deferred_sites.is_empty() || !sample_shadows.is_empty(),
+                timestamped_reports,
                 sample_shadows,
                 components: Default::default(),
                 component_simulation: None,
@@ -1429,6 +1473,7 @@ mod host {
                         ctx,
                     )
                 })
+                .map(|event| untimed_report(event, self.timed, ctx))
                 .collect()
         }
 
@@ -1715,6 +1760,7 @@ mod host {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .ok()?;
             Some(RuntimeEventDrain {
+                timed: self.timed,
                 buffer,
                 layout: self.backend.layout().clone(),
                 sites: self.program.runtime_schema.runtime_event_sites.clone(),

@@ -570,6 +570,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             location: None,
             assertion: None,
             deferred: Some(DeferredSite::FlushPoint),
+            timestamp_arg: false,
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),
@@ -3761,6 +3762,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
             }
         }
+        // A report carries the time it is issued at (IEEE 1800-2023 20.10).
+        let timestamp_arg = matches!(kind, SystemTaskKind::Message(_) | SystemTaskKind::Fatal);
+        if timestamp_arg {
+            let time = sv::ir::Expr::Ident(self.m.time_slot());
+            let reg = self.eval(&time, None)?;
+            arg_widths.push(self.b.register(&reg).width());
+            arg_signed.push(false);
+            arg_is_string.push(false);
+            arg_float_precision.push(None);
+            arg_is_handle.push(false);
+            regs.push(reg);
+        }
         // Argument effects happen before branching, and the condition register
         // retains the value it had before those effects.
         let resume = match assertion {
@@ -3794,6 +3807,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             location: report_location(site),
             assertion: assertion_site.cloned(),
             deferred,
+            timestamp_arg,
             arg_widths,
             arg_signed,
             arg_is_string,
