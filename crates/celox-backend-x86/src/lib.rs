@@ -59,9 +59,23 @@ pub struct X86BackendOptions {
     pub native_tick_loop: bool,
     /// Physical state offset where the function's private spill, scratch,
     /// and save arena begins. `None` places it directly after the semantic
-    /// state. Functions that may run concurrently need disjoint arenas.
+    /// state. Functions that may run concurrently or call generated kernels
+    /// need disjoint arenas. Kernel callers must reserve at least every
+    /// callee's complete `required_state_size`; use `with_native_callees`.
     pub arena_base: Option<usize>,
     pub diagnostics: NativeDiagnostics,
+}
+
+impl X86BackendOptions {
+    /// Place this function's private arena above all generated callees.
+    /// Sizes must be their complete emitted `required_state_size`, including
+    /// reservations for nested callees, rather than the semantic state size.
+    pub fn with_native_callees(mut self, sizes: impl IntoIterator<Item = usize>) -> Self {
+        if let Some(end) = sizes.into_iter().max() {
+            self.arena_base = Some(self.arena_base.map_or(end, |base| base.max(end)));
+        }
+        self
+    }
 }
 
 impl Default for X86BackendOptions {
