@@ -937,3 +937,8 @@ sv_backends! {
     fn constrained_randomize_inside(sim) { @case "class::constrained_randomize_inside"; }
     fn constrained_randomize_inside_widths(sim) { @case "class::constrained_randomize_inside_widths"; }
 }
+
+sv_backends! {
+    fn constrained_randomize_conditionals(sim) { @case "class::constrained_randomize_conditionals"; }
+    fn constrained_randomize_nested_guards(sim) { @case "class::constrained_randomize_nested_guards"; }
+}
