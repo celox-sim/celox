@@ -1,1 +1,1 @@
-Rebase class-container support onto updated master and retain merged ordering support
+Restore the original Change-Id and PR #2278 after a commit-message trailer mistake
