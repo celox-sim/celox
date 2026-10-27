@@ -1,0 +1,433 @@
+{
+  "standard": "IEEE 1800-2023 9.4.2.3, 6.21, 9.3.2",
+  "xezim_build": "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+  "xezim_limitation": "Available installed 0.11.3 build, git unknown. Current flake pin 270b39de cannot build because its dependency lock does not provide the requested xezim-core revision. No claim of current-pin validation.",
+  "probes": [
+    {
+      "case": "timing::iff_conditions_preserve_cross_module_combinational_order",
+      "source": "iff_conditions_preserve_cross_module_combinational_order.sv",
+      "expected_output": "rejected=0 accepted=2",
+      "observations": [
+        {
+          "top": "Top",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "-Wno-fatal",
+              "--top-module",
+              "Top",
+              "--Mdir",
+              "<checkout>/work/iff-probes/iff_conditions_preserve_cross_module_combinational_order-Top/obj",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv"
+            ],
+            "exit_code": 0,
+            "output": ""
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Top",
+              "-o",
+              "<checkout>/work/iff-probes/iff_conditions_preserve_cross_module_combinational_order-Top/probe.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv"
+            ],
+            "exit_code": 6,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv:13: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv:13: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv:13: error: Invalid event control.\n<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv:14: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv:14: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv:14: error: Invalid event control.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Top",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nrejected=2 accepted=2\nSimulation finished at time 4 ($finish called)\n"
+          },
+          "verilator_run": {
+            "command": [
+              "<checkout>/work/iff-probes/iff_conditions_preserve_cross_module_combinational_order-Top/obj/VTop"
+            ],
+            "exit_code": 0,
+            "output": "rejected=2 accepted=2\n- <checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv:16: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ps; walltime 0.000 s; speed 118.078 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+          }
+        },
+        {
+          "top": "Wrapped",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "-Wno-fatal",
+              "--top-module",
+              "Wrapped",
+              "--Mdir",
+              "<checkout>/work/iff-probes/iff_conditions_preserve_cross_module_combinational_order-Wrapped/obj",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv"
+            ],
+            "exit_code": 0,
+            "output": ""
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Wrapped",
+              "-o",
+              "<checkout>/work/iff-probes/iff_conditions_preserve_cross_module_combinational_order-Wrapped/probe.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv"
+            ],
+            "exit_code": 6,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv:13: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv:13: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv:13: error: Invalid event control.\n<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv:14: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv:14: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv:14: error: Invalid event control.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Wrapped",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nrejected=2 accepted=2\nSimulation finished at time 4 ($finish called)\n"
+          },
+          "verilator_run": {
+            "command": [
+              "<checkout>/work/iff-probes/iff_conditions_preserve_cross_module_combinational_order-Wrapped/obj/VWrapped"
+            ],
+            "exit_code": 0,
+            "output": "rejected=2 accepted=2\n- <checkout>/crates/celox-test-suite/verification/repros/iff_conditions_preserve_cross_module_combinational_order.sv:16: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ps; walltime 0.000 s; speed 73.031 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+          }
+        }
+      ]
+    },
+    {
+      "case": "timing::iff_forked_automatic_gates_are_separate",
+      "source": "iff_forked_automatic_gates_are_separate.sv",
+      "expected_output": "allowed=1 blocked=0",
+      "observations": [
+        {
+          "top": "Top",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "-Wno-fatal",
+              "--top-module",
+              "Top",
+              "--Mdir",
+              "<checkout>/work/iff-probes/iff_forked_automatic_gates_are_separate-Top/obj",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_forked_automatic_gates_are_separate.sv"
+            ],
+            "exit_code": 0,
+            "output": ""
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Top",
+              "-o",
+              "<checkout>/work/iff-probes/iff_forked_automatic_gates_are_separate-Top/probe.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_forked_automatic_gates_are_separate.sv"
+            ],
+            "exit_code": 3,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/iff_forked_automatic_gates_are_separate.sv:4: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_forked_automatic_gates_are_separate.sv:4: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_forked_automatic_gates_are_separate.sv:4: error: Invalid event control.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Top",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_forked_automatic_gates_are_separate.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nallowed=1 blocked=0\nSimulation finished at time 4 ($finish called)\n"
+          },
+          "verilator_run": {
+            "command": [
+              "<checkout>/work/iff-probes/iff_forked_automatic_gates_are_separate-Top/obj/VTop"
+            ],
+            "exit_code": 0,
+            "output": "allowed=1 blocked=0\n- <checkout>/crates/celox-test-suite/verification/repros/iff_forked_automatic_gates_are_separate.sv:9: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ps; walltime 0.000 s; speed 142.980 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+          }
+        },
+        {
+          "top": "Wrapped",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "-Wno-fatal",
+              "--top-module",
+              "Wrapped",
+              "--Mdir",
+              "<checkout>/work/iff-probes/iff_forked_automatic_gates_are_separate-Wrapped/obj",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_forked_automatic_gates_are_separate.sv"
+            ],
+            "exit_code": 0,
+            "output": ""
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Wrapped",
+              "-o",
+              "<checkout>/work/iff-probes/iff_forked_automatic_gates_are_separate-Wrapped/probe.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_forked_automatic_gates_are_separate.sv"
+            ],
+            "exit_code": 3,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/iff_forked_automatic_gates_are_separate.sv:4: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_forked_automatic_gates_are_separate.sv:4: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_forked_automatic_gates_are_separate.sv:4: error: Invalid event control.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Wrapped",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_forked_automatic_gates_are_separate.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nallowed=1 blocked=0\nSimulation finished at time 4 ($finish called)\n"
+          },
+          "verilator_run": {
+            "command": [
+              "<checkout>/work/iff-probes/iff_forked_automatic_gates_are_separate-Wrapped/obj/VWrapped"
+            ],
+            "exit_code": 0,
+            "output": "allowed=1 blocked=0\n- <checkout>/crates/celox-test-suite/verification/repros/iff_forked_automatic_gates_are_separate.sv:9: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ps; walltime 0.000 s; speed 130.170 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+          }
+        }
+      ]
+    },
+    {
+      "case": "timing::iff_shared_automatic_gate_uses_edge_time_value",
+      "source": "iff_shared_automatic_gate_uses_edge_time_value.sv",
+      "expected_output": "accepted=1 rejected=0",
+      "observations": [
+        {
+          "top": "Top",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "-Wno-fatal",
+              "--top-module",
+              "Top",
+              "--Mdir",
+              "<checkout>/work/iff-probes/iff_shared_automatic_gate_uses_edge_time_value-Top/obj",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv"
+            ],
+            "exit_code": 1,
+            "output": "%Error-LIFETIME: <checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:8:24: Invalid reference: Process might outlive variable 'enable'.\n                                                                                                                                                                                                   : ... note: In instance 'Top'\n                                                                                                                                                                                                   : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    8 |      begin #1 first=1; enable=0; second=1; end\n      |                        ^~~~~~\n                 ... For error description see https://verilator.org/warn/LIFETIME?v=5.052\n%Error: Exiting due to 1 error(s)\n"
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Top",
+              "-o",
+              "<checkout>/work/iff-probes/iff_shared_automatic_gate_uses_edge_time_value-Top/probe.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv"
+            ],
+            "exit_code": 7,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:4: sorry: Overriding the default variable lifetime is not yet supported.\n<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:6: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:6: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:6: error: Invalid event control.\n<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:7: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:7: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:7: error: Invalid event control.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Top",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\naccepted=1 rejected=1\nSimulation finished at time 4 ($finish called)\n"
+          }
+        },
+        {
+          "top": "Wrapped",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "-Wno-fatal",
+              "--top-module",
+              "Wrapped",
+              "--Mdir",
+              "<checkout>/work/iff-probes/iff_shared_automatic_gate_uses_edge_time_value-Wrapped/obj",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv"
+            ],
+            "exit_code": 1,
+            "output": "%Warning-PINMISSING: <checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:14:21: Instance has missing pin: 'accepted'\n   14 | module Wrapped; Top dut(); endmodule\n      |                     ^~~\n                     <checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:1:23: ... Location of port declaration\n    1 | module Top(output int accepted, rejected);\n      |                       ^~~~~~~~\n                     ... For warning description see https://verilator.org/warn/PINMISSING?v=5.052\n                     ... Use \"/* verilator lint_off PINMISSING */\" and lint_on around source to disable this message.\n%Warning-PINMISSING: <checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:14:21: Instance has missing pin: 'rejected'\n   14 | module Wrapped; Top dut(); endmodule\n      |                     ^~~\n                     <checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:1:33: ... Location of port declaration\n    1 | module Top(output int accepted, rejected);\n      |                                 ^~~~~~~~\n%Error-LIFETIME: <checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:8:24: Invalid reference: Process might outlive variable 'enable'.\n                                                                                                                                                                                                   : ... note: In instance 'Wrapped.dut'\n                                                                                                                                                                                                   : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    8 |      begin #1 first=1; enable=0; second=1; end\n      |                        ^~~~~~\n                 ... For error description see https://verilator.org/warn/LIFETIME?v=5.052\n%Error: Exiting due to 1 error(s)\n"
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Wrapped",
+              "-o",
+              "<checkout>/work/iff-probes/iff_shared_automatic_gate_uses_edge_time_value-Wrapped/probe.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv"
+            ],
+            "exit_code": 7,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:4: sorry: Overriding the default variable lifetime is not yet supported.\n<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:6: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:6: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:6: error: Invalid event control.\n<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:7: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:7: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv:7: error: Invalid event control.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Wrapped",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_shared_automatic_gate_uses_edge_time_value.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\naccepted=1 rejected=1\nSimulation finished at time 4 ($finish called)\n"
+          }
+        }
+      ]
+    },
+    {
+      "name": "write_order",
+      "source": "module Top;\n  bit clk, en;\n  int n;\n  initial forever begin @(posedge clk iff en); n++; end\n  initial begin\n    #1 en = 1;\n    #1 clk = 1; en = 0;\n    #1 clk = 0;\n    #1 en = 1;\n    #1 en = 0; clk = 1;\n    #1 clk = 0; en = 1;\n    #1 $display(\"n=%0d\", n);\n    $finish;\n  end\nendmodule\n",
+      "xezim_run": {
+        "command": [
+          "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+          "-s",
+          "Top",
+          "<checkout>/work/iff-probes/write_order.sv"
+        ],
+        "exit_code": 0,
+        "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nn=0\nSimulation finished at time 7 ($finish called)\n"
+      }
+    },
+    {
+      "name": "nonblocking_order",
+      "source": "module Top;\n  bit clk, en;\n  int n;\n  initial forever begin @(posedge clk iff en); n++; end\n  initial begin\n    #1 en <= 1; clk <= 1;\n    #1 clk <= 0;\n    #1 en <= 0; clk <= 1;\n    #1 clk <= 0; en <= 1;\n    #1 clk <= 1; en <= 0;\n    #1 $display(\"n=%0d\", n);\n    $finish;\n  end\nendmodule\n",
+      "xezim_run": {
+        "command": [
+          "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+          "-s",
+          "Top",
+          "<checkout>/work/iff-probes/nonblocking_order.sv"
+        ],
+        "exit_code": 0,
+        "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nn=1\nSimulation finished at time 6 ($finish called)\n"
+      }
+    },
+    {
+      "name": "combinational_order",
+      "source": "module Top;\n  bit a, clk, en;\n  int n;\n  always_comb begin en = a; clk = a; en = 0; end\n  initial forever begin @(posedge clk iff en); n++; end\n  initial begin\n    #1 a = 1;\n    #1 $display(\"n=%0d\", n);\n    $finish;\n  end\nendmodule\n",
+      "xezim_run": {
+        "command": [
+          "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+          "-s",
+          "Top",
+          "<checkout>/work/iff-probes/combinational_order.sv"
+        ],
+        "exit_code": 0,
+        "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nn=0\nSimulation finished at time 2 ($finish called)\n"
+      }
+    },
+    {
+      "case": "timing::iff_automatic_clock_preserves_enabled_pulses",
+      "source": "iff_automatic_clock_preserves_enabled_pulses.sv",
+      "expected_output": "accepted=1 rejected=0",
+      "observations": [
+        {
+          "top": "Top",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "-Wno-fatal",
+              "--top-module",
+              "Top",
+              "--Mdir",
+              "<checkout>/work/p2-probe-Top",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv"
+            ],
+            "exit_code": 1,
+            "output": "%Error-LIFETIME: <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:8:15: Invalid reference: Process might outlive variable 'clock'.\n                                                                                                                                                                                                 : ... note: In instance 'Top'\n                                                                                                                                                                                                 : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    8 |      begin #1 clock=1; enable=0; clock=0; end\n      |               ^~~~~\n                 ... For error description see https://verilator.org/warn/LIFETIME?v=5.052\n%Error-LIFETIME: <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:8:34: Invalid reference: Process might outlive variable 'clock'.\n                                                                                                                                                                                                 : ... note: In instance 'Top'\n                                                                                                                                                                                                 : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    8 |      begin #1 clock=1; enable=0; clock=0; end\n      |                                  ^~~~~\n%Error: Exiting due to 2 error(s)\n"
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Top",
+              "-o",
+              "<checkout>/work/p2-probe-Top.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv"
+            ],
+            "exit_code": 7,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:4: sorry: Overriding the default variable lifetime is not yet supported.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:6: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:6: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:6: error: Invalid event control.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:7: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:7: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:7: error: Invalid event control.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Top",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\naccepted=1 rejected=1\nSimulation finished at time 4 ($finish called)\n"
+          }
+        },
+        {
+          "top": "Wrapped",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "-Wno-fatal",
+              "--top-module",
+              "Wrapped",
+              "--Mdir",
+              "<checkout>/work/p2-probe-Wrapped",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv"
+            ],
+            "exit_code": 1,
+            "output": "%Warning-PINMISSING: <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:14:21: Instance has missing pin: 'accepted'\n   14 | module Wrapped; Top dut(); endmodule\n      |                     ^~~\n                     <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:1:23: ... Location of port declaration\n    1 | module Top(output int accepted, rejected);\n      |                       ^~~~~~~~\n                     ... For warning description see https://verilator.org/warn/PINMISSING?v=5.052\n                     ... Use \"/* verilator lint_off PINMISSING */\" and lint_on around source to disable this message.\n%Warning-PINMISSING: <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:14:21: Instance has missing pin: 'rejected'\n   14 | module Wrapped; Top dut(); endmodule\n      |                     ^~~\n                     <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:1:33: ... Location of port declaration\n    1 | module Top(output int accepted, rejected);\n      |                                 ^~~~~~~~\n%Error-LIFETIME: <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:8:15: Invalid reference: Process might outlive variable 'clock'.\n                                                                                                                                                                                                 : ... note: In instance 'Wrapped.dut'\n                                                                                                                                                                                                 : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    8 |      begin #1 clock=1; enable=0; clock=0; end\n      |               ^~~~~\n                 ... For error description see https://verilator.org/warn/LIFETIME?v=5.052\n%Error-LIFETIME: <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:8:34: Invalid reference: Process might outlive variable 'clock'.\n                                                                                                                                                                                                 : ... note: In instance 'Wrapped.dut'\n                                                                                                                                                                                                 : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    8 |      begin #1 clock=1; enable=0; clock=0; end\n      |                                  ^~~~~\n%Error: Exiting due to 2 error(s)\n"
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Wrapped",
+              "-o",
+              "<checkout>/work/p2-probe-Wrapped.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv"
+            ],
+            "exit_code": 7,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:4: sorry: Overriding the default variable lifetime is not yet supported.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:6: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:6: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:6: error: Invalid event control.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:7: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:7: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:7: error: Invalid event control.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Wrapped",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\naccepted=1 rejected=1\nSimulation finished at time 4 ($finish called)\n"
+          }
+        }
+      ]
+    }
+  ]
+}

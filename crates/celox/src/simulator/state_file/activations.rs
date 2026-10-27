@@ -184,7 +184,8 @@ impl<B: SimBackend> Simulator<B> {
                     .zip(&waiter.baselines)
                     .any(|((slot, _), baseline)| {
                         let (BaselineRecord::Value { value, mask }
-                        | BaselineRecord::Counter { value, mask, .. }) = baseline;
+                        | BaselineRecord::Counter { value, mask, .. }
+                        | BaselineRecord::Gated { value, mask, .. }) = baseline;
                         nonzero(value, mask)
                             && self
                                 .program

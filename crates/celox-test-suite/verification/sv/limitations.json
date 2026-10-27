@@ -2736,5 +2736,76 @@
         "class::constraint_mode_inheritance"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_iff_event_controls",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_iff_event_controls_icarus.json",
+      "verification/repros/sv_iff_hierarchy_automatic.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::iff_events_occur_only_while_the_condition_holds",
+        "timing::iff_conditions_see_writes_before_the_event",
+        "timing::iff_conditions_apply_to_their_own_items",
+        "timing::iff_conditions_read_automatic_task_arguments",
+        "timing::unknown_iff_conditions_are_false",
+        "timing::plain_always_iff_events_run_as_processes",
+        "timing::iff_conditions_are_judged_before_edge_processes_run",
+        "timing::iff_conditions_are_judged_at_the_write",
+        "timing::iff_conditions_follow_nonblocking_update_order",
+        "timing::iff_conditions_consume_occurrences_while_false",
+        "timing::iff_conditions_follow_combinational_process_order",
+        "timing::iff_conditions_preserve_cross_module_combinational_order",
+        "timing::iff_forked_automatic_gates_are_separate",
+        "timing::iff_shared_automatic_gate_uses_edge_time_value",
+        "timing::iff_automatic_clock_preserves_enabled_pulses"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_iff_late_conditions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. Standalone probes print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. A hierarchical waiter on clk also sees the later en write of a child always_comb (clk=a; en=a), giving rejected=2 instead of 0; reversing those writes correctly gives accepted=2.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_iff_late_conditions_verilator.json",
+      "verification/repros/sv_iff_hierarchy_automatic.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::iff_conditions_are_judged_at_the_write",
+        "timing::iff_conditions_follow_nonblocking_update_order",
+        "timing::iff_conditions_follow_combinational_process_order",
+        "timing::iff_conditions_preserve_cross_module_combinational_order"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_iff_shared_automatic",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects the write to a shared automatic gate or event signal in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_iff_hierarchy_automatic.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::iff_shared_automatic_gate_uses_edge_time_value",
+        "timing::iff_automatic_clock_preserves_enabled_pulses"
+      ]
+    }
   }
 ]

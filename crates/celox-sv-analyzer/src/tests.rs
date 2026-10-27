@@ -3498,10 +3498,6 @@ fn rejects_unimplemented_timing_constructs() {
         ("event e; initial @e;", "named event"),
         ("event e; initial ->e;", "named event"),
         (
-            "logic clk, en; initial @(posedge clk iff en);",
-            "iff-qualified event",
-        ),
-        (
             "logic a, b; initial a = #1 b;",
             "intra-assignment timing control",
         ),
@@ -3524,8 +3520,8 @@ fn rejects_unimplemented_timing_constructs() {
         );
     }
     assert_eq!(
-        AnalyzerError::Unsupported("iff-qualified event".to_string()).tracking_issue(),
-        1444
+        AnalyzerError::Unsupported("iff-qualified always_ff event".to_string()).tracking_issue(),
+        452
     );
 }
 
