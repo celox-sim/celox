@@ -283,3 +283,16 @@ then bring it into `develop`. Only when both branches contain the new CI:
 Rollback restores the saved GitHub `merge_queue` rules and native auto-merge
 setting. Do not revert the expanded PR checks while Mergify can still merge.
 See the [official migration guide](https://docs.mergify.com/migrate/github-merge-queue/).
+
+### Repairing only the crate publisher workflow
+
+If a stable release passed qualification but the publisher workflow has a
+configuration error, merge the workflow fix on master and create a numbered
+`vX.Y.Z-recovery.N` tag there. Dispatch `publish-crates.yml` from that recovery
+tag with `source_tag=vX.Y.Z`. This uses the repaired workflow while packaging
+the original immutable source tag. All package jobs and the qualification check
+use the resolved source SHA; the repair commit does not become package source.
+The existing tag and published versions are never replaced.
+
+If package source must change, use the numbered source recovery procedure in
+CONTRIBUTING.md instead, including full qualification of that new source SHA.
