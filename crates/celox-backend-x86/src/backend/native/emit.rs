@@ -815,6 +815,32 @@ pub fn emit(
     )
 }
 
+/// Emit a caller with disjoint storage above every generated callee's arena.
+/// Pass `required_state_size` from each reachable callee's `EmitResult`;
+/// each callee must itself have been emitted with its own callees' extents.
+/// `state_size` describes the common semantic state, not an arena reservation.
+pub fn emit_with_callees(
+    func: &MFunction,
+    assignment: &AssignmentMap,
+    spill_frame_size: u32,
+    state_size: usize,
+    callee_ends: &[usize],
+) -> Result<EmitResult, EmitError> {
+    verify_emission_inputs(func, assignment, spill_frame_size, false)?;
+    let plan = SsaDestructionPlan::build(func, assignment)?;
+    plan.verify(func, assignment, spill_frame_size)?;
+    emit_planned_with_callees(
+        func,
+        assignment,
+        spill_frame_size,
+        state_size,
+        &plan,
+        false,
+        false,
+        callee_ends,
+    )
+}
+
 /// Direct emitter tests do not carry a complete `MemoryLayout`. Place their
 /// native arena beyond every statically named SimState byte plus a guard so
 /// test-owned sentinel bytes cannot alias prologue/scratch storage.
@@ -845,11 +871,12 @@ pub(crate) fn emit_with_plan(
     assignment: &AssignmentMap,
     spill_frame_size: u32,
     state_size: usize,
+    callee_ends: &[usize],
     plan: &SsaDestructionPlan,
 ) -> Result<EmitResult, EmitError> {
     verify_emission_inputs(func, assignment, spill_frame_size, false)?;
     plan.verify(func, assignment, spill_frame_size)?;
-    emit_planned(
+    emit_planned_with_callees(
         func,
         assignment,
         spill_frame_size,
@@ -857,6 +884,7 @@ pub(crate) fn emit_with_plan(
         plan,
         false,
         false,
+        callee_ends,
     )
 }
 
@@ -865,12 +893,13 @@ fn emit_with_plan_tick_loop(
     assignment: &AssignmentMap,
     spill_frame_size: u32,
     state_size: usize,
+    callee_ends: &[usize],
     plan: &SsaDestructionPlan,
     check_runtime_events: bool,
 ) -> Result<EmitResult, EmitError> {
     verify_emission_inputs(func, assignment, spill_frame_size, true)?;
     plan.verify(func, assignment, spill_frame_size)?;
-    emit_planned(
+    emit_planned_with_callees(
         func,
         assignment,
         spill_frame_size,
@@ -878,6 +907,7 @@ fn emit_with_plan_tick_loop(
         plan,
         true,
         check_runtime_events,
+        callee_ends,
     )
 }
 
@@ -1043,6 +1073,45 @@ fn emit_planned(
     tick_loop: bool,
     check_runtime_events: bool,
 ) -> Result<EmitResult, EmitError> {
+    emit_planned_with_callees(
+        func,
+        assignment,
+        spill_frame_size,
+        state_size,
+        plan,
+        tick_loop,
+        check_runtime_events,
+        &[],
+    )
+}
+
+/// Callee extents include their own recursively reserved callees. The state
+/// pointer stays unchanged; only the caller's private arena is placed above
+/// those complete extents. Merely using the same semantic state size for both
+/// functions is not sufficient to isolate live spills and pinned saves.
+fn emit_planned_with_callees(
+    func: &MFunction,
+    assignment: &AssignmentMap,
+    spill_frame_size: u32,
+    state_size: usize,
+    plan: &SsaDestructionPlan,
+    tick_loop: bool,
+    check_runtime_events: bool,
+    callee_ends: &[usize],
+) -> Result<EmitResult, EmitError> {
+    let has_kernels = func.blocks.iter().flat_map(|b| &b.insts).any(|inst|
+        matches!(inst, MInst::CallExtern { func, .. } if celox_sir::extern_abi::native_kernel_index(*func).is_some()));
+    if has_kernels && (callee_ends.is_empty() || callee_ends.contains(&0)) {
+        return Err(EmitInputError::new(
+            "EMIT.NATIVE_CALLEE_ARENA",
+            None,
+            None,
+            None,
+            "generated kernel calls require the callees' complete required_state_size extents",
+        )
+        .into());
+    }
+    let state_size = callee_ends.iter().copied().fold(state_size, usize::max);
     let mut uses_bmi2 = false;
     let mut uses_avx = false;
     let mut uses_popcnt = false;
@@ -1295,6 +1364,30 @@ fn emit_planned(
                     } else {
                         asm.xor(eax, eax)?;
                         asm.jmp(epilogue_label)?;
+                    }
+                }
+                MInst::CallExtern { func, arg_count }
+                    if celox_sir::extern_abi::native_kernel_index(*func).is_some() =>
+                {
+                    extern_call::emit_call_extern(&mut asm, *func, *arg_count)?;
+                    // The call restored our state base and pinned registers.
+                    // RAX still holds the complete signed callee status.
+                    asm.test(rax, rax)?;
+                    if tick_loop {
+                        let mut success = asm.create_label();
+                        asm.jz(success)?;
+                        // Match ReturnError's completed-tick accounting while
+                        // retaining RAX for the common epilogue.
+                        asm.movq(r10, xmm15)?;
+                        asm.dec(r10)?;
+                        asm.movq(xmm15, r10)?;
+                        asm.jmp(epilogue_label)?;
+                        asm.set_label(&mut success)?;
+                        // A following MIR block may start here; code_asm
+                        // cannot bind two labels to the same instruction.
+                        asm.nop()?;
+                    } else {
+                        asm.jnz(epilogue_label)?;
                     }
                 }
                 MInst::ReturnError { code } => {
