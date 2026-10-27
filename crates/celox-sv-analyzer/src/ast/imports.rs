@@ -123,6 +123,11 @@ impl ScopeImports {
                 if package == "std" && normalize_identifier(&name.spelling) == "randomize" {
                     continue;
                 }
+                // Inline constraint local:: lookup bypasses the receiver class,
+                // not through a package dependency (18.7.1).
+                if package == "local" {
+                    continue;
+                }
                 // `C::name` names a member of class `C` (IEEE 1800-2023 8.23).
                 if visible_class(tree, &package) {
                     continue;

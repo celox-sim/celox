@@ -649,8 +649,8 @@ chapter-18/18.7--in-line-constraints--randomize_5.sv	2state	fail
 chapter-18/18.7--in-line-constraints--randomize_5.sv	4state	fail
 chapter-18/18.7--in-line-constraints--randomize_6.sv	2state	fail
 chapter-18/18.7--in-line-constraints--randomize_6.sv	4state	fail
-chapter-18/18.7.1--local-scope-resolution_0.sv	2state	fail
-chapter-18/18.7.1--local-scope-resolution_0.sv	4state	fail
+chapter-18/18.7.1--local-scope-resolution_0.sv	2state	pass
+chapter-18/18.7.1--local-scope-resolution_0.sv	4state	pass
 chapter-18/18.7.1--local-scope-resolution_1.sv	2state	fail
 chapter-18/18.7.1--local-scope-resolution_1.sv	4state	fail
 chapter-18/18.8--disabling-random-variables-with-rand_mode_0.sv	2state	fail

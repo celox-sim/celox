@@ -955,12 +955,96 @@ pub(super) fn randomize_with(
     let class = class(tree, dimensions, owner)?;
     // Inline constraints need the solver even on otherwise unconstrained classes.
     class.constraint_program()?;
-    let constraints = constraints
-        .ok_or_else(|| unsupported("inline constraint form"))?
+    let constraint_ids = constraints.ok_or_else(|| unsupported("inline constraint form"))?;
+    let mut inputs = HashMap::default();
+    let mut input_types = Vec::new();
+    let mut input_values = Vec::new();
+    let mut pending = constraint_ids.to_vec();
+    while let Some(id) = pending.pop() {
+        let candidate = match &native.expression(id).kind {
+            ExprKind::Name(name) => {
+                let name = instances::normalize_identifier(&name.spelling);
+                if class.properties.iter().any(|p| p.name == name) {
+                    None
+                } else if class.statics.iter().any(|p| p.name == name) {
+                    return Err(unsupported("static properties in inline constraints"));
+                } else {
+                    Some((name.clone(), name))
+                }
+            }
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "::"
+                && matches!(&native.expression(*expression).kind, ExprKind::Name(root) if root.spelling == "local") =>
+            {
+                let name = instances::normalize_identifier(&name.spelling);
+                Some((format!("local::{name}"), name))
+            }
+            ExprKind::Group(id) | ExprKind::Unary { expression: id, .. } => {
+                pending.push(*id);
+                None
+            }
+            ExprKind::Binary { left, right, .. } => {
+                pending.extend([*right, *left]);
+                None
+            }
+            ExprKind::Set(items) => {
+                for item in items {
+                    match item.kind {
+                        celox_sv_syntax::DimensionKind::Index(id) => pending.push(id),
+                        celox_sv_syntax::DimensionKind::Range { left, right } => {
+                            pending.extend([right, left])
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            _ => None,
+        };
+        let Some((key, name)) = candidate else {
+            continue;
+        };
+        if inputs.contains_key(&key) {
+            continue;
+        }
+        let variable = dimensions
+            .get(&name)
+            .ok_or_else(|| unsupported(format!("inline local variable `{name}`")))?;
+        if variable.real
+            || variable.string
+            || variable.class.is_some()
+            || variable.container.is_some()
+            || !variable.unpacked.is_empty()
+            || !variable.is_2state
+        {
+            return Err(unsupported(
+                "inline inputs require two-state scalar variables",
+            ));
+        }
+        let value = Expr::Ident(name);
+        let width = expr_static_width(&tree.state, &value, dimensions)
+            .filter(|width| (1..=64).contains(width))
+            .ok_or_else(|| unsupported("inline input width"))?;
+        let mut ty = classes::unsigned_type(width);
+        ty.is_signed = variable.signed;
+        inputs.insert(key, (input_types.len(), width as u32, variable.signed));
+        input_types.push(ty);
+        input_values.push(Some(value));
+    }
+    let constraints = constraint_ids
         .iter()
         .map(|&id| {
-            classes::constraints::bind(id, tree, &class.properties, &dimensions.const_env)
-                .map_err(|reason| unsupported(format!("inline constraints: {reason}")))
+            classes::constraints::bind_inputs(
+                id,
+                tree,
+                &class.properties,
+                &dimensions.const_env,
+                &inputs,
+            )
+            .map_err(|reason| unsupported(format!("inline constraints: {reason}")))
         })
         .collect::<Converted<Vec<_>>>()?;
     let selection = random_selection(tree, dimensions, &method_name, arguments, native)?;
@@ -975,13 +1059,25 @@ pub(super) fn randomize_with(
         key,
         class,
         constraints,
+        inputs: input_types,
         dimensions: dimensions.clone(),
     };
     let name = inline.name(owner);
+    // Argument evaluation is left-to-right. Prepare the receiver and run its
+    // pre-hook before sampling any caller-scope input. Evaluate the receiver once.
+    let handle = if input_values.is_empty() {
+        handle
+    } else {
+        Expr::Call {
+            callee: Callee::Subroutine(inline.prepare_name(owner)),
+            args: vec![Some(handle), Some(selection.clone())],
+            arg_order: Vec::new(),
+        }
+    };
     tree.state.inline_randomizations.borrow_mut().push(inline);
     Ok(Expr::Call {
         callee: Callee::Subroutine(name),
-        args: vec![Some(handle), Some(selection)],
+        args: [vec![Some(handle), Some(selection)], input_values].concat(),
         arg_order: Vec::new(),
     })
 }
