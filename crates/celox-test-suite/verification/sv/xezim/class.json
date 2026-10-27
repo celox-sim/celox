@@ -145,6 +145,28 @@
     },
     {
       "category": "Types",
+      "detail": "class::imported_member_type_dimensions at 2600:27: assert_eq sum: expected 0x21e, got 0x2",
+      "expectation": "Simulation",
+      "name": "class::imported_member_type_dimensions",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::imported_member_type_inheritance at 2640:27: assert_eq sum: expected 0xa5, got 0x1d",
+      "expectation": "Simulation",
+      "name": "class::imported_member_type_inheritance",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::inherited_methods_of_extended_interface_classes",

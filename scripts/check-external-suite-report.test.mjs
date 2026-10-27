@@ -285,6 +285,8 @@ test("every retained baseline accepts only its existing failures", () => {
           result.accepted_failures,
           tool === "icarus"
             ? [
+                "class::imported_member_type_dimensions",
+                "class::imported_member_type_inheritance",
                 "class::type_alias_lexical_scopes",
                 "class::type_alias_members",
                 "class::type_parameter_imports",

@@ -6915,6 +6915,84 @@ fn class_visibility_rejects_inaccessible_members() {
 }
 
 #[test]
+fn imported_class_member_types_keep_declaration_dimensions() {
+    let package = r#"
+        package p;
+            class Box #(int N = 5);
+                typedef bit [N-1:0] element_t;
+            endclass
+            typedef Box#() Small;
+            typedef Box#(9) Wide;
+        endpackage
+    "#;
+    let packages = analyze_packages(&[(package, Path::new("member-types-package.sv"))]).unwrap();
+    let ir = analyze_source_module_with_packages(
+        r#"
+        module Top import p::*; #(parameter int N = 29) (
+            input Small::element_t sample, input Wide::element_t other,
+            output bit done
+        );
+            assign done = $bits(sample) == 5 && $bits(other) == 9;
+        endmodule
+        "#,
+        Path::new("member-types-top.sv"),
+        "Top",
+        &HashMap::default(),
+        &packages,
+    )
+    .expect("imported class typedefs must retain their declaration's dimensions");
+    let top = ir
+        .modules()
+        .iter()
+        .find(|module| module.name() == "Top")
+        .unwrap();
+    for (name, expected) in [("sample", 5), ("other", 9)] {
+        let width = top
+            .ports()
+            .iter()
+            .find(|port| port.name() == name)
+            .and_then(|port| port.r#type().resolved_width());
+        assert_eq!(width, Some(expected), "{name}");
+    }
+}
+
+#[test]
+fn imported_class_member_types_preserve_package_qualifier_precedence() {
+    analyze_source(
+        r#"
+        package p; typedef bit [4:0] word_t; endpackage
+        package q; typedef byte p; endpackage
+        package r; typedef int p; endpackage
+        module Top import q::*; import r::*; (input p::word_t value, output bit done);
+            assign done = $bits(value) == 5;
+        endmodule
+        "#,
+        Path::new("package-qualifier-before-wildcards.sv"),
+    )
+    .expect("a package qualifier must not bind ambiguous wildcard type names");
+}
+
+#[test]
+fn imported_class_member_types_do_not_export_package_locals() {
+    let error = analyze_source(
+        r#"
+        package p;
+            typedef bit [3:0] Hidden;
+            class Item; typedef bit [7:0] Public; endclass
+        endpackage
+        module Top(output int sum);
+            import p::Item;
+            Item::Hidden sample;
+            initial sum = sample;
+        endmodule
+        "#,
+        Path::new("imported-class-private-scope.sv"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("Hidden"), "{error}");
+}
+
+#[test]
 fn class_type_parameter_qualifiers_are_not_package_dependencies() {
     for body in [
         "static function int get(); return TYPE::value; endfunction",
