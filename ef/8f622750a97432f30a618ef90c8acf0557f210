@@ -1,1 +1,1 @@
-Address review 5663030403: preserve case-wide comparison context and unknown membership results; sync merged lower PRs before final validation.
+Fix review 5663030403 after syncing merged #2231-#2234: normalize case-wide types, preserve membership X, and verify constant/local initialization and default-stack recursion.
