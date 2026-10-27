@@ -359,6 +359,19 @@ Lydite has its own test cadence (`scripts/ci-lydite-changes.mjs`):
   excludes them, and fails on selected-job failures or cancellations. Repository
   branch protection must require this check to make it a merge gate.
 
+Ordinary PRs normally execute native serial Rust tests. Cranelift, Wasm and
+parallel variants, their dedicated test binaries and backend-crate tests are
+excluded from execution unless the diff directly names the relevant backend
+or parallel/scheduler implementation or tests. Cargo manifests/lockfiles,
+Cargo configuration, toolchain changes and unknown diffs retain every lane.
+Use `ci:full` for a change that needs the complete backend matrix. Daily,
+manual full and release qualification runs retain all variants. The same
+execution policy applies to scoped PR tests, workspace fallback and bounded
+merge-queue tests. Test compilation and lint features remain unchanged because
+shared integration binaries currently require the optional backend features.
+This policy concerns Rust tests; NAPI/WASI and browser integration retain their
+separate existing selection rules.
+
 Ordinary PRs also scope Rust compilation and execution:
 
 - Library changes select the crate and its transitive consumers. Backend and
