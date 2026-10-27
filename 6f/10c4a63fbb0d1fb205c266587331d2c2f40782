@@ -1,0 +1,6 @@
+Revision history for #2276:
+
+rev 2 (content) 2026-10-27 13:42 UTC — Accept the 16 positive parsing improvements confirmed by the full sv-tests CI artifact; no other verdict changes.
+rev 1 (initial) 2026-10-27 13:42 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2276,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"3dd0603a7392eb15e5512497d19f708c5a2262a4","timestamp_iso":"2026-10-27T13:42:29Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"3dd0603a7392eb15e5512497d19f708c5a2262a4","new_sha":"65ec09567a8b97a3e4ea61b5656c85b10a9b845d","timestamp_iso":"2026-10-27T13:42:29Z","reason":"Accept the 16 positive parsing improvements confirmed by the full sv-tests CI artifact; no other verdict changes.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/3dd0603a7392eb15e5512497d19f708c5a2262a4...65ec09567a8b97a3e4ea61b5656c85b10a9b845d"}]} -->
