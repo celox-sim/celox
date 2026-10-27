@@ -122,6 +122,10 @@ pub(super) fn revision(state: &State) -> &generate::Revision {
     &state.revision
 }
 
+pub(super) fn analysis_options(state: &State) -> crate::AnalysisOptions {
+    state.design.borrow().design.options
+}
+
 pub(super) fn with_interface_instance<T>(
     state: &State,
     name: &str,
