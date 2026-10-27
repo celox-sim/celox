@@ -6636,7 +6636,7 @@ fn class_randomize_rejects_unsupported_semantics() {
         ),
         (
             "rand int x;",
-            "c.randomize() with { x == 1; }",
+            "c.randomize() with { outside == 1; }",
             "unsupported",
         ),
         ("rand int x;", "c.randomize(x + 1)", "arguments"),
@@ -7359,4 +7359,18 @@ fn class_randomize_bounds_nested_membership_expansion() {
             );
         }
     }
+}
+
+#[test]
+fn class_inline_randomize_retains_call_specific_constraints() {
+    let source = r#"module Top;
+        class C; rand int x; constraint c { x < 10; } endclass
+        C obj;
+        initial begin
+            obj = new;
+            if (!(obj.randomize() with { x == 2; })) $fatal;
+            obj.randomize() with { x == 3; };
+        end
+    endmodule"#;
+    analyze_source(source, Path::new("inline_randomize.sv")).unwrap();
 }

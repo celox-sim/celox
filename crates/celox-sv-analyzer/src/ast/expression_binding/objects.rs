@@ -933,3 +933,55 @@ fn check_random_access(
         property.protected,
     )
 }
+
+pub(super) fn randomize_with(
+    tree: &AnalysisContext<'_>,
+    expression: ExprId,
+    constraints: Option<&[ExprId]>,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Expr> {
+    let (callee, arguments) = match &native.expression(ungroup(expression, native)).kind {
+        ExprKind::Call {
+            expression,
+            arguments,
+        } => (*expression, arguments.as_slice()),
+        _ => (expression, &[][..]),
+    };
+    let (method_name, _, receiver) = method(tree, callee, native, dimensions)?
+        .filter(|(name, _, _)| name.ends_with("::randomize"))
+        .ok_or_else(|| unsupported("inline constraints require class randomize"))?;
+    let owner = method_name.strip_suffix("::randomize").unwrap();
+    let class = class(tree, dimensions, owner)?;
+    // Inline constraints need the solver even on otherwise unconstrained classes.
+    class.constraint_program()?;
+    let constraints = constraints
+        .ok_or_else(|| unsupported("inline constraint form"))?
+        .iter()
+        .map(|&id| {
+            classes::constraints::bind(id, tree, &class.properties, &dimensions.const_env)
+                .map_err(|reason| unsupported(format!("inline constraints: {reason}")))
+        })
+        .collect::<Converted<Vec<_>>>()?;
+    let selection = random_selection(tree, dimensions, &method_name, arguments, native)?;
+    let handle = match receiver {
+        Receiver::Handle(id) => bind_value(id, native, tree, dimensions, None)?,
+        Receiver::This => this(),
+        Receiver::Static => return Err(unsupported("inline randomize object receiver")),
+    };
+    let key = tree.state.next_call_site.get();
+    tree.state.next_call_site.set(key + 1);
+    let inline = classes::constraints::Inline {
+        key,
+        class,
+        constraints,
+        dimensions: dimensions.clone(),
+    };
+    let name = inline.name(owner);
+    tree.state.inline_randomizations.borrow_mut().push(inline);
+    Ok(Expr::Call {
+        callee: Callee::Subroutine(name),
+        args: vec![Some(handle), Some(selection)],
+        arg_order: Vec::new(),
+    })
+}
