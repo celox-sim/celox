@@ -865,6 +865,19 @@ pub(crate) fn promote_eval_apply_working_round_trips_with_mode(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     two_state: bool,
 ) -> bool {
+    if eu
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .any(|inst| {
+            matches!(inst, SIRInstruction::ExternCall { func, .. }
+            if celox_sir::extern_abi::native_kernel_index(*func).is_some())
+        })
+    {
+        // The callee can consume pending values or publish working state.
+        // Keep this function's memory form until StateSSA models that callee.
+        return false;
+    }
     let Ok(cfg) = SirCfg::analyze(eu) else {
         return false;
     };
