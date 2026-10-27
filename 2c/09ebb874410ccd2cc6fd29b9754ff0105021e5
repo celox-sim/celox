@@ -1,1 +1,7 @@
-Resolve conflicts with merged parser qualifier and constraint_mode updates before requeuing the existing container PR
+Revision history for #2278:
+
+rev 3 (content) 2026-10-27 14:34 UTC — Resolve conflicts with merged parser qualifier and constraint_mode updates before requeuing the existing container PR
+rev 2 (content) 2026-10-27 13:33 UTC — Restore the original Change-Id and PR #2278 after a commit-message trailer mistake
+rev 1 (initial) 2026-10-27 13:33 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2278,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"30d24273137ca19a08fe28759ec14e49a677632f","timestamp_iso":"2026-10-27T13:33:52Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"30d24273137ca19a08fe28759ec14e49a677632f","new_sha":"60015a43cdb2de7cdcfa41e50fa757069f224008","timestamp_iso":"2026-10-27T13:33:52Z","reason":"Restore the original Change-Id and PR #2278 after a commit-message trailer mistake","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/30d24273137ca19a08fe28759ec14e49a677632f...60015a43cdb2de7cdcfa41e50fa757069f224008"},{"number":3,"change_type":"content","old_sha":"60015a43cdb2de7cdcfa41e50fa757069f224008","new_sha":"2c09ebb874410ccd2cc6fd29b9754ff0105021e5","timestamp_iso":"2026-10-27T14:34:47Z","reason":"Resolve conflicts with merged parser qualifier and constraint_mode updates before requeuing the existing container PR","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/60015a43cdb2de7cdcfa41e50fa757069f224008...2c09ebb874410ccd2cc6fd29b9754ff0105021e5"}]} -->
