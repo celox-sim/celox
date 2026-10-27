@@ -1,0 +1,1 @@
+Preserve null-initialized two-state process fields during four-state class integration; add checkpoint regression and record synchronization validation.
