@@ -16,6 +16,8 @@ pub(crate) struct Object {
     class: u32,
     random_state: u64,
     random_modes: RandomModes,
+    constraint_default: bool,
+    constraint_modes: fxhash::FxHashMap<u32, bool>,
     saved_random_modes: Vec<RandomModes>,
     /// Remaining domain indices for each randc property, keyed by byte offset.
     random_cycles: fxhash::FxHashMap<u32, Vec<u16>>,
@@ -90,6 +92,8 @@ impl Heap {
                 class,
                 random_state: 0,
                 random_modes: RandomModes::default(),
+                constraint_default: true,
+                constraint_modes: Default::default(),
                 saved_random_modes: Vec::new(),
                 random_cycles: Default::default(),
                 bytes: vec![0; size].into(),
@@ -98,6 +102,28 @@ impl Heap {
         );
         self.created += 1;
         handle
+    }
+
+    /// Persistent per-object constraint modes (IEEE 1800-2023 18.9).
+    pub fn constraint_mode(&mut self, handle: Handle, index: u32) -> bool {
+        self.object_mut(handle).is_some_and(|object| {
+            object
+                .constraint_modes
+                .get(&index)
+                .copied()
+                .unwrap_or(object.constraint_default)
+        })
+    }
+
+    pub fn set_constraint_mode(&mut self, handle: Handle, index: Option<u32>, enabled: bool) {
+        if let Some(object) = self.object_mut(handle) {
+            if let Some(index) = index {
+                object.constraint_modes.insert(index, enabled);
+            } else {
+                object.constraint_modes.clear();
+                object.constraint_default = enabled;
+            }
+        }
     }
 
     /// Seed an object's independent random stream (IEEE 1800-2023 18.13.3).
@@ -317,6 +343,32 @@ mod tests {
         assert_eq!(heap.take_fault(), Some(Fault::NullDereference));
         assert_eq!(heap.take_fault(), None);
         assert_eq!(heap.class_of(NULL), 0);
+    }
+
+    #[test]
+    fn constraint_modes_are_object_state_and_do_not_follow_random_mode_scopes() {
+        let mut heap = Heap::new();
+        let handle = heap.new_object(1, 4);
+        assert!(heap.constraint_mode(handle, 0));
+        let original = heap.clone();
+        heap.set_constraint_mode(handle, None, false);
+        heap.set_constraint_mode(handle, Some(1), true);
+        assert!(!heap.same_contents(&original));
+        heap.push_random_modes(handle);
+        heap.set_constraint_mode(handle, Some(0), true);
+        heap.pop_random_modes(handle);
+        assert!(heap.constraint_mode(handle, 0));
+        assert!(heap.constraint_mode(handle, 1));
+        assert!(!heap.constraint_mode(handle, 2));
+        let bytes = serde_json::to_vec(&heap.objects[&handle]).unwrap();
+        let restored: Object = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored, heap.objects[&handle]);
+        let copy = heap.copy_object(handle);
+        heap.set_constraint_mode(copy, None, true);
+        assert!(heap.constraint_mode(copy, 2));
+        assert!(!heap.constraint_mode(handle, 2));
+        assert!(!heap.constraint_mode(NULL, 0));
+        assert_eq!(heap.take_fault(), Some(Fault::NullDereference));
     }
 
     #[test]

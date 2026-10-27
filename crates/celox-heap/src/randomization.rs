@@ -14,6 +14,11 @@ pub struct Field {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Expr {
+    /// Top-level named block predicate; inline predicates remain unconditional.
+    Enabled {
+        index: u32,
+        value: Box<Expr>,
+    },
     Literal(u32, u64),
     Field(usize),
     /// Read-only scalar supplied by this call, never a solver variable.
@@ -57,6 +62,7 @@ fn boolean(value: Term) -> Term {
 impl Expr {
     fn term(&self, fields: &[Term], inputs: &[u64]) -> Result<Term, String> {
         Ok(match self {
+            Self::Enabled { .. } => return Err("nested constraint mode predicate".into()),
             Self::Literal(width, value) => bv(*width, *value),
             Self::Input { index, width } => {
                 if !(1..=64).contains(width) {
@@ -221,6 +227,14 @@ impl Heap {
                 terms.push(term);
             }
             for constraint in &program.constraints {
+                let constraint = if let Expr::Enabled { index, value } = constraint {
+                    if !self.constraint_mode(handle, *index) {
+                        continue;
+                    }
+                    value.as_ref()
+                } else {
+                    constraint
+                };
                 formula = and(formula, truth(constraint.term(&terms, inputs)?));
             }
             let seed = if projection.is_empty() {

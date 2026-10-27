@@ -222,6 +222,17 @@ properties and skips the post-hook (18.6.3). Resource exhaustion is a runtime er
 This initial seeded-search policy does not guarantee a uniform distribution;
 distribution improvements are tracked in [#2187](https://github.com/celox-sim/celox/issues/2187).
 
+`object.block.constraint_mode()` returns the named block's mode as a signed
+`int`; `object.block.constraint_mode(bit)` changes it. The void setter
+`object.constraint_mode(bit)` changes every constraint of the dynamic object,
+including inherited and overridden blocks. All constraints start enabled.
+Aliases share modes; other objects do not. A pre-hook's mode updates affect the
+current solve and remain installed after success or failure. These modes are
+independent of `rand_mode`, explicit member selection and inline `with`
+predicates, which remain active. Checkpoints preserve modes (18.9, 18.5.2).
+Static/external constraint blocks remain unsupported. Regenerate serialized
+heap/checkpoint images from earlier builds after this heap-layout change.
+
 Set membership (`inside`) supports scalar two-state values and inclusive bounded
 ranges, including expressions of other properties. Reversed ranges are empty;
 negation excludes the set. All operands share the membership-wide width and
@@ -234,7 +245,7 @@ nested blocks. Both sides participate in solving: a required result can constrai
 the condition. These constructs do not choose a branch before solving.
 
 Constrained enums and `randc`, foreach/soft constraints,
-`dist`, `solve before`, constraint modes, external/static blocks and typed
+`dist`, `solve before`, external/static blocks and typed
 parameters in constraints remain unsupported. Larger unconstrained `randc`
 domains, static random properties and random array/object/string properties also
 remain unsupported. Unsupported dynamic subclasses are rejected before draws.

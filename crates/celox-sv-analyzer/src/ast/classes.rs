@@ -778,7 +778,10 @@ pub(super) fn class(
     for method in &declaration.methods {
         let subroutine = native.subroutine(method.subroutine);
         let method_name = instances::normalize_identifier(&subroutine.name.spelling);
-        if matches!(method_name.as_str(), "randomize" | "srandom" | "rand_mode") {
+        if matches!(
+            method_name.as_str(),
+            "randomize" | "srandom" | "rand_mode" | "constraint_mode"
+        ) {
             return Err(unsupported(
                 "overriding built-in class randomization methods",
             ));
@@ -868,7 +871,7 @@ pub(super) fn class(
         .unwrap_or_default();
     for block in &declaration.constraints {
         let block_name = block.name.spelling.clone();
-        constraints.retain(|(name, _)| *name != block_name);
+
         let expressions = block
             .expressions
             .as_ref()
@@ -879,7 +882,12 @@ pub(super) fn class(
                     .map(|&id| constraints::bind(id, tree, &properties, env))
                     .collect()
             });
-        constraints.push((block_name, expressions));
+        // Constraint indices survive overrides, including calls via base handles.
+        if let Some((_, inherited)) = constraints.iter_mut().find(|(name, _)| *name == block_name) {
+            *inherited = expressions;
+        } else {
+            constraints.push((block_name, expressions));
+        }
     }
     let class = Rc::new(Class {
         name: name.to_owned(),

@@ -196,6 +196,72 @@
     },
     {
       "category": "Types",
+      "detail": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_verilator_constraint_mode_override",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_base_dispatch",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "IEEE 1800-2023 18.9 declares constraint_mode(bit on_off). Passing integer 2 converts to bit zero and disables the block. Verilator keeps it enabled; the regression preserves the mode query assertion.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_verilator_constraint_mode_bit_argument",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "IEEE 1800-2023 18.9 declares constraint_mode(bit on_off). Passing integer 2 converts to bit zero and disables the block. Verilator keeps it enabled; the regression preserves the mode query assertion.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_basic",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_verilator_constraint_mode_override",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_inheritance",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::constructors_chain_to_base",

@@ -961,6 +961,8 @@ pub enum ObjectOp {
     Check(u32),
     /// Query or set the random mode of a property at its byte offset.
     ModeGet(u32, bool),
+    ConstraintModeGet(u32),
+    ConstraintModeSet(Option<u32>),
     ModeSet(u32),
     ModePush,
     ModePop,
@@ -992,12 +994,13 @@ impl ObjectOp {
             Self::Randomize(_)
             | Self::Seed
             | Self::Check(_)
+            | Self::ConstraintModeSet(_)
             | Self::ModeSet(_)
             | Self::ModePush
             | Self::ModePop
             | Self::ModeSelect(..)
             | Self::ModeSelected(_) => (32, false),
-            Self::ModeGet(..) => (32, true),
+            Self::ModeGet(..) | Self::ConstraintModeGet(_) => (32, true),
             Self::Load(field) => (field.width as usize, field.signed),
             Self::New { .. } | Self::ClassOf | Self::Store(_) | Self::Copy => (32, false),
         }
@@ -1018,6 +1021,8 @@ impl fmt::Display for ObjectOp {
             Self::Seed => "object random seed",
             Self::Check(_) => "object receiver check",
             Self::ModeGet(..) => "random mode query",
+            Self::ConstraintModeGet(_) => "constraint mode query",
+            Self::ConstraintModeSet(_) => "constraint mode update",
             Self::ModeSet(_) => "random mode update",
             Self::ModePush => "save random modes",
             Self::ModePop => "restore random modes",

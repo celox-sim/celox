@@ -829,6 +829,123 @@ pub(super) fn random_selection(
     )))
 }
 
+/// Constraint block modes are independent of member rand_mode and inline constraints (18.9).
+pub(in crate::ast) fn constraint_mode_call(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+    allow_set: bool,
+) -> Converted<Option<Expr>> {
+    let (callee, args) = match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Call {
+            expression,
+            arguments,
+        } => (*expression, arguments.as_slice()),
+        _ => (id, &[][..]),
+    };
+    let (owner, block, handle) = match &native.expression(ungroup(callee, native)).kind {
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "." && name.spelling == "constraint_mode" => {
+            if let Some(owner) = native_class(tree, *expression, native, dimensions) {
+                (
+                    owner,
+                    None,
+                    receiver(tree, Some(*expression), native, dimensions)?,
+                )
+            } else {
+                match &native.expression(ungroup(*expression, native)).kind {
+                    ExprKind::Member {
+                        expression: object,
+                        separator,
+                        name,
+                    } if separator == "." => {
+                        let Some(owner) = native_class(tree, *object, native, dimensions) else {
+                            return Ok(None);
+                        };
+                        (
+                            owner,
+                            Some(name.spelling.clone()),
+                            receiver(tree, Some(*object), native, dimensions)?,
+                        )
+                    }
+                    ExprKind::Name(name)
+                        if scope_class(dimensions).is_some()
+                            && dimensions.get(THIS).is_some()
+                            && dimensions.get(&name.spelling).is_none() =>
+                    {
+                        (
+                            scope_class(dimensions).unwrap(),
+                            Some(name.spelling.clone()),
+                            this(),
+                        )
+                    }
+                    _ => return Ok(None),
+                }
+            }
+        }
+        ExprKind::Name(name)
+            if name.spelling == "constraint_mode"
+                && dimensions.get("constraint_mode").is_none() =>
+        {
+            let Some(owner) = scope_class(dimensions) else {
+                return Ok(None);
+            };
+            if dimensions.get(THIS).is_none() {
+                return Err(unsupported("constraint_mode requires an object receiver"));
+            }
+            (owner, None, this())
+        }
+        _ => return Ok(None),
+    };
+    let class = class(tree, dimensions, &owner)?;
+    if class.constraints.iter().any(|(_, block)| {
+        block
+            .as_ref()
+            .is_err_and(|reason| reason == "unsupported constraint block form")
+    }) {
+        return Err(unsupported(
+            "constraint_mode for external or static constraint blocks",
+        ));
+    }
+    let index = block
+        .map(|name| {
+            class
+                .constraints
+                .iter()
+                .position(|(block, _)| *block == name)
+                .map(|index| index as u32)
+                .ok_or_else(|| unsupported(format!("unknown constraint block {name}")))
+        })
+        .transpose()?;
+    if args.is_empty() {
+        let index = index
+            .ok_or_else(|| unsupported("constraint_mode getter requires one named constraint"))?;
+        return Ok(Some(classes::object_call(
+            ObjectOp::ConstraintModeGet(index),
+            vec![handle],
+        )));
+    }
+    if !allow_set {
+        return Err(unsupported(
+            "constraint_mode setter is void and cannot be used as a value",
+        ));
+    }
+    if args.len() != 1 || args[0].name.is_some() || args[0].value.is_none() {
+        return Err(unsupported(
+            "constraint_mode setter requires one on_off argument",
+        ));
+    }
+    let enabled = bind_value(args[0].value.unwrap(), native, tree, dimensions, None)?;
+    Ok(Some(classes::object_call(
+        ObjectOp::ConstraintModeSet(index),
+        vec![handle, enabled],
+    )))
+}
+
 /// Bind rand_mode's void setter and integer getter separately (18.8).
 /// A getter requires one random property; only the setter accepts an object.
 pub(in crate::ast) fn rand_mode_call(
