@@ -2589,7 +2589,8 @@
     "evidence": [
       "verification/repros/sv_scalar_constraints.json",
       "LIMITATIONS.md#systemverilog-suite",
-      "verification/repros/sv_inside_constraints.json"
+      "verification/repros/sv_inside_constraints.json",
+      "verification/repros/sv_conditional_constraints.json"
     ],
     "cases": {
       "icarus": [
@@ -2597,7 +2598,9 @@
         "class::constrained_randomize_width_and_inheritance",
         "class::constrained_randomize_hooks",
         "class::constrained_randomize_inside",
-        "class::constrained_randomize_inside_widths"
+        "class::constrained_randomize_inside_widths",
+        "class::constrained_randomize_conditionals",
+        "class::constrained_randomize_nested_guards"
       ]
     }
   },

@@ -6588,11 +6588,6 @@ fn explicit_output_data_types_default_to_variables() {
 fn class_randomize_rejects_unsupported_semantics() {
     for (members, call, expected) in [
         (
-            "rand int x; constraint c { if (x) x == 1; }",
-            "c.randomize()",
-            "constraints",
-        ),
-        (
             "rand int x; constraint c { soft x == 1; }",
             "c.randomize()",
             "constraints",
@@ -6606,11 +6601,6 @@ fn class_randomize_rejects_unsupported_semantics() {
             "rand int x; constraint c { x inside {[1:$]}; }",
             "c.randomize()",
             "constraint",
-        ),
-        (
-            "rand int x; constraint c { (x == 1) -> (x < 3); }",
-            "c.randomize()",
-            "constraints",
         ),
         (
             "rand int x; constraint c { (x == 1) <-> (x < 3); }",

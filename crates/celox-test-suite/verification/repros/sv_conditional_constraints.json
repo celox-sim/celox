@@ -1,0 +1,16 @@
+{
+  "observations": [
+    {
+      "tool": "icarus",
+      "case": "class::constrained_randomize_conditionals",
+      "status": "compile_error",
+      "log": "<target>/sv-icarus/class/constrained_randomize_conditionals/source_0.sv:9: sorry: \"inside\" expressions not supported yet.\n<target>/sv-icarus/class/constrained_randomize_conditionals/source_0.sv:7: sorry: Constraint declarations not supported.\n"
+    },
+    {
+      "tool": "icarus",
+      "case": "class::constrained_randomize_nested_guards",
+      "status": "compile_error",
+      "log": "<target>/sv-icarus/class/constrained_randomize_nested_guards/source_0.sv:6: sorry: Constraint declarations not supported.\n"
+    }
+  ]
+}
