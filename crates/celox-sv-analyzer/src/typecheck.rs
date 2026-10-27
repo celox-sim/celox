@@ -93,6 +93,9 @@ pub(crate) trait ConstantEnvironment {
         None
     }
     fn get(&self, name: &str) -> Option<&i128>;
+    fn literal(&self, _name: &str) -> Option<&IntegralLiteral> {
+        None
+    }
 }
 
 impl ConstantEnvironment for HashMap<String, i128> {
@@ -342,12 +345,49 @@ pub fn eval_const_expr_with_types(
     constants: &HashMap<String, i128>,
     types: &HashMap<String, (usize, bool)>,
 ) -> Option<i128> {
+    // Runtime select bounds often contain large inlined expressions. Reject a
+    // required runtime value before attempting literal folding at every node.
+    if requires_unbound_value(expr, constants) {
+        return None;
+    }
     // Substitution only replaces the identifiers of typed constants.
     if !has_typed_constant(expr, constants, types) {
         return eval_const_expr(expr, constants);
     }
     let expr = substitute_typed_constants(expr.clone(), constants, types);
     eval_const_expr(&expr, constants)
+}
+
+fn requires_unbound_value(expr: &ConstExpr, constants: &HashMap<String, i128>) -> bool {
+    match expr {
+        ConstExpr::Literal(_) | ConstExpr::Function { .. } => return false,
+        ConstExpr::Ident(name) => return !constants.contains_key(name),
+        _ => {}
+    }
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        match expr {
+            ConstExpr::Ident(name) if !constants.contains_key(name) => return true,
+            ConstExpr::Unary { expr, .. } | ConstExpr::Resize { expr, .. } => pending.push(expr),
+            ConstExpr::Select { expr, bit } => pending.extend([bit.as_ref(), expr.as_ref()]),
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                pending.extend([lsb.as_ref(), msb.as_ref(), expr.as_ref()]);
+            }
+            ConstExpr::Binary { left, op, right } => {
+                // A right logical operand can be skipped. The left operand is
+                // required; preserve the evaluator's short-circuiting policy.
+                if !matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) {
+                    pending.push(right);
+                }
+                pending.push(left);
+            }
+            ConstExpr::Mux { condition, .. } => pending.push(condition),
+            // Argument evaluation belongs to the callee (including checked
+            // accesses). Do not infer whether a call needs its actuals here.
+            ConstExpr::Function { .. } | ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+        }
+    }
+    false
 }
 
 /// Whether `expr` names a constant that has a type, which
@@ -417,6 +457,23 @@ pub(crate) fn eval_const_expr_with_types_in_env(
 ) -> Option<i128> {
     let expr = substitute_typed_constants_with_lookup(expr.clone(), constants, types);
     eval_const_expr_in_env(&expr, constants)
+}
+
+/// An assignment supplies a size context before arithmetic is evaluated;
+/// the receiving declaration supplies its signedness only after evaluation.
+pub(crate) fn eval_const_assignment_in_env(
+    expr: &ConstExpr,
+    constants: &dyn ConstantEnvironment,
+    types: &impl Fn(&str) -> Option<(usize, bool)>,
+    width: usize,
+) -> Option<IntegralLiteral> {
+    let expr = substitute_typed_constants_with_lookup(expr.clone(), constants, types);
+    let literal = integral_literal_from_const_expr(&expr)?;
+    if literal.width >= width {
+        Some(literal)
+    } else {
+        eval_integral_in_context(&expr, width, literal.signed)
+    }
 }
 
 /// Evaluate and resize a constant expression in a case selector's comparison
@@ -552,12 +609,18 @@ fn substitute_typed_constants_with_lookup(
     types: &impl Fn(&str) -> Option<(usize, bool)>,
 ) -> ConstExpr {
     match expr {
-        ConstExpr::Ident(name) => match (constants.get(&name), types(&name)) {
-            (Some(value), Some((width, signed))) => {
-                ConstExpr::Literal(format_typed_constant_literal(*value, width, signed))
+        ConstExpr::Ident(name) => {
+            if let Some(literal) = constants.literal(&name) {
+                ConstExpr::Literal(format_integral_literal_binary(literal))
+            } else {
+                match (constants.get(&name), types(&name)) {
+                    (Some(value), Some((width, signed))) => {
+                        ConstExpr::Literal(format_typed_constant_literal(*value, width, signed))
+                    }
+                    _ => ConstExpr::Ident(name),
+                }
             }
-            _ => ConstExpr::Ident(name),
-        },
+        }
         ConstExpr::Literal(value) => ConstExpr::Literal(value),
         ConstExpr::SelectRange {
             expr,
@@ -688,6 +751,15 @@ fn context_binary_operands(
     right: &ConstExpr,
 ) -> Option<(IntegralLiteral, IntegralLiteral, bool)> {
     let (left_type, right_type) = integral_binary_operands(left, right)?;
+    context_binary_values(left, right, left_type, right_type)
+}
+
+fn context_binary_values(
+    left: &ConstExpr,
+    right: &ConstExpr,
+    left_type: IntegralLiteral,
+    right_type: IntegralLiteral,
+) -> Option<(IntegralLiteral, IntegralLiteral, bool)> {
     let width = left_type.width.max(right_type.width);
     let signed = left_type.signed && right_type.signed;
     // These values were already evaluated in their own expression contexts.
@@ -757,7 +829,7 @@ fn eval_literal_binary(
         );
         return eval_four_state_binary(&left, op, &right, signed);
     }
-    let (left, right, signed) = context_binary_operands(left_expr, right_expr)?;
+    let (left, right, signed) = context_binary_values(left_expr, right_expr, left, right)?;
     eval_four_state_binary(&left, op, &right, signed)
 }
 
@@ -1063,7 +1135,14 @@ fn self_determined_integral_literal(expr: &ConstExpr) -> Option<IntegralLiteral>
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static LITERAL_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral> {
+    #[cfg(test)]
+    LITERAL_EVALUATIONS.with(|count| count.set(count.get() + 1));
     match expr {
         ConstExpr::Literal(literal) => parse_integral_literal(literal),
         ConstExpr::Resize {
@@ -1289,9 +1368,8 @@ pub(crate) fn integral_literal_as_i128(literal: &IntegralLiteral, signed: bool) 
     if !signed || literal.width == 0 || value & (1u128 << (literal.width - 1)) == 0 {
         return i128::try_from(value).ok();
     }
-    i128::try_from(value)
-        .ok()
-        .and_then(|value| value.checked_sub(1i128 << literal.width))
+    // Extend the sign as a bit pattern: 2^127 is not a positive i128.
+    Some((value | (u128::MAX << literal.width)) as i128)
 }
 
 fn eval_integral_unary(op: UnaryOp, mut literal: IntegralLiteral) -> IntegralLiteral {
@@ -1933,6 +2011,15 @@ fn parse_power_of_two_based_digits(digits: &str, bits_per_digit: usize) -> Optio
     })
 }
 
+pub(crate) fn resize_const_integral_literal(
+    literal: IntegralLiteral,
+    width: usize,
+    signed: bool,
+) -> IntegralLiteral {
+    let extension = signed_extension(&literal, literal.signed);
+    resize_integral_literal(literal, width, signed, extension)
+}
+
 fn resize_integral_literal(
     literal: IntegralLiteral,
     width: usize,
@@ -1980,6 +2067,115 @@ fn extension_for_leading_digit(ch: char) -> (bool, bool) {
 #[cfg(test)]
 mod literal_tests {
     use super::*;
+
+    #[test]
+    fn numeric_binary_operands_are_evaluated_once_before_type_context() {
+        let expr = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Literal("2".into())),
+            op: BinaryOp::Add,
+            right: Box::new(ConstExpr::Literal("3".into())),
+        };
+        LITERAL_EVALUATIONS.with(|count| count.set(0));
+        assert_eq!(
+            eval_const_expr_with_types(&expr, &HashMap::default(), &HashMap::default()),
+            Some(5)
+        );
+        assert_eq!(LITERAL_EVALUATIONS.with(|count| count.get()), 2);
+    }
+
+    #[test]
+    fn runtime_bounds_skip_literal_evaluation_before_substitution() {
+        let mut bound = ConstExpr::Ident("runtime_index".into());
+        for _ in 0..64 {
+            bound = ConstExpr::Resize {
+                expr: Box::new(ConstExpr::Binary {
+                    left: Box::new(bound),
+                    op: BinaryOp::Add,
+                    right: Box::new(ConstExpr::Ident("P".into())),
+                }),
+                width: 32,
+                signed: false,
+            };
+        }
+        LITERAL_EVALUATIONS.with(|count| count.set(0));
+        assert_eq!(
+            eval_const_expr_with_types(
+                &bound,
+                &HashMap::from_iter([("P".into(), 7)]),
+                &HashMap::from_iter([("P".into(), (32, false))])
+            ),
+            None
+        );
+        assert_eq!(LITERAL_EVALUATIONS.with(|count| count.get()), 0);
+    }
+
+    #[test]
+    fn runtime_bound_probe_preserves_short_circuiting_and_sampled_values() {
+        let literal = |text: &str| ConstExpr::Literal(text.into());
+        let missing = || ConstExpr::Ident("runtime_index".into());
+        let expressions = [
+            (
+                ConstExpr::Binary {
+                    left: Box::new(literal("0")),
+                    op: BinaryOp::LogicAnd,
+                    right: Box::new(missing()),
+                },
+                Some(0),
+            ),
+            (
+                ConstExpr::Binary {
+                    left: Box::new(literal("1")),
+                    op: BinaryOp::LogicOr,
+                    right: Box::new(missing()),
+                },
+                Some(1),
+            ),
+            (
+                ConstExpr::Mux {
+                    condition: Box::new(literal("1")),
+                    then_expr: Box::new(literal("13")),
+                    else_expr: Box::new(missing()),
+                },
+                Some(13),
+            ),
+            (
+                ConstExpr::Mux {
+                    condition: Box::new(literal("0")),
+                    then_expr: Box::new(missing()),
+                    else_expr: Box::new(literal("19")),
+                },
+                Some(19),
+            ),
+            (
+                ConstExpr::Mux {
+                    condition: Box::new(literal("1'bx")),
+                    then_expr: Box::new(literal("17")),
+                    else_expr: Box::new(literal("17")),
+                },
+                Some(17),
+            ),
+        ];
+        for (expr, expected) in expressions {
+            assert_eq!(
+                eval_const_expr_with_types(&expr, &HashMap::default(), &HashMap::default()),
+                expected,
+                "{expr:?}"
+            );
+        }
+        let sample = ConstExpr::Binary {
+            left: Box::new(missing()),
+            op: BinaryOp::Mul,
+            right: Box::new(ConstExpr::Ident("P".into())),
+        };
+        assert_eq!(
+            eval_const_expr_with_types(
+                &sample,
+                &HashMap::from_iter([("runtime_index".into(), 3), ("P".into(), 7)]),
+                &HashMap::from_iter([("P".into(), (32, false))])
+            ),
+            Some(21)
+        );
+    }
 
     /// Expressions without typed constants evaluate as their substituted
     /// copies do, and typed constants still take their declared type.
@@ -2899,6 +3095,26 @@ mod literal_tests {
             };
 
             assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(expected));
+        }
+    }
+    #[test]
+    fn signed_127_bit_literals_extend_without_overflow() {
+        for (text, signed, expected) in [
+            (
+                "127'sh40000000000000000000000000000000",
+                true,
+                -(1i128 << 126),
+            ),
+            ("127'sh7fffffffffffffffffffffffffffffff", true, -1),
+            ("127'h7fffffffffffffffffffffffffffffff", false, i128::MAX),
+            ("128'h80000000000000000000000000000000", false, i128::MIN),
+        ] {
+            let literal = parse_integral_literal(text).unwrap();
+            assert_eq!(
+                integral_literal_as_i128(&literal, signed),
+                Some(expected),
+                "{text}"
+            );
         }
     }
 }

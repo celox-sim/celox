@@ -1,6 +1,9 @@
 use super::*;
 
 sv_backends! {
+    fn defers_interface_dependent_declarations_before_binding_array_ports(sim) {
+        @case "interfaces::defers_interface_dependent_declarations_before_binding_array_ports";
+    }
     fn connects_interface_array_slices_in_declaration_order(sim) {
         @case "interfaces::connects_interface_array_slices_in_declaration_order";
     }
@@ -276,4 +279,42 @@ fn rejects_interface_array_slices_in_multiple_dimensions() {
         error.contains("interface array slices in multiple dimensions"),
         "{error}"
     );
+}
+
+// The unindexed value-parameter shorthand is an explicit compatibility mode.
+sv_backends! {
+    fn unindexed_interface_array_parameters_preserve_bound_values_and_types(sim) {
+        @setup {
+            let source = "interface Bus #(parameter int WIDTH=8, parameter logic signed [7:0] NEG=-3);
+                    logic [WIDTH-1:0] data; modport sink(input data); endinterface
+                module Child(Bus.sink bus[5:4], output wire [31:0] q, n);
+                    function automatic int width_value(); return bus.WIDTH; endfunction
+                    localparam W=width_value();
+                    assign q=W;
+                    assign n=bus.NEG;
+                endmodule
+                module Top(output wire [31:0] q,n);
+                    Bus #(13,-5) buses[5:4](); Child dut(buses,q,n);
+                endmodule";
+            let mut policy=celox::DiagnosticPolicy::default();
+            policy.set("interface_array_parameter",celox::DiagnosticLevel::Allow);
+        }
+        @build Simulator::from_sv_sources(vec![(source,Path::new("array_parameter_types.sv"))],"Top").diagnostic_policy(policy);
+        assert_eq!(sim.get(sim.signal("q")),BigUint::from(13u8));
+        assert_eq!(sim.get(sim.signal("n")),BigUint::from(0xfffffffbu32));
+    }
+}
+
+#[test]
+fn interface_array_parameter_shorthand_does_not_bind_runtime_members() {
+    let source = "interface Bus #(parameter WIDTH=8); logic [WIDTH-1:0] data; endinterface
+        module Top(output wire [7:0] q); Bus bus[2](); assign q=bus.data; endmodule";
+    let mut policy = celox::DiagnosticPolicy::default();
+    policy.set("interface_array_parameter", celox::DiagnosticLevel::Allow);
+    let error = Simulator::from_sv_sources(vec![(source, Path::new("array_signal.sv"))], "Top")
+        .diagnostic_policy(policy)
+        .build_cranelift()
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("bus.data"), "{error}");
 }

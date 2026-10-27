@@ -1729,7 +1729,7 @@ fn lower_processes(
     for (index, process) in artifact.processes().iter().enumerate() {
         let name = |slot: &str| vec![format!("$process[{index}]"), slot.to_string()];
         let slots = ProcessSlots {
-            is_initializer: false,
+            kind: celox_design::ProcessKind::Regular,
             requires_timed_simulation: false,
             const_delays: false,
             program: None,
@@ -1754,6 +1754,7 @@ fn lower_processes(
             stable_signal(address, artifact.signals().len())
         }));
         processes.push(SymbolicProcess {
+            frame: None,
             kernel,
             slots,
             origin: celox_design::ProcessOrigin {
@@ -1971,6 +1972,8 @@ pub fn lower_frontend_artifact(
         nba_switches: Vec::new(),
         host_request_sites: Vec::new(),
         time_slot: None,
+        sample_shadows: Vec::new(),
+        initial_copies: Vec::new(),
     };
     let symbolic = SymbolicRtl {
         modules: [(module_id, sim_module.clone())].into_iter().collect(),

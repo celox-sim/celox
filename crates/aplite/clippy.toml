@@ -1,0 +1,14 @@
+# Preserve the finite solver's existing randomized standard hash maps.
+# Aplite accepts caller-owned expressions and does not inherit Celox's
+# trusted-compiler-input FxHash policy. Library I/O and ownership rules remain.
+disallowed-macros = [
+    { path = "std::thread_local", reason = "production state must be owned and passed explicitly; only test-local instrumentation may opt out" },
+    { path = "std::eprintln", reason = "library diagnostics must use tracing or a caller-provided writer" },
+]
+
+disallowed-methods = [
+    { path = "std::env::var", reason = "read CELOX diagnostics through DiagnosticsOptions::from_env at the application boundary" },
+    { path = "std::env::var_os", reason = "read CELOX diagnostics through DiagnosticsOptions::from_env at the application boundary" },
+    { path = "std::env::vars", reason = "read CELOX diagnostics through DiagnosticsOptions::from_env at the application boundary" },
+    { path = "std::env::vars_os", reason = "read CELOX diagnostics through DiagnosticsOptions::from_env at the application boundary" },
+]

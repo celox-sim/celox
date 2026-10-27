@@ -65,6 +65,7 @@ fn pattern_value(
     if let Some((dimension, rest)) = shape.unpacked.split_first() {
         let (_, _, count) = dimension_bounds(state, &dimension.left, &dimension.right, dims)?;
         let element = VariableDimensions {
+            container: None,
             real: false,
             string: false,
             class: None,
@@ -140,6 +141,7 @@ pub(super) fn assignment_value(
             Some((
                 &dim.width,
                 VariableDimensions {
+                    container: None,
                     unpacked: rest.to_vec(),
                     ..shape.clone()
                 },
@@ -150,6 +152,7 @@ pub(super) fn assignment_value(
             Some((
                 &dim.width,
                 VariableDimensions {
+                    container: None,
                     packed: rest.to_vec(),
                     signed: shape.signed_element_depth == Some(1),
                     signed_element_depth: shape

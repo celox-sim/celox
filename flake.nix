@@ -9,13 +9,13 @@
     };
     rust-overlay = {
       # Pin the revision explicitly so Renovate can group overlay and Rust updates.
-      url = "github:oxalica/rust-overlay/fad80eb74614f7dc37c1c83df8caae64361eda22";
+      url = "github:oxalica/rust-overlay/0d0575988e4bb9ebc4cf1afb1cec1ceac0b5914e";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     # The xezim reference simulator for the shared test suite, pinned by
     # revision so that Renovate proposes updates.
     xezim = {
-      url = "github:aionhw/xezim/058f2bba58648452e5799d17572356ebcae7d163";
+      url = "github:aionhw/xezim/44f5c88c4fa5dff684842884051332634c1d4cff";
       flake = false;
     };
   };

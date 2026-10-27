@@ -57,3 +57,12 @@ test("guards the repository setting that exposes the title to release automation
     /Revalidate merge group release impact\n\s+if: github\.event_name == 'merge_group' && github\.event\.merge_group\.base_ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)[\s\S]*MERGE_GROUP_BASE_REF:[\s\S]*MERGE_GROUP_HEAD_REF:[\s\S]*MERGE_GROUP_SHA:[\s\S]*run: node scripts\/check-pr-release-impact\.mjs/,
   );
 });
+
+test("title requests coalesce per PR without skipping edit validation", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/pr-title.yml", import.meta.url), "utf8");
+  assert.match(workflow, /types: \[opened, edited, synchronize, reopened\]/);
+  assert.match(workflow, /group: \$\{\{ github.workflow \}\}-\$\{\{ github.event_name \}\}-\$\{\{ github.event.pull_request.number \|\| github.event.merge_group.head_sha \|\| github.run_id \}\}/);
+  assert.match(workflow, /cancel-in-progress: \$\{\{ github.event_name == 'pull_request_target' \}\}/);
+  assert.doesNotMatch(workflow, /github.event.action != 'edited'|queue: max/);
+  assert.match(workflow, /github.event.pull_request.state == 'open'/);
+});

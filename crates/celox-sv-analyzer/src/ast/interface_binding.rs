@@ -33,6 +33,43 @@ pub(super) struct ArrayBinding {
     pub ranges: Vec<(i128, i128)>,
 }
 
+/// Compatibility shorthand for an unindexed interface-array value parameter.
+/// Follow the first element in declaration order, including nonzero bounds.
+/// Runtime members and type parameters retain their ordinary indexed lookup.
+pub(super) fn unindexed_parameter(
+    path: &[String],
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    root: celox_sv_syntax::ExprId,
+) -> Option<String> {
+    let (member, handle) = path.split_last()?;
+    let root_name = handle.first()?;
+    if dimensions.get(root_name).is_some()
+        || dimensions.const_env.contains_key(root_name)
+        || dimensions.parameter_values.contains_key(root_name)
+    {
+        return None;
+    }
+    let imported = scope::imported(&tree.state);
+    let array = imported.interface_arrays.get(&handle.join("."))?;
+    let element = array.elements.first()?;
+    let bound = imported
+        .interface_members
+        .get(&format!("{element}.{member}"))?;
+    if !imported.parameter_values.contains_key(bound) {
+        return None;
+    }
+    warnings::append(
+        &mut tree.state.diagnostics.borrow_mut(),
+        [warnings::AnalyzerWarning::InterfaceArrayParameter {
+            path: path.join("."),
+            element: element.clone(),
+            site: procedural::source_span(tree.declarations().expression(root).tokens, tree),
+        }],
+    );
+    Some(bound.clone())
+}
+
 pub(super) fn analyze_module(
     tree: &AnalysisContext<'_>,
     path: &Path,
@@ -113,8 +150,13 @@ pub(super) fn analyze_module(
         return Ok(None);
     }
     let array_scope = if interface_ports.iter().any(|port| port.array_rank != 0) {
-        let (header_ports, header_tree) =
-            binding_declaration_view(&view_ports, &instantiations, tree, &imported)?;
+        let (header_ports, header_tree) = binding_declaration_view(
+            &view_ports,
+            &instantiations,
+            interface_ports,
+            tree,
+            &imported,
+        )?;
         let mut header_imports = imported.clone();
         header_imports.declarations_only = true;
         Some(Module::from_selected_scope(
@@ -243,12 +285,15 @@ pub(super) fn analyze_module(
                     .ok_or_else(|| {
                         unsupported(format!("interface member `{}.{member}`", port.name))
                     })?;
-                bound.ports.push(Port::new(
-                    signal.name.clone(),
-                    *direction,
-                    signal.r#type.clone(),
-                    signal.is_net,
-                ));
+                bound.ports.push(
+                    Port::new(
+                        signal.name.clone(),
+                        *direction,
+                        signal.r#type.clone(),
+                        signal.is_net,
+                    )
+                    .with_unresolved_net(signal.unresolved_net),
+                );
             }
             bound
                 .signals
@@ -257,8 +302,13 @@ pub(super) fn analyze_module(
         }
     }
     // Resolve the caller's declarations before evaluating instance overrides.
-    let (header_ports, header_tree) =
-        binding_declaration_view(&view_ports, &instantiations, tree, &imported)?;
+    let (header_ports, header_tree) = binding_declaration_view(
+        &view_ports,
+        &instantiations,
+        interface_ports,
+        tree,
+        &imported,
+    )?;
     let mut header_imports = imported.clone();
     header_imports.declarations_only = true;
     let caller = Module::from_selected_scope(
@@ -324,8 +374,13 @@ pub(super) fn analyze_module(
         if generated_item.is_none() {
             // Newly bound instances may unlock declarations used by the next
             // instance's overrides. Keep only still-unbound dependencies out.
-            let (header_ports, header_tree) =
-                binding_declaration_view(&view_ports, &instantiations, tree, &imported)?;
+            let (header_ports, header_tree) = binding_declaration_view(
+                &view_ports,
+                &instantiations,
+                interface_ports,
+                tree,
+                &imported,
+            )?;
             let mut header_imports = imported.clone();
             header_imports.declarations_only = true;
             let caller = Module::from_selected_scope(
@@ -473,6 +528,7 @@ pub(super) fn analyze_module(
                         name: port.name.clone(),
                         r#type: port.r#type.clone(),
                         is_net: port.is_net,
+                        unresolved_net: port.unresolved_net,
                         is_const: false,
                         package_variable: None,
                         hierarchical: None,
@@ -817,11 +873,12 @@ fn native_body_items(tree: &SyntaxTree) -> Converted<Vec<celox_sv_syntax::BodyIt
     Ok(items)
 }
 
-/// Delay declarations that reference local interface instances (and declarations
+/// Delay declarations that reference unbound interface instances or ports (and declarations
 /// depending on those names) until the instances have populated semantic scopes.
 fn binding_declaration_view<'a>(
     selected: &port_owners::Selection<'a>,
     instances: &[celox_sv_syntax::BodyItemId],
+    ports: &[interfaces::NativePortPlan],
     tree: &AnalysisContext<'_>,
     imported: &scope::ScopeSymbols,
 ) -> Converted<(port_owners::Selection<'a>, SyntaxTree)> {
@@ -831,6 +888,7 @@ fn binding_declaration_view<'a>(
         .filter_map(|id| instances::declaration_from_item(*id, tree).ok())
         .flat_map(|instance| instance.instances.iter())
         .map(|instance| instances::normalize_identifier(&instance.name.spelling))
+        .chain(ports.iter().map(|port| port.name.clone()))
         .filter(|name| {
             !imported.interface_types.contains_key(name)
                 && !imported.interface_arrays.contains_key(name)

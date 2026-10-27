@@ -139,6 +139,51 @@ pub(super) fn numeric_system_function(
                 signed: function == SystemFunction::Signed,
             })
         }
+        // A sampled value has the type of its operand; the frontend reads
+        // it from copies of the operand's variables (IEEE 1800-2023 16.9.3).
+        SystemFunction::Sampled | SystemFunction::Past => {
+            let argument = arguments.first().cloned().ok_or_else(operand_error)?;
+            // A real operand keeps its type: an integral resize would
+            // round it.
+            if expression_binding::real_value(&argument, dimensions) {
+                return Ok(Expr::Call {
+                    callee: Callee::System(function),
+                    args: arguments.into_iter().map(Some).collect(),
+                    arg_order: Vec::new(),
+                });
+            }
+            let width =
+                expr_static_width(state, &argument, dimensions).ok_or_else(operand_error)?;
+            let signed =
+                dimensions::expression_signedness(&argument, dimensions, &dimensions.const_env)
+                    .ok_or_else(operand_error)?;
+            // The number of ticks is a constant expression, which the frontend
+            // reads as a literal.
+            if function == SystemFunction::Past
+                && let Some(ticks) = arguments.get_mut(1)
+                && let Some(constant) = expr_to_const(state, ticks.clone())
+                && let Some(value) = eval_ast_const_expr(state, &constant, &dimensions.const_env)
+            {
+                *ticks = Expr::Literal(value.to_string());
+            }
+            Ok(Expr::Resize {
+                expr: Box::new(Expr::Call {
+                    callee: Callee::System(function),
+                    args: arguments.into_iter().map(Some).collect(),
+                    arg_order: Vec::new(),
+                }),
+                width,
+                signed,
+            })
+        }
+        SystemFunction::Rose
+        | SystemFunction::Fell
+        | SystemFunction::Stable
+        | SystemFunction::Changed => Ok(Expr::Call {
+            callee: Callee::System(function),
+            args: arguments.into_iter().map(Some).collect(),
+            arg_order: Vec::new(),
+        }),
         SystemFunction::Ln
         | SystemFunction::Log10
         | SystemFunction::Exp

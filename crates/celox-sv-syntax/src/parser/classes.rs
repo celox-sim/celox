@@ -132,6 +132,19 @@ impl Parser<'_> {
         }
     }
 
+    /// Record a parameter or type declaration that is an item of the
+    /// innermost open class.
+    pub(super) fn class_item(&mut self, kind: &BodyItemKind) {
+        let Some(class) = self.class_stack.last_mut() else {
+            return;
+        };
+        match kind {
+            BodyItemKind::Parameter(id) => class.parameters.push(*id),
+            BodyItemKind::TypeAlias(id) => class.type_aliases.push(*id),
+            _ => {}
+        }
+    }
+
     /// Complete the innermost open class at its `endclass`.
     pub(super) fn finish_class(&mut self) {
         if let Some(mut class) = self.class_stack.pop() {
@@ -157,6 +170,7 @@ impl Parser<'_> {
         let name = self.name()?;
         let mut base = None;
         let mut interfaces = Vec::new();
+        let mut parameter_ports = None;
         if self.eat("#") {
             let start = self.at;
             self.expect("(")?;
@@ -166,6 +180,7 @@ impl Parser<'_> {
                 parameters,
                 tokens: self.range(start),
             });
+            parameter_ports = Some(id);
             items.push(super::generate::Builder::node(
                 self,
                 start,
@@ -208,6 +223,10 @@ impl Parser<'_> {
             base,
             interfaces,
             has_constraints: false,
+            constraints: Vec::new(),
+            parameter_ports,
+            parameters: Vec::new(),
+            type_aliases: Vec::new(),
             properties: Vec::new(),
             methods: Vec::new(),
             tokens: TokenRange { start, end: start },

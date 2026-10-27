@@ -9,7 +9,9 @@
 use super::*;
 mod assertions;
 mod control;
+mod final_procedures;
 mod foreach;
+use foreach::ForeachLoop;
 mod randomization;
 pub(super) mod timed_tasks;
 mod timing;
@@ -74,7 +76,9 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
 /// The packed and unpacked shape of a declared type, as selects see it.
 pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
     VariableDimensions {
-        randomizable: !r#type.is_enum || r#type.enum_values.is_some(),
+        container: r#type.container.clone(),
+        randomizable: r#type.container.is_none()
+            && (!r#type.is_enum || r#type.enum_values.is_some()),
         enum_values: r#type.enum_values.clone(),
         real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
         string: matches!(r#type.kind(), TypeKind::String),
@@ -116,6 +120,7 @@ pub(super) fn scoped_type(mut r#type: Type, const_env: &HashMap<String, i128>) -
 /// The `int` type of a loop variable declared by `foreach`.
 pub(super) fn int_type() -> Type {
     Type {
+        container: None,
         is_enum: false,
         enum_values: None,
         kind: TypeKind::Bit,
@@ -503,6 +508,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         native: (celox_sv_syntax::ExprId, celox_sv_syntax::ExprId),
     ) -> Result<Stmt, AnalyzerError> {
         let (left, right) = native;
+        if let Some(mut stmt) =
+            containers::set(left, right, op, nonblocking, self.tree, &self.dims)?
+        {
+            if let Stmt::Eval(expr) = &mut stmt {
+                self.rename_expr(expr);
+            }
+            return Ok(stmt);
+        }
         if let Some(parts) = self.concat_lvalue(left)? {
             if op != "=" {
                 return Err(unsupported("compound assignment to a concatenation"));
@@ -967,7 +980,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 _ => self.subroutine_call_statement(*id),
             },
             StatementKind::Assertion { .. } => Err(unsupported("concurrent assertion")),
-            StatementKind::WaitFork => Err(unsupported("wait fork statement")),
+            StatementKind::WaitFork => {
+                self.allow_timing("wait fork statement")?;
+                Ok(vec![Stmt::WaitFork])
+            }
             StatementKind::WaitOrder { .. } => Err(unsupported("wait order statement")),
             StatementKind::EventTrigger(_) => Err(unsupported("event trigger")),
             StatementKind::ProceduralAssign(_) | StatementKind::ProceduralRelease(_) => {
@@ -984,11 +1000,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     .filter(|token| !token.is_trivia())
                     .find(|token| token.text != "disable")
                     .is_some_and(|token| token.text == "fork");
-                Err(unsupported(if disables_fork {
-                    "disable fork statement"
+                if disables_fork {
+                    Ok(vec![Stmt::DisableFork])
                 } else {
-                    "disable statement"
-                }))
+                    Err(unsupported("disable statement"))
+                }
             }
             StatementKind::Parallel { .. } => Err(unsupported("fork-join block")),
             _ => Err(unsupported("procedural statement")),
@@ -1001,6 +1017,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     fn allow_timing(&self, construct: &'static str) -> Result<(), AnalyzerError> {
         match self.body {
             system_functions::Body::Initial => Ok(()),
+            system_functions::Body::Final => Err(AnalyzerError::TimingControlOutsideProcess {
+                construct,
+                context: "a final procedure",
+            }),
             system_functions::Body::Always => Err(AnalyzerError::TimingControlOutsideProcess {
                 construct,
                 context: "an always_comb or always_ff body",
@@ -1179,6 +1199,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         root: celox_sv_syntax::ExprId,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
         let native = self.tree.declarations();
+        if let Some(mut value) = containers::value(root, native, self.tree, &self.dims, true)? {
+            self.rename_expr(&mut value);
+            return Ok(vec![Stmt::Eval(value)]);
+        }
         if let celox_sv_syntax::ExprKind::Call {
             expression,
             arguments,
@@ -1212,6 +1236,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         {
             let query_root =
                 expression_binding::call_statement_root(root, discarded, self.tree.declarations())?;
+            if discarded
+                && let Some(mut value) =
+                    containers::value(query_root, native, self.tree, &self.dims, true)?
+            {
+                self.rename_expr(&mut value);
+                return Ok(vec![Stmt::Eval(value)]);
+            }
             if let Some(call) = self.method_call_statement(query_root)? {
                 return Ok(vec![call]);
             }
@@ -1547,7 +1578,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         &mut self,
         array: String,
         variables: Vec<Option<String>>,
-    ) -> Result<Vec<(String, i128, i128)>, AnalyzerError> {
+    ) -> Result<Vec<ForeachLoop>, AnalyzerError> {
         let dimensions = self
             .dims
             .get(&array)
@@ -1577,12 +1608,79 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             let right = eval_ast_const_expr(&self.tree.state, right, &self.dims.const_env)
                 .ok_or_else(|| unsupported("foreach bound"))?;
             let name = self.declare(&variable, int_type());
-            loops.push((name, left, right));
+            loops.push(ForeachLoop::Static(name, left, right));
         }
         Ok(loops)
     }
-    fn fold_foreach(loops: Vec<(String, i128, i128)>, mut body: Vec<Stmt>) -> Vec<Stmt> {
-        for (name, left, right) in loops.into_iter().rev() {
+    fn fold_foreach(loops: Vec<ForeachLoop>, mut body: Vec<Stmt>) -> Vec<Stmt> {
+        for bound in loops.into_iter().rev() {
+            let (name, left, right) = match bound {
+                ForeachLoop::Static(name, left, right) => (name, left, right),
+                ForeachLoop::Container {
+                    array,
+                    index,
+                    layout,
+                    status,
+                } => {
+                    let index_expr = Expr::Ident(index.clone());
+                    let (init, condition, step) = if let Some(status) = status {
+                        let call = |op| {
+                            containers::call(op, layout, vec![array.clone(), index_expr.clone()])
+                        };
+                        (
+                            vec![
+                                Stmt::Local {
+                                    name: index,
+                                    init: None,
+                                },
+                                Stmt::Local {
+                                    name: status.clone(),
+                                    init: Some(call(ContainerOp::First)),
+                                },
+                            ],
+                            Expr::Ident(status.clone()),
+                            vec![Stmt::Assign {
+                                lhs: LValue::Ident(status),
+                                rhs: call(ContainerOp::Next),
+                                nonblocking: false,
+                            }],
+                        )
+                    } else {
+                        (
+                            vec![Stmt::Local {
+                                name: index.clone(),
+                                init: Some(Expr::Literal("0".into())),
+                            }],
+                            Expr::Binary {
+                                left: Box::new(index_expr.clone()),
+                                op: BinaryOp::Lt,
+                                right: Box::new(containers::call(
+                                    ContainerOp::Size,
+                                    layout,
+                                    vec![array],
+                                )),
+                            },
+                            vec![Stmt::Assign {
+                                lhs: LValue::Ident(index),
+                                rhs: Expr::Binary {
+                                    left: Box::new(index_expr),
+                                    op: BinaryOp::Add,
+                                    right: Box::new(Expr::Literal("1".into())),
+                                },
+                                nonblocking: false,
+                            }],
+                        )
+                    };
+                    body = vec![Stmt::Loop {
+                        kind: LoopKind::For,
+                        init,
+                        condition: Some(condition),
+                        step,
+                        body,
+                    }];
+                    continue;
+                }
+            };
             let index = Expr::Ident(name.clone());
             let (compare, step) = if left <= right {
                 (BinaryOp::Le, BinaryOp::Add)
@@ -1748,6 +1846,8 @@ pub(super) fn subroutine_argument_names(
         for class in classes::item_classes(item.id, tree) {
             let _constant_functions = item.enter();
             let aliases = item.type_aliases(type_aliases);
+            // A specialization's methods see its parameters (8.25).
+            let (env, aliases) = classes::specializations::scope(tree, &class, &item.env, &aliases);
             let handle = classes::handle_type(tree, &class)
                 .ok_or_else(|| unsupported(format!("class `{class}`")))?;
             let mut constructor = false;
@@ -1772,7 +1872,7 @@ pub(super) fn subroutine_argument_names(
                 .collect::<Vec<_>>();
             // A class that cannot be laid out reports why where it is
             // lowered.
-            let layout = classes::class(tree, &class, &item.env, &aliases).ok();
+            let layout = classes::class(tree, &class, &env, &aliases).ok();
             if let Some(layout) = &layout {
                 methods.extend(layout.dispatched_methods().map(|method| {
                     (
@@ -1784,7 +1884,7 @@ pub(super) fn subroutine_argument_names(
             }
             for (name, native_id, is_static) in methods {
                 let native = tree.declarations().subroutine(native_id);
-                let mut params = subroutine_param_declarations(native, tree, &item.env, &aliases)?;
+                let mut params = subroutine_param_declarations(native, tree, &env, &aliases)?;
                 constructor |= native.kind == celox_sv_syntax::SubroutineKind::Constructor;
                 if !is_static {
                     params.insert(0, this.clone());
@@ -1799,7 +1899,7 @@ pub(super) fn subroutine_argument_names(
                     params
                         .iter()
                         .map(|(_, _, r#type, _)| {
-                            dimensions_from_type(&scoped_type(r#type.clone(), &item.env))
+                            dimensions_from_type(&scoped_type(r#type.clone(), &env))
                         })
                         .collect(),
                 );
@@ -1832,7 +1932,7 @@ pub(super) fn subroutine_argument_names(
                 shapes.insert(qualified.clone(), param_shapes);
                 names.insert(qualified, param_names);
             }
-            let handle = dimensions_from_type(&scoped_type(handle, &item.env));
+            let handle = dimensions_from_type(&scoped_type(handle, &env));
             if !constructor && !layout.is_some_and(|layout| layout.is_interface) {
                 let qualified = item.name(&classes::Class::subroutine_name(&class, "new"));
                 directions.insert(qualified.clone(), vec![ParamDirection::Input]);
@@ -2001,7 +2101,85 @@ pub(super) fn subroutines_with_symbolic_parameters(
             }
         }
     }
+    // A class of the scope, or of another package, that overrides a virtual
+    // method of a class that another scope declares is reached through that
+    // method's dispatcher, which the declaring scope lowered for the classes
+    // it saw: the scope lowers the dispatcher again, over every class it
+    // sees, when the dispatcher misses one (IEEE 1800-2023 8.20).
+    let imported = scope::imported(&tree.state);
+    for class in &imported.classes {
+        for method in class.dispatched_methods() {
+            let name = classes::Class::dispatcher_name(&class.name, &method.name);
+            if subroutines.iter().any(|known| known.name == name) {
+                continue;
+            }
+            let Some(dispatcher) = imported.subroutines.iter().find(|known| known.name == name)
+            else {
+                continue;
+            };
+            let targets = classes::dispatch_targets(
+                tree,
+                &class.name,
+                &method.name,
+                const_env,
+                module_type_aliases,
+            )?;
+            let covered = case_ids(&dispatcher.body);
+            if targets
+                .iter()
+                .all(|(_, ids)| ids.iter().all(|id| covered.contains(id)))
+            {
+                continue;
+            }
+            let mut dispatcher = dispatcher.clone();
+            dispatcher.body = vec![dispatch_body(
+                &targets,
+                &dispatcher.params,
+                dispatcher.return_var.as_deref(),
+            )];
+            subroutines.push(dispatcher);
+        }
+        // So does a `$cast` to a variable of the class (8.16).
+        let name = classes::Class::cast_name(&class.name);
+        if subroutines.iter().any(|known| known.name == name) {
+            continue;
+        }
+        let Some(cast) = imported.subroutines.iter().find(|known| known.name == name) else {
+            continue;
+        };
+        let targets = classes::cast_targets(tree, &class.name, const_env, module_type_aliases)?;
+        let covered = case_ids(&cast.body);
+        if targets.iter().all(|id| covered.contains(id)) {
+            continue;
+        }
+        let mut cast = cast.clone();
+        if let Some(Stmt::Case { items, .. }) = cast.body.first_mut()
+            && let Some(item) = items.first_mut()
+        {
+            item.labels = std::iter::once(0)
+                .chain(targets)
+                .map(|id| CaseLabel::Value(Expr::Literal(format!("32'd{id}"))))
+                .collect();
+            subroutines.push(cast);
+        }
+    }
     Ok(subroutines)
+}
+
+/// The class identifiers that the case on the class of an object in `body`,
+/// the body of a dispatcher or a `$cast` helper, selects.
+fn case_ids(body: &[Stmt]) -> HashSet<u32> {
+    let Some(Stmt::Case { items, .. }) = body.first() else {
+        return HashSet::default();
+    };
+    items
+        .iter()
+        .flat_map(|item| &item.labels)
+        .filter_map(|label| match label {
+            CaseLabel::Value(Expr::Literal(literal)) => literal.strip_prefix("32'd")?.parse().ok(),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Shared native subroutine lowering for execution and expression-form plans.
@@ -2028,7 +2206,13 @@ pub(super) fn lower_subroutine(
             class
                 .methods
                 .iter()
-                .any(|method| method.native == native_id && method.qualifiers.is_static)
+                // An inherited method of a class of another source may
+                // have the same identifier.
+                .any(|method| {
+                    method.native == native_id
+                        && method.owner == class.name
+                        && method.qualifiers.is_static
+                })
         });
     let handle = class
         .map(|class| {
@@ -2483,22 +2667,11 @@ impl BodyBuilder<'_, '_, '_> {
                     method.qualifiers.protected,
                 )?;
             }
-            let formals = base.constructor_formals(native);
-            if arguments.len() > formals {
-                return Err(unsupported(format!(
-                    "constructor of class `{}` with {} arguments",
-                    base.name,
-                    arguments.len()
-                )));
-            }
             let mut args = vec![Some(Expr::Ident(this.to_owned()))];
-            for argument in arguments {
-                if argument.name.is_some() {
-                    return Err(unsupported("named constructor argument"));
-                }
+            let (actuals, order) = base.constructor_arguments(arguments)?;
+            for actual in actuals {
                 args.push(
-                    argument
-                        .value
+                    actual
                         .map(|value| {
                             let mut value =
                                 expression_binding::value(value, native, self.tree, &self.dims)?;
@@ -2508,11 +2681,12 @@ impl BodyBuilder<'_, '_, '_> {
                         .transpose()?,
                 );
             }
-            args.resize(formals + 1, None);
             body.push(Stmt::Call {
                 name: classes::Class::subroutine_name(&base.name, "new"),
                 args,
-                arg_order: Vec::new(),
+                arg_order: std::iter::once(0)
+                    .chain(order.into_iter().map(|index| index + 1))
+                    .collect(),
             });
         }
         for property in class.own_properties() {
@@ -2565,11 +2739,20 @@ fn lower_class(
     state: &mut BodyState<'_>,
     item: &generate::Item,
 ) -> Converted<Vec<Subroutine>> {
+    // A specialization's methods see its parameters (IEEE 1800-2023 8.25).
+    let (declaration_env, type_aliases) =
+        classes::specializations::scope(tree, name, declaration_env, type_aliases);
+    let (item_dimensions, literals) =
+        classes::specializations::body_scope(tree, name, item_dimensions, literals);
+    let (declaration_env, type_aliases, item_dimensions, literals) =
+        (&declaration_env, &type_aliases, &item_dimensions, &literals);
     let class = match classes::class(tree, name, declaration_env, type_aliases) {
         Ok(class) => class,
         // An interface class that cannot be laid out has no subroutines; a
         // use of its handles reports why (IEEE 1800-2023 8.26).
-        Err(_) if classes::is_interface(tree, name) => return Ok(Vec::new()),
+        Err(AnalyzerError::Unsupported(_)) if classes::is_interface(tree, name) => {
+            return Ok(Vec::new());
+        }
         Err(error) => return Err(error),
     };
     let mut subroutines = Vec::new();
@@ -2862,20 +3045,29 @@ pub(super) fn initial_processes_from_scope(
                     assignments.push((
                         instances::normalize_identifier(&variable.name.spelling),
                         value,
+                        None,
                     ));
                 }
             }
         }
-        // Static class properties are initialized like variables.
+        // Static class properties are initialized like variables, in the
+        // scope of the class that declares them (IEEE 1800-2023 8.9, 8.25).
         for property in classes::item_statics(item.id, tree, &item.env, &type_aliases) {
             if let Some(value) = property.initializer {
-                assignments.push((property.variable, value));
+                assignments.push((property.variable, value, Some(property.owner)));
             }
         }
         if !assignments.is_empty() {
             let (item_dimensions, literals) = views.get(item);
             let mut body = Vec::new();
-            for (name, native) in assignments {
+            for (name, native, owner) in assignments {
+                let scoped = owner.map(|owner| {
+                    classes::specializations::body_scope(tree, &owner, item_dimensions, literals)
+                });
+                let (item_dimensions, literals) = match &scoped {
+                    Some((dimensions, literals)) => (dimensions, literals),
+                    None => (item_dimensions, &**literals),
+                };
                 if let Some(target) = selected_unpacked_shape(&name, 0, item_dimensions) {
                     let id = native;
                     array_compatibility::check_native_unpacked_assignment(
@@ -2895,12 +3087,23 @@ pub(super) fn initial_processes_from_scope(
                     tree,
                     item_dimensions,
                 )?;
-                body.push(Stmt::Assign {
+                let mut stmt = Stmt::Assign {
                     lhs,
                     rhs,
                     nonblocking: false,
-                });
+                };
+                // The parameters of the class are its own constants.
+                if scoped.is_some() {
+                    substitute_stmt_constants(
+                        &tree.state,
+                        &mut stmt,
+                        &item_dimensions.const_env,
+                        literals,
+                    );
+                }
+                body.push(stmt);
             }
+            let (_, literals) = views.get(item);
             for stmt in &mut body {
                 substitute_stmt_constants(&tree.state, stmt, &item.env, literals);
                 qualify_stmt(item, stmt);
@@ -2916,7 +3119,8 @@ pub(super) fn initial_processes_from_scope(
                     ),
                     condition: None,
                     body,
-                    initializer: true,
+                    kind: celox_design::ProcessKind::Initializer,
+                    validation_body: Vec::new(),
                     synthetic: false,
                     repeats: false,
                 });
@@ -2928,10 +3132,13 @@ pub(super) fn initial_processes_from_scope(
         };
         let construct = match procedure.kind {
             celox_sv_syntax::ProcedureKind::Initial => "initial",
+            celox_sv_syntax::ProcedureKind::Final => "final",
             _ => "always",
         };
         let repeats = match procedure.kind {
-            celox_sv_syntax::ProcedureKind::Initial => false,
+            celox_sv_syntax::ProcedureKind::Initial | celox_sv_syntax::ProcedureKind::Final => {
+                false
+            }
             celox_sv_syntax::ProcedureKind::Always
                 if validation::always_kind(procedure, tree.declarations())?
                     == validation::AlwaysKind::Process
@@ -2942,15 +3149,23 @@ pub(super) fn initial_processes_from_scope(
             _ => continue,
         };
         let (item_dimensions, literals) = views.get(item);
-        // A process statement runs in the body kind of an `initial` block:
-        // it may suspend and call any task.
+        let is_final = procedure.kind == celox_sv_syntax::ProcedureKind::Final;
         let mut builder = BodyBuilder::new(
             tree,
             item_dimensions,
             state,
-            system_functions::Body::Initial,
+            if is_final {
+                system_functions::Body::Final
+            } else {
+                system_functions::Body::Initial
+            },
         );
         let body = builder.native_body(&[procedure.body], &procedure.authored_statements)?;
+        let mut validation_body = if is_final {
+            std::mem::take(&mut builder.sensitivity_body)
+        } else {
+            Vec::new()
+        };
         let mut body = if repeats {
             vec![Stmt::Loop {
                 kind: LoopKind::Forever,
@@ -2962,7 +3177,7 @@ pub(super) fn initial_processes_from_scope(
         } else {
             body
         };
-        for stmt in &mut body {
+        for stmt in body.iter_mut().chain(&mut validation_body) {
             substitute_stmt_constants(&tree.state, stmt, &item.env, literals);
             qualify_stmt(item, stmt);
             substitute_stmt_constants(&tree.state, stmt, const_env, parameter_literals);
@@ -2976,7 +3191,12 @@ pub(super) fn initial_processes_from_scope(
             ),
             condition: None,
             body,
-            initializer: false,
+            kind: if is_final {
+                celox_design::ProcessKind::Final
+            } else {
+                celox_design::ProcessKind::Regular
+            },
+            validation_body,
             synthetic: false,
             repeats,
         });

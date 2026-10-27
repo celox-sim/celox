@@ -60,6 +60,18 @@ pub enum SystemFunction {
     Signed,
     /// `$unsigned` (11.7).
     Unsigned,
+    /// `$sampled` (IEEE 1800-2023 16.9.3): the value of its operand in the
+    /// Preponed region of the time slot.
+    Sampled,
+    /// `$past` (16.9.3): the sampled value of its operand at an earlier tick
+    /// of the clock.
+    Past,
+    /// `$rose`, `$fell`, `$stable` and `$changed` (16.9.3): the sampled value
+    /// of the operand against its sampled value at the previous tick.
+    Rose,
+    Fell,
+    Stable,
+    Changed,
     /// `$bits` (20.6.2).
     Bits,
     /// `$isunbounded` (20.6.3).
@@ -253,6 +265,12 @@ impl SystemFunction {
             Self::Timeprecision => "$timeprecision",
             Self::Signed => "$signed",
             Self::Unsigned => "$unsigned",
+            Self::Sampled => "$sampled",
+            Self::Past => "$past",
+            Self::Rose => "$rose",
+            Self::Fell => "$fell",
+            Self::Stable => "$stable",
+            Self::Changed => "$changed",
             Self::Bits => "$bits",
             Self::Isunbounded => "$isunbounded",
             Self::Dimensions => "$dimensions",
@@ -353,8 +371,29 @@ impl SystemFunction {
     /// Whether a call reads the state of the simulation: it has an effect,
     /// or it returns the simulation time. Such a call is not a constant
     /// expression, and a process evaluates it where it runs.
+    /// Whether the function reads the sampled values of its operand
+    /// (IEEE 1800-2023 16.9.3), which are those of earlier time slots.
+    pub fn reads_sampled_values(self) -> bool {
+        matches!(
+            self,
+            Self::Sampled | Self::Past | Self::Rose | Self::Fell | Self::Stable | Self::Changed
+        )
+    }
+
     pub fn reads_simulation_state(self) -> bool {
-        self.is_effectful() || matches!(self, Self::Time | Self::Stime | Self::Realtime)
+        self.is_effectful()
+            || matches!(
+                self,
+                Self::Time
+                    | Self::Stime
+                    | Self::Realtime
+                    | Self::Sampled
+                    | Self::Past
+                    | Self::Rose
+                    | Self::Fell
+                    | Self::Stable
+                    | Self::Changed
+            )
     }
 
     /// Whether the call writes argument `position` back, as `$random(seed)`
@@ -413,7 +452,14 @@ impl SystemFunction {
             | Self::Countones
             | Self::ScopeRandomize
             | Self::ScopeRandomizeEnum => Some((32, true)),
-            Self::Onehot | Self::Onehot0 | Self::Isunknown | Self::Isunbounded => Some((1, false)),
+            Self::Onehot
+            | Self::Onehot0
+            | Self::Isunknown
+            | Self::Isunbounded
+            | Self::Rose
+            | Self::Fell
+            | Self::Stable
+            | Self::Changed => Some((1, false)),
             Self::Random
             | Self::DistUniform
             | Self::DistNormal
@@ -440,6 +486,8 @@ impl SystemFunction {
             Self::Time => Some((64, false)),
             Self::Signed
             | Self::Unsigned
+            | Self::Sampled
+            | Self::Past
             | Self::Bits
             | Self::Dimensions
             | Self::UnpackedDimensions
@@ -773,11 +821,86 @@ impl ObjectField {
     }
 }
 
+/// Storage and conversion contract for a one-dimensional value container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContainerLayout {
+    pub kind: ContainerKind,
+    pub width: u32,
+    pub signed: bool,
+    pub two_state: bool,
+    pub handle: Option<HandleProperty>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContainerKind {
+    Dynamic,
+    Queue {
+        capacity: u32,
+    },
+    Associative {
+        key_width: u32,
+        signed: bool,
+        string: bool,
+    },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContainerOp {
+    Equal,
+    CaseEqual,
+    New,
+    Literal,
+    Convert,
+    Size,
+    Get,
+    Set,
+    Clear,
+    Delete,
+    Insert,
+    PushFront,
+    PushBack,
+    PopFront,
+    PopBack,
+    Exists,
+    First,
+    Last,
+    Next,
+    Prev,
+}
+impl ContainerOp {
+    pub fn mutates(self) -> bool {
+        matches!(
+            self,
+            Self::Set
+                | Self::Clear
+                | Self::Delete
+                | Self::Insert
+                | Self::PushFront
+                | Self::PushBack
+                | Self::PopFront
+                | Self::PopBack
+        )
+    }
+    pub fn result_type(self, layout: ContainerLayout) -> (usize, bool) {
+        match self {
+            Self::Equal | Self::CaseEqual => (1, false),
+            Self::Get | Self::PopFront | Self::PopBack => (layout.width as usize, layout.signed),
+            Self::Size | Self::Exists | Self::First | Self::Last | Self::Next | Self::Prev => {
+                (32, true)
+            }
+            _ => (32, false),
+        }
+    }
+}
+
 /// An operation on class objects (IEEE 1800-2023 clause 8). The analyzer
 /// lays out each class and writes the layout into the operation, so the
 /// frontend needs no class table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ObjectOp {
+    Randomize(celox_heap::randomization::Program),
+    Container {
+        op: ContainerOp,
+        layout: ContainerLayout,
+    },
     /// A new object of `class` with `size` zeroed bytes, whose handle
     /// properties are at the given offsets.
     New {
@@ -810,14 +933,31 @@ pub enum ObjectOp {
     ModePop,
     ModeSelect(u32, bool),
     ModeSelected(u32),
+    /// A new object of the class of the object in the argument, with a copy
+    /// of its properties (IEEE 1800-2023 8.12).
+    Copy,
 }
 
 impl ObjectOp {
+    /// Memory arguments changed by a container operation, including traversal's ref index.
+    pub fn writes_argument(&self, position: usize) -> bool {
+        match self {
+            Self::Container { op, .. } if op.mutates() => position == 0,
+            Self::Container {
+                op: ContainerOp::First | ContainerOp::Last | ContainerOp::Next | ContainerOp::Prev,
+                ..
+            } => position == 1,
+            _ => false,
+        }
+    }
+
     /// The width and signedness of the result.
     pub fn result_type(&self) -> (usize, bool) {
         match self {
+            Self::Container { op, layout } => op.result_type(*layout),
             Self::Random | Self::RandomCyclic { .. } => (64, false),
-            Self::Seed
+            Self::Randomize(_)
+            | Self::Seed
             | Self::Check(_)
             | Self::ModeSet(_)
             | Self::ModePush
@@ -826,7 +966,7 @@ impl ObjectOp {
             | Self::ModeSelected(_) => (32, false),
             Self::ModeGet(..) => (32, true),
             Self::Load(field) => (field.width as usize, field.signed),
-            Self::New { .. } | Self::ClassOf | Self::Store(_) => (32, false),
+            Self::New { .. } | Self::ClassOf | Self::Store(_) | Self::Copy => (32, false),
         }
     }
 }
@@ -834,11 +974,13 @@ impl ObjectOp {
 impl fmt::Display for ObjectOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Container { .. } => "container operation",
             Self::New { .. } => "new",
             Self::Load(_) => "property read",
             Self::Store(_) => "property write",
             Self::ClassOf => "class query",
             Self::Random => "object random bits",
+            Self::Randomize(_) => "constrained object randomization",
             Self::RandomCyclic { .. } => "object random cyclic index",
             Self::Seed => "object random seed",
             Self::Check(_) => "object receiver check",
@@ -848,6 +990,7 @@ impl fmt::Display for ObjectOp {
             Self::ModePop => "restore random modes",
             Self::ModeSelect(..) => "select random property",
             Self::ModeSelected(_) => "selected random property query",
+            Self::Copy => "shallow copy",
         })
     }
 }
@@ -1137,12 +1280,12 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$assertvacuousoff", Task),
     unsupported("$assertcontrol", Task),
     // 20.12 Sampled value system functions
-    unsupported("$sampled", Function),
-    unsupported("$rose", Function),
-    unsupported("$fell", Function),
-    unsupported("$stable", Function),
-    unsupported("$changed", Function),
-    unsupported("$past", Function),
+    function(SystemFunction::Sampled, 1, Some(1)),
+    function(SystemFunction::Rose, 1, Some(1)),
+    function(SystemFunction::Fell, 1, Some(1)),
+    function(SystemFunction::Stable, 1, Some(1)),
+    function(SystemFunction::Changed, 1, Some(1)),
+    function(SystemFunction::Past, 1, Some(3)),
     unsupported("$past_gclk", Function),
     unsupported("$rose_gclk", Function),
     unsupported("$fell_gclk", Function),
@@ -1461,6 +1604,8 @@ pub enum Body {
     /// `always`, `always_comb`, or `always_ff`.
     Always,
     Initial,
+    /// A final procedure, restricted to function statements (9.2.3).
+    Final,
     /// A function or task.
     Subroutine,
 }
@@ -1548,11 +1693,13 @@ pub fn check_call(
         });
     }
     // Functions require values, except the optional addressing operands of
-    // `$fread` (21.3.4.4). Tasks such as `$display(a,,b)` may omit operands.
+    // `$fread` (21.3.4.4) and the number of ticks of `$past` (16.9.3). Tasks
+    // such as `$display(a,,b)` may omit operands.
     if tf.kind != Task
         && let Some(position) = args.iter().enumerate().position(|(position, arg)| {
             *arg == Arg::Omitted
                 && !(checked == SystemCall::Function(SystemFunction::Fread) && position >= 2)
+                && !(checked == SystemCall::Function(SystemFunction::Past) && position == 1)
         })
     {
         return Err(AnalyzerError::InvalidSystemTfCall {

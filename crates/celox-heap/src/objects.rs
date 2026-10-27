@@ -11,7 +11,7 @@ use crate::{Handle, HandleKind, Heap};
 /// The handle of `null`, the value of zero-initialized memory.
 pub const NULL: Handle = 0;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Object {
     class: u32,
     random_state: u64,
@@ -24,7 +24,7 @@ pub(crate) struct Object {
     pub(crate) handles: Vec<(u32, HandleKind)>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct RandomModes {
     overrides: fxhash::FxHashMap<u32, bool>,
     /// Non-rand properties temporarily made random by an argument list.
@@ -47,8 +47,11 @@ impl Object {
 
 /// An error that compiled code made in a heap operation, which the runtime
 /// reports once control returns to it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Fault {
+    ConstraintRandomization(String),
+    NegativeArraySize,
+    ContainerAllocationLimit,
     /// A property access or method call through `null` or a handle of no
     /// live object (IEEE 1800-2023 8.4).
     NullDereference,
@@ -59,6 +62,13 @@ pub enum Fault {
 impl std::fmt::Display for Fault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ConstraintRandomization(reason) => {
+                write!(f, "constraint randomization failed: {reason}")
+            }
+            Self::NegativeArraySize => f.write_str("negative dynamic array size"),
+            Self::ContainerAllocationLimit => {
+                f.write_str("dynamic container allocation limit exceeded")
+            }
             Self::NullDereference => f.write_str("null object handle dereferenced"),
             Self::RandomizationClassMismatch => {
                 f.write_str("class randomization through a base handle is unsupported")
@@ -196,6 +206,18 @@ impl Heap {
         true
     }
 
+    /// A new object of the class of `object` with a copy of its properties:
+    /// the handles it holds are copied, not the objects they refer to (IEEE
+    /// 1800-2023 8.12). Copying `null` is a fault and gives `null`.
+    pub fn copy_object(&mut self, object: Handle) -> Handle {
+        let Some(copy) = self.object_mut(object).map(|object| object.clone()) else {
+            return NULL;
+        };
+        let handle = self.new_object(copy.class, 0);
+        self.objects.insert(handle, copy);
+        handle
+    }
+
     /// Declare that the property of `object` at byte `offset` holds a handle
     /// of `kind`.
     pub fn declare_handle(&mut self, object: Handle, offset: u32, kind: HandleKind) {
@@ -295,6 +317,28 @@ mod tests {
         assert_eq!(heap.take_fault(), Some(Fault::NullDereference));
         assert_eq!(heap.take_fault(), None);
         assert_eq!(heap.class_of(NULL), 0);
+    }
+
+    #[test]
+    fn copies_are_shallow() {
+        let mut heap = Heap::new();
+        let inner = heap.new_object(2, 4);
+        let original = heap.new_object(1, 8);
+        heap.declare_handle(original, 0, HandleKind::Object);
+        heap.store(original, 0, 4, inner.into());
+        heap.store(original, 4, 4, 9);
+        let copy = heap.copy_object(original);
+        assert_ne!(copy, original);
+        assert_eq!(heap.class_of(copy), 1);
+        assert_eq!(heap.load(copy, 0, 4), u64::from(inner));
+        heap.store(copy, 4, 4, 5);
+        assert_eq!(heap.load(original, 4, 4), 9);
+        // The copy keeps what its handle properties refer to alive.
+        heap.collect([Root::object(copy)]);
+        assert!(heap.contains_object(inner));
+        assert!(!heap.contains_object(original));
+        assert_eq!(heap.copy_object(NULL), NULL);
+        assert_eq!(heap.take_fault(), Some(Fault::NullDereference));
     }
 
     #[test]

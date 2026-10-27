@@ -69,11 +69,14 @@ jobs:
           python-version: "3.12"
       - name: Install recorded solver version
         run: python -m pip install z3-solver==5.1.0
+      - name: Check independent Aplite version
+        working-directory: .
+        run: node scripts/check-aplite-release.mjs
       - name: Test affected Lydite packages and documentation
         run: |
           Z3_BIN="$(command -v z3)"
           export Z3_BIN
-          cargo test --locked -p lydite -p lydite-ir -p lydite-solver -p lydite-syntax -p lydite-verify
+          cargo test --locked -p lydite -p lydite-ir -p lydite-solver -p lydite-syntax -p lydite-verify -p aplite
 
   documentation:
     needs: changes

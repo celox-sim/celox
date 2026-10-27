@@ -16,6 +16,7 @@ use num_bigint::BigUint;
 fn empty_layout() -> MemoryLayout {
     MemoryLayout {
         trace: None,
+        settle: None,
         four_state: false,
         mode: MemoryLayoutMode::Packed,
         unpacked_arrays: HashMap::default(),

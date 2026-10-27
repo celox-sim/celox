@@ -35,6 +35,7 @@ impl<B: SimBackend> SimulationState<B> {
             .get(site)
             .ok_or_else(|| Self::site_error(process, site))?;
         let driven = terms.iter().any(|term| term.driven);
+        let frame = &self.model.processes[process].frame;
         self.process_state
             .waiters
             .register(process, driven, |waiter| {
@@ -48,6 +49,12 @@ impl<B: SimBackend> SimulationState<B> {
                         .extend(terms.iter().map(|_| Baseline::Value(Value::default())));
                 }
                 for (term, baseline) in terms.iter().zip(&mut waiter.baselines) {
+                    if frame.as_ref().is_some_and(|frame| {
+                        frame.locals.contains(&term.signal) || frame.private.contains(&term.signal)
+                    }) {
+                        *baseline = Baseline::Value(read(backend, term.signal));
+                        continue;
+                    }
                     match term.counter {
                         Some(counter) => {
                             let seen = backend.get_as(counter);
@@ -96,13 +103,13 @@ impl<B: SimBackend> SimulationState<B> {
         backend: &mut B,
         signal: SignalRef,
         write: impl FnOnce(&mut B),
-    ) {
+    ) -> Result<(), Halt> {
         if self.model.counted.is_empty()
             && self.model.probes_by_offset.is_empty()
             && self.process_state.waiters.is_empty()
         {
             write(backend);
-            return;
+            return Ok(());
         }
         let counted = self.model.counted_by_offset.get(&signal.offset).copied();
         let probes = self.model.probes_by_offset.get(&signal.offset);
@@ -126,45 +133,102 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         if !self.process_state.waiters.is_empty() {
-            self.observe(backend, Some(signal));
+            self.observe(backend, Some(signal))?;
         }
+        Ok(())
     }
 
     /// Test the waits against the current state, or only their terms on
     /// signal `only` after a write of it. Woken processes become ready.
     #[inline]
-    pub(super) fn observe(&mut self, backend: &B, only: Option<SignalRef>) {
-        self.check_waits(backend, only, false);
+    pub(super) fn observe(&mut self, backend: &mut B, only: Option<SignalRef>) -> Result<(), Halt> {
+        self.check_waits(backend, only, false)
     }
 
     /// Like [`Self::observe`], at a point where only design code wrote
     /// state: terms on signals that only the host and the scheduler write
     /// cannot have changed.
     #[inline]
-    pub(super) fn observe_driven(&mut self, backend: &B) {
+    pub(super) fn observe_driven(&mut self, backend: &mut B) -> Result<(), Halt> {
         if !self.process_state.waiters.none_driven() {
-            self.check_waits(backend, None, true);
+            self.check_waits(backend, None, true)?;
         }
+        Ok(())
     }
 
-    fn check_waits(&mut self, backend: &B, only: Option<SignalRef>, driven_only: bool) {
+    fn check_waits(
+        &mut self,
+        backend: &mut B,
+        only: Option<SignalRef>,
+        driven_only: bool,
+    ) -> Result<(), Halt> {
         let processes = &self.model.processes;
-        let state = StateView::new(backend);
         let ProcessState {
             waiters,
             ready,
             reactive,
+            activations,
+            cells,
             ..
         } = &mut self.process_state;
+        let mut error = None;
         waiters.retain(driven_only, |process, waiter| {
+            if error.is_some() {
+                return true;
+            }
             let terms = &processes[process].wait_sites[waiter.site];
             let mut wake = false;
             for (index, term) in terms.iter().enumerate() {
+                if let Some(probe) = processes[process].frame.as_ref().and_then(|frame| {
+                    frame
+                        .event_probes
+                        .iter()
+                        .find(|probe| probe.result == term.signal)
+                }) {
+                    if only.is_some_and(|signal| !probe.inputs.contains(&signal)) {
+                        continue;
+                    }
+                    match super::activation::event_probe(
+                        backend,
+                        &processes[process],
+                        &activations[process],
+                        cells,
+                        probe,
+                    ) {
+                        Ok(value) => {
+                            let Baseline::Value(last) = &mut waiter.baselines[index] else {
+                                error = Some(SimulatorErrorCode::InternalError.into());
+                                return true;
+                            };
+                            wake |= occurs(term.kind, last, &value);
+                            *last = value;
+                        }
+                        Err(failure) => {
+                            error = Some(failure);
+                            return true;
+                        }
+                    }
+                    continue;
+                }
+                let state = StateView::new(&*backend);
                 if only.is_some_and(|signal| signal != term.signal) || (driven_only && !term.driven)
                 {
                     continue;
                 }
                 let baseline = &mut waiter.baselines[index];
+                if let Some(value) = super::activation::activation_value(
+                    activations,
+                    cells,
+                    &processes[process],
+                    process,
+                    term.signal,
+                ) {
+                    if let Baseline::Value(last) = baseline {
+                        wake |= occurs(term.kind, last, value);
+                        *last = value.clone();
+                        continue;
+                    }
+                }
                 // The common term: a plain signal no counter counts.
                 if let Baseline::Raw(last) = baseline {
                     let now = state.planes(term.signal).expect("a plain signal");
@@ -221,6 +285,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
             !wake
         });
+        error.map_or(Ok(()), Err)
     }
 
     /// Whether the change from the image `last` to `now` is an occurrence of
@@ -289,7 +354,7 @@ pub(super) fn wake_in_region(
 }
 
 /// What one term of a waiting process compares against.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Baseline {
     /// The counter's value when the wait began, and the signal's value at
     /// the last check. Only kernels and combinational process units count a
@@ -308,7 +373,7 @@ pub enum Baseline {
 }
 
 /// A process suspended at a wait.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Waiter {
     pub site: usize,
     pub baselines: Vec<Baseline>,
@@ -316,7 +381,7 @@ pub struct Waiter {
 
 /// The processes suspended at a wait, by process index. A slot keeps its
 /// storage while its process runs, so suspending again reuses it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Waiters {
     slots: Vec<Waiter>,
     waiting: Vec<bool>,

@@ -60,7 +60,10 @@ fn ff_process_from_procedure(
     packed_dimensions: &PackedDimensions,
     state: &mut procedural::BodyState<'_>,
 ) -> Result<Option<FfProcess>, AnalyzerError> {
-    if procedure.kind == celox_sv_syntax::ProcedureKind::Initial {
+    if matches!(
+        procedure.kind,
+        celox_sv_syntax::ProcedureKind::Initial | celox_sv_syntax::ProcedureKind::Final
+    ) {
         return Ok(None);
     }
     if always_kind(procedure, syntax_tree.declarations())? != AlwaysKind::Ff {

@@ -1,11 +1,18 @@
 # Release policy
 
 Celox is released as one lockstep distribution. `VERSION`,
-`.release-please-manifest.json`, the npm packages, and all Rust workspace crates
+`.release-please-manifest.json`, the npm packages, and all Celox Rust workspace crates
 must always carry the same version. The public Rust entry points are `celox`,
 `celox-frontend-sdk`, `celox-test-suite`, and the Rust adapter API in `celox-napi`; the remaining
 published `celox-*` crates satisfy their Cargo dependency graph and remain
 implementation details.
+
+Aplite has its own version and release train (`release-aplite.yml` and
+`publish-aplite.yml`). Publish the Aplite version required by the workspace
+before releasing Celox: `celox-heap` depends on it, and Cargo resolves the
+published Aplite crate when packaging Celox crates. A bootstrap `0.0.0` release
+does not satisfy this dependency. Aplite is deliberately absent from Celox's
+lockstep publication list.
 
 ## Versioning before 1.0
 

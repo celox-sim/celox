@@ -8,7 +8,7 @@ use crate::symbolic::artifact::{
 use crate::{
     FrontendLookup, FrontendTrace, FrontendTraceOptions, FusedSirOptimizationHints, HashMap,
     HashSet, InstancePath, ParallelScheduleOptions, ParserError, ScheduledRtl, ScheduledRtlOutput,
-    SourceAddr, SourceLocation, SourceVarId, VariableInfo, flattening,
+    SettlePartitionMode, SourceAddr, SourceLocation, SourceVarId, VariableInfo, flattening,
 };
 use celox_design::{
     BitAccess, CombDerivedClock, CounterKind, CounterSlots, DomainKind, ElaboratedDesign,
@@ -375,9 +375,10 @@ impl PackageBindings {
     }
 }
 
-/// Reject a package variable that two flip-flop processes write, that the
-/// initial writes of two instances write, or that a continuous driver and
-/// any other process write. Instances of one module are separate drivers.
+/// Reject a package variable that two flip-flop processes write, that a
+/// continuous driver and any other process write, or that an `always_ff`,
+/// `always_comb` or `always_latch` run as a process and any other process
+/// write. Instances of one module are separate drivers.
 /// Overlapping continuous drivers are rejected by the scheduler.
 fn check_package_variable_drivers(
     bindings: &PackageBindings,
@@ -455,6 +456,9 @@ fn check_package_variable_drivers(
     // values, and initial processes. The package's own declaration
     // initializers are not drivers.
     let mut initial_writes: Vec<((InstanceId, usize), AbsoluteAddr, BitAccess)> = Vec::new();
+    // The writes of processes that must be the only writers of what they
+    // write (IEEE 1800-2023 9.2.2.2 to 9.2.2.4).
+    let mut restricted_writes: Vec<((InstanceId, usize), AbsoluteAddr, BitAccess)> = Vec::new();
     for (&instance, module_id) in instance_modules {
         let module = &modules[module_id];
         if package_instances.contains_key(module_id) {
@@ -485,17 +489,34 @@ fn check_package_variable_drivers(
             }
         }
         for (index, process) in module.processes.iter().enumerate() {
+            let restricted = matches!(
+                process.origin.construct.as_str(),
+                "always_ff" | "always_comb" | "always_latch"
+            );
             for block in process.kernel.blocks.values() {
                 for instruction in &block.instructions {
-                    let (SIRInstruction::Store(address, ..)
-                    | SIRInstruction::Commit(_, address, ..)) = instruction
+                    let (SIRInstruction::Store(address, offset, bits, ..)
+                    | SIRInstruction::Commit(_, address, offset, bits, _)) = instruction
                     else {
                         continue;
                     };
                     let address = bindings.locate(instance, address.var_id);
                     if packages.contains(&address) {
-                        let access = BitAccess::new(0, width(&address).saturating_sub(1));
+                        // The bits the store writes, as for flip-flop
+                        // writes, so disjoint writers are not rejected.
+                        let access = offset
+                            .constant_bit_offset()
+                            .zip(bits.checked_sub(1))
+                            .and_then(|(lsb, tail)| {
+                                Some(BitAccess::new(lsb, lsb.checked_add(tail)?))
+                            })
+                            .unwrap_or_else(|| {
+                                BitAccess::new(0, width(&address).saturating_sub(1))
+                            });
                         initial_writes.push(((instance, index), address, access));
+                        if restricted {
+                            restricted_writes.push(((instance, index), address, access));
+                        }
                     }
                 }
             }
@@ -518,12 +539,28 @@ fn check_package_variable_drivers(
                         .then_some(*address)
                 })
         };
-    // Two flip-flop processes, or initial writes of two instances, race.
+    // Two flip-flop processes race. Initial writes and processes of several
+    // instances may write one package variable, as any processes may write
+    // a variable (IEEE 1800-2023 6.5).
     if let Some(address) = conflict(&ff_writes, &|left, right| left != right) {
         return Err(error(&address));
     }
-    if let Some(address) = conflict(&initial_writes, &|left, right| left.0 != right.0) {
-        return Err(error(&address));
+    // A restricted process overlaps every write of another process.
+    for (writer, address, access) in &restricted_writes {
+        let overlaps = |(other, other_address, other_access): &(
+            (InstanceId, usize),
+            AbsoluteAddr,
+            BitAccess,
+        )| {
+            other_address == address && other_access.overlaps(access) && other != writer
+        };
+        if initial_writes.iter().any(overlaps)
+            || ff_writes.iter().any(|(_, other_address, other_access)| {
+                other_address == address && other_access.overlaps(access)
+            })
+        {
+            return Err(error(address));
+        }
     }
     // A continuous driver overlaps every other write.
     for path in comb_blocks {
@@ -1470,6 +1507,29 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         }
     }
     let parallel_comb_blocks = parallel.enabled().then(|| comb_blocks.clone());
+    // The flag object of a partitioned settle is declared once the
+    // partitions are known; reserve its address now.
+    let root_instance = expanded[&InstancePath(Vec::new())];
+    let settle_flags =
+        settle_partitioning(parallel, &comb_blocks, &global_arena, eval_apply_ffs.len()).map(
+            |target_cost| {
+                let var_id = SourceVarId(
+                    modules[&root_id]
+                        .variables
+                        .keys()
+                        .map(|id| id.0 + 1)
+                        .max()
+                        .unwrap_or(0),
+                );
+                scheduler::SettlePartitioning {
+                    flags: AbsoluteAddr {
+                        instance_id: root_instance,
+                        var_id,
+                    },
+                    target_cost,
+                }
+            },
+        );
     let sched_start = flatten_timing.then(std::time::Instant::now);
     let schedule = match scheduler::sort_with_unpacked_element_widths(
         comb_blocks,
@@ -1480,6 +1540,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &var_widths,
         &unpacked_element_widths,
         next_runtime_error_code,
+        settle_flags,
     ) {
         Ok(schedule) => schedule,
         Err(error) => {
@@ -1520,6 +1581,19 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             });
         }
     };
+    let settle_partitions = schedule.partitions.clone();
+
+    let settle_flags = settle_flags.filter(|_| !settle_partitions.is_empty());
+    if let Some(settle) = &settle_flags {
+        // The flags carry what changed from one settle to the next.
+        persistent_comb_state.insert(settle.flags);
+        declare_settle_flags(
+            &mut modules,
+            root_id,
+            settle.flags.var_id,
+            settle_partitions.len(),
+        );
+    }
     let object_sizes = super::parallel::ObjectSizes {
         widths: &var_widths,
         element_widths: &unpacked_element_widths,
@@ -1640,7 +1714,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     // events; that copy lets the FF part use comb values in registers.
     // Beyond that the copies would multiply the design by its event count,
     // so the ticks share the one `eval_comb` program instead.
-    let merge_comb_apply = eval_apply_ffs.len() <= MERGED_COMB_APPLY_EVENTS;
+    // A merged program drops comb stores the next full settle would redo;
+    // a partitioned settle keeps what its skipped partitions stored.
+    let merge_comb_apply =
+        eval_apply_ffs.len() <= MERGED_COMB_APPLY_EVENTS && settle_flags.is_none();
     let mut eval_comb_apply_ffs = HashMap::default();
     let mut fused_direct_ff_writes = HashMap::default();
     if let (
@@ -1883,6 +1960,21 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .chain(bound_initials)
         .map(|(_, init)| init)
         .collect();
+    if let Some(settle) = &settle_flags {
+        // Every partition runs at the first settle.
+        let partitions = settle_partitions.len();
+        let value = (0..partitions).fold(BigUint::default(), |value, partition| {
+            value | (BigUint::from(1u8) << (partition * 8))
+        });
+        initial_memory_values.push(InitialStateValue {
+            address: settle.flags,
+            data: InitialStateData::Packed {
+                value,
+                mask: BigUint::default(),
+                written_mask: (BigUint::from(1u8) << ((partitions + 2) * 8)) - 1u8,
+            },
+        });
+    }
     let state_objects: HashMap<AbsoluteAddr, VariableMetadata> = instance_modules
         .iter()
         .flat_map(|(&instance_id, module_id)| {
@@ -1903,7 +1995,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .collect();
     let declaration_startup = processes
         .iter()
-        .any(|process| process.slots.is_initializer)
+        .any(|process| process.slots.kind == celox_design::ProcessKind::Initializer)
         .then(|| {
             let targets: BTreeSet<_> = folded_initials.iter().map(|init| init.address).collect();
             let mut reset = targets
@@ -2030,10 +2122,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     }
     let mut process_kernels = Vec::with_capacity(processes.len());
     let mut process_slots = Vec::with_capacity(processes.len());
+    let mut process_frames = Vec::with_capacity(processes.len());
     let mut process_origins = Vec::with_capacity(processes.len());
     for process in processes {
         process_kernels.push(process.kernel);
         process_slots.push(process.slots);
+        process_frames.push(process.frame);
         process_origins.push(process.origin);
     }
     let TimingMetadata {
@@ -2041,6 +2135,8 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         nba_sites,
         host_request_sites,
         time_slots,
+        sample_shadows,
+        initial_copies,
         ..
     } = timing;
     let source_sir = SirProgram {
@@ -2241,6 +2337,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         }
     }
 
+    let process_frames: Vec<_> = process_frames
+        .into_iter()
+        .map(|frame| frame.map(|frame| frame.map(project)))
+        .collect();
     let process_slots = process_slots
         .into_iter()
         .map(|slots| slots.map(project))
@@ -2288,7 +2388,41 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .collect();
     let active_commits: Vec<StateAddr> = active_commits.into_iter().map(project).collect();
     let time_slots: Vec<StateAddr> = time_slots.into_iter().map(project).collect();
+    let sample_shadows: Vec<(StateAddr, StateAddr)> = sample_shadows
+        .into_iter()
+        .map(|(variable, copy)| (project(variable), project(copy)))
+        .collect();
+    let initial_copies: Vec<(StateAddr, StateAddr)> = initial_copies
+        .into_iter()
+        .map(|(variable, copy)| (project(variable), project(copy)))
+        .collect();
     let root_instance = expanded[&InstancePath(Vec::new())];
+    let settle_partitions = settle_flags.map(|settle| {
+        let mut marks: HashMap<StateAddr, BTreeSet<u32>> = HashMap::default();
+        for (index, partition) in settle_partitions.iter().enumerate() {
+            let index = index as u32;
+            for addr in &partition.reads {
+                if let Some(&state) = source_to_state.get(addr) {
+                    marks.entry(state).or_default().insert(index);
+                }
+            }
+            for addr in &partition.writes {
+                if let Some(&state) = source_to_state.get(addr) {
+                    marks.entry(state).or_default().insert(index);
+                }
+            }
+        }
+        let mut marks = marks
+            .into_iter()
+            .map(|(state, partitions)| (state, partitions.into_iter().collect()))
+            .collect::<Vec<_>>();
+        marks.sort_unstable();
+        celox_design::SettlePartitions {
+            flags: project(settle.flags),
+            partitions: settle_partitions.len() as u32,
+            marks,
+        }
+    });
     let scheduler = scheduler_slots.map(|slots| celox_design::SchedulerSchema {
         slots: slots.map(|var_id| {
             project(AbsoluteAddr {
@@ -2347,6 +2481,13 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .collect();
     // The runtime counts the occurrences its own writes cause.
     timing_read_roots.extend(
+        process_frames
+            .iter()
+            .flatten()
+            .flat_map(|frame| frame.private.iter().chain(&frame.locals))
+            .copied(),
+    );
+    timing_read_roots.extend(
         occurrence_probes
             .iter()
             .flat_map(|(source, counter)| [source.id, *counter]),
@@ -2378,6 +2519,13 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 .flat_map(|(source, counter)| [source.id, *counter]),
         );
     }
+    // The host copies each sampled variable into its copy.
+    timing_read_roots.extend(
+        sample_shadows
+            .iter()
+            .chain(&initial_copies)
+            .flat_map(|&(variable, copy)| [variable, copy]),
+    );
     // A package variable's state object maps back to the package's own
     // variable, not to one of its aliases.
     let state_to_source = source_to_state
@@ -2420,6 +2568,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             declaration_startup,
             dead_store_policy: Default::default(),
             live_signals: Default::default(),
+            process_frames,
             processes: process_slots,
             process_origins,
             watches,
@@ -2429,8 +2578,11 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             host_request_sites,
             active_commits,
             time_slots,
+            sample_shadows,
+            initial_copies,
             scheduler,
             derived_edges: Vec::new(),
+            settle_partitions,
         },
     };
 
@@ -2446,6 +2598,78 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         scheduled,
         fused_optimization_hints: FusedSirOptimizationHints { direct_ff_writes },
     })
+}
+
+/// Smallest combinational program, in expression nodes, whose settle
+/// [`SettlePartitionMode::Estimated`] partitions.
+const MIN_PARTITIONED_SETTLE_COST: usize = 20_000;
+/// Expression nodes per partition of an estimated partitioned settle.
+const SETTLE_PARTITION_COST: usize = 2_000;
+
+/// The cost per partition of a partitioned settle of `comb_blocks`, or
+/// `None` to keep one pass.
+///
+/// A partition costs a flag test per settle and flag stores in every writer
+/// of what it reads, and pays off when most of the program is idle in most
+/// settles. A design with few event domains drives most of its logic from
+/// one clock, so it keeps the single pass, as does a small program.
+fn settle_partitioning(
+    parallel: &ParallelScheduleOptions,
+    comb_blocks: &[LogicPath<AbsoluteAddr>],
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    events: usize,
+) -> Option<usize> {
+    // Lane-partitioned kernels run the comb program as lane tasks.
+    if parallel.enabled() {
+        return None;
+    }
+    match parallel.settle {
+        SettlePartitionMode::Off => None,
+        SettlePartitionMode::Always => Some(1),
+        SettlePartitionMode::Estimated => {
+            if events <= MERGED_COMB_APPLY_EVENTS {
+                return None;
+            }
+            let cost: usize = comb_blocks
+                .iter()
+                .map(|path| scheduler::path_cost(arena, path))
+                .sum();
+            (cost >= MIN_PARTITIONED_SETTLE_COST).then_some(SETTLE_PARTITION_COST)
+        }
+    }
+}
+
+/// Declare the flags of a settle of `partitions` partitions, one byte each
+/// plus the untracked and the full byte, as a hidden variable of the top
+/// module.
+fn declare_settle_flags(
+    modules: &mut HashMap<ModuleId, SimModule>,
+    root: ModuleId,
+    var_id: SourceVarId,
+    partitions: usize,
+) {
+    let width = (partitions + 2) * 8;
+    let variables = &mut modules.get_mut(&root).expect("top module").variables;
+    variables.insert(
+        var_id,
+        crate::symbolic::artifact::SymbolicVariable {
+            path: vec!["$settle".to_string(), "flags".to_string()],
+            kind: crate::VariableKind::Variable,
+            signed: false,
+            metadata: VariableMetadata {
+                width,
+                is_4state: false,
+                kind: DomainKind::Other,
+                type_kind: celox_design::PortTypeKind::Bit,
+                array_dims: Vec::new(),
+                value_kind: Default::default(),
+            },
+            packed_dims: vec![width],
+            unpacked_ranges: Vec::new(),
+            source: None,
+            module_affiliated: false,
+        },
+    );
 }
 
 /// Declare the hidden objects a compiled scheduler exchanges with the
@@ -2890,6 +3114,9 @@ fn unify_clock_domains(
     let mut drive_graph: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>> = HashMap::default();
     // The edge each clock is sensed at: `true` rising, `false` falling.
     let mut polarities: HashMap<AbsoluteAddr, bool> = HashMap::default();
+    // Every range definition by its target, to follow single bits through
+    // wiring.
+    let mut wires: HashMap<AbsoluteAddr, Vec<Wire<'_>>> = HashMap::default();
 
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
@@ -2911,6 +3138,24 @@ fn unify_clock_domains(
             }
         };
 
+        for logic_path in &sim_module.comb_blocks {
+            // A definition reading a value from before its process ran
+            // is not a wire: `g = v[0]; v = {2{clk}};` makes `g` the old
+            // level of `clk`.
+            if !logic_path.previous_sources.is_empty() {
+                continue;
+            }
+            if let Some(target) = logic_path.target.var() {
+                wires
+                    .entry(bindings.locate(*id, target.id))
+                    .or_default()
+                    .push(Wire {
+                        access: target.access,
+                        expr: logic_path.expr,
+                        arena: WireArena::Comb(&sim_module.arena, *id),
+                    });
+            }
+        }
         // Internal aliases (e.g. `assign clk_internal = clk_port;`)
         for logic_path in &sim_module.comb_blocks {
             // Only unify whole-variable copies. Gated clocks and part-selects
@@ -2940,6 +3185,23 @@ fn unify_clock_domains(
                     GlueAddr::Parent(var) => width(sim_module, var),
                     GlueAddr::Child(var) => width(child_module, var),
                 };
+                for (_, logic_path) in glue_block
+                    .input_ports
+                    .iter()
+                    .chain(&glue_block.output_ports)
+                {
+                    if let Some(target) = logic_path.target.var() {
+                        let located = match target.id {
+                            GlueAddr::Parent(var) => bindings.locate(*id, var),
+                            GlueAddr::Child(var) => bindings.locate(child_id, var),
+                        };
+                        wires.entry(located).or_default().push(Wire {
+                            access: target.access,
+                            expr: logic_path.expr,
+                            arena: WireArena::Glue(&glue_block.arena, *id, child_id),
+                        });
+                    }
+                }
 
                 // Inputs: Parent -> Child (Parent drives Child)
                 for (_, logic_path) in &glue_block.input_ports {
@@ -2975,6 +3237,69 @@ fn unify_clock_domains(
                     }
                 }
             }
+        }
+    }
+
+    // A one-bit variable wired to a bit of a vector that is in turn wired
+    // to a one-bit variable, through bit selects, concatenations,
+    // replications and port connections, is a copy of that variable: a
+    // clock gated in a cell, collected into a vector and replicated to the
+    // clock inputs of many instances is the cell's output clock.
+    let one_bit = |addr: AbsoluteAddr| {
+        modules[&instance_modules[&addr.instance_id]]
+            .variables
+            .get(&addr.var_id)
+            .is_some_and(|variable| {
+                variable.metadata.width == 1 && variable.metadata.array_dims.is_empty()
+            })
+    };
+    let resolve = |(addr, bit): (AbsoluteAddr, usize)| {
+        let wire = wires
+            .get(&addr)?
+            .iter()
+            .find(|wire| wire.access.lsb <= bit && bit <= wire.access.msb)?;
+        let bit = bit - wire.access.lsb;
+        match wire.arena {
+            WireArena::Comb(arena, instance) => wired_bit(arena, wire.expr, bit)
+                .map(|(var, bit)| (bindings.locate(instance, var), bit)),
+            WireArena::Glue(arena, parent, child) => {
+                wired_bit(arena, wire.expr, bit).map(|(var, bit)| match var {
+                    GlueAddr::Parent(var) => (bindings.locate(parent, var), bit),
+                    GlueAddr::Child(var) => (bindings.locate(child, var), bit),
+                })
+            }
+        }
+    };
+    let mut targets = wires
+        .keys()
+        .copied()
+        .filter(|&addr| one_bit(addr))
+        .collect::<Vec<_>>();
+    targets.sort_unstable();
+    for target in targets {
+        let mut node = (target, 0);
+        for _ in 0..MAX_WIRED_BIT_STEPS {
+            let Some(next) = resolve(node) else {
+                break;
+            };
+            if one_bit(next.0) {
+                if next.0 != target {
+                    for addr in [target, next.0] {
+                        let polarity = modules[&instance_modules[&addr.instance_id]]
+                            .variables
+                            .get(&addr.var_id)
+                            .and_then(|variable| {
+                                celox_design::edges::polarity(variable.metadata.kind)
+                            });
+                        if let Some(polarity) = polarity {
+                            polarities.insert(addr, polarity);
+                        }
+                    }
+                    drive_graph.entry(next.0).or_default().push(target);
+                }
+                break;
+            }
+            node = next;
         }
     }
 
@@ -3083,6 +3408,66 @@ fn unify_clock_domains(
         clock_domains.insert(addr, current);
     }
     clock_domains
+}
+
+/// The most wiring hops followed from a one-bit variable to its source.
+const MAX_WIRED_BIT_STEPS: usize = 64;
+
+/// The node arena of a range definition, with the instances its
+/// addresses resolve in.
+#[derive(Clone, Copy)]
+enum WireArena<'a> {
+    Comb(&'a SLTNodeArena<SourceVarId>, InstanceId),
+    /// A port connection: the parent's and the child's instance.
+    Glue(&'a SLTNodeArena<GlueAddr>, InstanceId, InstanceId),
+}
+
+/// One range definition of a variable: `access` of the target takes `expr`.
+struct Wire<'a> {
+    access: BitAccess,
+    expr: NodeId,
+    arena: WireArena<'a>,
+}
+
+/// The variable bit that bit `bit` of `node` is wired to: a read of a
+/// variable, through bit selects and concatenations (replications are
+/// concatenations), with no operator in between.
+fn wired_bit<A: Copy + std::hash::Hash + Eq>(
+    arena: &SLTNodeArena<A>,
+    mut node: NodeId,
+    mut bit: usize,
+) -> Option<(A, usize)> {
+    loop {
+        match arena.get(node) {
+            celox_slt::SLTNode::Input {
+                variable,
+                index,
+                access,
+                ..
+            } if index.is_empty() => {
+                return (bit <= access.msb - access.lsb).then_some((*variable, access.lsb + bit));
+            }
+            celox_slt::SLTNode::Slice { expr, access } => {
+                if bit > access.msb - access.lsb {
+                    return None;
+                }
+                bit += access.lsb;
+                node = *expr;
+            }
+            celox_slt::SLTNode::Concat(parts) => {
+                // Parts run from the most significant one.
+                let mut offset = 0;
+                let (part, inner) = parts.iter().rev().find_map(|&(part, width)| {
+                    let found = (bit < offset + width).then_some((part, bit - offset));
+                    offset += width;
+                    found
+                })?;
+                node = part;
+                bit = inner;
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// The `(target, source)` of a path that copies one whole variable into
@@ -3597,6 +3982,10 @@ fn relocate_units(
                         &extern_function_map,
                     ),
                     slots: process.slots.map(|var_id| bindings.locate(*id, var_id)),
+                    frame: process
+                        .frame
+                        .clone()
+                        .map(|frame| frame.map(|var_id| bindings.locate(*id, var_id))),
                     origin: celox_design::ProcessOrigin {
                         scope: Some(scope.clone()),
                         ..process.origin.clone()
@@ -3728,6 +4117,7 @@ fn relocate_units(
 struct RelocatedProcess {
     kernel: ExecutionUnit<RegionedAbsoluteAddr>,
     slots: ProcessSlots<AbsoluteAddr>,
+    frame: Option<celox_design::ProcessFrame<AbsoluteAddr>>,
     origin: celox_design::ProcessOrigin,
     /// The instance and the module-local index of the process.
     key: (InstanceId, usize),
@@ -3742,6 +4132,8 @@ struct TimingMetadata {
     nba_sites: Vec<NbaSite<AbsoluteAddr>>,
     host_request_sites: Vec<HostRequestSite<AbsoluteAddr>>,
     time_slots: Vec<AbsoluteAddr>,
+    sample_shadows: Vec<(AbsoluteAddr, AbsoluteAddr)>,
+    initial_copies: Vec<(AbsoluteAddr, AbsoluteAddr)>,
     nba_switches: Vec<NbaSwitch<AbsoluteAddr>>,
 }
 
@@ -3933,6 +4325,18 @@ fn select_nba_paths(
     staged: &HashSet<AbsoluteAddr>,
     processes: &mut [RelocatedProcess],
 ) {
+    let mut staged = staged.clone();
+    // Fork activations can reach one NBA site concurrently. Always queue its
+    // captured value, rather than leaving one shared pending slot per kernel.
+    for site in &timing.nba_sites {
+        if processes[site.process].frame.is_some() {
+            for switch in &timing.nba_switches {
+                if switch.value == site.value {
+                    staged.remove(&switch.switch);
+                }
+            }
+        }
+    }
     let switches: HashMap<AbsoluteAddr, NbaSwitch<AbsoluteAddr>> = timing
         .nba_switches
         .iter()
@@ -4052,6 +4456,8 @@ fn relocate_timing(
         nba_sites: Vec::new(),
         host_request_sites: Vec::new(),
         time_slots: Vec::new(),
+        sample_shadows: Vec::new(),
+        initial_copies: Vec::new(),
         nba_switches: Vec::new(),
     };
     for (&instance, module) in instances {
@@ -4087,6 +4493,18 @@ fn relocate_timing(
                     }),
             );
         metadata.time_slots.extend(module.time_slot.map(locate));
+        metadata.sample_shadows.extend(
+            module
+                .sample_shadows
+                .iter()
+                .map(|&(variable, copy)| (locate(variable), locate(copy))),
+        );
+        metadata.initial_copies.extend(
+            module
+                .initial_copies
+                .iter()
+                .map(|&(variable, copy)| (locate(variable), locate(copy))),
+        );
         metadata.nba_switches.extend(
             module
                 .nba_switches

@@ -77,6 +77,8 @@ pub enum ExprKind {
         member: Name,
         value: Option<ExprId>,
     },
+    /// `new h`: a shallow copy of the object of handle `h` (8.12).
+    Copy(ExprId),
     Member {
         expression: ExprId,
         separator: String,
@@ -85,6 +87,12 @@ pub enum ExprKind {
     Call {
         expression: ExprId,
         arguments: Vec<Argument>,
+    },
+    /// Array manipulation method plus its iterator predicate (IEEE 1800-2023 7.12).
+    /// The method expression retains optional iterator/index arguments.
+    ArrayMethodWith {
+        expression: ExprId,
+        predicate: ExprId,
     },
     Parameterized {
         expression: ExprId,
@@ -952,6 +960,14 @@ pub struct VariableDeclaration {
     pub tokens: TokenRange,
 }
 
+/// A named constraint block. Unsupported constraint forms retain their name
+/// but no executable expressions, so randomization cannot silently ignore them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClassConstraint {
+    pub name: Name,
+    pub expressions: Option<Vec<ExprId>>,
+}
+
 /// A class declaration (IEEE 1800-2023 8.3). Its body also remains an
 /// unconverted body item covering the same tokens.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -968,6 +984,14 @@ pub struct ClassDeclaration {
     pub interfaces: Vec<TypeId>,
     /// Whether the class declares constraints, including prototypes.
     pub has_constraints: bool,
+    pub constraints: Vec<ClassConstraint>,
+    /// The parameter port list `#(...)`, after which the parameters the
+    /// body declares are local (8.25).
+    pub parameter_ports: Option<ParameterDeclarationId>,
+    /// The `parameter` and `localparam` declarations of the body.
+    pub parameters: Vec<ParameterDeclarationId>,
+    /// The `typedef` declarations of the body.
+    pub type_aliases: Vec<TypeAliasId>,
     pub properties: Vec<ClassProperty>,
     pub methods: Vec<ClassMethod>,
     pub tokens: TokenRange,

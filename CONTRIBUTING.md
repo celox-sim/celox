@@ -434,3 +434,26 @@ identify excluded cases rather than counting them as passes; see the suite's
 regressions and manual scaling measurements are not made passing by blindly
 running every `#[ignore]` test. New exclusions need a concrete reason and
 evidence; an unexpected failure must not become a skip.
+
+## Merge priority labels
+
+Both labels add `merge-ready` and request normal queue admission:
+
+| Label | Priority | Running lower-priority checks |
+| --- | --- | --- |
+| `merge-priority` | 9000 | Finish first; this PR goes ahead of waiting ordinary PRs |
+| `merge-urgent` | 10000 | May be interrupted to test this PR first |
+
+Both outrank normal and lightweight priorities. If both labels are present,
+`merge-urgent` wins. Reserve it for emergencies that justify restarting checks.
+Existing queue categories, batching, stack dependency ordering, and all required
+checks still apply. These labels do not permit merging failing CI.
+
+Drafts, conflicts, `release:hold`, and `dequeued` still block automatic admission.
+After addressing a dequeue's cause, remove `dequeued` to retry. Remove both
+priority labels to restore normal priority; remove `merge-ready` and explicitly
+dequeue as usual to withdraw the merge request entirely. The generated
+`merge-ready` label also activates the existing release-PR freeze mechanism.
+
+Each label's behavior works after its configuration reaches the PR's base
+branch. Creating or applying a label alone does not install the queue policy.

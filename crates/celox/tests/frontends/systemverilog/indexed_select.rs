@@ -403,3 +403,44 @@ sv_backends! {
         @case "indexed_select::generated_pipeline_with_explicit_generate_branches";
     }
 }
+
+sv_backends! {
+    fn disjoint_single_bit_array_drivers(sim) {
+        @case "indexed_select::disjoint_single_bit_array_drivers";
+    }
+}
+
+// Verilator 5.052 truncates the bit index of a one-bit packed element and
+// writes its zero bit for index 2. Keep the out-of-range check local; the
+// disjoint-driver behavior at valid indices is shared with both adapters.
+sv_backends! {
+    fn single_bit_array_drivers_ignore_invalid_inner_indices(sim) {
+        @setup {
+            let source = "module Top(input logic [1:0] index, input logic [2:0] value,
+                output wire [2:0] q);
+                logic [0:0] ready[3];
+                for (genvar n=0; n<3; n=n+1) begin : lanes
+                    always_comb begin ready[n]='0; ready[n][index]=value[n]; end
+                    assign q[n]=ready[n][0];
+                end
+                endmodule";
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("single_bit_bounds.sv"))], "Top");
+        let index=sim.signal("index");
+        let value=sim.signal("value");
+        let q=sim.signal("q");
+        for (position, bits, expected) in [(0u8,5u8,5u8),(1,5,0),(2,5,0),(0,2,2)] {
+            sim.modify(|io| {io.set(index,position);io.set(value,bits);}).unwrap();
+            assert_eq!(sim.get(q),BigUint::from(expected));
+        }
+    }
+}
+
+sv_backends! {
+    fn disjoint_shifted_single_bit_array_drivers(sim) {
+        @case "indexed_select::disjoint_shifted_single_bit_array_drivers";
+    }
+    fn disjoint_negative_single_bit_array_drivers(sim) {
+        @case "indexed_select::disjoint_negative_single_bit_array_drivers";
+    }
+}

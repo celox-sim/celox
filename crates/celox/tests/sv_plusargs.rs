@@ -287,3 +287,79 @@ packed_string_literals_backend!(packed_string_literals_cranelift, build);
 #[cfg(target_arch = "x86_64")]
 packed_string_literals_backend!(packed_string_literals_native, build_native);
 packed_string_literals_backend!(packed_string_literals_wasm, build_wasm);
+
+/// A plusargs query among the arguments of a `$display` suspends the process
+/// for the host; the arguments read before and after it keep their values.
+const DISPLAYED: &str = r#"
+module Top;
+  int i;
+  logic [7:0] v;
+  initial begin
+    i = 3;
+    v = 0;
+    $display("%0d %0d %0d %0d", i, $test$plusargs("verbose"), $value$plusargs("v=%d", v), v);
+  end
+endmodule
+"#;
+
+/// Arguments are evaluated left to right: a later argument's call does not
+/// change what an earlier argument read (Icarus prints `3 1 5 7`).
+const ORDERED: &str = r#"
+module Top;
+  int i;
+  function automatic int f();
+    return 0;
+  endfunction
+  function automatic int g();
+    i = 7;
+    return 5;
+  endfunction
+  initial begin
+    i = 3;
+    $display("%0d %0d %0d %0d", i + f(), $test$plusargs("verbose"), g(), i);
+  end
+endmodule
+"#;
+
+macro_rules! display_plusargs {
+    ($name:ident, $backend:ident) => {
+        display_plusargs!($name, $backend, DISPLAYED, "3 1 1 7");
+    };
+    ($name:ident, $backend:ident, $source:expr, $expected:literal) => {
+        #[test]
+        fn $name() {
+            let mut sim = celox::Simulation::from_sv_sources(
+                vec![($source, Path::new("displayed.sv"))],
+                "Top",
+            )
+            .plusargs(["+verbose", "+v=7"])
+            .$backend()
+            .unwrap();
+            sim.run_until(0).unwrap();
+            let lines: Vec<String> = sim
+                .drain_runtime_events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    celox::RuntimeEvent::Display { message } => {
+                        Some(String::from_utf8_lossy(&message).into_owned())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(lines, [$expected]);
+        }
+    };
+}
+display_plusargs!(display_of_plusargs_interpreter, build_interpreter);
+display_plusargs!(display_of_plusargs_compiled, build);
+#[cfg(target_arch = "x86_64")]
+display_plusargs!(display_of_plusargs_native, build_native);
+display_plusargs!(
+    ordered_arguments_interpreter,
+    build_interpreter,
+    ORDERED,
+    "3 1 5 7"
+);
+display_plusargs!(ordered_arguments_compiled, build, ORDERED, "3 1 5 7");
+#[cfg(target_arch = "x86_64")]
+display_plusargs!(ordered_arguments_native, build_native, ORDERED, "3 1 5 7");

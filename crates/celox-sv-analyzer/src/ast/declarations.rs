@@ -12,6 +12,7 @@ pub(super) fn ports_from_scope(
     let mut inherited_direction = PortDirection::Unspecified;
     let mut inherited_type = Type::implicit();
     let mut inherited_variable = false;
+    let mut inherited_unresolved = false;
     for native in port_owners::scope(selected, syntax_tree)? {
         let direction = native
             .direction
@@ -45,6 +46,9 @@ pub(super) fn ports_from_scope(
                 type_aliases,
             )?,
         );
+        if ty.container.is_some() {
+            return Err(unsupported("dynamic container port"));
+        }
         let default = native
             .default
             .map(|value| {
@@ -89,12 +93,20 @@ pub(super) fn ports_from_scope(
                 && native.data_type.is_none()
                 && inherited_variable);
         inherited_variable = variable;
+        inherited_unresolved = if let Some(net_type) = &native.net_type {
+            net_type == "uwire"
+        } else if native.direction.is_some() || variable {
+            false
+        } else {
+            inherited_unresolved
+        };
         let mut port = Port::new(
             native_port_name(native)?,
             direction,
             ty,
             !explicit && !variable,
         )
+        .with_unresolved_net(inherited_unresolved)
         .with_default(default);
         port.randomizable = variable && direction != PortDirection::Input;
         ports.push(port);
