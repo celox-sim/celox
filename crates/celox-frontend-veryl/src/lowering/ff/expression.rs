@@ -1613,155 +1613,160 @@ impl<'a> FfParser<'a> {
         candidates: &mut Vec<ArrayViewMergeCandidate>,
         candidate_indices: &mut HashMap<ArrayViewKey, usize>,
     ) {
-        let collect = |expr, candidates: &mut Vec<_>, candidate_indices: &mut HashMap<_, _>| {
-            self.collect_array_views_for_expression(expr, candidates, candidate_indices)
-        };
-        match expr {
-            Expression::Term(factor) => match factor.as_ref() {
-                Factor::Variable(var_id, index, select, _) => {
-                    if self
-                        .module
-                        .variables
-                        .get(var_id)
-                        .is_some_and(|variable| !variable.r#type.array.is_empty())
-                        && let Some(frame) =
-                            (0..self.function_arg_stack.len()).rev().find(|&frame| {
-                                self.function_array_view_enabled_stack[frame]
-                                    && self.function_arg_stack[frame].contains_key(var_id)
-                            })
-                    {
-                        let key = ArrayViewKey {
-                            frame,
-                            var_id: *var_id,
-                        };
-                        let static_indices = self.static_array_view_indices(*var_id, index, select);
-                        self.record_array_view_merge_candidate(
-                            key,
-                            static_indices.as_deref(),
-                            candidates,
-                            candidate_indices,
-                        );
-                        if let Some(bound_expr) = self.function_arg_stack[frame].get(var_id) {
-                            self.collect_array_views_in_bound_expression(
+        // A lowered decoder can contain a deep ternary chain. Traverse its
+        // operands iteratively so callee analysis starts on a bounded stack.
+        let mut pending = vec![expr];
+        while let Some(expr) = pending.pop() {
+            let mut children = Vec::new();
+            let mut collect = |expr| children.push(expr);
+            match expr {
+                Expression::Term(factor) => match factor.as_ref() {
+                    Factor::Variable(var_id, index, select, _) => {
+                        if self
+                            .module
+                            .variables
+                            .get(var_id)
+                            .is_some_and(|variable| !variable.r#type.array.is_empty())
+                            && let Some(frame) =
+                                (0..self.function_arg_stack.len()).rev().find(|&frame| {
+                                    self.function_array_view_enabled_stack[frame]
+                                        && self.function_arg_stack[frame].contains_key(var_id)
+                                })
+                        {
+                            let key = ArrayViewKey {
                                 frame,
-                                *var_id,
-                                bound_expr,
+                                var_id: *var_id,
+                            };
+                            let static_indices =
+                                self.static_array_view_indices(*var_id, index, select);
+                            self.record_array_view_merge_candidate(
+                                key,
                                 static_indices.as_deref(),
                                 candidates,
                                 candidate_indices,
                             );
+                            if let Some(bound_expr) = self.function_arg_stack[frame].get(var_id) {
+                                self.collect_array_views_in_bound_expression(
+                                    frame,
+                                    *var_id,
+                                    bound_expr,
+                                    static_indices.as_deref(),
+                                    candidates,
+                                    candidate_indices,
+                                );
+                            }
+                        }
+                        for expr in &index.0 {
+                            collect(expr);
+                        }
+                        for expr in &select.0 {
+                            collect(expr);
+                        }
+                        if let Some((_, expr)) = &select.1 {
+                            collect(expr);
                         }
                     }
-                    for expr in &index.0 {
-                        collect(expr, candidates, candidate_indices);
-                    }
-                    for expr in &select.0 {
-                        collect(expr, candidates, candidate_indices);
-                    }
-                    if let Some((_, expr)) = &select.1 {
-                        collect(expr, candidates, candidate_indices);
-                    }
-                }
-                Factor::FunctionCall(call) => {
-                    let input_usage = self.function_input_usage(call, &mut HashSet::default());
-                    let function_body = self.module.functions.get(&call.id).and_then(|function| {
-                        if let Some(index) = &call.index {
-                            function.get_function(index)
+                    Factor::FunctionCall(call) => {
+                        let input_usage = self.function_input_usage(call, &mut HashSet::default());
+                        let function_body =
+                            self.module.functions.get(&call.id).and_then(|function| {
+                                if let Some(index) = &call.index {
+                                    function.get_function(index)
+                                } else {
+                                    function.get_function(&[])
+                                }
+                            });
+                        if let (Some(input_usage), Some(function_body)) =
+                            (input_usage, function_body)
+                        {
+                            for (arg_path, arg_id) in &function_body.arg_map {
+                                let formal = &self.module.variables[arg_id];
+                                let needs_actual = if formal.r#type.array.is_empty() {
+                                    input_usage.runtime_reads.contains(arg_id)
+                                } else {
+                                    input_usage.runtime_reads.contains(arg_id)
+                                        || input_usage.array_views.contains(arg_id)
+                                };
+                                if needs_actual
+                                    && let Some(expr) = function_call_arg(&call.inputs, arg_path)
+                                {
+                                    collect(expr);
+                                }
+                            }
                         } else {
-                            function.get_function(&[])
-                        }
-                    });
-                    if let (Some(input_usage), Some(function_body)) = (input_usage, function_body) {
-                        for (arg_path, arg_id) in &function_body.arg_map {
-                            let formal = &self.module.variables[arg_id];
-                            let needs_actual = if formal.r#type.array.is_empty() {
-                                input_usage.runtime_reads.contains(arg_id)
-                            } else {
-                                input_usage.runtime_reads.contains(arg_id)
-                                    || input_usage.array_views.contains(arg_id)
-                            };
-                            if needs_actual
-                                && let Some(expr) = function_call_arg(&call.inputs, arg_path)
-                            {
-                                collect(expr, candidates, candidate_indices);
+                            // Unsupported or recursive callees will fail during
+                            // normal lowering; keep the conservative traversal.
+                            for expr in call.inputs.values() {
+                                collect(expr);
                             }
                         }
-                    } else {
-                        // Unsupported or recursive callees will fail during
-                        // normal lowering; keep the conservative traversal.
-                        for expr in call.inputs.values() {
-                            collect(expr, candidates, candidate_indices);
+                        for dst in call.outputs.values().flatten() {
+                            for expr in &dst.index.0 {
+                                collect(expr);
+                            }
+                            for expr in &dst.select.0 {
+                                collect(expr);
+                            }
+                            if let Some((_, expr)) = &dst.select.1 {
+                                collect(expr);
+                            }
                         }
                     }
-                    for dst in call.outputs.values().flatten() {
-                        for expr in &dst.index.0 {
-                            collect(expr, candidates, candidate_indices);
-                        }
-                        for expr in &dst.select.0 {
-                            collect(expr, candidates, candidate_indices);
-                        }
-                        if let Some((_, expr)) = &dst.select.1 {
-                            collect(expr, candidates, candidate_indices);
-                        }
-                    }
-                }
-                Factor::SystemFunctionCall(call) => match &call.kind {
-                    // Reflection queries are compile-time constants and do
-                    // not evaluate their operand during expression lowering.
-                    SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(..) => {}
-                    SystemFunctionKind::Clog2(input)
-                    | SystemFunctionKind::Onehot(input)
-                    | SystemFunctionKind::Signed(input)
-                    | SystemFunctionKind::Unsigned(input) => {
-                        collect(&input.0, candidates, candidate_indices)
-                    }
-                    SystemFunctionKind::Readmemh(_, _)
-                    | SystemFunctionKind::Display(_)
-                    | SystemFunctionKind::Write(_)
-                    | SystemFunctionKind::Assert { .. }
-                    | SystemFunctionKind::Finish => {}
+                    Factor::SystemFunctionCall(call) => match &call.kind {
+                        // Reflection queries are compile-time constants and do
+                        // not evaluate their operand during expression lowering.
+                        SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(..) => {}
+                        SystemFunctionKind::Clog2(input)
+                        | SystemFunctionKind::Onehot(input)
+                        | SystemFunctionKind::Signed(input)
+                        | SystemFunctionKind::Unsigned(input) => collect(&input.0),
+                        SystemFunctionKind::Readmemh(_, _)
+                        | SystemFunctionKind::Display(_)
+                        | SystemFunctionKind::Write(_)
+                        | SystemFunctionKind::Assert { .. }
+                        | SystemFunctionKind::Finish => {}
+                    },
+                    Factor::HierVariable(_) => {}
+                    Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
                 },
-                Factor::HierVariable(_) => {}
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
-            },
-            Expression::Binary(lhs, _, rhs, _) => {
-                collect(lhs, candidates, candidate_indices);
-                collect(rhs, candidates, candidate_indices);
-            }
-            Expression::Unary(_, inner, _) => collect(inner, candidates, candidate_indices),
-            Expression::Ternary(cond, then_expr, else_expr, _) => {
-                collect(cond, candidates, candidate_indices);
-                collect(then_expr, candidates, candidate_indices);
-                collect(else_expr, candidates, candidate_indices);
-            }
-            Expression::Concatenation(items, _) => {
-                for (expr, repeat) in items {
-                    collect(expr, candidates, candidate_indices);
-                    if let Some(repeat) = repeat {
-                        collect(repeat, candidates, candidate_indices);
+                Expression::Binary(lhs, _, rhs, _) => {
+                    collect(lhs);
+                    collect(rhs);
+                }
+                Expression::Unary(_, inner, _) => collect(inner),
+                Expression::Ternary(cond, then_expr, else_expr, _) => {
+                    collect(cond);
+                    collect(then_expr);
+                    collect(else_expr);
+                }
+                Expression::Concatenation(items, _) => {
+                    for (expr, repeat) in items {
+                        collect(expr);
+                        if let Some(repeat) = repeat {
+                            collect(repeat);
+                        }
                     }
                 }
-            }
-            Expression::ArrayLiteral(items, _) => {
-                for item in items {
-                    match item {
-                        ArrayLiteralItem::Value(expr, repeat) => {
-                            collect(expr, candidates, candidate_indices);
-                            if let Some(repeat) = repeat {
-                                collect(repeat, candidates, candidate_indices);
+                Expression::ArrayLiteral(items, _) => {
+                    for item in items {
+                        match item {
+                            ArrayLiteralItem::Value(expr, repeat) => {
+                                collect(expr);
+                                if let Some(repeat) = repeat {
+                                    collect(repeat);
+                                }
                             }
-                        }
-                        ArrayLiteralItem::Defaul(expr) => {
-                            collect(expr, candidates, candidate_indices)
+                            ArrayLiteralItem::Defaul(expr) => collect(expr),
                         }
                     }
                 }
-            }
-            Expression::StructConstructor(_, fields, _) => {
-                for (_, expr) in fields {
-                    collect(expr, candidates, candidate_indices);
+                Expression::StructConstructor(_, fields, _) => {
+                    for (_, expr) in fields {
+                        collect(expr);
+                    }
                 }
             }
+            pending.extend(children.into_iter().rev());
         }
     }
 
@@ -4761,29 +4766,67 @@ impl<'a> FfParser<'a> {
             && !self.expression_has_runtime_effect(els)
             && !branch_materializes_array_view
         {
-            self.parse_expression_in_context(
-                then,
-                targets,
-                domain,
-                convert,
-                sources,
-                ir_builder,
-                Some(branch_context),
-            )?;
-            let then_val = self.stack.pop_back().unwrap();
-            self.parse_expression_in_context(
-                els,
-                targets,
-                domain,
-                convert,
-                sources,
-                ir_builder,
-                Some(branch_context),
-            )?;
-            let else_val = self.stack.pop_back().unwrap();
-            let result = ir_builder.alloc_logic(result_width);
-            ir_builder.emit(SIRInstruction::Mux(result, cond_reg, then_val, else_val));
-            self.stack.push_back(result);
+            // Evaluate pure ternary trees with an explicit post-order stack.
+            // Large decoder muxes must not add a Rust frame for every arm.
+            enum Pending<'a> {
+                Eval(&'a Expression, ValueContext),
+                Merge(RegisterId, usize),
+            }
+            let mut pending = vec![
+                Pending::Merge(cond_reg, result_width),
+                Pending::Eval(els, branch_context),
+                Pending::Eval(then, branch_context),
+            ];
+            while let Some(item) = pending.pop() {
+                match item {
+                    Pending::Merge(cond, width) => {
+                        let els = self.stack.pop_back().unwrap();
+                        let then = self.stack.pop_back().unwrap();
+                        let result = ir_builder.alloc_logic(width);
+                        ir_builder.emit(SIRInstruction::Mux(result, cond, then, els));
+                        self.stack.push_back(result);
+                    }
+                    Pending::Eval(expr, context) => {
+                        if let Expression::Ternary(cond, then, els, comptime) = expr
+                            && !comptime.is_const
+                            && self
+                                .get_bound_function_event_arg_state(expr.token_range())
+                                .is_none()
+                            && self
+                                .get_bound_function_expression_value(expr.token_range())
+                                .is_none()
+                            && crate::float::precision(crate::float::type_of(expr)).is_none()
+                            && crate::float::precision(crate::float::type_of(then)).is_none()
+                            && crate::float::precision(crate::float::type_of(els)).is_none()
+                        {
+                            let context = ValueContext {
+                                width: self
+                                    .get_expression_width(then)
+                                    .max(self.get_expression_width(els))
+                                    .max(context.width),
+                                signed: context.signed,
+                            };
+                            self.parse_expression_in_context(
+                                cond, targets, domain, convert, sources, ir_builder, None,
+                            )?;
+                            let cond = self.stack.pop_back().unwrap();
+                            pending.push(Pending::Merge(cond, context.width));
+                            pending.push(Pending::Eval(els, context));
+                            pending.push(Pending::Eval(then, context));
+                        } else {
+                            self.parse_expression_in_context(
+                                expr,
+                                targets,
+                                domain,
+                                convert,
+                                sources,
+                                ir_builder,
+                                Some(context),
+                            )?;
+                        }
+                    }
+                }
+            }
             return Ok(());
         }
 

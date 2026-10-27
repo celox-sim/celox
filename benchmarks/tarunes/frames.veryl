@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Qualification probe: HDMI output currently disagrees with the SV reference.
+// Qualification probe: checks the same golden outputs as frames.sv.
 #[test(benchmark_frames)]
 module benchmark_frames {
     inst clk: $tb::clock_gen;
