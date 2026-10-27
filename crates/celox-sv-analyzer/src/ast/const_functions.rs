@@ -1214,12 +1214,19 @@ impl<'a> Frame<'a> {
             Expr::Select {
                 msb, lsb, signed, ..
             } => {
-                let msb = self.eval_lowered(&msb.clone().into())?;
-                let lsb = self.eval_lowered(&lsb.clone().into())?;
-                return Some(ty((
-                    usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)?,
-                    *signed,
-                )));
+                // Indexed selects have a constant width even when their base
+                // calls a function. Cancel the common base without executing it.
+                let width = typecheck::select_range_width(
+                    &msb.clone().into(),
+                    &lsb.clone().into(),
+                    &HashMap::default(),
+                )
+                .or_else(|| {
+                    let msb = self.eval_lowered(&msb.clone().into())?;
+                    let lsb = self.eval_lowered(&lsb.clone().into())?;
+                    usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)
+                })?;
+                return Some(ty((width, *signed)));
             }
             Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => {
                 let width = parts.iter().try_fold(0usize, |width, part| {
@@ -1306,18 +1313,8 @@ impl<'a> Frame<'a> {
                 condition,
                 then_expr,
                 else_expr,
-            } => {
-                // Only the selected arm is evaluated.
-                match self.eval(condition)?.truth() {
-                    Some(true) => self.lower(then_expr)?,
-                    Some(false) => self.lower(else_expr)?,
-                    None => ConstExpr::Mux {
-                        condition: Box::new(self.lower(condition)?),
-                        then_expr: Box::new(self.lower(then_expr)?),
-                        else_expr: Box::new(self.lower(else_expr)?),
-                    },
-                }
-            }
+            } => self.lower_mux(condition, then_expr, else_expr)?,
+
             Expr::Call {
                 callee: Callee::Subroutine(name),
                 args,
@@ -1410,6 +1407,49 @@ impl<'a> Frame<'a> {
             }
         }
         Some(lowered)
+    }
+
+    fn type_placeholder(&self, expr: &Expr) -> Option<ConstExpr> {
+        let ty = self.expression_type(expr)?;
+        if ty.width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+            return None;
+        }
+        Some(ConstExpr::Resize {
+            expr: Box::new(ConstExpr::Literal("0".into())),
+            width: ty.width,
+            signed: ty.signed,
+        })
+    }
+
+    #[inline(never)]
+    fn lower_mux(
+        &mut self,
+        condition: &Expr,
+        then_expr: &Expr,
+        else_expr: &Expr,
+    ) -> Option<ConstExpr> {
+        let condition = self.eval(condition)?;
+        let truth = condition.truth();
+        let condition = self.temporary(condition)?;
+        // The skipped arm still contributes its type (11.8.1), but its value
+        // and calls must not be evaluated (11.4.11). Keep the mux so an outer
+        // size context can reach arithmetic inside the selected arm (11.8.2).
+        let (then_expr, else_expr) = match truth {
+            Some(true) => {
+                let skipped = self.type_placeholder(else_expr)?;
+                (self.lower(then_expr)?, skipped)
+            }
+            Some(false) => {
+                let skipped = self.type_placeholder(then_expr)?;
+                (skipped, self.lower(else_expr)?)
+            }
+            None => (self.lower(then_expr)?, self.lower(else_expr)?),
+        };
+        Some(ConstExpr::Mux {
+            condition: Box::new(condition),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        })
     }
 
     #[inline(never)]

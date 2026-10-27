@@ -1788,7 +1788,7 @@ fn infer_const_expr_type_inner(
                     width: 1,
                     signed: false,
                 }),
-                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => Some(left),
+                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar | BinaryOp::Pow => Some(left),
                 _ => Some(ExprType {
                     width: left.width.max(right.width),
                     signed: left.signed && right.signed,

@@ -1,6 +1,9 @@
 use super::*;
 
 sv_backends! {
+    fn constant_function_conditional_types(sim) { @case "operators::constant_function_conditional_types"; }
+    fn constant_function_conditional_unknown_types(sim) { @case "operators::constant_function_conditional_unknown_types"; }
+
     // Compare cached runtime calls with elaboration-time constants through
     // Celox's four-state API, including the payload and mask of unknown bits.
     fn constant_function_inside_unknowns(sim) {
