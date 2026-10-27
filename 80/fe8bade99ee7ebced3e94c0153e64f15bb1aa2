@@ -1,0 +1,1 @@
+Fix CI regressions: explicitly verify startup comparisons in both state modes; correct default local X encoding and unsafe constant inlining of undriven bits; validate the four retained Verilator tristate failures. SV 5868, Veryl 4619, SLT 186, frontend 9, retained-report 4 and NAPI/JS 116 tests pass; affected clippy targets pass.
