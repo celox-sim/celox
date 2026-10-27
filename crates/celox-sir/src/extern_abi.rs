@@ -17,6 +17,21 @@ use crate::RegisterType;
 /// user extern function table.
 pub const HEAP_HELPER_ID: u32 = u32::MAX - 1;
 
+/// Native-only call to another compiled function in the same image. The low
+/// 30 bits index the extern address table. It takes the implicit state pointer,
+/// no explicit arguments or result, and propagates a nonzero status to its
+/// caller. The callee may read and write arbitrary simulation state.
+pub const NATIVE_KERNEL_CALL_TAG: u32 = 0x8000_0000;
+
+/// Decode a native kernel call, excluding the heap and floating-point helpers.
+pub const fn native_kernel_index(function: u32) -> Option<u32> {
+    if function & 0xc000_0000 == NATIVE_KERNEL_CALL_TAG {
+        Some(function & 0x3fff_ffff)
+    } else {
+        None
+    }
+}
+
 /// The number of arguments of an extern call to [`HEAP_HELPER_ID`].
 pub const HEAP_HELPER_ARGUMENTS: usize = 4;
 
