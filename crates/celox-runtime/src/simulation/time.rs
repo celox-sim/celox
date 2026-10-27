@@ -195,6 +195,7 @@ impl<B: SimBackend> SimulationState<B> {
         loop {
             let ready = self.take_ready_processes(current_time);
             if ready.is_empty() && self.process_state.ready.is_empty() {
+                executor.try_observed_deferred_assertions(current_time)?;
                 // The active region set is empty: the reactive region set
                 // runs, and the design activity it creates runs in the active
                 // region set again (IEEE 1800-2023 4.5).
@@ -241,6 +242,9 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        // Compiled slots without Reactive work reach this boundary directly.
+        // In the ordinary loop the Observed queue is already empty here.
+        executor.try_observed_deferred_assertions(current_time)?;
         executor.try_end_time_slot(current_time)
     }
 

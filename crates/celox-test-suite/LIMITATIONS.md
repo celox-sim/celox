@@ -839,3 +839,33 @@ not exclusions or passing assertions. Pinned xezim 0.11.3 passes all six;
 Verilator 5.052 passes the five two-state cases and its adapter does not support
 the four-state case. Reproduce with `verify-sv-icarus --filter
 fork_control::function_join_none_`.
+
+### Deferred assertions in fork processes
+
+`fork_deferred::` checks the process-local report queues of IEEE 1800-2023
+16.4.1, their event/wait flush points (16.4.2), and cancellation (16.4.4).
+Natural completion retains queued reports; a zero-delay resumption does not
+flush them. Observed reports mature before Reactive program activity and
+cannot subsequently be flushed, while Final reports remain flushable until
+Postponed. These cases remain executable with their original assertions.
+
+The reviewed [xezim observations](verification/sv/xezim/fork_deferred.json)
+include missing sibling/parent reports, a cancelled child report surviving,
+and missing reports after `#0`. The [standalone zero-delay source](verification/repros/fork_deferred_zero_delay.sv)
+and [observed output](verification/repros/fork_deferred_zero_delay.json)
+reproduce the latter without the suite emitter. The
+[Verilator observations](verification/sv/verilator/fork_deferred.json) retain
+incorrect sibling reports and internal compiler faults as mismatches and
+compile errors respectively. The [Icarus observations](verification/sv/icarus/fork_deferred.json)
+retain its explicit unsupported-deferred-assertion diagnostics as compile
+errors; disabling assertions would not validate these cases.
+
+The daily gate matches these exact reviewed classifications and diagnostics;
+none becomes an exclusion or a pass. Reproduce with `verify-sv-xezim`,
+`verify-sv-verilator`, or `verify-sv-icarus` and `--filter fork_deferred::`.
+
+For these nine cases, xezim 0.11.3 records 2 passes and 7 mismatches;
+Verilator 5.052 records 2 passes, 3 mismatches, 3 compiler faults, and
+1 unsupported four-state case; Icarus 13.0 records 9 compile errors.
+In the Reactive-wakeup case, xezim loses the matured Observed report,
+while Verilator also emits the Final report that the wait resumption must flush.

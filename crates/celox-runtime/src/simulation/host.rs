@@ -24,6 +24,15 @@ pub trait UnitExecutor {
         Ok(self.backend_mut().run_process(index)?)
     }
 
+    /// Attribute deferred assertion records to this dynamic process execution.
+    fn enter_deferred_assertion_process(&mut self, _process: usize) {}
+    /// Consume this invocation's records before another execution context runs.
+    fn leave_deferred_assertion_process(&mut self) {}
+    /// A naturally completed process retains its pending assertion reports.
+    fn finish_deferred_assertion_process(&mut self, _process: usize) {}
+    /// Disabling a live process flushes its deferred assertion reports (16.4.4).
+    fn cancel_deferred_assertion_process(&mut self, _process: usize) {}
+
     /// Prepare the declaration-only state before runtime static initializers.
     fn reset_declaration_startup(&mut self) -> Result<(), Halt> {
         Ok(())
@@ -135,6 +144,12 @@ pub trait HostBoundary: UnitExecutor {
     /// infallible hook for existing executor implementations.
     fn try_finish_timed_step(&mut self, timestamp: u64) -> Result<(), Halt> {
         self.finish_timed_step(timestamp);
+        Ok(())
+    }
+
+    /// Active-region work has drained. Mature Observed deferred assertions
+    /// before entering Reactive, so a later wakeup cannot flush them (16.4.1).
+    fn try_observed_deferred_assertions(&mut self, _timestamp: u64) -> Result<(), Halt> {
         Ok(())
     }
 

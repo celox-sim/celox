@@ -149,7 +149,7 @@ random streams and pending joins. State files also preserve strings held only
 by suspended children or shared automatic locals. Non-null class objects or dynamic containers and
 nonempty string/object values in pending NBA writes, host writes or event-wait
 baselines remain unsupported in activation state files; use
-`checkpoint()` / `restore()` for those states. Deferred assertions in a process containing forks remain unsupported.
+`checkpoint()` / `restore()` for those states.
 
 Direct event controls, `wait` conditions, and compound event expressions over
 fork-shared automatic locals are supported. Compound expressions may use constants
@@ -847,10 +847,22 @@ flushes the queue at its flush points (16.4.2):
   (one whose only timing control is its leading event control), each time it
   runs again.
 
-When the time slot is over, the actions still waiting are executed: those of
-`#0` ones first, then those of `final` ones. A deferred `$fatal` ends the
-simulation then. A deferred assertion as a module item is the same assertion
-in an `always_comb` (16.4.3). An action is one display or severity task
+Fork children have independent deferred assertion queues. A child's event or
+wait resumption cannot flush its parent or siblings. `disable fork` discards
+pending reports from the live descendants it terminates (16.4.4); natural child
+completion preserves pending reports, even when its process slot is reused.
+Compiler yields, `$stop`/resume and `#0` delays do not flush these queues.
+
+Core checkpoint restore and portable state load preserve previously issued host
+reports. Restored executions cannot cancel those reports by reusing a process
+slot; pending host reports are not serialized into portable core state files.
+
+`#0` reports mature after Active work drains, before Reactive program code runs.
+Once mature, they cannot be flushed by a later Reactive wakeup. Their display or
+severity actions execute at that boundary. `final` reports remain flushable
+until Postponed, after all Reactive activity. A deferred `$fatal` ends the
+simulation when its action executes. A deferred assertion as a module item is
+the same assertion in an `always_comb` (16.4.3). An action is one display or severity task
 call; a user subroutine, or more than one statement, is rejected. A
 `Simulator` call is a time slot: there, actions mature when the call settles
 combinational logic or runs a domain.

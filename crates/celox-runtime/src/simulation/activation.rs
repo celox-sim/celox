@@ -217,9 +217,9 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Follow ancestry through completed parents too (IEEE 1800-2023 9.6.3).
     /// Remove scheduler entries before releasing IDs for reuse.
-    pub(super) fn disable_children(&mut self, process: usize) {
+    pub(super) fn disable_children(&mut self, process: usize) -> Vec<usize> {
         if self.process_state.activations.is_empty() {
-            return;
+            return Vec::new();
         }
         let mut cancelled = vec![false; self.process_state.activations.len()];
         let mut pending = vec![process];
@@ -231,6 +231,13 @@ impl<B: SimBackend> SimulationState<B> {
                 }
             }
         }
+        let live_cancelled = cancelled
+            .iter()
+            .enumerate()
+            .filter_map(|(id, &cancelled)| {
+                (cancelled && self.process_state.activations[id].live).then_some(id)
+            })
+            .collect();
         let state = &mut self.process_state;
         for (id, activation) in state.activations.iter_mut().enumerate() {
             activation.pending.retain(|&child| !cancelled[child]);
@@ -252,6 +259,7 @@ impl<B: SimBackend> SimulationState<B> {
                 self.retire_activation(id);
             }
         }
+        live_cancelled
     }
 
     pub(super) fn end_activation(&mut self, process: usize) {
