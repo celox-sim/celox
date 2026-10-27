@@ -76,6 +76,138 @@ fn systemverilog_parameters_are_typed_read_only_objects_at_o2() {
     clear_runtime();
 }
 
+#[cfg(feature = "systemverilog")]
+#[test]
+fn interface_parameters_keep_instance_paths_and_specialized_values() {
+    let _serial = lock_vpi();
+    let source = r#"
+        package P; parameter PKG = 123; parameter axil_ctrl_bar$not_member = 99; endpackage
+        interface Bus #(parameter ADDR_W = 8, parameter extra$width = 3);
+            localparam HALF = ADDR_W / 2;
+            logic [ADDR_W-1:0] data;
+        endinterface
+        module Top #(parameter authored$width = 7)(output logic q);
+            import P::*;
+            Bus #(.ADDR_W(24)) axil_ctrl_bar();
+            Bus #(.ADDR_W(12)) lanes[1:0]();
+            assign q = 1'b0;
+        endmodule
+    "#;
+    let simulator = Simulator::from_sv_sources(
+        vec![(source, std::path::Path::new("interface_params.sv"))],
+        "Top",
+    )
+    .opt_level(celox::OptLevel::O1)
+    .build()
+    .unwrap();
+    let image = simulator.shared_code().program_image().clone();
+    let image =
+        celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+            .unwrap();
+    let _session = install_runtime(trusted_instance(image)).unwrap();
+    unsafe {
+        for (name, expected) in [
+            (c"Top.axil_ctrl_bar.ADDR_W", 24),
+            (c"Top.axil_ctrl_bar.HALF", 12),
+            (c"Top.lanes[1].ADDR_W", 12),
+            (c"Top.lanes[0].HALF", 6),
+            (c"Top.lanes[0].extra$width", 3),
+            (c"Top.authored$width", 7),
+        ] {
+            let handle = vpi_handle_by_name(name.as_ptr(), ptr::null_mut());
+            assert!(!handle.is_null(), "{name:?}");
+            assert_eq!(vpi_get(VPI_TYPE, handle), VPI_PARAMETER);
+            let mut value = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: 0 },
+            };
+            vpi_get_value(handle, &mut value);
+            assert_eq!(value.value.integer, expected, "{name:?}");
+            value.value.integer = 0;
+            vpi_put_value(handle, &value, ptr::null(), VPI_NO_DELAY);
+            vpi_get_value(handle, &mut value);
+            assert_eq!(value.value.integer, expected, "{name:?} is read-only");
+            vpi_free_object(handle);
+        }
+        // Imported package constants do not acquire module-instance names.
+        assert!(vpi_handle_by_name(c"Top.PKG".as_ptr(), ptr::null_mut()).is_null());
+        assert!(
+            vpi_handle_by_name(c"Top.axil_ctrl_bar$not_member".as_ptr(), ptr::null_mut()).is_null()
+        );
+    }
+    clear_runtime();
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn generate_scopes_with_only_child_instances_are_iterable() {
+    let _serial = lock_vpi();
+    let source = r#"
+        module Leaf #(parameter P = 0)(output logic q);
+            timeunit 1us; timeprecision 1ns;
+            assign q = P;
+        endmodule
+        module Top(output logic [1:0] q);
+            timeunit 1ns; timeprecision 1ps;
+            for (genvar n = 0; n < 2; n++) begin : bank
+                if (1) begin : shell
+                    Leaf #(.P(n)) u(q[n]);
+                end
+            end
+        endmodule
+    "#;
+    let simulator = Simulator::from_sv_sources(
+        vec![(source, std::path::Path::new("generate_scopes.sv"))],
+        "Top",
+    )
+    .opt_level(celox::OptLevel::O1)
+    .build()
+    .unwrap();
+    let image = simulator.shared_code().program_image().clone();
+    let image =
+        celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+            .unwrap();
+    let _session = install_runtime(trusted_instance(image)).unwrap();
+    unsafe {
+        let top = vpi_handle_by_name(c"Top".as_ptr(), ptr::null_mut());
+        let iterator = vpi_iterate(VPI_INTERNAL_SCOPE, top);
+        assert!(!iterator.is_null());
+        let mut names = Vec::new();
+        loop {
+            let bank = vpi_scan(iterator);
+            if bank.is_null() {
+                break;
+            }
+            names.push(
+                CStr::from_ptr(vpi_get_str(VPI_NAME, bank))
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+            );
+            assert_eq!(vpi_get(VPI_TIME_UNIT, bank), -9);
+            let nested = vpi_iterate(VPI_INTERNAL_SCOPE, bank);
+            assert!(!nested.is_null());
+            let shell = vpi_scan(nested);
+            assert!(!shell.is_null());
+            assert_eq!(CStr::from_ptr(vpi_get_str(VPI_NAME, shell)), c"shell");
+            assert_eq!(vpi_get(VPI_TIME_UNIT, shell), -9);
+            assert!(vpi_scan(nested).is_null());
+            let children = vpi_iterate(VPI_MODULE, shell);
+            let leaf = vpi_scan(children);
+            assert!(!leaf.is_null());
+            assert_eq!(CStr::from_ptr(vpi_get_str(VPI_NAME, leaf)), c"u");
+            assert_eq!(vpi_get(VPI_TIME_UNIT, leaf), -6);
+            assert!(vpi_scan(children).is_null());
+            vpi_free_object(leaf);
+            vpi_free_object(shell);
+            vpi_free_object(bank);
+        }
+        assert_eq!(names, ["bank[0]", "bank[1]"]);
+        vpi_free_object(top);
+    }
+    clear_runtime();
+}
+
 unsafe extern "C" fn reschedule_long_callback(data: *mut VpiCbData) -> i32 {
     let count = LONG_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
     let delay = LONG_CALLBACK_DELAY.load(Ordering::SeqCst);
