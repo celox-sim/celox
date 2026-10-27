@@ -1,1 +1,1 @@
-Fix merge-queue repository-script failure: synchronize the explicit SV Verilator retained-failure expectations with the four already recorded tristate compile errors; validate all repository scripts against current master.
+Fix merge-queue Lint & Format: enumerate the four recorded SV Verilator tristate failures in the JS report-gate test. All 316 repository Node tests, three benchmark shell suites and three updatecli unit tests pass after rebasing onto master 89b46b10dc.
