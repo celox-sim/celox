@@ -1,0 +1,1 @@
+Fix review 4385704812: retain inline predicates through scope imports and regenerate helpers for consumer subclasses
