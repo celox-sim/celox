@@ -1,0 +1,7 @@
+Revision history for #2233:
+
+rev 3 (content) 2026-10-27 09:51 UTC — Rebase the performance stack after #2229/#2230 merged; fix #2233 CI stack overflow while rejecting recursively parameterized inheritance, and keep the no-host SV build correction covered.
+rev 2 (rebase) 2026-10-27 06:18 UTC
+rev 1 (initial) 2026-10-27 06:18 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2233,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"930f194b43fa56e74a3afdc80d69a94405988bbc","timestamp_iso":"2026-10-27T06:18:57Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"930f194b43fa56e74a3afdc80d69a94405988bbc","new_sha":"33a33592d46a609c9417cec8200014f37a891229","timestamp_iso":"2026-10-27T06:18:57Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/930f194b43fa56e74a3afdc80d69a94405988bbc...33a33592d46a609c9417cec8200014f37a891229"},{"number":3,"change_type":"content","old_sha":"33a33592d46a609c9417cec8200014f37a891229","new_sha":"b03076c40c73d28a32cff4b540841b9f33146f09","timestamp_iso":"2026-10-27T09:51:47Z","reason":"Rebase the performance stack after #2229/#2230 merged; fix #2233 CI stack overflow while rejecting recursively parameterized inheritance, and keep the no-host SV build correction covered.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/33a33592d46a609c9417cec8200014f37a891229...b03076c40c73d28a32cff4b540841b9f33146f09"}]} -->
