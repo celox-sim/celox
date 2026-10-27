@@ -1,0 +1,1 @@
+Rebase the performance stack after #2229/#2230 merged; fix #2233 CI stack overflow while rejecting recursively parameterized inheritance, and keep the no-host SV build correction covered.
