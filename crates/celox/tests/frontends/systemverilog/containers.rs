@@ -1,6 +1,11 @@
 use super::*;
 
 sv_backends! {
+    fn ordering_integral(sim) { @case "containers::ordering_integral"; }
+    fn ordering_strings(sim) { @case "containers::ordering_strings"; }
+    fn ordering_four_state(sim) { @case "containers::ordering_four_state"; }
+    fn ordering_handles(sim) { @case "containers::ordering_handles"; }
+    fn ordering_events(sim) { @case "containers::ordering_events"; }
     fn optional_parentheses_packed_result(sim) { @case "containers::optional_parentheses_packed_result"; }
     fn optional_parentheses(sim) { @case "containers::optional_parentheses"; }
     fn optional_parentheses_queries(sim) { @case "containers::optional_parentheses_queries"; }
@@ -67,6 +72,79 @@ sv_backends! {
         let error = sim.run_until(0).unwrap_err().to_string();
         assert!(error.contains("negative dynamic array size"), "{error}");
     }
+}
+
+#[test]
+fn container_element_events_reject_mutating_index_calls() {
+    for event in ["q.pop_front", "q[q.pop_front()]", "q[q.pop_back]"] {
+        let source =
+            format!("module Top; int q[$]; initial begin q = {{1, 0}}; @({event}); end endmodule");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("impure-container-event.sv"))],
+            "Top",
+        )
+        .build_native()
+        .err()
+        .unwrap_or_else(|| panic!("a mutating call in an event expression must be rejected"))
+        .to_string();
+        assert!(error.contains("impure call"), "{event}: {error}");
+    }
+}
+
+#[test]
+fn ordering_survives_native_images_and_serialized_checkpoints() {
+    let source = r#"module Top(output int value);
+        timeunit 1ps / 1ps;
+        int q[$];
+        initial begin
+            q = {3, 1, 2};
+            #10 q.sort; value = q[0];
+            #10 q.rsort; value = q[0];
+            #10 q.reverse; value = q[0];
+        end
+    endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("ordering-interpreter.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build_interpreter()
+        .unwrap();
+        let value = sim.signal("value");
+        sim.run_until(15).unwrap();
+        assert_eq!(sim.get(value), BigUint::from(1u8));
+        sim.run_until(25).unwrap();
+        assert_eq!(sim.get(value), BigUint::from(3u8));
+        sim.run_until(35).unwrap();
+        assert_eq!(sim.get(value), BigUint::from(1u8));
+    }
+    let image =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("ordering-image.sv"))], "Top")
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+    let image =
+        celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+            .unwrap();
+    let mut sim = celox::Simulation::from_sv_sources(Vec::new(), "Top")
+        .build_native_from_image(image)
+        .unwrap();
+    let value = sim.signal("value");
+    sim.run_until(15).unwrap();
+    assert_eq!(sim.get(value), BigUint::from(1u8));
+    let bytes = sim.checkpoint().unwrap().to_bytes().unwrap();
+    // SAFETY: bytes were serialized from this simulator's checkpoint.
+    let checkpoint = unsafe { sim.checkpoint_from_bytes(&bytes) }.unwrap();
+    sim.run_until(25).unwrap();
+    assert_eq!(sim.get(value), BigUint::from(3u8));
+    sim.run_until(35).unwrap();
+    assert_eq!(sim.get(value), BigUint::from(1u8));
+    sim.restore(&checkpoint).unwrap();
+    sim.run_until(25).unwrap();
+    assert_eq!(sim.get(value), BigUint::from(3u8));
+    sim.run_until(35).unwrap();
+    assert_eq!(sim.get(value), BigUint::from(1u8));
 }
 
 const EMPTY_REDUCTION_MODES: &str = r#"

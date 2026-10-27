@@ -414,6 +414,17 @@ results may be discarded with `void'(...)`; type queries such as
 Integral pop result queries preserve the element's packed dimensions and
 declared bounds. Queries on string- or class-valued pop results remain unsupported.
 
+Dynamic arrays and queues support `reverse`, `sort` and `rsort`, with or
+without empty parentheses (IEEE 1800-2023 7.12.2). These void methods reorder
+the receiver in place and preserve its size and queue bound; a prior array
+assignment keeps its own copy. Sorting supports integral elements up to 64 bits,
+using their signedness, and strings in lexicographic order. Reversal also
+supports class handles. Element X/Z bits and class identity are preserved.
+For module variables, `@(a[i])` observes changes to the selected element,
+including changes caused by ordering methods (9.4.2).
+Associative arrays cannot use ordering methods. Fixed-array ordering, `shuffle`,
+`with` expressions and iterator arguments remain unsupported.
+
 Elements may be packed integral values up to 64 bits, strings or class
 handles. Positional assignment patterns and element concatenations construct
 sequences; assignments between dynamic arrays and queues copy values and
@@ -446,7 +457,7 @@ require a one-dimensional array variable;
 `with` expressions and iterator arguments remain unsupported.
 
 Multidimensional containers, elements wider than 64 bits, real elements,
-wildcard or class keys, slices, array locator and ordering methods, keyed patterns,
+wildcard or class keys, slices, array locator methods, keyed patterns,
 container operands within concatenations, compound or nonblocking element
 assignments, container ports / subroutine parameters / class properties and
 const containers remain unsupported. A `new[]` initializer currently requires

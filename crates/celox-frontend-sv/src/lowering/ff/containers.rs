@@ -99,7 +99,8 @@ impl Ff<'_, '_> {
             _ => {
                 let mut index_mask = zero;
                 let index = match op {
-                    Size | Clear | PushFront | PopFront | PushBack | PopBack => zero,
+                    Size | Clear | PushFront | PopFront | PushBack | PopBack | Reverse => zero,
+                    Sort | Rsort => self.constant64(u64::from(layout.signed)),
                     _ if string_key => self.handle(&args[1])?,
                     _ => {
                         let (width, signed) = match layout.kind {
@@ -266,6 +267,9 @@ impl Ff<'_, '_> {
                                 Set => heap::SET,
                                 Insert | PushFront | PushBack => heap::INSERT,
                                 Clear => heap::CLEAR,
+                                Reverse => heap::REVERSE,
+                                Sort => heap::SORT,
+                                Rsort => heap::RSORT,
                                 _ => heap::DELETE,
                             };
                             let mut updated = this.heap_call(code(opcode), &[handle, index, value]);

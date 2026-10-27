@@ -7259,6 +7259,20 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                 }
                 // A string operation is a value of its operands.
                 sv::ir::Callee::String(_) => continue,
+                // Container contents are immutable: reading an element is a
+                // value of the container handle and index, unlike a class
+                // property that can change without its handle changing.
+                sv::ir::Callee::Object(op)
+                    if matches!(
+                        *op,
+                        sv::ir::ObjectOp::Container {
+                            op: sv::ir::ContainerOp::Get,
+                            ..
+                        }
+                    ) =>
+                {
+                    continue;
+                }
                 // A property can change without the handle changing.
                 sv::ir::Callee::Object(op) => return Some(op.to_string()),
                 sv::ir::Callee::Checked { .. } => return Some("tagged union access".into()),
