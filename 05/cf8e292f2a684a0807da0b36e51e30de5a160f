@@ -1,6 +1,1 @@
-Revision history for #2231:
-
-rev 2 (content) 2026-10-27 06:18 UTC — Address review 4385415960: require an explicit generated-callee arena footprint, reserve disjoint caller storage, and test real generated spill-heavy nested callees rather than only a Rust surrogate.
-rev 1 (initial) 2026-10-27 06:18 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2231,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"af5bc1e44856111bd5a6d40042dbbe364b4f52a8","timestamp_iso":"2026-10-27T06:18:57Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"af5bc1e44856111bd5a6d40042dbbe364b4f52a8","new_sha":"04e3dc94d6d75a63f8b4a79e83388d5ee653d4ad","timestamp_iso":"2026-10-27T06:18:57Z","reason":"Address review 4385415960: require an explicit generated-callee arena footprint, reserve disjoint caller storage, and test real generated spill-heavy nested callees rather than only a Rust surrogate.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/af5bc1e44856111bd5a6d40042dbbe364b4f52a8...04e3dc94d6d75a63f8b4a79e83388d5ee653d4ad"}]} -->
+Rebase the unchanged native ABI member onto master after #2229 and #2230 merged, keeping the performance stack bases synchronized.
