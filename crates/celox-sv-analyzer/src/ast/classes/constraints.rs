@@ -110,7 +110,7 @@ fn emit(value: Typed, context: Option<(u32, bool)>) -> ConstraintExpr {
     }
 }
 
-pub(super) fn bind(
+pub(in crate::ast) fn bind(
     id: ExprId,
     tree: &AnalysisContext<'_>,
     properties: &[Property],
@@ -322,5 +322,40 @@ impl Class {
             fields,
             constraints,
         })
+    }
+}
+
+/// A generated call-specific method. Its immutable predicates never change the
+/// object's persistent constraints, including during nested hook calls.
+#[derive(Clone)]
+pub(in crate::ast) struct Inline {
+    pub key: usize,
+    pub class: std::rc::Rc<Class>,
+    pub constraints: Vec<ConstraintExpr>,
+    pub dimensions: PackedDimensions,
+}
+
+impl Inline {
+    pub fn name(&self, class: &str) -> String {
+        format!("{class}::$inline_randomize@{}", self.key)
+    }
+}
+
+/// Bound inline predicates survive package imports without retaining syntax or
+/// the declaring scope's dimensions. Consumer scopes can add dispatch targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::ast) struct InlineRequest {
+    pub key: usize,
+    pub class: Class,
+    pub constraints: Vec<ConstraintExpr>,
+}
+
+impl Inline {
+    pub fn request(&self) -> InlineRequest {
+        InlineRequest {
+            key: self.key,
+            class: (*self.class).clone(),
+            constraints: self.constraints.clone(),
+        }
     }
 }

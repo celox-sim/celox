@@ -12,7 +12,7 @@ use std::rc::Rc;
 use super::*;
 use crate::system_functions::{HandleProperty, ObjectField, ObjectOp};
 
-mod constraints;
+pub(super) mod constraints;
 pub(super) mod specializations;
 
 /// Bit width of a handle, see `celox_design::HANDLE_WIDTH`.
