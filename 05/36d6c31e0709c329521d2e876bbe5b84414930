@@ -1,1 +1,6 @@
-Address #2238 review: membership-wide sizing and bounded nested expansion
+Revision history for #2240:
+
+rev 2 (rebase) 2026-10-27 06:30 UTC — Address #2238 review: membership-wide sizing and bounded nested expansion
+rev 1 (initial) 2026-10-27 06:30 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2240,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"6777cdf97bad017cfca8150deec3c6d99c41811b","timestamp_iso":"2026-10-27T06:30:47Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"6777cdf97bad017cfca8150deec3c6d99c41811b","new_sha":"0536d6c31e0709c329521d2e876bbe5b84414930","timestamp_iso":"2026-10-27T06:30:47Z","reason":"Address #2238 review: membership-wide sizing and bounded nested expansion","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/6777cdf97bad017cfca8150deec3c6d99c41811b...0536d6c31e0709c329521d2e876bbe5b84414930"}]} -->
