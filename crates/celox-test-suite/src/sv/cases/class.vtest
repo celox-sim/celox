@@ -2519,3 +2519,56 @@ module Top(output bit [1:0] flags);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq flags 3))
+
+(case type_alias_members
+  (source "class.sv" #"
+package p;
+    class Item #(int N = 42);
+        static int value = N;
+        typedef bit [7:0] word_t;
+        static function int read(); return value; endfunction
+    endclass
+    typedef Item#(23) Alias;
+    class Reader;
+        static function int read(); return Alias::read(); endfunction
+    endclass
+endpackage
+module Top(output int sum, output bit done);
+    import p::*;
+    typedef Alias LocalAlias;
+    class Word;
+        typedef bit [7:0] word_t;
+    endclass
+    typedef Word WordAlias;
+    WordAlias::word_t sample;
+    initial begin
+        sample = 8'hff;
+        sum = Reader::read() + LocalAlias::value + sample;
+        Alias::value = 24;
+        done = Reader::read() == 24 && LocalAlias::value == 24;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 301) (assert_eq done 1))
+
+(case type_alias_lexical_scopes
+  (source "class.sv" #"
+package Alias;
+    parameter int value = 7;
+endpackage
+module Top(output int sum, output bit done);
+    class Item;
+        static int value = 42;
+    endclass
+    class Reader;
+        typedef Item Alias;
+        extern static function int read();
+    endclass
+    function int Reader::read(); return Alias::value; endfunction
+    initial begin
+        sum = Reader::read() + Alias::value;
+        done = sum == 49;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 49) (assert_eq done 1))

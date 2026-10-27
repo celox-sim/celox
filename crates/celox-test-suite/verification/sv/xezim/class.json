@@ -497,6 +497,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::type_alias_lexical_scopes at 2574:27: assert_eq sum: expected 0x31, got 0x7",
+      "expectation": "Simulation",
+      "name": "class::type_alias_lexical_scopes",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "class::type_parameter_imports at 2503:27: assert_eq done: expected 0x1, got 0x0",
       "expectation": "Simulation",
       "name": "class::type_parameter_imports",
