@@ -65,6 +65,7 @@ pub(super) struct ScopeSymbols {
     /// (IEEE 1800-2023 26.3): a scope that uses them may be analyzed from
     /// another source, without their declarations.
     pub classes: Vec<classes::Class>,
+    pub inline_randomizations: Vec<classes::constraints::InlineRequest>,
 }
 
 #[derive(Default)]
@@ -184,6 +185,15 @@ pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
 impl ScopeSymbols {
     /// Add the symbols of `other` that this scope does not already have.
     pub fn extend(&mut self, other: &ScopeSymbols) {
+        for request in &other.inline_randomizations {
+            if !self
+                .inline_randomizations
+                .iter()
+                .any(|known| known.key == request.key)
+            {
+                self.inline_randomizations.push(request.clone());
+            }
+        }
         for class in &other.classes {
             if !self.classes.iter().any(|known| known.name == class.name) {
                 self.classes.push(class.clone());
@@ -437,6 +447,7 @@ impl ScopeSymbols {
         ScopeSymbols {
             // Classes have their qualified names already.
             classes: self.classes.clone(),
+            inline_randomizations: self.inline_randomizations.clone(),
             declarations_only: self.declarations_only,
             interface_instances: self.interface_instances.clone(),
             interface_types: self.interface_types.clone(),

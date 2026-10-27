@@ -2128,3 +2128,122 @@ module Top(output bit done);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline
+  (source "inline_constraints.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand int x, y;
+        int limit, pre_count, post_count;
+        constraint c { x < 10; }
+        function void pre_randomize(); limit=3; pre_count++; endfunction
+        function void post_randomize(); post_count++; endfunction
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        if (!(p.randomize() with { x inside {[1:limit]}; y == x + 1; }))
+            $fatal(1, "inline success");
+        if (p.x < 1 || p.x > 3 || p.y != p.x + 1) $fatal(1, "inline values");
+        if (p.randomize() with { x == 12; }) $fatal(1, "lost class constraint");
+        if (p.pre_count != 2 || p.post_count != 1) $fatal(1, "inline hooks");
+        if (!(p.randomize() with { x == 7; if (x == 7) y == 8; })) $fatal(1, "inline leaked");
+        if (!p.randomize(null)) $fatal(1, "ordinary check");
+        if (p.randomize(null) with { x == 2; }) $fatal(1, "inline check");
+        if (p.x != 7 || p.y != 8) $fatal(1, "check-only changed fields");
+        if (!(p.randomize(x) with { x == y; })) $fatal(1, "inline selection");
+        if (p.x != 8 || p.y != 8) $fatal(1, "unselected field changed");
+        p.randomize() with { x == 4; y == 5; };
+        if (p.x != 4 || p.y != 5) $fatal(1, "discarded call");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_inheritance
+  (source "inline_inheritance.sv" #"
+module Top(output bit done);
+    class Base;
+        rand int x;
+    endclass
+    class Derived extends Base;
+        rand int x;
+        int hook;
+        constraint c { x == 9; }
+        function void pre_randomize(); hook++; endfunction
+    endclass
+    Base b;
+    Derived d;
+    initial begin
+        d = new; b = d;
+        if (!(b.randomize() with { x == 2; })) $fatal(1, "base inline scope");
+        if (b.x != 2 || d.x != 9 || d.hook != 1) $fatal(1, "static scope or dynamic hooks");
+        if (!(b.randomize() with { x == 5; })) $fatal(1, "second inline");
+        if (b.x != 5 || d.x != 9 || d.hook != 2) $fatal(1, "inline persistence");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_basic
+  (source "inline_basic.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand int x;
+        constraint c { x inside {1, 2}; }
+        function int pick(); return randomize() with { x == 1; }; endfunction
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        if (!(p.randomize() with { x == 2; })) $fatal(1, "inline member");
+        if (p.x != 2) $fatal(1, "inline value");
+        if (!p.pick() || p.x != 1) $fatal(1, "unqualified inline call");
+        if (p.randomize() with { x == 3; }) $fatal(1, "named constraint lost");
+        if (p.x != 1) $fatal(1, "failed inline changed member");
+        if (!(p.randomize() with { x == 2; })) $fatal(1, "inline not per-call");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_package_instances
+  (source "inline_package.sv" #"
+package pkg;
+    class Packet;
+        rand int x;
+        function int pick(); return randomize() with { x == 2; }; endfunction
+    endclass
+endpackage
+module Child(output bit done);
+    class Derived extends pkg::Packet;
+        rand int y;
+        int calls;
+        constraint c { y == 7; }
+        function void pre_randomize(); calls++; endfunction
+    endclass
+    pkg::Packet p;
+    Derived d;
+    if (1) begin : g
+        initial begin
+            p = new;
+            if (!p.pick() || p.x != 2) $fatal(1, "package method inline");
+            if (!(p.randomize() with { x == 3; }) || p.x != 3) $fatal(1, "instance inline");
+            d = new;
+            p = d;
+            if (!p.pick() || p.x != 2 || d.y != 7 || d.calls != 1)
+                $fatal(1, "imported inline subclass dispatch");
+            done = 1;
+        end
+    end
+endmodule
+module Top(output bit done);
+    wire a, b;
+    Child c0(a), c1(b);
+    assign done = a & b;
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
