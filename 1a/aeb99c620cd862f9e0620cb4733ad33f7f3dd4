@@ -1,0 +1,6 @@
+Revision history for #2292:
+
+rev 2 (content) 2026-10-27 16:13 UTC — Address review P1 by retaining reviewed external failures for the new type-parameter cases and preserving existing assertion locations
+rev 1 (initial) 2026-10-27 16:13 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2292,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"d47a56831c6fddef9da25e2d57b87789c65fb30c","timestamp_iso":"2026-10-27T16:13:28Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"d47a56831c6fddef9da25e2d57b87789c65fb30c","new_sha":"43858ac74241f59b644b9c646ef10ea2fd2cef0e","timestamp_iso":"2026-10-27T16:13:28Z","reason":"Address review P1 by retaining reviewed external failures for the new type-parameter cases and preserving existing assertion locations","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/d47a56831c6fddef9da25e2d57b87789c65fb30c...43858ac74241f59b644b9c646ef10ea2fd2cef0e"}]} -->
