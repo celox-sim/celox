@@ -1,0 +1,6 @@
+Revision history for #2307:
+
+rev 2 (content) 2026-10-27 19:09 UTC — Fix review r4392840008: pending inertial deposits must reopen a quiescent timed session at the current time; add resumed-run coverage while preserving closed ReadOnly timers.
+rev 1 (initial) 2026-10-27 19:09 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2307,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"ac9685ebe09eedb8137d4fae5d43af21a0ebaeca","timestamp_iso":"2026-10-27T19:09:57Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"ac9685ebe09eedb8137d4fae5d43af21a0ebaeca","new_sha":"6049655f153df2eada6f3bec00979023cc0e79d4","timestamp_iso":"2026-10-27T19:09:57Z","reason":"Fix review r4392840008: pending inertial deposits must reopen a quiescent timed session at the current time; add resumed-run coverage while preserving closed ReadOnly timers.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/ac9685ebe09eedb8137d4fae5d43af21a0ebaeca...6049655f153df2eada6f3bec00979023cc0e79d4"}]} -->
