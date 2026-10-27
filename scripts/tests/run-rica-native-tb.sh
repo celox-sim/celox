@@ -35,6 +35,7 @@ esac
 EOF
 chmod +x "$tmp/exporter" "$tmp/runner"
 export RICA_DIR="$tmp/source" RICA_REF=HEAD RICA_RESULTS_DIR="$tmp/results"
+export RICA_HARNESS=native-tb
 export RICA_KERNELS=kernel-tasks RICA_REPEAT=3 RICA_BUILD_CELOX_RUNNER=0
 export CELOX_RUNNER_BIN="$tmp/exporter" CELOX_TB_RUNNER_BIN="$tmp/runner" CALLS="$tmp/calls"
 bash "$root/scripts/run-rica-bench.sh" run > "$tmp/pass.log"

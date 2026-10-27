@@ -14,6 +14,8 @@ RTL 設計の性能を予測するものではありません。
 ## ワークロード
 
 メイン画面にはHeliodorと、SHA-256・FFT・LZ77の代表回路を掲載します。
+代表回路は Celox と Veryl simulator の tiered 同士を比較し、主指標は
+空のコンパイルキャッシュでのプロセス起動から終了までの時間です。
 ricaの既存ランナー、tarunesの検証状況、固定リビジョン、合格条件、次フェーズの
 SV frontend比較方針は[回路コレクション](../../benchmarks/collection.md)にまとめています。
 

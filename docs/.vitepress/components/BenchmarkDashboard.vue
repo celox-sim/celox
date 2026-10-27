@@ -54,6 +54,8 @@ interface Series {
   benchName: string;
   runtime:
     | "collection-celox-veryl-native"
+    | "collection-celox-tiered"
+    | "collection-veryl-tiered"
     | "rust"
     | "rust-dse"
     | "native-tb"
@@ -256,6 +258,8 @@ function classifySeries(benchName: string): string {
 
 const RUNTIME_COLORS: Record<string, string> = {
   "collection-celox-veryl-native": "#2563eb",
+  "collection-celox-tiered": "#2563eb",
+  "collection-veryl-tiered": "#e87924",
   rust: "#3b82f6",
   "rust-dse": "#a855f7",
   "native-tb": "#f43f5e",
@@ -276,6 +280,8 @@ const RUNTIME_COLORS: Record<string, string> = {
 
 const RUNTIME_LABELS: Record<string, string> = {
   "collection-celox-veryl-native": "Celox native · Veryl frontend / Veryl TB",
+  "collection-celox-tiered": "Celox tiered · Veryl TB",
+  "collection-veryl-tiered": "Veryl simulator tiered · Veryl TB",
   rust: "Celox (rust)",
   "rust-dse": "Celox (rust-dse)",
   "native-tb": "Celox (native-tb)",
@@ -305,7 +311,7 @@ const activeTab = ref("heliodor");
 
 function stripPrefix(name: string): string {
   return name.replace(
-    /^(collection-celox-veryl-native|rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-celox-tiered-aarch64|heliodor-veryl-tiered-x86_64|heliodor-veryl-tiered-aarch64|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-native-parallel-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-native-parallel-aarch64|heliodor-veryl-cc-aarch64)\//,
+    /^(collection-celox-tiered|collection-veryl-tiered|collection-celox-veryl-native|rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-celox-tiered-aarch64|heliodor-veryl-tiered-x86_64|heliodor-veryl-tiered-aarch64|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-native-parallel-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-native-parallel-aarch64|heliodor-veryl-cc-aarch64)\//,
     "",
   );
 }
@@ -338,6 +344,8 @@ function normalizeBenchName(benchName: string): string {
 }
 
 function runtime(name: string): Series["runtime"] | null {
+  if (name.startsWith("collection-celox-tiered/")) return "collection-celox-tiered";
+  if (name.startsWith("collection-veryl-tiered/")) return "collection-veryl-tiered";
   if (name.startsWith("collection-celox-veryl-native/")) return "collection-celox-veryl-native";
   if (name.startsWith("heliodor-celox-jit/")) return "heliodor-native-x86_64-jit";
   if (name.startsWith("heliodor-celox-total/")) return "heliodor-native-x86_64";
@@ -592,9 +600,13 @@ const tabData = computed(() => {
       byBenchName.get(s.benchName)!.push(s);
     }
 
-    // Create chart cards sorted alphabetically
+    // Lead circuit comparisons with cold-process total time.
     const cards: ChartCard[] = [...byBenchName.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
+      .sort(([a], [b]) => {
+        const rank = (name: string) => name.startsWith("collection_")
+          ? (name.endsWith("_total") ? 0 : 1) : 0;
+        return rank(a) - rank(b) || a.localeCompare(b);
+      })
       .map(([benchName, series]) => ({
         benchName,
         title: formatChartTitle(benchName),
