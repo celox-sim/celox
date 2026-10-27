@@ -2593,6 +2593,23 @@ pub(crate) fn proves_combinational(
     paths: &[LogicPath<VarId>],
     arena: &SLTNodeArena<VarId>,
 ) -> bool {
+    prove_combinational(paths, arena, false)
+}
+
+/// Only a diagnostic proof: the executable tree still retains its unmatched
+/// branch, so this never changes four-state case semantics.
+pub(crate) fn proves_binary_combinational(
+    paths: &[LogicPath<VarId>],
+    arena: &SLTNodeArena<VarId>,
+) -> bool {
+    prove_combinational(paths, arena, true)
+}
+
+fn prove_combinational(
+    paths: &[LogicPath<VarId>],
+    arena: &SLTNodeArena<VarId>,
+    binary_cases: bool,
+) -> bool {
     let mut targets: HashMap<VarId, Vec<BitAccess>> = HashMap::default();
     for target in paths.iter().filter_map(|path| path.target.var()) {
         targets.entry(target.id).or_default().push(target.access);
@@ -2658,8 +2675,14 @@ pub(crate) fn proves_combinational(
         };
         proof_roots.push(root);
     }
-    feedback_masks(&proof_roots, &proof_arena, &targets, &mut budget)
-        .is_some_and(|masks| masks.iter().all(Zero::is_zero))
+    feedback_masks(
+        &proof_roots,
+        &proof_arena,
+        &targets,
+        &mut budget,
+        binary_cases,
+    )
+    .is_some_and(|masks| masks.iter().all(Zero::is_zero))
 }
 
 struct FeedbackProofBudget {
@@ -2732,6 +2755,7 @@ fn feedback_masks(
     arena: &SLTNodeArena<VarId>,
     targets: &HashMap<VarId, Vec<BitAccess>>,
     budget: &mut FeedbackProofBudget,
+    binary_cases: bool,
 ) -> Option<Vec<BigUint>> {
     let nodes = feedback_proof_nodes(roots, arena, budget)?;
     let mut masks: HashMap<NodeId, BigUint> = HashMap::default();
@@ -2837,7 +2861,11 @@ fn feedback_masks(
                 then_expr,
                 else_expr,
             } => {
-                if !masks[cond].is_zero() {
+                if binary_cases
+                    && let Some(mask) = exhaustive_binary_case_mask(node, arena, &masks, budget)
+                {
+                    mask
+                } else if !masks[cond].is_zero() {
                     width_mask(width)
                 } else if get_width(*then_expr, arena) == width
                     && get_width(*else_expr, arena) == width
@@ -2852,6 +2880,76 @@ fn feedback_masks(
         masks.insert(node, mask);
     }
     Some(roots.iter().map(|root| masks[root].clone()).collect())
+}
+
+/// Recognize a bounded chain of equality tests on the same selector. Counting
+/// distinct labels (not arms) prevents duplicates from hiding missing values.
+/// Mixed widths, masks, nonconstant labels and signed comparisons are left to
+/// the conservative proof. Budget every visited edge, including failed scans.
+fn exhaustive_binary_case_mask(
+    root: NodeId,
+    arena: &SLTNodeArena<VarId>,
+    masks: &HashMap<NodeId, BigUint>,
+    budget: &mut FeedbackProofBudget,
+) -> Option<BigUint> {
+    let width = get_width(root, arena);
+    let mut current = root;
+    let mut selector = None;
+    let mut labels = HashSet::default();
+    let mut result = BigUint::zero();
+    loop {
+        budget.edges = budget.edges.checked_sub(1)?;
+        let SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        } = arena.get(current)
+        else {
+            return None;
+        };
+        if !masks[cond].is_zero() || get_width(*then_expr, arena) != width {
+            return None;
+        }
+        let mut condition = *cond;
+        // Procedural conditions normalize unknown truth to false.
+        while let SLTNode::Unary(UnaryOp::ToTwoState | UnaryOp::Or, inner) = arena.get(condition) {
+            budget.edges = budget.edges.checked_sub(1)?;
+            condition = *inner;
+        }
+        let SLTNode::Binary(lhs, BinaryOp::Eq | BinaryOp::EqCase | BinaryOp::EqWildcard, rhs) =
+            arena.get(condition)
+        else {
+            return None;
+        };
+        let (input, constant) = if let Some(c) = specialized_constant(*rhs, arena) {
+            (*lhs, c)
+        } else {
+            (*rhs, specialized_constant(*lhs, arena)?)
+        };
+        let bits = get_width(input, arena);
+        if bits == 0
+            || bits > 8
+            || constant.width != bits
+            || !constant.mask.is_zero()
+            || constant.signed
+        {
+            return None;
+        }
+        if selector.is_some_and(|previous| previous != input) {
+            return None;
+        }
+        selector = Some(input);
+        let label = constant.value.to_usize()?;
+        if label >= 1usize << bits {
+            return None;
+        }
+        labels.insert(label);
+        result |= &masks[then_expr];
+        if labels.len() == 1usize << bits {
+            return Some(result);
+        }
+        current = *else_expr;
+    }
 }
 
 fn specialize_slt_node(
@@ -4414,6 +4512,78 @@ mod tests {
     use crate::loop_provenance::{LoopProvenance, LoopSourceTable};
 
     #[test]
+    fn binary_case_proof_requires_distinct_complete_labels() {
+        for (labels, expected) in [
+            (vec![0u8, 1, 2, 3], true),
+            (vec![0, 1, 1, 3], false),
+            (vec![0, 1, 2], false),
+        ] {
+            let mut arena = SLTNodeArena::new();
+            let target = VarId::from_raw(1);
+            let selector = arena
+                .alloc(SLTNode::Input {
+                    variable: VarId::from_raw(2),
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, 1),
+                })
+                .unwrap();
+            let mut expr = arena
+                .alloc(SLTNode::Input {
+                    variable: target,
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, 7),
+                })
+                .unwrap();
+            for label in labels.into_iter().rev() {
+                let constant = arena
+                    .alloc(SLTNode::Constant(
+                        BigUint::from(label),
+                        BigUint::zero(),
+                        2,
+                        false,
+                    ))
+                    .unwrap();
+                let cond = arena
+                    .alloc(SLTNode::Binary(selector, BinaryOp::EqWildcard, constant))
+                    .unwrap();
+                let cond = super::super::procedural_condition(&mut arena, cond).unwrap();
+                let value = arena
+                    .alloc(SLTNode::Constant(
+                        BigUint::from(label + 10),
+                        BigUint::zero(),
+                        8,
+                        false,
+                    ))
+                    .unwrap();
+                expr = arena
+                    .alloc(SLTNode::Mux {
+                        cond,
+                        then_expr: value,
+                        else_expr: expr,
+                    })
+                    .unwrap();
+            }
+            let path = LogicPath {
+                target: celox_slt::LogicPathTarget::Var(VarAtomBase::new(target, 0, 7)),
+                expr,
+                transparent_copy: false,
+                sources: HashSet::default(),
+                previous_sources: Default::default(),
+                address_sources: Default::default(),
+                local_inputs: Vec::new(),
+                order_before: Default::default(),
+                comb_capture_enable_sites: Vec::new(),
+                comb_capture_enable_always: false,
+                pre_lower_nodes: Vec::new(),
+            };
+            assert!(!proves_combinational(std::slice::from_ref(&path), &arena));
+            assert_eq!(proves_binary_combinational(&[path], &arena), expected);
+        }
+    }
+
+    #[test]
     fn latch_feedback_proves_deep_fully_written_wide_graph() {
         let mut arena = SLTNodeArena::new();
         let old = arena
@@ -4499,7 +4669,16 @@ mod tests {
             bits: 64,
             edges: 64,
         };
-        assert!(feedback_masks(&[reduction], &arena, &HashMap::default(), &mut budget).is_none());
+        assert!(
+            feedback_masks(
+                &[reduction],
+                &arena,
+                &HashMap::default(),
+                &mut budget,
+                false
+            )
+            .is_none()
+        );
     }
 
     fn dependency_masks_for_test(
@@ -4513,7 +4692,7 @@ mod tests {
             bits: 65_536,
             edges: 4096,
         };
-        feedback_masks(roots, arena, &targets, &mut budget).unwrap()
+        feedback_masks(roots, arena, &targets, &mut budget, false).unwrap()
     }
 
     #[test]
