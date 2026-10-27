@@ -422,16 +422,16 @@ Local validation uses the behavior-based matrix above.
 | Daily at 02:17 UTC (11:17 JST) | `codspeed.yml` measures compile time on the default branch using CPU simulation. Execution failures and CodSpeed performance-check failures open or update a branch issue; the next healthy run closes it. Manual dispatch supports branch measurements. PRs, merge groups, and pushes do not run CodSpeed. |
 | Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs do not run this workflow; its tooling tests run in `Lint & Format` with the other script tests. |
 | Every full CI run | Run the pinned upstream `common_cells` Gray code SV TB through `celox run --project`, plus an assertion negative control. Logs are retained for 14 days and failures feed the Full CI issue. See [the reproduction instructions](conformance/common-cells/README.md). |
-| Every full CI run | Run every shared Veryl and SystemVerilog case against both Verilator and Icarus, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
+| Daily at 03:47 UTC (12:47 JST), on develop from nightly, and on demand | Independent `external-comparisons.yml` runs every shared Veryl and SystemVerilog case against Verilator, Icarus, and xezim, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
 | Affected pull requests and merge groups; daily at 03:41 UTC (12:41 JST); on demand | `lydite-checks.yml` owns Lydite Rust tests, proof, conformance, editor, and mutation gates. Unrelated changes skip these jobs. Bridge gates are disabled; daily and manual runs enable only core lanes and report failures in an issue. |
-| On demand | Dispatch `ci.yml` on the desired branch to run full CI and external comparisons, regardless of its diff. |
+| On demand | Dispatch `ci.yml` on the desired branch to run full product CI, regardless of its diff. Dispatch `external-comparisons.yml` separately for external comparisons. |
 
 Full runs have a separate concurrency group so ordinary pushes cannot cancel
 them. Scheduled and dispatched full runs on `master` and `develop` end with
 `Report full validation`: a failed or cancelled job opens the issue
 "Full CI is failing on <branch>", or comments on it while it stays open, and
 the next passing full run closes it. They report failures normally; they are not advisory jobs with
-`continue-on-error`. The external comparison gate accepts an existing retained
+`continue-on-error`. External comparisons report failures in their own issue and do not gate release publication or product CI. Their gate accepts an existing retained
 failure only when its case ID, expectation, status, phase, retained diagnostic,
 and tool version match the checked-in baseline. These cases still run every
 day and remain failures in the report. New or changed failures, abnormal runner

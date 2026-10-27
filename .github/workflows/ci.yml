@@ -370,106 +370,6 @@ jobs:
           cargo test --locked -p celox --lib
           cargo test --locked -p celox --doc
 
-  external-suites:
-    name: External suite (${{ matrix.suite }}, ${{ matrix.tool }})
-    needs: changes
-    # External comparisons belong to full validation, never the merge queue.
-    if: ${{ !cancelled() && needs.changes.outputs.full_validation == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [veryl, sv]
-        tool: [verilator, icarus, xezim]
-    env:
-      VERIFY_TOOL: ${{ matrix.tool }}
-      # xezim builds from source, so only its jobs enter the shell with it.
-      VERIFY_SHELL: ${{ matrix.tool == 'xezim' && '.#xezim' || '.' }}
-      VERIFY_SUITE: ${{ matrix.suite }}
-      VERIFY_BIN: ${{ matrix.suite == 'sv' && format('verify-sv-{0}', matrix.tool) || format('verify-{0}', matrix.tool) }}
-      VERIFY_BASELINE: ${{ matrix.suite == 'sv' && format('crates/celox-test-suite/verification/sv/{0}.json', matrix.tool) || format('crates/celox-test-suite/verification/{0}.json', matrix.tool) }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.validation_ref || github.sha }}
-          submodules: recursive
-
-      # Use the same locked tool versions as the retained exclusion evidence.
-      - name: Install Nix
-        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31
-
-      - name: Test live simulator adapters
-        if: matrix.suite == 'veryl'
-        run: >-
-          nix develop "$VERIFY_SHELL" --no-update-lock-file --command
-          cargo test --locked -p celox-test-suite --features "$VERIFY_TOOL"
-          --test oracles -- --ignored
-
-      # The VPI host's time-step regions against Icarus, through the same
-      # cocotb test module, with the locked cocotb and Icarus versions.
-      - name: Cross-check cocotb time-step regions against Icarus
-        if: matrix.suite == 'sv' && matrix.tool == 'icarus'
-        run: >-
-          nix develop "$VERIFY_SHELL" --no-update-lock-file --command
-          cargo test --locked -p celox-vpi --features systemverilog
-          --test cocotb_e2e icarus_and_celox_agree_on_dut_processes -- --ignored --exact
-
-      - name: Catalogue every shared case
-        if: ${{ !cancelled() }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/external-suite"
-          nix develop "$VERIFY_SHELL" --no-update-lock-file --command \
-            cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
-            --bin "$VERIFY_BIN" -- --list > "$RUNNER_TEMP/external-suite/catalogue.json"
-
-      - name: Verify every shared case against the external simulator
-        id: verify
-        if: ${{ !cancelled() }}
-        run: |
-          # The runner returns 1 for retained failures as well as regressions.
-          # The next step checks the complete fresh report and the exit status.
-          rm -f "$RUNNER_TEMP/external-suite/logs/results.json"
-          if nix develop "$VERIFY_SHELL" --no-update-lock-file --command \
-            cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
-            --bin "$VERIFY_BIN" -- --fresh --jobs 2 \
-            --output "$RUNNER_TEMP/external-suite/logs"; then
-            task_verify_status=0
-          else
-            task_verify_status=$?
-          fi
-          echo "exit_status=$task_verify_status" >> "$GITHUB_OUTPUT"
-
-      - name: Reject new or changed external verification failures
-        if: ${{ !cancelled() }}
-        env:
-          VERIFY_EXIT_STATUS: ${{ steps.verify.outputs.exit_status }}
-        run: >-
-          nix develop "$VERIFY_SHELL" --no-update-lock-file --command
-          node scripts/check-external-suite-report.mjs
-          "$RUNNER_TEMP/external-suite/logs/results.json" "$VERIFY_BASELINE"
-          "$RUNNER_TEMP/external-suite/catalogue.json" "$VERIFY_EXIT_STATUS" "$VERIFY_SUITE"
-
-      - name: Retain results and failure diagnostics
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: external-suite-${{ matrix.suite }}-${{ matrix.tool }}
-          # Keep evidence rather than hundreds of generated simulator binaries.
-          path: |
-            ${{ runner.temp }}/external-suite/catalogue.json
-            ${{ runner.temp }}/external-suite/logs/**/*.json
-            ${{ runner.temp }}/external-suite/logs/**/*.log
-            ${{ runner.temp }}/external-suite/logs/**/*.veryl
-            ${{ runner.temp }}/external-suite/logs/**/*.sv
-            ${{ runner.temp }}/external-suite/logs/**/*.v
-            ${{ runner.temp }}/external-suite/logs/**/*.svh
-            ${{ runner.temp }}/external-suite/logs/**/*.vh
-            ${{ runner.temp }}/external-suite/logs/**/harness.cpp
-            ${{ runner.temp }}/external-suite/logs/**/vpi_bits.hpp
-          if-no-files-found: error
-          retention-days: 14
-
   common-cells:
     name: Upstream SystemVerilog testbench
     needs: changes
@@ -704,7 +604,7 @@ jobs:
   # into a successful check merely because a downstream job was skipped.
   rust:
     name: Rust Test & NAPI Build
-    needs: [changes, rust-tests, rust-default-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites]
+    needs: [changes, rust-tests, rust-default-tests, sv-tests, arm64-backend, napi-linux, napi-wasm]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     env:
@@ -722,9 +622,6 @@ jobs:
       NATIVE_RESULT: ${{ needs.napi-linux.result }}
       WASM_REQUIRED: ${{ needs.changes.outputs.fast_queue != 'true' && needs.changes.outputs.napi != 'false' }}
       WASM_RESULT: ${{ needs.napi-wasm.result }}
-      # Every full run requires external comparisons as well as Celox tests.
-      RELEASE_REQUIRED: ${{ needs.changes.outputs.full_validation }}
-      EXTERNAL_RESULT: ${{ needs.external-suites.result }}
     steps:
       - name: Check tests and builds
         run: |
@@ -746,9 +643,6 @@ jobs:
           fi
           if [ "$WASM_REQUIRED" != false ] || [ "$WASM_RESULT" != skipped ]; then
             test "$WASM_RESULT" = success
-          fi
-          if [ "$RELEASE_REQUIRED" != false ]; then
-            test "$EXTERNAL_RESULT" = success
           fi
 
   arm64-backend:
@@ -1046,7 +940,6 @@ jobs:
         rust-tests,
         rust-default-tests,
         sv-tests,
-        external-suites,
         common-cells,
         napi-linux,
         napi-wasm,
@@ -1082,7 +975,6 @@ jobs:
         rust-tests,
         rust-default-tests,
         sv-tests,
-        external-suites,
         common-cells,
         napi-linux,
         napi-wasm,
