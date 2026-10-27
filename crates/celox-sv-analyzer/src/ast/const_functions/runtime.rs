@@ -517,4 +517,126 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn conditional_functions_keep_both_arm_types() {
+        let module = module(
+            r#"module Top(output int q);
+            function automatic int mixed_sign();
+                return 1'b1 ? 8'shff : 8'h00;
+            endfunction
+            function automatic logic [31:0] concat_width();
+                return {8'hab, (1'b1 ? 8'hff : 16'h0), 8'hcd};
+            endfunction
+            assign q = mixed_sign();
+        endmodule"#,
+        );
+        let constants = HashMap::default();
+        let mut actual = Vec::new();
+        let mut expected = Vec::new();
+        for four_state in [false, true] {
+            let evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
+            for (name, value) in [("mixed_sign", 255u32), ("concat_width", 0xab00ffcdu32)] {
+                let result = evaluator.value(name).unwrap();
+                actual.push((four_state, name, result.value, result.mask));
+                expected.push((four_state, name, BigUint::from(value), BigUint::default()));
+            }
+        }
+        assert_eq!(actual, expected);
+    }
+    #[test]
+    fn conditional_functions_skip_values_but_keep_types() {
+        let module = module(
+            r#"module Top(output int q);
+            function automatic logic [15:0] never_called();
+                return 16'h1234;
+            endfunction
+            function automatic int skipped_function();
+                return 1'b1 ? 8'shff : never_called();
+            endfunction
+            function automatic int skipped_function_false();
+                return 1'b0 ? never_called() : 8'shff;
+            endfunction
+            function automatic int skipped_unknown();
+                return 1'b1 ? 8'hff : 32'bx;
+            endfunction
+            function automatic int skipped_index();
+                logic [31:0] word;
+                return 1'b1 ? 8'hff : word[never_called() +: 16];
+            endfunction
+            function automatic logic [31:0] power_type();
+                return {8'hab, (1'b1 ? 8'hff : (8'h1 ** 32'd3)), 8'hcd};
+            endfunction
+            function automatic int signed_power_type();
+                return 1'b1 ? 8'shff : (8'sh1 ** 32'd3);
+            endfunction
+            function automatic logic [31:0] arithmetic_context();
+                return {(1'b1 ? (8'hff + 8'h01) : 16'h0)};
+            endfunction
+            function automatic int assignment_context();
+                return 1'b1 ? (8'hff + 8'h01) : 8'h0;
+            endfunction
+            function automatic int unsigned_shift_context();
+                return 1'b1 ? (8'sh80 >>> 1) : 8'h00;
+            endfunction
+            function automatic logic [15:0] power_context();
+                return {(1'b1 ? (8'h2 ** 32'd65536) : 16'h0)};
+            endfunction
+            assign q = 0;
+        endmodule"#,
+        );
+        let constants = HashMap::default();
+        for four_state in [false, true] {
+            let evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
+            for (name, expected) in [
+                ("skipped_function", 255u32),
+                ("skipped_function_false", 255),
+                ("skipped_unknown", 255),
+                ("skipped_index", 255),
+                ("power_type", 0x00abffcd),
+                ("signed_power_type", 0xffffffff),
+                ("arithmetic_context", 256),
+                ("assignment_context", 256),
+                ("unsigned_shift_context", 64),
+                ("power_context", 0),
+            ] {
+                FUNCTION_CALLS.with(|count| count.set(0));
+                let result = evaluator.value(name).unwrap();
+                assert_eq!(
+                    result.value,
+                    BigUint::from(expected),
+                    "{name}, four_state={four_state}"
+                );
+                assert_eq!(result.mask, BigUint::default(), "{name}");
+                assert_eq!(
+                    FUNCTION_CALLS.with(Cell::get),
+                    1,
+                    "{name} evaluated an unselected call"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_conditional_functions_evaluate_condition_once() {
+        let module = module(
+            r#"module Top(output logic [15:0] q);
+            function automatic logic predicate(); return 1'bx; endfunction
+            function automatic logic [7:0] left_value(); return 8'ha5; endfunction
+            function automatic logic [15:0] right_value(); return 16'h00a5; endfunction
+            function automatic logic [15:0] merged();
+                return predicate() ? left_value() : right_value();
+            endfunction
+            assign q = 0;
+        endmodule"#,
+        );
+        let constants = HashMap::default();
+        let evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
+        FUNCTION_CALLS.with(|count| count.set(0));
+        let result = evaluator.value("merged").unwrap();
+        assert_eq!(result.value, BigUint::from(0xa5u8));
+        assert_eq!(result.mask, BigUint::default());
+        assert_eq!(FUNCTION_CALLS.with(Cell::get), 4);
+        assert_eq!(evaluator.value("merged"), Some(result));
+        assert_eq!(FUNCTION_CALLS.with(Cell::get), 4);
+    }
 }
