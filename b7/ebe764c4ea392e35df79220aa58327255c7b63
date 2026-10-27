@@ -1,0 +1,1 @@
+Use the explicit generated-callee arena reservation helper introduced for review4385415960; retain the existing disjoint placement and avoid duplicating the footprint calculation.
