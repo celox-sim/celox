@@ -9033,3 +9033,47 @@ fn mixed_hierarchies_accept_many_sibling_specializations() {
     sim.modify(|io| io.set(x, 60u8)).unwrap();
     assert_eq!(sim.get(y), BigUint::from(124u8));
 }
+
+#[test]
+fn exhaustive_case_preserves_fixed_unknown_selector_bits() {
+    let source = r#"
+        module Top(input bit b, output logic y);
+            always_comb case ({b, 1'bx})
+                2'b0x: y = 0;
+                2'b1x: y = 1;
+            endcase
+        endmodule
+    "#;
+    for (kind, four_state) in [("bit", false), ("bit", true), ("logic", false)] {
+        let source = source.replace("input bit b", &format!("input {kind} b"));
+        let mut sim =
+            Simulator::from_sv_sources(vec![(&source, Path::new("fixed_unknown_case.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        let b = sim.signal("b");
+        let y = sim.signal("y");
+        for value in [0u8, 1, 0] {
+            sim.modify(|io| io.set(b, value)).unwrap();
+            assert_eq!(sim.get(y), BigUint::from(value));
+        }
+    }
+}
+
+sv_backends! {
+    fn exhaustive_case_preserves_fixed_selector_bits(sim) { @case "review_regressions::exhaustive_case_preserves_fixed_selector_bits"; }
+    fn fixed_case_bits_preserve_unknown_input_fallback(sim) { @case "review_regressions::fixed_case_bits_preserve_unknown_input_fallback"; }
+}
+
+#[test]
+fn fixed_selector_bits_do_not_hide_incomplete_cases() {
+    for source in [
+        "module Top(input logic b, output logic y); always_comb case ({b,1'bx}) 2'b0x:y=0; 2'b1x:y=1; endcase endmodule",
+        "module Top(input bit b, output logic y); always_comb case ({b,1'bx}) 2'b0x:y=0; endcase endmodule",
+        "module Top(input bit b, output logic y); always_comb case ({b,1'bx}) 2'b0z:y=0; 2'b1z:y=1; endcase endmodule",
+        "module Top(input bit b, output logic y); always_comb case ({b,1'bz}) 2'b0x:y=0; 2'b1x:y=1; endcase endmodule",
+    ] {
+        let error = four_state_cranelift_build_error(source);
+        assert!(error.contains("latch inference"), "{error}");
+    }
+}
