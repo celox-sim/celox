@@ -838,11 +838,20 @@ fn initializes_partially_driven_internal_nets_to_z() {
             assign undriven_bits_are_z = (w[7:1] === 7'bzzzzzzz);
         endmodule
     "#;
-    let mut sim =
-        Simulator::from_sv_sources(vec![(source, Path::new("partial_internal_net.sv"))], "Top")
-            .build_cranelift()
-            .unwrap();
-    assert_eq!(sim.get(sim.signal("undriven_bits_are_z")), 1u8.into());
+    // Runtime storage retains X/Z only in four-state mode. Literal X/Z
+    // in exact comparisons remain distinct from zero in both modes.
+    for four_state in [false, true] {
+        let mut sim =
+            Simulator::from_sv_sources(vec![(source, Path::new("partial_internal_net.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        assert_eq!(
+            sim.get_four_state(sim.signal("undriven_bits_are_z")),
+            (u8::from(four_state).into(), BigUint::default()),
+            "four_state={four_state}",
+        );
+    }
 }
 
 #[test]
@@ -893,11 +902,22 @@ fn initializes_shadowing_function_locals_to_unknown() {
             assign local_is_unknown = (f() === 1'bx);
         endmodule
     "#;
-    let mut sim =
-        Simulator::from_sv_sources(vec![(source, Path::new("function_local_shadow.sv"))], "Top")
-            .build_cranelift()
-            .unwrap();
-    assert_eq!(sim.get(sim.signal("local_is_unknown")), 1u8.into());
+    // Runtime storage retains X/Z only in four-state mode. Literal X/Z
+    // in exact comparisons remain distinct from zero in both modes.
+    for four_state in [false, true] {
+        let mut sim = Simulator::from_sv_sources(
+            vec![(source, Path::new("function_local_shadow.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build_cranelift()
+        .unwrap();
+        assert_eq!(
+            sim.get_four_state(sim.signal("local_is_unknown")),
+            (u8::from(four_state).into(), BigUint::default()),
+            "four_state={four_state}",
+        );
+    }
 }
 
 #[test]

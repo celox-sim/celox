@@ -388,6 +388,50 @@
     },
     {
       "category": "Operators",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-WIDTHEXPAND: <case>/source_0.sv:9:35: Operator EQCASE expects 8 bits on the LHS, but LHS's CONST '4'sbx001' generates 4 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n    9 |       assign signed_x = (4'sbx001 === 8'sbxxxxx001);\n      |                                   ^~~\n                      ... For warning description see https://verilator.org/warn/WIDTHEXPAND?v=5.052\n                      ... Use \"/* verilator lint_off WIDTHEXPAND */\" and lint_on around source to disable this message.\n%Warning-WIDTHEXPAND: <case>/source_0.sv:10:35: Operator EQCASE expects 8 bits on the LHS, but LHS's CONST '4'sbz001' generates 4 bits.\n                                              : ... note: In instance 'celox_suite_tb.dut'\n   10 |       assign signed_z = (4'sbz001 === 8'sbzzzzz001);\n      |                                   ^~~\n%Warning-WIDTHEXPAND: <case>/source_0.sv:11:37: Operator EQCASE expects 8 bits on the LHS, but LHS's CONST '4'sbx001' generates 4 bits.\n                                              : ... note: In instance 'celox_suite_tb.dut'\n   11 |       assign unsigned_x = (4'sbx001 === 8'bxxxxx001);\n      |                                     ^~~\n%Error-UNSUPPORTED: <case>/source_0.sv:7:33: Unsupported tristate construct: EQCASE\n                                           : ... note: In instance 'celox_suite_tb.dut'\n    7 |       assign x_vs_z = ({b,1'bx} === {b,1'bz});\n      |                                 ^~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "operators::two_state_case_equality_compares_literal_structure",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-WIDTHTRUNC: <case>/source_0.sv:13:24: Logical operator LOGNOT expects 1 bit on the LHS, but LHS's REPLICATE generates 2 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n   13 |       assign q[10] = ((!{b,1'bz}) === 1'bx);\n      |                        ^\n                     ... For warning description see https://verilator.org/warn/WIDTHTRUNC?v=5.052\n                     ... Use \"/* verilator lint_off WIDTHTRUNC */\" and lint_on around source to disable this message.\n%Error-UNSUPPORTED: <case>/source_0.sv:5:25: Unsupported tristate construct: XOR\n                                           : ... note: In instance 'celox_suite_tb.dut'\n    5 |       assign q[2] = ((b ^ 1'bz) === 1'bx);\n      |                         ^\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <case>/source_0.sv:14:24: Unsupported tristate construct: NOT\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   14 |       assign q[11] = ((~{b,1'bz}) === {~b,1'bx});\n      |                        ^\n%Error-UNSUPPORTED: <case>/source_0.sv:18:52: Unsupported tristate construct: EQCASE\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   18 |       assign q[15] = ((1'bx ? {b,1'bz} : {b,1'bz}) === {b,1'bz});\n      |                                                    ^~~\n%Error: Exiting due to 3 error(s)\n",
+      "expectation": "Simulation",
+      "name": "operators::two_state_case_equality_keeps_unknown_expression_bits",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:5:28: Unsupported tristate construct: NOT\n                                           : ... note: In instance 'celox_suite_tb.dut'\n    5 |       assign z_match = ((s ? 1'bz : 1'b0) === 1'bz);\n      |                            ^\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <case>/source_0.sv:8:17: Unsupported tristate construct (not in propagation graph): AND\n                                           : ... note: In instance 'celox_suite_tb.dut'\n    8 |         case (s ? 1'bz : 1'b0)\n      |                 ^\n%Error-UNSUPPORTED: <case>/source_0.sv:8:9: Unsupported tristate construct: CASE\n                                          : ... note: In instance 'celox_suite_tb.dut'\n    8 |         case (s ? 1'bz : 1'b0)\n      |         ^~~~\n%Error: Exiting due to 3 error(s)\n",
+      "expectation": "Simulation",
+      "name": "operators::two_state_case_equality_preserves_conditional_unknowns",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/testbench.sv:14:26: Unsupported: tristate in top-level IO: 'b'\n                                             : ... note: In instance 'celox_suite_tb'\n   14 |   Top dut (.clk(i_clk), .b(i_b), .parity_x(), .reversed_x(), .exact_z(), .different_x(), .ordinary_case(), .registered(), .guarded());\n      |                          ^\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "operators::two_state_case_equality_preserves_unknown_literals",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
       "detail": "four-state expectations",
       "expectation": "Simulation",
       "name": "operators::unknown_logical_operand_evaluates_effectful_right_operand",

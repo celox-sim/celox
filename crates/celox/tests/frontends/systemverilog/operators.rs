@@ -205,4 +205,19 @@ sv_backends! {
     fn wide_reduction_and_respects_partial_storage_words(sim) {
         @case "operators::wide_reduction_and_respects_partial_storage_words";
     }
+    fn two_state_case_equality_preserves_unknown_literals(sim) {
+        @case "operators::two_state_case_equality_preserves_unknown_literals";
+    }
+    fn two_state_case_equality_compares_literal_structure(sim) {
+        @case "operators::two_state_case_equality_compares_literal_structure";
+    }
+    fn two_state_case_equality_preserves_conditional_unknowns(sim) {
+        @case "operators::two_state_case_equality_preserves_conditional_unknowns";
+    }
+    fn two_state_case_equality_keeps_call_effects_and_loaded_bytes(sim) {
+        @case "operators::two_state_case_equality_keeps_call_effects_and_loaded_bytes";
+    }
+    fn two_state_case_equality_keeps_unknown_expression_bits(sim) {
+        @case "operators::two_state_case_equality_keeps_unknown_expression_bits";
+    }
 }

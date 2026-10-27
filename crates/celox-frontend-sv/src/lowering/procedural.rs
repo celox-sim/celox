@@ -2211,7 +2211,7 @@ pub(super) fn slt_unknown<A: std::hash::Hash + Eq + Clone>(
 ) -> Result<NodeId, sv::AnalyzerError> {
     let mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
     arena
-        .alloc(SLTNode::Constant(BigUint::default(), mask, width, false))
+        .alloc(SLTNode::Constant(mask.clone(), mask, width, false))
         .map_err(slt_error)
 }
 
