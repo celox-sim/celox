@@ -13,7 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CELOX_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 RICA_REPO="${RICA_REPO:-https://github.com/fabrica-eda/rica.git}"
-readonly PINNED_RICA_REF="$(cat "$SCRIPT_DIR/rica-revision")"
+PINNED_RICA_REF="$(cat "$SCRIPT_DIR/rica-revision")"
+readonly PINNED_RICA_REF
 RICA_REF="${RICA_REF:-$PINNED_RICA_REF}"
 RICA_DIR="${RICA_DIR:-$CELOX_ROOT/work/rica/source}"
 RICA_DIR="$(realpath -m "$RICA_DIR")"
@@ -21,7 +22,7 @@ RICA_RESULTS_DIR="${RICA_RESULTS_DIR:-$CELOX_ROOT/work/rica/results}"
 RICA_KERNELS="${RICA_KERNELS:-kernel-tasks kernel-syscalls kernel-atomics kernel-user kernel-supervisor}"
 RICA_REPEAT="${RICA_REPEAT:-3}"
 RICA_MODEL="${RICA_MODEL:-coincident}"
-RICA_HARNESS="${RICA_HARNESS:-native-tb}"
+RICA_HARNESS="${RICA_HARNESS:-tiered}"
 RICA_MAX_CYCLES="${RICA_MAX_CYCLES:-2000000}"
 CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O2}"
 CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
@@ -37,6 +38,7 @@ case "$RICA_CELOX_CARGO_PROFILE" in
 esac
 CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/$RICA_CELOX_PROFILE_DIR/celox-rica}"
 
+VERYL_TIMED_RUNNER_BIN="${VERYL_TIMED_RUNNER_BIN:-$CELOX_ROOT/target/$RICA_CELOX_PROFILE_DIR/veryl-heliodor}"
 CELOX_TB_RUNNER_BIN="${CELOX_TB_RUNNER_BIN:-$CELOX_ROOT/target/$RICA_CELOX_PROFILE_DIR/celox}"
 
 usage() {
@@ -53,13 +55,14 @@ Environment:
   RICA_KERNELS          space-separated kernel names (default: the M, U and S kernels)
   RICA_REPEAT           fresh native TB executions per kernel (default: 3)
   RICA_MODEL            coincident (tick_events), board (serialized ticks) or timed
-  RICA_HARNESS          native-tb (default); resolved/rica for host API diagnostics
+  RICA_HARNESS          tiered (default); native-tb/resolved/rica for diagnostics
   RICA_MAX_CYCLES       cycle budget per kernel (default: 2000000)
-  CELOX_OPT_LEVEL       O0, O1 or O2 (default: O2)
+  CELOX_OPT_LEVEL       O2 for paired runs; O0/O1/O2 for diagnostics
   CELOX_SIR_PASS_OVERRIDES
                         space-separated +sir:<pass> / -sir:<pass> overrides
   RICA_CELOX_CARGO_PROFILE
                         cargo profile for the runner (default: release)
+  VERYL_TIMED_RUNNER_BIN Veryl simulator runner for tiered comparison
   CELOX_TB_RUNNER_BIN   prebuilt celox CLI for native TB execution
   CELOX_RUNNER_BIN      prebuilt exporter/host runner; set RICA_BUILD_CELOX_RUNNER=0 to skip cargo
   RICA_ALLOW_UNPINNED   1 to run a checkout that is not a clean RICA_REF
@@ -106,8 +109,11 @@ run() {
     if [[ "$RICA_BUILD_CELOX_RUNNER" == 1 ]]; then
         (cd "$CELOX_ROOT" && cargo build --locked --quiet --profile "$RICA_CELOX_CARGO_PROFILE" -p celox-bench --bin celox-rica)
     fi
-    if [[ "$RICA_HARNESS" == native-tb && "$RICA_BUILD_CELOX_RUNNER" == 1 ]]; then
+    if [[ ( "$RICA_HARNESS" == native-tb || "$RICA_HARNESS" == tiered ) && "$RICA_BUILD_CELOX_RUNNER" == 1 ]]; then
         (cd "$CELOX_ROOT" && cargo build --locked --quiet --profile "$RICA_CELOX_CARGO_PROFILE" -p celox-vpi --bin celox)
+    fi
+    if [[ "$RICA_HARNESS" == tiered && "$RICA_BUILD_CELOX_RUNNER" == 1 ]]; then
+        (cd "$CELOX_ROOT" && cargo build --locked --quiet --profile "$RICA_CELOX_CARGO_PROFILE" -p celox-bench --bin veryl-heliodor)
     fi
     mkdir -p "$RICA_RESULTS_DIR"
     local -a elfs=()
@@ -130,10 +136,14 @@ run() {
     for override in $CELOX_SIR_PASS_OVERRIDES; do
         passes+=(--sir-pass "$override")
     done
-    if [[ "$RICA_HARNESS" == native-tb ]]; then
+    if [[ "$RICA_HARNESS" == native-tb || "$RICA_HARNESS" == tiered ]]; then
         [[ "$RICA_REPEAT" =~ ^[1-9][0-9]*$ ]] || { echo "error: invalid RICA_REPEAT" >&2; exit 1; }
         if [[ -n "$CELOX_SIR_PASS_OVERRIDES" ]]; then
             echo "error: native TB measurements do not accept SIR pass overrides" >&2
+            exit 1
+        fi
+        if [[ "$RICA_HARNESS" == tiered && "$CELOX_OPT_LEVEL" != O2 ]]; then
+            echo "error: paired tiered measurements require CELOX_OPT_LEVEL=O2" >&2
             exit 1
         fi
         local results
@@ -142,6 +152,12 @@ run() {
             --model "$RICA_MODEL" --max-cycles "$RICA_MAX_CYCLES" \
             --a-extension --sv39 --machine-console "${elfs[@]}" \
             --emit-native-tb "$results/projects" | tee "$results/export.log"
+        if [[ "$RICA_HARNESS" == tiered ]]; then
+            RICA_SOURCE_REVISION="$head" node "$SCRIPT_DIR/rica-tiered-benchmark.mjs" "$results/projects" "$results/comparison" \
+                "$CELOX_TB_RUNNER_BIN" "$VERYL_TIMED_RUNNER_BIN" "$RICA_REPEAT"
+            echo "tiered comparison written to $results/comparison/results.json"
+            return
+        fi
         local iteration log
         for name in $RICA_KERNELS; do
             for ((iteration=1; iteration<=RICA_REPEAT; iteration++)); do
@@ -154,7 +170,7 @@ run() {
                 grep -Eq '^CELOX_TEST_TIMING test=test_rica compile_ns=[0-9]+ execute_ns=[0-9]+ ' "$log"
             done
         done
-        echo "native TB results written to $results (board-kernel-native-tb-v1)"
+        echo "native TB results written to $results (board-kernel-native-tb-v2)"
         return
     fi
     local log="$RICA_RESULTS_DIR/celox-$RICA_MODEL-$RICA_HARNESS.log"

@@ -24,13 +24,15 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - name: Test collection tooling
-        run: node --test scripts/benchmark-collection.test.mjs scripts/publish-collection-bench.test.mjs
+        run: node --test scripts/benchmark-collection.test.mjs scripts/publish-collection-bench.test.mjs scripts/tiered-benchmark.test.mjs
       - name: Build runner
-        run: cargo build --release --locked -p celox-vpi --bin celox
+        run: |
+          cargo build --release --locked -p celox-vpi --bin celox
+          cargo build --release --locked -p celox-bench --bin veryl-heliodor
       - name: Prepare pinned sources
         run: node scripts/benchmark-collection.mjs prepare all work/circuits/sources
       - name: Measure circuits sequentially on one host
-        run: node scripts/benchmark-collection.mjs measure all work/circuits/sources work/circuits/results target/release/celox
+        run: node scripts/benchmark-collection.mjs measure all work/circuits/sources work/circuits/results target/release/celox target/release/veryl-heliodor
       - uses: actions/upload-artifact@v7
         if: always()
         with:

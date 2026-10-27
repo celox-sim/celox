@@ -30,6 +30,18 @@ module test_rica {
         console_host_push: 1'b0,
         console_host_data: 8'b0,
     );
+    // Keep both clock domains advancing on runtimes whose clock generators
+    // advance only while a process waits on them. $finish ends these drivers.
+    initial {
+        for _clock_tick in 0..(@MAX_CYCLES@ + (@IMAGE_LENGTH@ + 4) * @MEMORY_PERIOD@) {
+            clk_cpu.next();
+        }
+    }
+    initial {
+        for _clock_tick in 0..(@MAX_CYCLES@ + (@IMAGE_LENGTH@ + 4) * @MEMORY_PERIOD@) {
+            clk_mem.next();
+        }
+    }
     initial {
         run = 0;
         rst_n = 0;
@@ -81,7 +93,7 @@ module test_rica {
             }
         }
         $assert(complete == 1);
-        $display("RICA_COMPLETE @NAME@ cycles=%0d commits=%0d", cycles, commits);
+        $display("RICA_COMPLETE @NAME@ cycles=%d commits=%d", cycles, commits);
         $finish();
     }
 }

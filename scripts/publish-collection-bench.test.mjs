@@ -5,23 +5,24 @@ import { metrics } from "./publish-collection-bench.mjs";
 import { collection } from "./benchmark-collection.mjs";
 
 function report() {
-  return { schemaVersion: 1, mode: "measure", host: { cpu: "test CPU", arch: "x64" }, results: [{
+  return { schemaVersion: 2, comparison: "cold-tiered-process-v1", veryl: { version: "0.22.0" }, mode: "measure", host: { cpu: "test CPU", arch: "x64" }, results: ["celox-tiered", "veryl-tiered"].map(runner => ({
+    runner,
     circuit: "sha256", status: "measured", revision: collection.repositories.logikbench.revision,
     qualification: { status: "passed" }, negativeControl: { status: "passed" },
     workload: "nist-pairs-v1", testbench: "collection-nist-pairs-v1", testbenchLanguage: "veryl",
-    frontend: "veryl", backend: "native", optimization: "O2", stateModel: "two-state", threads: 1,
+    frontend: "veryl", backend: "tiered", optimization: "default-tiered", cache: "cold", stateModel: "two-state", threads: 1,
     workUnits: 8192, workUnit: "hashes", sourceSha256: "a".repeat(64), testbenchSha256: "b".repeat(64),
-    samples: [30, 10, 20].map(n => ({ status: "passed", compileNs: n, executeNs: n * 2, totalNs: n * 3 })),
-  }] };
+    samples: [30, 10, 20].map(n => ({ status: "passed", compileNs: n, executeNs: n * 2, totalNs: n * 3, processNs: n * 4, tiered: runner === "celox-tiered" ? { test: "test_sha256_smoke", tier: "interpreter", promotion: "pending", compiled_evaluations: "0", interpreted_evaluations: "1" } : { test: "test_sha256_smoke", compiled_dispatches: "0", fallback_dispatches: "1" } })),
+  })) };
 }
 
 test("publish medians only and separate every measurement contract", () => {
   const input = report();
   const benches = metrics(input);
-  assert.deepEqual(benches.map(b => b.value), [20, 40, 60]);
+  assert.deepEqual(benches.map(b => b.value), [20, 40, 80, 20, 40, 80]);
   assert.equal(benches[0].unit, "ns");
   assert.equal(JSON.parse(benches[0].extra).frontend, "veryl");
-  input.results[0].testbenchSha256 = "c".repeat(64);
+  input.results.forEach(r => r.testbenchSha256 = "c".repeat(64));
   assert.notEqual(metrics(input)[0].name, benches[0].name);
   input.host.arch = "arm64";
   assert.match(metrics(input)[0].name, /_arm64_compilation$/);
@@ -36,7 +37,11 @@ test("qualification, failures, partial samples and altered runner contracts cann
     r => r.results[0].revision = "0".repeat(40), r => r.results[0].frontend = "sv",
     r => r.results[0].testbenchLanguage = "systemverilog", r => r.results[0].stateModel = "four-state",
     r => r.results[0].optimization = "O0", r => r.results[0].threads = 2,
-    r => r.results.push(r.results[0]),
+    r => r.results.push(r.results[0]), r => r.results.pop(),
+    r => r.results[0].sourceSha256 = "c".repeat(64),
+    r => r.results[0].samples[0].tiered.promotion = "failed",
+    r => r.results[1].samples[0].tiered.fallback_dispatches = "0",
+    r => r.results[0].samples[0].processNs = 1,
   ]) {
     const input = report(); change(input); assert.throws(() => metrics(input));
   }

@@ -1003,7 +1003,7 @@ fn emit_native_testbenches(
             .collect::<String>();
         fs::write(project.join("image.hex"), hex)?;
         println!(
-            "RICA_NATIVE_TB project={} top=test_rica workload=board-kernel-native-tb-v1",
+            "RICA_NATIVE_TB project={} top=test_rica workload=board-kernel-native-tb-v2",
             project.display()
         );
     }
