@@ -220,7 +220,8 @@ impl ArrayParameter {
                 rhs: value,
                 nonblocking: false,
             }],
-            initializer: false,
+            kind: celox_design::ProcessKind::Regular,
+            validation_body: Vec::new(),
             synthetic: true,
             repeats: false,
         })

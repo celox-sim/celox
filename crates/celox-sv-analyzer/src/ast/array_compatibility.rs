@@ -51,6 +51,7 @@ pub(super) fn selected_unpacked_shape(
         .get(indices..)
         .filter(|rest| !rest.is_empty())?;
     Some(VariableDimensions {
+        container: None,
         real: false,
         string: false,
         class: None,

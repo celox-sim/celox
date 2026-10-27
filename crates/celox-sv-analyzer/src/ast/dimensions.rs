@@ -132,7 +132,9 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
         dimensions.insert(
             port.name().to_string(),
             VariableDimensions {
-                randomizable: (!port.r#type().is_enum || port.r#type().enum_values.is_some())
+                container: port.r#type().container.clone(),
+                randomizable: port.r#type().container.is_none()
+                    && (!port.r#type().is_enum || port.r#type().enum_values.is_some())
                     && port.randomizable,
                 enum_values: port.r#type().enum_values.clone(),
                 real: matches!(port.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
@@ -158,7 +160,9 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
         dimensions.insert(
             signal.name().to_string(),
             VariableDimensions {
-                randomizable: (!signal.r#type().is_enum || signal.r#type().enum_values.is_some())
+                container: signal.r#type().container.clone(),
+                randomizable: signal.r#type().container.is_none()
+                    && (!signal.r#type().is_enum || signal.r#type().enum_values.is_some())
                     && !signal.is_net()
                     && !signal.is_const,
                 enum_values: signal.r#type().enum_values.clone(),
@@ -354,6 +358,7 @@ fn extend_variable_dimensions_from_const_env(
         }
         let packed_ranges = ranges.split_off(unpacked);
         let ty = Type {
+            container: None,
             is_enum: false,
             enum_values: None,
             kind: TypeKind::Logic,
@@ -369,6 +374,7 @@ fn extend_variable_dimensions_from_const_env(
         };
         let mut shape = procedural::dimensions_from_type(&ty);
         if let Some(existing) = context.get(name) {
+            shape.container = existing.container.clone();
             shape.randomizable = existing.randomizable;
             shape.enum_values = existing.enum_values.clone();
             shape.members = existing.members.clone();
@@ -538,6 +544,7 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
             (
                 parameter.name.clone(),
                 VariableDimensions {
+                    container: None,
                     randomizable: true,
                     enum_values: None,
                     real: false,

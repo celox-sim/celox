@@ -21,21 +21,46 @@ fn query_context(context: &PackedDimensions) -> PackedDimensions {
     query
 }
 
+/// These operands carry all type information in their literal leaves. Walking
+/// declaration scopes cannot change their shape or signedness. Keep calls,
+/// casts and names on the discovery path, including names in unevaluated arms.
+fn literal_operand(root: ExprId, native: &celox_sv_syntax::Declarations) -> bool {
+    let root = expression_binding::ungroup(root, native);
+    if matches!(native.expression(root).kind, ExprKind::Literal(_)) {
+        return true;
+    }
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        match &native.expression(id).kind {
+            ExprKind::Literal(_) => {}
+            ExprKind::Group(inner)
+            | ExprKind::Unary {
+                expression: inner, ..
+            } => {
+                pending.push(*inner);
+            }
+            ExprKind::Binary { left, right, .. } => pending.extend([*left, *right]),
+            ExprKind::Conditional {
+                condition,
+                then_expression,
+                else_expression,
+            } => {
+                pending.extend([*condition, *then_expression, *else_expression]);
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
 pub(in crate::ast) fn query_context_for_operand(
     root: ExprId,
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
 ) -> Converted<PackedDimensions> {
-    // Literals carry their type in their spelling and cannot reference lexical
-    // declarations. Pattern elements otherwise rediscover the whole scope for
-    // each literal while the surrounding declaration is still being bound.
-    let operand = expression_binding::ungroup(root, tree.declarations());
-    if context.scope_types_complete
-        || matches!(
-            tree.declarations().expression(operand).kind,
-            ExprKind::Literal(_)
-        )
-    {
+    // Aggregate port defaults commonly repeat literal arithmetic. Rediscovering
+    // all declarations for each item repeatedly snapshots the growing prefix.
+    if context.scope_types_complete || literal_operand(root, tree.declarations()) {
         return Ok(query_context(context));
     }
     Ok(query_context(&query_operand_dimensions_id(
@@ -690,6 +715,29 @@ pub(in crate::ast) fn shape(
     while let Some(job) = jobs.pop() {
         match job {
             Job::Enter(id) => {
+                let callee = match native.expression(id).kind {
+                    ExprKind::Call { expression, .. } => expression,
+                    _ => id,
+                };
+                if let ExprKind::Member {
+                    expression, name, ..
+                } = &native.expression(callee).kind
+                    && let Some(container) = containers::native_type(*expression, native, context)
+                {
+                    // Validate the call without executing it. Pop returns the
+                    // declared element type, including packed dimensions and
+                    // authored bounds, rather than a flattened bit vector.
+                    let value = expression_binding::bind(id, tree, context)?;
+                    let shape = if matches!(name.spelling.as_str(), "pop_front" | "pop_back") {
+                        procedural::dimensions_from_type(&container.element)
+                    } else {
+                        let ty = bound_bits_type(&tree.state, &value, context)
+                            .ok_or_else(|| unsupported("container method result type"))?;
+                        scalar(ty.width, ty.signed, ty.width > 1)
+                    };
+                    values.push(shape);
+                    continue;
+                }
                 if let Some((name, dimensions)) = type_binding::argument_alias(id, native)
                     && dimensions.is_empty()
                 {

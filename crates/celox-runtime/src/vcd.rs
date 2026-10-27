@@ -13,7 +13,7 @@ use std::path::Path;
 /// Self-contained — does not reference any IR types. Can be cached
 /// alongside a shared backend artifact so that VCD
 /// works even on cache-hit paths.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct VcdSignalDesc {
     /// VCD scope name (e.g. instance path).
     pub scope: String,
@@ -29,7 +29,7 @@ pub struct VcdSignalDesc {
 
 /// Describes a signal whose value is supplied by an external runtime rather
 /// than stored in Celox's flat simulation memory.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct VcdExternalSignalDesc {
     pub scope: String,
     pub name: String,

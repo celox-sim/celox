@@ -196,6 +196,7 @@ fn compile_bit_count(op: UnaryOp, source_width: usize, four_state: bool) -> Comp
 
     let layout = MemoryLayout {
         trace: None,
+        settle: None,
         four_state,
         mode: MemoryLayoutMode::Packed,
         unpacked_arrays: HashMap::default(),

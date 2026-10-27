@@ -182,7 +182,29 @@ fn compile_native_image_configured(
 
 /// Run cocotb's VPI bootstrap against a compiled native program instance.
 pub fn run_cocotb(instance: NativeProgramInstance, vpi_path: &Path) -> Result<(), String> {
-    let _session = crate::install_runtime(instance)?;
+    run_session(crate::install_runtime(instance)?, vpi_path)
+}
+
+/// Run cocotb's VPI bootstrap against the design of a native image: a
+/// timed simulation when the design has processes, so that they run in step
+/// with the VPI time callbacks, and an untimed program instance otherwise.
+pub fn run_cocotb_image(image: celox::NativeProgramImage, vpi_path: &Path) -> Result<(), String> {
+    let session = if image.has_processes() {
+        let simulation = celox::Simulation::from_sv_sources(Vec::new(), "")
+            .build_native_from_image(image.clone())
+            .map_err(|error| format!("failed to load attached design: {error}"))?;
+        crate::install_timed_runtime(image, simulation)?
+    } else {
+        // Safety: the image is compiler-produced data attached to this
+        // executable.
+        let instance = unsafe { NativeProgramInstance::from_image(image) }
+            .map_err(|error| format!("failed to load attached design: {error}"))?;
+        crate::install_runtime(instance)?
+    };
+    run_session(session, vpi_path)
+}
+
+fn run_session(_session: crate::VpiSession, vpi_path: &Path) -> Result<(), String> {
     // Safety: cocotb's VPI library is kept loaded throughout all callbacks and
     // its documented bootstrap takes no arguments.
     let library = match unsafe { Library::new(vpi_path) } {

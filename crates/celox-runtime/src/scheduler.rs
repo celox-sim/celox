@@ -4,7 +4,7 @@ use crate::{
 };
 use std::collections::BinaryHeap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClockDef {
     pub period: u64,
 }

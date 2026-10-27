@@ -60,8 +60,8 @@ pub struct ProcessKernelBuilder {
     slots: ProcessSlots<SourceVarId>,
     /// The block each resume point continues in; point 0 is the start.
     resume_blocks: Vec<BlockId>,
-    /// The wait site whose resume point is being lowered.
-    wait_site: Option<u32>,
+    /// The wait site and predicate entry resume point being lowered.
+    wait_site: Option<(u32, usize)>,
     /// The runtime event site the process reports at its flush points
     /// (see [`Self::flush_deferred_at`]).
     flush_site: Option<u32>,
@@ -90,6 +90,11 @@ impl ProcessKernelBuilder {
     /// assertions (IEEE 1800-2023 16.4.2). A resume after a delay is not.
     pub fn flush_deferred_at(&mut self, site: u32) {
         self.flush_site = Some(site);
+    }
+
+    /// Number of continuation entries emitted so far.
+    pub fn resume_count(&self) -> usize {
+        self.resume_blocks.len()
     }
 
     /// The kernel's control slots, with [`ProcessSlots::const_delays`] set
@@ -152,6 +157,28 @@ impl ProcessKernelBuilder {
         Ok(())
     }
 
+    /// Open a separate dispatch entry for a pure event-expression probe.
+    /// The caller must close it with `end_event_probe`, without scheduling
+    /// operations or executing the waiting process's continuation.
+    pub fn begin_event_probe(&mut self) -> Result<(BlockId, u32), ProcessKernelError> {
+        let resume = self.resume_blocks.len();
+        if resume > MAX_PROCESS_SUSPENSIONS {
+            return Err(ProcessKernelError::TooManySuspensions);
+        }
+        let previous = self.builder.new_block();
+        self.builder
+            .seal_block(SIRTerminator::Jump(previous, Vec::new()));
+        let probe = self.builder.new_block();
+        self.resume_blocks.push(probe);
+        self.builder.switch_to_block(probe);
+        Ok((previous, resume as u32))
+    }
+
+    pub fn end_event_probe(&mut self, previous: BlockId) {
+        self.end(ProcessStatus::EventProbe);
+        self.builder.switch_to_block(previous);
+    }
+
     /// Suspend for the number of time units in `amount`, an unsigned
     /// two-state register of [`PROCESS_DELAY_WIDTH`] bits, and continue at
     /// a new resume point. A zero delay resumes after the nonblocking
@@ -192,6 +219,49 @@ impl ProcessKernelBuilder {
         self.suspend(ProcessStatus::Yield)
     }
 
+    /// Reserve one entry point for each child, then return to the runtime to spawn them.
+    /// The caller lowers each child into its entry block and ends it with `complete`.
+    pub fn fork(
+        &mut self,
+        count: usize,
+        join: celox_design::ForkJoin,
+    ) -> Result<(Vec<BlockId>, BlockId), ProcessKernelError> {
+        let first = self.resume_blocks.len();
+        if first + count > MAX_PROCESS_SUSPENSIONS {
+            return Err(ProcessKernelError::TooManySuspensions);
+        }
+        let children: Vec<_> = (0..count).map(|_| self.builder.new_block()).collect();
+        self.resume_blocks.extend(children.iter().copied());
+        let mode = match join {
+            celox_design::ForkJoin::All => 0u64,
+            celox_design::ForkJoin::Any => 1,
+            celox_design::ForkJoin::None => 2,
+        };
+        self.store_delay_constant(first as u64 | ((count as u64) << 16) | (mode << 32));
+        self.slots.const_delays = false;
+        self.slots.requires_timed_simulation = true;
+        self.suspend(ProcessStatus::Fork)?;
+        Ok((children, self.builder.current_block()))
+    }
+
+    /// Wait for the calling process's immediate children (IEEE 1800-2023 9.6.1).
+    pub fn wait_fork(&mut self) -> Result<(), ProcessKernelError> {
+        self.slots.const_delays = false;
+        self.slots.requires_timed_simulation = true;
+        self.suspend(ProcessStatus::WaitFork)
+    }
+
+    /// Cancel descendants without suspending HDL execution (9.6.3).
+    pub fn disable_fork(&mut self) -> Result<(), ProcessKernelError> {
+        self.slots.const_delays = false;
+        self.suspend(ProcessStatus::DisableFork)
+    }
+
+    pub fn local(&mut self, slot: usize) -> Result<(), ProcessKernelError> {
+        self.store_delay_constant(slot as u64);
+        self.suspend(ProcessStatus::Local)
+    }
+
     /// Suspend the simulation (`$stop`), and continue at a new resume point
     /// when it continues.
     pub fn stop(&mut self) -> Result<(), ProcessKernelError> {
@@ -215,7 +285,7 @@ impl ProcessKernelBuilder {
     pub fn suspend_wait(&mut self, site: u32) -> Result<(), ProcessKernelError> {
         self.store_delay_constant(u64::from(site));
         self.suspend(ProcessStatus::Wait)?;
-        self.wait_site = Some(site);
+        self.wait_site = Some((site, self.resume_blocks.len() - 1));
         Ok(())
     }
 
@@ -224,7 +294,7 @@ impl ProcessKernelBuilder {
     /// that the wait is still pending and return to the same resume point.
     /// The continuation block is open afterwards.
     pub fn wake_if(&mut self, condition: RegisterId) {
-        let site = self.wait_site.take().expect("wake_if follows suspend_wait");
+        let (site, resume) = self.wait_site.take().expect("wake_if follows suspend_wait");
         let woken = self.builder.new_block();
         let pending = self.builder.new_block();
         self.builder.seal_block(SIRTerminator::Branch {
@@ -233,6 +303,9 @@ impl ProcessKernelBuilder {
             false_block: (pending, Vec::new()),
         });
         self.builder.switch_to_block(pending);
+        // Predicate evaluation may itself yield to the runtime (for example,
+        // disable fork). A later wakeup must evaluate the whole predicate.
+        self.store_constant(self.slots.resume, PROCESS_RESUME_WIDTH, resume as u64);
         self.store_delay_constant(u64::from(site));
         self.end(ProcessStatus::Pending);
         self.builder.switch_to_block(woken);
@@ -377,6 +450,11 @@ impl ProcessKernelBuilder {
             .seal_block(SIRTerminator::Jump(join, Vec::new()));
         self.builder.switch_to_block(join);
         Ok(())
+    }
+
+    /// End only this activation, notifying a waiting fork parent.
+    pub fn complete(&mut self) {
+        self.end(ProcessStatus::Done);
     }
 
     /// End the simulation. No block is open afterwards.

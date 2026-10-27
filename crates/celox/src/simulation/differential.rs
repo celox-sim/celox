@@ -69,6 +69,28 @@ impl<'a, B: SimBackend> ShadowCheck<'a, B> {
     }
 }
 
+impl<B: SimBackend> ShadowCheck<'_, B> {
+    pub(super) fn after_finish(
+        &mut self,
+        state: &SimulationState<B>,
+        primary: &mut Simulator<B>,
+        result: &Result<(), RuntimeErrorCode>,
+    ) -> Result<(), RuntimeErrorCode> {
+        let shadow = &mut *self.shadow;
+        let reference = shadow.state.finish(&mut shadow.simulator);
+        self.checked += 1;
+        let result = result.clone().map(|()| Some(state.time()));
+        let reference = reference.map(|()| Some(shadow.state.time()));
+        match difference(state, primary, shadow, &result, &reference) {
+            None => Ok(()),
+            Some(message) => Err(RuntimeErrorCode::Runtime {
+                message: format!("finalization diverged from the reference: {message}"),
+                signals: Vec::new(),
+            }),
+        }
+    }
+}
+
 impl<B: SimBackend> StepObserver<Simulator<B>> for ShadowCheck<'_, B> {
     fn one_slot(&self) -> bool {
         self.one_slot
@@ -163,8 +185,9 @@ fn difference<B: SimBackend>(
             "scheduling state {key:?}, the reference {reference:?}"
         ));
     }
-    // The compiled scheduler's slots hold nothing between runs.
-    let scheduler: Vec<_> = primary
+    // The compiled scheduler's slots hold nothing between runs, and the
+    // settle's partition flags only what is left to recompute.
+    let excluded: Vec<_> = primary
         .program
         .runtime_schema
         .scheduler
@@ -174,9 +197,16 @@ fn difference<B: SimBackend>(
             let signal = primary.backend.resolve_signal(address);
             signal.offset..signal.offset + celox_state_layout::get_byte_size(signal.width)
         })
+        .chain(
+            primary
+                .backend
+                .layout()
+                .settle
+                .as_ref()
+                .map(|settle| settle.flags()),
+        )
         .collect();
-    if let Some(offset) = first_difference(&primary.backend, &shadow.simulator.backend, &scheduler)
-    {
+    if let Some(offset) = first_difference(&primary.backend, &shadow.simulator.backend, &excluded) {
         let signal = primary
             .named_signals()
             .into_iter()

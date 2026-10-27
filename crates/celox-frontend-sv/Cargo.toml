@@ -10,6 +10,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+serde_json = { workspace = true }
+
 celox-design = { workspace = true }
 celox-frontend-core = { workspace = true }
 celox-heap = { workspace = true }

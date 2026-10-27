@@ -2694,6 +2694,41 @@ fn class_header_defaults_keep_captured_native_ownership() {
         ));
         assert_eq!(syntax.units[0].parameters, None);
         assert_eq!(items.len(), 2);
+        // The class records its parameter port list and body parameters.
+        let class = &syntax.classes[0];
+        let BodyItemKind::Parameter(body) = syntax.body_item(items[1]).kind else {
+            panic!("body parameter owner missing")
+        };
+        assert!(
+            matches!(class.parameter_ports, Some(id) if syntax.parameter_declaration(id) == header)
+        );
+        assert_eq!(class.parameters, [body]);
+        assert!(class.type_aliases.is_empty());
+    }
+}
+
+#[test]
+fn class_body_typedefs_and_parameters_belong_to_their_class() {
+    for source in [
+        "class C; typedef int count_t; parameter int N = 2; function int f(); localparam L = 1; return L; endfunction endclass module M; endmodule",
+        "module M; class C; typedef int count_t; parameter int N = 2; function int f(); localparam L = 1; return L; endfunction endclass endmodule",
+    ] {
+        let syntax = parse(source);
+        let class = &syntax.classes[0];
+        assert_eq!(class.parameter_ports, None);
+        assert_eq!(class.type_aliases.len(), 1);
+        assert_eq!(
+            syntax.type_alias(class.type_aliases[0]).name.value(),
+            "count_t"
+        );
+        // A parameter of a method is not one of the class.
+        assert_eq!(class.parameters.len(), 1);
+        assert_eq!(
+            syntax.parameter_declaration(class.parameters[0]).parameters[0]
+                .name
+                .value(),
+            "N"
+        );
     }
 }
 
@@ -2868,6 +2903,27 @@ fn class_declarations_record_names_bases_properties_and_method_qualifiers() {
 }
 
 #[test]
+fn shallow_copies_are_expressions_of_their_own() {
+    let syntax = parse(
+        "module M; class C; endclass C a, b; initial begin b = new a; end C c = new a; C d = new; endmodule",
+    );
+    let copies = syntax
+        .expressions
+        .iter()
+        .filter_map(|expression| match expression.kind {
+            ExprKind::Copy(source) => Some(source),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(copies.len(), 2);
+    for source in copies {
+        assert!(
+            matches!(&syntax.expression(source).kind, ExprKind::Name(name) if name.value() == "a")
+        );
+    }
+}
+
+#[test]
 fn class_random_qualifiers_and_constraints_are_preserved() {
     let syntax = parse(
         "class C; rand bit x; randc bit y; extern constraint limits; endclass module M; endmodule",
@@ -2905,4 +2961,96 @@ fn non_ansi_port_declarations_fold_into_the_header() {
     // from the body.
     assert!(unit.net_declarations.is_empty());
     assert_eq!(unit.items.len(), 1);
+}
+
+#[test]
+fn array_method_with_expressions_parse_in_values_and_statements() {
+    parse(
+        "module M; int a[3], q[$]; initial begin
+         q = a.find(i) with ((i > 0) && check(i));
+         q = a.find with (item inside {[1:3]}).unique;
+         a.sort() with (item);
+         a.rsort with (-item);
+         q = a.find(i, position) with (position() == 1);
+         q = a.find(, position) with (position() == 1);
+         void'(a.find() with (item > 0));
+         q = a.find with (item > 0)[0];
+         end endmodule",
+    );
+}
+
+#[test]
+fn array_method_with_preserves_iterator_predicate_and_chaining() {
+    let syntax = parse("module M; initial q = a.find(i) with (i > 0).unique; endmodule");
+    let (id, expression, predicate) = syntax
+        .expressions
+        .iter()
+        .enumerate()
+        .find_map(|(id, node)| {
+            if let ExprKind::ArrayMethodWith {
+                expression,
+                predicate,
+            } = node.kind
+            {
+                Some((ExprId(id), expression, predicate))
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let ExprKind::Call {
+        expression: method,
+        arguments,
+    } = &syntax.expression(expression).kind
+    else {
+        panic!()
+    };
+    assert!(
+        matches!(&syntax.expression(*method).kind, ExprKind::Member { name, .. } if name.spelling == "find")
+    );
+    assert!(
+        matches!(&syntax.expression(arguments[0].value.unwrap()).kind, ExprKind::Name(name) if name.spelling == "i")
+    );
+    assert!(
+        matches!(&syntax.expression(predicate).kind, ExprKind::Binary { operator, .. } if operator == ">")
+    );
+    assert_eq!(
+        syntax.token_text(syntax.expression(id).tokens),
+        "a.find(i) with (i > 0)"
+    );
+    assert!(syntax.expressions.iter().any(|node| matches!(&node.kind, ExprKind::Member { expression, name, .. } if *expression == id && name.spelling == "unique")));
+}
+
+#[test]
+fn malformed_array_method_with_is_rejected() {
+    for expression in [
+        "a.find with ()",
+        "a.find with (item > 0",
+        "f() with (item)",
+        "a.find(1) with (item)",
+        "a.find(i,j,k) with (item)",
+        "a.find(.i(x)) with (item)",
+        "a.find with (item) with (item)",
+        "a.find with { item > 0; }",
+    ] {
+        assert!(
+            Declarations::parse(
+                &format!("module M; initial q = {expression}; endmodule"),
+                Path::new("invalid.sv")
+            )
+            .is_err(),
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn constraints_retain_simple_expressions_and_mark_other_forms() {
+    let tree = parse(
+        "class C; rand int x; constraint a { x > 0; x < 3; } constraint b { if (x) x == 1; } endclass",
+    );
+    let blocks = &tree.classes[0].constraints;
+    assert_eq!(blocks[0].name.spelling, "a");
+    assert_eq!(blocks[0].expressions.as_ref().unwrap().len(), 2);
+    assert!(blocks[1].expressions.is_none());
 }

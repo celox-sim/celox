@@ -183,6 +183,14 @@ interface_array_query = "warn"
 
 The CLI uses the same policy: `celox run top.sv --top Top --diagnostic interface_array_query=warn`.
 
+`interface_array_parameter` also defaults to `error`. Set it to `warn` or `allow`
+for the compatibility shorthand `bus.WIDTH` when `bus` is an interface array.
+It reads the value parameter from the first element in declaration order,
+including arrays with nonzero bounds. Signals and type parameters still require
+an explicit element selection. The same setting works in `[diagnostics]` and
+with `--diagnostic interface_array_parameter=warn`.
+
+
 `multiple_always_ff_drivers` defaults to `error` for shared memories written by
 an `always_ff` and another edge process (IEEE 1800-2023 §9.2.2.4). With `warn`
 or `allow`, Celox stages their nonblocking writes in sparse next-state storage

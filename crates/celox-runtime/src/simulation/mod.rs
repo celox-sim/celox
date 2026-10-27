@@ -1,6 +1,8 @@
 //! The timed scheduler: time slots, rounds, the process phase and the
 //! batch step of designs without processes.
 
+mod activation;
+pub use activation::Activation;
 mod batch;
 mod compiled;
 mod edges;
@@ -10,6 +12,7 @@ mod persist;
 mod process;
 mod round;
 mod stats;
+mod terminal;
 mod time;
 mod wait;
 
@@ -21,7 +24,7 @@ use celox_design::CounterKind;
 pub(crate) use batch::{edge_level, event_level};
 pub use host::{CompiledSlots, HostBoundary, HostWatch, SimulationExecutor, UnitExecutor};
 pub use nba::NbaUpdate;
-pub use persist::{ScheduleKey, ScheduleParts, SimulationSnapshot};
+pub use persist::{PersistedSimulationSnapshot, ScheduleKey, ScheduleParts, SimulationSnapshot};
 pub use stats::{KernelSchedule, SchedulerMode, SchedulerStats};
 pub use wait::{Baseline, Waiter, Waiters};
 
@@ -135,8 +138,9 @@ pub struct SimulationState<B: SimBackend> {
     /// The design keeps unknown bits, so edges follow the four-state rows
     /// of IEEE 1800-2023 Table 9-2.
     four_state: bool,
-    /// The design's scheduling facts, which never change.
+    /// Scheduling facts, including descriptors for dynamically spawned processes.
     model: ResolvedSchedule<B>,
+    kernel_count: usize,
     process_wakeups: BinaryHeap<ProcessWakeup>,
     process_state: ProcessState,
     declaration_processes: Vec<usize>,
@@ -146,6 +150,8 @@ pub struct SimulationState<B: SimBackend> {
     host_pending: bool,
     /// A process requested the end of the simulation.
     finished: bool,
+    /// Next final procedure while terminal execution is suspended by `$stop`.
+    finalizing: Option<usize>,
     /// A process suspended the simulation (`$stop`) in the last step.
     stopped: bool,
     /// The round a `$stop` suspended, which the next step continues.
@@ -193,7 +199,9 @@ impl<B: SimBackend> SimulationState<B> {
             .processes
             .iter()
             .enumerate()
-            .filter_map(|(index, process)| process.is_initializer.then_some(index))
+            .filter_map(|(index, process)| {
+                (process.kind == celox_design::ProcessKind::Initializer).then_some(index)
+            })
             .collect();
         let declarations_pending = !declaration_processes.is_empty();
         let mut state = Self {
@@ -202,14 +210,17 @@ impl<B: SimBackend> SimulationState<B> {
             last_clock_unknown: BitSet::new(),
             four_state: backend.layout().four_state,
             process_wakeups: (0..model.processes.len())
+                .filter(|&index| model.processes[index].kind != celox_design::ProcessKind::Final)
                 .map(|process| Reverse((0, process)))
                 .collect(),
+            kernel_count: model.processes.len(),
             model,
             process_state,
             declaration_processes,
             declarations_pending,
             host_pending: false,
             finished: false,
+            finalizing: None,
             stopped: false,
             suspended: None,
             scratch: None,
@@ -253,6 +264,13 @@ impl<B: SimBackend> SimulationState<B> {
         E: SimulationExecutor<Backend = B>,
     {
         self.stopped = false;
+        if self.finalizing.is_some() {
+            if self.scheduler.time > limit {
+                return Ok(None);
+            }
+            self.finalize_terminal(executor)?;
+            return Ok(Some(self.scheduler.time));
+        }
         match self.step_time(executor, limit) {
             Ok(time) => Ok(time),
             Err(Halt::Finish) => {
@@ -260,8 +278,15 @@ impl<B: SimBackend> SimulationState<B> {
                 Ok(Some(self.scheduler.time))
             }
             // The time slot goes on when the simulation continues.
-            Err(Halt::Stop) => Ok(Some(self.scheduler.time)),
+            Err(Halt::Stop) => {
+                self.stopped = true;
+                Ok(Some(self.scheduler.time))
+            }
             Err(Halt::Error(error)) => {
+                if matches!(&error, SimulatorErrorCode::Fatal { .. }) {
+                    let _ = self.finalize_terminal(executor);
+                    return Err(error);
+                }
                 // Preserve the primary runtime failure even if diagnostic
                 // waveform output also fails. This does not resume processes.
                 let _ = self.finish_timed_boundary(executor, self.scheduler.time);
@@ -312,11 +337,20 @@ impl<B: SimBackend> SimulationState<B> {
             // A process the scheduler does not run waits: the slot stays in
             // the reference loop. Test that first, as designs with such
             // processes fail it at every step.
-            let compiled = if compiles && self.process_state.waiters.len() <= waiting_kernels {
+            let compiled = if self.finalizing.is_none()
+                && compiles
+                && self.process_state.waiters.len() <= waiting_kernels
+            {
                 self.compiled_limit(executor, end, observer.one_slot())
             } else {
                 None
             };
+            if compiled.is_some()
+                && next_time > self.scheduler.time
+                && !self.leave_time(executor)?
+            {
+                return Ok(false);
+            }
             observer.before_step(self, executor);
             let result = match compiled {
                 Some(limit) => self.run_compiled(executor, limit),
@@ -331,8 +365,40 @@ impl<B: SimBackend> SimulationState<B> {
         if self.finished {
             return Ok(false);
         }
+        if end > self.scheduler.time && !self.leave_time(executor)? {
+            return Ok(false);
+        }
         self.advance_time(executor.backend_mut(), end);
         Ok(true)
+    }
+
+    /// The host's work before a run leaves the current time
+    /// ([`HostBoundary::try_leave_time`]). Returns `false` when it stopped
+    /// or finished the simulation.
+    fn leave_time<E>(&mut self, executor: &mut E) -> Result<bool, SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        match executor.try_leave_time(self.scheduler.time) {
+            Ok(()) => Ok(true),
+            Err(Halt::Stop) => {
+                self.stopped = true;
+                Ok(false)
+            }
+            Err(Halt::Finish) => {
+                self.finalize_terminal(executor)?;
+                Ok(false)
+            }
+            Err(Halt::Error(error)) => {
+                if matches!(&error, SimulatorErrorCode::Fatal { .. }) {
+                    let _ = self.finalize_terminal(executor);
+                    return Err(error);
+                }
+                let _ = self.finish_timed_boundary(executor, self.scheduler.time);
+                let _ = executor.flush_output();
+                Err(error)
+            }
+        }
     }
 
     /// Select the loop that runs time slots.
@@ -386,6 +452,11 @@ impl<B: SimBackend> SimulationState<B> {
         self.host_pending
     }
 
+    /// Whether runtime-owned activation storage needs a same-design checkpoint.
+    pub fn has_fork_activations(&self) -> bool {
+        !self.process_state.activations.is_empty()
+    }
+
     /// Set whether the next step settles host changes at the current time
     /// first, as when copying another simulation's state.
     #[doc(hidden)]
@@ -403,11 +474,17 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        self.retain_activation_roots(executor);
         match executor.try_finish_timed_step(time) {
             Ok(()) => Ok(()),
-            Err(Halt::Error(error)) => Err(error),
+            Err(Halt::Error(error)) => {
+                if matches!(&error, SimulatorErrorCode::Fatal { .. }) {
+                    let _ = self.finalize_terminal(executor);
+                }
+                Err(error)
+            }
             Err(Halt::Finish) => {
-                self.finish_checked(executor)?;
+                self.finalize_terminal(executor)?;
                 Ok(())
             }
             Err(Halt::Stop) => {
@@ -415,34 +492,6 @@ impl<B: SimBackend> SimulationState<B> {
                 Ok(())
             }
         }
-    }
-
-    fn finish_checked<E>(&mut self, executor: &mut E) -> Result<(), SimulatorErrorCode>
-    where
-        E: SimulationExecutor<Backend = B>,
-    {
-        self.finished = true;
-        executor.try_freeze()
-    }
-
-    /// Once $finish is consumed, output errors must not make execution resumable.
-    pub fn finalize_terminal<E>(&mut self, executor: &mut E) -> Result<(), SimulatorErrorCode>
-    where
-        E: SimulationExecutor<Backend = B>,
-    {
-        self.finished = true;
-        let output = self.finish_timed_boundary(executor, self.scheduler.time);
-        let frozen = executor.try_freeze();
-        output.and(frozen)
-    }
-
-    /// End the simulation where it is.
-    pub fn finish<E>(&mut self, executor: &mut E)
-    where
-        E: SimulationExecutor<Backend = B>,
-    {
-        self.finished = true;
-        executor.freeze();
     }
 
     /// Whether a process requested the end of the simulation.
@@ -461,7 +510,8 @@ impl<B: SimBackend> SimulationState<B> {
     /// Whether the simulation is suspended in the middle of a time slot, so
     /// that its scheduling state cannot be captured.
     pub fn is_suspended(&self) -> bool {
-        self.suspended.is_some() || (self.stopped && self.declarations_pending)
+        self.suspended.is_some()
+            || (self.stopped && (self.declarations_pending || self.finalizing.is_some()))
     }
 
     /// Settle externally driven state against the previous edge baseline even
@@ -486,6 +536,10 @@ impl<B: SimBackend> SimulationState<B> {
             }
             Err(Halt::Stop) => Ok(Some(self.scheduler.time)),
             Err(Halt::Error(error)) => {
+                if matches!(&error, SimulatorErrorCode::Fatal { .. }) {
+                    let _ = self.finalize_terminal(executor);
+                    return Err(error);
+                }
                 // Preserve the primary runtime failure even if diagnostic
                 // waveform output also fails. This does not resume processes.
                 let _ = self.finish_timed_boundary(executor, self.scheduler.time);
@@ -539,7 +593,21 @@ impl<B: SimBackend> SimulationState<B> {
     /// Move to `time` without running anything there, as the end of a run
     /// to a time without work does. Design code reads the new time.
     pub fn advance_time(&mut self, backend: &mut B, time: u64) {
+        if time > self.scheduler.time {
+            self.sample_values(backend);
+        }
         self.set_time(backend, time);
+    }
+
+    /// Copy each sampled variable into its copy, which then holds the value
+    /// the variable has in the Preponed region of the next time slot (IEEE
+    /// 1800-2023 4.4.2.1, 16.5.1). A timed simulation does it before
+    /// advancing to a later timestamp and once before the first slot.
+    /// Returning to the host at the same timestamp must retain the copy.
+    pub fn sample_values(&self, backend: &mut B) {
+        for &(variable, copy) in &self.model.sample_shadows {
+            crate::copy_signal(backend, variable, copy);
+        }
     }
 
     /// Store `time` where design code reads the simulation time (`$time`).
@@ -556,7 +624,7 @@ impl<B: SimBackend> SimulationState<B> {
             return None;
         }
         // Host writes are work of the current time.
-        if self.host_pending {
+        if self.host_pending || self.finalizing.is_some() {
             return Some(self.scheduler.time);
         }
         self.next_work_time()

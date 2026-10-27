@@ -1,5 +1,5 @@
 //! Class constraint syntax validation. Constraints retain their opaque class
-//! owner; no randomization or solver semantics are introduced here.
+//! owner. Simple expression blocks also retain their expression nodes.
 use super::*;
 
 enum Job {
@@ -32,10 +32,26 @@ impl Parser<'_> {
             class.has_constraints = true;
         }
         let prototype = self.eat("extern") || self.eat("pure");
-        self.eat("static");
+        let is_static = self.eat("static");
         self.expect("constraint")?;
-        self.name()?;
+        let name = self.name()?;
+        if self.class_stack.last().is_some_and(|class| {
+            class
+                .constraints
+                .iter()
+                .any(|block| block.name.spelling == name.spelling)
+        }) {
+            return Err(self.error("duplicate constraint block"));
+        }
+        let mut expressions = Vec::new();
+        let mut supported = !is_static;
         if self.eat(";") {
+            if let Some(class) = self.class_stack.last_mut() {
+                class.constraints.push(ClassConstraint {
+                    name,
+                    expressions: None,
+                });
+            }
             return Ok(());
         }
         if prototype {
@@ -52,6 +68,7 @@ impl Parser<'_> {
                     }
                     jobs.push(Job::Block(solve));
                     if solve && self.eat("solve") {
+                        supported = false;
                         self.constraint_primary_list()?;
                         self.expect("before")?;
                         self.constraint_primary_list()?;
@@ -74,32 +91,41 @@ impl Parser<'_> {
                 }
                 Job::Expression => {
                     if self.eat("if") {
+                        supported = false;
                         self.expect("(")?;
                         self.expression(0)?;
                         self.expect(")")?;
                         jobs.push(Job::Else);
                         jobs.push(Job::Set);
                     } else if self.eat("foreach") {
+                        supported = false;
                         self.foreach_header()?;
                         jobs.push(Job::Set);
                     } else if self.eat("disable") {
+                        supported = false;
                         self.expect("soft")?;
                         self.constraint_primary()?;
                         self.expect(";")?;
                     } else if self.eat("unique") {
+                        supported = false;
                         self.constraint_ranges(false)?;
                         self.expect(";")?;
                     } else {
                         let soft = self.eat("soft");
                         if soft {
+                            supported = false;
                             self.expression(0)?;
                         } else {
-                            self.constraint_condition()?;
+                            let (expression, simple) = self.constraint_condition()?;
+                            expressions.push(expression);
+                            supported &= simple;
                         }
                         if !soft && self.eat("->") {
+                            supported = false;
                             jobs.push(Job::Set);
                         } else {
                             if self.eat("dist") {
+                                supported = false;
                                 self.constraint_ranges(true)?;
                             }
                             self.expect(";")?;
@@ -108,17 +134,25 @@ impl Parser<'_> {
                 }
             }
         }
+        if let Some(class) = self.class_stack.last_mut() {
+            class.constraints.push(ClassConstraint {
+                name,
+                expressions: supported.then_some(expressions),
+            });
+        }
         Ok(())
     }
 
-    fn constraint_condition(&mut self) -> Result<()> {
+    fn constraint_condition(&mut self) -> Result<(ExprId, bool)> {
         // Keep the constraint-set arrow for the outer continuation. Equivalence
         // shares its expression precedence, so consume it explicitly here.
-        self.expression(2)?;
+        let expression = self.expression(2)?;
+        let mut simple = true;
         while self.eat("<->") {
+            simple = false;
             self.expression(2)?;
         }
-        Ok(())
+        Ok((expression, simple))
     }
 
     fn constraint_ranges(&mut self, distribution: bool) -> Result<()> {

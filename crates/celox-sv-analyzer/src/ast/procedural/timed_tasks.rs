@@ -8,11 +8,16 @@ pub(in crate::ast) fn classify<'a>(
     processes: &mut Vec<InitialProcess>,
 ) -> Result<(), AnalyzerError> {
     let subroutines: Vec<_> = subroutines.collect();
+    super::final_procedures::validate(&subroutines, processes)?;
+    let definitions: HashMap<_, _> = subroutines
+        .iter()
+        .map(|sub| (sub.name.as_str(), *sub))
+        .collect();
     let mut timed = HashSet::default();
     loop {
         let previous = timed.len();
         for subroutine in &subroutines {
-            if suspends(&subroutine.body, &timed) {
+            if requires_process(&subroutine.body, &timed, &definitions) {
                 timed.insert(subroutine.name.clone());
             }
         }
@@ -22,8 +27,22 @@ pub(in crate::ast) fn classify<'a>(
     }
     for subroutine in &subroutines {
         let is_timed = timed.contains(&subroutine.name);
-        if is_timed && !subroutine.is_task {
-            return Err(unsupported("timed task call in a function"));
+        if !subroutine.is_task {
+            let (blocking, _, calls) = super::final_procedures::effects(
+                subroutine.body.iter().chain(&subroutine.sensitivity_body),
+                &definitions,
+            );
+            if blocking
+                || calls.iter().any(|name| {
+                    definitions
+                        .get(name.as_str())
+                        .is_some_and(|sub| sub.is_task)
+                })
+            {
+                return Err(unsupported(
+                    "timed task call or blocking statement in a function",
+                ));
+            }
         }
         // Retaining static subroutine locals is an existing frontend limit.
         // Do not reinitialize them at each invocation when calls can overlap.
@@ -86,10 +105,17 @@ pub(in crate::ast) fn classify<'a>(
             ));
         }
     }
+    for process in processes.iter().filter(|process| process.is_initializer()) {
+        if requires_process(&process.body, &timed, &definitions) {
+            return Err(unsupported(
+                "background process scheduled by a declaration initializer; IEEE 1800-2023 13.4.4 requires an initial/always process",
+            ));
+        }
+    }
     let initial_count = processes.len();
     let mut retained = Vec::new();
     for process in std::mem::take(comb) {
-        if !suspends(&process.body, &timed) {
+        if !requires_process(&process.body, &timed, &definitions) {
             if process.kind == CombProcessKind::AlwaysStar && assigns_nonblocking(&process.body) {
                 return Err(unsupported("nonblocking assignment inside always_comb"));
             }
@@ -132,7 +158,8 @@ pub(in crate::ast) fn classify<'a>(
                 step: Vec::new(),
                 body,
             }],
-            initializer: false,
+            kind: celox_design::ProcessKind::Regular,
+            validation_body: Vec::new(),
             synthetic: false,
             repeats: true,
         });
@@ -140,7 +167,7 @@ pub(in crate::ast) fn classify<'a>(
     *comb = retained;
     let mut retained = Vec::new();
     for process in std::mem::take(ff) {
-        if !suspends(&process.body, &timed) {
+        if !requires_process(&process.body, &timed, &definitions) {
             retained.push(process);
             continue;
         }
@@ -172,32 +199,40 @@ pub(in crate::ast) fn classify<'a>(
                 step: Vec::new(),
                 body,
             }],
-            initializer: false,
+            kind: celox_design::ProcessKind::Regular,
+            validation_body: Vec::new(),
             synthetic: false,
             repeats: true,
         });
     }
     *ff = retained;
     if processes.len() != initial_count {
-        processes.sort_by_key(|process| (!process.initializer, process.creation_order));
+        processes.sort_by_key(|process| (!process.is_initializer(), process.creation_order));
     }
     Ok(())
 }
 
-fn suspends(body: &[Stmt], timed: &HashSet<String>) -> bool {
+fn requires_process(
+    body: &[Stmt],
+    timed: &HashSet<String>,
+    definitions: &HashMap<&str, &Subroutine>,
+) -> bool {
     let mut result = false;
     for statement in body {
         statement.walk(&mut |statement| {
-            result |= match statement {
-                Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::WaitImplicit(_) | Stmt::Wait(_) => {
-                    true
-                }
-                Stmt::Call { name, .. } => timed.contains(name),
-                _ => false,
-            };
+            result |= matches!(
+                statement,
+                Stmt::Delay { .. }
+                    | Stmt::WaitEvent(_)
+                    | Stmt::WaitImplicit(_)
+                    | Stmt::Wait(_)
+                    | Stmt::WaitFork
+                    | Stmt::Fork { .. }
+            );
         });
     }
-    result
+    let (_, _, calls) = super::final_procedures::effects(body.iter(), definitions);
+    result || calls.iter().any(|name| timed.contains(name))
 }
 
 fn assigns_nonblocking(body: &[Stmt]) -> bool {

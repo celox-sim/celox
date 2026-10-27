@@ -410,6 +410,7 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) declaration_startup: Option<celox_design::DeclarationStartup<AbsoluteAddr>>,
     pub(crate) processes: Vec<celox_design::ProcessSlots<AbsoluteAddr>>,
     pub(crate) process_origins: Vec<celox_design::ProcessOrigin>,
+    pub(crate) process_frames: Vec<Option<celox_design::ProcessFrame<AbsoluteAddr>>>,
     pub(crate) watches: Vec<celox_design::EventWatch<AbsoluteAddr>>,
     pub(crate) occurrence_probes: Vec<(celox_design::VarAtomBase<AbsoluteAddr>, AbsoluteAddr)>,
     pub(crate) wait_sites: Vec<celox_design::WaitSite<AbsoluteAddr>>,
@@ -417,6 +418,10 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) host_request_sites: Vec<celox_design::HostRequestSite<AbsoluteAddr>>,
     pub(crate) active_commits: Vec<AbsoluteAddr>,
     pub(crate) time_slots: Vec<AbsoluteAddr>,
+    #[serde(default)]
+    pub(crate) sample_shadows: Vec<(AbsoluteAddr, AbsoluteAddr)>,
+    #[serde(default)]
+    pub(crate) initial_copies: Vec<(AbsoluteAddr, AbsoluteAddr)>,
     pub(crate) scheduler: Option<celox_design::SchedulerSchema<AbsoluteAddr>>,
     pub(crate) derived_edges: Vec<celox_design::DerivedEdgeUnits<AbsoluteAddr>>,
 }
@@ -490,6 +495,11 @@ impl NativeProgramImage {
         &self.reflection
     }
 
+    /// Design metadata used to name saved state objects.
+    pub(crate) fn state_design(&self) -> &crate::ir::RuntimeDesign {
+        &self.design
+    }
+
     /// Source-independent runtime diagnostics and combinational observers.
     pub(crate) fn runtime_schema(&self) -> &NativeRuntimeSchema {
         &self.runtime_schema
@@ -503,6 +513,61 @@ impl NativeProgramImage {
     /// Canonical event-domain topology used by the runtime scheduler.
     pub(crate) fn event_topology(&self) -> &celox_design::EventTopology<AbsoluteAddr> {
         &self.design.events
+    }
+
+    /// The storage a reflected signal shares with its aliases: its own, or
+    /// for a clock or reset its canonical event domain's.
+    pub fn signal_identity(
+        &self,
+        id: celox_runtime::ReflectionSignalId,
+    ) -> Option<super::NativeSignalIdentity> {
+        let signal = self.reflection.signal(id)?;
+        Some(if signal.domain_kind == celox_design::DomainKind::Other {
+            super::NativeSignalIdentity::State(signal.signal)
+        } else {
+            super::NativeSignalIdentity::Event(
+                self.event_topology().canonical(signal.state_address),
+            )
+        })
+    }
+
+    /// Whether the design has process kernels, which only a timed
+    /// [`crate::Simulation`] runs.
+    pub fn has_processes(&self) -> bool {
+        !self.runtime_schema.processes.is_empty()
+    }
+
+    /// The compiler-inserted override slots of a reflected signal, as
+    /// (enable, value) pairs: setting the enable makes the design read the
+    /// value instead of its drivers.
+    pub fn force_slots(
+        &self,
+        id: celox_runtime::ReflectionSignalId,
+    ) -> Vec<(SignalRef, SignalRef)> {
+        self.runtime_schema
+            .force_bindings
+            .iter()
+            .filter(|binding| binding.signal == id)
+            .map(|binding| (binding.enabled, binding.value))
+            .collect()
+    }
+
+    /// Every reflected signal stored at `identity`, in storage order.
+    pub fn signal_aliases(&self, identity: super::NativeSignalIdentity) -> Vec<SignalRef> {
+        let mut signals = self
+            .reflection
+            .signals()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, signal)| {
+                (self.signal_identity(celox_runtime::ReflectionSignalId(index as u32))
+                    == Some(identity))
+                .then_some(signal.signal)
+            })
+            .collect::<Vec<_>>();
+        signals.sort_unstable();
+        signals.dedup();
+        signals
     }
 
     /// Reconstruct the source-independent runtime metadata retained by this
@@ -527,6 +592,7 @@ impl NativeProgramImage {
                 live_signals: self.runtime_schema.live_signals.iter().copied().collect(),
                 processes: self.runtime_schema.processes.clone(),
                 process_origins: self.runtime_schema.process_origins.clone(),
+                process_frames: self.runtime_schema.process_frames.clone(),
                 watches: self.runtime_schema.watches.clone(),
                 occurrence_probes: self.runtime_schema.occurrence_probes.clone(),
                 wait_sites: self.runtime_schema.wait_sites.clone(),
@@ -534,8 +600,11 @@ impl NativeProgramImage {
                 host_request_sites: self.runtime_schema.host_request_sites.clone(),
                 active_commits: self.runtime_schema.active_commits.clone(),
                 time_slots: self.runtime_schema.time_slots.clone(),
+                sample_shadows: self.runtime_schema.sample_shadows.clone(),
+                initial_copies: self.runtime_schema.initial_copies.clone(),
                 scheduler: self.runtime_schema.scheduler.clone(),
                 derived_edges: self.runtime_schema.derived_edges.clone(),
+                settle_partitions: None,
             },
             testbench: self.testbench.clone(),
         }
@@ -646,6 +715,46 @@ impl NativeProgramImage {
                     .saturating_add(derived_units)
         {
             return Err("process kernels and their control slots disagree".into());
+        }
+        if self.runtime_schema.process_frames.len() != self.runtime_schema.processes.len() {
+            return Err("process kernels and their activation frames disagree".into());
+        }
+        for (slots, frame) in self
+            .runtime_schema
+            .processes
+            .iter()
+            .zip(&self.runtime_schema.process_frames)
+        {
+            let Some(frame) = frame else {
+                continue;
+            };
+            let mut addresses = HashSet::default();
+            if ![slots.resume, slots.status, slots.delay, frame.random]
+                .iter()
+                .all(|slot| frame.private.contains(slot))
+                || frame.private.iter().chain(&frame.locals).any(|slot| {
+                    !self.design.state_objects.contains_key(slot) || !addresses.insert(*slot)
+                })
+            {
+                return Err("invalid process activation frame storage".into());
+            }
+            let mut entries = HashSet::default();
+            for probe in &frame.event_probes {
+                if probe.resume == 0
+                    || probe.resume as usize >= frame.resume_count
+                    || !entries.insert(probe.resume)
+                    || !frame.private.contains(&probe.result)
+                    || !probe.scratch.contains(&probe.result)
+                    || probe
+                        .scratch
+                        .iter()
+                        .any(|slot| !frame.private.contains(slot))
+                    || probe.inputs.iter().any(|slot| !frame.locals.contains(slot))
+                    || probe.inputs.iter().collect::<HashSet<_>>().len() != probe.inputs.len()
+                {
+                    return Err("invalid process event-expression probe".into());
+                }
+            }
         }
         if self.required_native_features & !KNOWN_NATIVE_FEATURES != 0 {
             return Err("native image contains unknown feature requirements".into());
@@ -2553,6 +2662,7 @@ fn compile_program(
                     .collect(),
                 processes: sir.runtime().runtime_schema.processes.clone(),
                 process_origins: sir.runtime().runtime_schema.process_origins.clone(),
+                process_frames: sir.runtime().runtime_schema.process_frames.clone(),
                 watches: sir.runtime().runtime_schema.watches.clone(),
                 occurrence_probes: sir.runtime().runtime_schema.occurrence_probes.clone(),
                 wait_sites: sir.runtime().runtime_schema.wait_sites.clone(),
@@ -2561,6 +2671,8 @@ fn compile_program(
                 declaration_startup: sir.runtime().runtime_schema.declaration_startup.clone(),
                 active_commits: sir.runtime().runtime_schema.active_commits.clone(),
                 time_slots: sir.runtime().runtime_schema.time_slots.clone(),
+                sample_shadows: sir.runtime().runtime_schema.sample_shadows.clone(),
+                initial_copies: sir.runtime().runtime_schema.initial_copies.clone(),
                 scheduler: sir.runtime().runtime_schema.scheduler.clone(),
                 derived_edges: sir.runtime().runtime_schema.derived_edges.clone(),
             },
@@ -2592,6 +2704,9 @@ pub struct NativeBackend {
     /// Boxed so the address in the state header survives moves.
     heap: Box<celox_heap::Heap>,
     execution_timing: Option<NativeExecutionTiming>,
+    /// Whether generated calls go through [`Self::call_func_slow`]: timing
+    /// is on, or settles are cross-checked.
+    slow_calls: bool,
     /// Worker threads for lane-partitioned kernels, started on first use.
     lane_pool: Option<celox_runtime::parallel::LanePool>,
     /// Per-kernel choice between partitioned and sequential code.
@@ -2810,6 +2925,7 @@ impl NativeBackend {
             }
         }
 
+        let slow_calls = shared.layout.settle_check();
         let mut backend = Self {
             compiled: shared,
             memory,
@@ -2817,6 +2933,7 @@ impl NativeBackend {
             comb_capture_enabled,
             heap: Default::default(),
             execution_timing: None,
+            slow_calls,
             lane_pool: None,
             lane_selectors: Default::default(),
         };
@@ -2839,6 +2956,7 @@ impl NativeBackend {
         comb_capture_enabled: Vec<u8>,
         heap: Box<celox_heap::Heap>,
     ) -> Self {
+        let slow_calls = shared.layout.settle_check();
         let mut backend = Self {
             compiled: shared,
             memory,
@@ -2846,6 +2964,7 @@ impl NativeBackend {
             comb_capture_enabled,
             heap,
             execution_timing: None,
+            slow_calls,
             lane_pool: None,
             lane_selectors: Default::default(),
         };
@@ -2951,6 +3070,7 @@ impl NativeBackend {
     /// Start a fresh opt-in measurement of generated native function calls.
     pub fn start_execution_timing(&mut self) {
         self.execution_timing = Some(NativeExecutionTiming::default());
+        self.slow_calls = true;
     }
 
     /// Total capacity of the live image in `u64` words.
@@ -2970,10 +3090,12 @@ impl NativeBackend {
             self.memory.resize_zeroed_within_capacity(mem_size_words);
         }
         self.compiled = shared;
+        self.slow_calls = self.execution_timing.is_some() || self.compiled.layout.settle_check();
     }
 
     /// Stop timing and return the accumulated generated-code interval.
     pub fn finish_execution_timing(&mut self) -> Option<NativeExecutionTiming> {
+        self.slow_calls = self.compiled.layout.settle_check();
         self.execution_timing.take()
     }
 
@@ -3148,6 +3270,29 @@ impl NativeBackend {
     }
 
     fn call_func_timed(&mut self, func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
+        if !self.slow_calls {
+            return Self::call_func(self.memory.as_mut_slice(), func);
+        }
+        self.call_func_slow(func)
+    }
+
+    #[cold]
+    fn call_func_slow(&mut self, func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
+        if func as usize == self.compiled.comb_func as usize && self.compiled.layout.settle_check()
+        {
+            let compiled = Arc::clone(&self.compiled);
+            return crate::settle::run_checked(
+                self,
+                compiled.layout.settle.as_ref().expect("checked settle"),
+                compiled.layout.total_size,
+                |backend| backend.memory.as_mut_bytes(),
+                |backend| backend.call_func_measured(func),
+            );
+        }
+        self.call_func_measured(func)
+    }
+
+    fn call_func_measured(&mut self, func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
         let Some(_) = self.execution_timing else {
             return Self::call_func(self.memory.as_mut_slice(), func);
         };
@@ -3517,10 +3662,12 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
-        (
+        let view = (
             self.memory.expose_mut_ptr().cast(),
             self.memory.len_words() * 8,
-        )
+        );
+        self.mark_settle_untracked();
+        view
     }
 
     fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
@@ -3529,6 +3676,10 @@ impl super::super::SimBackend for NativeBackend {
 
     fn write_memory(&mut self, offset: usize, bytes: &[u8]) {
         self.memory.write_bytes(offset, bytes);
+        self.mark_settle_range(offset, bytes.len());
+        if !self.memory.vcd_tracking_enabled() {
+            self.mark_settle_untracked();
+        }
     }
 
     fn vcd_tracking_enabled(&self) -> bool {

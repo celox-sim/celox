@@ -600,6 +600,12 @@ pub fn parse_sv(
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
     let frontend_trace_options = trace_opts.frontend(diagnostics);
     let mut frontend_trace = celox_frontend_core::FrontendTrace::default();
+    let mut schedule_options = crate::optimizer::parallel_schedule_options(optimize_options);
+    if !force_signals.is_empty() {
+        // Native code applies explicit forces to reads the SLT has already
+        // folded, outside any partition's dependencies.
+        schedule_options.settle = celox_frontend_core::SettlePartitionMode::Off;
+    }
     let scheduled =
         celox_frontend_sv::schedule_sources_with_parameter_expressions_and_latch_policy(
             sources,
@@ -608,7 +614,7 @@ pub fn parse_sv(
             ignored_loops,
             true_loops,
             four_state,
-            &crate::optimizer::parallel_schedule_options(optimize_options),
+            &schedule_options,
             &frontend_trace_options,
             trace.is_some().then_some(&mut frontend_trace),
             config.allow_inferred_latches,

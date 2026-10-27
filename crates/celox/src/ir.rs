@@ -566,6 +566,18 @@ pub struct LaidOutProgram {
 }
 
 impl LaidOutProgram {
+    /// The units, with the layout and runtime metadata they are checked
+    /// against, borrowed apart.
+    pub(crate) fn split_mut(
+        &mut self,
+    ) -> (
+        &mut SirProgram,
+        &crate::backend::MemoryLayout,
+        &RuntimeProgram,
+    ) {
+        (&mut self.sir, &self.layout, &self.runtime)
+    }
+
     #[cfg(feature = "host-runtime")]
     pub(crate) fn enable_vcd_tracking(&mut self) {
         self.layout.enable_trace();
@@ -573,6 +585,15 @@ impl LaidOutProgram {
 
     pub fn layout(&self) -> &crate::backend::MemoryLayout {
         &self.layout
+    }
+
+    /// Cross-check every partitioned settle (see
+    /// [`celox_state_layout::SettleLayout::check`]).
+    #[cfg(feature = "host-runtime")]
+    pub(crate) fn set_settle_check(&mut self, check: bool) {
+        if let Some(settle) = self.layout.settle.as_mut() {
+            settle.check = check;
+        }
     }
 
     pub fn runtime(&self) -> &RuntimeProgram {
@@ -701,7 +722,8 @@ impl OptimizedSir {
                 });
         }
         crate::optimizer::sir::retain_final_identity_aliases(&mut program, four_state);
-        let layout = crate::backend::MemoryLayout::build(&program, four_state, mode);
+        let mut layout = crate::backend::MemoryLayout::build(&program, four_state, mode);
+        layout.settle = crate::settle::layout(&program, &layout);
         // Classify before alias stores disappear: an identity alias is a
         // combinational copy even once it only shares its source's storage.
         collect_comb_writes(&mut program);
@@ -747,11 +769,13 @@ impl OptimizedSir {
             layout_requirements,
         } = program;
         debug_assert!(layout_requirements.is_empty());
-        LaidOutProgram {
+        let mut laid_out = LaidOutProgram {
             sir,
             runtime,
             layout,
-        }
+        };
+        crate::settle::instrument(&mut laid_out);
+        laid_out
     }
 }
 

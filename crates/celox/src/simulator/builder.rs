@@ -1694,6 +1694,9 @@ mod host {
         /// Emit the additional combinational entries needed to reapply foreign
         /// force overrides between procedural store boundaries.
         pub native_force_support: bool,
+        /// Cross-check every partitioned settle against one that runs every
+        /// partition (see [`SimulatorBuilder::settle_check`]).
+        pub settle_check: bool,
         /// Explicit hierarchical observation and native force targets.
         pub signal_access: crate::SignalAccessOptions,
         /// Dead store elimination policy.
@@ -1709,6 +1712,11 @@ mod host {
         pub dpi: crate::DpiSymbols,
         /// Ordered command-line arguments for SystemVerilog plusargs queries.
         pub plusargs: Vec<String>,
+        /// Host I/O factory; each simulator receives an independent instance.
+        pub file_system: celox_runtime::file_io_backend::FileSystemFactory,
+        /// Leave timed initialization pending so a host can install a checkpoint
+        /// before any declaration or combinational effect executes.
+        pub defer_initialization: bool,
         /// The loop that runs the time slots of a [`crate::Simulation`].
         #[doc(hidden)]
         pub scheduler: crate::SchedulerMode,
@@ -1803,6 +1811,7 @@ mod host {
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+        sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
         if let Err(error) = validate_native_vcd_layout(sim.layout(), &sim.program, &vcd_path) {
             return Err(error.with_warnings(std::mem::take(&mut sim.warnings)));
         }
@@ -1999,6 +2008,7 @@ mod host {
                 emit_triggers: false,
                 #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
                 derived_edge_units: None,
+                settle_check: false,
                 native_force_support: false,
                 signal_access: crate::SignalAccessOptions::default(),
                 dead_store_policy: DeadStorePolicy::Off,
@@ -2007,6 +2017,8 @@ mod host {
                 allow_inferred_latches: false,
                 dpi: crate::DpiSymbols::default(),
                 plusargs: Vec::new(),
+                file_system: Default::default(),
+                defer_initialization: false,
                 scheduler: crate::SchedulerMode::default(),
             }
         }
@@ -2166,6 +2178,21 @@ mod host {
             self
         }
 
+        /// Supply the host filesystem for runtime file tasks. The factory is
+        /// invoked before declaration initialization for each simulator.
+        /// Snapshot behavior is defined by the returned [`crate::FileSystem`].
+        pub fn file_system(
+            mut self,
+            factory: impl Fn() -> Box<dyn celox_runtime::file_io_backend::FileSystem>
+            + Send
+            + Sync
+            + 'static,
+        ) -> Self {
+            self.options.file_system =
+                celox_runtime::file_io_backend::FileSystemFactory::new(factory);
+            self
+        }
+
         /// Set the ordered arguments queried by `$test$plusargs` and
         /// `$value$plusargs`. A leading `+` is optional on each argument.
         /// Queries currently require a timed procedural process, such as an
@@ -2229,9 +2256,11 @@ mod host {
         pub fn opt_level(mut self, level: crate::optimizer::OptLevel) -> Self {
             let lanes = self.options.optimize_options.parallel_lanes();
             let partition = self.options.optimize_options.parallel_partition();
+            let settle = self.options.optimize_options.settle_partition();
             self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level)
                 .with_parallel_lanes(lanes)
-                .with_parallel_partition(partition);
+                .with_parallel_partition(partition)
+                .with_settle_partition(settle);
             self.options.cranelift_options =
                 crate::backend::CraneliftOptions::for_speed_optimization(
                     level != crate::optimizer::OptLevel::O0,
@@ -2266,13 +2295,15 @@ mod host {
         pub fn optimize(mut self, enable: bool) -> Self {
             let lanes = self.options.optimize_options.parallel_lanes();
             let partition = self.options.optimize_options.parallel_partition();
+            let settle = self.options.optimize_options.settle_partition();
             self.options.optimize_options = if enable {
                 crate::optimizer::OptimizeOptions::all()
             } else {
                 crate::optimizer::OptimizeOptions::none()
             }
             .with_parallel_lanes(lanes)
-            .with_parallel_partition(partition);
+            .with_parallel_partition(partition)
+            .with_settle_partition(settle);
             self
         }
 
@@ -2292,9 +2323,15 @@ mod host {
             } else {
                 self.options.optimize_options.parallel_partition()
             };
+            let settle = if options.settle_partition() == crate::SettlePartition::Always {
+                crate::SettlePartition::Always
+            } else {
+                self.options.optimize_options.settle_partition()
+            };
             self.options.optimize_options = options
                 .with_parallel_lanes(lanes)
-                .with_parallel_partition(partition);
+                .with_parallel_partition(partition)
+                .with_settle_partition(settle);
             self
         }
 
@@ -2333,6 +2370,34 @@ mod host {
                 .optimize_options
                 .clone()
                 .with_parallel_partition(partition);
+            self
+        }
+
+        /// Debug cross-check of a partitioned settle: the native and
+        /// Cranelift backends run each settle a second time from the same
+        /// state with every partition flagged, and panic at the first state
+        /// byte the two runs leave differently. Slow; for testing the
+        /// partitioning. Effects of the partitions that run in both passes,
+        /// such as runtime events, happen twice.
+        pub fn settle_check(mut self, enable: bool) -> Self {
+            self.options.settle_check = enable;
+            self
+        }
+
+        /// Cut the combinational settle into partitions that run only when
+        /// state they read changed ([`crate::SirPass::PartitionedSettle`]).
+        ///
+        /// [`crate::SettlePartition::Estimated`] partitions a large settle of
+        /// a design with several clock events;
+        /// [`crate::SettlePartition::Always`] partitions every settle it can,
+        /// for testing.
+        pub fn settle_partition(mut self, partition: crate::SettlePartition) -> Self {
+            self.options.optimize_options = self
+                .options
+                .optimize_options
+                .clone()
+                .enable(crate::optimizer::SirPass::PartitionedSettle)
+                .with_settle_partition(partition);
             self
         }
 
@@ -2910,6 +2975,8 @@ mod host {
                 }
             }
 
+            // Units generated from here on write state the settle may read.
+            let first_generated_process = laid_out.sir.processes.len();
             // A timed simulation runs the slots of kernels that only delay
             // in a compiled scheduler, generated from the final units.
             #[cfg(feature = "host-runtime")]
@@ -2930,6 +2997,8 @@ mod host {
             if let Some(sink) = &self.options.derived_edge_units {
                 crate::derived_edge::attach_test_units(&mut laid_out, sink);
             }
+            crate::settle::instrument_processes_from(&mut laid_out, first_generated_process, false);
+            laid_out.set_settle_check(self.options.settle_check);
 
             // Link DPI-C imports before code generation, so a missing C
             // function fails the build early; the backends reuse the result.
@@ -3011,6 +3080,7 @@ mod host {
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -3065,6 +3135,7 @@ mod host {
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -3122,6 +3193,7 @@ mod host {
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -3193,6 +3265,7 @@ mod host {
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -3407,6 +3480,7 @@ mod host {
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -3625,6 +3699,8 @@ mod host {
                     .set_injected(self.injected_components.clone());
                 sim.diagnostics = self.options.diagnostics.clone();
                 sim.plusargs = celox_runtime::plusargs::Plusargs(self.options.plusargs.clone());
+                sim.file_io =
+                    celox_runtime::file_io::FileIo::new(self.options.file_system.create());
                 sim.apply_initial_values();
                 sim.modify(|_| {}).map_err(|error| {
                     SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
@@ -3662,6 +3738,14 @@ mod host {
     }
 
     impl<'a> SimulatorBuilder<'a, crate::Simulation> {
+        /// Build without executing declaration or combinational initialization.
+        /// Use when preparing a checkpoint restore target. Without a restore,
+        /// the first simulation step performs the pending initialization.
+        pub fn defer_initialization(mut self, defer: bool) -> Self {
+            self.options.defer_initialization = defer;
+            self
+        }
+
         pub(crate) fn new(code: &'a str, top: &'a str) -> Self {
             Self {
                 sources: vec![(code, Path::new(""))],
@@ -3951,12 +4035,10 @@ mod host {
             )?;
             // Host state outside the memory image, such as open files,
             // cannot be shared with a shadow.
-            Ok(Some(
-                match shadow.simulator.check_host_checkpoint_support() {
-                    Ok(()) => Ok(Box::new(shadow)),
-                    Err(_) => Err("the design keeps host state outside its memory image"),
-                },
-            ))
+            Ok(Some(match shadow.simulator.check_host_restore_support() {
+                Ok(()) => Ok(Box::new(shadow)),
+                Err(_) => Err("the design keeps host state outside its memory image"),
+            }))
         }
 
         /// Load `image` into executable memory and start a timed simulation
@@ -4049,6 +4131,7 @@ mod host {
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -4064,19 +4147,21 @@ mod host {
             }
             sim.apply_initial_values();
             // Runtime static declarations precede every comb activation.
-            if !sim
-                .program
-                .runtime_schema
-                .processes
-                .iter()
-                .any(|slots| slots.is_initializer)
+            if !options.defer_initialization
+                && !sim
+                    .program
+                    .runtime_schema
+                    .processes
+                    .iter()
+                    .any(|slots| slots.kind == celox_design::ProcessKind::Initializer)
             {
                 sim.modify(|_| {}).map_err(|error| {
                     SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
                 })?;
             }
             let warnings = std::mem::take(&mut sim.warnings);
-            match crate::Simulation::try_new(sim) {
+            match crate::Simulation::try_new_with_initialization(sim, !options.defer_initialization)
+            {
                 Ok(mut simulation) => {
                     simulation.simulator.warnings = warnings;
                     simulation.state.set_scheduler_mode(options.scheduler);
@@ -4100,6 +4185,64 @@ mod host {
             }
         }
         Ok(())
+    }
+
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn portable_fork_state_remaps_reordered_compiled_kernels() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output bit [4:0] q);
+ initial begin
+   fork begin #2; q[0]=1; end begin #4; q[1]=1; end join
+   q[2]=1;
+ end
+ initial begin fork begin #3; q[3]=1; end join q[4]=1; end
+endmodule"#;
+        let sources = vec![(source, std::path::Path::new("reordered.sv"))];
+        let mut origin = crate::Simulation::from_sv_sources(sources.clone(), "Top")
+            .build_native()
+            .unwrap();
+        origin.run_until(1).unwrap();
+        let file = origin.save_state().unwrap();
+        let (mut program, warnings, options, _, _) =
+            crate::Simulation::from_sv_sources(sources, "Top")
+                .emit_triggers()
+                .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided)
+                .unwrap();
+        let schema = &mut program.runtime.runtime_schema;
+        let count = schema.processes.len();
+        assert!(count > 1);
+        schema.processes.reverse();
+        schema.process_origins.reverse();
+        schema.process_frames.reverse();
+        for site in &mut schema.wait_sites {
+            site.process = count - 1 - site.process;
+        }
+        for site in &mut schema.nba_sites {
+            site.process = count - 1 - site.process;
+        }
+        for site in &mut schema.host_request_sites {
+            site.process = count - 1 - site.process;
+        }
+        program.sir.processes.reverse();
+        let image =
+            crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
+        let runtime = image.runtime_program();
+        // SAFETY: this image was compiled from the trusted fixture above.
+        let backend = unsafe { crate::backend::native::NativeBackend::from_image(image) }.unwrap();
+        let mut simulator =
+            crate::Simulator::with_backend_and_program_for_simulation(backend, runtime, warnings);
+        simulator.apply_initial_values();
+        simulator.modify(|_| {}).unwrap();
+        let mut target = crate::Simulation::new(simulator);
+        target.load_state(&file).unwrap();
+        target.run_until(5).unwrap();
+        assert_eq!(target.get(target.signal("q")), 31u8.into());
     }
 
     #[cfg(all(

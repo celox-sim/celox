@@ -2026,6 +2026,10 @@ impl<'p, 'a> Comb<'p, 'a> {
         stmt: &sv::ir::Stmt,
     ) -> Result<Store, sv::AnalyzerError> {
         match stmt {
+            sv::ir::Stmt::DisableFork => Ok(store),
+            sv::ir::Stmt::Fork { .. } | sv::ir::Stmt::WaitFork => {
+                Err(unsupported("fork control outside a timed process"))
+            }
             sv::ir::Stmt::Assign {
                 lhs,
                 rhs,
@@ -3574,6 +3578,19 @@ impl<'p, 'a> Comb<'p, 'a> {
             arg_widths.push(self.width(node));
             captured.push(self.capture(node)?);
         }
+        // A report carries the time it is issued at (IEEE 1800-2023 20.10).
+        // The time does not run the process.
+        let timestamp_arg = matches!(kind, SystemTaskKind::Message(_) | SystemTaskKind::Fatal);
+        if timestamp_arg {
+            let time = sv::ir::Expr::Ident(self.m.time_slot());
+            let (node, _) = self.eval(store, frames, &time, None)?;
+            arg_signed.push(false);
+            arg_is_string.push(false);
+            arg_float_precision.push(None);
+            arg_is_handle.push(false);
+            arg_widths.push(self.width(node));
+            captured.push(self.capture(node)?);
+        }
         let event_kind = kind.event_kind();
         let condition = self.path_condition()?;
         let guard = if let Some(passed) = assertion {
@@ -3645,6 +3662,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             location: report_location(site),
             assertion: assertion_site.cloned(),
             deferred,
+            timestamp_arg,
             arg_widths,
             arg_signed,
             arg_is_string,

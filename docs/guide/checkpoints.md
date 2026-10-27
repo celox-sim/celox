@@ -57,6 +57,93 @@ sim.time(); // 100
 - Checkpoints live in memory. To keep state across processes, use a state
   file.
 
+## External resources: file I/O and VPI {#external-resources}
+
+A design containing file I/O, `$fscanf` (including stdin), or VCD tasks can
+be captured at the normal API boundary. `checkpoint()` copies state without
+executing HDL; `save_state()` / `saveState()` retain their usual combinational
+settling behavior. A simulation suspended mid-slot by `$stop` must still be
+continued before capture.
+
+Rust hosts can supply runtime I/O through `FileSystem`, keeping the OS-backed
+`HostFileSystem` as the default:
+
+```rust
+let mut sim = Simulation::from_sv_sources(sources, "Top")
+    .file_system(|| Box::new(MyHostIo::new()))
+    .build()?;
+let saved = sim.checkpoint()?;
+// Advance the simulation, then restore both HDL and host I/O state.
+sim.restore(&saved)?;
+```
+
+`MyHostIo` implements `celox::FileSystem`. The factory runs before declaration
+initialization and creates an independent backend for each simulator. It handles
+open/read/write/seek/close/flush, stdin and stderr; runtime `$writemem*` operations
+also use it. This boundary covers runtime file tasks, not compiler source-file
+loading, compile-time memory initialization, or VCD writers. It does not require
+any particular filesystem or storage strategy.
+
+Core checkpoints contain HDL memory, heap values, process state and scheduling
+state. They do **not** contain effect-handler state. A design using file I/O or
+VPI can take and restore a core checkpoint without asking its handlers to save
+anything. Restoring only the core leaves those handlers attached and unchanged;
+subsequent SV calls are interpreted by their current state.
+
+The file-I/O handler owns HDL descriptor allocation, FD/MCD mappings, readability,
+EOF flags, scan lookahead and standard-stream flags. Its injected `FileSystem`
+owns the backing resources and defines their effect semantics. Rust hosts can
+compose these independently at a quiescent execution boundary:
+
+```rust,ignore
+let core = simulation.checkpoint()?;
+let io = simulation.file_io().snapshot();
+// ... execute a scenario ...
+let restored_io = simulation.file_io().prepare_restore(&io)?;
+simulation.replace_file_io(restored_io);
+simulation.restore(&core)?;
+```
+
+The host chooses which handlers to include, how external effects are retained,
+and the persistence format of its **system checkpoint**. Core does not require
+a memory filesystem, a disk overlay, or handler persistence. The default Rust
+`HostFileSystem` continues to use the OS directly. Its lack of an independent
+resource snapshot does not prevent core checkpoint capture or restore.
+
+`FileSystem::restore()` prepares a replacement handler with the saved private
+handle identities. This helper's contract leaves the existing handler and
+external resources untouched during preparation. A host with a different effect
+commit protocol can coordinate its own replacement instead. Validation and
+commit order belong to that host system, not to the core checkpoint.
+
+`SimulationCheckpoint::to_bytes()` encodes the core, including live fork
+activations and heap objects, without event-code pointers. An instance built
+from the same design binds saved event IDs through
+`unsafe Simulation::checkpoint_from_bytes()`. This implementation format is
+versioned and checks layout and accidental corruption; load only trusted,
+unmodified artifacts from a compatible build. It is separate from portable
+`StateFile`, which contains named HDL values and an optional schedule.
+
+Portable state-file restore retains its existing host-resource restrictions.
+System hosts can compose core and effect-handler snapshots into their own
+resumable checkpoint format.
+
+For native VPI hosts, Rust `VpiSession::save_state()` and
+`NativeProgramInstance::save_state()` return the same `StateFile` format,
+without evaluating HDL or dispatching callbacks. Capture between dispatch runs
+or in a read-only synchronization callback for settled values. In other callback
+phases, the file contains the values currently visible to VPI reads, which may
+not yet be settled. The file has no simulation schedule: pending VPI writes,
+callback registrations, force registrations, plugin memory, and cocotb/Python
+coroutines are excluded. Applied force values are visible in the HDL data.
+These files support inspection, comparison, and HDL-only initialization; they
+are not resumable VPI sessions. C plugins can call
+`int celox_vpi_save_state(const char *path)` under the same contract (1 for
+success, 0 for failure). The path is UTF-8; an existing file is overwritten.
+
+Opaque external component state also remains with its host. Core checkpoints
+do not capture it; portable state-file APIs retain their component restrictions.
+
 ## Waveforms
 
 VCD output keeps recording across a restore: the next `dump()` writes the
@@ -132,7 +219,20 @@ the differences. Combinational signals are recomputed after loading, so they
 need not match; their saved values only seed combinational loops declared with
 `true_loop`, which settle back into the saved state. A `Simulation` state file also records the time, clocks and
 pending events by name, and where the design's processes are suspended or
-waiting.
+waiting. Dynamic fork activations use named kernels and frame slots, with
+file-local parent/child and shared-local references. This includes pending
+joins, random streams and all active/reactive scheduling queues. Graph, slot
+and continuation validation happens before loading changes the simulator.
+
+Activation state files preserve strings in suspended private frames and shared
+automatic locals. They reject non-null class objects, and nonempty string/object
+values in queued NBA writes, host writes or event-wait baselines. Use checkpoints
+for those states. Host filesystem and external-effect restore restrictions remain
+the same as for other state files.
+
+Files requiring activation or reactive-region records use format version 3.
+Files without those records continue to use version 1 or 2; both remain readable.
+Older Celox builds cannot read version 3.
 
 The `celox` command line tool inspects state files:
 
