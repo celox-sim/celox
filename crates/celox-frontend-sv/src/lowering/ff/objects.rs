@@ -52,6 +52,24 @@ impl Ff<'_, '_> {
                     self.heap_call(ops::OBJECT_RANDOMIZE_INPUTS, &[object, program, inputs])
                 }
             }
+            ObjectOp::ConstraintModeGet(index) => {
+                let object = self.handle(&args[0])?;
+                self.heap_call(
+                    ops::encode(ops::OBJECT_CONSTRAINT_MODE_GET, u64::from(*index)),
+                    &[object],
+                )
+            }
+            ObjectOp::ConstraintModeSet(index) => {
+                let object = self.handle(&args[0])?;
+                let enabled = self.integer_of_width(&args[1], 1, false)?;
+                self.heap_call(
+                    ops::encode(
+                        ops::OBJECT_CONSTRAINT_MODE_SET,
+                        u64::from(index.unwrap_or(u32::MAX)),
+                    ),
+                    &[object, enabled],
+                )
+            }
             ObjectOp::Container { .. } => unreachable!("handled by container_call"),
             ObjectOp::New {
                 class,
@@ -161,6 +179,8 @@ impl Ff<'_, '_> {
                 HandleProperty::Object => celox_design::ValueKind::ObjRef,
             }),
             ObjectOp::Randomize(_)
+            | ObjectOp::ConstraintModeGet(_)
+            | ObjectOp::ConstraintModeSet(_)
             | ObjectOp::Store(_)
             | ObjectOp::ClassOf
             | ObjectOp::Random

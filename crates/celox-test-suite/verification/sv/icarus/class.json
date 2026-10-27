@@ -578,6 +578,94 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_constraint_modes",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_base_dispatch",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_constraint_modes",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_basic",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_constraint_modes",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_hooks",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_constraint_modes",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_inheritance",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::constructors_chain_to_base",

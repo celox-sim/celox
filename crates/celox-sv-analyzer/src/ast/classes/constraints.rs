@@ -350,12 +350,17 @@ impl Class {
             });
         }
         let mut constraints = Vec::new();
-        for (_, block) in &self.constraints {
+        for (index, (_, block)) in self.constraints.iter().enumerate() {
             constraints.extend(
                 block
                     .as_ref()
                     .map_err(|reason| unsupported(format!("constraints: {reason}")))?
-                    .clone(),
+                    .iter()
+                    .cloned()
+                    .map(|value| ConstraintExpr::Enabled {
+                        index: index as u32,
+                        value: Box::new(value),
+                    }),
             );
         }
         Ok(Program {
