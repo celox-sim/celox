@@ -1,0 +1,1 @@
+Fix review 5663030403 after syncing merged #2231-#2234: normalize case-wide types, preserve membership X, and verify constant/local initialization and default-stack recursion.
