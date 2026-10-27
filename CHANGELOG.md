@@ -1,8 +1,16 @@
 # Changelog
 
-## 0.12.0 (2026-10-27)
+## 0.12.0 (2026-10-28)
 
 ## What's Changed
+* fix(sv): parse virtual method qualifiers before visibility in https://github.com/celox-sim/celox/pull/2276
+* feat(sv)!: support per-object constraint modes in https://github.com/celox-sim/celox/pull/2271
+* ci: default pull request Rust tests to native serial execution in https://github.com/celox-sim/celox/pull/2283
+* feat(sv): support dynamic container class properties in https://github.com/celox-sim/celox/pull/2278
+* feat(sv): forward interface header ports through modports in https://github.com/celox-sim/celox/pull/2277
+* test(xezim): update xezim digest to 5eab5f2 in https://github.com/celox-sim/celox/pull/2286
+* fix(sv): retain conditional types in constant functions in https://github.com/celox-sim/celox/pull/2289
+* ci: separate external comparisons from release qualification in https://github.com/celox-sim/celox/pull/2288
 * chore(deps): update dependency lefthook to v2.2.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1282
 * chore(deps): update dependency @playwright/test to v1.64.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1284
 * fix(release): publish SV analyzer before the test suite by @tignear in https://github.com/celox-sim/celox/pull/1287
