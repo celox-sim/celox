@@ -514,7 +514,7 @@ test("full cocotb runs reuse the workspace build and report failures before uplo
   const rust = job("rust-tests");
   const full = rust.match(/run: >-\n\s+(cargo nextest run[^\n]*)\n\s+(--features [^\n]*)/);
   assert.ok(full);
-  const original = `${full[1]} ${full[2]}`.replaceAll("'", "").split(/\s+/).slice(1);
+  const original = `${full[1]} ${full[2]}`.replace(' -E "$RUST_BACKEND_FILTER"', "").replaceAll("'", "").split(/\s+/).slice(1);
   const args = cargoArguments("rust-tests", "Run cocotb VPI end-to-end test", { RUST_FULL: "true" });
   assert.deepEqual(args.slice(0, -4), original);
   assert.ok(rust.indexOf("Collect Rust test reports") < rust.indexOf("Run cocotb VPI end-to-end test"));
@@ -597,4 +597,18 @@ test("evicted default-branch dependency caches recover without dependency change
     assert.match(block, /if: steps.cache.outputs.cache-hit != 'true'/);
   }
   assert.doesNotMatch(warm, /pull_request_target:|workflow_run:/);
+});
+
+
+test("PR backend policy reaches scoped, workspace fallback and queue execution", () => {
+  assert.match(job("changes"), /rust_backend_filter: \$\{\{ steps\.classify\.outputs\.rust_backend_filter \}\}/);
+  const rust = job("rust-tests");
+  assert.match(rust, /RUST_BACKEND_FILTER: \$\{\{ needs\.changes\.outputs\.rust_backend_filter \|\| 'all\(\)' \}\}/);
+  assert.equal((rust.match(/-E "\$RUST_BACKEND_FILTER"/g) ?? []).length, 2);
+  const args = cargoArguments("rust-tests", "Run the tests this pull request can affect", {
+    BUILDS: JSON.stringify([{ packages: ["celox"], targets: ["counter"], features: [] }]),
+    FILTER: "binary_id(celox::counter)", RUST_BACKEND_FILTER: "not test(parallel)",
+    CELOX_VTEST_RUNNER: "/executor",
+  });
+  assert.equal(args.at(-1), "(binary_id(celox::counter)) & (not test(parallel))");
 });

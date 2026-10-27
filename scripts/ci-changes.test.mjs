@@ -160,6 +160,7 @@ test("full validation overrides even an empty valid diff", () => {
       queue: true,
       full_validation: true,
       fast_queue: false,
+      rust_backend_filter: false,
       heliodor_arm64: true,
       // The whole Rust workspace, with no package scope or filter.
       rust_full: true,
@@ -216,7 +217,7 @@ function runClassifier(
         const [name, value] = line.split("=");
         return [name, value === "true"];
       })
-      .filter(([name]) => !name.startsWith("rust_") && !["queue", "full_validation", "fast_queue"].includes(name)),
+      .filter(([name]) => !name.startsWith("rust_") && !["queue", "full_validation", "fast_queue", "rust_backend_filter"].includes(name)),
   );
 }
 
