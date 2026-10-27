@@ -147,6 +147,72 @@ fn partitioned_native_matches_single_pass() {
     assert_eq!(trace!(partitioned().build_native().unwrap()), reference());
 }
 
+/// A count of dirty partitions says nothing about their share of the work:
+/// unrelated partitions can contain much wider expressions or larger processes.
+/// Updating one input must not promote its three readers to a full settle.
+#[test]
+fn sparse_partition_updates_do_not_promote_unrelated_work() {
+    const SOURCE: &str = r#"
+module Top (
+    a: input logic<8>, b: input logic<8>, c: input logic<8>,
+    a0: output logic<8>, a1: output logic<8>, a2: output logic<8>,
+    b0: output logic<8>, b1: output logic<8>, b2: output logic<8>,
+    c0: output logic<8>, c1: output logic<8>, c2: output logic<8>,
+) {
+    assign a0 = a + 8'd1; assign a1 = a + 8'd2; assign a2 = a + 8'd3;
+    assign b0 = b + 8'd1; assign b1 = b + 8'd2; assign b2 = b + 8'd3;
+    assign c0 = c + 8'd1; assign c1 = c + 8'd2; assign c2 = c + 8'd3;
+}
+"#;
+    let mut sim = Simulator::builder(SOURCE, "Top")
+        .settle_partition(SettlePartition::Always)
+        .build_interpreter()
+        .unwrap();
+    let settle = sim.layout().settle.as_ref().unwrap().clone();
+    let flags = || {
+        let (memory, _) = sim.memory_as_ptr();
+        // SAFETY: these offsets describe this simulator's state allocation.
+        unsafe {
+            std::slice::from_raw_parts(memory.add(settle.flags_offset), settle.partitions + 2)
+                .to_vec()
+        }
+    };
+    // Initial evaluation still runs every partition.
+    let initial = flags();
+    assert!(initial[..settle.partitions].iter().all(|&flag| flag == 1));
+    sim.eval_comb().unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 7u8)).unwrap();
+    let (memory, _) = sim.memory_as_ptr();
+    let pending =
+        unsafe { std::slice::from_raw_parts(memory.add(settle.flags_offset), settle.partitions) };
+    let dirty = pending.iter().filter(|&&flag| flag != 0).count();
+    assert_eq!(dirty, 3);
+    assert_eq!(settle.partitions, 9);
+    sim.eval_comb().unwrap();
+    let (memory, _) = sim.memory_as_ptr();
+    assert_eq!(
+        unsafe { *memory.add(settle.flags_offset + settle.partitions + 1) },
+        0,
+        "a partial update promoted unrelated partitions to a full settle"
+    );
+    let a2 = sim.signal("a2");
+    let b2 = sim.signal("b2");
+    assert_eq!(sim.get(a2), BigUint::from(10u8));
+    assert_eq!(sim.get(b2), BigUint::from(3u8));
+
+    // A retained raw view still requires full evaluation on every settle.
+    let (memory, _) = sim.memory_as_mut_ptr();
+    // SAFETY: a names an eight-bit input in this allocation.
+    unsafe { *memory.add(a.offset) = 11 };
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(a2), BigUint::from(14u8));
+    assert_eq!(
+        unsafe { *memory.add(settle.flags_offset + settle.partitions + 1) },
+        1
+    );
+}
+
 /// Loading a state file writes every object, so every partition reading one
 /// must run again; the settle's flags themselves are not state.
 #[test]
