@@ -1,1 +1,1 @@
-Investigate and fix PR #2233 CI SIGABRT in misused_parameterized_classes_are_rejected; retain host-runtime-disabled SV feature-gating fix and validate affected consumers.
+Rebase the performance stack after #2229/#2230 merged; fix #2233 CI stack overflow while rejecting recursively parameterized inheritance, and keep the no-host SV build correction covered.
