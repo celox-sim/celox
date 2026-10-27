@@ -662,6 +662,10 @@
     "sv_class-X12": {
       "title": "A class type-parameter qualifier in a static method resolves to a same-named package or zero instead of the selected class static property",
       "standard": "IEEE 1800-2023 6.20.3, 8.23, 8.24, 8.25.1"
+    },
+    "sv_class-X13": {
+      "title": "A class-local typedef qualifier in an out-of-block static method fails to shadow a same-named package",
+      "standard": "IEEE 1800-2023 6.18, 8.23, 8.24"
     }
   },
   "cases": [
@@ -4087,6 +4091,14 @@
       "classification": "xezim_bug",
       "bug": "sv_class-X12",
       "note": "TYPE defaults to Item, whose static value is initialized to 42. TYPE::value inside Local must read 42; the unrelated package TYPE::value stays 7 outside Local. The shared imports case reports done=0 instead of 1; the shadowing case reports flags=1 instead of 3. The adapter-free fixture prints direct=42 result=7 pkg=7 for both Top and Wrapped, instead of result=42. Pinned source 5eab5f2, core 1947ac68. Repro: verification/repros/sv_class_type_parameter_xezim.sv; observations: verification/repros/sv_class_type_parameter_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "class::type_alias_lexical_scopes",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X13",
+      "note": "Reader::get must see its class-local typedef Alias=Item, so Alias::value reads Item::value=42; the package Alias::value outside the class stays 7. The shared case reports sum=7 instead of 49. The adapter-free fixture prints direct=42 result=7 pkg=7 as Top, demonstrating the incorrect package lookup without a generated testbench; as Wrapped it returns result=0, exposing the additional non-top extern-method lookup problem. Pinned source 5eab5f2, core 1947ac68. Repro: verification/repros/sv_class_type_alias_xezim.sv; observations: verification/repros/sv_class_type_alias_xezim.json."
     }
   ]
 }

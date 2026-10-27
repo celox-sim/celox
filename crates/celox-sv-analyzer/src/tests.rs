@@ -6964,6 +6964,37 @@ fn class_type_parameter_scopes_do_not_hide_unknown_packages() {
 }
 
 #[test]
+fn class_type_alias_qualifiers_are_not_package_dependencies() {
+    for source in [
+        "package p; class Item; static int value=42; endclass typedef Item Alias; class Q; static function int get(); return Alias::value; endfunction endclass endpackage module Top; endmodule",
+        "package p; class Item#(int N=42); static int value=N; endclass typedef Item#(23) Alias; class Q; static function int get(); return Alias::value; endfunction endclass endpackage module Top; endmodule",
+        "module Top; class Item; typedef bit[7:0] word_t; endclass typedef Item Alias; Alias::word_t value; endmodule",
+        "package Alias; class Item; static int value=42; endclass endpackage module Top; typedef Alias::Item Alias; initial $display(Alias::value); endmodule",
+        "module Top; class Item; static int value=42; endclass if (1) begin : g typedef Item Alias; initial $display(Alias::value); end endmodule",
+        "module Top; class Item; static int value=42; endclass class Q; typedef Item Alias; static function int get(); return Alias::value; endfunction endclass endmodule",
+        "package a; typedef int Alias; endpackage package b; typedef byte Alias; endpackage module Top; import a::*; import b::*; class Item; static int value=42; endclass class Q; typedef Item Alias; static function int get(); return Alias::value; endfunction endclass endmodule",
+    ] {
+        analyze_source(source, Path::new("class-alias-qualifier.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+}
+
+#[test]
+fn class_type_alias_scopes_preserve_package_dependencies() {
+    for source in [
+        "module Top; class Item; static int value=42; endclass class Q; typedef Item Alias; endclass localparam int value=Alias::value; endmodule",
+        "module Top; class Item; static int value=42; endclass if (1) begin : g typedef Item Alias; end localparam int value=Alias::value; endmodule",
+        "module Top; class Item; endclass typedef Alias::Item Alias; endmodule",
+    ] {
+        let error = analyze_source(source, Path::new("class-alias-real-package.sv")).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown package `Alias`"),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
 fn class_visibility_accepts_lexical_access_and_shadowing() {
     for member in [
         "int x;",

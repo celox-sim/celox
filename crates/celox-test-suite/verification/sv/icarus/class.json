@@ -1481,6 +1481,28 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Syntax error in typedef clause.\n<case>/source_0.sv:11: sorry: External methods are not yet supported.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: I give up on this function definition.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::type_alias_lexical_scopes",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::type_alias_members",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:7: syntax error\nI give up.\n",
       "expectation": "Simulation",
       "name": "class::type_parameter_imports",
