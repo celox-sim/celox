@@ -234,10 +234,22 @@ nested blocks. Both sides participate in solving: a required result can constrai
 the condition. These constructs do not choose a branch before solving.
 
 Constrained enums and `randc`, foreach/soft constraints,
-`dist`, `solve before`, constraint modes, external/static blocks, typed parameters
-in constraints, and inline `with` remain unsupported. Larger unconstrained `randc`
+`dist`, `solve before`, constraint modes, external/static blocks and typed
+parameters in constraints remain unsupported. Larger unconstrained `randc`
 domains, static random properties and random array/object/string properties also
 remain unsupported. Unsupported dynamic subclasses are rejected before draws.
+`object.randomize() with { ... }` adds per-call scalar constraints to the
+object's declared constraints. It supports the operators, membership and
+conditional constraints above, explicit member selection and `randomize(null)`.
+Unqualified property names resolve against the handle's declared class; derived
+object constraints and hooks still apply. A failed solve preserves properties,
+skips the post-hook and restores temporary selection modes. Inline constraints
+do not remain installed for later calls.
+
+This initial inline subset accepts unqualified instance-property references.
+Caller-local captures, `local::`, `this` / `super` qualified references, restricted
+`with (names)` lookup and scope `std::randomize(...) with` remain unsupported.
+
 A call through `null` is a runtime error.
 
 ### Time literal delays {#time-literal-delays}
