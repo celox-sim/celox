@@ -632,6 +632,16 @@ fn verify_instruction_types<A>(
             same_width(*old, *new, "TYPE.CAPTURE_COMPARE_OPERANDS")?;
         }
         SIRInstruction::ExternCall { dst, func, args } => {
+            if crate::extern_abi::native_kernel_index(*func).is_some()
+                && (dst.is_some() || !args.is_empty())
+            {
+                return Err(SirVerifyError::instruction(
+                    "TYPE.NATIVE_KERNEL_CALL_SIGNATURE",
+                    block,
+                    index,
+                    "a native kernel call has only an implicit state pointer",
+                ));
+            }
             if *func == crate::extern_abi::HEAP_HELPER_ID
                 && args.len() != crate::extern_abi::HEAP_HELPER_ARGUMENTS
             {
