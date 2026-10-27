@@ -761,6 +761,9 @@ unsupported, including when the inference option is enabled.
   `clk = 1; en = 0;` is an event and `en = 0; clk = 1;` is none.
   This also preserves assignment order across hierarchical references and
   reads automatic gates from the waiting activation, including shared fork locals.
+  Tracked host pulses also use that activation's gate. Implicit function or
+  output-argument writes to operands of an automatic gated wait are rejected
+  until those writes have safe assignment observation boundaries.
   Verilator 5.052 judges the condition later, after the process suspends,
   and gives the opposite results. A condition that is an expression or a
   net, an `expr` other than a variable, and a variable that a flip-flop

@@ -389,6 +389,8 @@ Rust の `.allow_inferred_latches(true)` と JavaScript の `allowInferredLatche
   スケジュールされたクロックのエッジ、ホストの書き込みといった `expr` への書き込みごとに条件を判定します。
   1つのプロセスで `clk = 1; en = 0;` はイベントになり、`en = 0; clk = 1;` はなりません。
   階層参照でも書き込み順を保持し、automatic な条件は待機側の activation から読みます。fork で共有する局所変数も対象です。
+  ホスト書き込みのパルスも待機側の条件で判定します。automatic 変数を含む gated wait のオペランドへの、
+  関数や出力引数経由の暗黙の書き込みは、安全な代入観測境界に未対応のため拒否します。
   Verilator 5.052 はプロセスが suspend した後で条件を判定し、逆の結果になります。式やネットの条件、
   変数以外の `expr`、flip-flop の domain が書く変数（[#1830](https://github.com/celox-sim/celox/issues/1830)）は、
   組み合わせ回路が確定した後に発生を検出した時点で判定します。イベント式と同じく、プロセスの書き込みは

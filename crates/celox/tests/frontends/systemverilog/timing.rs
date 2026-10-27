@@ -1845,3 +1845,105 @@ fn iff_fork_waits_keep_gates_across_state_files() {
 timed_cases! {
     fn iff_automatic_clock_preserves_enabled_pulses = "timing::iff_automatic_clock_preserves_enabled_pulses";
 }
+
+#[test]
+fn iff_automatic_gate_rejects_unobserved_function_writes() {
+    let source = r#"
+        module Top(output int n);
+            bit clk;
+            function automatic int pulse(output bit gate);
+                clk=1; gate=0; return 0;
+            endfunction
+            initial begin
+                automatic bit enable=1;
+                int unused;
+                fork
+                    begin @(posedge clk iff enable); n++; end
+                    begin #1; unused=pulse(enable); end
+                join_none
+                #3;
+            end
+        endmodule
+    "#;
+    let error = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("iff_function_write.sv"))],
+        "Top",
+    )
+    .build()
+    .err()
+    .unwrap_or_else(|| panic!("implicit function writes require observation boundaries"))
+    .to_string();
+    assert!(
+        error.contains("implicit write to an activation-local event operand"),
+        "{error}"
+    );
+    let unrelated = source
+        .replace("bit clk;", "bit clk, other;")
+        .replace("clk=1; gate=0;", "other=1; gate=0;")
+        .replace(
+            "automatic bit enable=1;",
+            "automatic bit enable=1, other_gate=0;",
+        )
+        .replace("pulse(enable)", "pulse(other_gate)");
+    assert!(
+        celox::Simulation::from_sv_sources(
+            vec![(
+                unrelated.as_str(),
+                std::path::Path::new("iff_unrelated_function.sv")
+            )],
+            "Top"
+        )
+        .build()
+        .is_ok()
+    );
+}
+
+#[test]
+fn iff_host_pulses_use_the_waiting_automatic_gate() {
+    let source = r#"
+        module Top(input bit clk, output int accepted, rejected);
+            timeunit 1ns / 1ns;
+            initial begin
+                automatic bit enabled=1, disabled=0;
+                fork
+                    begin @(posedge clk iff enabled); accepted++; end
+                    begin @(posedge clk iff disabled); rejected++; end
+                join_none
+                #4;
+            end
+        endmodule
+    "#;
+    let build = || {
+        celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("iff_local_host_pulse.sv"))],
+            "Top",
+        )
+    };
+    macro_rules! check {
+        ($sim:expr) => {{
+            let mut sim = $sim.unwrap();
+            sim.run_until(1).unwrap();
+            let clk = sim.signal("clk");
+            sim.modify(|io| {
+                io.set(clk, 1u8);
+                io.set(clk, 0u8);
+            })
+            .unwrap();
+            let mut bytes = Vec::new();
+            sim.save_state().unwrap().write_to(&mut bytes).unwrap();
+            let file = celox::StateFile::read_from(bytes.as_slice()).unwrap();
+            for restored in [false, true] {
+                if restored {
+                    sim.load_state(&file).unwrap();
+                }
+                sim.run_until(2).unwrap();
+                assert_eq!(sim.get(sim.signal("accepted")), 1u32.into());
+                assert_eq!(sim.get(sim.signal("rejected")), 0u32.into());
+            }
+        }};
+    }
+    check!(build().build_interpreter());
+    check!(build().build_native());
+    check!(build().build_cranelift());
+    check!(build().build_wasm());
+}

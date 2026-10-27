@@ -5977,12 +5977,26 @@ impl Ff<'_, '_> {
                 "activation-local event expression without assignment observation boundaries",
             ));
         }
-        if self.event_probes.iter().any(|probe| {
+        let implicit_probe_write = self.event_probes.iter().any(|probe| {
             probe
                 .inputs
                 .iter()
                 .any(|input| self.unobserved_function_writes.contains(input))
-        }) {
+        });
+        let implicit_gate_write = self.wait_sites.iter().any(|site| {
+            site.terms
+                .iter()
+                .zip(&site.gates)
+                .any(|(&(signal, _), gate)| {
+                    gate.is_some_and(|gate| {
+                        gate.at_write
+                            && gate.counters.is_none()
+                            && (self.unobserved_function_writes.contains(&signal)
+                                || self.unobserved_function_writes.contains(&gate.signal))
+                    })
+                })
+        });
+        if implicit_probe_write || implicit_gate_write {
             return Err(unsupported(
                 "implicit write to an activation-local event operand without an observation boundary",
             ));

@@ -560,6 +560,7 @@ impl<B: SimBackend> SimulationState<B> {
             ready,
             reactive,
             activations,
+            cells,
             ..
         } = &mut self.process_state;
         waiters.retain(false, |process, waiter| {
@@ -572,10 +573,28 @@ impl<B: SimBackend> SimulationState<B> {
                 .zip(&mut waiter.baselines)
                 .enumerate()
             {
-                // A gated term is judged at the next settled check.
-                if term.signal != signal || gates.get(index).is_some_and(Option::is_some) {
+                if term.signal != signal {
                     continue;
                 }
+                let gate_holds = match gates.get(index).copied().flatten() {
+                    None => true,
+                    Some(gate) if gate.at_write && gate.counters.is_none() => {
+                        // No module counter can capture an activation-local
+                        // gate. Replay each host value with that activation's
+                        // unchanged gate before HDL execution resumes.
+                        let Some(value) = super::activation::activation_value(
+                            activations,
+                            cells,
+                            &processes[process],
+                            process,
+                            gate.signal,
+                        ) else {
+                            continue;
+                        };
+                        value.0.bit(0) && !value.1.bit(0)
+                    }
+                    Some(_) => continue,
+                };
                 match baseline {
                     // Counters are bumped by the write itself.
                     Baseline::Counter { .. }
@@ -583,10 +602,10 @@ impl<B: SimBackend> SimulationState<B> {
                     | Baseline::Gated { .. } => {}
                     Baseline::Raw(last) => {
                         let now = encode_planes(value, signal.width, last.len());
-                        wake |= Self::advance(term.kind, last, &now, signal.width);
+                        wake |= Self::advance(term.kind, last, &now, signal.width) & gate_holds;
                     }
                     Baseline::Value(last) => {
-                        wake |= occurs(term.kind, last, value);
+                        wake |= occurs(term.kind, last, value) & gate_holds;
                         *last = value.clone();
                     }
                 }
