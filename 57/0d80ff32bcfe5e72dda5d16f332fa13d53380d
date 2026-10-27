@@ -1,0 +1,1 @@
+Fix review 5663715698: sample inline inputs after pre_randomize, reject receiver static names before fallback, and accept observed sv-tests improvement
