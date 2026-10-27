@@ -128,6 +128,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
+name = "aplite"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -627,6 +634,7 @@ dependencies = [
  "miette",
  "num-bigint",
  "num-traits",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
@@ -656,7 +664,10 @@ dependencies = [
 name = "celox-heap"
 version = "0.11.0"
 dependencies = [
+ "aplite",
  "fxhash",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -776,6 +787,7 @@ name = "celox-sv-analyzer"
 version = "0.11.0"
 dependencies = [
  "celox-design",
+ "celox-heap",
  "celox-sv-syntax",
  "fxhash",
  "miette",
@@ -841,6 +853,7 @@ dependencies = [
  "celox",
  "celox-design",
  "celox-frontend-veryl",
+ "celox-runtime",
  "celox-sv-analyzer",
  "clap",
  "fxhash",
@@ -2770,6 +2783,7 @@ dependencies = [
 name = "lydite-ir"
 version = "0.11.0"
 dependencies = [
+ "aplite",
  "serde_json",
 ]
 
@@ -2777,6 +2791,7 @@ dependencies = [
 name = "lydite-solver"
 version = "0.11.0"
 dependencies = [
+ "aplite",
  "lydite-ir",
  "serde_json",
 ]
@@ -5650,9 +5665,9 @@ dependencies = [
 
 [[package]]
 name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
+version = "2.1.2+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",

@@ -372,6 +372,15 @@ jobs:
           cargo test --locked -p celox-test-suite --features "$VERIFY_TOOL"
           --test oracles -- --ignored
 
+      # The VPI host's time-step regions against Icarus, through the same
+      # cocotb test module, with the locked cocotb and Icarus versions.
+      - name: Cross-check cocotb time-step regions against Icarus
+        if: matrix.suite == 'sv' && matrix.tool == 'icarus'
+        run: >-
+          nix develop "$VERIFY_SHELL" --no-update-lock-file --command
+          cargo test --locked -p celox-vpi --features systemverilog
+          --test cocotb_e2e icarus_and_celox_agree_on_dut_processes -- --ignored --exact
+
       - name: Catalogue every shared case
         if: ${{ !cancelled() }}
         run: |
@@ -529,6 +538,15 @@ jobs:
           --expected conformance/sv-tests/expected.tsv
           --report "$RUNNER_TEMP/sv-tests-report.tsv"
 
+      - name: Summarize sv-tests failures
+        if: always()
+        shell: bash
+        run: |
+          report="$RUNNER_TEMP/sv-tests-report.summary.md"
+          if [ -f "$report" ]; then
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Retain the report and official per-case logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -537,6 +555,8 @@ jobs:
           path: |
             ${{ runner.temp }}/sv-tests-report.tsv
             ${{ runner.temp }}/sv-tests-report.summary.json
+            ${{ runner.temp }}/sv-tests-report.summary.md
+            ${{ runner.temp }}/sv-tests-report.failures.json
             ${{ runner.temp }}/sv-tests-results
           if-no-files-found: ignore
           retention-days: 14

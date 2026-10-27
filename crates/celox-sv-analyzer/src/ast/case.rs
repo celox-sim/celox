@@ -70,9 +70,11 @@ pub(super) fn expr_is_two_state(
             ..
         } => false,
         Expr::Call {
-            callee: Callee::Object(_),
+            callee: Callee::Object(op),
             ..
-        } => true,
+        } => {
+            !matches!(**op, ObjectOp::Container { op: ContainerOp::Get | ContainerOp::PopFront | ContainerOp::PopBack | ContainerOp::Equal, layout } if !layout.two_state)
+        }
         Expr::Call {
             callee: Callee::Subroutine(name),
             ..

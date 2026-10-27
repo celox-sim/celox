@@ -125,7 +125,7 @@ fn bind_in_context(
                     operator,
                     right,
                 } => {
-                    if constants::binary_op_from_text(operator).is_none() {
+                    if operator != "->" && constants::binary_op_from_text(operator).is_none() {
                         return Ok(None);
                     }
                     jobs.push(Job::Binary(operator.clone()));
@@ -339,6 +339,9 @@ fn bind_in_context(
                     };
                     values.push(value);
                 }
+                ExprKind::ArrayMethodWith { .. } => {
+                    return Err(unsupported("array method with expression"));
+                }
                 _ => return Ok(None),
             },
             Job::Cast(target) => {
@@ -363,9 +366,21 @@ fn bind_in_context(
             Job::Binary(op) => {
                 let right = values.pop().ok_or_else(disagreement)?;
                 let left = values.pop().ok_or_else(disagreement)?;
+                let left = if op == "->" {
+                    ConstExpr::Unary {
+                        op: UnaryOp::LogicNot,
+                        expr: Box::new(left),
+                    }
+                } else {
+                    left
+                };
                 values.push(ConstExpr::Binary {
                     left: Box::new(left),
-                    op: constants::binary_op_from_text(&op).ok_or_else(disagreement)?,
+                    op: if op == "->" {
+                        BinaryOp::LogicOr
+                    } else {
+                        constants::binary_op_from_text(&op).ok_or_else(disagreement)?
+                    },
                     right: Box::new(right),
                 });
             }

@@ -6498,6 +6498,7 @@ mod bit_count_tests {
 
         MemoryLayout {
             trace: None,
+            settle: None,
             four_state,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),

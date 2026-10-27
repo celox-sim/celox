@@ -461,8 +461,6 @@ fn event_expressions_with_effects_are_rejected() {
 fn unimplemented_timing_features_are_rejected() {
     for (body, construct, issue) in [
         ("bit a; initial @(a iff a);", "iff-qualified event", 1444),
-        ("initial fork #1; join", "fork-join block", 88),
-        ("initial fork #1; join_none", "fork-join block", 88),
         ("event e; initial -> e;", "named event", 88),
         (
             "bit a, b; initial a = #1 b;",
@@ -479,8 +477,6 @@ fn unimplemented_timing_features_are_rejected() {
             "intra-assignment timing control",
             88,
         ),
-        ("initial wait fork;", "wait fork statement", 88),
-        ("initial disable fork;", "disable fork statement", 88),
         (
             "bit a; task t(input bit x); wait (a ^ x); endtask initial t(0);",
             "wait condition reading a static task argument",
@@ -1163,5 +1159,206 @@ fn design_processes_a_program_wakes_run_before_the_nonblocking_updates() {
             sim.get(signal)
         });
         assert_eq!(values, [0u8.into(), 1u8.into()], "four_state={four_state}");
+    }
+}
+
+// Forked child activations and join boundaries.
+timed_cases! {
+    fn fork_join_any_keeps_other_children_running = "fork::join_any_keeps_other_children_running";
+    fn fork_join_none_starts_after_parent_blocks = "fork::join_none_starts_after_parent_blocks";
+    fn fork_repeated_forks_capture_each_automatic_local = "fork::repeated_forks_capture_each_automatic_local";
+    fn fork_nested_forks_wait_for_their_own_children = "fork::nested_forks_wait_for_their_own_children";
+    fn fork_automatic_task_inputs_outlive_the_call = "fork::automatic_task_inputs_outlive_the_call";
+    fn fork_fork_children_wait_for_signal_changes = "fork::fork_children_wait_for_signal_changes";
+    fn fork_repeated_forks_reuse_finished_instances = "fork::repeated_forks_reuse_finished_instances";
+    fn fork_static_locals_are_shared_between_overlapping_children = "fork::static_locals_are_shared_between_overlapping_children";
+    fn fork_fork_nonblocking_updates_keep_each_child_value = "fork::fork_nonblocking_updates_keep_each_child_value";
+    fn fork_children_share_a_live_automatic_local = "fork::children_share_a_live_automatic_local";
+    fn fork_wait_on_shared_automatic_local_wakes_after_child_write = "fork::wait_on_shared_automatic_local_wakes_after_child_write";
+    fn fork_event_on_shared_automatic_local_wakes_after_child_write = "fork::event_on_shared_automatic_local_wakes_after_child_write";
+    fn fork_suspended_child_keeps_automatic_string_alive = "fork::suspended_child_keeps_automatic_string_alive";
+    fn fork_child_delay_uses_current_simulation_time = "fork::child_delay_uses_current_simulation_time";
+    fn fork_join_any_waits_only_for_immediate_children = "fork::join_any_waits_only_for_immediate_children";
+}
+
+timed_cases! { fn fork_four_state_automatic_values_survive_fork_suspension = "fork::four_state_automatic_values_survive_fork_suspension"; }
+
+timed_cases! {
+    fn fork_control_no_children_does_not_suspend = "fork_control::no_children_does_not_suspend";
+    fn fork_control_wait_in_task_includes_earlier_forks = "fork_control::wait_in_task_includes_earlier_forks";
+    fn fork_control_wait_excludes_descendants_of_completed_children = "fork_control::wait_excludes_descendants_of_completed_children";
+    fn fork_control_disable_before_children_start = "fork_control::disable_before_children_start";
+    fn fork_control_disable_after_join_any_cancels_waiters_and_delays = "fork_control::disable_after_join_any_cancels_waiters_and_delays";
+    fn fork_control_disable_reaches_through_completed_parents = "fork_control::disable_reaches_through_completed_parents";
+    fn fork_control_disable_does_not_kill_siblings_or_caller = "fork_control::disable_does_not_kill_siblings_or_caller";
+    fn fork_control_disable_removes_nested_join_waits = "fork_control::disable_removes_nested_join_waits";
+    fn fork_control_cancelled_ids_can_be_reused_without_stale_wakeups = "fork_control::cancelled_ids_can_be_reused_without_stale_wakeups";
+    fn fork_control_program_waits_then_cancels_in_reactive_region = "fork_control::program_waits_then_cancels_in_reactive_region";
+}
+
+timed_cases! {
+    fn fork_control_function_disable_uses_calling_process = "fork_control::function_disable_uses_calling_process";
+}
+
+timed_cases! {
+    fn fork_control_four_state_values_survive_wait_and_cancellation = "fork_control::four_state_values_survive_wait_and_cancellation";
+}
+
+timed_cases! {
+    fn fork_control_review_wait_predicate_preserves_cancellation = "fork_control::wait_predicate_preserves_cancellation";
+    fn fork_control_review_wait_predicate_repeats_effects_on_each_wakeup = "fork_control::wait_predicate_repeats_effects_on_each_wakeup";
+    fn fork_control_review_event_driven_caller_propagates_wait_fork_through_tasks = "fork_control::event_driven_caller_propagates_wait_fork_through_tasks";
+    fn fork_control_review_event_driven_caller_spawns_untimed_children = "fork_control::event_driven_caller_spawns_untimed_children";
+}
+
+timed_cases! {
+    fn fork_control_function_join_none_automatic_values_outlive_returns = "fork_control::function_join_none_automatic_values_outlive_returns";
+    fn fork_control_function_join_none_children_can_call_timed_tasks = "fork_control::function_join_none_children_can_call_timed_tasks";
+    fn fork_control_function_join_none_preserves_expression_temporaries = "fork_control::function_join_none_preserves_expression_temporaries";
+    fn fork_control_function_join_none_retains_child_only_class_handle = "fork_control::function_join_none_retains_child_only_class_handle";
+    fn fork_control_function_join_none_event_driven_caller = "fork_control::function_join_none_event_driven_caller";
+    fn fork_control_function_join_none_calls_in_defaults_need_process_frames = "fork_control::function_join_none_calls_in_defaults_need_process_frames";
+}
+
+#[test]
+fn function_join_none_interpreter() {
+    for name in [
+        "automatic_values_outlive_returns",
+        "children_can_call_timed_tasks",
+        "calls_in_defaults_need_process_frames",
+        "event_driven_caller",
+        "preserves_expression_temporaries",
+        "retains_child_only_class_handle",
+    ] {
+        crate::suite::run_case(
+            &format!("fork_control::function_join_none_{name}"),
+            "interpreter",
+        );
+    }
+}
+
+// Activation-local compound event expressions (IEEE 1800-2023 9.4.2).
+timed_cases! {
+    fn fork_compound_event_tracks_result_not_operands = "fork::compound_event_tracks_result_not_operands";
+    fn fork_compound_event_activations_outlive_parent = "fork::compound_event_activations_outlive_parent";
+    fn fork_compound_event_function_scratch_isolated = "fork::compound_event_function_scratch_isolated";
+    fn fork_compound_event_four_state_lsb_edges = "fork::compound_event_four_state_lsb_edges";
+}
+
+#[test]
+fn fork_compound_event_rejects_nonautomatic_operands() {
+    let source = r#"
+        module Top;
+            int operand;
+            function automatic int pulse(); operand=1; operand=0; return 0; endfunction
+            initial begin
+                automatic int local_value=1;
+                int unused_result;
+                fork
+                    begin @(operand && local_value); end
+                    begin #1; unused_result=pulse(); end
+                join
+            end
+        endmodule
+    "#;
+    let error = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("function_operand_write.sv"))],
+        "Top",
+    )
+    .build()
+    .err()
+    .unwrap_or_else(|| panic!("mixed global operands need additional observation boundaries"))
+    .to_string();
+    assert!(
+        error.contains("activation-local event expression reading a non-automatic variable"),
+        "{error}"
+    );
+}
+
+#[test]
+fn fork_compound_event_interpreter() {
+    for name in [
+        "compound_event_tracks_result_not_operands",
+        "compound_event_activations_outlive_parent",
+        "compound_event_function_scratch_isolated",
+        "compound_event_four_state_lsb_edges",
+    ] {
+        crate::suite::run_case(&format!("fork::{name}"), "interpreter");
+    }
+}
+
+#[test]
+fn fork_compound_event_rejects_transitive_global_and_default_reads() {
+    for expression in ["outer(local_value)", "with_default(local_value)"] {
+        let source = format!(
+            r#"
+            module Top;
+                int global_value=1;
+                function automatic int inner(); return global_value; endfunction
+                function automatic int outer(input int x); return x+inner(); endfunction
+                function automatic int with_default(input int x, input int y=inner()); return x+y; endfunction
+                initial begin
+                    automatic int local_value=0;
+                    fork begin @({expression}); end begin #1; local_value=1; end join
+                end
+            endmodule
+        "#
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(
+                source.as_str(),
+                std::path::Path::new("global_probe_read.sv"),
+            )],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("global reads require additional event observation"))
+        .to_string();
+        assert!(
+            error.contains("activation-local event expression reading a non-automatic variable"),
+            "{expression}: {error}"
+        );
+    }
+}
+
+#[test]
+fn fork_compound_event_rejects_implicit_expression_writes() {
+    for expression in [
+        "put(value,1)+put(value,0)",
+        "$random(value)",
+        "$dist_uniform(value,0,1)",
+        "$value$plusargs(\"v=%d\",value)",
+    ] {
+        let source = format!(
+            r#"
+            module Top;
+                function automatic int put(output int dst,input int x); dst=x; return 0; endfunction
+                initial begin
+                    automatic int value=0;
+                    int discard;
+                    fork
+                        begin @(value==1); end
+                        begin #1; discard={expression}; end
+                    join
+                end
+            endmodule
+        "#
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(
+                source.as_str(),
+                std::path::Path::new("implicit_probe_write.sv"),
+            )],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("implicit writes need safe observation boundaries"))
+        .to_string();
+        assert!(
+            error.contains("implicit write to an activation-local event operand"),
+            "{expression}: {error}"
+        );
     }
 }

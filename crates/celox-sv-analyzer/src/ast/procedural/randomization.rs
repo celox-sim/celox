@@ -26,7 +26,7 @@ pub(super) fn lower(
     };
     let mut result = Vec::new();
     for method in ["randomize", "srandom", "rand_mode"] {
-        if method == "randomize" && class.check_randomize(tree).is_err() {
+        if method == "randomize" && class.check_randomize().is_err() {
             continue;
         }
         let mut builder =
@@ -133,32 +133,66 @@ pub(super) fn lower(
                     else_body: Vec::new(),
                 });
                 body.extend(hook("pre_randomize"));
-                for property in &class.properties {
-                    if property.constant
-                        || property.field.handle.is_some()
-                        || (property.r#type.is_enum && property.r#type.enum_values.is_none())
-                    {
-                        continue;
-                    }
-                    body.push(Stmt::If {
-                        condition: Expr::Binary {
-                            left: Box::new(Expr::Binary {
-                                left: Box::new(Expr::Ident(argument.clone())),
-                                op: BinaryOp::Ne,
-                                right: Box::new(Expr::Literal("1".into())),
-                            }),
-                            op: BinaryOp::LogicAnd,
-                            right: Box::new(classes::object_call(
-                                ObjectOp::ModeGet(
-                                    property.field.offset,
-                                    property.rand || property.randc,
-                                ),
-                                vec![Expr::Ident(this.clone())],
-                            )),
-                        },
-                        then_body: random_property(&mut builder, property, &this),
-                        else_body: Vec::new(),
+                if class.has_constraints {
+                    let success = builder.declare("$constraint_success", int_type());
+                    body.push(Stmt::Assign {
+                        lhs: LValue::Ident(success.clone()),
+                        rhs: classes::object_call(
+                            ObjectOp::Randomize(class.constraint_program()?),
+                            vec![
+                                Expr::Ident(this.clone()),
+                                Expr::Binary {
+                                    left: Box::new(Expr::Ident(argument.clone())),
+                                    op: BinaryOp::Eq,
+                                    right: Box::new(Expr::Literal("1".into())),
+                                },
+                            ],
+                        ),
+                        nonblocking: false,
                     });
+                    body.push(Stmt::If {
+                        condition: Expr::Ident(success),
+                        then_body: Vec::new(),
+                        else_body: vec![
+                            Stmt::If {
+                                condition: Expr::Ident(argument.clone()),
+                                then_body: vec![Stmt::Eval(classes::object_call(
+                                    ObjectOp::ModePop,
+                                    vec![Expr::Ident(this.clone())],
+                                ))],
+                                else_body: Vec::new(),
+                            },
+                            Stmt::Return(Some(Expr::Literal("32'sd0".into()))),
+                        ],
+                    });
+                } else {
+                    for property in &class.properties {
+                        if property.constant
+                            || property.field.handle.is_some()
+                            || (property.r#type.is_enum && property.r#type.enum_values.is_none())
+                        {
+                            continue;
+                        }
+                        body.push(Stmt::If {
+                            condition: Expr::Binary {
+                                left: Box::new(Expr::Binary {
+                                    left: Box::new(Expr::Ident(argument.clone())),
+                                    op: BinaryOp::Ne,
+                                    right: Box::new(Expr::Literal("1".into())),
+                                }),
+                                op: BinaryOp::LogicAnd,
+                                right: Box::new(classes::object_call(
+                                    ObjectOp::ModeGet(
+                                        property.field.offset,
+                                        property.rand || property.randc,
+                                    ),
+                                    vec![Expr::Ident(this.clone())],
+                                )),
+                            },
+                            then_body: random_property(&mut builder, property, &this),
+                            else_body: Vec::new(),
+                        });
+                    }
                 }
                 body.extend(hook("post_randomize"));
                 body.push(Stmt::If {
@@ -183,18 +217,17 @@ pub(super) fn lower(
             // Object-wide rand_mode also covers the dynamic object's members.
             let mut items = Vec::new();
             let aliases = item.type_aliases(&dimensions.type_aliases);
-            for declaration in &tree.declarations().classes {
-                if declaration.interface || declaration.virtual_class {
-                    continue;
-                }
-                let name = instances::normalize_identifier(&declaration.name.spelling);
+            for name in classes::visible_classes(tree) {
                 if name == class.name {
                     continue;
                 }
                 let Ok(derived) = classes::class(tree, &name, &item.env, &aliases) else {
                     continue;
                 };
-                if (method == "randomize" && derived.check_randomize(tree).is_err())
+                if derived.is_abstract || derived.is_interface {
+                    continue;
+                }
+                if (method == "randomize" && derived.check_randomize().is_err())
                     || !derived.derives_from(tree, &class.name, &item.env, &aliases)
                 {
                     continue;

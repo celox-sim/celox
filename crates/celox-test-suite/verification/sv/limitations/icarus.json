@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 17,
     "emission_error": 0,
-    "compile_error": 120,
+    "compile_error": 138,
     "runtime_error": 8,
     "unsupported": 0,
     "ignored": 0
@@ -1359,6 +1359,150 @@
       "name": "timing::always_star_timed_task_calls_wait_on_folded_branch_reads",
       "phase": "execute",
       "status": "mismatch"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 26; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Invalid module item.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:15: error: Invalid module item.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Invalid module item.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:18: error: Invalid module item.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Invalid module instantiation\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Malformed statement\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Malformed statement\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:24: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::class_scoped_parameters_and_types",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: I give up on this function definition.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:18: error: Invalid module item.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Invalid module instantiation\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::named_constructor_arguments",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: I give up on this function definition.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::specializations_are_named_by_parameter_values",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 28; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Invalid module item.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:14: error: Invalid module item.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Invalid module item.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:17: error: Invalid module item.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Invalid module instantiation\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Invalid module instantiation\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: error: Invalid module instantiation\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "class::specializations_of_interface_classes",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 28; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module instantiation\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: I give up on this function definition.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Syntax error defining function.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:19: error: Invalid module item.\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: error: I give up on this function definition.\n<case>/source_0.sv:26: syntax error\n<case>/source_0.sv:27: error: Invalid module item.\n<case>/source_0.sv:28: syntax error\n<case>/source_0.sv:28: error: Invalid module instantiation\n<case>/source_0.sv:29: syntax error\n<case>/source_0.sv:29: error: Invalid module instantiation\n<case>/source_0.sv:30: syntax error\n<case>/source_0.sv:30: error: Invalid module instantiation\n<case>/source_0.sv:31: syntax error\n<case>/source_0.sv:31: error: Invalid module instantiation\n<case>/source_0.sv:32: syntax error\n<case>/source_0.sv:32: error: Invalid module instantiation\n<case>/source_0.sv:40: syntax error\n<case>/source_0.sv:40: error: Malformed statement\n<case>/source_0.sv:42: syntax error\n<case>/source_0.sv:42: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::specializations_of_parameterized_classes",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 18; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:13: error: Invalid module item.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Invalid module instantiation\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "class::specializations_with_their_own_handles",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 18; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:14: error: Invalid module item.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Invalid module item.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:18: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "class::typedefs_of_interface_classes",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: I give up on this function definition.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:12: error: Invalid module item.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Invalid module instantiation\n<case>/source_0.sv:12: error: Invalid module instantiation\n<case>/source_0.sv:15: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Malformed statement\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Invalid module instantiation\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Invalid module item.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Invalid module instantiation\n<case>/testbench.sv:3: error: Invalid module item.\n<case>/testbench.sv:11: warning: Static variable initialization requires explicit lifetime in this context.\n<case>/source_0.sv:2: assert: pform.cc:1478: failed assertion lexical_scope == cur_module\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "class::specializations_in_generate_blocks",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 36; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Syntax error in typedef clause.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:13: error: Invalid module item.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:18: error: Invalid module item.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Invalid module item.\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:21: error: Invalid module item.\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: error: Invalid module instantiation\n<case>/source_0.sv:23: error: Invalid module instantiation\n<case>/source_0.sv:24: error: Invalid module item.\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:26: error: Invalid module item.\n<case>/source_0.sv:28: syntax error\n<case>/source_0.sv:28: error: I give up on this function definition.\n<case>/source_0.sv:31: syntax error\n<case>/source_0.sv:32: error: Invalid module item.\n<case>/source_0.sv:33: syntax error\n<case>/source_0.sv:33: error: Invalid module instantiation\n<case>/source_0.sv:34: syntax error\n<case>/source_0.sv:34: error: Invalid module instantiation\n<case>/source_0.sv:35: syntax error\n<case>/source_0.sv:35: error: Invalid module instantiation\n<case>/source_0.sv:37: syntax error\n<case>/source_0.sv:37: error: Invalid module instantiation\n<case>/source_0.sv:48: syntax error\n<case>/source_0.sv:48: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::specializations_keep_their_parameter_scopes",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "class::untyped_class_parameters_take_the_type_of_their_value",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 36; see <case>/build.log\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:16: error: Invalid module item.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Syntax error in typedef clause.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:22: error: Invalid module item.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:24: error: Invalid module item.\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: error: Syntax error in typedef clause.\n<case>/source_0.sv:26: syntax error\n<case>/source_0.sv:27: error: Invalid module item.\n<case>/source_0.sv:31: syntax error\n<case>/source_0.sv:32: error: Invalid module item.\n<case>/source_0.sv:34: syntax error\n<case>/source_0.sv:35: error: Invalid module item.\n<case>/source_0.sv:36: syntax error\n<case>/source_0.sv:1: error: Syntax error in variable list.\n<case>/source_0.sv:37: syntax error\n<case>/source_0.sv:37: error: Invalid module instantiation\n<case>/source_0.sv:38: syntax error\n<case>/source_0.sv:38: error: Invalid module instantiation\n<case>/source_0.sv:39: syntax error\n<case>/source_0.sv:39: error: Invalid module instantiation\n<case>/source_0.sv:40: syntax error\n<case>/source_0.sv:40: error: Invalid module instantiation\n<case>/source_0.sv:41: syntax error\n<case>/source_0.sv:41: error: Invalid module instantiation\n<case>/source_0.sv:48: syntax error\n<case>/source_0.sv:48: error: Malformed statement\n<case>/source_0.sv:49: syntax error\n<case>/source_0.sv:49: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::class_declarations_bind_in_their_scopes",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid module instantiation\n<case>/source_0.sv:16: syntax error\n<case>/testbench.sv:3: error: Invalid module item.\n<case>/testbench.sv:4: error: Repeat timeunit found and the initial timeunit for this scope is missing.\n<case>/testbench.sv:5: error: Repeat timeprecision found and the initial timeprecision for this scope is missing.\n",
+      "expectation": "Simulation",
+      "name": "class::parameter_defaults_bind_where_the_class_is_declared",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 65; see <case>/build.log\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: I give up on this function definition.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:15: error: Invalid module item.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Syntax error in typedef clause.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Syntax error in parameter value assignment list.\n<case>/source_0.sv:17: error: Invalid module instantiation\n<case>/source_0.sv:18: error: I give up on this function definition.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:22: error: Invalid module item.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:24: error: Invalid module item.\n<case>/source_0.sv:26: syntax error\n<case>/source_0.sv:27: error: Invalid module item.\n<case>/source_0.sv:28: error: 'made' has already been declared in this scope.\n<case>/source_0.sv:10:      : It was declared here as a variable.\n<case>/source_0.sv:29: syntax error\n<case>/source_0.sv:29: error: I give up on this function definition.\n<case>/source_0.sv:32: syntax error\n<case>/source_0.sv:33: error: Invalid module item.\n<case>/source_0.sv:35: syntax error\n<case>/source_0.sv:36: error: Invalid module item.\n<case>/source_0.sv:37: syntax error\n<case>/source_0.sv:37: error: Invalid module item.\n<case>/source_0.sv:39: syntax error\n<case>/source_0.sv:39: error: Invalid module item.\n<case>/source_0.sv:40: syntax error\n<case>/source_0.sv:41: error: Invalid module item.\n<case>/source_0.sv:42: syntax error\n<case>/source_0.sv:43: error: Invalid module item.\n<case>/source_0.sv:44: syntax error\n<case>/source_0.sv:44: error: Invalid module item.\n<case>/source_0.sv:45: syntax error\n<case>/source_0.sv:45: error: Invalid module item.\n<case>/source_0.sv:46: syntax error\n<case>/source_0.sv:48: error: Invalid module item.\n<case>/source_0.sv:50: syntax error\n<case>/source_0.sv:50: error: Invalid module instantiation\n<case>/source_0.sv:53: syntax error\n<case>/source_0.sv:53: error: Malformed statement\n<case>/source_0.sv:54: syntax error\n<case>/source_0.sv:54: error: Malformed statement\n<case>/source_0.sv:55: syntax error\n<case>/source_0.sv:55: error: Malformed statement\n<case>/source_0.sv:56: syntax error\n<case>/source_0.sv:56: error: Malformed statement\n<case>/source_0.sv:57: syntax error\n<case>/source_0.sv:57: error: Malformed statement\n<case>/source_0.sv:58: syntax error\n<case>/source_0.sv:58: error: Malformed statement\n<case>/source_0.sv:59: syntax error\n<case>/source_0.sv:59: error: Malformed statement\n<case>/source_0.sv:60: syntax error\n<case>/source_0.sv:60: error: Malformed statement\n<case>/source_0.sv:61: syntax error\n<case>/source_0.sv:61: error: Malformed statement\n<case>/source_0.sv:62: syntax error\n<case>/source_0.sv:62: error: Malformed statement\n<case>/source_0.sv:68: syntax error\n<case>/source_0.sv:68: error: Malformed statement\n<case>/source_0.sv:71: syntax error\n<case>/source_0.sv:71: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::specialization_keys_follow_the_bound_parameters",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 13; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:12: error: Invalid module item.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Invalid module instantiation\n<case>/testbench.sv:11: error: Invalid module item.\n<case>/testbench.sv:12: error: Repeat timeunit found and the initial timeunit for this scope is missing.\n<case>/testbench.sv:13: error: Repeat timeprecision found and the initial timeprecision for this scope is missing.\n",
+      "expectation": "Simulation",
+      "name": "class::derived_classes_keep_their_declaration_scopes",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:34: syntax error\n<case>/source_0.sv:34: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::shallow_copies",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Invalid class item.\n<case>/source_0.sv:27: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::classes_of_packages",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::classes_of_the_compilation_unit",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n<case>/testbench.sv:50: syntax error\n<case>/testbench.sv:50: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:51: syntax error\n<case>/testbench.sv:51: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::package_classes_by_their_qualified_names",
+      "phase": "compile",
+      "status": "compile_error"
     }
   ]
 }

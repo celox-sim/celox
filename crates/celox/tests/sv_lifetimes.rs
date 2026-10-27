@@ -221,10 +221,11 @@ fn static_initializers_must_be_constant() {
 
 #[test]
 fn output_arguments_and_loop_exits_write_static_locals() {
+    // IEEE 1800-2023 13.4(b): even a zero-time task cannot be called by a function.
     assert_eq!(
         output(
             "module Top(output logic [7:0] y);
-               task set(output int v, input int a); v = a; endtask
+               function void set(output int v, input int a); v = a; endfunction
                function int f(input int a);
                  int t, u;
                  set(t, a);

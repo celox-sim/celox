@@ -45,7 +45,7 @@ modes, sources without a module still undergo preprocessing and parsing; root
 detection then reports the actual no-root diagnostic. The current
 compiler and simulator require a module root, so the driver reports a failure for
 rootless unit, package and interface inputs. The official runner still decides
-the case verdict, including expected failures. There is no `no_top` classification
+the case verdict, including expected failures. There is no `no_top` verdict
 or preemptive skip. Without an explicit top, the driver infers a single root from
 parsed declarations and instantiations; multiple roots receive a diagnostic
 because Celox’s simulator requires one root. Each input file is a separate
@@ -89,6 +89,88 @@ to a fresh simulation, in upstream order. A failed run stops the driver; logs
 from successful runs still reach the official assertion evaluator. The official
 runner timeout covers the complete invocation, including all variants.
 Elaboration/parsing cases do not execute variants.
+
+Parameterized classes update fourteen more rows: both state modes for
+`8.5--parameters`, `8.8--typed_constructor_param`,
+`8.25--parametrized_class_extend`, `8.25.1--parametrized_class_scope_resolution`
+and `8.26.3--type_access_implements` change from fail to pass. Each was
+simulated and its displayed values checked, including the parameter that
+`par_cls#()::b` reads and the base constructor argument passed by name in
+`8.8--typed_constructor_param`. The negative
+`8.26.6.2--parameter_type_conflict_unresolved` and
+`8.26.6.3--diamond_relationship_parametrized` probes now fail for the reason
+they test: an interface class inherits `T` from two different interface
+classes or specializations without declaring its own. Full official runs at the
+pinned revision report 1080 passing cases in 2state and 1091 in 4state, with no
+passing case regressing; `8.25.1--parametrized_class_invalid_scope_resolution`
+stays a passing negative case because `par_cls::b` outside the class is
+rejected. `8.5--properties_enum` keeps failing because enumeration constants
+declared in a class are not supported.
+
+Shallow copies update two more rows: both state modes for `8.12--shallow_copy`
+change from fail to pass. The case was simulated and its displayed values
+checked: the property of the copy keeps the value it was copied with after the
+method call changes the original. Full official runs at the pinned revision
+report 1081 passing cases in 2state and 1092 in 4state, with no passing case
+regressing.
+
+Classes of packages and of the compilation unit update 62 more rows: both
+state modes of 31 chapter 18 cases that declare classes outside any module
+change from fail to pass, as such sources now elaborate their compilation unit.
+Seven declare no constraints: `18.4.1--rand-modifier`,
+`18.12--randomization-of-scope-variables_0`, `18.13.1--urandom_0`,
+`18.13.1--urandom_2`, `18.13.2--urandom_range_0` and
+`18.15--manually-seeding-randomize_0` were each simulated with a module that
+constructs the class and calls its methods or `randomize()`, and printed the
+expected results; `18.4.2--randc-modifier` elaborates while `randomize()` of
+its `randc` property is rejected. The other 24 pass by elaboration alone:
+their constraint blocks are parsed but not checked, and `randomize()` of a
+class with constraints is rejected. `18.5.8.1--foreach-iterative-constraints_0`,
+`18.5.8.2--array-reduction-iterative-constraints_0` and
+`18.6.3--behavior-of-randomization-methods_0` keep failing on their array and
+static random properties. Full official runs at the pinned revision report 1112
+passing cases in 2state and 1123 in 4state, with no passing case regressing.
+
+Dynamic container support updates 22 rows: both state modes of eleven chapter 7
+cases change from fail to pass. Eight cases execute simulations and their
+`:assert:` output passes: associative assignment, `exists`, `first`, `last`,
+`next`, `prev`, traversal with a byte key, and dynamic-array `new[]`. The traversal
+case declares both its key and output as `byte`; the stored key is already
+truncated before traversal, so returning 1 is correct. The integral-key and
+string-key associative declaration cases and `queues/basic` pass elaboration
+only; they do not establish runtime behavior. Queue mutations and other container
+behavior are exercised by the shared container simulation cases.
+The [reviewed CI run](https://github.com/celox-sim/celox/actions/runs/40323383639)
+contains 3,300 case/mode verdicts at the pinned revision. These are its only
+changed rows, with no passing case regressing: 1,201 cases pass in 2state and
+1,212 in 4state. Only these reviewed expectations are updated.
+
+Zero-argument dynamic-container methods accept omitted parentheses, including
+`size`, associative `num`, `delete`, and queue `pop_front` / `pop_back`
+(7.5.2–7.5.3, 7.9, 7.10.2). Sixteen unmodified upstream simulation cases pass
+the official runner in both state modes at the pinned revision: dynamic
+`op-delete` / `op-size`, associative `alloc`, `nonexistent`, `delete`, `num`,
+and `size`, and queue
+`bounded`, `delete`, `insert`, `max-size`, `pop_back`, `pop_front`, `push_back`,
+`push_front` and `size`. Only these 32 expectations change from `fail` to `pass`.
+The focused runner checked 36 pinned case files containing these bare
+method names (72 case/mode verdicts), with no passing candidate regressing.
+This does not establish full dynamic-container conformance.
+Shared regressions additionally cover discarded pop results, string/class
+handles, four-state values and empty-pop defaults, and unevaluated type queries
+that preserve packed result dimensions and authored bounds. The packed-result
+query regression failed on all five Celox backend configurations even after
+the initial 28 upstream checks passed. Arity and void-result rejection remain checked.
+Queue slices, queue operands in concatenations, element-reference persistence,
+warning diagnostics, and queries on nonintegral pop results remain outside
+this change's support contract.
+
+Logical implication (`->`) now passes six generated cases in both state modes.
+The binary-operator case passes elaboration; the five logical-operator cases
+execute simulations and pass their assertions. A full run before the container
+method changes above changed only these twelve verdicts, with no passing case
+regressing: 1,208 cases pass in 2state and 1,219 in 4state. Shared tests also cover short-circuiting and
+unknown operands (IEEE 1800-2023 11.4.7).
 
 ## Running locally
 
@@ -286,3 +368,68 @@ These fixtures exercise the actual upstream runner with a controlled driver,
 including mode priority, skips, negative tests, assertions, timeouts, library
 injection and missing-environment failures. The Rust example is a single-case
 compiler/simulator driver; it does not parse sv-tests metadata or judge verdicts.
+
+## Failure triage
+
+`run.py` now writes four companion artifacts:
+
+- `report.tsv`: official verdicts plus `failure_category`, `diagnostic`, a bounded
+  diagnostic excerpt (`evidence`), and `negative_test` (`1`, `0`, or empty when unknown).
+- `report.summary.json`: schema version 2, collection completeness, requested and
+  collected row counts, per-group/per-state totals, failure counts and frequent
+  diagnostics. `classification_version` identifies the diagnostic rules.
+- `report.summary.md`: a readable overview, also attached to the CI job summary.
+- `report.failures.json`: every failing case with its classification and log path,
+  plus collection errors. No case is removed from the TSV or denominator.
+
+Categories describe **observed diagnostics**, not proven compiler root causes:
+
+| Category | Evidence |
+| --- | --- |
+| `unsupported` | explicit unsupported-construct or single-module-root diagnostic |
+| `compile_error` | parse-error or illegal-context diagnostic, even if the selected mode was simulation |
+| `runtime_error` | `$fatal` or lost-runtime-event diagnostic |
+| `assertion_failure` | official simulation output validation failed after a successful positive invocation |
+| `unexpected_success` | a negative test's driver succeeded |
+| `timeout` | upstream timeout return code **and** timeout diagnostic |
+| `crash` | Rust panic diagnostic or abnormal/signal return code |
+| `input_issue` | the reviewed upstream input defect described above |
+| `environment` | missing include directory without the reviewed input exception |
+| `unclassified` | unknown diagnostic, missing log, or TSV/log metadata disagreement |
+
+For example, a parser error on a valid but unimplemented grammar construct is
+still `compile_error`; the classifier does not guess whether the source or the
+parser is wrong. A nonzero return code in simulation mode alone does not establish
+a runtime bug because compilation may have failed first. Frequent diagnostic
+counts normalize source paths and line numbers; `.failures.json` retains the
+individual evidence and log locations. Tag counts still overlap as described above.
+
+Negative-test passes accompanied by unsupported, root-requirement, timeout or
+crash diagnostics appear in `negative_pass_diagnostics` for review. They remain
+**official passes**, not new failures. No assertion expression is evaluated by
+this classification code.
+
+Missing drivers, missing libraries, runner exceptions and other collection
+errors still return exit code 2 and prohibit `--update`. A failed collection now
+retains already completed rows and separate `collection_errors`, with
+`complete: false`; cancelled/unrun cases do not become invented failure rows.
+An incomplete report must not be used as a full conformance score. Successful
+collection has `complete: true` even when comparison with expectations returns 1.
+
+Reclassify a downloaded or older **run report**, without rerunning simulations or
+changing `expected.tsv`:
+
+```bash
+python conformance/sv-tests/reporting.py work/sv-tests-report.tsv \
+  --log-root work/sv-tests-results \
+  --meta-tags ../sv-tests/conf/meta-tags.conf \
+  --output work/triage/report.tsv
+```
+
+`--log-root` relocates logs using `STATE/TEST/official.log`. Otherwise the paths
+in the TSV are used (relative paths resolve against the TSV directory).
+`--meta-tags` should reference the matching pinned checkout; omit it to count
+only literal tags, reported as `meta_tags_expanded: false`. The existing summary
+supplies the corpus revision and incomplete-collection provenance. Without a
+completeness marker in that summary, offline reports use `complete: null`
+(unknown), not a claim that every case ran. Missing logs stay unclassified.

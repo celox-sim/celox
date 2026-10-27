@@ -1086,6 +1086,234 @@
   (assert_eq a 255)
   (assert_eq b 15))
 
+(case wide_constant_functions_inside_conditional_parameter_initializers
+  ; IEEE 1800-2023 13.4.3 and 11.4.11: a packed return is assembled
+  ; before its value and declared type participate in the conditional.
+  (source "wide_constant_functions.sv" #"
+    module Layout #(parameter N=4)(output logic [N*32-1:0] selected, direct);
+      localparam [N*32-1:0] WIDTHS={N{32'd24}};
+      function automatic [N-1:0][31:0] offsets(input int unused);
+        logic [31:0] base, size, mask;
+        int width;
+        offsets='0;
+        base='0;
+        for (int i=0; i<N; i++) begin
+          width=WIDTHS[i*32 +: 32];
+          mask={32{1'b1}}>>(32-width);
+          size=mask+1;
+          if (width>0) begin
+            if ((base&mask)!=0) base=base+size-(base&mask);
+            offsets[i]=base;
+            base=base+size;
+          end
+        end
+      endfunction
+      localparam [N*32-1:0] VALUE=1'b0 ? (N*32)'(0) : offsets(0);
+      localparam [N*32-1:0] DIRECT=offsets(0);
+      assign selected=VALUE;
+      assign direct=DIRECT;
+    endmodule
+    module Top(output logic [127:0] selected4, direct4,
+               output logic [95:0] selected3, direct3);
+      Layout #(.N(4)) four(selected4, direct4);
+      Layout #(.N(3)) three(selected3, direct3);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq selected4 0x03000000020000000100000000000000)
+  (assert_eq direct4 0x03000000020000000100000000000000)
+  (assert_eq selected3 0x020000000100000000000000)
+  (assert_eq direct3 0x020000000100000000000000))
+
+(case constant_function_assignments_at_127_and_128_bit_boundaries
+  (source "constant_function_boundaries.sv" #"
+    module Top(output logic [127:0] full, boundary_value, sign_extended, zero_extended,
+               output logic [127:0] fill_return, fill_local);
+      function automatic [127:0] fill(input int unused);
+        fill[127:0]=128'hfedcba98765432100123456789abcdef;
+      endfunction
+      function automatic [127:0] boundary(input int unused);
+        boundary='1;
+        boundary[127]=0;
+        boundary[126]=1;
+        boundary[7:0]=8'ha5;
+      endfunction
+      function automatic signed [126:0] signed_value(input int unused);
+        signed_value='0;
+        signed_value[126]=1;
+        signed_value[7:0]=8'ha5;
+        if (signed_value<0) signed_value[8]=1;
+      endfunction
+      function automatic [126:0] unsigned_value(input int unused);
+        unsigned_value='1;
+        unsigned_value[126:0]='0;
+        unsigned_value[126]=1;
+        unsigned_value[7:0]=8'ha5;
+        if (unsigned_value<0) unsigned_value[8]=1;
+      endfunction
+      function automatic [127:0] return_fill(input int unused);
+        return '1;
+      endfunction
+      function automatic [127:0] local_fill(input int unused);
+        logic [127:0] value='1;
+        return value;
+      endfunction
+      localparam [127:0] RF=return_fill(0), LF=local_fill(0);
+      assign fill_return=RF;
+      assign fill_local=LF;
+      localparam [127:0] F=1'b0 ? 128'(0) : fill(0);
+      localparam [127:0] E=1'b0 ? 128'(0) : boundary(0);
+      localparam signed [126:0] S=1'b0 ? 127'(0) : signed_value(0);
+      localparam [126:0] U=1'b0 ? 127'(0) : unsigned_value(0);
+      assign full=F;
+      assign boundary_value=E;
+      assign sign_extended=S;
+      assign zero_extended=U;
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq full 0xfedcba98765432100123456789abcdef)
+  (assert_eq boundary_value 0x7fffffffffffffffffffffffffffffa5)
+  (assert_eq sign_extended 0xc00000000000000000000000000001a5)
+  (assert_eq zero_extended 0x400000000000000000000000000000a5)
+  (assert_eq fill_return 0xffffffffffffffffffffffffffffffff)
+  (assert_eq fill_local 0xffffffffffffffffffffffffffffffff))
+
+; Wide constants must remain wide both when reading a packed lookup table
+; and when assembling the function result (IEEE 1800-2023 13.4.3).
+(case constant_functions_evaluate_wide_address_tables
+  (source "wide_address_tables.sv" #"
+    module Layout #(parameter N=9, W=20)(output wire [N*W-1:0] selected, direct);
+      localparam [N*32-1:0] WIDTHS={N{32'd16}};
+      function automatic int index_of(input int i); return i; endfunction
+      function automatic [N*W-1:0] offsets(input int unused);
+        logic [W-1:0] base, mask, size;
+        int width;
+        offsets='0;
+        base='0;
+        for (int i=0; i<N; i++) begin
+          width=WIDTHS[index_of(i)*32 +: 32];
+          mask={W{1'b1}}>>(W-width);
+          size=mask+1;
+          if (width>0) begin
+            if ((base&mask)!=0) base=base+size-(base&mask);
+            offsets[i*W +: W]=base;
+            base=base+size;
+          end
+        end
+      endfunction
+      localparam [N*W-1:0] VALUE=1'b0 ? (N*W)'(0) : offsets(0);
+      localparam [N*W-1:0] DIRECT=offsets(0);
+      assign selected=VALUE;
+      assign direct=DIRECT;
+    endmodule
+    module Top(output wire [179:0] selected9, direct9,
+               output wire [94:0] selected5, direct5);
+      Layout nine(selected9,direct9);
+      Layout #(.N(5),.W(19)) five(selected5,direct5);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq selected9 0x800007000060000500004000030000200001000000000)
+  (assert_eq direct9 0x800007000060000500004000030000200001000000000)
+  (assert_eq selected5 0x400006000080000800000000)
+  (assert_eq direct5 0x400006000080000800000000))
+
+(case constant_functions_preserve_wide_arguments_and_signedness
+  (source "wide_function_arguments.sv" #"
+    module Top(output wire [255:0] changed, filled, negative, positive,
+               output wire [255:0] crossing, arithmetic, argument_context,
+               output wire [limit(0)-1:0] width_port);
+      function automatic [159:0] limit(input int unused);
+        return 160'd8;
+      endfunction
+      assign width_port=8'ha5;
+      function automatic [255:0] identity(input logic [255:0] value);
+        return value;
+      endfunction
+      function automatic [255:0] transform(input logic [255:0] value);
+        logic [255:0] scratch=value;
+        scratch[191:128]=64'hfedcba9876543210;
+        return identity({scratch[127:0],scratch[255:128]});
+      endfunction
+      function automatic signed [128:0] signed_value(input int unused);
+        return -129'sd5;
+      endfunction
+      function automatic [127:0] unsigned_value(input int unused);
+        return 128'h80000000000000000000000000000001;
+      endfunction
+      function automatic [255:0] boundary(input int unused);
+        boundary='1;
+        boundary[143:120]=24'h123456;
+        boundary[255:252]=4'h5;
+        boundary[3:0]=4'hb;
+      endfunction
+      function automatic [255:0] shifted(input int unused);
+        return (1 << 159) + 1;
+      endfunction
+      localparam [255:0] A=shifted(0), AC=identity(1 << 200);
+      assign arithmetic=A;
+      assign argument_context=AC;
+      localparam [255:0] C=transform(identity(256'h0123456789abcdef0000000000000000112233445566778899aabbccddeeff00));
+      localparam [255:0] F=identity('1);
+      localparam signed [128:0] S=signed_value(0);
+      localparam [127:0] U=unsigned_value(0);
+      localparam [255:0] B=boundary(0);
+      assign changed=C;
+      assign filled=F;
+      assign negative=S;
+      assign positive=U;
+      assign crossing=B;
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq changed 0x112233445566778899aabbccddeeff000123456789abcdeffedcba9876543210)
+  (assert_eq filled (- (<< 1 256) 1))
+  (assert_eq negative (- (<< 1 256) 5))
+  (assert_eq positive 0x80000000000000000000000000000001)
+  (assert_eq width_port 0xa5)
+  (assert_eq arithmetic (+ (<< 1 159) 1))
+  (assert_eq argument_context (<< 1 200))
+  (assert_eq crossing 0x5fffffffffffffffffffffffffff123456fffffffffffffffffffffffffffffb))
+
+(case constant_functions_preserve_wide_unknown_masks
+  (source "wide_function_masks.sv" #"
+    module Top(output wire [255:0] result, copied, merged, bits_only);
+      function automatic logic [255:0] make_value(input logic [255:0] value);
+        logic [255:0] scratch=value;
+        scratch[159:128]=32'hxxxxzzzz;
+        return scratch;
+      endfunction
+      function automatic logic [255:0] identity(input logic [255:0] value);
+        return value;
+      endfunction
+      function automatic bit [255:0] to_bits(input bit [255:0] value);
+        if ($isunknown(value)) return '1;
+        return value;
+      endfunction
+      function automatic logic [255:0] merge_value(input int unused);
+        return 1'bx ? {128'hffff,128'h1} : {128'hffff,128'h3};
+      endfunction
+      localparam logic [255:0] R=make_value('1);
+      localparam logic [255:0] C=identity(R);
+      localparam logic [255:0] M=merge_value(0);
+      localparam bit [255:0] B=to_bits(R);
+      assign result=R;
+      assign copied=C;
+      assign merged=M;
+      assign bits_only=B;
+    endmodule
+  "#)
+  (top Top)
+  (four_state)
+  (let known (| (<< (- (<< 1 96) 1) 160) (- (<< 1 128) 1)))
+  (let mask (<< 0xffffffff 128))
+  (let value (| known (<< 0xffff0000 128)))
+  (assert_eq result (fourstate value mask))
+  (assert_eq copied (fourstate value mask))
+  (assert_eq merged (fourstate (| (<< 0xffff 128) 3) 2))
+  (assert_eq bits_only known))
+
 (case static_function_locals_share_storage_between_calls
   (source "static_functions.sv" #"
     module Top(input logic clk, output int first, second, paired);

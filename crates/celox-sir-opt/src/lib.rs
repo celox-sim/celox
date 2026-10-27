@@ -102,5 +102,6 @@ pub fn optimize(
 
 mod policy;
 pub use policy::{
-    OptLevel, OptimizeOptions, ParallelPartition, PassOptions, SirDiagnostics, SirPass,
+    OptLevel, OptimizeOptions, ParallelPartition, PassOptions, SettlePartition, SirDiagnostics,
+    SirPass,
 };

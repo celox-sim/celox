@@ -42,6 +42,10 @@ pub enum FrontendWarningKind {
     MixedTimescale,
     #[error("`$size` on an interface array is a language extension")]
     InterfaceArrayQuery,
+    #[error(
+        "unindexed interface array parameter `{path}` uses the first declared element `{element}`"
+    )]
+    InterfaceArrayParameter { path: String, element: String },
     /// IEEE 1800-2023 9.2.2.4 restricts writes by other processes.
     #[error("multiple variable drivers for `{signal}` in `{module}` include an always_ff process")]
     MultipleAlwaysFfDrivers { module: String, signal: String },
@@ -101,6 +105,17 @@ pub(crate) fn analyzer_warnings(
         celox_sv_analyzer::ir::AnalyzerWarning::InterfaceArrayQuery { site } => {
             (FrontendWarningKind::InterfaceArrayQuery, site.clone())
         }
+        celox_sv_analyzer::ir::AnalyzerWarning::InterfaceArrayParameter {
+            path,
+            element,
+            site,
+        } => (
+            FrontendWarningKind::InterfaceArrayParameter {
+                path: path.clone(),
+                element: element.clone(),
+            },
+            site.clone(),
+        ),
         celox_sv_analyzer::ir::AnalyzerWarning::MixedTimescale => {
             (FrontendWarningKind::MixedTimescale, None)
         }
@@ -155,6 +170,7 @@ impl miette::Diagnostic for FrontendWarning {
         Some(Box::new(match self.kind {
             FrontendWarningKind::MixedTimescale => "mixed_timescale",
             FrontendWarningKind::InterfaceArrayQuery => "interface_array_query",
+            FrontendWarningKind::InterfaceArrayParameter { .. } => "interface_array_parameter",
             FrontendWarningKind::MultipleAlwaysFfDrivers { .. } => "multiple_always_ff_drivers",
             FrontendWarningKind::UnpackedPortDefault { .. } => "unpacked_port_default",
             FrontendWarningKind::InferredLatch => "inferred_latch",
@@ -174,6 +190,9 @@ impl miette::Diagnostic for FrontendWarning {
             }
             FrontendWarningKind::InterfaceArrayQuery => {
                 "interface arrays are not data arrays in IEEE 1800-2023 20.7; set interface_array_query=warn or allow for compatibility"
+            }
+            FrontendWarningKind::InterfaceArrayParameter { .. } => {
+                "IEEE 1800-2023 23.6 requires an instance select before a member; set interface_array_parameter=warn or allow to use the first declared element"
             }
             FrontendWarningKind::MixedTimescale => {
                 "declare timeunit/timeprecision consistently; undeclared scopes use 1ns/1ps when this check is relaxed"

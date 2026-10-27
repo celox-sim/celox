@@ -513,7 +513,7 @@ fn collect_immediate_state_writes(
             }
         }
     }
-    propagate_comb_writes(&scheduled.sir.eval_comb, &mut writes);
+    propagate_comb_writes(scheduled, &mut writes);
     writes
 }
 
@@ -640,7 +640,7 @@ fn collect_state_change_writes(
     // comb propagation and newly reached event domains.
     loop {
         let before = writes.clone();
-        propagate_comb_writes(&scheduled.sir.eval_comb, &mut writes);
+        propagate_comb_writes(scheduled, &mut writes);
         for event in &scheduled.design.events.ordered_events {
             if writes
                 .iter()
@@ -726,16 +726,20 @@ fn push_unit_stable_writes(
     }
 }
 
-fn propagate_comb_writes(
-    units: &[ExecutionUnit<celox_design::RegionedStateAddr>],
-    writes: &mut Vec<StateWrite>,
-) {
+fn propagate_comb_writes(scheduled: &ScheduledRtl, writes: &mut Vec<StateWrite>) {
+    // A partitioned settle's flags only say what to recompute: running a
+    // partition whose inputs did not change stores the values already there.
+    let settle_flags = scheduled
+        .runtime_schema
+        .settle_partitions
+        .as_ref()
+        .map(|settle| settle.flags);
     // A later unit may feed an earlier one when a conservative scheduler path
     // was retained. Iterate to a fixed point rather than relying on unit order.
     loop {
         let before = writes.clone();
-        for unit in units {
-            propagate_comb_unit(unit, writes);
+        for unit in &scheduled.sir.eval_comb {
+            propagate_comb_unit(unit, settle_flags, writes);
         }
         if *writes == before {
             break;
@@ -745,6 +749,7 @@ fn propagate_comb_writes(
 
 fn propagate_comb_unit(
     unit: &ExecutionUnit<celox_design::RegionedStateAddr>,
+    settle_flags: Option<StateAddr>,
     writes: &mut Vec<StateWrite>,
 ) {
     let mut registers: HashMap<RegisterId, Vec<BitAccess>> = HashMap::default();
@@ -883,6 +888,8 @@ fn propagate_comb_unit(
                         };
                         changed |= extend_register_taint(&mut registers, *dst, taint);
                     }
+                    SIRInstruction::Store(address, ..)
+                        if Some(address.absolute_addr()) == settle_flags => {}
                     SIRInstruction::Store(address, offset, width, source, ..) => {
                         let address_tainted = offset
                             .dynamic_registers()

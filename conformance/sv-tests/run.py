@@ -3,7 +3,7 @@
 
 import argparse
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 import csv
 import importlib.util
 import json
@@ -12,6 +12,8 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+
+import reporting
 
 MODES = ("2state", "4state")
 HEADER = ("test", "state_mode", "result")
@@ -116,7 +118,7 @@ def run_case(root, driver, out_dir, test, state_mode):
     verdict = official_verdict(result.stderr, log, test)
     meta = log_metadata(log) if log else {}
     input_issues = json.loads((REPO / "conformance/sv-tests/input-issues.json").read_text())["cases"]
-    return {
+    return reporting.annotate({
         "test": test, "state_mode": state_mode, "result": verdict,
         "mode": meta.get("mode", ""), "tags": meta.get("tags", ""),
         "group": (meta.get("results_group") or "main") if meta else "unclassified",
@@ -124,7 +126,7 @@ def run_case(root, driver, out_dir, test, state_mode):
                         if meta.get("rc") == "1" and "include directory is unavailable:" in log else ""),
         "rc": meta.get("rc", ""), "tool_success": meta.get("tool_success", ""),
         "log": str(log_path),
-    }
+    }, log)
 
 
 def read_meta_tags(path):
@@ -171,6 +173,7 @@ def summarize(rows, meta_tags=None):
                 "by_tag": {tag: {"passed": count["pass"], "executed": sum(count.values())}
                            for tag, count in sorted(tags.items())},
                 "by_execution_mode": {mode: dict(count) for mode, count in sorted(modes.items())},
+                **reporting.breakdown(selected),
             }
     return groups
 
@@ -182,23 +185,38 @@ def positive_int(value):
     return number
 
 
+class CollectionError(ValueError):
+    def __init__(self, rows, errors):
+        super().__init__("official runner infrastructure failure; collection is incomplete")
+        self.rows = sorted(rows, key=lambda row: (row["test"], row["state_mode"]))
+        self.errors = sorted(errors, key=lambda error: (error["test"], error["state_mode"]))
+
+
 def collect_cases(root, driver, out_dir, tests, modes, jobs):
-    # Each official runner owns a unique case/state directory. BaseRunner also
-    # uses mkdtemp for its work directory below OUT_DIR/tmp.
+    # Preserve completed evidence, but never update a baseline after an error.
+    rows, errors = [], []
     executor = ThreadPoolExecutor(max_workers=jobs)
-    futures = []
-    rows = []
     try:
-        futures = [executor.submit(run_case, root, driver, out_dir, test, mode)
-                   for test in tests for mode in modes]
+        futures = {executor.submit(run_case, root, driver, out_dir, test, mode): (test, mode)
+                   for test in tests for mode in modes}
         for future in as_completed(futures):
-            rows.append(future.result())
-            if len(rows) % (100 * len(modes)) == 0:
+            test, mode = futures[future]
+            try:
+                rows.append(future.result())
+            except CancelledError:
+                continue
+            except (OSError, ValueError) as error:
+                errors.append({"category": "infrastructure", "stage": "collection", "test": test,
+                               "state_mode": mode, "message": str(error),
+                               "log": str(out_dir / mode / test / "runner.log")})
+                for pending in futures:
+                    pending.cancel()
+            if len(rows) and len(rows) % (100 * len(modes)) == 0:
                 print(f"sv-tests: {len(rows)}/{len(tests) * len(modes)} mode runs", file=sys.stderr)
     finally:
-        # A preparation/infrastructure error cannot accept a partial baseline.
-        # Cancel queued work and let already running official processes clean up.
         executor.shutdown(wait=True, cancel_futures=True)
+    if errors:
+        raise CollectionError(rows, errors)
     return sorted(rows, key=lambda row: (row["test"], row["state_mode"]))
 
 
@@ -216,31 +234,31 @@ def main(argv=None):
     if options.update and not options.expected:
         parser.error("--update requires --expected")
     root, driver, out_dir = options.sv_tests.resolve(), options.driver.resolve(), options.out_dir.resolve()
+    report = options.report or out_dir / "report.tsv"
+    rows, meta_tags, requested = [], {}, None
+    stage = "preflight"
+    revision = None
     try:
+        result = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True)
+        revision = result.stdout.strip() if result.returncode == 0 else None
         preflight(root, driver)
         meta_tags = read_meta_tags(root / "conf/meta-tags.conf")
         modes = MODES if options.state_mode == "both" else (options.state_mode,)
         expected = read_expected(options.expected) if options.expected and options.expected.exists() else {}
         if options.expected and not options.expected.exists() and not options.update:
             raise ValueError(f"expectations do not exist: {options.expected}")
+        stage = "corpus"
         tests = sorted(p.relative_to(root / "tests").as_posix()
                        for p in (root / "tests").rglob("*") if p.is_file() and p.suffix.lower() == ".sv")
         if not tests:
             raise ValueError("sv-tests checkout contains no .sv tests")
+        requested = len(tests) * len(modes)
+        stage = "collection"
         rows = collect_cases(root, driver, out_dir, tests, modes, options.jobs)
         results = {(row["test"], row["state_mode"]): row["result"] for row in rows}
-        report = options.report or out_dir / "report.tsv"
-        report.parent.mkdir(parents=True, exist_ok=True)
-        with report.open("w", newline="") as stream:
-            writer = csv.DictWriter(stream, fieldnames=list(rows[0]), delimiter="\t", lineterminator="\n")
-            writer.writeheader()
-            writer.writerows(rows)
+        stage = "report"
         groups = summarize(rows, meta_tags)
-        revision = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
-                                  capture_output=True, text=True)
-        summary = {"revision": revision.stdout.strip() if revision.returncode == 0 else None,
-                   "groups": groups}
-        report.with_suffix(".summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        reporting.write_reports(report, rows, groups, revision, requested=requested)
         for group, states in groups.items():
             for mode, counts in states.items():
                 print(f"{group} [{mode}]: {counts['passed']}/{counts['executed']} passed "
@@ -263,6 +281,13 @@ def main(argv=None):
         return 0
     except (OSError, ValueError) as error:
         print(f"sv-tests: {error}", file=sys.stderr)
+        errors = [{"category": "infrastructure", "stage": stage, "message": str(error)}]
+        if isinstance(error, CollectionError):
+            rows, errors = error.rows, error.errors
+        try:
+            reporting.write_reports(report, rows, summarize(rows, meta_tags), revision, errors, requested)
+        except OSError as report_error:
+            print(f"sv-tests: cannot write incomplete report: {report_error}", file=sys.stderr)
         return 2
 
 

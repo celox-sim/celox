@@ -783,7 +783,7 @@ module Top {
     let err = sim.eval_comb().unwrap_err();
     assert_eq!(
         err,
-        celox::RuntimeErrorCode::Runtime {
+        celox::RuntimeErrorCode::Fatal {
             message: "constant fail".to_string(),
             signals: Vec::new(),
         },
@@ -806,7 +806,7 @@ module Top {
     let err = sim.eval_comb().unwrap_err();
     assert_eq!(
         err,
-        celox::RuntimeErrorCode::Runtime {
+        celox::RuntimeErrorCode::Fatal {
             message: "initial fatal".to_string(),
             signals: Vec::new(),
         },
@@ -831,7 +831,7 @@ module Top (
     let err = sim.modify(|io| io.set(trigger, 1u8)).unwrap_err();
     assert_eq!(
         err,
-        celox::RuntimeErrorCode::Runtime {
+        celox::RuntimeErrorCode::Fatal {
             message: "constant fatal after modify".to_string(),
             signals: Vec::new(),
         },
@@ -853,7 +853,7 @@ module Top {
     let err = sim.eval_comb().unwrap_err();
     assert_eq!(
         err,
-        celox::RuntimeErrorCode::Runtime {
+        celox::RuntimeErrorCode::Fatal {
             message: "user says for-loop step does not advance the loop variable".to_string(),
             signals: Vec::new(),
         },
@@ -899,7 +899,7 @@ module Top (
     let err = sim.eval_comb().unwrap_err();
     assert_eq!(
         err,
-        celox::RuntimeErrorCode::Runtime {
+        celox::RuntimeErrorCode::Fatal {
             message: "a must be set".to_string(),
             signals: Vec::new(),
         },
@@ -1205,7 +1205,7 @@ module Top (
     let err = sim.eval_comb().unwrap_err();
     assert_eq!(
         err,
-        celox::RuntimeErrorCode::Runtime {
+        celox::RuntimeErrorCode::Fatal {
             message: "fatal y".to_string(),
             signals: Vec::new(),
         },
@@ -1718,7 +1718,7 @@ module Top (
     let err = sim.eval_comb().unwrap_err();
     assert_eq!(
         err,
-        celox::RuntimeErrorCode::Runtime {
+        celox::RuntimeErrorCode::Fatal {
             message: "x1 became 1".to_string(),
             signals: Vec::new(),
         },

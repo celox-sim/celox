@@ -1997,10 +1997,12 @@ impl SimBackend for InterpBackend {
     }
 
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
-        (
+        let view = (
             self.memory.expose_mut_ptr() as *mut u8,
             self.layout.merged_total_size,
-        )
+        );
+        self.mark_settle_untracked();
+        view
     }
 
     fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
@@ -2009,6 +2011,10 @@ impl SimBackend for InterpBackend {
 
     fn write_memory(&mut self, offset: usize, bytes: &[u8]) {
         self.memory.write_bytes(offset, bytes);
+        self.mark_settle_range(offset, bytes.len());
+        if !self.memory.vcd_tracking_enabled() {
+            self.mark_settle_untracked();
+        }
     }
 
     fn vcd_tracking_enabled(&self) -> bool {

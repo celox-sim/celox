@@ -61,6 +61,10 @@ pub(super) struct ScopeSymbols {
     /// The names the imports of a generate block bind there to another
     /// declaration than outside it, by the native body identity of the block.
     pub generate_imports: HashMap<celox_sv_syntax::BodyItemId, HashMap<String, String>>,
+    /// The classes the scope declares, laid out, by their qualified names
+    /// (IEEE 1800-2023 26.3): a scope that uses them may be analyzed from
+    /// another source, without their declarations.
+    pub classes: Vec<classes::Class>,
 }
 
 #[derive(Default)]
@@ -180,6 +184,11 @@ pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
 impl ScopeSymbols {
     /// Add the symbols of `other` that this scope does not already have.
     pub fn extend(&mut self, other: &ScopeSymbols) {
+        for class in &other.classes {
+            if !self.classes.iter().any(|known| known.name == class.name) {
+                self.classes.push(class.clone());
+            }
+        }
         for (name, value) in &other.const_env {
             self.const_env.entry(name.clone()).or_insert(*value);
         }
@@ -346,7 +355,13 @@ impl ScopeSymbols {
                         .cloned()
                         .map(|stmt| rename.stmt(stmt))
                         .collect(),
-                    initializer: process.initializer,
+                    kind: process.kind,
+                    validation_body: process
+                        .validation_body
+                        .iter()
+                        .cloned()
+                        .map(|stmt| rename.stmt(stmt))
+                        .collect(),
                     synthetic: process.synthetic,
                     repeats: process.repeats,
                 })
@@ -420,6 +435,8 @@ impl ScopeSymbols {
             })
             .collect();
         ScopeSymbols {
+            // Classes have their qualified names already.
+            classes: self.classes.clone(),
             declarations_only: self.declarations_only,
             interface_instances: self.interface_instances.clone(),
             interface_types: self.interface_types.clone(),
@@ -536,6 +553,7 @@ impl ScopeSymbols {
                         rename.r#type(port.r#type.clone()),
                         port.is_net,
                     )
+                    .with_unresolved_net(port.unresolved_net)
                     .with_default(port.default.clone().map(|value| rename.const_expr(value)))
                 })
                 .collect(),
@@ -585,7 +603,13 @@ impl ScopeSymbols {
                         .cloned()
                         .map(|stmt| rename.stmt(stmt))
                         .collect(),
-                    initializer: process.initializer,
+                    kind: process.kind,
+                    validation_body: process
+                        .validation_body
+                        .iter()
+                        .cloned()
+                        .map(|stmt| rename.stmt(stmt))
+                        .collect(),
                     synthetic: process.synthetic,
                     repeats: process.repeats,
                 })
@@ -598,7 +622,7 @@ impl ScopeSymbols {
 
 /// Whether `process` assigns the signal `name`.
 pub(super) fn initializes(process: &InitialProcess, name: &str) -> bool {
-    process.body.iter().any(|stmt| stmt_initializes(stmt, name))
+    !process.is_final() && process.body.iter().any(|stmt| stmt_initializes(stmt, name))
 }
 
 fn stmt_initializes(stmt: &Stmt, name: &str) -> bool {

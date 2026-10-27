@@ -108,7 +108,7 @@ impl<B: SimBackend> SimulationState<B> {
                     self.observe_host_write(signal, &value);
                 }
                 self.settle_host_resume(executor, &mut suspended.round, &suspended.levels)?;
-                self.observe(executor.backend(), None);
+                self.observe(executor.backend_mut(), None)?;
             }
             self.continue_round(
                 executor,
@@ -127,6 +127,9 @@ impl<B: SimBackend> SimulationState<B> {
             };
             if current_time > limit {
                 return Ok(settled);
+            }
+            if current_time > self.scheduler.time {
+                executor.try_leave_time(self.scheduler.time)?;
             }
             // Host writes alone: settle them, then go on to the next time.
             let host_only = self.host_pending && self.next_work_time() != Some(current_time);
@@ -205,6 +208,7 @@ impl<B: SimBackend> SimulationState<B> {
             self.charge_pass()?;
             self.step_round(executor, current_time, Vec::new(), ready, false, false)?;
         }
+        self.retain_activation_roots(executor);
         executor.try_finish_timed_step(current_time)?;
         // What the host writes after the slot is an update of its time.
         if executor.take_slot_writes() {
@@ -213,7 +217,7 @@ impl<B: SimBackend> SimulationState<B> {
         // The slot is over when nothing more is due at its time, host
         // writes included.
         if !self.host_pending && self.next_work_time() != Some(current_time) {
-            executor.try_end_time_slot(current_time)?;
+            self.end_time_slot(executor, current_time)?;
         }
         Ok(())
     }
@@ -225,6 +229,19 @@ impl<B: SimBackend> SimulationState<B> {
         !state.reactive.is_empty()
             || !state.re_inactive.is_empty()
             || !state.re_nba_queue.is_empty()
+    }
+
+    /// Run the host's Observed and Postponed work after quiescence.
+    /// The host may resume this timestamp, so sampling waits for time advance.
+    pub(super) fn end_time_slot<E>(
+        &mut self,
+        executor: &mut E,
+        current_time: u64,
+    ) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        executor.try_end_time_slot(current_time)
     }
 
     /// Count a round or a pass of the process phase against the slot's
@@ -299,7 +316,10 @@ impl<B: SimBackend> SimulationState<B> {
         if self.finished {
             return None;
         }
-        if !self.process_state.ready.is_empty() || !self.process_state.reactive.is_empty() {
+        if self.finalizing.is_some()
+            || !self.process_state.ready.is_empty()
+            || !self.process_state.reactive.is_empty()
+        {
             return Some(self.scheduler.time);
         }
         let process = self.process_wakeups.peek().map(|&Reverse((time, _))| time);

@@ -7,6 +7,26 @@ pub(super) fn retains_state(
     targets: &[VarAtomBase<SourceVarId>],
     widths: &HashMap<SourceVarId, usize>,
 ) -> bool {
+    retained_state(unit, targets, widths, true)
+}
+
+/// Whether any read of these temporary slots can observe their entry values.
+/// Unlike combinational outputs, scratch need not be written on paths that
+/// never use it (for example, a loop body skipped on a zero-trip loop).
+pub(super) fn reads_prior_state(
+    unit: &ExecutionUnit<RegionedVarAddr>,
+    targets: &[VarAtomBase<SourceVarId>],
+    widths: &HashMap<SourceVarId, usize>,
+) -> bool {
+    retained_state(unit, targets, widths, false)
+}
+
+fn retained_state(
+    unit: &ExecutionUnit<RegionedVarAddr>,
+    targets: &[VarAtomBase<SourceVarId>],
+    widths: &HashMap<SourceVarId, usize>,
+    require_complete_outputs: bool,
+) -> bool {
     let mask = |offset: usize, width: usize, limit: usize| {
         if offset >= limit {
             return BigUint::zero();
@@ -164,7 +184,8 @@ pub(super) fn retains_state(
                 _ => (),
             }
         }
-        if matches!(unit.blocks[&block].terminator, SIRTerminator::Return)
+        if require_complete_outputs
+            && matches!(unit.blocks[&block].terminator, SIRTerminator::Return)
             && all.iter().any(|(id, target)| &written[id] != target)
         {
             return true;
