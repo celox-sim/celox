@@ -9,6 +9,9 @@ description.workspace = true
 edition.workspace     = true
 
 [features]
+cranelift = ["celox/cranelift"]
+wasm-runtime = ["celox/wasm-runtime"]
+wasm-component = ["celox/wasm-component"]
 default = ["systemverilog"]
 arm64-codegen = ["celox/arm64-codegen"]
 x86_64-codegen = ["celox/x86_64-codegen"]
@@ -47,6 +50,7 @@ thiserror.workspace = true
 tempfile.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 celox-design.workspace = true
+celox-runtime.workspace = true
 celox-sv-analyzer = { workspace = true, optional = true }
 clap.workspace = true
 fxhash.workspace = true

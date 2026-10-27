@@ -61,6 +61,14 @@ pub(super) struct ScopeSymbols {
     /// The names the imports of a generate block bind there to another
     /// declaration than outside it, by the native body identity of the block.
     pub generate_imports: HashMap<celox_sv_syntax::BodyItemId, HashMap<String, String>>,
+    /// The classes the scope declares, laid out, by their qualified names
+    /// (IEEE 1800-2023 26.3): a scope that uses them may be analyzed from
+    /// another source, without their declarations.
+    pub classes: Vec<classes::Class>,
+    /// Class-declared types, frozen in each specialization's declaration
+    /// environment before another source imports them (8.23, 8.25).
+    pub class_member_types: HashMap<String, HashMap<String, Type>>,
+    pub inline_randomizations: Vec<classes::constraints::InlineRequest>,
 }
 
 #[derive(Default)]
@@ -72,6 +80,7 @@ pub(super) struct State {
 /// Restores the previously analyzed package when dropped.
 pub(super) struct InPackage {
     previous: Option<String>,
+    revision: u64,
     state: std::rc::Rc<AnalysisState>,
 }
 
@@ -79,6 +88,7 @@ impl Drop for InPackage {
     fn drop(&mut self) {
         let previous = self.previous.take();
         *self.state.scope.package.borrow_mut() = previous;
+        self.state.revision.restore(self.revision);
     }
 }
 
@@ -88,6 +98,7 @@ pub(super) fn enter_package(state: &std::rc::Rc<AnalysisState>, name: &str) -> I
     let previous = state.scope.package.borrow_mut().replace(name.to_string());
     InPackage {
         previous,
+        revision: state.revision.change(),
         state: state.clone(),
     }
 }
@@ -107,6 +118,7 @@ pub(super) fn qualified_name(state: &AnalysisState, package: &str, name: &str) -
 /// Restores the previously imported symbols when dropped.
 pub(super) struct Installed {
     previous: Arc<ScopeSymbols>,
+    revision: u64,
     state: std::rc::Rc<AnalysisState>,
 }
 
@@ -114,6 +126,7 @@ impl Drop for Installed {
     fn drop(&mut self) {
         let previous = std::mem::take(&mut self.previous);
         *self.state.scope.imported.borrow_mut() = previous;
+        self.state.revision.restore(self.revision);
     }
 }
 
@@ -123,6 +136,7 @@ pub(super) fn install(state: &std::rc::Rc<AnalysisState>, symbols: Arc<ScopeSymb
     let previous = state.scope.imported.replace(symbols);
     Installed {
         previous,
+        revision: state.revision.change(),
         state: state.clone(),
     }
 }
@@ -174,6 +188,21 @@ pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
 impl ScopeSymbols {
     /// Add the symbols of `other` that this scope does not already have.
     pub fn extend(&mut self, other: &ScopeSymbols) {
+        for request in &other.inline_randomizations {
+            if !self
+                .inline_randomizations
+                .iter()
+                .any(|known| known.key == request.key)
+            {
+                self.inline_randomizations.push(request.clone());
+            }
+        }
+        for class in &other.classes {
+            if !self.classes.iter().any(|known| known.name == class.name) {
+                self.classes.push(class.clone());
+            }
+        }
+        extend_missing(&mut self.class_member_types, &other.class_member_types);
         for (name, value) in &other.const_env {
             self.const_env.entry(name.clone()).or_insert(*value);
         }
@@ -340,7 +369,13 @@ impl ScopeSymbols {
                         .cloned()
                         .map(|stmt| rename.stmt(stmt))
                         .collect(),
-                    initializer: process.initializer,
+                    kind: process.kind,
+                    validation_body: process
+                        .validation_body
+                        .iter()
+                        .cloned()
+                        .map(|stmt| rename.stmt(stmt))
+                        .collect(),
                     synthetic: process.synthetic,
                     repeats: process.repeats,
                 })
@@ -414,6 +449,10 @@ impl ScopeSymbols {
             })
             .collect();
         ScopeSymbols {
+            // Classes have their qualified names already.
+            classes: self.classes.clone(),
+            class_member_types: self.class_member_types.clone(),
+            inline_randomizations: self.inline_randomizations.clone(),
             declarations_only: self.declarations_only,
             interface_instances: self.interface_instances.clone(),
             interface_types: self.interface_types.clone(),
@@ -530,6 +569,7 @@ impl ScopeSymbols {
                         rename.r#type(port.r#type.clone()),
                         port.is_net,
                     )
+                    .with_unresolved_net(port.unresolved_net)
                     .with_default(port.default.clone().map(|value| rename.const_expr(value)))
                 })
                 .collect(),
@@ -579,7 +619,13 @@ impl ScopeSymbols {
                         .cloned()
                         .map(|stmt| rename.stmt(stmt))
                         .collect(),
-                    initializer: process.initializer,
+                    kind: process.kind,
+                    validation_body: process
+                        .validation_body
+                        .iter()
+                        .cloned()
+                        .map(|stmt| rename.stmt(stmt))
+                        .collect(),
                     synthetic: process.synthetic,
                     repeats: process.repeats,
                 })
@@ -592,7 +638,7 @@ impl ScopeSymbols {
 
 /// Whether `process` assigns the signal `name`.
 pub(super) fn initializes(process: &InitialProcess, name: &str) -> bool {
-    process.body.iter().any(|stmt| stmt_initializes(stmt, name))
+    !process.is_final() && process.body.iter().any(|stmt| stmt_initializes(stmt, name))
 }
 
 fn stmt_initializes(stmt: &Stmt, name: &str) -> bool {

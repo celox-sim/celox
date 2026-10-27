@@ -17,6 +17,7 @@ mod instances;
 mod keywords;
 mod modports;
 mod nets;
+mod non_ansi;
 mod numbers;
 mod packages;
 mod procedures;
@@ -108,6 +109,7 @@ impl Declarations {
             indices,
             at: 0,
             next_parameter_id: 0,
+            inline_constraint_depth: 0,
             keyword_versions: Vec::new(),
             source_items: Vec::new(),
             expressions: Vec::new(),
@@ -324,6 +326,7 @@ struct Parser<'a> {
     indices: Vec<usize>,
     at: usize,
     next_parameter_id: usize,
+    inline_constraint_depth: usize,
     keyword_versions: Vec<keywords::KeywordVersion>,
     source_items: Vec<SourceItem>,
     expressions: Vec<Expr>,

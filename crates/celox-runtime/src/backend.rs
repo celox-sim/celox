@@ -119,6 +119,27 @@ pub trait SimBackend {
         assert!(offset + bytes.len() <= len, "write past the memory image");
         // Safety: the backend exposes `len` writable bytes at `ptr`.
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(offset), bytes.len()) };
+        self.mark_settle_range(offset, bytes.len());
+    }
+
+    /// Set the flags of the settle partitions reading `offset..offset + len`,
+    /// which the host wrote.
+    fn mark_settle_range(&mut self, offset: usize, len: usize) {
+        if let Some(settle) = self.layout().settle.as_ref() {
+            let (ptr, _) = self.memory_as_ptr();
+            // SAFETY: the settle layout describes this backend's state image.
+            unsafe { settle.mark_range(ptr.cast_mut(), offset, len) };
+        }
+    }
+
+    /// From now on run every settle partition on every settle: a raw view
+    /// of the state can change it without reporting.
+    fn mark_settle_untracked(&mut self) {
+        if let Some(settle) = self.layout().settle.as_ref() {
+            let (ptr, _) = self.memory_as_ptr();
+            // SAFETY: the settle layout describes this backend's state image.
+            unsafe { settle.mark_untracked(ptr.cast_mut()) };
+        }
     }
 
     /// Return an opaque owner that keeps the memory allocation alive.
@@ -137,6 +158,12 @@ pub trait SimBackend {
         None
     }
     fn set_comb_capture_event_enabled(&mut self, _active_sites: &[bool]) {}
+    /// Which runtime event sites are enabled for combinational capture, by
+    /// the host before an evaluation or by the evaluation for observers
+    /// whose inputs it changed. Empty for a backend without capture.
+    fn comb_capture_event_enabled(&self) -> Vec<bool> {
+        Vec::new()
+    }
     fn stable_region_size(&self) -> usize;
     fn layout(&self) -> &MemoryLayout;
     /// The heap that handle slots in this backend's state refer to.
@@ -194,17 +221,18 @@ pub trait SimBackend {
 
     /// Called by host setters, which share the generated-store notification ABI.
     fn mark_vcd_signal(&mut self, signal: SignalRef) {
+        let len = signal.array_layout.map_or_else(
+            || celox_state_layout::get_byte_size(signal.width),
+            |array| array.element_count * array.element_stride,
+        );
         if let Some(trace) = self.layout().trace.as_ref() {
-            let len = signal.array_layout.map_or_else(
-                || celox_state_layout::get_byte_size(signal.width),
-                |array| array.element_count * array.element_stride,
-            );
             let (ptr, _) = self.memory_as_ptr();
             // SAFETY: layout homes and metadata fit in the writable state image.
             unsafe {
                 trace.mark_range(ptr.cast_mut(), signal.offset, len);
             }
         }
+        self.mark_settle_range(signal.offset, len);
     }
 }
 

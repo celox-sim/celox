@@ -8,7 +8,7 @@ use crate::symbolic::artifact::{
 use crate::{
     FrontendLookup, FrontendTrace, FrontendTraceOptions, FusedSirOptimizationHints, HashMap,
     HashSet, InstancePath, ParallelScheduleOptions, ParserError, ScheduledRtl, ScheduledRtlOutput,
-    SourceAddr, SourceLocation, SourceVarId, VariableInfo, flattening,
+    SettlePartitionMode, SourceAddr, SourceLocation, SourceVarId, VariableInfo, flattening,
 };
 use celox_design::{
     BitAccess, CombDerivedClock, CounterKind, CounterSlots, DomainKind, ElaboratedDesign,
@@ -59,6 +59,11 @@ pub struct FusedFfAction {
 /// Adapter hook for source-aware FF lowering used by shared-clock scheduling,
 /// with or without a preceding comb phase. The scheduler and all identities
 /// crossing this trait remain source neutral.
+/// The most events whose combined comb-then-FF ticks each get their own
+/// program with a copy of the combinational program
+/// ([`SirProgram::merge_comb_apply`]).
+pub const MERGED_COMB_APPLY_EVENTS: usize = 4;
+
 pub trait FusedFfLoweringFactory {
     fn create(
         &self,
@@ -370,9 +375,10 @@ impl PackageBindings {
     }
 }
 
-/// Reject a package variable that two flip-flop processes write, that the
-/// initial writes of two instances write, or that a continuous driver and
-/// any other process write. Instances of one module are separate drivers.
+/// Reject a package variable that two flip-flop processes write, that a
+/// continuous driver and any other process write, or that an `always_ff`,
+/// `always_comb` or `always_latch` run as a process and any other process
+/// write. Instances of one module are separate drivers.
 /// Overlapping continuous drivers are rejected by the scheduler.
 fn check_package_variable_drivers(
     bindings: &PackageBindings,
@@ -450,6 +456,9 @@ fn check_package_variable_drivers(
     // values, and initial processes. The package's own declaration
     // initializers are not drivers.
     let mut initial_writes: Vec<((InstanceId, usize), AbsoluteAddr, BitAccess)> = Vec::new();
+    // The writes of processes that must be the only writers of what they
+    // write (IEEE 1800-2023 9.2.2.2 to 9.2.2.4).
+    let mut restricted_writes: Vec<((InstanceId, usize), AbsoluteAddr, BitAccess)> = Vec::new();
     for (&instance, module_id) in instance_modules {
         let module = &modules[module_id];
         if package_instances.contains_key(module_id) {
@@ -480,17 +489,34 @@ fn check_package_variable_drivers(
             }
         }
         for (index, process) in module.processes.iter().enumerate() {
+            let restricted = matches!(
+                process.origin.construct.as_str(),
+                "always_ff" | "always_comb" | "always_latch"
+            );
             for block in process.kernel.blocks.values() {
                 for instruction in &block.instructions {
-                    let (SIRInstruction::Store(address, ..)
-                    | SIRInstruction::Commit(_, address, ..)) = instruction
+                    let (SIRInstruction::Store(address, offset, bits, ..)
+                    | SIRInstruction::Commit(_, address, offset, bits, _)) = instruction
                     else {
                         continue;
                     };
                     let address = bindings.locate(instance, address.var_id);
                     if packages.contains(&address) {
-                        let access = BitAccess::new(0, width(&address).saturating_sub(1));
+                        // The bits the store writes, as for flip-flop
+                        // writes, so disjoint writers are not rejected.
+                        let access = offset
+                            .constant_bit_offset()
+                            .zip(bits.checked_sub(1))
+                            .and_then(|(lsb, tail)| {
+                                Some(BitAccess::new(lsb, lsb.checked_add(tail)?))
+                            })
+                            .unwrap_or_else(|| {
+                                BitAccess::new(0, width(&address).saturating_sub(1))
+                            });
                         initial_writes.push(((instance, index), address, access));
+                        if restricted {
+                            restricted_writes.push(((instance, index), address, access));
+                        }
                     }
                 }
             }
@@ -513,12 +539,28 @@ fn check_package_variable_drivers(
                         .then_some(*address)
                 })
         };
-    // Two flip-flop processes, or initial writes of two instances, race.
+    // Two flip-flop processes race. Initial writes and processes of several
+    // instances may write one package variable, as any processes may write
+    // a variable (IEEE 1800-2023 6.5).
     if let Some(address) = conflict(&ff_writes, &|left, right| left != right) {
         return Err(error(&address));
     }
-    if let Some(address) = conflict(&initial_writes, &|left, right| left.0 != right.0) {
-        return Err(error(&address));
+    // A restricted process overlaps every write of another process.
+    for (writer, address, access) in &restricted_writes {
+        let overlaps = |(other, other_address, other_access): &(
+            (InstanceId, usize),
+            AbsoluteAddr,
+            BitAccess,
+        )| {
+            other_address == address && other_access.overlaps(access) && other != writer
+        };
+        if initial_writes.iter().any(overlaps)
+            || ff_writes.iter().any(|(_, other_address, other_access)| {
+                other_address == address && other_access.overlaps(access)
+            })
+        {
+            return Err(error(address));
+        }
     }
     // A continuous driver overlaps every other write.
     for path in comb_blocks {
@@ -686,6 +728,107 @@ pub type LoopMember = (ModuleId, VarAtomBase<SourceVarId>);
 /// [`schedule_symbolic_rtl`], which also reports the ranges the blocks of a
 /// combinational loop write when the scheduler rejects one.
 #[allow(clippy::too_many_arguments)]
+/// The sensitivity atoms whose occurrences the processes and observers of
+/// `comb_blocks` and `comb_observers` count, with their counters, in order of
+/// discovery: the atoms they list, then the upstream atoms of transparent
+/// copies into them. `same_kind` tells whether a copy carries occurrences
+/// between two variables.
+fn sensitivity_probes(
+    comb_blocks: &[LogicPath<AbsoluteAddr>],
+    comb_observers: &[CombObserver<AbsoluteAddr>],
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    same_kind: impl Fn(&AbsoluteAddr, &AbsoluteAddr) -> bool,
+) -> Vec<(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)> {
+    let mut probes = Vec::new();
+    let mut probed = HashSet::default();
+    for path in comb_blocks {
+        if let LogicPathTarget::Process {
+            sensitivity_counters,
+            ..
+        } = &path.target
+        {
+            for &(source, counter) in sensitivity_counters {
+                if probed.insert((source, counter)) {
+                    probes.push((source, counter));
+                }
+            }
+        }
+    }
+    for observer in comb_observers {
+        for &(source, counter) in &observer.sensitivity_counters {
+            if probed.insert((source, counter)) {
+                probes.push((source, counter));
+            }
+        }
+    }
+    add_copied_probes(&mut probes, &mut probed, comb_blocks, arena, same_kind);
+    probes
+}
+
+/// Adds to `probes` the upstream atoms of the transparent copies of
+/// `comb_blocks` into atoms of `probes`, transitively, each with the counter
+/// of the atom it reaches. `probed` holds the entries of `probes`.
+///
+/// A direct wire/port connection carries occurrences as well as its settled
+/// value. Preserve them when a kernel writes the upstream object twice
+/// before the copy path is evaluated. Only equal-width, unindexed copies are
+/// transparent here; expressions remain scheduled combinational evaluations.
+fn add_copied_probes(
+    probes: &mut Vec<(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)>,
+    probed: &mut HashSet<(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)>,
+    comb_blocks: &[LogicPath<AbsoluteAddr>],
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    same_kind: impl Fn(&AbsoluteAddr, &AbsoluteAddr) -> bool,
+) {
+    let mut copies_to: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
+    for (path_index, path) in comb_blocks.iter().enumerate() {
+        if let LogicPathTarget::Var(target) = &path.target
+            && path.transparent_copy
+        {
+            copies_to.entry(target.id).or_default().push(path_index);
+        }
+    }
+    let mut next_probe = 0;
+    while next_probe < probes.len() {
+        let (source, counter) = probes[next_probe];
+        next_probe += 1;
+        for &path_index in copies_to.get(&source.id).into_iter().flatten() {
+            let path = &comb_blocks[path_index];
+            let LogicPathTarget::Var(target) = &path.target else {
+                unreachable!("copies_to holds variable targets");
+            };
+            if !target.access.overlaps(&source.access) {
+                continue;
+            }
+            let celox_slt::SLTNode::Input {
+                variable,
+                access,
+                index,
+                ..
+            } = arena.get(path.expr)
+            else {
+                continue;
+            };
+            if !index.is_empty()
+                || !same_kind(variable, &target.id)
+                || access.msb - access.lsb != target.access.msb - target.access.lsb
+            {
+                continue;
+            }
+            let lsb = source.access.lsb.max(target.access.lsb);
+            let msb = source.access.msb.min(target.access.msb);
+            let upstream = VarAtomBase::new(
+                *variable,
+                access.lsb + lsb - target.access.lsb,
+                access.lsb + msb - target.access.lsb,
+            );
+            if probed.insert((upstream, counter)) {
+                probes.push((upstream, counter));
+            }
+        }
+    }
+}
+
 pub fn schedule_symbolic_rtl_reporting_loops(
     symbolic: SymbolicRtl,
     fused_ff_factory: Option<&dyn FusedFfLoweringFactory>,
@@ -879,73 +1022,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         );
         // Count sensitivity occurrences before any optimizer can coalesce
         // consecutive writes whose final value is unchanged.
-        let mut probes = Vec::new();
-        for path in &comb_blocks {
-            if let LogicPathTarget::Process {
-                sensitivity_counters,
-                ..
-            } = &path.target
-            {
-                for &(source, counter) in sensitivity_counters {
-                    if !probes.contains(&(source, counter)) {
-                        probes.push((source, counter));
-                    }
-                }
-            }
-        }
-        for observer in &comb_observers {
-            for &(source, counter) in &observer.sensitivity_counters {
-                if !probes.contains(&(source, counter)) {
-                    probes.push((source, counter));
-                }
-            }
-        }
-        // A direct wire/port connection carries occurrences as well as its
-        // settled value. Preserve them when a kernel writes the upstream
-        // object twice before the copy path is evaluated. Only equal-width,
-        // unindexed copies are transparent here; expressions remain scheduled
-        // combinational evaluations.
-        let mut next_probe = 0;
-        while next_probe < probes.len() {
-            let (source, counter) = probes[next_probe];
-            next_probe += 1;
-            for path in &comb_blocks {
-                let LogicPathTarget::Var(target) = &path.target else {
-                    continue;
-                };
-                if !path.transparent_copy
-                    || target.id != source.id
-                    || !target.access.overlaps(&source.access)
-                {
-                    continue;
-                }
-                let celox_slt::SLTNode::Input {
-                    variable,
-                    access,
-                    index,
-                    ..
-                } = global_arena.get(path.expr)
-                else {
-                    continue;
-                };
-                if !index.is_empty()
-                    || (four_state && variables[variable].1 != variables[&target.id].1)
-                    || access.msb - access.lsb != target.access.msb - target.access.lsb
-                {
-                    continue;
-                }
-                let lsb = source.access.lsb.max(target.access.lsb);
-                let msb = source.access.msb.min(target.access.msb);
-                let upstream = VarAtomBase::new(
-                    *variable,
-                    access.lsb + lsb - target.access.lsb,
-                    access.lsb + msb - target.access.lsb,
-                );
-                if !probes.contains(&(upstream, counter)) {
-                    probes.push((upstream, counter));
-                }
-            }
-        }
+        let probes = sensitivity_probes(
+            &comb_blocks,
+            &comb_observers,
+            &global_arena,
+            |source, target| !four_state || variables[source].1 == variables[target].1,
+        );
         declaration_probes = probes.clone();
         occurrence_probes = probes.clone();
         // Signals a flip-flop evaluation may store twice in its working
@@ -954,88 +1036,127 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         // working state is seeded with the stable value first, so a store
         // compares with the value its update replaces.
         let ff_multi_stored = ff_multi_stored(&eval_apply_ffs, &eval_only_ffs, &parallel_ff_units);
-        for (source, counter) in probes {
-            let width = source.access.msb - source.access.lsb + 1;
-            let four_state = four_state && variables[&source.id].1;
-            let offset = match unpacked_element_widths.get(&source.id) {
-                Some(&element_width)
-                    if width > element_width
-                        && source.access.lsb.is_multiple_of(element_width)
-                        && width.is_multiple_of(element_width) =>
-                {
-                    celox_sir::SIROffset::PackedElements {
-                        bit_offset: source.access.lsb,
-                        element_width,
+        // Each unit is instrumented once for all probes. Probe `p` is pass
+        // `2p` over the stable state and pass `2p + 1` over a flip-flop
+        // evaluation's working state, the order of instrumenting probe by
+        // probe.
+        let probe_codes: Vec<_> = probes
+            .iter()
+            .map(|&(source, counter)| {
+                let width = source.access.msb - source.access.lsb + 1;
+                let four_state = four_state && variables[&source.id].1;
+                let offset = match unpacked_element_widths.get(&source.id) {
+                    Some(&element_width)
+                        if width > element_width
+                            && source.access.lsb.is_multiple_of(element_width)
+                            && width.is_multiple_of(element_width) =>
+                    {
+                        celox_sir::SIROffset::PackedElements {
+                            bit_offset: source.access.lsb,
+                            element_width,
+                        }
                     }
-                }
-                _ => celox_sir::SIROffset::Static(source.access.lsb),
-            };
-            let stable = |address| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address);
-            let code = |address: &RegionedAbsoluteAddr| {
-                (address.region == STABLE_REGION && address.absolute_addr() == source.id).then(
-                    || crate::watch::WatchCode {
-                        signal: stable(source.id),
-                        width,
-                        offset: offset.clone(),
-                        four_state,
-                        counters: vec![(CounterKind::Changes, stable(counter))],
-                        gated: Vec::new(),
-                    },
-                )
-            };
-            for process in &mut processes {
-                crate::watch::instrument_unit(&mut process.kernel, code);
-            }
-            for units in eval_apply_ffs
-                .values_mut()
-                .chain(eval_only_ffs.values_mut())
-                .chain(apply_ffs.values_mut())
-            {
-                for unit in units {
-                    crate::watch::instrument_unit(unit, code);
-                }
-            }
-            for parts in parallel_ff_units.values_mut() {
-                for (_, part) in parts {
-                    crate::watch::instrument_unit(&mut part.evaluate, code);
-                    crate::watch::instrument_unit(&mut part.apply, code);
-                }
-            }
-            if ff_multi_stored.contains(&source.id) {
-                let working =
-                    |address| RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, address);
-                let code = |address: &RegionedAbsoluteAddr| {
-                    (address.region == WORKING_REGION && address.absolute_addr() == source.id).then(
-                        || crate::watch::WatchCode {
-                            signal: working(source.id),
-                            width,
-                            offset: offset.clone(),
-                            four_state,
-                            counters: vec![(CounterKind::Changes, stable(counter))],
-                            gated: Vec::new(),
-                        },
-                    )
+                    _ => celox_sir::SIROffset::Static(source.access.lsb),
                 };
-                for_each_ff_evaluation(
-                    &mut eval_apply_ffs,
-                    &mut eval_only_ffs,
-                    &mut parallel_ff_units,
-                    |unit| instrument_stores(unit, code),
-                );
+                (counter, width, four_state, offset)
+            })
+            .collect();
+        let mut probes_of: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
+        for (index, (source, _)) in probes.iter().enumerate() {
+            probes_of.entry(source.id).or_default().push(index);
+        }
+        // The first probe of `signal` whose `pass` is `after` or later.
+        let first_probe = |signal: AbsoluteAddr, pass: fn(usize) -> usize, after: usize| {
+            let indices = probes_of.get(&signal)?;
+            indices
+                .get(indices.partition_point(|&index| pass(index) < after))
+                .copied()
+        };
+        fn probe_code<A>(
+            probe: &(AbsoluteAddr, usize, bool, celox_sir::SIROffset),
+            signal: A,
+            counter: A,
+        ) -> crate::watch::WatchCode<A> {
+            let &(_, width, four_state, ref offset) = probe;
+            crate::watch::WatchCode {
+                signal,
+                width,
+                offset: offset.clone(),
+                four_state,
+                counters: vec![(CounterKind::Changes, counter)],
+                gated: Vec::new(),
             }
-            for path in &mut comb_blocks {
-                if let LogicPathTarget::Process { unit, .. } = &mut path.target {
-                    crate::watch::instrument_unit(unit, |address| {
-                        (*address == source.id).then(|| crate::watch::WatchCode {
-                            signal: source.id,
-                            width,
-                            offset: offset.clone(),
-                            four_state,
-                            counters: vec![(CounterKind::Changes, counter)],
-                            gated: Vec::new(),
-                        })
-                    });
-                }
+        }
+        let stable = |address| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address);
+        let working = |address| RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, address);
+        let stable_code = |instruction: &SIRInstruction<RegionedAbsoluteAddr>, after: usize| {
+            let address = crate::watch::write_destination(instruction)?;
+            if address.region != STABLE_REGION {
+                return None;
+            }
+            let index = first_probe(address.absolute_addr(), |index| 2 * index, after)?;
+            Some((
+                2 * index,
+                probe_code(
+                    &probe_codes[index],
+                    stable(address.absolute_addr()),
+                    stable(probe_codes[index].0),
+                ),
+            ))
+        };
+        // A flip-flop evaluation's stores to a signal of `ff_multi_stored`;
+        // the commits that seed its working state are not writes of the
+        // process.
+        let evaluation_code = |instruction: &SIRInstruction<RegionedAbsoluteAddr>, after: usize| {
+            if let SIRInstruction::Store(address, ..) = instruction
+                && address.region == WORKING_REGION
+                && ff_multi_stored.contains(&address.absolute_addr())
+                && let Some(index) =
+                    first_probe(address.absolute_addr(), |index| 2 * index + 1, after)
+            {
+                return Some((
+                    2 * index + 1,
+                    probe_code(
+                        &probe_codes[index],
+                        working(address.absolute_addr()),
+                        stable(probe_codes[index].0),
+                    ),
+                ));
+            }
+            stable_code(instruction, after)
+        };
+        for process in &mut processes {
+            crate::watch::instrument_writes_in_passes(&mut process.kernel, stable_code);
+        }
+        for units in eval_apply_ffs
+            .values_mut()
+            .chain(eval_only_ffs.values_mut())
+        {
+            for unit in units {
+                crate::watch::instrument_writes_in_passes(unit, evaluation_code);
+            }
+        }
+        for units in apply_ffs.values_mut() {
+            for unit in units {
+                crate::watch::instrument_writes_in_passes(unit, stable_code);
+            }
+        }
+        for parts in parallel_ff_units.values_mut() {
+            for (_, part) in parts {
+                crate::watch::instrument_writes_in_passes(&mut part.evaluate, evaluation_code);
+                crate::watch::instrument_writes_in_passes(&mut part.apply, stable_code);
+            }
+        }
+        for path in &mut comb_blocks {
+            if let LogicPathTarget::Process { unit, .. } = &mut path.target {
+                crate::watch::instrument_writes_in_passes(unit, |instruction, after| {
+                    let &address = crate::watch::write_destination(instruction)?;
+                    let index = first_probe(address, |index| index, after)?;
+                    Some((
+                        index,
+                        probe_code(&probe_codes[index], address, probe_codes[index].0),
+                    ))
+                });
             }
         }
         let ff_written: HashSet<AbsoluteAddr> = eval_apply_ffs
@@ -1101,32 +1222,46 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             .iter()
             .map(|slots| slots.signal)
             .collect();
-        for (signal, slots) in &counted {
-            if !ff_multi_stored.contains(signal) || pending.contains(signal) {
-                continue;
-            }
-            let (width, is_4state) = variables[signal];
-            let regioned = RegionedAbsoluteAddr::from_absolute_addr;
-            let code = |address: &RegionedAbsoluteAddr| {
-                (address.region == WORKING_REGION && address.absolute_addr() == *signal).then(
-                    || crate::watch::WatchCode {
-                        signal: regioned(WORKING_REGION, *signal),
-                        offset: celox_sir::SIROffset::Static(0),
-                        width,
-                        four_state: four_state && is_4state,
-                        counters: CounterKind::ALL
-                            .into_iter()
-                            .map(|kind| (kind, regioned(STABLE_REGION, slots.counter(kind))))
-                            .collect(),
-                        gated: Vec::new(),
-                    },
-                )
-            };
+        // One pass per signal, in signal order; each pass watches only its
+        // own signal.
+        let regioned = RegionedAbsoluteAddr::from_absolute_addr;
+        let multi_stored: HashMap<AbsoluteAddr, (usize, crate::watch::WatchCode<_>)> = counted
+            .iter()
+            .filter(|(signal, _)| ff_multi_stored.contains(signal) && !pending.contains(signal))
+            .enumerate()
+            .map(|(pass, (&signal, slots))| {
+                let (width, is_4state) = variables[&signal];
+                let code = crate::watch::WatchCode {
+                    signal: regioned(WORKING_REGION, signal),
+                    offset: celox_sir::SIROffset::Static(0),
+                    width,
+                    four_state: four_state && is_4state,
+                    counters: CounterKind::ALL
+                        .into_iter()
+                        .map(|kind| (kind, regioned(STABLE_REGION, slots.counter(kind))))
+                        .collect(),
+                    gated: Vec::new(),
+                };
+                (signal, (pass, code))
+            })
+            .collect();
+        if !multi_stored.is_empty() {
             for_each_ff_evaluation(
                 &mut eval_apply_ffs,
                 &mut eval_only_ffs,
                 &mut parallel_ff_units,
-                |unit| instrument_stores(unit, code),
+                |unit| {
+                    crate::watch::instrument_writes_in_passes(unit, |instruction, after| {
+                        let SIRInstruction::Store(address, ..) = instruction else {
+                            return None;
+                        };
+                        if address.region != WORKING_REGION {
+                            return None;
+                        }
+                        let (pass, code) = multi_stored.get(&address.absolute_addr())?;
+                        (*pass >= after).then(|| (*pass, code.clone()))
+                    })
+                },
             );
         }
         counted
@@ -1420,6 +1555,29 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         }
     }
     let parallel_comb_blocks = parallel.enabled().then(|| comb_blocks.clone());
+    // The flag object of a partitioned settle is declared once the
+    // partitions are known; reserve its address now.
+    let root_instance = expanded[&InstancePath(Vec::new())];
+    let settle_flags =
+        settle_partitioning(parallel, &comb_blocks, &global_arena, eval_apply_ffs.len()).map(
+            |target_cost| {
+                let var_id = SourceVarId(
+                    modules[&root_id]
+                        .variables
+                        .keys()
+                        .map(|id| id.0 + 1)
+                        .max()
+                        .unwrap_or(0),
+                );
+                scheduler::SettlePartitioning {
+                    flags: AbsoluteAddr {
+                        instance_id: root_instance,
+                        var_id,
+                    },
+                    target_cost,
+                }
+            },
+        );
     let sched_start = flatten_timing.then(std::time::Instant::now);
     let schedule = match scheduler::sort_with_unpacked_element_widths(
         comb_blocks,
@@ -1430,6 +1588,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &var_widths,
         &unpacked_element_widths,
         next_runtime_error_code,
+        settle_flags,
     ) {
         Ok(schedule) => schedule,
         Err(error) => {
@@ -1470,6 +1629,19 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             });
         }
     };
+    let settle_partitions = schedule.partitions.clone();
+
+    let settle_flags = settle_flags.filter(|_| !settle_partitions.is_empty());
+    if let Some(settle) = &settle_flags {
+        // The flags carry what changed from one settle to the next.
+        persistent_comb_state.insert(settle.flags);
+        declare_settle_flags(
+            &mut modules,
+            root_id,
+            settle.flags.var_id,
+            settle_partitions.len(),
+        );
+    }
     let object_sizes = super::parallel::ObjectSizes {
         widths: &var_widths,
         element_widths: &unpacked_element_widths,
@@ -1585,6 +1757,15 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    // Every event's combined comb-then-FF tick gets its own program, with
+    // the combinational program in it, only while there are a handful of
+    // events; that copy lets the FF part use comb values in registers.
+    // Beyond that the copies would multiply the design by its event count,
+    // so the ticks share the one `eval_comb` program instead.
+    // A merged program drops comb stores the next full settle would redo;
+    // a partitioned settle keeps what its skipped partitions stored.
+    let merge_comb_apply =
+        eval_apply_ffs.len() <= MERGED_COMB_APPLY_EVENTS && settle_flags.is_none();
     let mut eval_comb_apply_ffs = HashMap::default();
     let mut fused_direct_ff_writes = HashMap::default();
     if let (
@@ -1604,8 +1785,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             Vec<usize>,
             (
                 Option<Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-                Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
-                Vec<VarAtomBase<RegionedAbsoluteAddr>>,
+                Option<(
+                    Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+                    Vec<VarAtomBase<RegionedAbsoluteAddr>>,
+                )>,
             ),
         >::default();
         let schedule = |paths, actions| {
@@ -1633,13 +1816,14 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         };
         for (trigger, actions) in actions {
             let action_ids = actions.iter().map(|action| action.id).collect::<Vec<_>>();
-            if let Some((ff_only, units, direct_ff_writes)) = fused_schedule_cache.get(&action_ids)
-            {
+            if let Some((ff_only, fused)) = fused_schedule_cache.get(&action_ids) {
                 if let Some(ff_only) = ff_only {
                     eval_apply_ffs.insert(trigger, ff_only.clone());
                 }
-                eval_comb_apply_ffs.insert(trigger, units.clone());
-                fused_direct_ff_writes.insert(trigger, direct_ff_writes.clone());
+                if let Some((units, direct_ff_writes)) = fused {
+                    eval_comb_apply_ffs.insert(trigger, units.clone());
+                    fused_direct_ff_writes.insert(trigger, direct_ff_writes.clone());
+                }
                 continue;
             }
             let fused_start = flatten_timing.then(std::time::Instant::now);
@@ -1653,21 +1837,23 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             } else {
                 None
             };
-            let fused = schedule(clock_comb_blocks.clone(), actions)?;
+            let fused = if merge_comb_apply {
+                let fused = schedule(clock_comb_blocks.clone(), actions)?;
+                Some((fused.execution_units, fused.direct_ff_writes))
+            } else {
+                None
+            };
             if let Some(start) = fused_start {
                 tracing::debug!("[flatten] scheduler::sort_clock: {:?}", start.elapsed());
             }
-            let direct_ff_writes = fused.direct_ff_writes;
-            let units = fused.execution_units;
-            fused_schedule_cache.insert(
-                action_ids,
-                (ff_only.clone(), units.clone(), direct_ff_writes.clone()),
-            );
+            fused_schedule_cache.insert(action_ids, (ff_only.clone(), fused.clone()));
             if let Some(ff_only) = ff_only {
                 eval_apply_ffs.insert(trigger, ff_only);
             }
-            eval_comb_apply_ffs.insert(trigger, units);
-            fused_direct_ff_writes.insert(trigger, direct_ff_writes);
+            if let Some((units, direct_ff_writes)) = fused {
+                eval_comb_apply_ffs.insert(trigger, units);
+                fused_direct_ff_writes.insert(trigger, direct_ff_writes);
+            }
         }
     }
 
@@ -1819,6 +2005,21 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .chain(bound_initials)
         .map(|(_, init)| init)
         .collect();
+    if let Some(settle) = &settle_flags {
+        // Every partition runs at the first settle.
+        let partitions = settle_partitions.len();
+        let value = (0..partitions).fold(BigUint::default(), |value, partition| {
+            value | (BigUint::from(1u8) << (partition * 8))
+        });
+        initial_memory_values.push(InitialStateValue {
+            address: settle.flags,
+            data: InitialStateData::Packed {
+                value,
+                mask: BigUint::default(),
+                written_mask: (BigUint::from(1u8) << ((partitions + 2) * 8)) - 1u8,
+            },
+        });
+    }
     let state_objects: HashMap<AbsoluteAddr, VariableMetadata> = instance_modules
         .iter()
         .flat_map(|(&instance_id, module_id)| {
@@ -1839,7 +2040,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .collect();
     let declaration_startup = processes
         .iter()
-        .any(|process| process.slots.is_initializer)
+        .any(|process| process.slots.kind == celox_design::ProcessKind::Initializer)
         .then(|| {
             let targets: BTreeSet<_> = folded_initials.iter().map(|init| init.address).collect();
             let mut reset = targets
@@ -1966,10 +2167,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     }
     let mut process_kernels = Vec::with_capacity(processes.len());
     let mut process_slots = Vec::with_capacity(processes.len());
+    let mut process_frames = Vec::with_capacity(processes.len());
     let mut process_origins = Vec::with_capacity(processes.len());
     for process in processes {
         process_kernels.push(process.kernel);
         process_slots.push(process.slots);
+        process_frames.push(process.frame);
         process_origins.push(process.origin);
     }
     let TimingMetadata {
@@ -1977,11 +2180,14 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         nba_sites,
         host_request_sites,
         time_slots,
+        sample_shadows,
+        initial_copies,
         ..
     } = timing;
     let source_sir = SirProgram {
         eval_apply_ffs,
         eval_comb_apply_ffs,
+        merge_comb_apply,
         eval_only_ffs,
         apply_ffs,
         eval_comb,
@@ -2176,6 +2382,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         }
     }
 
+    let process_frames: Vec<_> = process_frames
+        .into_iter()
+        .map(|frame| frame.map(|frame| frame.map(project)))
+        .collect();
     let process_slots = process_slots
         .into_iter()
         .map(|slots| slots.map(project))
@@ -2223,7 +2433,41 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .collect();
     let active_commits: Vec<StateAddr> = active_commits.into_iter().map(project).collect();
     let time_slots: Vec<StateAddr> = time_slots.into_iter().map(project).collect();
+    let sample_shadows: Vec<(StateAddr, StateAddr)> = sample_shadows
+        .into_iter()
+        .map(|(variable, copy)| (project(variable), project(copy)))
+        .collect();
+    let initial_copies: Vec<(StateAddr, StateAddr)> = initial_copies
+        .into_iter()
+        .map(|(variable, copy)| (project(variable), project(copy)))
+        .collect();
     let root_instance = expanded[&InstancePath(Vec::new())];
+    let settle_partitions = settle_flags.map(|settle| {
+        let mut marks: HashMap<StateAddr, BTreeSet<u32>> = HashMap::default();
+        for (index, partition) in settle_partitions.iter().enumerate() {
+            let index = index as u32;
+            for addr in &partition.reads {
+                if let Some(&state) = source_to_state.get(addr) {
+                    marks.entry(state).or_default().insert(index);
+                }
+            }
+            for addr in &partition.writes {
+                if let Some(&state) = source_to_state.get(addr) {
+                    marks.entry(state).or_default().insert(index);
+                }
+            }
+        }
+        let mut marks = marks
+            .into_iter()
+            .map(|(state, partitions)| (state, partitions.into_iter().collect()))
+            .collect::<Vec<_>>();
+        marks.sort_unstable();
+        celox_design::SettlePartitions {
+            flags: project(settle.flags),
+            partitions: settle_partitions.len() as u32,
+            marks,
+        }
+    });
     let scheduler = scheduler_slots.map(|slots| celox_design::SchedulerSchema {
         slots: slots.map(|var_id| {
             project(AbsoluteAddr {
@@ -2278,6 +2522,13 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .collect();
     // The runtime counts the occurrences its own writes cause.
     timing_read_roots.extend(
+        process_frames
+            .iter()
+            .flatten()
+            .flat_map(|frame| frame.private.iter().chain(&frame.locals))
+            .copied(),
+    );
+    timing_read_roots.extend(
         occurrence_probes
             .iter()
             .flat_map(|(source, counter)| [source.id, *counter]),
@@ -2309,6 +2560,13 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 .flat_map(|(source, counter)| [source.id, *counter]),
         );
     }
+    // The host copies each sampled variable into its copy.
+    timing_read_roots.extend(
+        sample_shadows
+            .iter()
+            .chain(&initial_copies)
+            .flat_map(|&(variable, copy)| [variable, copy]),
+    );
     // A package variable's state object maps back to the package's own
     // variable, not to one of its aliases.
     let state_to_source = source_to_state
@@ -2351,6 +2609,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             declaration_startup,
             dead_store_policy: Default::default(),
             live_signals: Default::default(),
+            process_frames,
             processes: process_slots,
             process_origins,
             watches,
@@ -2360,8 +2619,11 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             host_request_sites,
             active_commits,
             time_slots,
+            sample_shadows,
+            initial_copies,
             scheduler,
             derived_edges: Vec::new(),
+            settle_partitions,
         },
     };
 
@@ -2377,6 +2639,85 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         scheduled,
         fused_optimization_hints: FusedSirOptimizationHints { direct_ff_writes },
     })
+}
+
+/// Smallest combinational program, in expression nodes, whose settle
+/// [`SettlePartitionMode::Estimated`] partitions.
+const MIN_PARTITIONED_SETTLE_COST: usize = 20_000;
+/// Expression nodes per partition of an estimated partitioned settle.
+const SETTLE_PARTITION_COST: usize = 16_000;
+/// Bound flag tests, publication checks, and their compiler analyses on large
+/// designs instead of growing the number of partitions with every source node.
+const TARGET_ESTIMATED_SETTLE_PARTITIONS: usize = 64;
+
+fn estimated_settle_partition_cost(cost: usize) -> usize {
+    SETTLE_PARTITION_COST.max(cost.div_ceil(TARGET_ESTIMATED_SETTLE_PARTITIONS))
+}
+
+/// The cost per partition of a partitioned settle of `comb_blocks`, or
+/// `None` to keep one pass.
+///
+/// A partition costs a flag test per settle and flag stores in every writer
+/// of what it reads, and pays off when most of the program is idle in most
+/// settles. A design with few event domains drives most of its logic from
+/// one clock, so it keeps the single pass, as does a small program.
+fn settle_partitioning(
+    parallel: &ParallelScheduleOptions,
+    comb_blocks: &[LogicPath<AbsoluteAddr>],
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    events: usize,
+) -> Option<usize> {
+    // Lane-partitioned kernels run the comb program as lane tasks.
+    if parallel.enabled() {
+        return None;
+    }
+    match parallel.settle {
+        SettlePartitionMode::Off => None,
+        SettlePartitionMode::Always => Some(1),
+        SettlePartitionMode::Estimated => {
+            if events <= MERGED_COMB_APPLY_EVENTS {
+                return None;
+            }
+            let cost: usize = comb_blocks
+                .iter()
+                .map(|path| scheduler::path_cost(arena, path))
+                .sum();
+            (cost >= MIN_PARTITIONED_SETTLE_COST).then(|| estimated_settle_partition_cost(cost))
+        }
+    }
+}
+
+/// Declare the flags of a settle of `partitions` partitions, one byte each
+/// plus the untracked and the full byte, as a hidden variable of the top
+/// module.
+fn declare_settle_flags(
+    modules: &mut HashMap<ModuleId, SimModule>,
+    root: ModuleId,
+    var_id: SourceVarId,
+    partitions: usize,
+) {
+    let width = (partitions + 2) * 8;
+    let variables = &mut modules.get_mut(&root).expect("top module").variables;
+    variables.insert(
+        var_id,
+        crate::symbolic::artifact::SymbolicVariable {
+            path: vec!["$settle".to_string(), "flags".to_string()],
+            kind: crate::VariableKind::Variable,
+            signed: false,
+            metadata: VariableMetadata {
+                width,
+                is_4state: false,
+                kind: DomainKind::Other,
+                type_kind: celox_design::PortTypeKind::Bit,
+                array_dims: Vec::new(),
+                value_kind: Default::default(),
+            },
+            packed_dims: vec![width],
+            unpacked_ranges: Vec::new(),
+            source: None,
+            module_affiliated: false,
+        },
+    );
 }
 
 /// Declare the hidden objects a compiled scheduler exchanges with the
@@ -2821,6 +3162,9 @@ fn unify_clock_domains(
     let mut drive_graph: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>> = HashMap::default();
     // The edge each clock is sensed at: `true` rising, `false` falling.
     let mut polarities: HashMap<AbsoluteAddr, bool> = HashMap::default();
+    // Every range definition by its target, to follow single bits through
+    // wiring.
+    let mut wires: HashMap<AbsoluteAddr, Vec<Wire<'_>>> = HashMap::default();
 
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
@@ -2842,6 +3186,24 @@ fn unify_clock_domains(
             }
         };
 
+        for logic_path in &sim_module.comb_blocks {
+            // A definition reading a value from before its process ran
+            // is not a wire: `g = v[0]; v = {2{clk}};` makes `g` the old
+            // level of `clk`.
+            if !logic_path.previous_sources.is_empty() {
+                continue;
+            }
+            if let Some(target) = logic_path.target.var() {
+                wires
+                    .entry(bindings.locate(*id, target.id))
+                    .or_default()
+                    .push(Wire {
+                        access: target.access,
+                        expr: logic_path.expr,
+                        arena: WireArena::Comb(&sim_module.arena, *id),
+                    });
+            }
+        }
         // Internal aliases (e.g. `assign clk_internal = clk_port;`)
         for logic_path in &sim_module.comb_blocks {
             // Only unify whole-variable copies. Gated clocks and part-selects
@@ -2871,6 +3233,23 @@ fn unify_clock_domains(
                     GlueAddr::Parent(var) => width(sim_module, var),
                     GlueAddr::Child(var) => width(child_module, var),
                 };
+                for (_, logic_path) in glue_block
+                    .input_ports
+                    .iter()
+                    .chain(&glue_block.output_ports)
+                {
+                    if let Some(target) = logic_path.target.var() {
+                        let located = match target.id {
+                            GlueAddr::Parent(var) => bindings.locate(*id, var),
+                            GlueAddr::Child(var) => bindings.locate(child_id, var),
+                        };
+                        wires.entry(located).or_default().push(Wire {
+                            access: target.access,
+                            expr: logic_path.expr,
+                            arena: WireArena::Glue(&glue_block.arena, *id, child_id),
+                        });
+                    }
+                }
 
                 // Inputs: Parent -> Child (Parent drives Child)
                 for (_, logic_path) in &glue_block.input_ports {
@@ -2906,6 +3285,69 @@ fn unify_clock_domains(
                     }
                 }
             }
+        }
+    }
+
+    // A one-bit variable wired to a bit of a vector that is in turn wired
+    // to a one-bit variable, through bit selects, concatenations,
+    // replications and port connections, is a copy of that variable: a
+    // clock gated in a cell, collected into a vector and replicated to the
+    // clock inputs of many instances is the cell's output clock.
+    let one_bit = |addr: AbsoluteAddr| {
+        modules[&instance_modules[&addr.instance_id]]
+            .variables
+            .get(&addr.var_id)
+            .is_some_and(|variable| {
+                variable.metadata.width == 1 && variable.metadata.array_dims.is_empty()
+            })
+    };
+    let resolve = |(addr, bit): (AbsoluteAddr, usize)| {
+        let wire = wires
+            .get(&addr)?
+            .iter()
+            .find(|wire| wire.access.lsb <= bit && bit <= wire.access.msb)?;
+        let bit = bit - wire.access.lsb;
+        match wire.arena {
+            WireArena::Comb(arena, instance) => wired_bit(arena, wire.expr, bit)
+                .map(|(var, bit)| (bindings.locate(instance, var), bit)),
+            WireArena::Glue(arena, parent, child) => {
+                wired_bit(arena, wire.expr, bit).map(|(var, bit)| match var {
+                    GlueAddr::Parent(var) => (bindings.locate(parent, var), bit),
+                    GlueAddr::Child(var) => (bindings.locate(child, var), bit),
+                })
+            }
+        }
+    };
+    let mut targets = wires
+        .keys()
+        .copied()
+        .filter(|&addr| one_bit(addr))
+        .collect::<Vec<_>>();
+    targets.sort_unstable();
+    for target in targets {
+        let mut node = (target, 0);
+        for _ in 0..MAX_WIRED_BIT_STEPS {
+            let Some(next) = resolve(node) else {
+                break;
+            };
+            if one_bit(next.0) {
+                if next.0 != target {
+                    for addr in [target, next.0] {
+                        let polarity = modules[&instance_modules[&addr.instance_id]]
+                            .variables
+                            .get(&addr.var_id)
+                            .and_then(|variable| {
+                                celox_design::edges::polarity(variable.metadata.kind)
+                            });
+                        if let Some(polarity) = polarity {
+                            polarities.insert(addr, polarity);
+                        }
+                    }
+                    drive_graph.entry(next.0).or_default().push(target);
+                }
+                break;
+            }
+            node = next;
         }
     }
 
@@ -3014,6 +3456,66 @@ fn unify_clock_domains(
         clock_domains.insert(addr, current);
     }
     clock_domains
+}
+
+/// The most wiring hops followed from a one-bit variable to its source.
+const MAX_WIRED_BIT_STEPS: usize = 64;
+
+/// The node arena of a range definition, with the instances its
+/// addresses resolve in.
+#[derive(Clone, Copy)]
+enum WireArena<'a> {
+    Comb(&'a SLTNodeArena<SourceVarId>, InstanceId),
+    /// A port connection: the parent's and the child's instance.
+    Glue(&'a SLTNodeArena<GlueAddr>, InstanceId, InstanceId),
+}
+
+/// One range definition of a variable: `access` of the target takes `expr`.
+struct Wire<'a> {
+    access: BitAccess,
+    expr: NodeId,
+    arena: WireArena<'a>,
+}
+
+/// The variable bit that bit `bit` of `node` is wired to: a read of a
+/// variable, through bit selects and concatenations (replications are
+/// concatenations), with no operator in between.
+fn wired_bit<A: Copy + std::hash::Hash + Eq>(
+    arena: &SLTNodeArena<A>,
+    mut node: NodeId,
+    mut bit: usize,
+) -> Option<(A, usize)> {
+    loop {
+        match arena.get(node) {
+            celox_slt::SLTNode::Input {
+                variable,
+                index,
+                access,
+                ..
+            } if index.is_empty() => {
+                return (bit <= access.msb - access.lsb).then_some((*variable, access.lsb + bit));
+            }
+            celox_slt::SLTNode::Slice { expr, access } => {
+                if bit > access.msb - access.lsb {
+                    return None;
+                }
+                bit += access.lsb;
+                node = *expr;
+            }
+            celox_slt::SLTNode::Concat(parts) => {
+                // Parts run from the most significant one.
+                let mut offset = 0;
+                let (part, inner) = parts.iter().rev().find_map(|&(part, width)| {
+                    let found = (bit < offset + width).then_some((part, bit - offset));
+                    offset += width;
+                    found
+                })?;
+                node = part;
+                bit = inner;
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// The `(target, source)` of a path that copies one whole variable into
@@ -3528,6 +4030,10 @@ fn relocate_units(
                         &extern_function_map,
                     ),
                     slots: process.slots.map(|var_id| bindings.locate(*id, var_id)),
+                    frame: process
+                        .frame
+                        .clone()
+                        .map(|frame| frame.map(|var_id| bindings.locate(*id, var_id))),
                     origin: celox_design::ProcessOrigin {
                         scope: Some(scope.clone()),
                         ..process.origin.clone()
@@ -3659,6 +4165,7 @@ fn relocate_units(
 struct RelocatedProcess {
     kernel: ExecutionUnit<RegionedAbsoluteAddr>,
     slots: ProcessSlots<AbsoluteAddr>,
+    frame: Option<celox_design::ProcessFrame<AbsoluteAddr>>,
     origin: celox_design::ProcessOrigin,
     /// The instance and the module-local index of the process.
     key: (InstanceId, usize),
@@ -3673,6 +4180,8 @@ struct TimingMetadata {
     nba_sites: Vec<NbaSite<AbsoluteAddr>>,
     host_request_sites: Vec<HostRequestSite<AbsoluteAddr>>,
     time_slots: Vec<AbsoluteAddr>,
+    sample_shadows: Vec<(AbsoluteAddr, AbsoluteAddr)>,
+    initial_copies: Vec<(AbsoluteAddr, AbsoluteAddr)>,
     nba_switches: Vec<NbaSwitch<AbsoluteAddr>>,
 }
 
@@ -3864,6 +4373,18 @@ fn select_nba_paths(
     staged: &HashSet<AbsoluteAddr>,
     processes: &mut [RelocatedProcess],
 ) {
+    let mut staged = staged.clone();
+    // Fork activations can reach one NBA site concurrently. Always queue its
+    // captured value, rather than leaving one shared pending slot per kernel.
+    for site in &timing.nba_sites {
+        if processes[site.process].frame.is_some() {
+            for switch in &timing.nba_switches {
+                if switch.value == site.value {
+                    staged.remove(&switch.switch);
+                }
+            }
+        }
+    }
     let switches: HashMap<AbsoluteAddr, NbaSwitch<AbsoluteAddr>> = timing
         .nba_switches
         .iter()
@@ -3983,6 +4504,8 @@ fn relocate_timing(
         nba_sites: Vec::new(),
         host_request_sites: Vec::new(),
         time_slots: Vec::new(),
+        sample_shadows: Vec::new(),
+        initial_copies: Vec::new(),
         nba_switches: Vec::new(),
     };
     for (&instance, module) in instances {
@@ -4018,6 +4541,18 @@ fn relocate_timing(
                     }),
             );
         metadata.time_slots.extend(module.time_slot.map(locate));
+        metadata.sample_shadows.extend(
+            module
+                .sample_shadows
+                .iter()
+                .map(|&(variable, copy)| (locate(variable), locate(copy))),
+        );
+        metadata.initial_copies.extend(
+            module
+                .initial_copies
+                .iter()
+                .map(|&(variable, copy)| (locate(variable), locate(copy))),
+        );
         metadata.nba_switches.extend(
             module
                 .nba_switches
@@ -4053,19 +4588,6 @@ fn ff_multi_stored(
         )
         .flat_map(|unit| crate::watch::multi_store_only_candidates(unit, working))
         .collect()
-}
-
-/// [`crate::watch::instrument_unit`] for the stores alone: the commits that
-/// seed a flip-flop evaluation's working state are not writes of the
-/// process.
-fn instrument_stores(
-    unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    watch_for: impl Fn(&RegionedAbsoluteAddr) -> Option<crate::watch::WatchCode<RegionedAbsoluteAddr>>,
-) {
-    crate::watch::instrument_writes(unit, |instruction| match instruction {
-        SIRInstruction::Store(address, ..) => watch_for(address),
-        _ => None,
-    });
 }
 
 /// Run `f` on every flip-flop evaluation.
@@ -4126,8 +4648,12 @@ fn choose_comb_alternatives(
             let locate = |var_id| bindings.locate(instance, var_id);
             if alternative.candidates.iter().any(|&candidate| {
                 let candidate = locate(candidate);
-                counted.contains_key(&candidate) || gated.contains(&candidate)
-            }) {
+                counted.contains_key(&candidate)
+            }) || alternative
+                .targets
+                .iter()
+                .any(|target| gated.contains(&locate(target.id)))
+            {
                 for target in &alternative.targets {
                     symbolic
                         .entry(locate(target.id))
@@ -4516,10 +5042,10 @@ fn build_comb_observer_capture_paths(
                 | RuntimeEventKind::Finish
                 | RuntimeEventKind::Stop
         );
-        let fatal_error_code = sites[observer.site_id as usize]
-            .kind
-            .is_fatal()
-            .then_some(observer.site_id as i64);
+        // A deferred `$fatal` ends the simulation when it matures.
+        let fatal_error_code = (sites[observer.site_id as usize].kind.is_fatal()
+            && sites[observer.site_id as usize].deferred.is_none())
+        .then_some(observer.site_id as i64);
         let pre_lower_nodes = observer_pre_lower_nodes(observer, arena);
         for idx in &order_after {
             comb_blocks[idx.0]
@@ -4572,10 +5098,10 @@ fn build_comb_observer_capture_paths(
                         | RuntimeEventKind::Finish
                         | RuntimeEventKind::Stop
                 );
-                let member_fatal_error_code = sites[member.site_id as usize]
-                    .kind
-                    .is_fatal()
-                    .then_some(member.site_id as i64);
+                // A deferred `$fatal` ends the simulation when it matures.
+                let member_fatal_error_code = (sites[member.site_id as usize].kind.is_fatal()
+                    && sites[member.site_id as usize].deferred.is_none())
+                .then_some(member.site_id as i64);
                 let member_expr = match member
                     .loop_runner
                     .or(member.guard)
@@ -5758,6 +6284,177 @@ impl GateBuilder<'_> {
                 program.push(GateOp::Mux, 3)
             }
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(var: u32) -> AbsoluteAddr {
+        AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: SourceVarId(var),
+        }
+    }
+
+    /// The previous propagation, which scans every path for each probe.
+    fn add_copied_probes_by_scan(
+        probes: &mut Vec<(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)>,
+        comb_blocks: &[LogicPath<AbsoluteAddr>],
+        arena: &SLTNodeArena<AbsoluteAddr>,
+        same_kind: impl Fn(&AbsoluteAddr, &AbsoluteAddr) -> bool,
+    ) {
+        let mut next_probe = 0;
+        while next_probe < probes.len() {
+            let (source, counter) = probes[next_probe];
+            next_probe += 1;
+            for path in comb_blocks {
+                let LogicPathTarget::Var(target) = &path.target else {
+                    continue;
+                };
+                if !path.transparent_copy
+                    || target.id != source.id
+                    || !target.access.overlaps(&source.access)
+                {
+                    continue;
+                }
+                let celox_slt::SLTNode::Input {
+                    variable,
+                    access,
+                    index,
+                    ..
+                } = arena.get(path.expr)
+                else {
+                    continue;
+                };
+                if !index.is_empty()
+                    || !same_kind(variable, &target.id)
+                    || access.msb - access.lsb != target.access.msb - target.access.lsb
+                {
+                    continue;
+                }
+                let lsb = source.access.lsb.max(target.access.lsb);
+                let msb = source.access.msb.min(target.access.msb);
+                let upstream = VarAtomBase::new(
+                    *variable,
+                    access.lsb + lsb - target.access.lsb,
+                    access.lsb + msb - target.access.lsb,
+                );
+                if !probes.contains(&(upstream, counter)) {
+                    probes.push((upstream, counter));
+                }
+            }
+        }
+    }
+
+    /// Indexing the transparent copies by target finds the probes the scan
+    /// of every path finds, in the same order.
+    #[test]
+    fn copied_probes_match_path_scan() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        let mut copied = 0;
+        for _ in 0..50 {
+            let mut arena = SLTNodeArena::new();
+            let mut comb_blocks = Vec::new();
+            for _ in 0..60 {
+                let target_lsb = next(12);
+                let target_width = 1 + next(4);
+                let source_lsb = next(12);
+                // Mostly equal widths, so that most copies are transparent.
+                let source_width = if next(5) == 0 {
+                    1 + next(4)
+                } else {
+                    target_width
+                };
+                let expr = if next(8) == 0 {
+                    arena
+                        .alloc(celox_slt::SLTNode::Constant(
+                            BigUint::from(0u32),
+                            BigUint::from(0u32),
+                            source_width,
+                            false,
+                        ))
+                        .unwrap()
+                } else {
+                    arena
+                        .alloc(celox_slt::SLTNode::Input {
+                            variable: addr(next(12) as u32),
+                            signed: false,
+                            index: Vec::new(),
+                            access: BitAccess::new(source_lsb, source_lsb + source_width - 1),
+                        })
+                        .unwrap()
+                };
+                comb_blocks.push(LogicPath {
+                    target: LogicPathTarget::Var(VarAtomBase::new(
+                        addr(next(12) as u32),
+                        target_lsb,
+                        target_lsb + target_width - 1,
+                    )),
+                    transparent_copy: next(6) != 0,
+                    sources: HashSet::default(),
+                    previous_sources: HashSet::default(),
+                    address_sources: HashSet::default(),
+                    local_inputs: Vec::new(),
+                    order_before: HashSet::default(),
+                    comb_capture_enable_sites: Vec::new(),
+                    comb_capture_enable_always: false,
+                    pre_lower_nodes: Vec::new(),
+                    expr,
+                });
+            }
+            let mut probes = Vec::new();
+            for _ in 0..4 {
+                let lsb = next(14);
+                let probe = (
+                    VarAtomBase::new(addr(next(12) as u32), lsb, lsb + next(3)),
+                    addr(100 + next(3) as u32),
+                );
+                if !probes.contains(&probe) {
+                    probes.push(probe);
+                }
+            }
+            // Variables 0..6 are four-state and the others two-state.
+            let same_kind =
+                |a: &AbsoluteAddr, b: &AbsoluteAddr| (a.var_id.0 < 6) == (b.var_id.0 < 6);
+            let mut expected = probes.clone();
+            add_copied_probes_by_scan(&mut expected, &comb_blocks, &arena, same_kind);
+            let mut probed = probes.iter().copied().collect();
+            add_copied_probes(&mut probes, &mut probed, &comb_blocks, &arena, same_kind);
+            assert_eq!(probes, expected);
+            assert_eq!(probed.len(), probes.len());
+            copied += probes.len();
+        }
+        // The cases find copies, beyond the 4 initial probes each.
+        assert!(copied > 50 * 4 + 50, "{copied} probes");
+    }
+}
+
+#[cfg(test)]
+mod estimated_settle_budget_tests {
+    use super::*;
+
+    #[test]
+    fn estimated_guard_count_stays_bounded_as_the_program_grows() {
+        for cost in [
+            20_000,
+            100_000,
+            1_000_000,
+            3_000_000,
+            100_000_000,
+            usize::MAX,
+        ] {
+            let target = estimated_settle_partition_cost(cost);
+            assert!(target >= SETTLE_PARTITION_COST);
+            assert!(cost.div_ceil(target) <= TARGET_ESTIMATED_SETTLE_PARTITIONS);
         }
     }
 }

@@ -1,11 +1,23 @@
 use super::*;
 
 sv_backends! {
+    fn reads_upward_interface_members_in_each_parent(sim) {
+        @case "hierarchical_references::reads_upward_interface_members_in_each_parent";
+    }
+    fn writes_upward_interface_members_through_an_intermediate_module(sim) {
+        @case "hierarchical_references::writes_upward_interface_members_through_an_intermediate_module";
+    }
+    fn upward_interface_members_do_not_alias_formal_interface_ports(sim) {
+        @case "hierarchical_references::upward_interface_members_do_not_alias_formal_interface_ports";
+    }
     fn reads_signals_of_instances_below(sim) {
         @case "hierarchical_references::reads_signals_of_instances_below";
     }
     fn writes_memory_elements_of_instances_below(sim) {
         @case "hierarchical_references::writes_memory_elements_of_instances_below";
+    }
+    fn nonblocking_element_writes_keep_hierarchical_writes_of_the_same_step(sim) {
+        @case "hierarchical_references::nonblocking_element_writes_keep_hierarchical_writes_of_the_same_step";
     }
     fn names_instance_array_elements_and_generated_instances(sim) {
         @case "hierarchical_references::names_instance_array_elements_and_generated_instances";
@@ -209,4 +221,48 @@ fn forced_targets_of_hierarchical_names_stay_forceable() {
         })
         .collect();
     assert_eq!(displayed, ["4 1"]);
+}
+
+#[test]
+fn local_interface_scopes_block_upward_fallback_even_when_empty() {
+    for body in ["", "logic other;"] {
+        let source = format!(
+            r#"
+            interface Bus; logic v; endinterface
+            interface Empty; {body} endinterface
+            module Child(output wire q);
+                Empty ancestor_bus();
+                assign q = ancestor_bus.v;
+            endmodule
+            module Top(input logic d, output wire q);
+                Bus ancestor_bus();
+                assign ancestor_bus.v = d;
+                Child child(q);
+            endmodule
+        "#
+        );
+        let error = build_error(&source);
+        assert!(
+            error.contains("unresolved hierarchical reference `ancestor_bus.v`"),
+            "{error}"
+        );
+    }
+    let source = r#"
+        interface Bus; logic v; endinterface
+        interface Empty; endinterface
+        module Child(output wire q);
+            Empty ancestor_bus[2]();
+            assign q = ancestor_bus[0].v;
+        endmodule
+        module Top(input logic d, output wire q);
+            Bus ancestor_bus[2]();
+            assign ancestor_bus[0].v = d;
+            Child child(q);
+        endmodule
+    "#;
+    let error = build_error(source);
+    assert!(
+        error.contains("unresolved hierarchical reference `ancestor_bus[0].v`"),
+        "{error}"
+    );
 }

@@ -678,6 +678,44 @@ fn native_program_image_rejects_v19_before_loading_float_helper_abi() {
     ));
 }
 
+/// Version 39 replaces the initializer flag with a process phase.
+#[test]
+fn native_program_image_rejects_v38_before_decoding_process_kinds() {
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let mut encoded = sim
+        .shared_code()
+        .program_image()
+        .to_container_bytes()
+        .unwrap();
+    let trailer_start = encoded.len() - NATIVE_IMAGE_TRAILER_SIZE;
+    encoded[trailer_start + NATIVE_IMAGE_VERSION_OFFSET
+        ..trailer_start + NATIVE_IMAGE_VERSION_OFFSET + 2]
+        .copy_from_slice(&38u16.to_le_bytes());
+    assert!(matches!(
+        celox::NativeProgramImage::discover_appended(&encoded),
+        Err(NativeImageContainerError::UnsupportedVersion(38))
+    ));
+}
+
+/// Version 38 adds host operand value kinds to the runtime metadata.
+#[test]
+fn native_program_image_rejects_v37_before_decoding_host_operand_value_kinds() {
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let mut encoded = sim
+        .shared_code()
+        .program_image()
+        .to_container_bytes()
+        .unwrap();
+    let trailer_start = encoded.len() - NATIVE_IMAGE_TRAILER_SIZE;
+    encoded[trailer_start + NATIVE_IMAGE_VERSION_OFFSET
+        ..trailer_start + NATIVE_IMAGE_VERSION_OFFSET + 2]
+        .copy_from_slice(&37u16.to_le_bytes());
+    assert!(matches!(
+        celox::NativeProgramImage::discover_appended(&encoded),
+        Err(NativeImageContainerError::UnsupportedVersion(37))
+    ));
+}
+
 /// Version 17 adds synchronous host requests to the runtime metadata.
 #[test]
 fn native_program_image_rejects_v16_before_decoding_host_request_schema() {

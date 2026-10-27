@@ -37,6 +37,7 @@ impl<B: SimBackend> SimulationState<B> {
             .ok_or_else(|| Self::site_error(process, site))?;
         let driven = terms.iter().any(|term| term.driven);
         let gates = &self.model.wait_gates;
+        let frame = &self.model.processes[process].frame;
         self.process_state
             .waiters
             .register(process, driven, |waiter| {
@@ -50,6 +51,12 @@ impl<B: SimBackend> SimulationState<B> {
                         .extend(terms.iter().map(|_| Baseline::Value(Value::default())));
                 }
                 for (term, baseline) in terms.iter().zip(&mut waiter.baselines) {
+                    if frame.as_ref().is_some_and(|frame| {
+                        frame.locals.contains(&term.signal) || frame.private.contains(&term.signal)
+                    }) {
+                        *baseline = Baseline::Value(read(backend, term.signal));
+                        continue;
+                    }
                     match term.counter {
                         Some(counter) => {
                             let seen = backend.get_as(counter);
@@ -86,7 +93,12 @@ impl<B: SimBackend> SimulationState<B> {
                         },
                     }
                 }
-                let gates = gates.get(process).map_or(&[][..], |sites| &sites[site]);
+                let kernel = self
+                    .process_state
+                    .activations
+                    .get(process)
+                    .map_or(process, |a| a.kernel);
+                let gates = gates.get(kernel).map_or(&[][..], |sites| &sites[site]);
                 for (index, gate) in gates.iter().enumerate() {
                     if let Some(GateRefs {
                         counters: Some(counters),
@@ -116,13 +128,13 @@ impl<B: SimBackend> SimulationState<B> {
         backend: &mut B,
         signal: SignalRef,
         write: impl FnOnce(&mut B),
-    ) {
+    ) -> Result<(), Halt> {
         if self.model.counted.is_empty()
             && self.model.probes_by_offset.is_empty()
             && self.process_state.waiters.is_empty()
         {
             write(backend);
-            return;
+            return Ok(());
         }
         let counted = self.model.counted_by_offset.get(&signal.offset).copied();
         let probes = self.model.probes_by_offset.get(&signal.offset);
@@ -161,198 +173,205 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         if !self.process_state.waiters.is_empty() {
-            self.observe(backend, Some(signal));
+            self.observe(backend, Some(signal))?;
         }
+        Ok(())
     }
 
-    /// Test the waits against the current state, or only their terms on
-    /// signal `only` after a write of it, before combinational logic has
-    /// settled. Woken processes become ready.
-    #[inline(always)]
-    pub(super) fn observe(&mut self, backend: &B, only: Option<SignalRef>) {
-        if self.model.wait_gates.is_empty() {
-            self.check_waits(backend, only, false);
-        } else {
-            self.check_gated_waits(backend, only, false, false);
+    /// Observe writes before or after combinational settling. Ungated
+    /// designs monomorphize away every gate lookup.
+    pub(super) fn observe(&mut self, backend: &mut B, only: Option<SignalRef>) -> Result<(), Halt> {
+        self.observe_waits(backend, only, false, false)
+    }
+    pub(super) fn observe_settled(&mut self, backend: &mut B) -> Result<(), Halt> {
+        self.observe_waits(backend, None, false, true)
+    }
+    pub(super) fn observe_driven(&mut self, backend: &mut B) -> Result<(), Halt> {
+        if self.process_state.waiters.none_driven() {
+            return Ok(());
         }
+        self.observe_waits(backend, None, true, true)
     }
-
-    /// Like [`Self::observe`] of every term, after combinational logic has
-    /// settled.
-    #[inline(always)]
-    pub(super) fn observe_settled(&mut self, backend: &B) {
-        if self.model.wait_gates.is_empty() {
-            self.check_waits(backend, None, false);
-        } else {
-            self.check_gated_waits(backend, None, false, true);
+    pub(super) fn observe_driven_unsettled(&mut self, backend: &mut B) -> Result<(), Halt> {
+        if self.process_state.waiters.none_driven() {
+            return Ok(());
         }
+        self.observe_waits(backend, None, true, false)
     }
-
-    /// Like [`Self::observe_settled`], at a point where only design code
-    /// wrote state: terms on signals that only the host and the scheduler
-    /// write cannot have changed.
-    #[inline(always)]
-    pub(super) fn observe_driven(&mut self, backend: &B) {
-        if !self.process_state.waiters.none_driven() {
-            if self.model.wait_gates.is_empty() {
-                self.check_waits(backend, None, true);
-            } else {
-                self.check_gated_waits(backend, None, true, true);
-            }
-        }
-    }
-
-    /// Like [`Self::observe_driven`], before combinational logic has
-    /// settled.
-    #[inline(always)]
-    pub(super) fn observe_driven_unsettled(&mut self, backend: &B) {
-        if !self.process_state.waiters.none_driven() {
-            if self.model.wait_gates.is_empty() {
-                self.check_waits(backend, None, true);
-            } else {
-                self.check_gated_waits(backend, None, true, false);
-            }
-        }
-    }
-
-    /// The waits of a design without `iff` gates: [`Self::check_gated_waits`]
-    /// without the gates.
-    fn check_waits(&mut self, backend: &B, only: Option<SignalRef>, driven_only: bool) {
-        let processes = &self.model.processes;
-        let state = StateView::new(backend);
-        let ProcessState {
-            waiters,
-            ready,
-            reactive,
-            ..
-        } = &mut self.process_state;
-        waiters.retain(driven_only, |process, waiter| {
-            let terms = &processes[process].wait_sites[waiter.site];
-            let mut wake = false;
-            for (index, term) in terms.iter().enumerate() {
-                if only.is_some_and(|signal| signal != term.signal) || (driven_only && !term.driven)
-                {
-                    continue;
-                }
-                let baseline = &mut waiter.baselines[index];
-                // The common term: a plain signal no counter counts.
-                if let Baseline::Raw(last) = baseline {
-                    let now = state.planes(term.signal).expect("a plain signal");
-                    wake |= Self::advance(term.kind, last, now, term.signal.width);
-                    continue;
-                }
-                let counted = |seen: u32| {
-                    term.counter
-                        .is_some_and(|counter| backend.get_as::<u32>(counter) != seen)
-                };
-                wake |= match baseline {
-                    Baseline::RawCounter { seen, raw } => {
-                        let now = state.planes(term.signal).expect("a plain signal");
-                        let changed = Self::advance(term.kind, raw, now, term.signal.width);
-                        counted(*seen) || changed
-                    }
-                    Baseline::Counter { seen, value } => match state.planes(term.signal) {
-                        // A baseline loaded from a state file.
-                        Some(now) => {
-                            let seen = *seen;
-                            let mut raw = encode_planes(value, term.signal.width, now.len());
-                            let changed =
-                                Self::advance(term.kind, &mut raw, now, term.signal.width);
-                            *baseline = Baseline::RawCounter { seen, raw };
-                            counted(seen) || changed
-                        }
-                        None => {
-                            let now = read(backend, term.signal);
-                            let changed = occurs(term.kind, value, &now);
-                            *value = now;
-                            counted(*seen) || changed
-                        }
-                    },
-                    Baseline::Raw(_) => unreachable!("tested above"),
-                    // Only gated terms with counters have it.
-                    Baseline::Gated { .. } => false,
-                    Baseline::Value(last) => match state.planes(term.signal) {
-                        // A baseline loaded from a state file.
-                        Some(now) => {
-                            let mut raw = encode_planes(last, term.signal.width, now.len());
-                            let hit = Self::advance(term.kind, &mut raw, now, term.signal.width);
-                            *baseline = Baseline::Raw(raw);
-                            hit
-                        }
-                        None => {
-                            let now = read(backend, term.signal);
-                            let hit = occurs(term.kind, last, &now);
-                            *last = now;
-                            hit
-                        }
-                    },
-                };
-            }
-            if wake {
-                wake_in_region(processes, ready, reactive, process);
-            }
-            !wake
-        });
-    }
-
-    /// [`Self::check_waits`] for a design with `iff` gates. With
-    /// `settled`, combinational logic has settled since the last write. A
-    /// term whose gate has no counters is judged only then: the gate may be
-    /// computed from what was written, so before then its baseline is left
-    /// as it is and the occurrence is judged, with the gate, at the next
-    /// settled check.
-    #[inline(never)]
-    fn check_gated_waits(
+    #[inline]
+    fn observe_waits(
         &mut self,
-        backend: &B,
+        backend: &mut B,
         only: Option<SignalRef>,
         driven_only: bool,
         settled: bool,
-    ) {
+    ) -> Result<(), Halt> {
+        if self.model.wait_gates.is_empty() {
+            self.check_waits::<false>(backend, only, driven_only, settled)
+        } else {
+            self.check_waits::<true>(backend, only, driven_only, settled)
+        }
+    }
+
+    fn check_waits<const GATED: bool>(
+        &mut self,
+        backend: &mut B,
+        only: Option<SignalRef>,
+        driven_only: bool,
+        settled: bool,
+    ) -> Result<(), Halt> {
         let processes = &self.model.processes;
-        let state = StateView::new(backend);
         let ProcessState {
             waiters,
             ready,
             reactive,
+            activations,
+            cells,
             ..
         } = &mut self.process_state;
-        let gates = &self.model.wait_gates;
+        let all_gates = &self.model.wait_gates;
+        let mut error = None;
         waiters.retain(driven_only, |process, waiter| {
+            if error.is_some() {
+                return true;
+            }
             let terms = &processes[process].wait_sites[waiter.site];
-            let gates = &gates[process][waiter.site];
             let mut wake = false;
             for (index, term) in terms.iter().enumerate() {
+                let gate = if GATED {
+                    let kernel = activations.get(process).map_or(process, |a| a.kernel);
+                    all_gates
+                        .get(kernel)
+                        .and_then(|sites| sites.get(waiter.site))
+                        .and_then(|gates| gates.get(index))
+                        .copied()
+                        .flatten()
+                } else {
+                    None
+                };
+                if let Some(gate) = gate {
+                    if let Some(counters) = gate.counters {
+                        if only.is_some_and(|signal| signal != term.signal)
+                            || (driven_only && !term.driven)
+                        {
+                            continue;
+                        }
+                        let state = StateView::new(&*backend);
+                        wake |= Self::gated_occurred(
+                            &state,
+                            backend,
+                            term,
+                            gate.signal,
+                            counters,
+                            &mut waiter.baselines[index],
+                        );
+                        continue;
+                    }
+                    let local_variable = processes[process]
+                        .frame
+                        .as_ref()
+                        .is_some_and(|frame| frame.locals.contains(&gate.signal));
+                    if !settled && !local_variable {
+                        continue;
+                    }
+                }
+                let gate_holds = match gate {
+                    None => true,
+                    Some(gate) => {
+                        let probe = processes[process].frame.as_ref().and_then(|frame| {
+                            frame
+                                .event_probes
+                                .iter()
+                                .find(|probe| probe.result == gate.signal)
+                        });
+                        let value = if let Some(probe) = probe {
+                            match super::activation::event_probe(
+                                backend,
+                                &processes[process],
+                                &activations[process],
+                                cells,
+                                probe,
+                            ) {
+                                Ok(value) => value,
+                                Err(failure) => {
+                                    error = Some(failure);
+                                    return true;
+                                }
+                            }
+                        } else {
+                            super::activation::activation_value(
+                                activations,
+                                cells,
+                                &processes[process],
+                                process,
+                                gate.signal,
+                            )
+                            .cloned()
+                            .unwrap_or_else(|| read(backend, gate.signal))
+                        };
+                        value.0.bit(0) && !value.1.bit(0)
+                    }
+                };
+                if let Some(probe) = processes[process].frame.as_ref().and_then(|frame| {
+                    frame
+                        .event_probes
+                        .iter()
+                        .find(|probe| probe.result == term.signal)
+                }) {
+                    if only.is_some_and(|signal| !probe.inputs.contains(&signal)) {
+                        continue;
+                    }
+                    match super::activation::event_probe(
+                        backend,
+                        &processes[process],
+                        &activations[process],
+                        cells,
+                        probe,
+                    ) {
+                        Ok(value) => {
+                            let Baseline::Value(last) = &mut waiter.baselines[index] else {
+                                error = Some(SimulatorErrorCode::InternalError.into());
+                                return true;
+                            };
+                            wake |= occurs(term.kind, last, &value) & gate_holds;
+                            *last = value;
+                        }
+                        Err(failure) => {
+                            error = Some(failure);
+                            return true;
+                        }
+                    }
+                    continue;
+                }
+                let state = StateView::new(&*backend);
                 if only.is_some_and(|signal| signal != term.signal) || (driven_only && !term.driven)
                 {
                     continue;
                 }
                 let baseline = &mut waiter.baselines[index];
-                match gates.get(index).copied().flatten() {
-                    None => wake |= Self::occurred(&state, backend, term, baseline),
-                    Some(GateRefs {
-                        signal: gate,
-                        counters: Some(counters),
-                    }) => {
-                        wake |=
-                            Self::gated_occurred(&state, backend, term, gate, counters, baseline);
+                if let Some(value) = super::activation::activation_value(
+                    activations,
+                    cells,
+                    &processes[process],
+                    process,
+                    term.signal,
+                ) {
+                    if let Baseline::Value(last) = baseline {
+                        wake |= occurs(term.kind, last, value) & gate_holds;
+                        *last = value.clone();
+                        continue;
                     }
-                    Some(_) if !settled => {}
-                    // The occurrence is consumed even when the gate does not
-                    // hold (IEEE 1800-2023 9.4.2.3).
-                    Some(gate) => {
-                        if Self::occurred(&state, backend, term, baseline) {
-                            if Self::gate_holds(&state, backend, gate.signal) {
-                                wake = true;
-                            } else if let Some(counter) = term.counter
-                                && let Baseline::RawCounter { seen, .. }
-                                | Baseline::Counter { seen, .. } = baseline
-                            {
-                                // The counted occurrences are consumed: a later
-                                // check judges only new ones.
-                                *seen = backend.get_as(counter);
-                            }
-                        }
+                }
+                let occurred = Self::occurred(&state, backend, term, baseline);
+                wake |= occurred && gate_holds;
+                if occurred
+                    && !gate_holds
+                    && let Some(counter) = term.counter
+                {
+                    if let Baseline::RawCounter { seen, .. } | Baseline::Counter { seen, .. } =
+                        baseline
+                    {
+                        *seen = backend.get_as(counter);
                     }
                 }
             }
@@ -361,11 +380,9 @@ impl<B: SimBackend> SimulationState<B> {
             }
             !wake
         });
+        error.map_or(Ok(()), Err)
     }
 
-    /// Whether a gated `term` with `counters` occurred since the wait began:
-    /// a write counted it while `gate` held, or the signal changed without
-    /// any write counting it, as a raw host write does, while `gate` holds.
     fn gated_occurred(
         state: &StateView<'_>,
         backend: &B,
@@ -499,7 +516,12 @@ impl<B: SimBackend> SimulationState<B> {
         let processes = &self.model.processes;
         let gates = &self.model.wait_gates;
         for (process, waiter) in self.process_state.waiters.iter_mut() {
-            let Some(gates) = gates[process].get(waiter.site) else {
+            let kernel = self
+                .process_state
+                .activations
+                .get(process)
+                .map_or(process, |a| a.kernel);
+            let Some(gates) = gates.get(kernel).and_then(|sites| sites.get(waiter.site)) else {
                 continue;
             };
             for (index, gate) in gates.iter().enumerate() {
@@ -540,11 +562,12 @@ impl<B: SimBackend> SimulationState<B> {
             waiters,
             ready,
             reactive,
+            activations,
             ..
         } = &mut self.process_state;
         waiters.retain(false, |process, waiter| {
             let gates = gates
-                .get(process)
+                .get(activations.get(process).map_or(process, |a| a.kernel))
                 .map_or(&[][..], |sites| &sites[waiter.site]);
             let mut wake = false;
             for (index, (term, baseline)) in processes[process].wait_sites[waiter.site]
@@ -596,7 +619,7 @@ pub(super) fn wake_in_region(
 }
 
 /// What one term of a waiting process compares against.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Baseline {
     /// The counter's value when the wait began, and the signal's value at
     /// the last check. Only kernels and combinational process units count a
@@ -620,7 +643,7 @@ pub enum Baseline {
 }
 
 /// A process suspended at a wait.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Waiter {
     pub site: usize,
     pub baselines: Vec<Baseline>,
@@ -628,7 +651,7 @@ pub struct Waiter {
 
 /// The processes suspended at a wait, by process index. A slot keeps its
 /// storage while its process runs, so suspending again reuses it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Waiters {
     slots: Vec<Waiter>,
     waiting: Vec<bool>,

@@ -145,6 +145,7 @@ pub fn compile(recover: bool) -> CompiledUpdate {
     )];
     let layout = MemoryLayout {
         trace: None,
+        settle: None,
         four_state: false,
         mode: celox_state_layout::MemoryLayoutMode::Packed,
         offsets: [

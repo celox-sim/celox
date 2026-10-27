@@ -171,8 +171,9 @@
   (assert_eq y 9))
 
 (case explicit_list_of_every_read_waits_for_a_change
-  ; Like `always @*`, the list waits before its first run: neither the
-  ; declaration initializers nor the write of `y` wake it (9.4.2).
+  ; In four-state mode, like `always @*`, the list waits before its first
+  ; run: neither the declaration initializers nor the write of `y` wake it
+  ; (9.4.2). Two-state mode runs it at time zero (#2021).
   (source "level_list.sv" #"
                 module Top(output logic [7:0] y);
                     logic [7:0] a = 8'd0;
@@ -187,6 +188,7 @@
                 endmodule
             "#)
   (top Top)
+  (four_state)
   (run_until 1)
   (assert_eq y 1)
   (run_until 3)
@@ -217,6 +219,8 @@
   (run_to_finish)
   (assert_eq y 9))
 
+; In four-state mode the list waits for a change; two-state mode also runs
+; it once at time zero (#2026).
 (case list_with_an_extra_signal_wakes_on_it
   (source "extra_signal.sv" #"
                 module Top;
@@ -232,6 +236,7 @@
                 endmodule
             "#)
   (top Top)
+  (four_state)
   (run_to_finish)
   (expect_output "sum=3\nsum=3\n"))
 
@@ -2925,3 +2930,53 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (top Top)
   (run_to_finish)
   (expect_output "n=1\n"))
+
+; IEEE 1800-2023 9.4.2.3: hierarchical readers must preserve the writer's order.
+(case iff_conditions_preserve_cross_module_combinational_order
+ (source "iff_hierarchy.sv" #"module ClockFirst(input bit a);
+ bit clk, en;
+ always_comb begin clk=a; en=a; end
+endmodule
+module GateFirst(input bit a);
+ bit clk, en;
+ always_comb begin en=a; clk=a; end
+endmodule
+module Top(output int rejected, accepted);
+ bit a;
+ ClockFirst late_gate(a);
+ GateFirst early_gate(a);
+ initial forever begin @(posedge late_gate.clk iff late_gate.en); rejected++; end
+ initial forever begin @(posedge early_gate.clk iff early_gate.en); accepted++; end
+ initial begin #1 a=1; #1 a=0; #1 a=1; end
+endmodule"#)
+ (top Top) (run_until 4)
+ (assert_eq rejected 0) (assert_eq accepted 2))
+
+(case iff_forked_automatic_gates_are_separate
+ (source "iff_fork.sv" #"module Top(output int allowed, blocked);
+ bit clk;
+ task automatic worker(input bit en, input bit which);
+   @(posedge clk iff en);
+   if (which) allowed++; else blocked++;
+ endtask
+ initial fork worker(1,1); worker(0,0); join_none
+ initial begin #1 clk=1; #1 clk=0; #1 clk=1; end
+endmodule"#)
+ (top Top) (run_until 4)
+ (assert_eq allowed 1) (assert_eq blocked 0))
+
+(case iff_shared_automatic_gate_uses_edge_time_value
+ (source "iff_shared_gate.sv" #"module Top(output int accepted, rejected);
+ bit first, second;
+ initial begin
+   automatic bit enable=1;
+   fork
+     begin @(posedge first iff enable); accepted++; end
+     begin @(posedge second iff enable); rejected++; end
+     begin #1 first=1; enable=0; second=1; end
+   join_none
+   #3;
+ end
+endmodule"#)
+ (top Top) (run_until 4)
+ (assert_eq accepted 1) (assert_eq rejected 0))

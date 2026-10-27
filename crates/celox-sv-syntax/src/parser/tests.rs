@@ -2495,6 +2495,27 @@ fn constructed_declarations_validate_types_dimensions_and_allocation_operands() 
 }
 
 #[test]
+fn class_properties_retain_constructed_declarations_and_initializers() {
+    let syntax = parse(
+        "module M; class Cell; endclass class Store; int data[] = new[2]; int q[$], map[string]; Cell child = new; endclass endmodule",
+    );
+    let properties = &syntax.classes[1].properties;
+    let names = properties
+        .iter()
+        .flat_map(|property| &property.declaration.variables)
+        .map(|variable| variable.name.spelling.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["data", "q", "map", "child"]);
+    let data = &properties[0].declaration.variables[0];
+    assert!(matches!(data.dimensions[0].kind, DimensionKind::Unsized));
+    assert!(matches!(
+        syntax.expression(data.value.unwrap()).kind,
+        ExprKind::Select { .. }
+    ));
+    assert!(properties[2].declaration.variables[0].value.is_some());
+}
+
+#[test]
 fn class_property_payloads_validate_while_opaque_nonproperty_items_keep_boundaries() {
     let members = "rand protected int x=1; static const int y=2; const protected static int z=3; C object=new old_object; int data[]=new[2]; constraint c { x > 0; } int after_constraint=1; extern constraint forward; nettype int N with resolver; covergroup cg; coverpoint x; endgroup int after_covergroup=2; virtual function int f(); return x; endfunction extern function int g(); function new(); super.new(); endfunction";
     parse(&format!("class C; {members} endclass module M; endmodule"));
@@ -2694,6 +2715,41 @@ fn class_header_defaults_keep_captured_native_ownership() {
         ));
         assert_eq!(syntax.units[0].parameters, None);
         assert_eq!(items.len(), 2);
+        // The class records its parameter port list and body parameters.
+        let class = &syntax.classes[0];
+        let BodyItemKind::Parameter(body) = syntax.body_item(items[1]).kind else {
+            panic!("body parameter owner missing")
+        };
+        assert!(
+            matches!(class.parameter_ports, Some(id) if syntax.parameter_declaration(id) == header)
+        );
+        assert_eq!(class.parameters, [body]);
+        assert!(class.type_aliases.is_empty());
+    }
+}
+
+#[test]
+fn class_body_typedefs_and_parameters_belong_to_their_class() {
+    for source in [
+        "class C; typedef int count_t; parameter int N = 2; function int f(); localparam L = 1; return L; endfunction endclass module M; endmodule",
+        "module M; class C; typedef int count_t; parameter int N = 2; function int f(); localparam L = 1; return L; endfunction endclass endmodule",
+    ] {
+        let syntax = parse(source);
+        let class = &syntax.classes[0];
+        assert_eq!(class.parameter_ports, None);
+        assert_eq!(class.type_aliases.len(), 1);
+        assert_eq!(
+            syntax.type_alias(class.type_aliases[0]).name.value(),
+            "count_t"
+        );
+        // A parameter of a method is not one of the class.
+        assert_eq!(class.parameters.len(), 1);
+        assert_eq!(
+            syntax.parameter_declaration(class.parameters[0]).parameters[0]
+                .name
+                .value(),
+            "N"
+        );
     }
 }
 
@@ -2799,14 +2855,20 @@ fn specparam_retains_its_body_item_boundary() {
 }
 
 #[test]
-fn module_deferred_assertions_do_not_become_final_procedures() {
+/// A deferred assertion as a module item is an `always_comb` procedure
+/// (IEEE 1800-2023 16.4.3), never a `final` one.
+fn module_deferred_assertions_become_always_comb_procedures() {
     for keyword in ["assert", "assume", "cover"] {
         for deferral in ["#0", "final"] {
             let native = parse(&format!("module M; {keyword} {deferral} (1); endmodule"));
-            assert!(native.procedures.is_empty());
-            assert!(
-                matches!(&native.body_item(native.units[0].items[0]).kind, BodyItemKind::Unconverted { category, .. } if category == keyword)
-            );
+            let [procedure] = &native.procedures[..] else {
+                panic!("{:?}", native.procedures)
+            };
+            assert_eq!(procedure.kind, ProcedureKind::AlwaysComb);
+            assert!(matches!(
+                &native.statement(procedure.body).kind,
+                StatementKind::Assertion { keyword: k, .. } if k == keyword
+            ));
         }
     }
 }
@@ -2862,6 +2924,27 @@ fn class_declarations_record_names_bases_properties_and_method_qualifiers() {
 }
 
 #[test]
+fn shallow_copies_are_expressions_of_their_own() {
+    let syntax = parse(
+        "module M; class C; endclass C a, b; initial begin b = new a; end C c = new a; C d = new; endmodule",
+    );
+    let copies = syntax
+        .expressions
+        .iter()
+        .filter_map(|expression| match expression.kind {
+            ExprKind::Copy(source) => Some(source),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(copies.len(), 2);
+    for source in copies {
+        assert!(
+            matches!(&syntax.expression(source).kind, ExprKind::Name(name) if name.value() == "a")
+        );
+    }
+}
+
+#[test]
 fn class_random_qualifiers_and_constraints_are_preserved() {
     let syntax = parse(
         "class C; rand bit x; randc bit y; extern constraint limits; endclass module M; endmodule",
@@ -2872,4 +2955,191 @@ fn class_random_qualifiers_and_constraints_are_preserved() {
     assert!(!class.properties[0].qualifiers.randc);
     assert!(class.properties[1].qualifiers.randc);
     assert!(!class.properties[1].qualifiers.rand);
+}
+
+#[test]
+fn non_ansi_port_declarations_fold_into_the_header() {
+    let syntax = parse(
+        "module M(a, b, q);\n input [7:0] a;\n input wire b;\n output reg [7:0] q;\n \
+         wire [7:0] a;\n always @(posedge b) q <= a;\nendmodule\n",
+    );
+    let unit = &syntax.units[0];
+    assert_eq!(unit.port_style, PortStyle::Ansi);
+    let ports: Vec<_> = unit
+        .ports
+        .iter()
+        .map(|port| (port.direction, port.net_type.as_deref(), port.variable))
+        .collect();
+    assert_eq!(
+        ports,
+        [
+            (Some(Direction::Input), Some("wire"), false),
+            (Some(Direction::Input), Some("wire"), false),
+            (Some(Direction::Output), None, false),
+        ]
+    );
+    // The port declarations and the completing net declaration are gone
+    // from the body.
+    assert!(unit.net_declarations.is_empty());
+    assert_eq!(unit.items.len(), 1);
+}
+
+#[test]
+fn array_method_with_expressions_parse_in_values_and_statements() {
+    parse(
+        "module M; int a[3], q[$]; initial begin
+         q = a.find(i) with ((i > 0) && check(i));
+         q = a.find with (item inside {[1:3]}).unique;
+         a.sort() with (item);
+         a.rsort with (-item);
+         q = a.find(i, position) with (position() == 1);
+         q = a.find(, position) with (position() == 1);
+         void'(a.find() with (item > 0));
+         q = a.find with (item > 0)[0];
+         end endmodule",
+    );
+}
+
+#[test]
+fn array_method_with_preserves_iterator_predicate_and_chaining() {
+    let syntax = parse("module M; initial q = a.find(i) with (i > 0).unique; endmodule");
+    let (id, expression, predicate) = syntax
+        .expressions
+        .iter()
+        .enumerate()
+        .find_map(|(id, node)| {
+            if let ExprKind::ArrayMethodWith {
+                expression,
+                predicate,
+            } = node.kind
+            {
+                Some((ExprId(id), expression, predicate))
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let ExprKind::Call {
+        expression: method,
+        arguments,
+    } = &syntax.expression(expression).kind
+    else {
+        panic!()
+    };
+    assert!(
+        matches!(&syntax.expression(*method).kind, ExprKind::Member { name, .. } if name.spelling == "find")
+    );
+    assert!(
+        matches!(&syntax.expression(arguments[0].value.unwrap()).kind, ExprKind::Name(name) if name.spelling == "i")
+    );
+    assert!(
+        matches!(&syntax.expression(predicate).kind, ExprKind::Binary { operator, .. } if operator == ">")
+    );
+    assert_eq!(
+        syntax.token_text(syntax.expression(id).tokens),
+        "a.find(i) with (i > 0)"
+    );
+    assert!(syntax.expressions.iter().any(|node| matches!(&node.kind, ExprKind::Member { expression, name, .. } if *expression == id && name.spelling == "unique")));
+}
+
+#[test]
+fn malformed_array_method_with_is_rejected() {
+    for expression in [
+        "a.find with ()",
+        "a.find with (item > 0",
+        "f() with (item)",
+        "a.find(1) with (item)",
+        "a.find(i,j,k) with (item)",
+        "a.find(.i(x)) with (item)",
+        "a.find with (item) with (item)",
+        "a.find with { item > 0; }",
+    ] {
+        assert!(
+            Declarations::parse(
+                &format!("module M; initial q = {expression}; endmodule"),
+                Path::new("invalid.sv")
+            )
+            .is_err(),
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn constraints_retain_simple_expressions_and_mark_other_forms() {
+    let tree = parse(
+        "class C; rand int x; constraint a { x > 0; x < 3; } constraint b { if (x) x == 1; } constraint c { soft x == 1; } constraint d { if (1) {} } endclass",
+    );
+    let blocks = &tree.classes[0].constraints;
+    assert_eq!(blocks[0].name.spelling, "a");
+    assert_eq!(blocks[0].expressions.as_ref().unwrap().len(), 2);
+    let guarded = blocks[1].expressions.as_ref().unwrap();
+    assert_eq!(guarded.len(), 1);
+    assert!(
+        matches!(&tree.expression(guarded[0]).kind, ExprKind::Binary { operator, .. } if operator == "||")
+    );
+    assert!(blocks[2].expressions.is_none());
+    assert!(blocks[3].expressions.as_ref().unwrap().is_empty());
+}
+
+#[test]
+fn inline_constraints_retain_ownership_and_bound_nested_calls() {
+    let syntax =
+        parse("module M; initial obj.randomize() with { if (x) y == 1; else y == 2; }; endmodule");
+    assert!(
+        syntax
+            .expression_nodes()
+            .any(|(_, node)| matches!(&node.kind,
+        ExprKind::RandomizeWith { constraints: Some(values), .. } if values.len() == 2))
+    );
+    let source = format!(
+        "module M; initial {}1;{} endmodule",
+        "obj.randomize() with { ".repeat(100),
+        " };".repeat(100)
+    );
+    assert!(
+        Declarations::parse(&source, Path::new("nested_inline.sv"))
+            .unwrap_err()
+            .to_string()
+            .contains("inline constraint nesting limit")
+    );
+}
+
+#[test]
+fn virtual_method_visibility_order_preserves_class_members() {
+    for qualifiers in [
+        "virtual protected",
+        "protected virtual",
+        "virtual local",
+        "local virtual",
+    ] {
+        let body = format!(
+            "class C; {qualifiers} function int f(); return 1; endfunction {qualifiers} task t(); endtask virtual interface bus vif; int after; endclass"
+        );
+        for source in [
+            format!("{body} module M; endmodule"),
+            format!("module M; {body} endmodule"),
+            format!("package P; {body} endpackage module M; endmodule"),
+        ] {
+            let syntax = parse(&source);
+            let class = &syntax.classes[0];
+            assert_eq!(class.methods.len(), 2, "{source}");
+            for method in &class.methods {
+                assert!(method.qualifiers.is_virtual);
+                assert_eq!(
+                    method.qualifiers.protected,
+                    qualifiers.contains("protected")
+                );
+                assert_eq!(method.qualifiers.local, qualifiers.contains("local"));
+            }
+            assert_eq!(class.properties.len(), 2, "{source}");
+            assert!(!class.properties[0].qualifiers.is_virtual);
+            assert!(matches!(
+                syntax
+                    .data_type(class.properties[0].declaration.data_type)
+                    .kind,
+                DataTypeKind::VirtualInterface { .. }
+            ));
+        }
+    }
 }

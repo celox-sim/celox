@@ -16,9 +16,10 @@ pub(super) use direct::{
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
 pub(super) use objects::{
     Cast as ObjectCast, Receiver as ObjectReceiver, cast as object_cast,
-    check_assignment as check_handle_assignment, constructor as object_constructor,
+    check_access as check_member_access, check_assignment as check_handle_assignment,
+    constraint_mode_call as object_constraint_mode_call, constructor as object_constructor,
     method as object_method, property as object_property, rand_mode_call as object_rand_mode_call,
-    receiver as object_receiver, this as object_this,
+    receiver as object_receiver, static_property as object_static_property, this as object_this,
 };
 pub(super) use strings::{
     call as string_call, method as string_method, native_string, to_string as string_operand,
@@ -44,6 +45,9 @@ pub(super) fn expression(
         LValue::Ident(name) => dimensions.get(name),
         _ => None,
     };
+    if let Some(target) = shape.and_then(|shape| shape.container.as_deref()) {
+        return containers::assignment(root, tree, dimensions, target);
+    }
     // `new` creates an object of the class of the variable or of the
     // element of an array of handles (IEEE 1800-2023 8.7).
     let class = match lhs {

@@ -717,7 +717,10 @@ impl Emitter<'_> {
 /// settle before the domains evaluate.
 #[derive(Clone, Copy, Debug)]
 enum Settle {
-    #[cfg_attr(not(all(test, feature = "systemverilog")), allow(dead_code))]
+    #[cfg_attr(
+        not(all(test, feature = "systemverilog", feature = "cranelift")),
+        allow(dead_code)
+    )]
     Fixed(bool),
     /// A flag object, not zero when it must.
     Flag(AbsoluteAddr),
@@ -785,6 +788,49 @@ impl EdgePlan {
 /// record them in [`celox_design::RuntimeSchema::derived_edges`]. A unit
 /// reads the scheduler's dirty flag to know whether to settle first.
 pub(crate) fn attach(program: &mut LaidOutProgram) {
+    attach_with_mode(program, false);
+}
+
+/// Reserve native entry indices without retaining a copy of the full circuit
+/// for both polarities of every derived-clock event.
+pub(crate) fn attach_deferred(program: &mut LaidOutProgram) {
+    attach_with_mode(program, true);
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DeferredEdge {
+    event: AbsoluteAddr,
+    rising: bool,
+    fires: bool,
+    flag: AbsoluteAddr,
+    pub(crate) blocks: usize,
+    pub(crate) instructions: usize,
+}
+
+impl DeferredEdge {
+    pub(crate) fn generate(
+        &self,
+        program: &LaidOutProgram,
+        model: &ScheduleModel<AbsoluteAddr>,
+    ) -> Result<Unit, &'static str> {
+        self.generate_with_comb(program, model, &program.sir.eval_comb)
+    }
+
+    pub(crate) fn generate_with_comb(
+        &self,
+        program: &LaidOutProgram,
+        model: &ScheduleModel<AbsoluteAddr>,
+        comb: &[Unit],
+    ) -> Result<Unit, &'static str> {
+        let plan = EdgePlan::new(program, model, self.event)?
+            .ok_or("deferred derived edge no longer has a plan")?;
+        let mut unit = plan.unit(comb, self.rising, self.fires, Settle::Flag(self.flag));
+        crate::settle::instrument_unit(program, &mut unit);
+        Ok(unit)
+    }
+}
+
+fn attach_with_mode(program: &mut LaidOutProgram, deferred: bool) {
     let schema = &program.runtime.runtime_schema;
     let Some(flag) = schema
         .scheduler
@@ -812,14 +858,81 @@ pub(crate) fn attach(program: &mut LaidOutProgram) {
             _ => true,
         };
         let mut indices = [0usize; 2];
-        for (index, rising) in [true, false].into_iter().enumerate() {
-            let unit = plan.unit(
-                &program.sir.eval_comb,
-                rising,
-                fires(rising),
-                Settle::Flag(flag),
+        // Include both settles and every possible FF path. The control-flow
+        // allowance also covers gate expressions and per-unit continuations.
+        let (estimated_blocks, estimated_instructions) = if deferred {
+            let units = program
+                .sir
+                .eval_comb
+                .iter()
+                .chain(&program.sir.eval_comb)
+                .chain(plan.entries().flat_map(|units| {
+                    units
+                        .eval_apply
+                        .iter()
+                        .chain(units.eval_only.as_ref().unwrap_or(&units.eval_apply))
+                        .chain(units.apply.iter().flatten())
+                }));
+            let gate_ops = plan.gated.iter().map(|gate| gate.gate.len()).sum::<usize>();
+            units.fold(
+                (
+                    1024usize,
+                    8192usize.saturating_add(gate_ops.saturating_mul(16)),
+                ),
+                |(blocks, instructions), unit| {
+                    (
+                        blocks.saturating_add(unit.blocks.len()).saturating_add(2),
+                        instructions.saturating_add(
+                            unit.blocks
+                                .values()
+                                .map(|b| b.instructions.len())
+                                .sum::<usize>(),
+                        ),
+                    )
+                },
+            )
+        } else {
+            (0, 0)
+        };
+        if deferred {
+            tracing::debug!(
+                "[derived-edge-size] event={} kind={:?} blocks={} instructions={}",
+                program.get_path(&event),
+                kind,
+                estimated_blocks,
+                estimated_instructions,
             );
+        }
+        for (index, rising) in [true, false].into_iter().enumerate() {
             indices[index] = program.sir.processes.len();
+            let unit = if deferred {
+                program.deferred_derived_edges.insert(
+                    indices[index],
+                    DeferredEdge {
+                        event,
+                        rising,
+                        fires: fires(rising),
+                        flag,
+                        blocks: estimated_blocks,
+                        instructions: estimated_instructions,
+                    },
+                );
+                let mut builder = Builder::new();
+                builder.seal_block(SIRTerminator::Return);
+                let (blocks, register_map, _) = builder.drain();
+                Unit {
+                    entry_block_id: BlockId(0),
+                    blocks,
+                    register_map,
+                }
+            } else {
+                plan.unit(
+                    &program.sir.eval_comb,
+                    rising,
+                    fires(rising),
+                    Settle::Flag(flag),
+                )
+            };
             program.sir.processes.push(unit);
         }
         edges.push(celox_design::DerivedEdgeUnits {
@@ -845,13 +958,14 @@ pub(crate) fn without_units(program: &LaidOutProgram) -> LaidOutProgram {
         .min();
     if let Some(first) = first {
         program.sir.processes.truncate(first);
+        program.deferred_derived_edges.clear();
         program.runtime.runtime_schema.derived_edges.clear();
     }
     program
 }
 
 /// A generated edge unit and the edge it runs, for the tests.
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(all(test, feature = "systemverilog", feature = "cranelift"))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TestEdgeUnit {
     pub(crate) event: AbsoluteAddr,
@@ -861,12 +975,12 @@ pub(crate) struct TestEdgeUnit {
     pub(crate) index: usize,
 }
 
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(all(test, feature = "systemverilog", feature = "cranelift"))]
 pub(crate) type TestEdgeUnits = std::sync::Arc<std::sync::Mutex<Vec<TestEdgeUnit>>>;
 
 /// Append an edge unit of every event with a plan this module emits, for
 /// each edge, settle and own-edge case, and record them in `sink`.
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(all(test, feature = "systemverilog", feature = "cranelift"))]
 pub(crate) fn attach_test_units(program: &mut LaidOutProgram, sink: &TestEdgeUnits) {
     let model = ScheduleModel::derive(&program.design, &program.runtime.runtime_schema);
     for event in crate::edge_plans::event_addresses(program) {
@@ -893,7 +1007,7 @@ pub(crate) fn attach_test_units(program: &mut LaidOutProgram, sink: &TestEdgeUni
     }
 }
 
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(all(test, feature = "systemverilog", feature = "cranelift"))]
 mod tests {
     use std::path::Path;
 
@@ -1074,8 +1188,24 @@ mod tests {
             generated_dirty = stale(generated_dirty, outcome);
             assert_eq!(generated_dirty, walked_dirty, "step {step}");
             let (left, right) = (state(&generated.backend), state(&walked.backend));
-            if let Some(offset) = left.iter().zip(&right).position(|(a, b)| a != b) {
-                let offset = offset + celox_state_layout::STATE_HEADER_SIZE;
+            // The settle's partition flags hold only what is left to
+            // recompute.
+            let flags = walked
+                .backend
+                .layout()
+                .settle
+                .as_ref()
+                .map(|settle| settle.flags());
+            if let Some(offset) = left
+                .iter()
+                .zip(&right)
+                .enumerate()
+                .map(|(offset, pair)| (offset + celox_state_layout::STATE_HEADER_SIZE, pair))
+                .find(|(offset, (a, b))| {
+                    a != b && !flags.as_ref().is_some_and(|flags| flags.contains(offset))
+                })
+                .map(|(offset, _)| offset)
+            {
                 let name = walked
                     .named_signals()
                     .into_iter()
@@ -1141,6 +1271,30 @@ mod tests {
         for source in [GATED, INVERTED, DIVIDERS, RAISED_ENABLE, INDEPENDENT] {
             ticks_agree(source);
         }
+    }
+
+    /// An edge reaching 60 gated domains.
+    #[test]
+    fn an_edge_reaching_60_gated_domains_runs_as_the_plan_walk() {
+        const GATED_CLOCKS: usize = 60;
+        let mut source = String::from(
+            "module Top(input logic clk, input logic en, output logic [7:0] q);\n  \
+             logic [6:0] count = 0;\n  logic [7:0] sum;\n  \
+             always_ff @(posedge clk) count <= count + 7'd1;\n",
+        );
+        let mut terms = Vec::new();
+        for index in 0..GATED_CLOCKS {
+            source += &format!(
+                "  logic g{index};\n  logic [7:0] n{index} = 0;\n  \
+                 assign g{index} = clk & (en ^ (count[2:0] == 3'd{bits}) ^ (count[6:3] == 4'd{high}));\n  \
+                 always_ff @(posedge g{index}) n{index} <= n{index} + 8'd1;\n",
+                bits = index % 8,
+                high = index / 8,
+            );
+            terms.push(format!("n{index}"));
+        }
+        source += &format!("  assign q = {};\nendmodule\n", terms.join(" ^ "));
+        ticks_agree(&source);
     }
 
     #[test]

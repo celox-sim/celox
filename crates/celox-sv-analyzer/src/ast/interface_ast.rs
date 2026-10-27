@@ -13,10 +13,12 @@ pub(super) struct State {
 }
 struct InstanceGuard {
     state: std::rc::Rc<AnalysisState>,
+    revision: u64,
 }
 impl Drop for InstanceGuard {
     fn drop(&mut self) {
         self.state.interfaces.active_instances.borrow_mut().pop();
+        self.state.revision.restore(self.revision);
     }
 }
 
@@ -56,6 +58,7 @@ pub(super) fn analyze(
     }
     let _instance = InstanceGuard {
         state: tree.state.clone(),
+        revision: tree.state.revision.change(),
     };
     let _timescales =
         timescales::install_for_tree(&tree.state.timescales, packages.timescales.clone(), tree)?;
@@ -141,9 +144,19 @@ pub(super) fn signature(
         .collect::<HashMap<_, _>>();
     let rename = scope::Renamer { names: &names };
     module.name = name;
+    let header_ports = module.ports.clone();
     module.ports = members
         .iter()
         .map(|name| {
+            if let Some(port) = header_ports.iter().find(|port| port.name == *name) {
+                return Ok(Port::new(
+                    rename.name(name),
+                    PortDirection::Input,
+                    rename.r#type(port.r#type.clone()),
+                    port.is_net,
+                )
+                .with_unresolved_net(port.unresolved_net));
+            }
             let signal = declarations
                 .iter()
                 .find(|signal| signal.name() == name)
@@ -153,7 +166,8 @@ pub(super) fn signature(
                 PortDirection::Input,
                 rename.r#type(signal.r#type.clone()),
                 signal.is_net,
-            ))
+            )
+            .with_unresolved_net(signal.unresolved_net))
         })
         .collect::<Converted<_>>()?;
     module

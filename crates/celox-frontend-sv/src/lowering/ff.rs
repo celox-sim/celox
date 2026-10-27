@@ -9,6 +9,7 @@
 //! Expressions are lowered through SLT, which keeps their width and
 //! four-state semantics identical to the combinational lowering.
 
+mod containers;
 mod file_io;
 mod fread;
 mod objects;
@@ -54,6 +55,9 @@ pub(super) struct Ff<'p, 'a> {
     /// Variables a process kernel may write between the evaluation of this
     /// process and the NBA region (see `kernel_window_writes`).
     window_writes: HashSet<SourceVarId>,
+    /// Variables several edge processes write by blocking assignments (see
+    /// `with_shared_variables`).
+    shared: HashSet<SourceVarId>,
     b: SIRBuilder<Addr>,
     /// Variables read from the working region.
     working: HashSet<SourceVarId>,
@@ -66,6 +70,8 @@ pub(super) struct Ff<'p, 'a> {
     /// Loop variables of unrolled loops and their literal values.
     overlay: HashMap<String, (String, i128)>,
     active_calls: Vec<String>,
+    // Detached children have their own function timing context.
+    timing_call_boundary: usize,
     element_widths: HashMap<Addr, usize>,
     unrolled: usize,
     /// Read-modify-write views of a variable's working value: alias -> var.
@@ -82,6 +88,12 @@ pub(super) struct Ff<'p, 'a> {
     /// body is lowered, and the process reads and writes stable state
     /// directly.
     kernel: Option<ProcessKernelBuilder>,
+    forked: bool,
+    frame_locals: Vec<SourceVarId>,
+    event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
+    unobserved_function_writes: HashSet<SourceVarId>,
+    observe_blocking_assignments: bool,
+    implicit_write_depth: usize,
     /// The index of the process being lowered among the module's kernels.
     process: usize,
     /// The wait sites of the process, by local index.
@@ -98,6 +110,33 @@ pub(super) struct Ff<'p, 'a> {
     /// The flush-point site of a process with deferred assertions, whose
     /// queue their actions wait in.
     flush_site: Option<u32>,
+    /// The clock that the sampled value functions of the process infer
+    /// (IEEE 1800-2023 16.14.6).
+    inferred_clock: Option<Clock>,
+    /// The `$past` histories of the process.
+    history: Vec<History>,
+}
+
+/// The clock of an edge-triggered process.
+pub(super) struct Clock {
+    /// The clock signal.
+    pub signal: String,
+    /// Whether a tick is a rising edge.
+    pub rising: bool,
+    /// The clock is the only event of the process, so every run is a tick.
+    pub alone: bool,
+}
+
+/// The sampled values of variable `name` at the previous ticks of the clock
+/// of a process: `chain[k - 1]` holds the value `k` ticks ago, counting
+/// only the ticks at which the gate held.
+struct History {
+    name: String,
+    gate: Option<sv::ir::Expr>,
+    /// The hidden variable that holds the gate's value at the tick, before
+    /// the body runs.
+    gate_value: Option<String>,
+    chain: Vec<String>,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -130,6 +169,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             element_writes: HashSet::default(),
             other_writes: HashSet::default(),
             window_writes: HashSet::default(),
+            shared: HashSet::default(),
             b: SIRBuilder::new(),
             working: HashSet::default(),
             nonblocking: HashSet::default(),
@@ -138,6 +178,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             functions: Vec::new(),
             overlay: HashMap::default(),
             active_calls: Vec::new(),
+            timing_call_boundary: 0,
             element_widths,
             unrolled: 0,
             aliases: HashMap::default(),
@@ -146,6 +187,12 @@ impl<'p, 'a> Ff<'p, 'a> {
             random_seed,
             dist_seed: None,
             kernel: None,
+            forked: false,
+            frame_locals: Vec::new(),
+            event_probes: Vec::new(),
+            unobserved_function_writes: HashSet::default(),
+            observe_blocking_assignments: false,
+            implicit_write_depth: 0,
             direct: false,
             input_occurrences: true,
             process: 0,
@@ -154,7 +201,407 @@ impl<'p, 'a> Ff<'p, 'a> {
             host_request_sites: Vec::new(),
             nba_switches: Vec::new(),
             flush_site: None,
+            inferred_clock: None,
+            history: Vec::new(),
         }
+    }
+
+    /// Lower an edge-triggered process with the clock its sampled value
+    /// functions infer, if any.
+    pub fn with_inferred_clock(mut self, clock: Option<Clock>) -> Self {
+        self.inferred_clock = clock;
+        self
+    }
+
+    /// The operand of `$sampled` (IEEE 1800-2023 16.9.3) with each static
+    /// variable read through its sampled copy. Automatic variables and the
+    /// lowering's own temporaries keep their current value (16.5.1). A
+    /// combinational process stays sensitive to the variables themselves,
+    /// whose changes run it, not to their copies: it is lowered as a gated
+    /// unit that keeps the value it last computed.
+    fn sampled(
+        &mut self,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let [Some(operand)] = args else {
+            return Err(unsupported("operand of `$sampled`"));
+        };
+        // A sampled value function in the operand would read the sampled
+        // copies instead of its history.
+        let mut nested = Vec::new();
+        collect_calls(operand, &mut nested);
+        if nested.iter().any(|(callee, _)| {
+            matches!(
+                callee,
+                sv::ir::Callee::System(
+                    sv::ir::SystemFunction::Past
+                        | sv::ir::SystemFunction::Rose
+                        | sv::ir::SystemFunction::Fell
+                        | sv::ir::SystemFunction::Stable
+                        | sv::ir::SystemFunction::Changed
+                )
+            )
+        }) {
+            return Err(unsupported(
+                "`$sampled` of an operand that calls a sampled value function",
+            ));
+        }
+        let operand = self.propagate(operand);
+        let mut names = HashSet::default();
+        expr_idents(&operand, &mut names);
+        let mut renames = HashMap::default();
+        for name in names {
+            let Some(id) = self.m.id(&name) else {
+                continue;
+            };
+            if self.m.is_hidden(id) {
+                continue;
+            }
+            if self.m.var(id).value_kind.is_handle() {
+                return Err(unsupported("$sampled of a string or class handle"));
+            }
+            renames.insert(name, self.m.sampled_copy(id));
+        }
+        Ok(rename_idents(&operand, &renames))
+    }
+
+    /// Declare the `$past` histories that the sampled value functions of
+    /// `body`, and of the subroutines it calls, read, as nonblocking targets
+    /// of the process. A subroutine's calls infer the clock of the process
+    /// that calls it.
+    fn declare_history(&mut self, body: &[sv::ir::Stmt]) -> Result<(), sv::AnalyzerError> {
+        use sv::ir::SystemFunction;
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+        }
+        // The calls after these are in subroutines the body calls.
+        let body_calls = calls.len();
+        let mut visited = HashSet::default();
+        let mut index = 0;
+        while index < calls.len() {
+            if let (sv::ir::Callee::Subroutine(name), args) = calls[index].clone()
+                && let Some(subroutine) = self.m.subroutine(&name).cloned()
+            {
+                // The defaults of omitted arguments run at the call.
+                default_calls(&subroutine, &args, &mut calls);
+                if visited.insert(name) {
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+                    }
+                }
+            }
+            index += 1;
+        }
+        for (position, (callee, args)) in calls.into_iter().enumerate() {
+            let sv::ir::Callee::System(
+                function @ (SystemFunction::Past
+                | SystemFunction::Rose
+                | SystemFunction::Fell
+                | SystemFunction::Stable
+                | SystemFunction::Changed),
+            ) = callee
+            else {
+                continue;
+            };
+            if self.inferred_clock.is_none() {
+                return Err(unsupported(format!(
+                    "`{function}` outside an edge-triggered process whose clock it infers"
+                )));
+            }
+            let (depth, gate) = past_depth_and_gate(function, &args)?;
+            let Some(Some(operand)) = args.first() else {
+                return Err(unsupported(format!("operand of `{function}`")));
+            };
+            // The process evaluates the gate before its body runs, outside
+            // the subroutine: there the gate can read only module variables,
+            // not the subroutine's arguments or locals.
+            if position >= body_calls
+                && let Some(gate) = &gate
+            {
+                let mut names = HashSet::default();
+                expr_idents(gate, &mut names);
+                if names
+                    .iter()
+                    .any(|name| self.m.id(name).is_none_or(|id| self.m.is_hidden(id)))
+                {
+                    return Err(unsupported(format!(
+                        "`{function}` in a subroutine with a gate that reads the subroutine's arguments or locals"
+                    )));
+                }
+            }
+            // The history of a nested call would need its own chain.
+            let mut nested = Vec::new();
+            collect_calls(operand, &mut nested);
+            if nested.iter().any(|(callee, _)| {
+                matches!(
+                    callee,
+                    sv::ir::Callee::System(
+                        SystemFunction::Past
+                            | SystemFunction::Rose
+                            | SystemFunction::Fell
+                            | SystemFunction::Stable
+                            | SystemFunction::Changed
+                    )
+                )
+            }) {
+                return Err(unsupported(format!(
+                    "`{function}` of an operand that calls a sampled value function other than `$sampled`"
+                )));
+            }
+            // The histories hold variables: the result of a call, which can
+            // read the time or state the operand does not name, has none.
+            if nested.iter().any(|(callee, _)| {
+                !matches!(callee, sv::ir::Callee::System(SystemFunction::Sampled))
+            }) {
+                return Err(unsupported(format!(
+                    "`{function}` of an operand that calls a function"
+                )));
+            }
+            let mut names = HashSet::default();
+            expr_idents(operand, &mut names);
+            let mut names: Vec<_> = names.into_iter().collect();
+            names.sort();
+            for name in names {
+                let Some(id) = self.m.id(&name) else {
+                    continue;
+                };
+                if self.m.is_hidden(id) {
+                    continue;
+                }
+                if self.m.var(id).value_kind.is_handle() {
+                    return Err(unsupported(format!(
+                        "`{function}` of a string or class handle"
+                    )));
+                }
+                // A history moves one tick back with one nonblocking copy
+                // of the variable, which an unpacked array has no form of.
+                if !self.m.var(id).array_dims.is_empty() {
+                    return Err(unsupported(format!("`{function}` of an unpacked array")));
+                }
+                let index = match self
+                    .history
+                    .iter()
+                    .position(|history| history.name == name && history.gate == gate)
+                {
+                    Some(index) => index,
+                    None => {
+                        self.history.push(History {
+                            name: name.clone(),
+                            gate: gate.clone(),
+                            gate_value: None,
+                            chain: Vec::new(),
+                        });
+                        self.history.len() - 1
+                    }
+                };
+                while self.history[index].chain.len() < depth {
+                    let register = self.m.history_copy(id);
+                    // A hidden variable is no target of its own: the
+                    // history is state the process commits at each tick.
+                    self.record_target(&sv::ir::LValue::Ident(register.clone()), false);
+                    let copy = self.m.id(&register).expect("a new history register");
+                    let width = self.m.var(copy).width;
+                    self.targets.push((copy, BitAccess::new(0, width - 1)));
+                    self.history[index].chain.push(register);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The operand of `$past` (IEEE 1800-2023 16.9.3) evaluated over the
+    /// sampled values of its variables `depth` ticks ago.
+    fn past(
+        &self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let (depth, gate) = past_depth_and_gate(function, args)?;
+        let Some(Some(operand)) = args.first() else {
+            return Err(unsupported(format!("operand of `{function}`")));
+        };
+        let operand = self.propagate(operand);
+        let mut names = HashSet::default();
+        expr_idents(&operand, &mut names);
+        let mut renames = HashMap::default();
+        for name in names {
+            if self.m.id(&name).is_none_or(|id| self.m.is_hidden(id)) {
+                continue;
+            }
+            // `declare_history` declared the histories of the process body;
+            // a call elsewhere, as in a subroutine, has no clock.
+            let history = self
+                .history
+                .iter()
+                .find(|history| {
+                    history.name == name && history.gate == gate && history.chain.len() >= depth
+                })
+                .ok_or_else(|| {
+                    unsupported(format!(
+                        "`{function}` outside an edge-triggered process whose clock it infers"
+                    ))
+                })?;
+            renames.insert(name, history.chain[depth - 1].clone());
+        }
+        Ok(rename_idents(&operand, &renames))
+    }
+
+    /// `$rose`, `$fell`, `$stable` or `$changed` (IEEE 1800-2023 16.9.3): the
+    /// sampled value of the operand against its value at the previous tick,
+    /// with case equality for integral values and numeric equality for reals.
+    /// A change from or to X counts. `$rose` and
+    /// `$fell` look at the least significant bit.
+    fn value_change(
+        &mut self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr, SystemFunction};
+        let current = self.sampled(args)?;
+        let past = self.past(function, args)?;
+        // Resolve nested $sampled calls before inspecting the operand's type.
+        let current = self.hoist(&current)?;
+        let past = self.hoist(&past)?;
+        let real = floating::precision(&current, self.m.variables, self.m.name_to_id).is_some();
+        let binary = |left: Expr, op, right: Expr| Expr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let bit = |value: Expr| binary(value, BinaryOp::BitAnd, Expr::Literal("1'b1".into()));
+        let literal = |text: &str| Expr::Literal(text.into());
+        Ok(match function {
+            SystemFunction::Rose | SystemFunction::Fell => {
+                let level = if function == SystemFunction::Rose {
+                    "1'b1"
+                } else {
+                    "1'b0"
+                };
+                binary(
+                    binary(bit(past), BinaryOp::NeCase, literal(level)),
+                    BinaryOp::LogicAnd,
+                    binary(bit(current), BinaryOp::EqCase, literal(level)),
+                )
+            }
+            SystemFunction::Stable => binary(
+                current,
+                if real { BinaryOp::Eq } else { BinaryOp::EqCase },
+                past,
+            ),
+            _ => binary(
+                current,
+                if real { BinaryOp::Ne } else { BinaryOp::NeCase },
+                past,
+            ),
+        })
+    }
+
+    /// The `$past` updates at the end of an evaluation, a tick of the
+    /// process's clock: each history moves one tick back and takes the
+    /// sampled value, where its gate holds at the tick.
+    fn update_history(&mut self) -> Result<bool, sv::AnalyzerError> {
+        use sv::ir::{Expr, LValue, Stmt};
+        let sampled = |expr: Expr| Expr::Call {
+            callee: sv::ir::Callee::System(sv::ir::SystemFunction::Sampled),
+            args: vec![Some(expr)],
+            arg_order: Vec::new(),
+        };
+        let mut stmts = Vec::new();
+        if self.history.is_empty() {
+            return Ok(true);
+        }
+        for history in &self.history {
+            let mut updates: Vec<Stmt> = history
+                .chain
+                .windows(2)
+                .map(|pair| Stmt::Assign {
+                    lhs: LValue::Ident(pair[1].clone()),
+                    rhs: Expr::Ident(pair[0].clone()),
+                    nonblocking: true,
+                })
+                .collect();
+            updates.push(Stmt::Assign {
+                lhs: LValue::Ident(history.chain[0].clone()),
+                rhs: sampled(Expr::Ident(history.name.clone())),
+                nonblocking: true,
+            });
+            match &history.gate_value {
+                None => stmts.extend(updates),
+                Some(gate) => stmts.push(Stmt::If {
+                    condition: Expr::Ident(gate.clone()),
+                    then_body: updates,
+                    else_body: Vec::new(),
+                }),
+            }
+        }
+        // A run for another event, such as an asynchronous reset, is no
+        // tick: the clock has kept the level it had before the slot.
+        let clock = self
+            .inferred_clock
+            .as_ref()
+            .expect("histories have a clock");
+        if !clock.alone {
+            use sv::ir::BinaryOp::{EqCase, LogicAnd, LogicOr, NeCase};
+            let to = Expr::Literal(if clock.rising { "1'b1" } else { "1'b0" }.into());
+            let from = Expr::Literal(if clock.rising { "1'b0" } else { "1'b1" }.into());
+            // Edge events inspect only the least significant bit (9.4.2).
+            let signal = Expr::Resize {
+                expr: Box::new(Expr::Ident(clock.signal.clone())),
+                width: 1,
+                signed: false,
+            };
+            let old = sampled(signal.clone());
+            let compare = |left: Expr, op, right: Expr| Expr::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
+            // Table 9-2: leaving the opposite known level for X/Z is an
+            // edge too, as is arriving at the target level from X/Z.
+            let tick = compare(
+                compare(
+                    compare(old.clone(), EqCase, from.clone()),
+                    LogicAnd,
+                    compare(signal.clone(), NeCase, from),
+                ),
+                LogicOr,
+                compare(
+                    compare(old, NeCase, to.clone()),
+                    LogicAnd,
+                    compare(signal, EqCase, to),
+                ),
+            );
+            stmts = vec![Stmt::If {
+                condition: tick,
+                then_body: stmts,
+                else_body: Vec::new(),
+            }];
+        }
+        self.exec_block(&stmts)
+    }
+
+    /// Evaluate the gate of each `$past` history before the body runs. The
+    /// gate is the `iff` of the clocking event, which is evaluated at the
+    /// tick (IEEE 1800-2023 9.4.2.3), not after the body's assignments.
+    fn capture_history_gates(&mut self) -> Result<(), sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        for index in 0..self.history.len() {
+            let Some(gate) = self.history[index].gate.clone() else {
+                continue;
+            };
+            // Its truth, which keeps an unknown gate unknown, as `if` reads it.
+            let truth = Expr::Binary {
+                left: Box::new(gate),
+                op: BinaryOp::Ne,
+                right: Box::new(Expr::Literal("1'b0".into())),
+            };
+            let value = self.eval(&truth, Some((1, false)))?;
+            let (temp, name) = self.m.temp("gate", 1, false, true);
+            self.store(temp, SIROffset::Static(0), 1, value);
+            self.history[index].gate_value = Some(name);
+        }
+        Ok(())
     }
 
     /// Whether `stmts`, or a subroutine they call, including in timing
@@ -223,6 +670,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             location: None,
             assertion: None,
             deferred: Some(DeferredSite::FlushPoint),
+            timestamp_arg: false,
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),
@@ -256,10 +704,23 @@ impl<'p, 'a> Ff<'p, 'a> {
         self
     }
 
+    /// Variables other edge processes also write by blocking assignments.
+    /// The process reads and writes their stable state directly, as a
+    /// blocking assignment updates the variable at once (IEEE 1800-2023
+    /// 10.4.1): its reads see its own preceding writes, and the last write of
+    /// any process stays, even when a later process does not write it. A
+    /// working value seeded by each process would instead be committed by
+    /// every one of them.
+    pub fn with_shared_variables(mut self, names: &HashSet<String>) -> Self {
+        self.shared = names.iter().filter_map(|name| self.m.id(name)).collect();
+        self
+    }
+
     /// Where a write of `id`, and a read of a value the process wrote, go:
-    /// the working region, or stable state in a process kernel.
+    /// the working region, or stable state in a process kernel and for a
+    /// shared variable.
     fn target(&self, id: SourceVarId) -> Addr {
-        if self.kernel.is_some() || self.direct {
+        if self.kernel.is_some() || self.direct || self.shared.contains(&id) {
             stable(id)
         } else {
             working(id)
@@ -281,6 +742,27 @@ impl<'p, 'a> Ff<'p, 'a> {
         let Some(id) = self.m.id(lvalue.name()) else {
             return;
         };
+        let variable = self.m.var(id);
+        let constant = match lvalue {
+            sv::ir::LValue::Ident(_) => None,
+            sv::ir::LValue::Select { msb, lsb, .. } => sv::typecheck::eval_const_expr_with_types(
+                msb,
+                self.m.constants,
+                self.m.parameter_types,
+            )
+            .zip(sv::typecheck::eval_const_expr_with_types(
+                lsb,
+                self.m.constants,
+                self.m.parameter_types,
+            ))
+            .and_then(|(msb, lsb)| constant_select_write(variable, msb, lsb)),
+        };
+        // An empty constant write is not a dynamic write of the whole
+        // variable. Keep it out of publication and latch-coverage targets.
+        if matches!(constant, Some((None, _))) {
+            return;
+        }
+        let constant = constant.and_then(|(access, _)| access);
         if blocking {
             self.working.insert(id);
         } else {
@@ -289,7 +771,6 @@ impl<'p, 'a> Ff<'p, 'a> {
         if self.m.is_hidden(id) {
             return;
         }
-        let variable = self.m.var(id);
         // A run-time bit select within one array element writes only that
         // element (see `write`); a run-time element may be any of them.
         let element_write = dynamic_array_element_lvalue(
@@ -313,20 +794,6 @@ impl<'p, 'a> Ff<'p, 'a> {
             .flatten()
             .and_then(|write| write.window)
             .unwrap_or(BitAccess::new(0, variable.width - 1));
-        let constant = match lvalue {
-            sv::ir::LValue::Ident(_) => None,
-            sv::ir::LValue::Select { msb, lsb, .. } => sv::typecheck::eval_const_expr_with_types(
-                msb,
-                self.m.constants,
-                self.m.parameter_types,
-            )
-            .zip(sv::typecheck::eval_const_expr_with_types(
-                lsb,
-                self.m.constants,
-                self.m.parameter_types,
-            ))
-            .and_then(|(msb, lsb)| constant_select_write(variable, msb, lsb)?.0),
-        };
         if constant.is_none() {
             // `write` takes the same order: a constant range, then one
             // run-time element, then a read-modify-write of the variable.
@@ -353,6 +820,13 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut assigned = HashSet::default();
         let mut visited = HashSet::default();
         while let Some((callee, args)) = calls.pop() {
+            if let sv::ir::Callee::Object(op) = &callee {
+                assigned.extend(
+                    written_object_arguments(op, &args)
+                        .iter()
+                        .filter_map(|lhs| self.m.id(lhs.name())),
+                );
+            }
             let sv::ir::Callee::Subroutine(name) = callee else {
                 continue;
             };
@@ -413,6 +887,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
         while let Some((callee, args)) = calls.pop() {
+            if let sv::ir::Callee::Object(op) = &callee {
+                for lhs in written_object_arguments(op, &args) {
+                    self.record_target(&lhs, true);
+                }
+            }
             let name = match callee {
                 sv::ir::Callee::System(function) => {
                     use sv::ir::SystemFunction;
@@ -476,9 +955,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         let working_set = &self.working;
         let variables = &*self.m.variables;
         let direct = self.kernel.is_some() || self.direct;
+        let shared = &self.shared;
         let map = |id: &SourceVarId| -> Addr {
-            if direct {
-                stable(*aliases.get(id).unwrap_or(id))
+            let var = aliases.get(id).unwrap_or(id);
+            if direct || shared.contains(var) {
+                stable(*var)
             } else if let Some(var) = aliases.get(id) {
                 working(*var)
             } else if working_set.contains(id)
@@ -489,6 +970,27 @@ impl<'p, 'a> Ff<'p, 'a> {
                 stable(*id)
             }
         };
+        if !self.m.four_state {
+            // Node IDs are topological. Cache exact comparisons before mapping
+            // their parents, reusing the existing graph/loop remapper.
+            for (index, expression) in arena.iter().enumerate() {
+                if let SLTNode::Binary(left, op @ (BinaryOp::EqCase | BinaryOp::NeCase), right) =
+                    expression
+                {
+                    let left = arena
+                        .get(*left)
+                        .map_addr(*left, arena, &mut mapped_arena, &mut cache, &map)
+                        .map_err(slt_error)?;
+                    let right = arena
+                        .get(*right)
+                        .map_addr(*right, arena, &mut mapped_arena, &mut cache, &map)
+                        .map_err(slt_error)?;
+                    let equal = super::case_equality::compare(&mut mapped_arena, left, *op, right)
+                        .map_err(slt_error)?;
+                    cache.insert(NodeId(index), equal);
+                }
+            }
+        }
         let mapped = arena
             .get(node)
             .map_addr(node, arena, &mut mapped_arena, &mut cache, &map)
@@ -751,8 +1253,25 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
                 let mut lowered = Vec::with_capacity(args.len());
                 for arg in args {
-                    let arg = self.hoist_const(arg, calls)?;
-                    lowered.push(expr_from_const_expr(&arg).ok_or_else(|| {
+                    // Sampled/history functions must resolve their operands
+                    // before nested calls hide the original inputs behind
+                    // temporaries holding current-slot values.
+                    let arg = if matches!(
+                        callee,
+                        sv::ir::Callee::System(
+                            sv::ir::SystemFunction::Sampled
+                                | sv::ir::SystemFunction::Past
+                                | sv::ir::SystemFunction::Rose
+                                | sv::ir::SystemFunction::Fell
+                                | sv::ir::SystemFunction::Stable
+                                | sv::ir::SystemFunction::Changed
+                        )
+                    ) {
+                        arg.clone()
+                    } else {
+                        self.hoist_const(arg, calls)?
+                    };
+                    lowered.push(expr_from_const_expr_with_calls(&arg, true).ok_or_else(|| {
                         unsupported(format!("argument of `{callee}` in a select"))
                     })?);
                 }
@@ -761,8 +1280,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                     callee: callee.clone(),
                     args: lowered.into_iter().map(Some).collect(),
                 };
-                let sv::ir::Expr::Ident(result) = self.hoist(&call)? else {
-                    return Err(unsupported(format!("call of `{callee}` in a select")));
+                let result = match self.hoist(&call)? {
+                    sv::ir::Expr::Ident(result) => result,
+                    // A sampled/history operand can retain any expression
+                    // shape (including a resize inserted for the index).
+                    // Evaluate it only after its references are resolved.
+                    hoisted => {
+                        let value = self.eval(&hoisted, None)?;
+                        let width = self.b.register(&value).width();
+                        let (temp, name) = self.m.temp("select", width, false, true);
+                        self.store(temp, SIROffset::Static(0), width, value);
+                        name
+                    }
                 };
                 let result = ConstExpr::Ident(result);
                 calls.push((expr.clone(), result.clone()));
@@ -1018,6 +1547,13 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// Execute the user subroutine calls of an expression and replace each by
     /// a hidden variable holding its result.
     fn hoist(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        self.implicit_write_depth += 1;
+        let result = self.hoist_inner(expr);
+        self.implicit_write_depth -= 1;
+        result
+    }
+
+    fn hoist_inner(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use sv::ir::Expr;
         if !self.m.calls(expr) {
             return Ok(expr.clone());
@@ -1045,6 +1581,36 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let (_, name) = self.m.temp("tagged_member", *width, *signed, true);
                 self.assign(&sv::ir::LValue::Ident(name.clone()), value)?;
                 Expr::Ident(name)
+            }
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Sampled),
+                args,
+                ..
+            } => {
+                let operand = self.sampled(args)?;
+                self.hoist(&operand)?
+            }
+            Expr::Call {
+                callee: sv::ir::Callee::System(function @ sv::ir::SystemFunction::Past),
+                args,
+                ..
+            } => {
+                let operand = self.past(*function, args)?;
+                self.hoist(&operand)?
+            }
+            Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
+                        function @ (sv::ir::SystemFunction::Rose
+                        | sv::ir::SystemFunction::Fell
+                        | sv::ir::SystemFunction::Stable
+                        | sv::ir::SystemFunction::Changed),
+                    ),
+                args,
+                ..
+            } => {
+                let change = self.value_change(*function, args)?;
+                self.hoist(&change)?
             }
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fread),
@@ -1082,7 +1648,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                 callee: sv::ir::Callee::Object(op),
                 args,
                 ..
-            } => self.object_call(op, args)?,
+            } => match &**op {
+                sv::ir::ObjectOp::Container { op, layout } => {
+                    self.container_call(*op, *layout, args)?
+                }
+                _ => self.object_call(op, args)?,
+            },
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fopen),
                 args,
@@ -1500,6 +2071,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let (id, _) = self.m.temp("vcd_argument", width, signed, is_4state);
             self.store(id, SIROffset::Static(0), width, reg);
             values.push(HostRequestValue {
+                value_kind: celox_design::ValueKind::Bits,
                 float_precision: None,
                 id,
                 width,
@@ -2197,6 +2769,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let (seed_id, seed_result) =
             self.host_hidden("distribution_seed", &formal, 32, true, true)?;
         let value = |id| HostRequestValue {
+            value_kind: celox_design::ValueKind::Bits,
             float_precision: None,
             id,
             width: 32,
@@ -2237,6 +2810,25 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok(Expr::Ident(ret_name))
     }
 
+    /// The value of `expr` now, in a temporary of its type.
+    fn keep_argument(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let signed = self.expr_signed(expr);
+        let float = floating::precision(expr, self.m.variables, self.m.name_to_id);
+        let handle = reads_string_variable(expr, self.m.variables, self.m.name_to_id);
+        let value = self.eval(expr, None)?;
+        let register = self.b.register(&value).clone();
+        let width = register.width();
+        let four_state = matches!(register, celox_sir::RegisterType::Logic { .. });
+        let (temp, name) = self.m.temp("task_argument", width, signed, four_state);
+        let variable = self.m.variables.get_mut(&temp).unwrap();
+        variable.float = float;
+        if handle {
+            variable.value_kind = celox_design::ValueKind::StrRef;
+        }
+        self.store(temp, SIROffset::Static(0), width, value);
+        Ok(sv::ir::Expr::Ident(name))
+    }
+
     fn plusargs(
         &mut self,
         function: sv::ir::SystemFunction,
@@ -2264,6 +2856,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut results = Vec::new();
         let (ret_id, ret_name) = self.m.temp("plusargs_result", 32, true, false);
         results.push(HostRequestValue {
+            value_kind: celox_design::ValueKind::Bits,
             float_precision: None,
             id: ret_id,
             width: 32,
@@ -2282,6 +2875,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .ok_or_else(|| unsupported("integral plusargs destination"))?;
             let (id, result) = self.host_hidden("plusargs_value", &captured, width, false, true)?;
             results.push(HostRequestValue {
+                value_kind: celox_design::ValueKind::Bits,
                 float_precision: None,
                 id,
                 width,
@@ -2302,6 +2896,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             kind: HostRequestKind::Plusargs,
             operation: u32::from(value_query),
             args: vec![HostRequestValue {
+                value_kind: celox_design::ValueKind::Bits,
                 float_precision: None,
                 id: query_id,
                 width,
@@ -2324,6 +2919,21 @@ impl<'p, 'a> Ff<'p, 'a> {
     }
 
     fn store(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
+        // Intrinsic and subroutine expression copy-outs, including seed and
+        // plusargs actuals, bypass statement lowering. They cannot introduce
+        // observation yields while caller registers are live. Record the
+        // resolved destination here so a later probe cannot silently miss it.
+        if self.observe_blocking_assignments
+            && self.kernel.is_some()
+            && (self.implicit_write_depth != 0
+                || self.active_calls.iter().any(|name| {
+                    self.m
+                        .subroutine(name)
+                        .is_some_and(|subroutine| !subroutine.is_task)
+                }))
+        {
+            self.unobserved_function_writes.insert(id);
+        }
         let value = if let Some((enabled, forced)) = self.m.force_controls(id) {
             let condition = self.b.alloc_bit(1, false);
             self.b.emit(SIRInstruction::Load(
@@ -2897,6 +3507,27 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok(true)
     }
 
+    /// Publish each blocking assignment before the next statement, without
+    /// switching the writer or releasing deferred join_none children.
+    fn observe_assignment(&mut self, targets: &[sv::ir::LValue]) -> Result<(), sv::AnalyzerError> {
+        if !self.forked || !self.observe_blocking_assignments || self.kernel.is_none() {
+            return Ok(());
+        }
+        let in_function = self.active_calls.iter().any(|name| {
+            self.m
+                .subroutine(name)
+                .is_some_and(|subroutine| !subroutine.is_task)
+        });
+        if in_function || self.implicit_write_depth != 0 {
+            self.unobserved_function_writes
+                .extend(targets.iter().filter_map(|target| self.m.id(target.name())));
+        } else {
+            self.with_kernel(ProcessKernelBuilder::yield_now)
+                .map_err(kernel_error)?;
+        }
+        Ok(())
+    }
+
     fn jump(&mut self, target: BlockId) {
         self.b.seal_block(SIRTerminator::Jump(target, Vec::new()));
     }
@@ -2909,11 +3540,15 @@ impl<'p, 'a> Ff<'p, 'a> {
                 | sv::ir::Stmt::WaitImplicit(_)
                 | sv::ir::Stmt::Wait(_)
         ) && (self.kernel.is_none()
-            || self.active_calls.iter().any(|name| {
-                self.m
-                    .subroutine(name)
-                    .is_some_and(|subroutine| !subroutine.is_task)
-            }))
+            || self
+                .active_calls
+                .iter()
+                .skip(self.timing_call_boundary)
+                .any(|name| {
+                    self.m
+                        .subroutine(name)
+                        .is_some_and(|subroutine| !subroutine.is_task)
+                }))
         {
             return Err(unsupported("timed task call outside a suspendable process"));
         }
@@ -2936,10 +3571,12 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             sv::ir::Stmt::Assign { lhs, rhs, .. } => {
                 self.assign(lhs, rhs)?;
+                self.observe_assignment(std::slice::from_ref(lhs))?;
                 Ok(true)
             }
             sv::ir::Stmt::AssignConcat { parts, rhs, .. } => {
                 self.assign_concat(parts, rhs)?;
+                self.observe_assignment(parts)?;
                 Ok(true)
             }
             sv::ir::Stmt::Delay {
@@ -2962,11 +3599,66 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.wait_level(condition)?;
                 Ok(true)
             }
+            sv::ir::Stmt::WaitFork | sv::ir::Stmt::DisableFork => {
+                if self.kernel.is_none() {
+                    return if matches!(stmt, sv::ir::Stmt::DisableFork) {
+                        Ok(true)
+                    } else {
+                        Err(unsupported("fork control outside a timed process"))
+                    };
+                }
+                if matches!(stmt, sv::ir::Stmt::WaitFork) {
+                    self.with_kernel(ProcessKernelBuilder::wait_fork)
+                        .map_err(kernel_error)?;
+                } else {
+                    self.with_kernel(ProcessKernelBuilder::disable_fork)
+                        .map_err(kernel_error)?;
+                }
+                Ok(true)
+            }
+            sv::ir::Stmt::Fork { join, branches } => {
+                if self.kernel.is_none() {
+                    return Err(unsupported("fork outside a timed process"));
+                }
+                self.forked = true;
+                let (entries, continuation) = self
+                    .with_kernel(|kernel| kernel.fork(branches.len(), *join))
+                    .map_err(kernel_error)?;
+                self.b.seal_block(SIRTerminator::Return);
+                let loops = std::mem::take(&mut self.loops);
+                let functions = std::mem::take(&mut self.functions);
+                let overlay = std::mem::take(&mut self.overlay);
+                let timing_boundary = self.timing_call_boundary;
+                self.timing_call_boundary = self.active_calls.len();
+                for (entry, branch) in entries.into_iter().zip(branches) {
+                    self.b.switch_to_block(entry);
+                    if self.exec_block(branch)? {
+                        self.with_kernel(ProcessKernelBuilder::complete);
+                    }
+                }
+                self.timing_call_boundary = timing_boundary;
+                self.loops = loops;
+                self.functions = functions;
+                self.overlay = overlay;
+                self.b.switch_to_block(continuation);
+                Ok(true)
+            }
             sv::ir::Stmt::Local { name, init } => {
                 let id = self
                     .m
                     .id(name)
                     .ok_or_else(|| unsupported(format!("local `{name}`")))?;
+                if self.forked && self.kernel.is_some() {
+                    let slot = match self.frame_locals.iter().position(|&local| local == id) {
+                        Some(slot) => slot,
+                        None => {
+                            self.frame_locals.push(id);
+                            self.frame_locals.len() - 1
+                        }
+                    };
+                    self.with_kernel(|kernel| kernel.local(slot))
+                        .map_err(kernel_error)?;
+                }
                 match init {
                     Some(init) => self.assign(&sv::ir::LValue::Ident(name.clone()), init)?,
                     None => self.init_default(id),
@@ -3080,7 +3772,16 @@ impl<'p, 'a> Ff<'p, 'a> {
                 args,
                 site,
                 assertion,
-            } => self.system_task(*task, args, site.as_ref(), assertion.as_ref()),
+            } => {
+                // System-task output writes (including readmem) have their own
+                // lowering. Until they expose safe per-update boundaries, a
+                // watched automatic destination is rejected like expression
+                // copy-out rather than losing intermediate changes.
+                self.implicit_write_depth += 1;
+                let result = self.system_task(*task, args, site.as_ref(), assertion.as_ref());
+                self.implicit_write_depth -= 1;
+                result
+            }
         }
     }
 
@@ -3187,6 +3888,32 @@ impl<'p, 'a> Ff<'p, 'a> {
         };
         let (template, mut values) = system_task_template(self.m, &kind, args);
         prepare_time_operands(self.m, template.as_deref(), &mut values)?;
+        // Arguments are evaluated left to right. A later argument's call can
+        // change what an earlier one reads, or suspend the process (a host
+        // request) so that a value read before it would not survive the
+        // resume. So every argument before the last one with a call is
+        // evaluated whole into a temporary at its place; that one only has
+        // its calls run before its own reads, as any expression does.
+        let last_call = values.iter().rposition(
+            |value| matches!(value, sv::ir::SystemTaskArg::Expr(expr) if self.m.calls(expr)),
+        );
+        if let Some(last_call) = last_call {
+            for (index, value) in values[..=last_call].iter_mut().enumerate() {
+                let sv::ir::SystemTaskArg::Expr(expr) = value else {
+                    continue;
+                };
+                let hoisted = if self.m.calls(expr) {
+                    self.hoist(expr)?
+                } else {
+                    expr.clone()
+                };
+                *expr = if index == last_call || matches!(hoisted, sv::ir::Expr::Literal(_)) {
+                    hoisted
+                } else {
+                    self.keep_argument(&hoisted)?
+                };
+            }
+        }
         let mut regs = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
         let mut arg_signed = Vec::with_capacity(values.len());
@@ -3196,11 +3923,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         for value in &values {
             match value {
                 sv::ir::SystemTaskArg::Expr(expr) => {
-                    let expr = if self.m.calls(expr) {
-                        self.hoist(expr)?
-                    } else {
-                        expr.clone()
-                    };
+                    let expr = expr.clone();
                     let signed = self.expr_signed(&expr);
                     arg_is_handle.push(reads_string_variable(
                         &expr,
@@ -3238,6 +3961,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
             }
         }
+        // A report carries the time it is issued at (IEEE 1800-2023 20.10).
+        let timestamp_arg = matches!(kind, SystemTaskKind::Message(_) | SystemTaskKind::Fatal);
+        if timestamp_arg {
+            let time = sv::ir::Expr::Ident(self.m.time_slot());
+            let reg = self.eval(&time, None)?;
+            arg_widths.push(self.b.register(&reg).width());
+            arg_signed.push(false);
+            arg_is_string.push(false);
+            arg_float_precision.push(None);
+            arg_is_handle.push(false);
+            regs.push(reg);
+        }
         // Argument effects happen before branching, and the condition register
         // retains the value it had before those effects.
         let resume = match assertion {
@@ -3271,6 +4006,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             location: report_location(site),
             assertion: assertion_site.cloned(),
             deferred,
+            timestamp_arg,
             arg_widths,
             arg_signed,
             arg_is_string,
@@ -3420,7 +4156,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         step: &[sv::ir::Stmt],
         body: &[sv::ir::Stmt],
     ) -> Result<bool, sv::AnalyzerError> {
-        if let sv::ir::LoopKind::For = kind
+        if !(self.observe_blocking_assignments && self.kernel.is_some())
+            && let sv::ir::LoopKind::For = kind
             && let Some(canonical) = canonical_for_loop(init, condition, step)
             && self
                 .m
@@ -3741,7 +4478,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         // another process can enter the same task while this one is suspended.
         // Static formals/locals deliberately keep their module-wide addresses.
         let mut activation = Vec::new();
-        if self.kernel.is_some() && subroutine.is_task {
+        if self.kernel.is_some() && (subroutine.is_task || self.forked) {
             for name in &subroutine.automatic_locals {
                 let original = self
                     .m
@@ -3766,6 +4503,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                     self.element_widths.insert(working(copy), width);
                 }
                 self.m.name_to_id.insert(name.clone(), copy);
+                if self.forked {
+                    let slot = self.frame_locals.len();
+                    self.frame_locals.push(copy);
+                    self.with_kernel(|kernel| kernel.local(slot))
+                        .map_err(kernel_error)?;
+                }
                 activation.push((name.clone(), original));
             }
         }
@@ -3899,14 +4642,21 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.assign(lvalue, &sv::ir::Expr::Ident(formal))?;
             } else {
                 let _ = signed;
-                let parts = lvalues;
-                self.assign_concat(&parts, &sv::ir::Expr::Ident(formal))?;
+                self.assign_concat(&lvalues, &sv::ir::Expr::Ident(formal))?;
             }
+            self.observe_assignment(&lvalues)?;
         }
+        let result = subroutine.return_var.as_ref().map(|name| {
+            if activation.iter().any(|(local, _)| local == name) {
+                self.m.var(self.m.id(name).unwrap()).path[0].clone()
+            } else {
+                name.clone()
+            }
+        });
         for (name, original) in activation {
             self.m.name_to_id.insert(name, original);
         }
-        Ok(subroutine.return_var.clone())
+        Ok(result)
     }
 
     // -------------------------------------------------------------- process
@@ -3926,6 +4676,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         arena: &mut SLTNodeArena<SourceVarId>,
     ) -> Result<Vec<LogicPath<SourceVarId>>, sv::AnalyzerError> {
         let always_comb = kind != sv::ir::CombProcessKind::AlwaysStar;
+        // `always @*` and a sensitivity list wait for a change (IEEE
+        // 1800-2023 9.2.2.2). In two-state mode their outputs would then
+        // start as a real 0, so they run once at time zero, after the
+        // `initial` blocks, like `always_comb`, as Verilator settles them.
+        let runs_at_time_zero = always_comb || !self.m.four_state;
         self.direct = true;
         let mut reads = self.m.implicit_reads(body, always_comb);
         reads.extend(self.m.implicit_reads(sensitivity_body, always_comb));
@@ -3952,6 +4707,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let width = self.m.var(id).width;
             self.targets.push((id, BitAccess::new(0, width - 1)));
         }
+        let flush_site = self.deferred_flush_site(body);
         if self.exec_block(body)? {
             self.b.seal_block(SIRTerminator::Return);
         }
@@ -4088,7 +4844,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             counter_snapshots.push((counter, saved_counter));
         }
         let run = self.b.alloc_bit(1, false);
-        if always_comb {
+        if runs_at_time_zero {
             let first = self.b.alloc_bit(1, false);
             self.b
                 .emit(SIRInstruction::Unary(first, UnaryOp::LogicNot, init));
@@ -4113,6 +4869,13 @@ impl<'p, 'a> Ff<'p, 'a> {
             false_block: (done, vec![]),
         });
         self.b.switch_to_block(execute);
+        // Each run is a resume of the process (IEEE 1800-2023 16.4.2).
+        if let Some(site_id) = flush_site {
+            self.b.emit(SIRInstruction::RuntimeEvent {
+                site_id,
+                args: Vec::new(),
+            });
+        }
         self.b.inline_execution_unit(&body_unit);
         if !always_comb {
             // @* is not waiting during its body. Its own writes cannot wake
@@ -4195,7 +4958,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 target: LogicPathTarget::Process {
                     process: initialized,
                     sensitivity_counters: sensitivity_counters.clone(),
-                    startup: (!always_comb).then(|| celox_slt::CombStartup {
+                    startup: (!runs_at_time_zero).then(|| celox_slt::CombStartup {
                         initialized,
                         counters: counter_snapshots.clone(),
                         inputs: sources
@@ -4207,7 +4970,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                     after_initials: matches!(
                         kind,
                         sv::ir::CombProcessKind::AlwaysComb | sv::ir::CombProcessKind::AlwaysLatch
-                    ),
+                    ) || (kind == sv::ir::CombProcessKind::AlwaysStar
+                        && !self.m.four_state),
                     target,
                     unit: Box::new(unit.clone()),
                 },
@@ -4230,6 +4994,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         mut self,
         body: &[sv::ir::Stmt],
     ) -> Result<FfProcessUnits, sv::AnalyzerError> {
+        self.declare_history(body)?;
         let mut visited = HashSet::default();
         self.scan(body, &mut visited);
         // A variable only this process's nonblocking assignments write here,
@@ -4269,6 +5034,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             })
             .collect();
         self.sparse_memories.extend(sparse);
+        if self.nonblocking.iter().any(|id| self.shared.contains(id)) {
+            return Err(unsupported(
+                "nonblocking writes to a variable several edge processes write",
+            ));
+        }
         if self
             .working
             .iter()
@@ -4325,20 +5095,51 @@ impl<'p, 'a> Ff<'p, 'a> {
                     value_name,
                     mask,
                     mask_name,
+                    sites: None,
                 }
             })
             .collect();
+        // Publish only the elements an array's nonblocking writes wrote, so
+        // an edge costs its writes rather than the whole array.
+        let mut staged = staged;
+        if self.kernel.is_none() && !self.direct {
+            for stage in &mut staged {
+                if self.m.var(stage.id).array_dims.is_empty() {
+                    continue;
+                }
+                let Some(count) = array_nba_site_count(body, stage.id, self.m) else {
+                    continue;
+                };
+                let sites = (0..count)
+                    .map(|_| {
+                        let (lsb, lsb_name) = self.m.temp("nba_lsb", 64, false, false);
+                        let (msb, msb_name) = self.m.temp("nba_msb", 64, false, false);
+                        let (hit, hit_name) = self.m.temp("nba_hit", 1, false, false);
+                        NbaArraySite {
+                            lsb,
+                            lsb_name,
+                            msb,
+                            msb_name,
+                            hit,
+                            hit_name,
+                        }
+                    })
+                    .collect();
+                stage.sites = Some(sites);
+            }
+        }
         let body = if staged.is_empty() {
             body.to_vec()
         } else {
-            stage_nonblocking(body, &staged, self.m)
+            stage_nonblocking(body, &staged, self.m, &mut HashMap::default())
         };
         // A variable staged for an exact publication has no next state of
-        // its own: only its merge publishes it.
+        // its own: only its merge publishes it. A shared variable is written
+        // in stable state.
         let published: Vec<_> = targets
             .iter()
             .copied()
-            .filter(|target| !exact.contains(&target.id))
+            .filter(|target| !exact.contains(&target.id) && !self.shared.contains(&target.id))
             .collect();
         let ordinary_targets: Vec<_> = published
             .iter()
@@ -4352,6 +5153,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let zero = self.b.alloc_bit(width, false);
                 self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
                 self.store(stage.mask, SIROffset::Static(0), width, zero);
+            } else if stage.sites.is_some() {
+                // The merge clears the mask bits it published.
             } else {
                 // Nothing writes the mask's stable state, which stays zero;
                 // a store may not span the elements of an array.
@@ -4371,7 +5174,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                 args: Vec::new(),
             });
         }
-        if self.exec_block(&body)? {
+        self.capture_history_gates()?;
+        if self.exec_block(&body)? && self.update_history()? {
             self.b.seal_block(SIRTerminator::Return);
         }
         let mut eval = seal_drained(self.b);
@@ -4514,6 +5318,87 @@ struct NbaStage {
     value_name: String,
     mask: SourceVarId,
     mask_name: String,
+    /// For an unpacked array, the sites of its nonblocking writes, when each
+    /// runs at most once an evaluation: the merge then publishes only the
+    /// elements they wrote. Without them every element is merged.
+    sites: Option<Vec<NbaArraySite>>,
+}
+
+/// A nonblocking write of a staged unpacked array: the bit range it wrote,
+/// in the array's flattened bits, and whether it ran.
+struct NbaArraySite {
+    lsb: SourceVarId,
+    lsb_name: String,
+    msb: SourceVarId,
+    msb_name: String,
+    hit: SourceVarId,
+    hit_name: String,
+}
+
+/// The number of nonblocking writes of the unpacked array `id` in `stmts`,
+/// when each is a select [`stage_nonblocking`] stages and none is in a loop,
+/// so that each runs at most once an evaluation.
+fn array_nba_site_count(
+    stmts: &[sv::ir::Stmt],
+    id: SourceVarId,
+    pm: &ProcModule<'_>,
+) -> Option<usize> {
+    let writes = |stmt: &sv::ir::Stmt| {
+        let mut found = false;
+        stmt.walk(&mut |stmt| match stmt {
+            sv::ir::Stmt::Assign {
+                lhs,
+                nonblocking: true,
+                ..
+            } => found |= pm.id(lhs.name()) == Some(id),
+            sv::ir::Stmt::AssignConcat {
+                parts,
+                nonblocking: true,
+                ..
+            } => found |= parts.iter().any(|part| pm.id(part.name()) == Some(id)),
+            _ => {}
+        });
+        found
+    };
+    let mut count = 0;
+    for stmt in stmts {
+        match stmt {
+            sv::ir::Stmt::Assign {
+                lhs,
+                nonblocking: true,
+                ..
+            } if pm.id(lhs.name()) == Some(id) => match lhs {
+                sv::ir::LValue::Select {
+                    msb,
+                    lsb,
+                    array_slice_width: None,
+                    ..
+                } if expr_from_const_expr(msb).is_some() && expr_from_const_expr(lsb).is_some() => {
+                    count += 1;
+                }
+                _ => return None,
+            },
+            sv::ir::Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                count += array_nba_site_count(then_body, id, pm)?;
+                count += array_nba_site_count(else_body, id, pm)?;
+            }
+            sv::ir::Stmt::Case { items, default, .. } => {
+                for item in items {
+                    count += array_nba_site_count(&item.body, id, pm)?;
+                }
+                if let Some(default) = default {
+                    count += array_nba_site_count(default, id, pm)?;
+                }
+            }
+            other if writes(other) => return None,
+            _ => {}
+        }
+    }
+    Some(count)
 }
 
 /// `stmts` with every nonblocking assignment to a staged variable writing
@@ -4522,6 +5407,7 @@ fn stage_nonblocking(
     stmts: &[sv::ir::Stmt],
     staged: &[NbaStage],
     pm: &ProcModule<'_>,
+    next_site: &mut HashMap<SourceVarId, usize>,
 ) -> Vec<sv::ir::Stmt> {
     let stage_of = |lvalue: &sv::ir::LValue| {
         staged
@@ -4558,6 +5444,29 @@ fn stage_nonblocking(
                 nonblocking: true,
             } if stage_of(lhs).is_some() => {
                 let stage = stage_of(lhs).unwrap();
+                if let (Some(sites), sv::ir::LValue::Select { msb, lsb, .. }) = (&stage.sites, lhs)
+                {
+                    let index = next_site.entry(stage.id).or_default();
+                    let site = &sites[*index];
+                    *index += 1;
+                    let record = |name: &str, rhs: sv::ir::Expr| sv::ir::Stmt::Assign {
+                        lhs: sv::ir::LValue::Ident(name.to_string()),
+                        rhs,
+                        nonblocking: false,
+                    };
+                    out.push(record(
+                        &site.lsb_name,
+                        expr_from_const_expr(lsb).expect("a staged site's bounds are expressions"),
+                    ));
+                    out.push(record(
+                        &site.msb_name,
+                        expr_from_const_expr(msb).expect("a staged site's bounds are expressions"),
+                    ));
+                    out.push(record(
+                        &site.hit_name,
+                        sv::ir::Expr::Literal("1'b1".to_string()),
+                    ));
+                }
                 out.push(sv::ir::Stmt::Assign {
                     lhs: renamed(lhs, &stage.value_name),
                     rhs: rhs.clone(),
@@ -4593,8 +5502,8 @@ fn stage_nonblocking(
                 else_body,
             } => out.push(sv::ir::Stmt::If {
                 condition: condition.clone(),
-                then_body: stage_nonblocking(then_body, staged, pm),
-                else_body: stage_nonblocking(else_body, staged, pm),
+                then_body: stage_nonblocking(then_body, staged, pm, next_site),
+                else_body: stage_nonblocking(else_body, staged, pm, next_site),
             }),
             sv::ir::Stmt::Case {
                 kind,
@@ -4608,12 +5517,12 @@ fn stage_nonblocking(
                     .iter()
                     .map(|item| sv::ir::CaseItem {
                         labels: item.labels.clone(),
-                        body: stage_nonblocking(&item.body, staged, pm),
+                        body: stage_nonblocking(&item.body, staged, pm, next_site),
                     })
                     .collect(),
                 default: default
                     .as_ref()
-                    .map(|body| stage_nonblocking(body, staged, pm)),
+                    .map(|body| stage_nonblocking(body, staged, pm, next_site)),
             }),
             sv::ir::Stmt::Loop {
                 kind,
@@ -4626,7 +5535,7 @@ fn stage_nonblocking(
                 init: init.clone(),
                 condition: condition.clone(),
                 step: step.clone(),
-                body: stage_nonblocking(body, staged, pm),
+                body: stage_nonblocking(body, staged, pm, next_site),
             }),
             other => out.push(other.clone()),
         }
@@ -4644,7 +5553,14 @@ fn emit_nba_merges(builder: &mut SIRBuilder<Addr>, staged: &[NbaStage], pm: &Pro
         if let Some(element_width) =
             unpacked_element_width(variable).filter(|_| !variable.array_dims.is_empty())
         {
-            emit_array_nba_merge(builder, stage, variable, element_width);
+            match &stage.sites {
+                Some(sites) => {
+                    for site in sites {
+                        emit_array_site_merge(builder, stage, site, variable, element_width);
+                    }
+                }
+                None => emit_array_nba_merge(builder, stage, variable, element_width),
+            }
             continue;
         }
         let width = variable.width;
@@ -4708,41 +5624,81 @@ fn emit_nba_merges(builder: &mut SIRBuilder<Addr>, staged: &[NbaStage], pm: &Pro
     }
 }
 
-/// [`emit_nba_merges`] for an unpacked array: a loop merges each element,
-/// since an access may not span elements.
-fn emit_array_nba_merge(
+/// [`emit_nba_merges`] for one write site of an unpacked array: when it ran,
+/// a loop merges the elements its bit range covers, and clears their mask
+/// bits and its hit for the next evaluation. Another site that wrote the
+/// same element merged it already, and then finds its mask clear.
+fn emit_array_site_merge(
     builder: &mut SIRBuilder<Addr>,
     stage: &NbaStage,
+    site: &NbaArraySite,
     variable: &SvVariable,
     element_width: usize,
 ) {
     let count = variable.width / element_width;
-    let four_state = variable.is_4state;
-    let alloc = |builder: &mut SIRBuilder<Addr>| {
-        if four_state {
-            builder.alloc_logic(element_width)
-        } else {
-            builder.alloc_bit(element_width, false)
-        }
+    let hit = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Load(
+        hit,
+        working(site.hit),
+        SIROffset::Static(0),
+        1,
+    ));
+    let first = builder.new_block();
+    let done = builder.new_block();
+    let next = builder.new_block();
+    builder.seal_block(SIRTerminator::Branch {
+        cond: hit,
+        true_block: (first, Vec::new()),
+        false_block: (next, Vec::new()),
+    });
+
+    builder.switch_to_block(first);
+    let load = |builder: &mut SIRBuilder<Addr>, id| {
+        let value = builder.alloc_bit(64, false);
+        builder.emit(SIRInstruction::Load(
+            value,
+            working(id),
+            SIROffset::Static(0),
+            64,
+        ));
+        value
     };
-    let first = builder.alloc_bit(64, false);
-    builder.emit(SIRInstruction::Imm(first, SIRValue::new(0u8)));
+    let lsb = load(builder, site.lsb);
+    let msb = load(builder, site.msb);
+    let reversed = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Binary(reversed, msb, BinaryOp::LtU, lsb));
+    let low = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Mux(low, reversed, msb, lsb));
+    let high = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Mux(high, reversed, lsb, msb));
+    let width = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(
+        width,
+        SIRValue::new(element_width as u64),
+    ));
+    let start = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Binary(start, low, BinaryOp::DivU, width));
+    let end = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Binary(end, high, BinaryOp::DivU, width));
     let index = builder.alloc_bit(64, false);
     let header = builder.new_block_with(vec![index]);
     let body_index = builder.alloc_bit(64, false);
     let body = builder.new_block_with(vec![body_index]);
-    let exit = builder.new_block();
-    builder.seal_block(SIRTerminator::Jump(header, vec![first]));
+    builder.seal_block(SIRTerminator::Jump(header, vec![start]));
 
     builder.switch_to_block(header);
     let limit = builder.alloc_bit(64, false);
     builder.emit(SIRInstruction::Imm(limit, SIRValue::new(count as u64)));
+    let inside = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Binary(inside, index, BinaryOp::LtU, limit));
+    let covered = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Binary(covered, index, BinaryOp::LeU, end));
     let more = builder.alloc_bit(1, false);
-    builder.emit(SIRInstruction::Binary(more, index, BinaryOp::LtU, limit));
+    builder.emit(SIRInstruction::Binary(more, inside, BinaryOp::And, covered));
     builder.seal_block(SIRTerminator::Branch {
         cond: more,
         true_block: (body, vec![index]),
-        false_block: (exit, Vec::new()),
+        false_block: (done, Vec::new()),
     });
 
     builder.switch_to_block(body);
@@ -4751,6 +5707,60 @@ fn emit_array_nba_merge(
         element_width,
         bit_offset: 0,
         dynamic_bit_offset: None,
+    };
+    emit_element_merge(builder, stage, variable, element_width, &offset);
+    let clear = builder.alloc_bit(element_width, false);
+    builder.emit(SIRInstruction::Imm(clear, SIRValue::new(0u8)));
+    builder.emit(SIRInstruction::Store(
+        working(stage.mask),
+        offset,
+        element_width,
+        clear,
+        Vec::new(),
+        Vec::new(),
+    ));
+    let one = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+    let following = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Binary(
+        following,
+        body_index,
+        BinaryOp::Add,
+        one,
+    ));
+    builder.seal_block(SIRTerminator::Jump(header, vec![following]));
+
+    builder.switch_to_block(done);
+    let unset = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Imm(unset, SIRValue::new(0u8)));
+    builder.emit(SIRInstruction::Store(
+        working(site.hit),
+        SIROffset::Static(0),
+        1,
+        unset,
+        Vec::new(),
+        Vec::new(),
+    ));
+    builder.seal_block(SIRTerminator::Jump(next, Vec::new()));
+
+    builder.switch_to_block(next);
+}
+
+/// Merge the staged nonblocking value of one element of an unpacked array
+/// into its stable state, in the bits its mask marks.
+fn emit_element_merge(
+    builder: &mut SIRBuilder<Addr>,
+    stage: &NbaStage,
+    variable: &SvVariable,
+    element_width: usize,
+    offset: &SIROffset,
+) {
+    let alloc = |builder: &mut SIRBuilder<Addr>| {
+        if variable.is_4state {
+            builder.alloc_logic(element_width)
+        } else {
+            builder.alloc_bit(element_width, false)
+        }
     };
     let current = alloc(builder);
     builder.emit(SIRInstruction::Load(
@@ -4783,12 +5793,51 @@ fn emit_array_nba_merge(
     builder.emit(SIRInstruction::Binary(merged, kept, BinaryOp::Or, taken));
     builder.emit(SIRInstruction::Store(
         stable(stage.id),
-        offset,
+        offset.clone(),
         element_width,
         merged,
         Vec::new(),
         Vec::new(),
     ));
+}
+
+/// [`emit_nba_merges`] for an unpacked array: a loop merges each element,
+/// since an access may not span elements.
+fn emit_array_nba_merge(
+    builder: &mut SIRBuilder<Addr>,
+    stage: &NbaStage,
+    variable: &SvVariable,
+    element_width: usize,
+) {
+    let count = variable.width / element_width;
+    let first = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(first, SIRValue::new(0u8)));
+    let index = builder.alloc_bit(64, false);
+    let header = builder.new_block_with(vec![index]);
+    let body_index = builder.alloc_bit(64, false);
+    let body = builder.new_block_with(vec![body_index]);
+    let exit = builder.new_block();
+    builder.seal_block(SIRTerminator::Jump(header, vec![first]));
+
+    builder.switch_to_block(header);
+    let limit = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(limit, SIRValue::new(count as u64)));
+    let more = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Binary(more, index, BinaryOp::LtU, limit));
+    builder.seal_block(SIRTerminator::Branch {
+        cond: more,
+        true_block: (body, vec![index]),
+        false_block: (exit, Vec::new()),
+    });
+
+    builder.switch_to_block(body);
+    let offset = SIROffset::Element {
+        index: body_index,
+        element_width,
+        bit_offset: 0,
+        dynamic_bit_offset: None,
+    };
+    emit_element_merge(builder, stage, variable, element_width, &offset);
     let one = builder.alloc_bit(64, false);
     builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
     let next = builder.alloc_bit(64, false);
@@ -4808,6 +5857,114 @@ impl Ff<'_, '_> {
         process: usize,
     ) -> Result<KernelUnit, sv::AnalyzerError> {
         self.process = process;
+        let starts_with_event_wait = slots.requires_timed_simulation;
+        let first_created = self.m.created.len();
+        fn has_fork(
+            m: &ProcModule<'_>,
+            body: &[sv::ir::Stmt],
+            visited: &mut HashSet<String>,
+            defaults: &mut HashSet<(String, usize)>,
+        ) -> bool {
+            let mut found = false;
+            let mut calls = Vec::new();
+            for stmt in body {
+                stmt.walk(&mut |stmt| {
+                    found |= matches!(stmt, sv::ir::Stmt::Fork { .. } | sv::ir::Stmt::WaitFork);
+                    stmt_calls(stmt, &mut calls);
+                    match stmt {
+                        sv::ir::Stmt::Wait(condition) => collect_calls(condition, &mut calls),
+                        sv::ir::Stmt::WaitEvent(items) => {
+                            for item in items {
+                                collect_calls(&item.expr, &mut calls);
+                            }
+                        }
+                        sv::ir::Stmt::Delay { amount, .. } => collect_calls(amount, &mut calls),
+                        _ => {}
+                    }
+                });
+            }
+            if found {
+                return true;
+            }
+            while let Some((callee, args)) = calls.pop() {
+                let sv::ir::Callee::Subroutine(name) = callee else {
+                    continue;
+                };
+                let Some(subroutine) = m.subroutine(&name) else {
+                    continue;
+                };
+                for (position, param) in subroutine.params.iter().enumerate() {
+                    if matches!(args.get(position), None | Some(None))
+                        && let Some(default) = &param.default
+                        && defaults.insert((name.clone(), position))
+                    {
+                        collect_calls(default, &mut calls);
+                    }
+                }
+                if visited.insert(name) && has_fork(m, &subroutine.body, visited, defaults) {
+                    return true;
+                }
+            }
+            false
+        }
+        // Only kernels containing the new activation-local compound waits
+        // need per-assignment observation. Plain fork kernels keep their
+        // existing suspension count and execution cost.
+        fn has_activation_event(
+            m: &ProcModule<'_>,
+            body: &[sv::ir::Stmt],
+            visited: &mut HashSet<String>,
+        ) -> bool {
+            let mut found = false;
+            let mut calls = Vec::new();
+            for stmt in body {
+                stmt.walk(&mut |stmt| match stmt {
+                    sv::ir::Stmt::WaitEvent(items) => {
+                        found |= items.iter().any(|item| {
+                            item.iff.is_some() || !matches!(&item.expr, sv::ir::Expr::Ident(_))
+                        });
+                    }
+                    sv::ir::Stmt::Call { name, .. } => calls.push(name.clone()),
+                    _ => {}
+                });
+                stmt.clone().visit_mut(
+                    &mut |expr| collect_call_names(expr, &mut calls),
+                    &mut |_| {},
+                    &mut |_| {},
+                );
+            }
+            if found {
+                return true;
+            }
+            while let Some(name) = calls.pop() {
+                if !visited.insert(name.clone()) {
+                    continue;
+                }
+                if let Some(sub) = m.subroutine(&name) {
+                    for param in &sub.params {
+                        if let Some(default) = &param.default {
+                            collect_call_names(default, &mut calls);
+                        }
+                    }
+                    if has_activation_event(m, &sub.body, visited) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        self.observe_blocking_assignments =
+            has_activation_event(self.m, body, &mut HashSet::default());
+        self.forked = has_fork(
+            self.m,
+            body,
+            &mut HashSet::default(),
+            &mut HashSet::default(),
+        );
+        // Forks reached through inlined tasks also need per-activation random state.
+        if self.forked {
+            self.urandom_state();
+        }
         let mut kernel = ProcessKernelBuilder::new(slots);
         if let Some(site) = self.deferred_flush_site(body) {
             kernel.flush_deferred_at(site);
@@ -4815,12 +5972,44 @@ impl Ff<'_, '_> {
         std::mem::swap(&mut self.b, kernel.builder());
         self.kernel = Some(kernel);
         self.exec_block(body)?;
+        if !self.observe_blocking_assignments && !self.event_probes.is_empty() {
+            return Err(unsupported(
+                "activation-local event expression without assignment observation boundaries",
+            ));
+        }
+        if self.event_probes.iter().any(|probe| {
+            probe
+                .inputs
+                .iter()
+                .any(|input| self.unobserved_function_writes.contains(input))
+        }) {
+            return Err(unsupported(
+                "implicit write to an activation-local event operand without an observation boundary",
+            ));
+        }
         let mut kernel = self.kernel.take().expect("lowering a process kernel");
         std::mem::swap(&mut self.b, kernel.builder());
         let slots = kernel.slots();
+        let resume_count = kernel.resume_count();
         let mut unit = kernel.build();
         prune_unreachable_blocks(&mut unit);
+        let frame = self.forked.then(|| {
+            let mut private = self.m.created[first_created..].to_vec();
+            private.extend([slots.resume, slots.status, slots.delay]);
+            private
+                .retain(|id| !self.frame_locals.contains(id) && Some(*id) != self.m.id(TIME_SLOT));
+            celox_design::ProcessFrame {
+                resume_count,
+                private,
+                locals: self.frame_locals,
+                event_probes: self.event_probes,
+                random: self.random.as_ref().unwrap().0,
+                seed: self.random_seed,
+                starts_with_event_wait,
+            }
+        });
         Ok(KernelUnit {
+            frame,
             unit,
             slots,
             wait_sites: self.wait_sites,
@@ -5482,8 +6671,11 @@ impl Ff<'_, '_> {
             let mut variable = false;
             let id = match &expr {
                 sv::ir::Expr::Ident(name) => match self.m.id(name) {
-                    Some(id) if !self.m.is_hidden(id) => {
-                        variable = self.m.var(id).array_dims.is_empty();
+                    Some(id)
+                        if !self.m.is_hidden(id)
+                            || (self.forked && self.frame_locals.contains(&id)) =>
+                    {
+                        variable = !self.m.is_hidden(id) && self.m.var(id).array_dims.is_empty();
                         id
                     }
                     Some(_) => self.event_expression(&expr, samples)?,
@@ -5556,12 +6748,12 @@ impl Ff<'_, '_> {
         let iff = self.propagate(iff);
         if let sv::ir::Expr::Ident(name) = &iff
             && let Some(id) = self.m.id(name)
-            && !self.m.is_hidden(id)
+            && (!self.m.is_hidden(id) || self.forked && self.frame_locals.contains(&id))
             && self.m.var(id).width == 1
             && self.m.var(id).float.is_none()
             && self.m.var(id).array_dims.is_empty()
         {
-            return Ok((id, true));
+            return Ok((id, !self.m.is_hidden(id)));
         }
         let not = |expr| sv::ir::Expr::Unary {
             op: sv::ir::UnaryOp::LogicNot,
@@ -5591,6 +6783,8 @@ impl Ff<'_, '_> {
             hidden: true,
             force_control: None,
             value_kind: Default::default(),
+            sampled_from: None,
+            history_of: None,
         };
         let (gated, _) = self.m.event_variable(index, None, counter.clone());
         let (all, _) = self
@@ -5639,6 +6833,9 @@ impl Ff<'_, '_> {
             })
             .collect();
         locals.sort_unstable();
+        if self.forked && locals.iter().any(|(_, id)| self.frame_locals.contains(id)) {
+            return self.activation_event_expression(expr, width, signed, float);
+        }
         // Another call can copy a new argument into a static formal while
         // the process waits, which a copy taken now would not see.
         if locals.iter().any(|&(_, id)| self.is_static_task_formal(id)) {
@@ -5669,6 +6866,8 @@ impl Ff<'_, '_> {
                 source: None,
                 hidden: true,
                 force_control: None,
+                sampled_from: None,
+                history_of: None,
                 value_kind: Default::default(),
             },
         );
@@ -5696,6 +6895,190 @@ impl Ff<'_, '_> {
             }],
         ));
         Ok(event)
+    }
+
+    /// An activation-local expression cannot use a module-wide continuous
+    /// proxy. Give it a pure dispatch entry and retain only its sampled result
+    /// in the waiter's existing baseline.
+    fn activation_event_expression(
+        &mut self,
+        expr: &sv::ir::Expr,
+        width: usize,
+        signed: bool,
+        float: Option<celox_sir::FloatPrecision>,
+    ) -> Result<SourceVarId, sv::AnalyzerError> {
+        let mut names = HashSet::default();
+        expr_idents(expr, &mut names);
+        subroutine_reads(self.m, expr, &mut names);
+        if names.iter().any(|name| {
+            self.m
+                .id(name)
+                .is_some_and(|id| self.is_static_task_formal(id))
+        }) {
+            return Err(unsupported(
+                "event expression reading a static task argument",
+            ));
+        }
+        let mut inputs: Vec<_> = names
+            .iter()
+            .filter_map(|name| self.m.id(name))
+            .filter(|id| !self.m.is_hidden(*id) || self.frame_locals.contains(id))
+            .collect();
+        inputs.sort_unstable();
+        inputs.dedup();
+        if inputs.iter().any(|id| !self.frame_locals.contains(id)) {
+            return Err(unsupported(
+                "activation-local event expression reading a non-automatic variable",
+            ));
+        }
+        let (result, name) = self.m.temp("event_probe", width, signed, float.is_none());
+        self.m.variables.get_mut(&result).unwrap().float = float;
+        // Isolate expression code so every clobbered scratch slot can be
+        // audited, including function formals declared before this kernel.
+        let saved_builder = std::mem::take(&mut self.b);
+        let kernel = self.kernel.take();
+        let direct = std::mem::replace(&mut self.direct, true);
+        let lowered = self.assign(&sv::ir::LValue::Ident(name.clone()), expr);
+        self.direct = direct;
+        self.kernel = kernel;
+        let expression_builder = std::mem::replace(&mut self.b, saved_builder);
+        lowered?;
+        let mut unit = seal_builder(expression_builder);
+        let mut scratch = Vec::new();
+        for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
+            match instruction {
+                SIRInstruction::Store(address, _, _, _, triggers, captures) => {
+                    if address.region != STABLE_REGION
+                        || !triggers.is_empty()
+                        || !captures.is_empty()
+                    {
+                        return Err(unsupported("event expression with observable stores"));
+                    }
+                    scratch.push(address.var_id);
+                }
+                SIRInstruction::Commit(..)
+                | SIRInstruction::RuntimeEvent { .. }
+                | SIRInstruction::CombCaptureEvent { .. }
+                | SIRInstruction::CombCaptureEnableIfChanged { .. }
+                | SIRInstruction::ExternCall { .. } => {
+                    return Err(unsupported("event expression with runtime effects"));
+                }
+                SIRInstruction::Imm(..)
+                | SIRInstruction::Binary(..)
+                | SIRInstruction::Unary(..)
+                | SIRInstruction::Load(..)
+                | SIRInstruction::Concat(..)
+                | SIRInstruction::Slice(..)
+                | SIRInstruction::Mux(..) => {}
+            }
+        }
+        scratch.sort_unstable();
+        scratch.dedup();
+        // Function formals and temporaries may predate this process frame.
+        // Give the probe exclusive storage, so instrumentation of the normal
+        // function cannot add observable counters or capture hooks here.
+        let mut copies = HashMap::default();
+        for id in &mut scratch {
+            if *id == result {
+                continue;
+            }
+            if !self.m.is_hidden(*id) || self.frame_locals.contains(id) {
+                return Err(unsupported("event expression modifying persistent state"));
+            }
+            let variable = self.m.var(*id).clone();
+            let (copy, copy_name) = self.m.temp(
+                "event_scratch",
+                variable.width,
+                variable.signed,
+                variable.is_4state,
+            );
+            self.m.variables.insert(
+                copy,
+                SvVariable {
+                    path: vec![copy_name],
+                    ..variable
+                },
+            );
+            copies.insert(*id, copy);
+            *id = copy;
+        }
+        for block in unit.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                *instruction = instruction.map_addr(|address| Addr {
+                    var_id: copies
+                        .get(&address.var_id)
+                        .copied()
+                        .unwrap_or(address.var_id),
+                    ..*address
+                });
+            }
+        }
+        // AST names alone cannot expose implicit receivers or generated
+        // aliases. Validate the complete lowered read set after remapping.
+        for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
+            if let SIRInstruction::Load(_, address, _, _) = instruction
+                && (address.region != STABLE_REGION
+                    || !(self.frame_locals.contains(&address.var_id)
+                        || scratch.contains(&address.var_id)))
+            {
+                return Err(unsupported(
+                    "activation-local event expression reading non-automatic storage",
+                ));
+            }
+        }
+        inputs = unit
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Load(_, address, _, _)
+                    if self.frame_locals.contains(&address.var_id) =>
+                {
+                    Some(address.var_id)
+                }
+                _ => None,
+            })
+            .collect();
+        inputs.sort_unstable();
+        inputs.dedup();
+        let targets: Vec<_> = scratch
+            .iter()
+            .map(|&id| VarAtomBase::new(id, 0, self.m.var(id).width - 1))
+            .collect();
+        let widths = scratch
+            .iter()
+            .map(|&id| (id, self.m.var(id).width))
+            .collect();
+        if super::comb_retention::reads_prior_state(&unit, &targets, &widths) {
+            return Err(unsupported(
+                "activation-local event expression retaining function scratch state",
+            ));
+        }
+        if super::comb_retention::retains_state(
+            &unit,
+            &[VarAtomBase::new(result, 0, width - 1)],
+            &widths,
+        ) {
+            return Err(unsupported(
+                "activation-local event expression without a definite result",
+            ));
+        }
+        let (previous, resume) = self
+            .with_kernel(ProcessKernelBuilder::begin_event_probe)
+            .map_err(kernel_error)?;
+        self.b.inline_execution_unit(&unit);
+        self.with_kernel(|kernel| kernel.end_event_probe(previous));
+        self.event_probes.push(celox_design::ProcessEventProbe {
+            result,
+            resume,
+            inputs,
+            scratch,
+        });
+        // Use the identical pure code for the initial baseline too. Lowering
+        // the call again as ordinary process code could allocate activation
+        // cells or suspend inside a function's temporary declarations.
+        self.b.inline_execution_unit(&unit);
+        Ok(result)
     }
 
     /// Whether `id` is a static formal of a task, which keeps one
@@ -5731,7 +7114,7 @@ impl Ff<'_, '_> {
         let mut ids: Vec<_> = names
             .iter()
             .filter_map(|name| self.m.id(name))
-            .filter(|&id| !self.m.is_hidden(id))
+            .filter(|&id| !self.m.is_hidden(id) || (self.forked && self.frame_locals.contains(&id)))
             .collect();
         ids.sort_unstable();
         ids.dedup();
@@ -5741,30 +7124,29 @@ impl Ff<'_, '_> {
                 .collect(),
             Vec::new(),
         );
-        // The condition is lowered once per check: before the process
-        // suspends and at every resume.
-        let mut error = None;
-        let mut kernel = self.kernel.take().expect("lowering a process kernel");
-        std::mem::swap(&mut self.b, kernel.builder());
-        // The kernel is out of `self` while it builds the checks; reads go
-        // to stable state all the same.
+        // Keep the kernel available while evaluating the predicate: functions
+        // may perform synchronous process control such as disable fork.
         let direct = std::mem::replace(&mut self.direct, true);
-        let result = kernel.wait_level(site, |builder| {
-            std::mem::swap(&mut self.b, builder);
-            let truth = self.eval_truth(condition).map(|(truth, _)| truth);
-            std::mem::swap(&mut self.b, builder);
-            truth.unwrap_or_else(|e| {
-                error = Some(e);
-                let never = builder.alloc_bit(1, false);
-                builder.emit(SIRInstruction::Imm(never, SIRValue::new(0u8)));
-                never
-            })
-        });
+        let result = (|| {
+            let (holds, _) = self.eval_truth(condition)?;
+            let join = self.b.new_block();
+            let wait = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: holds,
+                true_block: (join, Vec::new()),
+                false_block: (wait, Vec::new()),
+            });
+            self.b.switch_to_block(wait);
+            self.with_kernel(|kernel| kernel.suspend_wait(site))
+                .map_err(kernel_error)?;
+            let (holds, _) = self.eval_truth(condition)?;
+            self.with_kernel(|kernel| kernel.wake_if(holds));
+            self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
+            self.b.switch_to_block(join);
+            Ok(())
+        })();
         self.direct = direct;
-        std::mem::swap(&mut self.b, kernel.builder());
-        self.kernel = Some(kernel);
-        result.map_err(kernel_error)?;
-        error.map_or(Ok(()), Err)
+        result
     }
 
     /// Declare a wait site of the process with the given terms and return
@@ -5826,6 +7208,7 @@ impl Ff<'_, '_> {
 pub(super) struct KernelUnit {
     pub unit: ExecutionUnit<Addr>,
     pub slots: ProcessSlots<SourceVarId>,
+    pub frame: Option<celox_design::ProcessFrame<SourceVarId>>,
     pub wait_sites: Vec<WaitSite<SourceVarId>>,
     pub nba_sites: Vec<NbaSite<SourceVarId>>,
     pub host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
@@ -5918,6 +7301,7 @@ fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSe
         for param in &subroutine.params {
             if let Some(default) = &param.default {
                 expr_idents(default, names);
+                collect_call_names(default, &mut pending);
             }
         }
         for stmt in &subroutine.body {
@@ -5961,6 +7345,20 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                 }
                 // A string operation is a value of its operands.
                 sv::ir::Callee::String(_) => continue,
+                // Container contents are immutable: reading an element is a
+                // value of the container handle and index, unlike a class
+                // property that can change without its handle changing.
+                sv::ir::Callee::Object(op)
+                    if matches!(
+                        *op,
+                        sv::ir::ObjectOp::Container {
+                            op: sv::ir::ContainerOp::Get,
+                            ..
+                        }
+                    ) =>
+                {
+                    continue;
+                }
                 // A property can change without the handle changing.
                 sv::ir::Callee::Object(op) => return Some(op.to_string()),
                 sv::ir::Callee::Checked { .. } => return Some("tagged union access".into()),
@@ -6009,7 +7407,10 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                         args: args.clone(),
                         arg_order: arg_order.clone(),
                     }),
-                    sv::ir::Stmt::SystemTask { .. }
+                    sv::ir::Stmt::DisableFork
+                    | sv::ir::Stmt::WaitFork
+                    | sv::ir::Stmt::Fork { .. }
+                    | sv::ir::Stmt::SystemTask { .. }
                     | sv::ir::Stmt::Delay { .. }
                     | sv::ir::Stmt::WaitEvent(_)
                     | sv::ir::Stmt::WaitImplicit(_)
@@ -6452,4 +7853,30 @@ fn force_reads(expr: &sv::ir::Expr, m: &ProcModule<'_>) -> sv::ir::Expr {
                 .collect(),
         },
     }
+}
+
+/// The depth and the gate of a `$past` call, or of the comparison a
+/// value change function makes with the previous tick.
+fn past_depth_and_gate(
+    function: sv::ir::SystemFunction,
+    args: &[Option<sv::ir::Expr>],
+) -> Result<(usize, Option<sv::ir::Expr>), sv::AnalyzerError> {
+    if function != sv::ir::SystemFunction::Past {
+        return Ok((1, None));
+    }
+    let depth = match args.get(1) {
+        None | Some(None) => 1,
+        Some(Some(depth)) => {
+            let mut depth = depth;
+            while let sv::ir::Expr::Resize { expr, .. } = depth {
+                depth = expr;
+            }
+            literal_usize(depth)
+                .filter(|&depth| depth >= 1)
+                .ok_or_else(|| {
+                    unsupported("number of ticks of `$past` other than a positive constant")
+                })?
+        }
+    };
+    Ok((depth, args.get(2).cloned().flatten()))
 }

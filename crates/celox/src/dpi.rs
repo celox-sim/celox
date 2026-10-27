@@ -176,6 +176,13 @@ impl Default for ExternFunctionTable {
 }
 
 impl ExternFunctionTable {
+    /// Append image-local compiled callees after the DPI imports.
+    pub(crate) fn append_native_kernels(&mut self, addresses: impl IntoIterator<Item = usize>) {
+        let mut table = self.addresses.to_vec();
+        table.extend(addresses);
+        self.addresses = table.into();
+    }
+
     /// The user table's address, which the state header holds. The internal
     /// floating-point helper occupies the immediately preceding slot, and the
     /// heap helper the one before it.

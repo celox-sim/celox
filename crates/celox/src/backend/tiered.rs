@@ -45,16 +45,18 @@ use num_bigint::BigUint;
 
 use super::compile_cancel::CompileCancel;
 use super::{
-    EventHandle, MemoryLayout, RuntimeEventBuffer, SharedJitCode, SimBackend, SimulatorErrorCode,
+    EventHandle, MemoryLayout, RuntimeEventBuffer, SimBackend, SimulatorErrorCode,
     memory_image::MemoryImage,
 };
+use crate::backend::InterpBackend;
 #[cfg(any(
     target_arch = "x86_64",
     feature = "arm64-codegen",
     target_arch = "aarch64"
 ))]
 use crate::backend::native::SharedNativeCode;
-use crate::backend::{InterpBackend, JitBackend};
+#[cfg(feature = "cranelift")]
+use crate::backend::{JitBackend, SharedJitCode};
 use crate::{
     SimulatorError, SimulatorOptions,
     ir::{AbsoluteAddr, LaidOutProgram, SignalRef},
@@ -109,6 +111,7 @@ pub(crate) fn tiered_layout_mode(
 
 /// The adopted compiled tier.
 enum CompiledTier {
+    #[cfg(feature = "cranelift")]
     Jit(Box<JitBackend>),
     #[cfg(any(
         target_arch = "x86_64",
@@ -127,6 +130,7 @@ impl CompiledCode {
             // scratch beyond the semantic state, and adoption resizes the
             // transferred image to the compiled layout's total size; report
             // that requirement so promotion stays inside the reservation.
+            #[cfg(feature = "cranelift")]
             CompiledCode::Cranelift(shared) => shared.layout.merged_total_size.div_ceil(8),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -158,6 +162,7 @@ impl CompiledTier {
             memory.resize_zeroed_within_capacity(code.required_image_words());
         }
         match code {
+            #[cfg(feature = "cranelift")]
             CompiledCode::Cranelift(shared) => {
                 Self::Jit(Box::new(JitBackend::adopt_shared_with_state(
                     shared,
@@ -186,6 +191,7 @@ impl CompiledTier {
 
     fn layout(&self) -> &MemoryLayout {
         match self {
+            #[cfg(feature = "cranelift")]
             Self::Jit(jit) => jit.layout(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -198,6 +204,7 @@ impl CompiledTier {
 
     fn memory_base_mut(&mut self) -> *mut u8 {
         match self {
+            #[cfg(feature = "cranelift")]
             Self::Jit(jit) => jit.memory_as_ptr().0.cast_mut(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -211,6 +218,7 @@ impl CompiledTier {
     /// Logical capacity of the live image in `u64` words.
     fn memory_word_capacity(&self) -> usize {
         match self {
+            #[cfg(feature = "cranelift")]
             Self::Jit(jit) => {
                 let (_, size_bytes) = jit.memory_as_ptr();
                 size_bytes.div_ceil(8)
@@ -233,12 +241,14 @@ impl CompiledTier {
             feature = "arm64-codegen",
             target_arch = "aarch64"
         ))]
+        #[allow(irrefutable_let_patterns)]
         if let CompiledCode::Native(shared) = code {
             return match self {
                 Self::Native(native) => {
                     native.replace_shared_code(shared);
                     true
                 }
+                #[cfg(feature = "cranelift")]
                 Self::Jit(_) => false,
             };
         }
@@ -255,6 +265,7 @@ impl CompiledTier {
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
         match self {
+            #[cfg(feature = "cranelift")]
             Self::Jit(jit) => jit.eval_comb(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -270,6 +281,7 @@ impl CompiledTier {
     /// so translation is an array lookup.
     fn eval_apply_ff_at(&mut self, id: usize) -> Result<(), SimulatorErrorCode> {
         match self {
+            #[cfg(feature = "cranelift")]
             Self::Jit(jit) => {
                 let event = jit.id_to_event_slice()[id];
                 jit.eval_apply_ff_at(event)
@@ -288,6 +300,7 @@ impl CompiledTier {
 
     fn eval_comb_apply_ff_at(&mut self, id: usize) -> Result<(), SimulatorErrorCode> {
         match self {
+            #[cfg(feature = "cranelift")]
             Self::Jit(jit) => {
                 let event = jit.id_to_event_slice()[id];
                 jit.eval_comb_apply_ff_at(event)
@@ -314,6 +327,7 @@ impl CompiledTier {
         count: u64,
     ) -> (u64, Result<(), SimulatorErrorCode>) {
         match self {
+            #[cfg(feature = "cranelift")]
             Self::Jit(jit) => (1, {
                 let event = jit.id_to_event_slice()[id];
                 jit.eval_comb_apply_ff_at(event)
@@ -337,6 +351,7 @@ impl CompiledTier {
     /// here; the address resolves through each tier's phase-specific map.
     fn eval_only_ff_at_addr(&mut self, addr: &AbsoluteAddr) -> Result<(), SimulatorErrorCode> {
         match self {
+            #[cfg(feature = "cranelift")]
             Self::Jit(jit) => {
                 let event = jit
                     .resolve_eval_only_event(addr)
@@ -359,6 +374,7 @@ impl CompiledTier {
 
     fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode> {
         match self {
+            #[cfg(feature = "cranelift")]
             Self::Jit(jit) => jit.run_process(index),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -373,6 +389,7 @@ impl CompiledTier {
     /// and execute it.
     fn apply_ff_at_addr(&mut self, addr: &AbsoluteAddr) -> Result<(), SimulatorErrorCode> {
         match self {
+            #[cfg(feature = "cranelift")]
             Self::Jit(jit) => {
                 let event = jit
                     .resolve_apply_event(addr)
@@ -397,6 +414,7 @@ impl CompiledTier {
 /// Compiled code produced by the background worker, before it is bound to a
 /// live simulation state at promotion time.
 pub(crate) enum CompiledCode {
+    #[cfg(feature = "cranelift")]
     Cranelift(Arc<SharedJitCode>),
     #[cfg(any(
         target_arch = "x86_64",
@@ -661,6 +679,16 @@ impl TieredBackend {
                 unreachable!("native tier selected on a host without native support")
             }
         } else {
+            #[cfg(not(feature = "cranelift"))]
+            {
+                Self::with_compiler(laid_out, options, |_, _, _| {
+                    Err(
+                        crate::CodegenError::message("Cranelift requires the cranelift feature")
+                            .into(),
+                    )
+                })
+            }
+            #[cfg(feature = "cranelift")]
             Self::with_compiler(laid_out, options, |laid_out, options, _cancel| {
                 let mut trace = crate::debug::CompilationTrace::default();
                 let wants_codegen_trace = options.trace.pre_optimized_clif
@@ -1354,6 +1382,7 @@ impl SimBackend for TieredBackend {
     fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.resolve_signal(addr),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.resolve_signal(addr),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1374,6 +1403,7 @@ impl SimBackend for TieredBackend {
                     id: ev.id(),
                 }
             }
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => {
                 let ev = jit.resolve_event(addr);
                 TieredEventRef {
@@ -1405,6 +1435,7 @@ impl SimBackend for TieredBackend {
                     id: ev.id(),
                 })
             }
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => {
                 jit.resolve_event_opt(addr).map(|ev| TieredEventRef {
                     addr: ev.addr(),
@@ -1436,6 +1467,7 @@ impl SimBackend for TieredBackend {
                         id: ev.id(),
                     })
             }
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => {
                 jit.resolve_eval_only_event(addr).map(|ev| TieredEventRef {
                     addr: ev.addr(),
@@ -1465,6 +1497,7 @@ impl SimBackend for TieredBackend {
                     id: ev.id(),
                 })
             }
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => {
                 jit.resolve_apply_event(addr).map(|ev| TieredEventRef {
                     addr: ev.addr(),
@@ -1489,6 +1522,7 @@ impl SimBackend for TieredBackend {
     fn set<T: Copy>(&mut self, signal: SignalRef, value: T) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.set(signal, value),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.set(signal, value),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1503,6 +1537,7 @@ impl SimBackend for TieredBackend {
     fn set_wide(&mut self, signal: SignalRef, value: BigUint) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.set_wide(signal, value),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.set_wide(signal, value),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1517,6 +1552,7 @@ impl SimBackend for TieredBackend {
     fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.set_four_state(signal, value, mask),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.set_four_state(signal, value, mask),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1533,6 +1569,7 @@ impl SimBackend for TieredBackend {
     fn get(&self, signal: SignalRef) -> BigUint {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.get(signal),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.get(signal),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1547,6 +1584,7 @@ impl SimBackend for TieredBackend {
     fn get_as<T: Default + Copy>(&self, signal: SignalRef) -> T {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.get_as(signal),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.get_as(signal),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1561,6 +1599,7 @@ impl SimBackend for TieredBackend {
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.get_four_state(signal),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.get_four_state(signal),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1575,6 +1614,7 @@ impl SimBackend for TieredBackend {
     fn memory_as_ptr(&self) -> (*const u8, usize) {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.memory_as_ptr(),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.memory_as_ptr(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1589,6 +1629,7 @@ impl SimBackend for TieredBackend {
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.memory_as_mut_ptr(),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.memory_as_mut_ptr(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1603,6 +1644,7 @@ impl SimBackend for TieredBackend {
     fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.memory_owner(),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.memory_owner(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1617,6 +1659,7 @@ impl SimBackend for TieredBackend {
     fn write_memory(&mut self, offset: usize, bytes: &[u8]) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.write_memory(offset, bytes),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.write_memory(offset, bytes),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1631,6 +1674,7 @@ impl SimBackend for TieredBackend {
     fn vcd_tracking_enabled(&self) -> bool {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.vcd_tracking_enabled(),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.vcd_tracking_enabled(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1645,6 +1689,7 @@ impl SimBackend for TieredBackend {
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.runtime_event_buffer_as_ptr(),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.runtime_event_buffer_as_ptr(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1659,6 +1704,7 @@ impl SimBackend for TieredBackend {
     fn runtime_event_buffer(&self) -> Option<Arc<RuntimeEventBuffer>> {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.runtime_event_buffer(),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => Some(jit.runtime_event_buffer().clone()),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1675,6 +1721,7 @@ impl SimBackend for TieredBackend {
             Phase::Interpreting(Some(interp)) => {
                 interp.set_comb_capture_event_enabled(active_sites)
             }
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => {
                 jit.set_comb_capture_event_enabled(active_sites)
             }
@@ -1690,9 +1737,25 @@ impl SimBackend for TieredBackend {
         }
     }
 
+    fn comb_capture_event_enabled(&self) -> Vec<bool> {
+        match &self.phase {
+            Phase::Interpreting(Some(interp)) => interp.comb_capture_event_enabled(),
+            #[cfg(feature = "cranelift")]
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.comb_capture_event_enabled(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.comb_capture_event_enabled(),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
     fn stable_region_size(&self) -> usize {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.stable_region_size(),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.stable_region_size(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1707,6 +1770,7 @@ impl SimBackend for TieredBackend {
     fn layout(&self) -> &MemoryLayout {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.layout(),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.layout(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1721,6 +1785,7 @@ impl SimBackend for TieredBackend {
     fn heap(&self) -> &celox_heap::Heap {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.heap(),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.heap(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1735,6 +1800,7 @@ impl SimBackend for TieredBackend {
     fn heap_mut(&mut self) -> &mut celox_heap::Heap {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.heap_mut(),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.heap_mut(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1749,6 +1815,7 @@ impl SimBackend for TieredBackend {
     fn id_to_addr_slice(&self) -> &[AbsoluteAddr] {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.id_to_addr_slice(),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.id_to_addr_slice(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1767,6 +1834,7 @@ impl SimBackend for TieredBackend {
     fn num_events(&self) -> usize {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.num_events(),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.num_events(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1781,6 +1849,7 @@ impl SimBackend for TieredBackend {
     fn clear_triggered_bits(&mut self) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.clear_triggered_bits(),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.clear_triggered_bits(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1795,6 +1864,7 @@ impl SimBackend for TieredBackend {
     fn mark_triggered_bit(&mut self, id: usize) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.mark_triggered_bit(id),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.mark_triggered_bit(id),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1809,6 +1879,7 @@ impl SimBackend for TieredBackend {
     fn get_triggered_bits(&self) -> bit_set::BitSet {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.get_triggered_bits(),
+            #[cfg(feature = "cranelift")]
             Phase::Compiled(CompiledTier::Jit(jit)) => jit.get_triggered_bits(),
             #[cfg(any(
                 target_arch = "x86_64",
@@ -2226,6 +2297,83 @@ module Top (
         }
     }
 
+    /// SV unpacked arrays start unknown through packed initial values, take
+    /// element writes and whole-array NBA commits, and read back whole: the
+    /// element-strided interpreter, the packed interpreter and native agree.
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn strided_sv_arrays_initialize_commit_and_read_like_packed_ones() {
+        const SOURCE: &str = r#"
+            module Top (
+                input logic clk, input logic we,
+                input logic [2:0] wi, input logic [12:0] wd, input logic [2:0] ri,
+                output logic [12:0] q
+            );
+                logic [12:0] mem [8];
+                always_ff @(posedge clk) if (we) mem[wi] <= wd;
+                assign q = mem[ri];
+            endmodule
+        "#;
+        fn run<B: crate::backend::SimBackend>(
+            mut sim: Simulator<B>,
+        ) -> (bool, Vec<(num_bigint::BigUint, num_bigint::BigUint)>) {
+            let strided = sim.signal("mem").array_layout.is_some();
+            let (clk, we, wi, wd, ri, q, mem) = (
+                sim.event("clk"),
+                sim.signal("we"),
+                sim.signal("wi"),
+                sim.signal("wd"),
+                sim.signal("ri"),
+                sim.signal("q"),
+                sim.signal("mem"),
+            );
+            let mut seen = vec![sim.get_four_state(mem)];
+            for step in 0..12u16 {
+                sim.modify(|io| {
+                    io.set(we, u8::from(step % 4 != 3));
+                    io.set(wi, (step * 5 % 8) as u8);
+                    io.set(wd, step.wrapping_mul(0x9e5) & 0x1fff);
+                })
+                .unwrap();
+                sim.tick(clk).unwrap();
+                for index in 0..8u8 {
+                    sim.modify(|io| io.set(ri, index)).unwrap();
+                    seen.push(sim.get_four_state(q));
+                }
+                seen.push(sim.get_four_state(mem));
+            }
+            (strided, seen)
+        }
+        let builder = || {
+            Simulator::from_sv_sources(
+                vec![(SOURCE, std::path::Path::new("strided_array.sv"))],
+                "Top",
+            )
+            .four_state(true)
+        };
+        let (_, reference) = run(builder().build_interpreter().unwrap());
+        // Every element starts unknown.
+        assert_eq!(
+            reference[0].1,
+            (num_bigint::BigUint::from(1u8) << (13 * 8)) - 1u8
+        );
+        let gate = Gate::closed();
+        let worker_gate = gate.0.clone();
+        let (strided, interpreted) = run(builder()
+            .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                wait_for_gate_or_cancel(&worker_gate, cancel)?;
+                let image = NativeBackend::compile_image(laid_out, options)?;
+                let shared = unsafe { SharedNativeCode::from_image(image)? };
+                Ok(CompiledCode::Native(Arc::new(shared)))
+            })
+            .unwrap());
+        assert!(strided, "the tiered interpreter stores the array strided");
+        assert_eq!(interpreted, reference);
+        let (strided, native) = run(builder().build_native().unwrap());
+        assert!(strided, "native stores the array strided");
+        assert_eq!(native, reference);
+    }
+
     #[test]
     fn outputs_match_reference_when_promotion_never_happens() {
         let inputs: Vec<u8> = (10..40).collect();
@@ -2617,6 +2765,7 @@ module Top (
     /// beyond the interpreter's semantic state), and the growth must stay
     /// within the reserved arena so the live image never moves.
     #[test]
+    #[cfg(feature = "cranelift")]
     fn cranelift_promotion_covers_its_image_requirement_without_moving_the_image() {
         use std::sync::Mutex;
 

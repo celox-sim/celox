@@ -321,6 +321,48 @@ fn rejects_overlapping_always_ff_variable_drivers() {
 }
 
 #[test]
+fn rejects_loop_indices_shared_with_always_ff() {
+    // Only plain always processes may share a variable (IEEE 1800-2023
+    // 9.2.2.4); nonblocking writes from several processes stay rejected.
+    for (first, second) in [
+        ("always_ff", "always_ff"),
+        ("always_ff", "always"),
+        ("always", "always_ff"),
+    ] {
+        let error = cranelift_build_error(&format!(
+            r#"
+            module Top(input logic clk, input logic [3:0] a, b, output wire [3:0] y, z);
+                integer i;
+                logic [3:0] p, q;
+                {first} @(posedge clk) for (i = 0; i < 4; i = i + 1) p[i] <= a[i];
+                {second} @(posedge clk) for (i = 0; i < 4; i = i + 1) q[i] <= b[i];
+                assign y = p;
+                assign z = q;
+            endmodule
+            "#
+        ));
+        assert!(
+            error.contains("multiple variable drivers for `i`"),
+            "{first}/{second}: unexpected error: {error}"
+        );
+    }
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic clk, a, b, output wire y);
+            logic q;
+            always @(posedge clk) q <= a;
+            always @(posedge clk) q = b;
+            assign y = q;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multiple variable drivers for `q`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn rejects_variables_also_written_through_output_arguments() {
     // A called subroutine writes its output actual for the calling process
     // (IEEE 1800-2023 9.2.2.2), so `q` has two always_ff drivers.
@@ -796,11 +838,20 @@ fn initializes_partially_driven_internal_nets_to_z() {
             assign undriven_bits_are_z = (w[7:1] === 7'bzzzzzzz);
         endmodule
     "#;
-    let mut sim =
-        Simulator::from_sv_sources(vec![(source, Path::new("partial_internal_net.sv"))], "Top")
-            .build_cranelift()
-            .unwrap();
-    assert_eq!(sim.get(sim.signal("undriven_bits_are_z")), 1u8.into());
+    // Runtime storage retains X/Z only in four-state mode. Literal X/Z
+    // in exact comparisons remain distinct from zero in both modes.
+    for four_state in [false, true] {
+        let mut sim =
+            Simulator::from_sv_sources(vec![(source, Path::new("partial_internal_net.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        assert_eq!(
+            sim.get_four_state(sim.signal("undriven_bits_are_z")),
+            (u8::from(four_state).into(), BigUint::default()),
+            "four_state={four_state}",
+        );
+    }
 }
 
 #[test]
@@ -851,11 +902,22 @@ fn initializes_shadowing_function_locals_to_unknown() {
             assign local_is_unknown = (f() === 1'bx);
         endmodule
     "#;
-    let mut sim =
-        Simulator::from_sv_sources(vec![(source, Path::new("function_local_shadow.sv"))], "Top")
-            .build_cranelift()
-            .unwrap();
-    assert_eq!(sim.get(sim.signal("local_is_unknown")), 1u8.into());
+    // Runtime storage retains X/Z only in four-state mode. Literal X/Z
+    // in exact comparisons remain distinct from zero in both modes.
+    for four_state in [false, true] {
+        let mut sim = Simulator::from_sv_sources(
+            vec![(source, Path::new("function_local_shadow.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build_cranelift()
+        .unwrap();
+        assert_eq!(
+            sim.get_four_state(sim.signal("local_is_unknown")),
+            (u8::from(four_state).into(), BigUint::default()),
+            "four_state={four_state}",
+        );
+    }
 }
 
 #[test]
@@ -4143,13 +4205,30 @@ fn rejects_enum_initializers_that_do_not_fit_the_base_type() {
     let error = cranelift_build_error(
         r#"
         module Top(output logic [1:0] y);
-            typedef enum logic [1:0] { A = 3'd4 } E;
+            typedef enum logic [1:0] { A = 4 } E;
             assign y = A;
         endmodule
         "#,
     );
     assert!(
         error.contains("enum member `A` value does not fit its base type"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_enum_literals_with_mismatched_explicit_widths() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(output logic [1:0] y);
+            typedef enum logic [1:0] { A = 3'd1 } E;
+            assign y = A;
+        endmodule
+        "#,
+    );
+    // The value fits, but an explicitly sized literal must match the enum base.
+    assert!(
+        error.contains("enum member `A` sized literal width 3 differs from base width 2"),
         "unexpected error: {error}"
     );
 }
@@ -4800,6 +4879,103 @@ fn expands_function_calls_in_child_input_connections() {
 }
 
 #[test]
+fn rejects_inout_nets_with_several_drivers() {
+    // Both sides of an inout connection are one net (IEEE 1800-2023 23.3.3);
+    // resolving several drivers of it is not supported yet.
+    let pad = r#"
+        module Pad(input logic oe, inout wire io); assign io = oe ? 1'b1 : 1'bz; endmodule
+        module Pass(input logic oe, inout wire io); Pad pad(.oe(oe), .io(io)); endmodule
+    "#;
+    for top in [
+        // Two children drive the net.
+        r#"module Top(input logic a, b, output wire y);
+               wire w;
+               Pad left(.oe(a), .io(w));
+               Pad right(.oe(b), .io(w));
+               assign y = w;
+           endmodule"#,
+        // The parent and a child below a pass-through module drive the net.
+        r#"module Top(input logic a, b, output wire y);
+               wire w;
+               assign w = a ? 1'b0 : 1'bz;
+               Pass pass(.oe(b), .io(w));
+               assign y = w;
+           endmodule"#,
+        // A child output and a child inout drive the net.
+        r#"module Source(output logic y); assign y = 1'b0; endmodule
+           module Top(input logic a, output wire y);
+               wire w;
+               Source source(.y(w));
+               Pad pad(.oe(a), .io(w));
+               assign y = w;
+           endmodule"#,
+    ] {
+        let error = cranelift_build_error(&format!("{pad}{top}"));
+        assert!(error.contains("multiple net drivers for `w`"), "{error}");
+    }
+    // A driver of the net inside the child and one on the parent's side of
+    // an inout port of the child.
+    let error = cranelift_build_error(
+        r#"
+        module Pad(input logic oe, inout wire io); assign io = oe ? 1'b1 : 1'bz; endmodule
+        module Block(input logic a, b, inout wire io);
+            assign io = a ? 1'b0 : 1'bz;
+            Pad pad(.oe(b), .io(io));
+        endmodule
+        module Top(input logic a, b, output wire y);
+            wire w;
+            Block block(.a(a), .b(b), .io(w));
+            assign y = w;
+        endmodule
+    "#,
+    );
+    assert!(error.contains("multiple net drivers for `io`"), "{error}");
+}
+
+#[test]
+fn rejects_variables_and_expressions_on_inout_ports() {
+    // Only nets may be on either side of an inout port (IEEE 1800-2023
+    // 23.3.3.2).
+    let reader = r#"
+        module Reader(inout wire [3:0] io, output wire [3:0] y); assign y = io; endmodule
+        module Pad(input logic oe, inout wire [3:0] io); assign io = oe ? 4'h1 : 4'hz; endmodule
+    "#;
+    for (top, variable) in [
+        (
+            r#"module Top(input logic [3:0] a, output wire [3:0] y);
+                   logic [3:0] v;
+                   assign v = a;
+                   Reader reader(.io(v), .y(y));
+               endmodule"#,
+            Some("variable `v`"),
+        ),
+        (
+            r#"module Top(input logic oe, output logic [3:0] v);
+                   Pad pad(.oe(oe), .io(v));
+               endmodule"#,
+            Some("variable `v`"),
+        ),
+        (
+            r#"module Top(input logic [3:0] a, output wire [3:0] y);
+                   wire [3:0] w;
+                   Reader reader(.io(w[3:0] ^ a), .y(y));
+               endmodule"#,
+            None,
+        ),
+    ] {
+        let error = cranelift_build_error(&format!("{reader}{top}"));
+        assert!(
+            error.contains("inout port `io` must connect to a net"),
+            "{error}"
+        );
+        assert!(
+            variable.is_none_or(|variable| error.contains(variable)),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn rejects_local_drivers_of_implicit_child_output_nets() {
     let source = r#"
         module Source(output logic y); assign y = 1'b1; endmodule
@@ -5259,25 +5435,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "index 2 of `values` outside its declared range",
-            r#"
-            module Top(output logic y);
-                logic [7:0] values [0:1][0:2];
-                assign y = values[0][3];
-            endmodule
-        "#,
-        ),
-        (
-            "index 2 of `values` outside its declared range",
-            r#"
-            module Top(output logic y);
-                localparam J = 3;
-                logic [7:0] values [0:1][0:2];
-                assign y = values[0][J];
-            endmodule
-        "#,
-        ),
-        (
             "combinational expression",
             r#"
             module Top(input logic a, output logic y); assign y = unknown(a); endmodule
@@ -5350,17 +5507,9 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "final construct",
+            "non-ANSI port expressions",
             r#"
-            module Top(input logic done);
-                final assert (done);
-            endmodule
-        "#,
-        ),
-        (
-            "non-ANSI module port declarations",
-            r#"
-            module Top(y); output y; assign y = 1'b1; endmodule
+            module Top({y, z}); output y, z; assign y = 1'b1; assign z = 1'b0; endmodule
         "#,
         ),
         (
@@ -5622,15 +5771,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(output logic y);
                 logic [7:0] values [0:9223372036854775807][0:1];
                 assign y = values[0][0];
-            endmodule
-        "#,
-        ),
-        (
-            "index 2 of `values` outside its declared range",
-            r#"
-            module Top(output logic y);
-                logic [7:0] values [0:1][0:2];
-                assign y = values[1][3];
             endmodule
         "#,
         ),
@@ -8601,9 +8741,12 @@ fn timed_task_edge_drivers_are_checked_against_child_outputs() {
 }
 
 #[test]
-fn timed_task_edge_drivers_of_package_variables_are_checked_across_instances() {
-    let error = cranelift_build_error(
-        r#"
+fn timed_task_edge_processes_of_several_instances_may_write_a_package_variable() {
+    // `always` processes, unlike `always_ff`, may share their variables
+    // (IEEE 1800-2023 6.5, 9.2.2.4).
+    celox::Simulation::from_sv_sources(
+        vec![(
+            r#"
         package p; bit q; endpackage
         module Child(input bit clk);
             task automatic pause; #1; endtask
@@ -8613,11 +8756,12 @@ fn timed_task_edge_drivers_of_package_variables_are_checked_across_instances() {
             Child first(clk), second(clk);
         endmodule
     "#,
-    );
-    assert!(
-        error.contains("multiple drivers of package variable `p::q`"),
-        "{error}"
-    );
+            Path::new("timed_task_package_writers.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .unwrap_or_else(|error| panic!("{error}"));
 }
 
 mod aggregate_regressions {
@@ -8811,5 +8955,125 @@ fn masked_reads_preserve_observer_sensitivity_and_real_self_dependencies() {
                 message: b"tick".to_vec()
             }]
         );
+    }
+}
+
+#[test]
+fn net_alias_coalescing_retains_distinct_and_variable_drivers() {
+    for (source, diagnostic) in [
+        (
+            "module Top(input logic a, output uwire y); assign y=a; assign y=a; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(input logic a, output wire y); uwire n; assign n=a; assign n=a; assign y=n; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(input logic a, output uwire first, y); assign first=a; assign y=a; assign y=a; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(input logic a, output logic y); assign y=a; assign y=a; endmodule",
+            "multiple variable drivers",
+        ),
+        (
+            "module Top(input logic a,b, output wire y); assign y=a; assign y=a; assign y=b; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(output wire [31:0] y); assign y=$random; assign y=$random; endmodule",
+            "multiple net drivers",
+        ),
+    ] {
+        let error =
+            Simulator::from_sv_sources(vec![(source, Path::new("alias_drivers.sv"))], "Top")
+                .build_native()
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains(diagnostic), "{error}");
+    }
+}
+
+#[test]
+fn single_bit_array_driver_windows_still_reject_overlaps() {
+    for source in [
+        "module Top(input logic index, input logic a, b, output logic [0:0] q[2]);
+          always_comb begin q[0]='0; q[0][index]=a; end
+          always_comb begin q[0]='0; q[0][index]=b; end endmodule",
+        "module Top(input logic index, input logic a, b, output logic [0:0] q[2]);
+          always_comb q[index]=a;
+          always_comb q[0]=b; endmodule",
+    ] {
+        let error = cranelift_build_error(source);
+        assert!(error.contains("multiple variable drivers"), "{error}");
+    }
+}
+
+#[test]
+fn mixed_hierarchies_accept_many_sibling_specializations() {
+    let veryl = "module Top(x: input logic<8>, y: output logic<8>) { inst tree: $sv::Root(x, y); }";
+    let sv = "module Leaf #(parameter ID=0)(input wire [7:0] x, output wire [7:0] y);
+        assign y=x ^ 8'(ID); endmodule
+        module Root(input wire [7:0] x, output wire [7:0] y);
+        wire [7:0] lanes[65];
+        for(genvar n=0;n<65;n=n+1) begin: g
+            Leaf #(.ID(n)) u(.x(x),.y(lanes[n]));
+        end
+        assign y=lanes[64]; endmodule";
+    let mut sim = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("siblings.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(x, 60u8)).unwrap();
+    assert_eq!(sim.get(y), BigUint::from(124u8));
+}
+
+#[test]
+fn exhaustive_case_preserves_fixed_unknown_selector_bits() {
+    let source = r#"
+        module Top(input bit b, output logic y);
+            always_comb case ({b, 1'bx})
+                2'b0x: y = 0;
+                2'b1x: y = 1;
+            endcase
+        endmodule
+    "#;
+    for (kind, four_state) in [("bit", false), ("bit", true), ("logic", false)] {
+        let source = source.replace("input bit b", &format!("input {kind} b"));
+        let mut sim =
+            Simulator::from_sv_sources(vec![(&source, Path::new("fixed_unknown_case.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        let b = sim.signal("b");
+        let y = sim.signal("y");
+        for value in [0u8, 1, 0] {
+            sim.modify(|io| io.set(b, value)).unwrap();
+            assert_eq!(sim.get(y), BigUint::from(value));
+        }
+    }
+}
+
+sv_backends! {
+    fn exhaustive_case_preserves_fixed_selector_bits(sim) { @case "review_regressions::exhaustive_case_preserves_fixed_selector_bits"; }
+    fn fixed_case_bits_preserve_unknown_input_fallback(sim) { @case "review_regressions::fixed_case_bits_preserve_unknown_input_fallback"; }
+}
+
+#[test]
+fn fixed_selector_bits_do_not_hide_incomplete_cases() {
+    for source in [
+        "module Top(input logic b, output logic y); always_comb case ({b,1'bx}) 2'b0x:y=0; 2'b1x:y=1; endcase endmodule",
+        "module Top(input bit b, output logic y); always_comb case ({b,1'bx}) 2'b0x:y=0; endcase endmodule",
+        "module Top(input bit b, output logic y); always_comb case ({b,1'bx}) 2'b0z:y=0; 2'b1z:y=1; endcase endmodule",
+        "module Top(input bit b, output logic y); always_comb case ({b,1'bz}) 2'b0x:y=0; 2'b1x:y=1; endcase endmodule",
+    ] {
+        let error = four_state_cranelift_build_error(source);
+        assert!(error.contains("latch inference"), "{error}");
     }
 }

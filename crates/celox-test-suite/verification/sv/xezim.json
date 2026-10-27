@@ -9,6 +9,8 @@
     "xezim/file_core.json",
     "xezim/file_io.json",
     "xezim/floating_point.json",
+    "xezim/fork.json",
+    "xezim/fork_deferred.json",
     "xezim/generate.json",
     "xezim/hierarchy.json",
     "xezim/indexed_select.json",

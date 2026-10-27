@@ -43,6 +43,10 @@ pub(super) fn keep_static_locals<'b, T>(
         return Ok((kept, initializers));
     }
     for body in bodies {
+        let mut concurrent = false;
+        for stmt in body.iter() {
+            stmt.walk(&mut |stmt| concurrent |= matches!(stmt, Stmt::Fork { .. }));
+        }
         keep_in(
             state,
             body,
@@ -50,6 +54,7 @@ pub(super) fn keep_static_locals<'b, T>(
             directions,
             &mut kept,
             &mut initializers,
+            concurrent,
         )?;
     }
     Ok((kept, initializers))
@@ -62,19 +67,24 @@ fn keep_in<T>(
     directions: &Directions,
     kept: &mut Vec<String>,
     initializers: &mut Vec<Stmt>,
+    concurrent: bool,
 ) -> Result<(), AnalyzerError> {
     let mut index = 0;
     while index < stmts.len() {
+        // A sampled value of a static local is its value from an earlier
+        // time slot (IEEE 1800-2023 16.5.1), which the local keeps.
         if let Stmt::Local { name, init } = &stmts[index]
             && statics.contains_key(name)
-            && entry(
-                state,
-                name,
-                init.as_ref(),
-                &stmts[index + 1..],
-                directions,
-                &HashMap::default(),
-            )? == Entry::Observed
+            && (concurrent
+                || sampled_reads(&stmts[index + 1..], name)
+                || entry(
+                    state,
+                    name,
+                    init.as_ref(),
+                    &stmts[index + 1..],
+                    directions,
+                    &HashMap::default(),
+                )? == Entry::Observed)
         {
             let Stmt::Local { name, init } = stmts.remove(index) else {
                 unreachable!("the statement is a local declaration");
@@ -95,8 +105,24 @@ fn keep_in<T>(
                 else_body,
                 ..
             } => {
-                keep_in(state, then_body, statics, directions, kept, initializers)?;
-                keep_in(state, else_body, statics, directions, kept, initializers)?;
+                keep_in(
+                    state,
+                    then_body,
+                    statics,
+                    directions,
+                    kept,
+                    initializers,
+                    concurrent,
+                )?;
+                keep_in(
+                    state,
+                    else_body,
+                    statics,
+                    directions,
+                    kept,
+                    initializers,
+                    concurrent,
+                )?;
             }
             Stmt::Case { items, default, .. } => {
                 for item in items {
@@ -107,18 +133,56 @@ fn keep_in<T>(
                         directions,
                         kept,
                         initializers,
+                        concurrent,
                     )?;
                 }
                 if let Some(default) = default {
-                    keep_in(state, default, statics, directions, kept, initializers)?;
+                    keep_in(
+                        state,
+                        default,
+                        statics,
+                        directions,
+                        kept,
+                        initializers,
+                        concurrent,
+                    )?;
                 }
             }
             Stmt::Loop {
                 init, step, body, ..
             } => {
-                keep_in(state, init, statics, directions, kept, initializers)?;
-                keep_in(state, step, statics, directions, kept, initializers)?;
-                keep_in(state, body, statics, directions, kept, initializers)?;
+                keep_in(
+                    state,
+                    init,
+                    statics,
+                    directions,
+                    kept,
+                    initializers,
+                    concurrent,
+                )?;
+                keep_in(
+                    state,
+                    step,
+                    statics,
+                    directions,
+                    kept,
+                    initializers,
+                    concurrent,
+                )?;
+                keep_in(
+                    state,
+                    body,
+                    statics,
+                    directions,
+                    kept,
+                    initializers,
+                    concurrent,
+                )?;
+            }
+            Stmt::Fork { branches, .. } => {
+                for branch in branches {
+                    keep_in(state, branch, statics, directions, kept, initializers, true)?;
+                }
             }
             _ => {}
         }
@@ -550,6 +614,13 @@ impl Flow<'_> {
                     Ok(Exits::next(written))
                 }
             }
+            Stmt::Fork { branches, .. } => {
+                for branch in branches {
+                    self.block(branch, written)?;
+                }
+                // A sibling's write need not precede another sibling's read.
+                Ok(Exits::next(written))
+            }
             Stmt::Break => Ok(Exits {
                 breaks: Some(written),
                 ..Exits::default()
@@ -605,6 +676,7 @@ impl Flow<'_> {
                 self.read(expr, written)?;
                 Ok(Exits::next(written))
             }
+            Stmt::WaitFork | Stmt::DisableFork => Ok(Exits::next(written)),
             Stmt::WaitEvent(items) => {
                 for item in items {
                     self.read(&item.expr, written)?;
@@ -767,8 +839,32 @@ pub(super) fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
             .flat_map(|item| std::iter::once(&item.expr).chain(&item.iff))
             .collect(),
         // The statements of an `@*` describe its reads and do not run.
-        Stmt::WaitImplicit(_) | Stmt::Break | Stmt::Continue => Vec::new(),
+        Stmt::Fork { .. }
+        | Stmt::WaitFork
+        | Stmt::DisableFork
+        | Stmt::WaitImplicit(_)
+        | Stmt::Break
+        | Stmt::Continue => Vec::new(),
     }
+}
+
+/// Whether a sampled value function in `stmts` reads `name`.
+fn sampled_reads(stmts: &[Stmt], name: &str) -> bool {
+    let mut found = false;
+    for stmt in stmts {
+        stmt.walk(&mut |stmt| {
+            for expr in stmt_exprs(stmt) {
+                visit_calls(expr, &mut |callee, args| {
+                    if let Callee::System(function) = callee
+                        && function.reads_sampled_values()
+                    {
+                        found |= args.iter().flatten().any(|arg| expr_reads(arg, name));
+                    }
+                });
+            }
+        });
+    }
+    found
 }
 
 /// Call `f` with the callee and arguments of every call in `expr`.

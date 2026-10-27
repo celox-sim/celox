@@ -27,3 +27,51 @@ sv_backends! {
         @case "always_comb::explicit_list_of_every_read_settles_like_a_wildcard";
     }
 }
+
+sv_backends! {
+    fn two_state_sensitivity_lists_run_at_time_zero(sim) {
+        @case "always_comb::two_state_sensitivity_lists_run_at_time_zero";
+    }
+}
+
+sv_backends! {
+    fn two_state_other_sensitivity_lists_run_at_time_zero(sim) {
+        @case "always_comb::two_state_other_sensitivity_lists_run_at_time_zero";
+    }
+}
+
+sv_backends! {
+    fn covering_sensitivity_lists_settle_like_a_wildcard(sim) {
+        @case "always_comb::covering_sensitivity_lists_settle_like_a_wildcard";
+    }
+    fn covering_sensitivity_lists_settle_like_a_wildcard_in_four_state(sim) {
+        @case "always_comb::covering_sensitivity_lists_settle_like_a_wildcard_in_four_state";
+    }
+    fn multi_store_blocks_with_covering_lists_stay_processes(sim) {
+        @case "always_comb::multi_store_blocks_with_covering_lists_stay_processes";
+    }
+}
+
+sv_backends! {
+    fn settles_feedback_through_chained_concat(sim) {
+        @case "always_comb::settles_feedback_through_chained_concat";
+    }
+    fn settles_feedback_through_chained_mux(sim) {
+        @case "always_comb::settles_feedback_through_chained_mux";
+    }
+    fn settles_feedback_through_chained_qspi(sim) {
+        @case "always_comb::settles_feedback_through_chained_qspi";
+    }
+}
+
+sv_backends! {
+    fn settles_feedback_through_chained_concat_four_state(sim) {
+        @case "always_comb::settles_feedback_through_chained_concat_four_state";
+    }
+    fn settles_feedback_through_chained_mux_four_state(sim) {
+        @case "always_comb::settles_feedback_through_chained_mux_four_state";
+    }
+    fn settles_feedback_through_chained_qspi_four_state(sim) {
+        @case "always_comb::settles_feedback_through_chained_qspi_four_state";
+    }
+}

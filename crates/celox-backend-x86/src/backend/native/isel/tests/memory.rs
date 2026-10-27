@@ -800,6 +800,7 @@ fn narrowed_wide_binary_store_does_not_write_source_width() {
 
     let layout = MemoryLayout {
         trace: None,
+        settle: None,
         four_state: false,
         mode: MemoryLayoutMode::Packed,
         unpacked_arrays: HashMap::default(),
@@ -1130,6 +1131,7 @@ fn execute_unaligned_64_bit_load(dynamic: bool) -> u64 {
 
     let layout = MemoryLayout {
         trace: None,
+        settle: None,
         four_state: false,
         mode: MemoryLayoutMode::Packed,
         unpacked_arrays: HashMap::default(),
@@ -1295,6 +1297,7 @@ fn verify_scalar_alignment_matrix(dynamic: bool, four_state: bool) {
     eu.verify();
     let layout = MemoryLayout {
         trace: None,
+        settle: None,
         four_state,
         mode: MemoryLayoutMode::Packed,
         unpacked_arrays: HashMap::default(),
@@ -1511,6 +1514,7 @@ fn verify_wide_alignment_matrix(dynamic: bool) {
     eu.verify();
     let layout = MemoryLayout {
         trace: None,
+        settle: None,
         four_state: false,
         mode: MemoryLayoutMode::Packed,
         unpacked_arrays: HashMap::default(),

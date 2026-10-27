@@ -52,6 +52,8 @@ pub struct ResolvedSchedule<B: SimBackend> {
     pub(crate) active_commits: bit_set::BitSet,
     /// Signals the current time is stored into before each round.
     pub(crate) time_slots: Vec<SignalRef>,
+    /// Sampled variables and their copies, captured before entering a later timestamp.
+    pub(crate) sample_shadows: Vec<(SignalRef, SignalRef)>,
     /// The compiled scheduler, when one was generated.
     pub(crate) scheduler: Option<SchedulerRefs>,
     /// Per process kernel, why the compiled scheduler does not run it, or
@@ -263,10 +265,19 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             .processes
             .iter()
             .map(|process| ProcessRefs {
-                is_initializer: process.slots.is_initializer,
+                frame: process
+                    .frame
+                    .clone()
+                    .map(|frame| frame.map(|id| resolve(&id))),
+                kind: process.slots.kind,
                 program: process.slots.program.as_ref().map(resolve),
                 resume: resolve(&process.slots.resume),
-                starts_with_event_wait: process.slots.requires_timed_simulation,
+                starts_with_event_wait: process
+                    .frame
+                    .as_ref()
+                    .map_or(process.slots.requires_timed_simulation, |frame| {
+                        frame.starts_with_event_wait
+                    }),
                 status: resolve(&process.slots.status),
                 delay: resolve(&process.slots.delay),
                 wait_sites: process
@@ -281,7 +292,13 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                                     signal,
                                     kind: term.kind,
                                     counter: counter_of(signal, term.kind),
-                                    driven: term.driven,
+                                    driven: term.driven
+                                        || process.frame.as_ref().is_some_and(|frame| {
+                                            frame
+                                                .event_probes
+                                                .iter()
+                                                .any(|probe| probe.result == term.signal)
+                                        }),
                                 }
                             })
                             .collect()
@@ -377,7 +394,9 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             program_processes: processes
                 .iter()
                 .enumerate()
-                .filter(|(_, process)| process.program.is_some())
+                .filter(|(_, process)| {
+                    process.kind == celox_design::ProcessKind::Regular && process.program.is_some()
+                })
                 .map(|(index, _)| index)
                 .collect(),
             processes,
@@ -392,6 +411,11 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             timed: model.timed,
             active_commits,
             time_slots: model.time_slots.iter().map(resolve).collect(),
+            sample_shadows: model
+                .sample_shadows
+                .iter()
+                .map(|(variable, copy)| (resolve(variable), resolve(copy)))
+                .collect(),
             scheduler: model.scheduler.as_ref().and_then(|scheduler| {
                 let slots = &scheduler.slots;
                 let mut refs = SchedulerRefs {

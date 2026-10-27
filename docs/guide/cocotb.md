@@ -60,15 +60,111 @@ limit before completion fails the command. This limit does not bound compilation
 or work within a single step/tick; use an external process timeout when a wall
 clock limit is needed. `--unlimited` removes the step/tick limit. Source languages cannot be mixed in one invocation.
 
+For a SystemVerilog testbench, a positional argument starting with `+` (or
+`--plusarg +ARG`, repeatable) is a plusarg, not a source: `$test$plusargs` and
+`$value$plusargs` see them in command-line order, on every backend.
+
+```sh
+celox run tb.v --top tb +iterations=9 --plusarg +trace
+```
+
 ## Select execution and collect measurements
 
 `celox run` accepts `--threads N` (1–64, default 1) and `--four-state` for both
 languages. Both languages support `--backend native|tiered|interpreter|cranelift|wasm`
-(default: native). Tiered starts interpreted and adopts compiled code at a scheduler
+(default: tiered; native when `--compile-only`, a native image, `--build-cache-dir` or an
+IR dump is requested). Tiered starts interpreted and adopts compiled code at a scheduler
 safe point while preserving pending events. For example:
 
 ```sh
 celox run test/Top.sv --top Top --backend tiered --threads 4
+```
+
+### Signal checkpoints
+
+On Unix, `celox run` installs a `SIGUSR1` handler by default for SystemVerilog.
+After the `SIGUSR1 checkpoint ready` message, request a checkpoint with:
+
+```sh
+kill -USR1 "$sim_pid"
+celox run top.sv --top Top --restore-checkpoint "signal-${sim_pid}-1.checkpoint"
+```
+
+The signal handler only sets a flag. At the next complete simulation time step,
+the CLI saves its **system checkpoint** and continues running. Requests arriving
+before that boundary coalesce; blocking host I/O and a non-advancing time slot
+are not interrupted. Files are `signal-<PID>-<N>.checkpoint` in
+`--save-state-dir` (the current directory by default). Publication is atomic and
+never overwrites an existing file. Save failures are reported on stderr and do
+not terminate the run. Use `--no-checkpoint-on-signal` to disable the handler.
+
+The CLI container combines core execution state with its file-effect handler
+state, source-driven waveform controls, and the CLI's accumulated assertion/error
+outcome. A run that already reported a failure remains failed after resume.
+The container also retains pending scheduled-save requests, the counted signal,
+cycle count and its previous level. Resume uses that saved schedule, including
+when the original `--save-state-at*` flags are repeated or omitted; it does not
+reissue consumed requests or restart cycle numbering. `--save-state-dir` and
+signal-handler registration come from the resumed invocation. Restore builds the target with
+declaration and combinational initialization deferred, so it does not repeat
+initialization effects before installing the checkpoint.
+
+The handler keeps a disk-backed working view of files encountered by the
+run, preserving file contents, handle positions, EOF and scan lookahead across
+restore. Writes publish that working view to the requested host path immediately.
+Restore reconstructs the saved working view without undoing already delivered
+external output; subsequent writes publish the restored branch's contents.
+Closed working files retain their disk contents without retaining OS descriptors;
+operations reopen them temporarily. Active output streams retain their host
+handle until close, so renaming or unlinking a file does not redirect ordinary
+writes. After restore, output streams reconnect to their recorded paths lazily;
+OS handles themselves are not persisted. Working files are keyed by normalized paths
+(absolute paths with existing symlinks resolved). Different paths, including hard
+links to the same host file, have independent working views. The caller is
+responsible for coordinating such aliases; the CLI does not infer file identity.
+A write-only append target does not require read permission: its inaccessible existing prefix
+stays external, while appended bytes and positions are checkpointed. Resuming
+retains that prefix and replaces only the known suffix on the next write; the
+host prefix must still exist and be at least as long as when captured.
+Standard streams, named pipes and devices remain live external channels. Their already consumed input
+and delivered output are not rewound. No handler state enters the core checkpoint.
+
+Source-driven `$dumpfile`/`$dumpvars` recording resumes in a new, uniquely named
+`<original-name>.resume-<id>.vcd` beside the original file; the CLI reports its path.
+The original trace is neither truncated nor appended to. Each segment has its own
+header and starts at the restored time with the saved signal selections and
+`$dumpoff`/`$dumpon` state. `$dumplimit` retains its configured per-file limit with
+a fresh byte budget for the new segment. Later dump controls continue to work.
+Waveform configuration lives in the CLI container, not the core checkpoint.
+Rust hosts can compose `source_waveform_state()` with their core checkpoint and
+use `restore_source_waveform()` to supply their own new output file.
+
+Resume with the same sources, top, options and a compatible Celox build.
+`--restore-checkpoint` loads a trusted artifact, like a native image; do not use
+it on files from an untrusted producer. This resumes the CLI simulation, not
+VPI plugins or Python coroutines. Scheduled `.state` saves below remain the
+portable inspection format.
+
+### Save state files during a SystemVerilog run
+
+To compare two runs or two simulators, `celox run` can save
+[state files](checkpoints.md#state-files) for `celox state dump` and `celox state diff`:
+
+| Options | Purpose |
+| --- | --- |
+| `--save-state-on SIGNAL` | Count the cycles of `SIGNAL`, a hierarchical path such as `tb.clk` (the top module's name may be left out). A cycle is a time step at whose end the signal is 1 while it was not at the end of the previous time step. |
+| `--save-state-at N[,M...]` | Save the state after cycles N, M, ... of `--save-state-on`, counted from 1, as `<SIGNAL>-<N>.state`. The file is written right after that time step, with every region of the time done, so its nonblocking updates are included. |
+| `--save-state-at-time T[,U...]` | Save the state after everything due at times up to T, before the run advances past T, as `time-<T>.state`. T is in units of the design's global time precision. |
+| `--save-state-dir DIR` | Write the files to `DIR` (default: the current directory). |
+
+A cycle that the run never reaches is an error. These options are available for
+SystemVerilog testbenches on every backend, including designs with file I/O or
+VCD tasks. The saved file contains HDL state; external resources are excluded
+under the [snapshot contract](checkpoints.md#external-resources).
+
+```sh
+celox run c906.v --top tb --save-state-on tb.clk --save-state-at 1000,2000 --save-state-dir states
+celox state diff states/tb.clk-1000.state other/tb.clk-1000.state
 ```
 
 For Veryl native testbenches it also provides:
@@ -213,11 +309,49 @@ List package definitions before their consumers. It does not discover a
 must all be `.sv` files; for Veryl, pass one project entry file. The
 `celox-vpi-compile` binary accepts the same source list.
 
-cocotb drives the design, so the compiled executable runs no HDL process.
-Compilation fails for a design with an `initial` process, an ordinary `always`
-process or another procedure Celox runs as a process, and names the first one;
-constant `initial` blocks and declaration initializers still set initial
-values.
+### Designs with processes
+
+A SystemVerilog design with processes, such as an `initial` block with delays
+or system tasks, an `always` block with delays or event controls, or a clock
+generator like `always #5 clk = ~clk`, compiles into a timed simulation. The
+executable runs its processes in step with cocotb: cocotb's timers and the
+design's delays share one time axis, and the design's `$display`/`$write`
+output and `$finish` work as in `celox run`. A design without processes
+compiles as before.
+
+Within one time step, the VPI callbacks cocotb waits on run at these points:
+
+| cocotb trigger (VPI callback) | Runs |
+|---|---|
+| `Timer` (`cbAfterDelay`), `NextTimeStep` (`cbNextSimTime`) | at the start of the time step, before the design's processes |
+| `RisingEdge`, `FallingEdge`, `Edge` (`cbValueChange`) | at the next boundary after the change: when a round's processes have run, before its flip-flops make their nonblocking updates; after each wave of nonblocking updates and the combinational logic that follows it; or when the time step has settled |
+| `ReadWrite` (`cbReadWriteSynch`) | when the time step has settled; writes there settle again at the same time |
+| `ReadOnly` (`cbReadOnlySynch`) | at the end of the time step; writes there are rejected |
+
+So the edge of a clock or reset is reported before the flip-flops it triggers
+commit, whether cocotb or the design drives it. A change is reported at the
+boundary of the wave that made it: after that wave's combinational settle, so
+a register's combinational readers already show its new value, and before the
+processes the change wakes have run. Where a callback runs relative to the
+design's own events within the time step is a choice of this implementation:
+IEEE 1800-2023 4.7 lets a simulator process those events in any order, and
+Icarus Verilog, for example, reports a register's change before its
+combinational readers follow it. For the same reason, a pulse within one wave,
+such as `x = 1; x = 0;` in one process, is not reported: a callback sees the
+value at a boundary.
+
+A write from cocotb is a blocking assignment at the current time. Outside the
+regions of a time step, in a `Timer` callback for example, a read returns the
+stored value: what combinational logic derives from a write in the same
+callback reads as before until the time step settles.
+
+Only `celox vpi build` supports designs with processes; `celox-vpi-compile`
+and its `celox-vpi-runtime` still reject them
+([#1983](https://github.com/celox-sim/celox/issues/1983)).
+
+`$stop` ends the run, as `vpiStop` does, because the executable has no
+interactive mode. Pausing instead is tracked in
+[#1886](https://github.com/celox-sim/celox/issues/1886).
 
 ## Run cocotb
 

@@ -1,0 +1,70 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:4: error: functions cannot have delay statements.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "fork_control::function_join_none_automatic_values_outlive_returns",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: error: functions cannot have delay statements.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "fork_control::function_join_none_calls_in_defaults_need_process_frames",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:4: error: Functions cannot enable/call tasks.\n<case>/source_0.sv:4: error: functions cannot have delay statements.\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "fork_control::function_join_none_children_can_call_timed_tasks",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: error: functions cannot have delay statements.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "fork_control::function_join_none_event_driven_caller",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:4: error: functions cannot have delay statements.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "fork_control::function_join_none_preserves_expression_temporaries",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:8: error: functions cannot have delay statements.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "fork_control::function_join_none_retains_child_only_class_handle",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

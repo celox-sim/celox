@@ -16,13 +16,13 @@ pub(crate) mod memory_layout;
     )
 ))]
 pub(crate) mod native;
-#[cfg(feature = "host-runtime")]
+#[cfg(feature = "cranelift")]
 mod runtime;
 #[cfg(feature = "host-runtime")]
 pub(crate) mod tiered;
 pub use celox_backend_wasm as wasm_codegen;
 pub use celox_runtime::backend as traits;
-#[cfg(feature = "host-runtime")]
+#[cfg(feature = "wasm-runtime")]
 pub mod wasm_runtime;
 #[cfg(feature = "host-runtime")]
 pub(crate) use celox_runtime::RuntimeEventBuffer;
@@ -33,15 +33,17 @@ pub use traits::{EventHandle, SimBackend};
 #[cfg(feature = "host-runtime")]
 mod host {
     pub use super::interp::InterpBackend;
+    #[cfg(feature = "cranelift")]
     pub use super::runtime::{EventRef, JitBackend, SharedJitCode};
     pub use super::tiered::{
         TieredBackend, TieredExecutionStats, TieredExecutionTier, TieredExecutionTiming,
         TieredPromotionStatus,
     };
-    pub(crate) use celox_backend_cranelift::JitEngine;
-    pub use celox_backend_cranelift::{
+    pub use celox_backend_common::cranelift_options::{
         CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm,
     };
+    #[cfg(feature = "cranelift")]
+    pub(crate) use celox_backend_cranelift::JitEngine;
 
     #[cfg(any(
         target_arch = "x86_64",

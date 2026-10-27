@@ -681,8 +681,8 @@ fn scoped_parameter_dump_does_not_select_imported_state() {
 }
 
 #[test]
-fn direct_fatal_errors_publish_waveform_without_freezing_recovery() {
-    for action in ["eval_comb", "try_dump"] {
+fn direct_fatal_errors_publish_waveform_and_terminate() {
+    for action in ["eval_comb", "try_dump", "dump"] {
         check_direct_fatal_waveform(action);
     }
 }
@@ -701,9 +701,10 @@ fn check_direct_fatal_waveform(action: &str) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("direct-fatal.vcd");
     let source = format!(
-        r#"module Top(input logic fail_now, output logic value);
-            initial begin $dumpfile("{}"); $dumpvars(0,Top.value); end
+        r#"module Top(input logic fail_now, output logic value, output int final_calls);
+            initial begin final_calls=0; $dumpfile("{}"); $dumpvars(0,Top.value); end
             always_comb begin value=fail_now; if(fail_now) $fatal(1,"direct primary"); end
+            final final_calls += 1;
             endmodule"#,
         path.display()
     );
@@ -716,6 +717,13 @@ fn check_direct_fatal_waveform(action: &str) {
     let error = match action {
         "eval_comb" => format!("{:?}", simulation.eval_comb().unwrap_err()),
         "try_dump" => format!("{:?}", simulation.try_dump(0).unwrap_err()),
+        "dump" => {
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                simulation.dump(0);
+            }))
+            .unwrap_err();
+            *panic.downcast::<String>().unwrap()
+        }
         "run_until" => format!("{:?}", simulation.run_until(1).unwrap_err()),
         "run_until_bounded" => format!("{:?}", simulation.run_until_bounded(1, 10).unwrap_err()),
         _ => unreachable!(),
@@ -723,11 +731,17 @@ fn check_direct_fatal_waveform(action: &str) {
     assert!(error.contains("direct primary"), "{action}: {error}");
     let text = std::fs::read_to_string(path).unwrap();
     assert!(text.contains("1!"), "{action}: {text}");
+    // $fatal implicitly calls $finish (20.10), including when lazy
+    // combinational evaluation was triggered by a waveform API.
+    assert!(simulation.is_finished(), "{action}");
+    let final_calls = simulation.signal("final_calls");
+    assert_eq!(simulation.get(final_calls), 1u8.into(), "{action}");
     simulation.modify(|io| io.set(fail, 0u8)).unwrap();
     simulation.eval_comb().unwrap();
     let value = simulation.signal("value");
-    assert_eq!(simulation.get(value), 0u8.into());
-    assert!(!simulation.is_finished());
+    assert_eq!(simulation.get(value), 1u8.into(), "{action}");
+    simulation.finish().unwrap();
+    assert_eq!(simulation.get(final_calls), 1u8.into(), "{action}");
 }
 
 #[test]

@@ -50,6 +50,10 @@ pub(super) enum Job {
         minimum: u8,
         member: Name,
     },
+    Copy {
+        start: usize,
+        minimum: u8,
+    },
     GroupTypical {
         start: usize,
         minimum: u8,
@@ -83,6 +87,11 @@ pub(super) enum Job {
         minimum: u8,
         left: ExprId,
         parameterized: bool,
+    },
+    ArrayMethodWith {
+        start: usize,
+        minimum: u8,
+        left: ExprId,
     },
     Select {
         start: usize,
@@ -312,6 +321,7 @@ impl Parser<'_> {
                     pending.push(*expression);
                 }
                 ExprKind::Group(value)
+                | ExprKind::Copy(value)
                 | ExprKind::Member {
                     expression: value, ..
                 } => pending.push(*value),
@@ -362,6 +372,19 @@ impl Parser<'_> {
                     pending.extend(expressions);
                 }
                 ExprKind::Tagged { value, .. } => pending.extend(value),
+                ExprKind::RandomizeWith {
+                    expression,
+                    constraints,
+                } => {
+                    pending.push(*expression);
+                    pending.extend(constraints.iter().flatten());
+                }
+                ExprKind::ArrayMethodWith {
+                    expression,
+                    predicate,
+                } => {
+                    pending.extend([*expression, *predicate]);
+                }
                 ExprKind::Call { .. }
                 | ExprKind::Parameterized { .. }
                 | ExprKind::Type(_)
@@ -582,6 +605,22 @@ impl Parser<'_> {
                                 jobs.push(Job::Expression(0));
                             }
                         }
+                        // `new h` copies the object of `h`; `new` followed
+                        // by `(`, or by nothing, constructs one (8.7, 8.12).
+                        "new"
+                            if self.indices.get(self.at + 1).is_some_and(|&index| {
+                                let token = &self.tokens[index];
+                                matches!(
+                                    token.kind,
+                                    TokenKind::Identifier | TokenKind::EscapedIdentifier
+                                ) && (!self.reserved_identifier(token)
+                                    || matches!(token.text.as_str(), "this" | "super"))
+                            }) =>
+                        {
+                            self.at += 1;
+                            jobs.push(Job::Copy { start, minimum });
+                            jobs.push(Job::Expression(0));
+                        }
                         "(" => {
                             self.at += 1;
                             jobs.push(Job::Group { start, minimum });
@@ -748,6 +787,77 @@ impl Parser<'_> {
                             parameterized,
                         });
                         jobs.push(Job::Arguments);
+                    }
+                    "with" if self.nth(1) == "{" => {
+                        let callee = match &self.expressions[left.0].kind {
+                            ExprKind::Call { expression, .. } => *expression,
+                            _ => left,
+                        };
+                        let is_randomize = match &self.expressions[callee.0].kind {
+                            ExprKind::Name(name) | ExprKind::Member { name, .. } => {
+                                name.value() == "randomize"
+                            }
+                            _ => false,
+                        };
+                        if !is_randomize {
+                            return Err(self.error("constraint with block requires randomize"));
+                        }
+                        self.at += 1;
+                        if self.inline_constraint_depth != 0 {
+                            return Err(self.unsupported("inline constraint nesting limit"));
+                        }
+                        self.inline_constraint_depth += 1;
+                        let constraints = self.constraint_block();
+                        self.inline_constraint_depth -= 1;
+                        let constraints = constraints?;
+                        self.tail(
+                            &mut jobs,
+                            start,
+                            minimum,
+                            ExprKind::RandomizeWith {
+                                expression: left,
+                                constraints,
+                            },
+                        )?;
+                    }
+                    "with" if self.nth(1) == "(" => {
+                        let method = match &self.expressions[left.0].kind {
+                            ExprKind::Call {
+                                expression,
+                                arguments,
+                            } => {
+                                if arguments.len() > 2
+                                    || arguments.iter().any(|argument| {
+                                        argument.name.is_some()
+                                            || argument.value.is_some_and(|id| {
+                                                !matches!(
+                                                    &self.expressions[id.0].kind,
+                                                    ExprKind::Name(_)
+                                                )
+                                            })
+                                    })
+                                {
+                                    return Err(self.error(
+                                        "array method iterator arguments must be identifiers",
+                                    ));
+                                }
+                                *expression
+                            }
+                            _ => left,
+                        };
+                        if !matches!(&self.expressions[method.0].kind,
+                            ExprKind::Member { separator, .. } if separator == ".")
+                        {
+                            return Err(self.error("with expression requires an array method"));
+                        }
+                        self.at += 1;
+                        self.expect("(")?;
+                        jobs.push(Job::ArrayMethodWith {
+                            start,
+                            minimum,
+                            left,
+                        });
+                        jobs.push(Job::Expression(0));
                     }
                     "[" => {
                         jobs.push(Job::Select {
@@ -924,6 +1034,10 @@ impl Parser<'_> {
                         ExprKind::Tagged { member, value },
                     )?;
                 }
+                Job::Copy { start, minimum } => {
+                    let value = values.pop().unwrap().expression();
+                    self.tail(&mut jobs, start, minimum, ExprKind::Copy(value))?;
+                }
                 Job::GroupTypical {
                     start,
                     minimum,
@@ -1027,6 +1141,23 @@ impl Parser<'_> {
                         }
                     };
                     self.tail(&mut jobs, start, minimum, kind)?;
+                }
+                Job::ArrayMethodWith {
+                    start,
+                    minimum,
+                    left,
+                } => {
+                    let predicate = values.pop().unwrap().expression();
+                    self.expect(")")?;
+                    self.tail(
+                        &mut jobs,
+                        start,
+                        minimum,
+                        ExprKind::ArrayMethodWith {
+                            expression: left,
+                            predicate,
+                        },
+                    )?;
                 }
                 Job::Select {
                     start,
@@ -1262,6 +1393,15 @@ impl Parser<'_> {
                 }
                 Job::Concat { start, minimum } => {
                     self.expect("{")?;
+                    if self.eat("}") {
+                        self.tail(
+                            &mut jobs,
+                            start,
+                            minimum,
+                            ExprKind::Concatenation(Vec::new()),
+                        )?;
+                        continue;
+                    }
                     if matches!(self.peek(), "<<" | ">>") {
                         let operator = self.peek().to_owned();
                         self.at += 1;

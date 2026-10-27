@@ -37,6 +37,7 @@ pub(crate) mod portable;
 // Builds without the host runtime run every slot in the reference loop.
 #[cfg(feature = "host-runtime")]
 mod scheduler;
+mod settle;
 #[cfg(feature = "host-runtime")]
 mod simulation;
 mod simulator;
@@ -90,6 +91,7 @@ pub use num_bigint::BigUint;
 pub use optimizer::OptLevel;
 pub use optimizer::OptimizeOptions;
 pub use optimizer::ParallelPartition;
+pub use optimizer::SettlePartition;
 pub use optimizer::SirDiagnostics;
 pub use optimizer::SirPass;
 pub use simulator::render_diagnostic;
@@ -103,15 +105,22 @@ pub const MAX_SIMULATION_THREADS: u32 = 64;
 mod host_api {
     use crate::SimBackend;
     pub use crate::backend::tiered::TieredEventRef;
+    #[cfg(feature = "wasm-runtime")]
     pub use crate::backend::wasm_runtime::WasmBackend;
     pub use crate::backend::{
-        CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, EventRef, InterpBackend,
-        JitBackend, RegallocAlgorithm, SharedJitCode, TieredBackend, TieredExecutionStats,
-        TieredExecutionTier, TieredExecutionTiming, TieredPromotionStatus,
+        CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm,
+    };
+    #[cfg(feature = "cranelift")]
+    pub use crate::backend::{EventRef, JitBackend, SharedJitCode};
+    pub use crate::backend::{
+        InterpBackend, TieredBackend, TieredExecutionStats, TieredExecutionTier,
+        TieredExecutionTiming, TieredPromotionStatus,
     };
     pub use crate::debug::CompilationTraceResult;
     pub use crate::diagnostics::DiagnosticsOptions;
-    pub use crate::simulation::{Simulation, SimulationCheckpoint, SlotObserver};
+    pub use crate::simulation::{
+        CheckpointFileError, Simulation, SimulationCheckpoint, SlotObserver, SourceWaveformState,
+    };
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
@@ -178,11 +187,36 @@ mod host_api {
     pub struct SlotIo<'a, B: SimBackend = DefaultBackend> {
         io: IOContext<'a, B>,
         wrote: bool,
+        finish_requested: bool,
     }
 
     impl<'a, B: SimBackend> SlotIo<'a, B> {
         pub(crate) fn new(io: IOContext<'a, B>) -> Self {
-            Self { io, wrote: false }
+            Self {
+                io,
+                wrote: false,
+                finish_requested: false,
+            }
+        }
+
+        /// Capture current HDL values without running any simulation regions.
+        /// Use the schema obtained from this simulation before entering the slot.
+        /// This diagnostic file has no schedule and is not a resumable checkpoint.
+        pub fn capture_state(
+            &self,
+            schema: &crate::StateSchema,
+        ) -> Result<crate::StateFile, crate::StateError> {
+            schema.capture(self.io.backend)
+        }
+
+        /// End the simulation when this observer callback returns, before
+        /// any further scheduled work runs. Earlier host writes remain in state.
+        pub fn request_finish(&mut self) {
+            self.finish_requested = true;
+        }
+
+        pub(crate) fn finish_requested(&self) -> bool {
+            self.finish_requested
         }
 
         pub(crate) fn wrote(&self) -> bool {
@@ -296,3 +330,6 @@ pub use signal_access::SignalAccessOptions;
 
 mod timescale;
 pub use timescale::SvTimescale;
+
+/// Host-injected file I/O and snapshot contracts.
+pub use celox_runtime::file_io_backend::{FileMode, FileSystem, FileSystemFactory, HostFileSystem};

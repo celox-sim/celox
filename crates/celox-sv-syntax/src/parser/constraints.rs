@@ -1,12 +1,18 @@
 //! Class constraint syntax validation. Constraints retain their opaque class
-//! owner; no randomization or solver semantics are introduced here.
+//! owner. Simple expression blocks also retain their expression nodes.
 use super::*;
 
 enum Job {
     Block(bool),
     Expression,
     Set,
-    Else,
+    Guard {
+        condition: ExprId,
+        first: usize,
+        start: usize,
+        negate: bool,
+        has_else: bool,
+    },
 }
 
 impl Parser<'_> {
@@ -32,15 +38,42 @@ impl Parser<'_> {
             class.has_constraints = true;
         }
         let prototype = self.eat("extern") || self.eat("pure");
-        self.eat("static");
+        let is_static = self.eat("static");
         self.expect("constraint")?;
-        self.name()?;
+        let name = self.name()?;
+        if self.class_stack.last().is_some_and(|class| {
+            class
+                .constraints
+                .iter()
+                .any(|block| block.name.spelling == name.spelling)
+        }) {
+            return Err(self.error("duplicate constraint block"));
+        }
         if self.eat(";") {
+            if let Some(class) = self.class_stack.last_mut() {
+                class.constraints.push(ClassConstraint {
+                    name,
+                    expressions: None,
+                });
+            }
             return Ok(());
         }
         if prototype {
             return Err(self.error("extern or pure constraint requires a prototype"));
         }
+        let expressions = self.constraint_block()?;
+        if let Some(class) = self.class_stack.last_mut() {
+            class.constraints.push(ClassConstraint {
+                name,
+                expressions: if is_static { None } else { expressions },
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn constraint_block(&mut self) -> Result<Option<Vec<ExprId>>> {
+        let mut expressions = Vec::new();
+        let mut supported = true;
         self.expect("{")?;
         let mut jobs = vec![Job::Block(true)];
         while let Some(job) = jobs.pop() {
@@ -52,6 +85,7 @@ impl Parser<'_> {
                     }
                     jobs.push(Job::Block(solve));
                     if solve && self.eat("solve") {
+                        supported = false;
                         self.constraint_primary_list()?;
                         self.expect("before")?;
                         self.constraint_primary_list()?;
@@ -67,39 +101,97 @@ impl Parser<'_> {
                         jobs.push(Job::Expression);
                     }
                 }
-                Job::Else => {
-                    if self.eat("else") {
+                Job::Guard {
+                    condition,
+                    first,
+                    start,
+                    negate,
+                    has_else,
+                } => {
+                    let guard = if negate {
+                        self.node(
+                            start,
+                            ExprKind::Unary {
+                                operator: "!".into(),
+                                expression: condition,
+                                postfix: false,
+                            },
+                        )?
+                    } else {
+                        condition
+                    };
+                    let body: Vec<_> = expressions.drain(first..).collect();
+                    for expression in body {
+                        expressions.push(self.node(
+                            start,
+                            ExprKind::Binary {
+                                left: guard,
+                                operator: "||".into(),
+                                right: expression,
+                            },
+                        )?);
+                    }
+                    if has_else && self.eat("else") {
+                        jobs.push(Job::Guard {
+                            condition,
+                            first: expressions.len(),
+                            start,
+                            negate: false,
+                            has_else: false,
+                        });
                         jobs.push(Job::Set);
                     }
                 }
                 Job::Expression => {
+                    let start = self.at;
                     if self.eat("if") {
                         self.expect("(")?;
-                        self.expression(0)?;
+                        let condition = self.expression(0)?;
                         self.expect(")")?;
-                        jobs.push(Job::Else);
+                        jobs.push(Job::Guard {
+                            condition,
+                            first: expressions.len(),
+                            start,
+                            negate: true,
+                            has_else: true,
+                        });
                         jobs.push(Job::Set);
                     } else if self.eat("foreach") {
+                        supported = false;
                         self.foreach_header()?;
                         jobs.push(Job::Set);
                     } else if self.eat("disable") {
+                        supported = false;
                         self.expect("soft")?;
                         self.constraint_primary()?;
                         self.expect(";")?;
                     } else if self.eat("unique") {
+                        supported = false;
                         self.constraint_ranges(false)?;
                         self.expect(";")?;
                     } else {
                         let soft = self.eat("soft");
                         if soft {
+                            supported = false;
                             self.expression(0)?;
                         } else {
-                            self.constraint_condition()?;
+                            let (expression, simple) = self.constraint_condition()?;
+                            expressions.push(expression);
+                            supported &= simple;
                         }
                         if !soft && self.eat("->") {
+                            let condition = expressions.pop().expect("condition retained");
+                            jobs.push(Job::Guard {
+                                condition,
+                                first: expressions.len(),
+                                start,
+                                negate: true,
+                                has_else: false,
+                            });
                             jobs.push(Job::Set);
                         } else {
                             if self.eat("dist") {
+                                supported = false;
                                 self.constraint_ranges(true)?;
                             }
                             self.expect(";")?;
@@ -108,17 +200,19 @@ impl Parser<'_> {
                 }
             }
         }
-        Ok(())
+        Ok(supported.then_some(expressions))
     }
 
-    fn constraint_condition(&mut self) -> Result<()> {
+    fn constraint_condition(&mut self) -> Result<(ExprId, bool)> {
         // Keep the constraint-set arrow for the outer continuation. Equivalence
         // shares its expression precedence, so consume it explicitly here.
-        self.expression(2)?;
+        let expression = self.expression(2)?;
+        let mut simple = true;
         while self.eat("<->") {
+            simple = false;
             self.expression(2)?;
         }
-        Ok(())
+        Ok((expression, simple))
     }
 
     fn constraint_ranges(&mut self, distribution: bool) -> Result<()> {

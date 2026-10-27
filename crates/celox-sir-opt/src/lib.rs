@@ -1,3 +1,10 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_macros,
+        reason = "thread-local verification counters exist only in unit tests; non-test builds enforce the ban"
+    )
+)]
 //! Backend-independent SIR optimization policy and pass pipeline.
 
 pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
@@ -102,5 +109,6 @@ pub fn optimize(
 
 mod policy;
 pub use policy::{
-    OptLevel, OptimizeOptions, ParallelPartition, PassOptions, SirDiagnostics, SirPass,
+    OptLevel, OptimizeOptions, ParallelPartition, PassOptions, SettlePartition, SirDiagnostics,
+    SirPass,
 };

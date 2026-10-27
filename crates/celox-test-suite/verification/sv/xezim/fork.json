@@ -1,0 +1,48 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "fork::compound_event_activations_outlive_parent",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork::compound_event_four_state_lsb_edges at 302:2: assert_eq rises: expected 0x3, got 0x0",
+      "expectation": "Simulation",
+      "name": "fork::compound_event_four_state_lsb_edges",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "fork::compound_event_function_scratch_isolated",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork::compound_event_tracks_result_not_operands at 238:2: assert_eq q: expected 0x3, got 0x66",
+      "expectation": "Simulation",
+      "name": "fork::compound_event_tracks_result_not_operands",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

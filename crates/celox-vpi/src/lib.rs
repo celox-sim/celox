@@ -1,7 +1,8 @@
 //! Minimal IEEE VPI compatibility layer backed by an attached Celox image.
 //!
 //! This first layer intentionally implements object discovery, hierarchy
-//! iteration, properties, and immediate signal values. Callback scheduling is
+//! iteration, properties, immediate values, and zero-delay inertial deposits.
+//! Callback scheduling is
 //! kept separate because it must share the runtime's simulation-region loop.
 
 #![cfg_attr(
@@ -21,12 +22,14 @@ use std::{
 
 use celox::{
     BigUint, DomainKind, NativeProgramInstance, NativeSignalIdentity, ReflectionScopeId,
-    ReflectionSignalId, RuntimeEvent, RuntimeFormatContext, Severity, SignalDirection, SimBackend,
+    ReflectionSignalId, RuntimeEvent, RuntimeFormatContext, Severity, SignalDirection,
 };
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 mod callbacks;
 pub mod driver;
+mod state;
+
 pub use callbacks::{
     CB_AFTER_DELAY, CB_END_OF_SIMULATION, CB_NEXT_SIM_TIME, CB_READ_ONLY_SYNCH,
     CB_READ_WRITE_SYNCH, CB_START_OF_SIMULATION, CB_VALUE_CHANGE, VPI_SCALED_REAL_TIME,
@@ -34,6 +37,7 @@ pub use callbacks::{
     celox_vpi_current_time, vpi_chk_error, vpi_control, vpi_get_time, vpi_get_vlog_info,
     vpi_handle_by_index, vpi_register_cb, vpi_remove_cb,
 };
+use state::{Runtime, TimedRuntime, VpiState};
 
 pub const VPI_BIN_STR_VAL: i32 = 1;
 pub const VPI_HEX_STR_VAL: i32 = 4;
@@ -139,7 +143,7 @@ impl SignalSelection {
     }
 
     /// Resolve storage without cloning hierarchy names or dimension metadata.
-    fn signal(self, runtime: &NativeProgramInstance) -> Option<celox::SignalRef> {
+    fn signal(self, runtime: &dyn VpiState) -> Option<celox::SignalRef> {
         let root = runtime.reflection().signal(self.root)?;
         let mut signal = root.signal;
         if self.depth == 0 {
@@ -165,7 +169,7 @@ impl SignalSelection {
         Some(signal)
     }
 
-    fn domain_kind(self, runtime: &NativeProgramInstance) -> Option<DomainKind> {
+    fn domain_kind(self, runtime: &dyn VpiState) -> Option<DomainKind> {
         let root = runtime.reflection().signal(self.root)?;
         Some(if self.depth == 0 {
             root.domain_kind
@@ -174,7 +178,7 @@ impl SignalSelection {
         })
     }
 
-    fn resolve(self, runtime: &NativeProgramInstance) -> Option<celox::ReflectionSignal> {
+    fn resolve(self, runtime: &dyn VpiState) -> Option<celox::ReflectionSignal> {
         let mut signal = runtime.reflection().signal(self.root)?.clone();
         signal.signal = self.signal(runtime)?;
         if self.depth == 0 {
@@ -205,7 +209,7 @@ impl SignalSelection {
         Some(signal)
     }
 
-    fn select(self, runtime: &NativeProgramInstance, index: i32) -> Option<Self> {
+    fn select(self, runtime: &dyn VpiState, index: i32) -> Option<Self> {
         let root = runtime.reflection().signal(self.root)?;
         let &(left, right) = root.unpacked_ranges.get(self.depth)?;
         let index = i128::from(index);
@@ -232,7 +236,7 @@ impl SignalSelection {
 
     // Some arrays use contiguous bits instead of a byte stride (including
     // scalar arrays and arrays whose uses cannot be lowered as strided loads).
-    fn slice(self, runtime: &NativeProgramInstance) -> Option<(usize, usize)> {
+    fn slice(self, runtime: &dyn VpiState) -> Option<(usize, usize)> {
         let root = runtime.reflection().signal(self.root)?;
         if self.depth == 0 || root.signal.array_layout.is_some() {
             return None;
@@ -246,7 +250,7 @@ impl SignalSelection {
         Some((self.first * element_width, remaining * element_width))
     }
 
-    fn width(self, runtime: &NativeProgramInstance) -> Option<usize> {
+    fn width(self, runtime: &dyn VpiState) -> Option<usize> {
         if let Some((_, width)) = self.slice(runtime) {
             Some(width)
         } else {
@@ -254,7 +258,7 @@ impl SignalSelection {
         }
     }
 
-    fn identity(self, runtime: &NativeProgramInstance) -> Option<VpiSignalIdentity> {
+    fn identity(self, runtime: &dyn VpiState) -> Option<VpiSignalIdentity> {
         let storage = if self.depth == 0 || self.slice(runtime).is_some() {
             runtime.signal_identity(self.root)?
         } else {
@@ -266,38 +270,38 @@ impl SignalSelection {
         })
     }
 
-    fn read(self, runtime: &NativeProgramInstance) -> Option<(BigUint, BigUint)> {
+    fn read(self, runtime: &dyn VpiState) -> Option<(BigUint, BigUint)> {
         let signal = self.signal(runtime)?;
         let Some((offset, width)) = self.slice(runtime) else {
-            return Some(runtime.backend().get_four_state(signal));
+            return Some(runtime.get_four_state(signal));
         };
         let (window, shift) = bit_window(signal, offset, width);
         let mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
-        let bits = (runtime.backend().get_four_state(window).0 >> shift) & &mask;
+        let bits = (runtime.get_four_state(window).0 >> shift) & &mask;
         let unknowns = if signal.is_4state && runtime.four_state() {
             let mut mask_window = window;
             mask_window.offset += signal.width.div_ceil(8);
-            (runtime.backend().get_four_state(mask_window).0 >> shift) & mask
+            (runtime.get_four_state(mask_window).0 >> shift) & mask
         } else {
             BigUint::default()
         };
         Some((bits, unknowns))
     }
 
-    fn write(self, runtime: &mut NativeProgramInstance, bits: BigUint, mask: BigUint) {
+    fn write(self, runtime: &mut dyn VpiState, bits: BigUint, mask: BigUint) {
         let Some(signal) = self.signal(runtime) else {
             return;
         };
         let Some((offset, width)) = self.slice(runtime) else {
-            runtime.backend_mut().set_four_state(signal, bits, mask);
+            runtime.set_four_state(signal, bits, mask);
             return;
         };
         let (window, shift) = bit_window(signal, offset, width);
         let selected = ((BigUint::from(1u8) << width) - BigUint::from(1u8)) << shift;
         let whole = (BigUint::from(1u8) << window.width) - BigUint::from(1u8);
         let retained = &whole ^ &selected;
-        let old = runtime.backend().get_four_state(window).0;
-        runtime.backend_mut().set_four_state(
+        let old = runtime.get_four_state(window).0;
+        runtime.set_four_state(
             window,
             (old & &retained) | ((bits << shift) & &selected),
             BigUint::default(),
@@ -305,8 +309,8 @@ impl SignalSelection {
         if signal.is_4state && runtime.four_state() {
             let mut mask_window = window;
             mask_window.offset += signal.width.div_ceil(8);
-            let old = runtime.backend().get_four_state(mask_window).0;
-            runtime.backend_mut().set_four_state(
+            let old = runtime.get_four_state(mask_window).0;
+            runtime.set_four_state(
                 mask_window,
                 (old & retained) | ((mask << shift) & selected),
                 BigUint::default(),
@@ -362,9 +366,11 @@ pub type VpiHandle = *mut VpiHandleObject;
 /// per process because standard VPI entry points carry no host context.
 #[derive(Default)]
 struct VpiHost {
-    runtime: RefCell<Option<NativeProgramInstance>>,
+    runtime: RefCell<Option<Runtime>>,
     forced_values: RefCell<HashMap<VpiSignalIdentity, ForcedValue>>,
     pending_writes: RefCell<PendingWrites>,
+    // Zero-delay inertial deposits become visible in the next update round.
+    inertial_writes: RefCell<HashMap<VpiSignalIdentity, PendingDeposit>>,
     callbacks: RefCell<callbacks::CallbackState>,
     vlog: RefCell<Option<callbacks::VlogStorage>>,
 }
@@ -386,6 +392,17 @@ pub struct VpiSession {
 }
 
 impl VpiSession {
+    /// Capture the last evaluated HDL values without dispatching callbacks.
+    ///
+    /// VPI callbacks, pending writes, forces and plugin memory are not saved.
+    /// The returned file is for inspection/diff or HDL-only initialization;
+    /// it cannot resume a VPI session. Call between dispatch runs or from a
+    /// read-only synchronization callback for settled values. Other callback
+    /// phases capture exactly the values currently visible to VPI reads.
+    pub fn save_state(&self) -> Result<celox::StateFile, String> {
+        capture_host_state(&self.host)
+    }
+
     // The C loader has no Rust caller to retain a guard. Transfer its lifetime
     // to the explicit celox_vpi_clear_runtime/clear_runtime boundary instead.
     fn detach(mut self) {
@@ -451,28 +468,29 @@ fn host_is_active() -> bool {
         .is_some_and(|host| host.owner == std::thread::current().id())
 }
 
+fn selected_host() -> Option<std::rc::Rc<VpiHost>> {
+    let active = ACTIVE_HOST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    active
+        .as_ref()
+        .filter(|host| host.owner == std::thread::current().id())
+        .map(|host| {
+            let pointer = host.address as *const VpiHost;
+            // Safety: the owning registration stays live under the lock and
+            // only its owner thread touches this non-Send Rc. The cloned Rc
+            // keeps the host alive across callbacks and reentrant teardown.
+            unsafe {
+                std::rc::Rc::increment_strong_count(pointer);
+                std::rc::Rc::from_raw(pointer)
+            }
+        })
+}
+
 fn with_host<R>(operation: impl FnOnce(&VpiHost) -> R) -> R {
-    let host = {
-        let active = ACTIVE_HOST
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        active
-            .as_ref()
-            .filter(|host| host.owner == std::thread::current().id())
-            .map(|host| {
-                let pointer = host.address as *const VpiHost;
-                // Safety: the owning registration stays live under the lock and
-                // only its owner thread touches this non-Send Rc. The cloned Rc
-                // keeps the host alive across callbacks and reentrant teardown.
-                unsafe {
-                    std::rc::Rc::increment_strong_count(pointer);
-                    std::rc::Rc::from_raw(pointer)
-                }
-            })
-    };
     // An unbound/foreign-thread C call sees an empty host, never another
     // thread's non-Send simulation state.
-    let host = host.unwrap_or_default();
+    let host = selected_host().unwrap_or_default();
     operation(&host)
 }
 
@@ -620,8 +638,22 @@ fn apply_pending_deposits(
 /// guard for the entire plugin lifetime. Overlapping sessions are rejected,
 /// including installation from a callback before its current host has stopped.
 pub fn install_runtime(instance: NativeProgramInstance) -> Result<VpiSession, String> {
+    install(Runtime::Untimed(instance))
+}
+
+/// Install a timed simulation of `image`, which runs the design's processes
+/// in step with the VPI time callbacks. Retain the returned guard as for
+/// [`install_runtime`].
+pub fn install_timed_runtime(
+    image: celox::NativeProgramImage,
+    simulation: celox::Simulation<celox::NativeBackend>,
+) -> Result<VpiSession, String> {
+    install(Runtime::Timed(TimedRuntime::new(image, simulation)))
+}
+
+fn install(runtime: Runtime) -> Result<VpiSession, String> {
     let mut host = VpiHost::default();
-    *host.runtime.get_mut() = Some(instance);
+    *host.runtime.get_mut() = Some(runtime);
     let host = std::rc::Rc::new(host);
     let mut active = ACTIVE_HOST
         .lock()
@@ -638,6 +670,45 @@ pub fn install_runtime(instance: NativeProgramInstance) -> Result<VpiSession, St
         host,
         registered: true,
     })
+}
+
+fn capture_host_state(host: &VpiHost) -> Result<celox::StateFile, String> {
+    let runtime = host
+        .runtime
+        .try_borrow()
+        .map_err(|_| "VPI runtime is executing; capture at a callback boundary")?;
+    runtime
+        .as_ref()
+        .ok_or("VPI runtime is unavailable")?
+        .save_state()
+        .map_err(|error| error.to_string())
+}
+
+/// Write a diagnostic HDL state file for the active VPI session.
+///
+/// Returns 1 on success, 0 for an unavailable/busy runtime, invalid UTF-8 path,
+/// unsupported state value, or I/O failure. Uses the capture contract of
+/// [`VpiSession::save_state`]. Existing files at `path` are overwritten.
+///
+/// # Safety
+/// `path` must be null or point to a readable NUL-terminated UTF-8 string
+/// for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn celox_vpi_save_state(path: *const c_char) -> i32 {
+    if path.is_null() {
+        return 0;
+    }
+    // Safety: the caller supplies a readable C string.
+    let Ok(path) = unsafe { CStr::from_ptr(path) }.to_str() else {
+        return 0;
+    };
+    let Ok(state) = with_host(capture_host_state) else {
+        return 0;
+    };
+    let Ok(file) = std::fs::File::create(path) else {
+        return 0;
+    };
+    i32::from(state.write_to(file).is_ok())
 }
 
 /// Unregister the current thread's host. During callback dispatch this requests
@@ -692,7 +763,12 @@ pub fn run_callbacks_result() -> Result<bool, String> {
     if let Some(error) = callbacks::take_error() {
         return Err(error);
     }
-    let finished = callbacks::run();
+    let timed = with_timed_mut(|_| ()).is_some();
+    let finished = if timed {
+        callbacks::run_timed()
+    } else {
+        callbacks::run()
+    };
     let error = callbacks::take_error();
     if with_host(|host| borrow_cell(&host.callbacks, |state| state.detach_on_stop)) {
         clear_runtime();
@@ -719,12 +795,43 @@ pub extern "C" fn celox_vpi_load_current_executable() -> i32 {
     }
 }
 
-fn with_runtime<R>(operation: impl FnOnce(&NativeProgramInstance) -> R) -> Option<R> {
-    with_host(|host| borrow_cell(&host.runtime, |runtime| runtime.as_ref().map(operation)))
+fn with_runtime<R>(operation: impl FnOnce(&dyn VpiState) -> R) -> Option<R> {
+    with_host(|host| {
+        borrow_cell(&host.runtime, |runtime| {
+            runtime.as_ref().map(|runtime| operation(runtime.state()))
+        })
+    })
 }
 
-fn with_runtime_mut<R>(operation: impl FnOnce(&mut NativeProgramInstance) -> R) -> Option<R> {
-    with_host(|host| borrow_cell_mut(&host.runtime, |runtime| runtime.as_mut().map(operation)))
+fn with_runtime_mut<R>(operation: impl FnOnce(&mut dyn VpiState) -> R) -> Option<R> {
+    with_host(|host| {
+        borrow_cell_mut(&host.runtime, |runtime| {
+            runtime
+                .as_mut()
+                .map(|runtime| operation(runtime.state_mut()))
+        })
+    })
+}
+
+/// The untimed program instance of the session, whose regions the VPI host
+/// schedules itself; `None` for a timed simulation.
+fn with_instance_mut<R>(operation: impl FnOnce(&mut NativeProgramInstance) -> R) -> Option<R> {
+    with_host(|host| {
+        borrow_cell_mut(&host.runtime, |runtime| match runtime {
+            Some(Runtime::Untimed(instance)) => Some(operation(instance)),
+            _ => None,
+        })
+    })
+}
+
+/// The timed runtime of the session, if it has one.
+fn with_timed_mut<R>(operation: impl FnOnce(&mut TimedRuntime) -> R) -> Option<R> {
+    with_host(|host| {
+        borrow_cell_mut(&host.runtime, |runtime| match runtime {
+            Some(Runtime::Timed(timed)) => Some(operation(timed)),
+            _ => None,
+        })
+    })
 }
 
 fn c_string(value: &str) -> CString {
@@ -1183,21 +1290,23 @@ pub unsafe extern "C" fn vpi_get_str(property: i32, reference: VpiHandle) -> *mu
 }
 
 fn value_bits(id: SignalSelection) -> Option<(BigUint, BigUint, usize)> {
-    with_host(|host| {
-        borrow_cell(&host.runtime, |runtime| {
-            let runtime = runtime.as_ref()?;
-            let signal = runtime.reflection().signal(id.root)?;
-            if id.depth != signal.unpacked_dims.len() {
-                return None;
-            }
-            let width = id.width(runtime)?;
-            let identity = id.identity(runtime)?;
-            if let Some(forced) = host.forced_values.borrow().get(&identity) {
-                return Some((forced.value.clone(), forced.mask.clone(), width));
-            }
-            let (value, mask) = id.read(runtime)?;
-            Some((value, mask, width))
-        })
+    with_host(|host| value_bits_at(host, id))
+}
+
+fn value_bits_at(host: &VpiHost, id: SignalSelection) -> Option<(BigUint, BigUint, usize)> {
+    borrow_cell(&host.runtime, |runtime| {
+        let runtime = runtime.as_ref()?.state();
+        let signal = runtime.reflection().signal(id.root)?;
+        if id.depth != signal.unpacked_dims.len() {
+            return None;
+        }
+        let width = id.width(runtime)?;
+        let identity = id.identity(runtime)?;
+        if let Some(forced) = host.forced_values.borrow().get(&identity) {
+            return Some((forced.value.clone(), forced.mask.clone(), width));
+        }
+        let (value, mask) = id.read(runtime)?;
+        Some((value, mask, width))
     })
 }
 
@@ -1290,28 +1399,28 @@ fn encode_signal_value(
 }
 
 unsafe fn write_snapshot_value(
+    host: &VpiHost,
     reference: VpiHandle,
     value: *mut VpiValue,
     bits: &BigUint,
     mask: &BigUint,
 ) {
-    if value.is_null() {
+    if value.is_null() || reference.is_null() {
         return;
     }
-    // Safety: the caller upholds the VPI handle contract.
-    let Some(handle) = (unsafe { handle_mut(reference) }) else {
-        return;
-    };
+    // Safety: the caller has selected this host and keeps the callback's
+    // object handle live through dispatch.
+    let handle = unsafe { &mut *reference };
     let HandleKind::Object(ObjectRef::Signal(id)) = handle.kind else {
         return;
     };
-    let metadata = with_runtime(|runtime| {
+    let metadata = borrow_cell(&host.runtime, |runtime| {
+        let runtime = runtime.as_ref()?.state();
         runtime
             .reflection()
             .signal(id.root)
             .and_then(|signal| Some((id.width(runtime)?, signal.signed)))
-    })
-    .flatten();
+    });
     let Some((width, signed)) = metadata else {
         return;
     };
@@ -1327,13 +1436,17 @@ unsafe fn write_snapshot_value(
 /// `reference` must be a live signal handle and `value` must point to writable
 /// `VpiValue` storage. Returned string/vector pointers are owned by the handle.
 pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValue) {
-    if value.is_null() {
+    if value.is_null() || reference.is_null() {
         return;
     }
-    // Safety: both pointers follow the VPI ABI contract.
-    let Some(handle) = (unsafe { handle_mut(reference) }) else {
+    // The selected host belongs to this thread. Resolve it once for both
+    // handle access and signal metadata instead of reentering the registry.
+    let Some(host) = selected_host() else {
         return;
     };
+    // Safety: the caller supplies a live handle; selection above rejects
+    // foreign-thread/unbound calls before dereferencing it.
+    let handle = unsafe { &mut *reference };
     if let HandleKind::Constant(integer) = handle.kind {
         // Safety: checked non-null above; caller owns the `VpiValue` allocation.
         let value = unsafe { &mut *value };
@@ -1345,17 +1458,15 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
     let HandleKind::Object(ObjectRef::Signal(id)) = handle.kind else {
         return;
     };
-    let Some((bits, mask, width)) = value_bits(id) else {
+    let Some((bits, mask, width)) = value_bits_at(&host, id) else {
         return;
     };
-    let signed = with_runtime(|runtime| {
+    let signed = borrow_cell(&host.runtime, |runtime| {
         runtime
-            .reflection()
-            .signal(id.root)
-            .map(|signal| signal.signed)
-    })
-    .flatten()
-    .unwrap_or(false);
+            .as_ref()
+            .and_then(|runtime| runtime.state().reflection().signal(id.root))
+            .is_some_and(|signal| signal.signed)
+    });
     // Safety: checked non-null above; caller owns the `VpiValue` allocation.
     encode_signal_value(handle, unsafe { &mut *value }, &bits, &mask, width, signed);
 }
@@ -1472,6 +1583,10 @@ pub unsafe extern "C" fn vpi_put_value(
     when: *const c_void,
     flags: i32,
 ) -> VpiHandle {
+    // A ReadOnly callback may not write (IEEE 1800-2023 38.36.2, Table 38-6).
+    if callbacks::in_read_only() {
+        return ptr::null_mut();
+    }
     let inertial_is_immediate = flags == VPI_INERTIAL_DELAY
         && (when.is_null() || {
             // Safety: a non-null VPI delay pointer addresses `s_vpi_time`.
@@ -1493,29 +1608,22 @@ pub unsafe extern "C" fn vpi_put_value(
     let Some(ObjectRef::Signal(id)) = (unsafe { object_ref(reference) }) else {
         return ptr::null_mut();
     };
-    if with_runtime(|runtime| {
-        runtime
-            .reflection()
-            .signal(id.root)
-            .is_some_and(|signal| signal.is_parameter)
-    })
-    .unwrap_or(false)
-    {
+    if id.depth != 0 && matches!(flags, VPI_FORCE_FLAG | VPI_RELEASE_FLAG) {
         return ptr::null_mut();
     }
-    if !with_runtime(|runtime| {
-        runtime
-            .reflection()
-            .signal(id.root)
-            .is_some_and(|signal| id.depth == signal.unpacked_dims.len())
+    let signal_info = with_runtime(|runtime| {
+        let root = runtime.reflection().signal(id.root)?;
+        if root.is_parameter || id.depth != root.unpacked_dims.len() {
+            return None;
+        }
+        Some((
+            id.identity(runtime)?,
+            id.width(runtime)?,
+            id.signal(runtime)?.is_4state && runtime.four_state(),
+        ))
     })
-    .unwrap_or(false)
-        || (id.depth != 0 && matches!(flags, VPI_FORCE_FLAG | VPI_RELEASE_FLAG))
-    {
-        return ptr::null_mut();
-    }
-    let identity = with_runtime(|runtime| id.identity(runtime)).flatten();
-    let Some(identity) = identity else {
+    .flatten();
+    let Some((identity, width, is_4state)) = signal_info else {
         return ptr::null_mut();
     };
     if flags == VPI_RELEASE_FLAG {
@@ -1538,27 +1646,27 @@ pub unsafe extern "C" fn vpi_put_value(
                 } else {
                     (released.deposited_value, released.deposited_mask)
                 };
-                runtime.release_signal(id.root);
-                let (old_value, old_mask) = runtime.backend().get_four_state(signal.signal);
-                let old_level = logic_level(&old_value, &old_mask);
-                let new_level = logic_level(&released_value, &released_mask);
-                with_host(|host| {
-                    borrow_cell_mut(&host.pending_writes, |pending| {
-                        record_pending_write(
-                            pending,
-                            id,
-                            identity,
-                            released_value.clone(),
-                            released_mask.clone(),
-                            signal.domain_kind,
-                            old_level,
-                            new_level,
-                        );
-                    })
-                });
-                runtime
-                    .backend_mut()
-                    .set_four_state(signal.signal, released_value, released_mask);
+                runtime.release(id.root);
+                if runtime.schedules_writes() {
+                    let (old_value, old_mask) = runtime.get_four_state(signal.signal);
+                    let old_level = logic_level(&old_value, &old_mask);
+                    let new_level = logic_level(&released_value, &released_mask);
+                    with_host(|host| {
+                        borrow_cell_mut(&host.pending_writes, |pending| {
+                            record_pending_write(
+                                pending,
+                                id,
+                                identity,
+                                released_value.clone(),
+                                released_mask.clone(),
+                                signal.domain_kind,
+                                old_level,
+                                new_level,
+                            );
+                        })
+                    });
+                }
+                runtime.set_four_state(signal.signal, released_value, released_mask);
                 true
             })
             .unwrap_or(false)
@@ -1570,16 +1678,6 @@ pub unsafe extern "C" fn vpi_put_value(
         };
     }
 
-    let signal_info = with_runtime(|runtime| {
-        Some((
-            id.width(runtime)?,
-            id.signal(runtime)?.is_4state && runtime.four_state(),
-        ))
-    })
-    .flatten();
-    let Some((width, is_4state)) = signal_info else {
-        return ptr::null_mut();
-    };
     // Safety: value follows the VPI value contract.
     let Some((mut bits, mut mask)) = (unsafe { decode_value(value, width) }) else {
         return ptr::null_mut();
@@ -1597,6 +1695,33 @@ pub unsafe extern "C" fn vpi_put_value(
             mask = 0u8.into();
         }
     }
+    if flags == VPI_INERTIAL_DELAY {
+        with_host(|host| {
+            host.inertial_writes.borrow_mut().insert(
+                identity,
+                PendingDeposit {
+                    id,
+                    value: bits,
+                    mask,
+                },
+            );
+        });
+        return reference;
+    }
+    if apply_signal_value(id, identity, bits, mask, flags) {
+        reference
+    } else {
+        ptr::null_mut()
+    }
+}
+
+fn apply_signal_value(
+    id: SignalSelection,
+    identity: VpiSignalIdentity,
+    bits: BigUint,
+    mask: BigUint,
+    flags: i32,
+) -> bool {
     let force_deposited = if flags == VPI_FORCE_FLAG {
         let deposited = with_host(|host| {
             borrow_cell(&host.forced_values, |forced| {
@@ -1609,11 +1734,10 @@ pub unsafe extern "C" fn vpi_put_value(
             })
         })
         .or_else(|| {
-            with_runtime(|runtime| Some(runtime.backend().get_four_state(id.signal(runtime)?)))
-                .flatten()
+            with_runtime(|runtime| Some(runtime.get_four_state(id.signal(runtime)?))).flatten()
         });
         let Some((deposited_value, deposited_mask)) = deposited else {
-            return ptr::null_mut();
+            return false;
         };
         Some((deposited_value, deposited_mask))
     } else if with_host(|host| {
@@ -1625,7 +1749,7 @@ pub unsafe extern "C" fn vpi_put_value(
             })
         })
     }) {
-        return reference;
+        return true;
     } else {
         None
     };
@@ -1639,26 +1763,29 @@ pub unsafe extern "C" fn vpi_put_value(
         let old_level = logic_level(&old_value, &old_mask);
         let new_level = logic_level(&bits, &mask);
         if flags == VPI_FORCE_FLAG {
-            if !runtime.force_signal(id.root, bits.clone(), mask.clone()) {
+            if !runtime.force(id.root, bits.clone(), mask.clone()) {
                 return false;
             }
         } else {
             id.write(runtime, bits.clone(), mask.clone());
         }
-        with_host(|host| {
-            borrow_cell_mut(&host.pending_writes, |pending| {
-                record_pending_write(
-                    pending,
-                    id,
-                    identity,
-                    bits.clone(),
-                    mask.clone(),
-                    domain_kind,
-                    old_level,
-                    new_level,
-                );
-            })
-        });
+        // A timed simulation schedules the edges of its host writes itself.
+        if runtime.schedules_writes() {
+            with_host(|host| {
+                borrow_cell_mut(&host.pending_writes, |pending| {
+                    record_pending_write(
+                        pending,
+                        id,
+                        identity,
+                        bits.clone(),
+                        mask.clone(),
+                        domain_kind,
+                        old_level,
+                        new_level,
+                    );
+                })
+            });
+        }
         true
     })
     .unwrap_or(false);
@@ -1679,12 +1806,35 @@ pub unsafe extern "C" fn vpi_put_value(
             });
         }
     }
-    let succeeded = succeeded && (callbacks::is_running() || flush_pending_writes());
-    if succeeded {
-        reference
-    } else {
-        ptr::null_mut()
+    succeeded && (callbacks::is_running() || flush_pending_writes())
+}
+
+fn has_inertial_writes() -> bool {
+    with_host(|host| !host.inertial_writes.borrow().is_empty())
+}
+
+/// Apply one inertial update round after the current callbacks and domains.
+/// A callback on an edge generated here can enqueue the next round, but its
+/// deposits must not change the values sampled by that edge's FF kernel.
+fn flush_inertial_writes() -> bool {
+    let writes = with_host(|host| std::mem::take(&mut *host.inertial_writes.borrow_mut()));
+    if writes.is_empty() {
+        return false;
     }
+    for (identity, deposit) in writes {
+        if !apply_signal_value(
+            deposit.id,
+            identity,
+            deposit.value,
+            deposit.mask,
+            VPI_NO_DELAY,
+        ) {
+            callbacks::fail("failed to apply an inertial VPI write".into());
+            return true;
+        }
+    }
+    flush_pending_writes();
+    true
 }
 
 fn flush_pending_writes() -> bool {
@@ -1701,7 +1851,7 @@ fn flush_pending_writes() -> bool {
         let overridden = replay_overrides.keys().copied().collect::<HashSet<_>>();
         let running = callbacks::is_running();
         let result: Result<Vec<celox_design::StateAddr>, celox::RuntimeErrorCode> =
-            with_runtime_mut(|runtime| {
+            with_instance_mut(|runtime| {
                 let active_edges = batch
                     .active_signals
                     .into_iter()
@@ -1709,8 +1859,7 @@ fn flush_pending_writes() -> bool {
                         let deposit = batch.deposits.get(&identity)?;
                         let signal = deposit.id.resolve(runtime)?;
                         if overridden.contains(&identity) {
-                            let (old_value, old_mask) =
-                                runtime.backend().get_four_state(signal.signal);
+                            let (old_value, old_mask) = runtime.get_four_state(signal.signal);
                             if !is_active_edge(
                                 signal.domain_kind,
                                 logic_level(&old_value, &old_mask),
@@ -1757,7 +1906,7 @@ fn flush_pending_writes() -> bool {
             }
             let wrote_inputs =
                 with_host(|host| borrow_cell(&host.pending_writes, |pending| pending.settle));
-            let result = with_runtime_mut(|runtime| {
+            let result = with_instance_mut(|runtime| {
                 let context = RuntimeFormatContext {
                     tb_time: Some(celox_vpi_current_time()),
                     scope: None,
@@ -1813,7 +1962,7 @@ fn flush_pending_writes() -> bool {
             }
         }
     }
-    let result: Result<(), celox::RuntimeErrorCode> = with_runtime_mut(|runtime| {
+    let result: Result<(), celox::RuntimeErrorCode> = with_instance_mut(|runtime| {
         apply_pending_deposits(runtime, &final_deposits);
         runtime.settle_active_edges_with_context(
             &[],
@@ -1834,10 +1983,11 @@ fn flush_pending_writes() -> bool {
 
 fn process_runtime_events() {
     let time = celox_vpi_current_time();
-    let events = with_runtime_mut(|runtime| {
-        runtime.drain_runtime_events_with_context(RuntimeFormatContext {
-            tb_time: Some(time),
-            scope: None,
+    let events = with_host(|host| {
+        borrow_cell_mut(&host.runtime, |runtime| {
+            runtime
+                .as_mut()
+                .map(|runtime| runtime.drain_runtime_events(time))
         })
     })
     .unwrap_or_default();

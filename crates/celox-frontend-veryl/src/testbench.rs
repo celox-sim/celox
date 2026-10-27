@@ -112,6 +112,7 @@ fn runtime_event_site_for_assert(
         location: None,
         assertion: None,
         deferred: None,
+        timestamp_arg: false,
         arg_widths: value_args.iter().map(assert_arg_width).collect(),
         arg_signed: value_args
             .iter()
@@ -3192,7 +3193,14 @@ impl<'a> SemanticTestbenchBuilder<'a> {
     /// PortTypeKind covers all four reset types (async/sync × high/low),
     /// unlike DomainKind which maps sync resets to Other.
     fn resolve_reset_polarity(&self, inst: &StrId) -> (u8, u8) {
-        if let Some((_, info)) = self.named_variable(*inst) {
+        if let Some((address, info)) = self.named_variable(*inst) {
+            if let Some(Some(active_low)) = self
+                .testbench_source
+                .declared_reset_active_low
+                .get(&address)
+            {
+                return if *active_low { (0, 1) } else { (1, 0) };
+            }
             return match info.type_kind {
                 PortTypeKind::ResetAsyncHigh | PortTypeKind::ResetSyncHigh => (1, 0),
                 PortTypeKind::ResetAsyncLow | PortTypeKind::ResetSyncLow => (0, 1),

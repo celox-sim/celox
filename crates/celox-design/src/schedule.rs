@@ -46,6 +46,9 @@ pub struct ScheduleModel<A> {
     /// Objects the scheduler stores the current time into
     /// ([`RuntimeSchema::time_slots`]).
     pub time_slots: Vec<A>,
+    /// Sampled variables and their copies
+    /// ([`RuntimeSchema::sample_shadows`]).
+    pub sample_shadows: Vec<(A, A)>,
     /// The compiled scheduler, if one was generated
     /// ([`RuntimeSchema::scheduler`]).
     pub scheduler: Option<crate::SchedulerSchema<A>>,
@@ -63,6 +66,7 @@ pub struct CountedModel<A> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessModel<A> {
     pub slots: ProcessSlots<A>,
+    pub frame: Option<crate::ProcessFrame<A>>,
     pub waits: Vec<Vec<TermModel<A>>>,
     pub nbas: Vec<NbaSite<A>>,
     pub host_requests: Vec<crate::HostRequestSite<A>>,
@@ -103,7 +107,9 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
         let mut processes: Vec<ProcessModel<A>> = schema
             .processes
             .iter()
-            .map(|slots| ProcessModel {
+            .enumerate()
+            .map(|(index, slots)| ProcessModel {
+                frame: schema.process_frames.get(index).cloned().flatten(),
                 slots: *slots,
                 waits: Vec::new(),
                 nbas: Vec::new(),
@@ -159,6 +165,7 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
                 .any(|site| matches!(site.kind, RuntimeEventKind::Finish)),
             active_commits: schema.active_commits.clone(),
             time_slots: schema.time_slots.clone(),
+            sample_shadows: schema.sample_shadows.clone(),
             scheduler: schema.scheduler.clone(),
         }
     }

@@ -211,6 +211,11 @@ pub struct RuntimeEventSite {
     /// deferred assertions.
     #[serde(default)]
     pub deferred: Option<DeferredSite>,
+    /// The last argument is the simulation time at which the site issued
+    /// the event, which a report carries (IEEE 1800-2023 20.10). It is not
+    /// formatted.
+    #[serde(default)]
+    pub timestamp_arg: bool,
     pub arg_widths: Vec<usize>,
     pub arg_signed: Vec<bool>,
     pub arg_is_string: Vec<bool>,
@@ -335,6 +340,71 @@ pub enum InitialStateData {
     Writes(Vec<InitialStateWriteRun>),
 }
 
+impl InitialStateData {
+    /// The written bits below `width` of `Packed` data as write runs, so a
+    /// target such as an unpacked array is written run by run instead of
+    /// being read and written back whole. A target without a mask plane
+    /// (`four_state` false) receives unknown bits as 0, as a two-state write
+    /// of the packed value does.
+    pub fn packed_write_runs(
+        value: &BigUint,
+        mask: &BigUint,
+        written_mask: &BigUint,
+        width: usize,
+        four_state: bool,
+    ) -> Vec<InitialStateWriteRun> {
+        let (value, mask, written) = (
+            value.to_u64_digits(),
+            mask.to_u64_digits(),
+            written_mask.to_u64_digits(),
+        );
+        let bit = |digits: &[u64], index: usize| {
+            digits
+                .get(index / 64)
+                .is_some_and(|digit| digit >> (index % 64) & 1 == 1)
+        };
+        let mut runs = Vec::new();
+        let mut index = 0;
+        while index < width {
+            if written
+                .get(index / 64)
+                .is_none_or(|&digit| digit >> (index % 64) == 0)
+            {
+                // No written bit in the rest of this digit.
+                index = (index / 64 + 1) * 64;
+                continue;
+            }
+            if !bit(&written, index) {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            while index < width && bit(&written, index) {
+                index += 1;
+            }
+            let bit_width = index - start;
+            let mut value_bytes = vec![0u8; bit_width.div_ceil(8)];
+            let mut mask_bytes = vec![0u8; bit_width.div_ceil(8)];
+            for offset in 0..bit_width {
+                let unknown = bit(&mask, start + offset);
+                if bit(&value, start + offset) && (four_state || !unknown) {
+                    value_bytes[offset / 8] |= 1 << (offset % 8);
+                }
+                if four_state && unknown {
+                    mask_bytes[offset / 8] |= 1 << (offset % 8);
+                }
+            }
+            runs.push(InitialStateWriteRun {
+                bit_offset: start,
+                bit_width,
+                value_bytes,
+                mask_bytes,
+            });
+        }
+        runs
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialStateValue<A> {
     pub address: A,
@@ -345,6 +415,14 @@ pub struct InitialStateValue<A> {
 pub struct RuntimeErrorInfo<A> {
     pub message: String,
     pub signals: Vec<A>,
+}
+
+/// When a parent resumes after creating concurrent children (IEEE 1800-2023 9.3.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ForkJoin {
+    All,
+    Any,
+    None,
 }
 
 /// How a process kernel returned control to the runtime, as stored in its
@@ -387,6 +465,16 @@ pub enum ProcessStatus {
     /// A program kernel called `$exit` (IEEE 1800-2023 24.7): it and every
     /// other kernel of its program instance ([`ProcessSlots::program`]) end.
     Exit,
+    /// Create child activations. The delay slot encodes their entry points and join mode.
+    Fork,
+    /// Allocate a fresh automatic local cell before its declaration initializer.
+    Local,
+    /// Wait for all live immediate child activations.
+    WaitFork,
+    /// Terminate all descendants of the calling activation.
+    DisableFork,
+    /// A side-effect-free event-expression probe completed; no HDL continuation ran.
+    EventProbe,
 }
 
 impl ProcessStatus {
@@ -405,6 +493,11 @@ impl ProcessStatus {
             Self::Stop => 9,
             Self::HostRequest => 10,
             Self::Exit => 11,
+            Self::Fork => 12,
+            Self::Local => 13,
+            Self::WaitFork => 14,
+            Self::DisableFork => 15,
+            Self::EventProbe => 16,
         }
     }
 
@@ -421,6 +514,11 @@ impl ProcessStatus {
             9 => Some(Self::Stop),
             10 => Some(Self::HostRequest),
             11 => Some(Self::Exit),
+            12 => Some(Self::Fork),
+            13 => Some(Self::Local),
+            14 => Some(Self::WaitFork),
+            15 => Some(Self::DisableFork),
+            16 => Some(Self::EventProbe),
             _ => None,
         }
     }
@@ -471,6 +569,9 @@ pub struct HostRequestValue<A> {
     pub width: usize,
     pub signed: bool,
     pub is_string: bool,
+    /// The payload representation, independent of display formatting.
+    #[serde(default)]
+    pub value_kind: ValueKind,
     #[serde(default)]
     pub float_precision: Option<FloatPrecision>,
 }
@@ -478,6 +579,7 @@ pub struct HostRequestValue<A> {
 impl<A: Copy> HostRequestValue<A> {
     pub fn map<B>(&self, map: &mut impl FnMut(A) -> B) -> HostRequestValue<B> {
         HostRequestValue {
+            value_kind: self.value_kind,
             id: map(self.id),
             width: self.width,
             signed: self.signed,
@@ -547,6 +649,64 @@ impl std::fmt::Display for ProcessOrigin {
     }
 }
 
+/// When a procedural kernel is invoked by the runtime.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProcessKind {
+    /// Static declarations run before ordinary HDL procedures.
+    Initializer,
+    #[default]
+    Regular,
+    /// A final procedure runs only when simulation ends (IEEE 1800-2023 9.2.3).
+    Final,
+}
+
+/// A pure expression evaluated with the storage of one waiting activation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessEventProbe<A> {
+    pub result: A,
+    pub resume: u32,
+    pub inputs: Vec<A>,
+    /// Exclusive probe storage for all lowered stores, including function scratch.
+    pub scratch: Vec<A>,
+}
+
+/// Storage switched when several activations execute the same kernel.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessFrame<A> {
+    /// Number of legal continuation entries in the compiled kernel.
+    pub resume_count: usize,
+    /// Compiler temporaries and control slots private to each activation.
+    pub private: Vec<A>,
+    /// Automatic locals shared with children until the declaration is re-entered.
+    pub locals: Vec<A>,
+    pub random: A,
+    pub seed: u32,
+    pub starts_with_event_wait: bool,
+    pub event_probes: Vec<ProcessEventProbe<A>>,
+}
+impl<A> ProcessFrame<A> {
+    pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessFrame<B> {
+        ProcessFrame {
+            resume_count: self.resume_count,
+            private: self.private.into_iter().map(&mut map).collect(),
+            locals: self.locals.into_iter().map(&mut map).collect(),
+            random: map(self.random),
+            seed: self.seed,
+            starts_with_event_wait: self.starts_with_event_wait,
+            event_probes: self
+                .event_probes
+                .into_iter()
+                .map(|probe| ProcessEventProbe {
+                    result: map(probe.result),
+                    resume: probe.resume,
+                    inputs: probe.inputs.into_iter().map(&mut map).collect(),
+                    scratch: probe.scratch.into_iter().map(&mut map).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// State through which one process kernel exchanges control with the runtime.
 ///
 /// A process kernel is a resumable function. On entry it reads `resume` to
@@ -556,9 +716,9 @@ impl std::fmt::Display for ProcessOrigin {
 /// checkpoints capture a suspended process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcessSlots<A> {
-    /// A static declaration initializer, executed before all HDL procedures.
-    pub is_initializer: bool,
-    /// This kernel originated from an edge procedure and must execute in Simulation.
+    /// The phase in which the runtime invokes this kernel.
+    pub kind: ProcessKind,
+    /// This kernel requires Simulation's process scheduler rather than Simulator.
     pub requires_timed_simulation: bool,
     /// Every delay the kernel suspends for is a constant of at least one
     /// time unit.
@@ -577,7 +737,7 @@ pub struct ProcessSlots<A> {
 impl<A> ProcessSlots<A> {
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessSlots<B> {
         ProcessSlots {
-            is_initializer: self.is_initializer,
+            kind: self.kind,
             requires_timed_simulation: self.requires_timed_simulation,
             const_delays: self.const_delays,
             program: self.program.map(&mut map),
@@ -1022,6 +1182,7 @@ pub struct RuntimeSchema<A> {
     pub processes: Vec<ProcessSlots<A>>,
     /// Source procedures of the process kernels, in kernel order.
     pub process_origins: Vec<ProcessOrigin>,
+    pub process_frames: Vec<Option<ProcessFrame<A>>>,
     /// Counted signals and their occurrence counters.
     pub watches: Vec<EventWatch<A>>,
     /// Bit ranges whose changes bump an occurrence counter: the sensitivity
@@ -1045,6 +1206,15 @@ pub struct RuntimeSchema<A> {
     /// most one per module instance. Before each round a timed scheduler
     /// stores the current time into each, as [`TIME_SLOT_WIDTH`] bits.
     pub time_slots: Vec<A>,
+    /// Variables of `$sampled` operands and their copies, which hold the
+    /// value of the variable in the Preponed region (IEEE 1800-2023
+    /// 16.5.1): a host copies each variable into its copy when a time slot
+    /// is over, and once before the first.
+    pub sample_shadows: Vec<(A, A)>,
+    /// Variables and copies that start with the variable's value, such as
+    /// the `$past` histories (IEEE 1800-2023 16.9.3): a host copies each
+    /// once before the first time slot.
+    pub initial_copies: Vec<(A, A)>,
     /// The state a compiled scheduler exchanges with the runtime, and the
     /// scheduler itself once one is generated. Present when the design has
     /// process kernels.
@@ -1052,6 +1222,28 @@ pub struct RuntimeSchema<A> {
     /// Generated units that run an edge of an event with every derived
     /// clock domain it reaches, for the events that have them.
     pub derived_edges: Vec<DerivedEdgeUnits<A>>,
+    /// The partitions of a partitioned combinational settle, when it is
+    /// partitioned.
+    pub settle_partitions: Option<SettlePartitions<A>>,
+}
+
+/// A combinational settle split into partitions that run only when state
+/// they read changed since they last ran.
+///
+/// Byte `p` of `flags` is partition `p`'s dirty flag. The byte after the
+/// last partition's is the untracked byte, set once state may change
+/// without anyone setting flags (a retained raw view), after which every
+/// partition always runs. The next one says whether the current settle runs
+/// every partition, decided at its start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettlePartitions<A> {
+    pub flags: A,
+    pub partitions: u32,
+    /// State the settle reads or writes, with the partitions to mark when
+    /// something other than the settle writes it. A written object lists
+    /// its writers as well, so that, as in a single pass, the settle
+    /// recomputes it.
+    pub marks: Vec<(A, Vec<u32>)>,
 }
 
 /// The process units that run the edges of one event together with its
@@ -1269,6 +1461,7 @@ impl<A> Default for RuntimeSchema<A> {
             live_signals: HashSet::default(),
             processes: Vec::new(),
             process_origins: Vec::new(),
+            process_frames: Vec::new(),
             watches: Vec::new(),
             occurrence_probes: Vec::new(),
             wait_sites: Vec::new(),
@@ -1276,8 +1469,11 @@ impl<A> Default for RuntimeSchema<A> {
             host_request_sites: Vec::new(),
             active_commits: Vec::new(),
             time_slots: Vec::new(),
+            sample_shadows: Vec::new(),
+            initial_copies: Vec::new(),
             scheduler: None,
             derived_edges: Vec::new(),
+            settle_partitions: None,
         }
     }
 }
@@ -1945,6 +2141,67 @@ impl<V: fmt::Display> fmt::Display for RegionedAbsoluteAddrBase<V> {
 mod tests {
     use super::*;
 
+    /// Applying the runs to a target equals the packed merge: written bits
+    /// take the value, unwritten bits keep the target's.
+    #[test]
+    fn packed_write_runs_match_the_packed_merge() {
+        let width = 203;
+        let all: BigUint = (BigUint::from(1u8) << width) - 1u8;
+        let pattern = |seed: u64| {
+            (0..width).fold(BigUint::default(), |acc, bit| {
+                let set = (seed.wrapping_mul(bit as u64 + 1) >> 7).is_multiple_of(3);
+                if set {
+                    acc | (BigUint::from(1u8) << bit)
+                } else {
+                    acc
+                }
+            })
+        };
+        let (value, mask, current) = (pattern(0x9e37), pattern(0x51ed), pattern(0x2545));
+        let written_masks = [
+            BigUint::default(),
+            all.clone(),
+            pattern(0x7f4a) | (BigUint::from(1u8) << (width + 3)),
+            (BigUint::from(1u8) << 64) - 1u8,
+        ];
+        for written in &written_masks {
+            for four_state in [false, true] {
+                let runs =
+                    InitialStateData::packed_write_runs(&value, &mask, written, width, four_state);
+                let (mut got_value, mut got_mask) = (current.clone(), BigUint::default());
+                for run in &runs {
+                    let run_mask = ((BigUint::from(1u8) << run.bit_width) - 1u8) << run.bit_offset;
+                    let keep = &all ^ &run_mask;
+                    got_value = (got_value & &keep)
+                        | (BigUint::from_bytes_le(&run.value_bytes) << run.bit_offset);
+                    got_mask = (got_mask & &keep)
+                        | (BigUint::from_bytes_le(&run.mask_bytes) << run.bit_offset);
+                }
+                let written = written & &all;
+                let keep = &all ^ &written;
+                let (want_value, want_mask) = if four_state {
+                    ((&current & &keep) | (&value & &written), &mask & &written)
+                } else {
+                    let known = &all ^ (&mask & &all);
+                    (
+                        (&current & &keep) | (&value & &written & known),
+                        BigUint::default(),
+                    )
+                };
+                assert_eq!(
+                    (got_value, got_mask),
+                    (want_value, want_mask),
+                    "{four_state}"
+                );
+                assert!(
+                    runs.windows(2).all(|pair| {
+                        pair[0].bit_offset + pair[0].bit_width < pair[1].bit_offset
+                    })
+                );
+            }
+        }
+    }
+
     #[test]
     fn host_request_encoding_keeps_families_and_full_site_indices_distinct() {
         for kind in [
@@ -1974,6 +2231,7 @@ mod tests {
     #[test]
     fn host_request_mapping_relocates_operands_and_results() {
         let value = |id| HostRequestValue {
+            value_kind: ValueKind::StrRef,
             id,
             width: 17,
             signed: true,
@@ -1993,6 +2251,7 @@ mod tests {
         assert_eq!(relocated.process, 2);
         assert_eq!(relocated.args[0].width, 17);
         assert!(relocated.results[0].signed);
+        assert_eq!(relocated.args[0].value_kind, ValueKind::StrRef);
         assert_eq!(relocated.strings, site.strings);
     }
 
@@ -2068,6 +2327,7 @@ mod tests {
             location: None,
             assertion: None,
             deferred: None,
+            timestamp_arg: false,
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),

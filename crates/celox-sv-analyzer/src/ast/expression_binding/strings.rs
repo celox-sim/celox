@@ -32,8 +32,11 @@ pub(in crate::ast) fn string_value(expr: &Expr, dimensions: &PackedDimensions) -
         Expr::Call {
             callee: Callee::Object(op),
             ..
-        } => matches!(**op, crate::system_functions::ObjectOp::Load(field)
-            if field.handle == Some(crate::system_functions::HandleProperty::String)),
+        } => {
+            matches!(**op, crate::system_functions::ObjectOp::Load(field)
+            if field.handle == Some(crate::system_functions::HandleProperty::String))
+                || matches!(**op, ObjectOp::Container { op: ContainerOp::Get | ContainerOp::PopFront | ContainerOp::PopBack, layout } if layout.handle == Some(crate::system_functions::HandleProperty::String))
+        }
         Expr::Mux {
             then_expr,
             else_expr,
@@ -131,6 +134,22 @@ pub(in crate::ast) fn native_string(
     dimensions: &PackedDimensions,
 ) -> bool {
     match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Select { expression, .. }
+            if containers::native_type(*expression, native, tree, dimensions)
+                .ok()
+                .flatten()
+                .is_some() =>
+        {
+            containers::native_type(*expression, native, tree, dimensions)
+                .ok()
+                .flatten()
+                .is_some_and(|ty| {
+                    ty.layout.handle == Some(crate::system_functions::HandleProperty::String)
+                })
+        }
+        ExprKind::Call { expression, .. } if matches!(&native.expression(*expression).kind, ExprKind::Member { expression: base, name, .. } if matches!(name.spelling.as_str(), "pop_front" | "pop_back") && containers::native_type(*base, native, tree, dimensions).ok().flatten().is_some_and(|ty| ty.layout.handle == Some(crate::system_functions::HandleProperty::String))) => {
+            true
+        }
         ExprKind::Name(name)
             if dimensions
                 .get(&instances::normalize_identifier(&name.spelling))

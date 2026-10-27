@@ -604,14 +604,15 @@ mod inferred_latch {
     #[test]
     fn out_of_bounds_state_writes_do_not_expand_diagnostic_masks() {
         let source = "module Top(output logic [7:0] q); logic [7:0] a[2]; always_comb begin q=$time; a[-1]=$time; a[2147483647]=$time; end endmodule";
-        let error = Simulator::from_sv_sources(vec![(source, Path::new("oob_state.sv"))], "Top")
-            .diagnostic_policy(policy("inferred_latch", DiagnosticLevel::Warn))
-            .build_interpreter()
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("outside its declared range"),
-            "{error}"
-        );
+        // Invalid unpacked writes are ignored (IEEE 1800-2023 7.4.5).
+        // Their offsets must not enlarge coverage masks or create a latch.
+        for level in [DiagnosticLevel::Error, DiagnosticLevel::Warn] {
+            let sim = Simulator::from_sv_sources(vec![(source, Path::new("oob_state.sv"))], "Top")
+                .diagnostic_policy(policy("inferred_latch", level))
+                .build_interpreter()
+                .unwrap();
+            assert!(sim.warnings().is_empty(), "{:?}", sim.warnings());
+        }
     }
 }
 
@@ -732,4 +733,72 @@ fn invalid_interface_array_query_dimensions_return_integer_unknowns() {
             (u32::MAX.into(), u32::MAX.into())
         );
     }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn unindexed_interface_array_parameters_have_a_located_recoverable_diagnostic() {
+    use std::path::Path;
+    let source = "interface Bus #(parameter WIDTH=8); logic [WIDTH-1:0] v; endinterface
+        module Top(output wire [31:0] q); Bus #(13) bus[5:4](); assign q=bus.WIDTH; endmodule";
+    let build =
+        || Simulator::from_sv_sources(vec![(source, Path::new("array_parameter.sv"))], "Top");
+    let error = build().build_cranelift().err().unwrap();
+    assert!(
+        matches!(error.kind(), SimulatorErrorKind::DiagnosticPolicy(_)),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("interface_array_parameter"),
+        "{error}"
+    );
+    for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
+        let mut sim = build()
+            .diagnostic_policy(policy("interface_array_parameter", level))
+            .build_cranelift()
+            .unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 13u8.into());
+        assert_eq!(
+            sim.warnings().len(),
+            usize::from(level == DiagnosticLevel::Warn)
+        );
+        if let Some(warning) = sim.warnings().first() {
+            let rendered = celox::render_diagnostic(warning);
+            assert!(rendered.contains("array_parameter.sv"), "{rendered}");
+            assert!(rendered.contains("bus[5]"), "{rendered}");
+        }
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn unindexed_interface_parameter_lookup_respects_lexical_shadowing() {
+    use std::path::Path;
+    let source = "interface Bus #(parameter WIDTH=13); endinterface
+        module Top(output wire [31:0] q);
+        Bus bus[2]();
+        typedef struct packed {logic [7:0] WIDTH;} Word;
+        function automatic int f(input Word bus); return bus.WIDTH; endfunction
+        localparam VALUE=f(8'd42); assign q=VALUE; endmodule";
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("shadowed_bus.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 42u8.into());
+    assert!(sim.warnings().is_empty());
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn unindexed_interface_parameters_resolve_inside_indexed_generate_paths() {
+    use std::path::Path;
+    let source = "interface Bus #(parameter WIDTH=8); endinterface
+        module Top(output wire [31:0] q);
+        for(genvar i=0;i<2;i=i+1) begin:g Bus #(10+i) bus[5:4](); end
+        assign q=g[1].bus.WIDTH; endmodule";
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("generated_bus.sv"))], "Top")
+        .diagnostic_policy(policy("interface_array_parameter", DiagnosticLevel::Warn))
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 11u8.into());
+    assert_eq!(sim.warnings().len(), 1);
 }

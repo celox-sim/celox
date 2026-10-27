@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use celox_design::{DomainKind, StateAddr};
+use celox_design::StateAddr;
 use celox_runtime::backend::EventHandle;
 use celox_runtime::{DesignReflection, ReflectionSignal, SignalRef};
 use num_bigint::BigUint;
@@ -61,13 +61,37 @@ impl NativeProgramInstance {
     /// validation is structural and does not authenticate executable code.
     ///
     /// An image with process kernels, which only a timed
-    /// [`crate::Simulation`] runs, fails to attach.
+    /// [`crate::Simulation`] runs, fails to attach. So does one with sampled
+    /// value copies, `$past` histories or deferred assertions, whose time
+    /// slots a [`crate::Simulator`] or [`crate::Simulation`] ends.
     pub unsafe fn from_image(image: NativeProgramImage) -> Result<Self, NativeProgramLoadError> {
-        let schema = image.runtime_schema();
-        if !schema.processes.is_empty() {
-            let origin = schema.process_origins.first().cloned().unwrap_or_default();
+        if image.has_processes() {
+            let origin = image
+                .runtime_schema()
+                .process_origins
+                .first()
+                .cloned()
+                .unwrap_or_default();
             return Err(NativeProgramLoadError::Attach(SimulatorError::new(
                 crate::SimulatorErrorKind::ProcessRequiresSimulation(origin),
+            )));
+        }
+        let schema = image.runtime_schema();
+        if !schema.sample_shadows.is_empty()
+            || !schema.initial_copies.is_empty()
+            || schema
+                .runtime_event_sites
+                .iter()
+                .any(|site| site.deferred.is_some())
+        {
+            return Err(NativeProgramLoadError::Attach(SimulatorError::new(
+                crate::SimulatorErrorKind::Runtime(crate::RuntimeErrorCode::Runtime {
+                    message: "a native program instance does not end time slots: sampled \
+                              values, `$past` and deferred assertions need a `Simulator` or \
+                              `Simulation`"
+                        .to_string(),
+                    signals: Vec::new(),
+                }),
             )));
         }
         // Safety: upheld by this constructor's caller.
@@ -122,6 +146,27 @@ impl NativeProgramInstance {
         unsafe { Self::from_image(appended.image) }
     }
 
+    /// Capture HDL values as last evaluated, without executing code or callbacks.
+    ///
+    /// This diagnostic state file excludes VPI callbacks, pending writes, force
+    /// registrations, plugin memory and time scheduling. It has no schedule and
+    /// is not a resumable VPI session. Signal values include currently applied
+    /// forces; output already emitted is not withdrawn.
+    pub fn save_state(&self) -> Result<celox_runtime::StateFile, crate::StateError> {
+        let image = self.shared.program_image();
+        let schema = image.runtime_schema();
+        crate::StateSchema::from_design(
+            &self.backend,
+            image.state_design(),
+            |address| schema.comb_writes.contains(address),
+            schema
+                .time_slots
+                .iter()
+                .chain(schema.scheduler.iter().flat_map(|s| s.slots.iter())),
+        )
+        .capture(&self.backend)
+    }
+
     /// Physical duration of one tick in the attached design.
     pub fn time_precision(&self) -> celox_design::TimePrecision {
         self.shared.program_image().time_precision()
@@ -154,17 +199,7 @@ impl NativeProgramInstance {
         &self,
         id: celox_runtime::ReflectionSignalId,
     ) -> Option<NativeSignalIdentity> {
-        let signal = self.reflection().signal(id)?;
-        Some(if signal.domain_kind == DomainKind::Other {
-            NativeSignalIdentity::State(signal.signal)
-        } else {
-            NativeSignalIdentity::Event(
-                self.shared
-                    .program_image()
-                    .event_topology()
-                    .canonical(signal.state_address),
-            )
-        })
+        self.shared.program_image().signal_identity(id)
     }
 
     /// Execute combinational logic after one or more foreign writes.
@@ -312,25 +347,20 @@ impl NativeProgramInstance {
         value: BigUint,
         mask: BigUint,
     ) -> bool {
-        let bindings = self
-            .runtime_schema()
-            .force_bindings
-            .iter()
-            .filter(|binding| binding.signal == id)
-            .cloned()
-            .collect::<Vec<_>>();
-        if !self.shared.supports_forces() && bindings.is_empty() {
+        let image = self.shared.program_image();
+        let slots = image.force_slots(id);
+        if !self.shared.supports_forces() && slots.is_empty() {
             return false;
         }
-        for binding in bindings {
-            self.backend
-                .set_four_state(binding.value, value.clone(), mask.clone());
-            self.backend.set(binding.enabled, 1u8);
-        }
-        let Some(identity) = self.signal_identity(id) else {
+        let Some(identity) = image.signal_identity(id) else {
             return false;
         };
-        let aliases = self.signal_refs_for_identity(identity);
+        let aliases = image.signal_aliases(identity);
+        for (enabled, slot) in slots {
+            self.backend
+                .set_four_state(slot, value.clone(), mask.clone());
+            self.backend.set(enabled, 1u8);
+        }
         for signal in aliases {
             self.backend
                 .set_four_state(signal, value.clone(), mask.clone());
@@ -341,39 +371,23 @@ impl NativeProgramInstance {
 
     /// Restore normal design-driver control for a reflected signal.
     pub fn release_signal(&mut self, id: celox_runtime::ReflectionSignalId) {
-        let bindings = self
-            .runtime_schema()
-            .force_bindings
-            .iter()
-            .filter(|binding| binding.signal == id)
-            .cloned()
-            .collect::<Vec<_>>();
-        if !self.shared.supports_forces() && bindings.is_empty() {
+        let image = self.shared.program_image();
+        let slots = image.force_slots(id);
+        if !self.shared.supports_forces() && slots.is_empty() {
             return;
         }
-        for binding in bindings {
-            self.backend.set(binding.enabled, 0u8);
+        let identity = image.signal_identity(id);
+        for (enabled, _) in slots {
+            self.backend.set(enabled, 0u8);
         }
-        if let Some(identity) = self.signal_identity(id) {
+        if let Some(identity) = identity {
             self.forced_values.remove(&identity);
         }
     }
 
-    fn signal_refs_for_identity(&self, identity: NativeSignalIdentity) -> Vec<SignalRef> {
-        let mut signals = self
-            .reflection()
-            .signals()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, signal)| {
-                (self.signal_identity(celox_runtime::ReflectionSignalId(index as u32))
-                    == Some(identity))
-                .then_some(signal.signal)
-            })
-            .collect::<Vec<_>>();
-        signals.sort_unstable();
-        signals.dedup();
-        signals
+    /// The image this instance runs.
+    pub fn program_image(&self) -> &NativeProgramImage {
+        self.shared.program_image()
     }
 
     fn runtime_schema(&self) -> &NativeRuntimeSchema {
@@ -479,7 +493,9 @@ impl NativeProgramInstance {
             .forced_values
             .iter()
             .flat_map(|(identity, (value, mask))| {
-                self.signal_refs_for_identity(*identity)
+                self.shared
+                    .program_image()
+                    .signal_aliases(*identity)
                     .into_iter()
                     .map(|signal| (signal, value.clone(), mask.clone()))
             })

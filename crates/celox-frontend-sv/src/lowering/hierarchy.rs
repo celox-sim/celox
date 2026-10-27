@@ -29,6 +29,7 @@ pub(super) struct ElaboratedModule {
     name: String,
     /// Ports and signals, by local name, with their net kind.
     signals: Vec<(String, sv::ir::Type, bool)>,
+    interface_scopes: HashSet<String>,
     instances: Vec<LoweredSvInstance>,
     constants: HashMap<String, i128>,
     parameter_types: HashMap<String, (usize, bool)>,
@@ -39,6 +40,12 @@ impl ElaboratedModule {
         Self {
             name: lowered.source.name().to_string(),
             signals: signals(&lowered.source),
+            interface_scopes: lowered
+                .source
+                .interface_scope_names()
+                .iter()
+                .cloned()
+                .collect(),
             instances: lowered.instances,
             constants: lowered.constants,
             parameter_types: lowered.parameter_types,
@@ -57,6 +64,7 @@ impl ElaboratedModule {
         Ok(Self {
             name: source.name().to_string(),
             signals: signals(source),
+            interface_scopes: source.interface_scope_names().iter().cloned().collect(),
             instances,
             constants,
             parameter_types,
@@ -255,7 +263,7 @@ impl<'a> Hierarchy<'a> {
     }
 
     /// Follow a name written in `module` down from it: from an instance of
-    /// it, or from the module's own name (IEEE 1800-2023 23.8).
+    /// it, a local interface, or from the module's own name (23.8).
     fn downward(
         &self,
         module: ModuleId,
@@ -266,6 +274,16 @@ impl<'a> Hierarchy<'a> {
             return Ok(self
                 .walk(module, components, 0)?
                 .filter(|found| !found.path.is_empty()));
+        }
+        // Interface instances are flattened into the module's signals, rather
+        // than retained as child modules. Their scopes still participate in
+        // upwards lookup (IEEE 1800-2023 23.8).
+        if (1..components.len()).any(|end| {
+            elaborated
+                .interface_scopes
+                .contains(&components[..end].join("."))
+        }) {
+            return self.walk(module, components, 0);
         }
         if components[0] == self.authored_name(module) {
             return self.walk(module, components, 1);
@@ -534,6 +552,12 @@ fn declares(module: &ElaboratedModule, name: &str) -> bool {
                 .is_some_and(|rest| rest.starts_with(['.', '[', '$']))
     };
     module.signals.iter().any(|(signal, _, _)| scoped(signal))
+        || module.interface_scopes.iter().any(|scope| {
+            scoped(scope)
+                || name
+                    .strip_prefix(scope.as_str())
+                    .is_some_and(|rest| rest.starts_with('['))
+        })
         || module
             .instances
             .iter()

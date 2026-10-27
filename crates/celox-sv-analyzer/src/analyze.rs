@@ -121,6 +121,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     ),
                     port.is_net(),
                 )
+                .with_unresolved_net(port.is_unresolved_net())
                 .with_default(port.default().cloned().map(Into::into))
                 .with_pattern_target(port.r#type().pattern_target(
                     &ast::const_functions::Environment {
@@ -145,6 +146,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     ),
                     signal.is_net(),
                 )
+                .with_unresolved_net(signal.is_unresolved_net())
                 .with_package_variable(signal.package_variable())
                 .with_hierarchical(signal.hierarchical())
             })
@@ -230,6 +232,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     .map(|subroutine| subroutine.map(&mut Into::into, &mut Into::into, &mut |t| t))
                     .collect(),
             )
+            .with_interface_scope_names(module.interface_scope_names().to_vec())
             .with_dpi_imports(module.dpi_imports().to_vec())
             .with_program(module.is_program())
             .with_imported_parameters(imported_parameters)

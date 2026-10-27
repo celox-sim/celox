@@ -59,47 +59,9 @@ jobs:
           token: ${{ steps.release-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-          # Keep tag/Release creation active when a frozen PR has merged.
+          # Version PRs land on master; only the release branch publishes.
+          skip-github-release: true
           skip-github-pull-request: ${{ steps.release-pr.outputs.frozen == 'true' }}
-
-      # A merge queue can push several merged PRs together. The release tag
-      # then points at an earlier commit than github.sha. Publish the tag that
-      # release-please actually created, including on scheduled/manual runs.
-      - name: Queue package publication for this release
-        if: steps.release.outputs.release_created == 'true'
-        env:
-          GH_TOKEN: ${{ steps.release-token.outputs.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
-        shell: bash
-        run: |
-          release_tag="$RELEASE_TAG"
-          if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Expected a v-prefixed stable release tag, got $release_tag." >&2
-            exit 1
-          fi
-
-          published_tag="$(
-            gh release view "$release_tag" \
-              --repo "$GITHUB_REPOSITORY" \
-              --json tagName,isDraft,isPrerelease \
-              --jq 'select(.isDraft == false and .isPrerelease == false) | .tagName'
-          )"
-          if [ "$published_tag" != "$release_tag" ]; then
-            echo "Published GitHub Release $release_tag was not found." >&2
-            exit 1
-          fi
-
-          jq -n \
-            --arg tag "$release_tag" \
-            '{event_type: "napi-release", client_payload: {tag: $tag}}' \
-            | gh api \
-                --method POST \
-                "repos/$GITHUB_REPOSITORY/dispatches" \
-                --input -
-
-          gh workflow run publish-crates.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref "$release_tag"
 
   queue-release:
     name: Queue weekly release

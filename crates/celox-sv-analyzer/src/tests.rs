@@ -3483,7 +3483,10 @@ fn rejects_unlowered_constructs() {
         Path::new("fork.sv"),
     )
     .expect_err("unlowered constructs must not be silently ignored");
-    assert!(matches!(error, AnalyzerError::Unsupported(_)), "{error:?}");
+    assert!(
+        matches!(error, AnalyzerError::TimingControlOutsideProcess { .. }),
+        "{error:?}"
+    );
 }
 
 /// Timing constructs that remain unimplemented are rejected with their
@@ -3491,8 +3494,6 @@ fn rejects_unlowered_constructs() {
 #[test]
 fn rejects_unimplemented_timing_constructs() {
     for (body, construct) in [
-        ("initial begin fork #1; join end", "fork-join block"),
-        ("initial wait fork;", "wait fork statement"),
         // The `event` data type is rejected by name before its uses.
         ("event e; initial @e;", "named event"),
         ("event e; initial ->e;", "named event"),
@@ -3505,7 +3506,6 @@ fn rejects_unimplemented_timing_constructs() {
             "intra-assignment timing control",
         ),
         ("initial begin : b disable b; end", "disable statement"),
-        ("initial disable fork;", "disable fork statement"),
         (
             "logic a, y; always_latch y <= a;",
             "nonblocking assignment inside always_latch",
@@ -4815,10 +4815,6 @@ fn rejects_unsupported_interface_uses() {
         );
     }
     for (interface, message) in [
-        (
-            "interface I(input logic clk); endinterface",
-            "ports of interface `I`",
-        ),
         (
             "interface I; enum {Idle, Busy} state; endinterface",
             "enum type in interface `I`",
@@ -6584,7 +6580,27 @@ fn explicit_output_data_types_default_to_variables() {
 fn class_randomize_rejects_unsupported_semantics() {
     for (members, call, expected) in [
         (
-            "rand int x; constraint c { x == 1; }",
+            "rand int x; constraint c { soft x == 1; }",
+            "c.randomize()",
+            "constraints",
+        ),
+        (
+            "rand int x, y; constraint c { solve x before y; x == y; }",
+            "c.randomize()",
+            "constraints",
+        ),
+        (
+            "rand int x; constraint c { x inside {[1:$]}; }",
+            "c.randomize()",
+            "constraint",
+        ),
+        (
+            "rand int x; constraint c { (x == 1) <-> (x < 3); }",
+            "c.randomize()",
+            "constraints",
+        ),
+        (
+            "rand int x; constraint c { x dist {1 := 2}; }",
             "c.randomize()",
             "constraints",
         ),
@@ -6612,7 +6628,7 @@ fn class_randomize_rejects_unsupported_semantics() {
         ),
         (
             "rand int x;",
-            "c.randomize() with { x == 1; }",
+            "c.randomize() with { outside == 1; }",
             "unsupported",
         ),
         ("rand int x;", "c.randomize(x + 1)", "arguments"),
@@ -6624,8 +6640,8 @@ fn class_randomize_rejects_unsupported_semantics() {
             "not an instance property",
         ),
         ("const int x = 1;", "c.randomize(x)", "const"),
-        ("local int x;", "c.randomize(x)", "non-public"),
-        ("protected int x;", "c.randomize(x)", "non-public"),
+        ("local int x;", "c.randomize(x)", "not accessible"),
+        ("protected int x;", "c.randomize(x)", "not accessible"),
         ("rand int x;", "c.rand_mode()", "getter requires"),
         ("int x;", "c.x.rand_mode()", "rand or randc"),
         (
@@ -6817,4 +6833,791 @@ fn class_randc_checks_domain_limits() {
             assert!(error.to_string().contains("randc"), "{error}");
         }
     }
+}
+
+#[test]
+fn class_visibility_rejects_inaccessible_members() {
+    for visibility in ["local", "protected"] {
+        for member in [
+            "int x;",
+            "static int x;",
+            "function int x(); return 1; endfunction",
+            "static function int x(); return 1; endfunction",
+        ] {
+            let access = if member.contains("function") {
+                "c.x()"
+            } else {
+                "c.x"
+            };
+            for derived in [false, true] {
+                let declaration = if derived {
+                    "class D extends C; endclass D c;"
+                } else {
+                    "C c;"
+                };
+                let source = format!(
+                    "module Top; class C; {visibility} {member} endclass {declaration} int result; initial begin c=new; result={access}; end endmodule"
+                );
+                let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+                assert!(
+                    matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+                    "{source}: {error}"
+                );
+            }
+        }
+    }
+    for member in [
+        "int x;",
+        "static int x;",
+        "function int x(); return 1; endfunction",
+        "static function int x(); return 1; endfunction",
+    ] {
+        let access = if member.contains("function") {
+            "x()"
+        } else {
+            "x"
+        };
+        for prefix in ["", "this.", "super."] {
+            let source = format!(
+                "module Top; class C; local {member} endclass class D extends C; function int read(); return {prefix}{access}; endfunction endclass D c; int result; initial begin c=new; result=c.read(); end endmodule"
+            );
+            let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+            assert!(
+                matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+                "{source}: {error}"
+            );
+        }
+    }
+    for access in ["x=2", "x++"] {
+        let source = format!(
+            "module Top; class C; local static int x; endclass class D extends C; function void write(); {access}; endfunction endclass D c; initial begin c=new; c.write(); end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+        assert!(
+            matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+            "{source}: {error}"
+        );
+    }
+    for access in ["c.x=2", "c.x++", "C::x=2"] {
+        let source = format!(
+            "module Top; class C; local static int x; endclass C c; initial begin c=new; {access}; end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+        assert!(
+            matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn imported_class_member_types_keep_declaration_dimensions() {
+    let package = r#"
+        package p;
+            class Box #(int N = 5);
+                typedef bit [N-1:0] element_t;
+            endclass
+            typedef Box#() Small;
+            typedef Box#(9) Wide;
+        endpackage
+    "#;
+    let packages = analyze_packages(&[(package, Path::new("member-types-package.sv"))]).unwrap();
+    let ir = analyze_source_module_with_packages(
+        r#"
+        module Top import p::*; #(parameter int N = 29) (
+            input Small::element_t sample, input Wide::element_t other,
+            output bit done
+        );
+            assign done = $bits(sample) == 5 && $bits(other) == 9;
+        endmodule
+        "#,
+        Path::new("member-types-top.sv"),
+        "Top",
+        &HashMap::default(),
+        &packages,
+    )
+    .expect("imported class typedefs must retain their declaration's dimensions");
+    let top = ir
+        .modules()
+        .iter()
+        .find(|module| module.name() == "Top")
+        .unwrap();
+    for (name, expected) in [("sample", 5), ("other", 9)] {
+        let width = top
+            .ports()
+            .iter()
+            .find(|port| port.name() == name)
+            .and_then(|port| port.r#type().resolved_width());
+        assert_eq!(width, Some(expected), "{name}");
+    }
+}
+
+#[test]
+fn imported_class_member_types_preserve_package_qualifier_precedence() {
+    analyze_source(
+        r#"
+        package p; typedef bit [4:0] word_t; endpackage
+        package q; typedef byte p; endpackage
+        package r; typedef int p; endpackage
+        module Top import q::*; import r::*; (input p::word_t value, output bit done);
+            assign done = $bits(value) == 5;
+        endmodule
+        "#,
+        Path::new("package-qualifier-before-wildcards.sv"),
+    )
+    .expect("a package qualifier must not bind ambiguous wildcard type names");
+}
+
+#[test]
+fn imported_class_member_types_do_not_export_package_locals() {
+    let error = analyze_source(
+        r#"
+        package p;
+            typedef bit [3:0] Hidden;
+            class Item; typedef bit [7:0] Public; endclass
+        endpackage
+        module Top(output int sum);
+            import p::Item;
+            Item::Hidden sample;
+            initial sum = sample;
+        endmodule
+        "#,
+        Path::new("imported-class-private-scope.sv"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("Hidden"), "{error}");
+}
+
+#[test]
+fn class_type_parameter_qualifiers_are_not_package_dependencies() {
+    for body in [
+        "static function int get(); return TYPE::value; endfunction",
+        "typedef TYPE::word_t element_t;",
+        "localparam type element_t = TYPE::word_t;",
+        "extern static function int get();",
+    ] {
+        let out_of_block = if body.starts_with("extern") {
+            "function int Q::get(); return TYPE::value; endfunction"
+        } else {
+            ""
+        };
+        let source = format!(
+            "package p; class Item; static int value=42; typedef bit[7:0] word_t; endclass class Q#(type TYPE=Item); {body} endclass {out_of_block} endpackage module Top; endmodule"
+        );
+        analyze_source(&source, Path::new("class-type-qualifier.sv"))
+            .unwrap_or_else(|error| panic!("{body}: {error}"));
+    }
+}
+
+#[test]
+fn class_type_parameter_scopes_do_not_hide_unknown_packages() {
+    for (body, outside, name) in [
+        (
+            "static function int get(); return missing::value; endfunction",
+            "",
+            "missing",
+        ),
+        ("", "localparam int value=TYPE::value;", "TYPE"),
+        (
+            "typedef TYPE Alias;",
+            "localparam int value=Alias::value;",
+            "Alias",
+        ),
+    ] {
+        let source = format!(
+            "package p; class Item; endclass class Q#(type TYPE=Item); {body} endclass endpackage module Top; {outside} endmodule"
+        );
+        let error = analyze_source(&source, Path::new("class-type-real-package.sv")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("unknown package `{name}`")),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn class_type_alias_qualifiers_are_not_package_dependencies() {
+    for source in [
+        "package p; class Item; static int value=42; endclass typedef Item Alias; class Q; static function int get(); return Alias::value; endfunction endclass endpackage module Top; endmodule",
+        "package p; class Item#(int N=42); static int value=N; endclass typedef Item#(23) Alias; class Q; static function int get(); return Alias::value; endfunction endclass endpackage module Top; endmodule",
+        "module Top; class Item; typedef bit[7:0] word_t; endclass typedef Item Alias; Alias::word_t value; endmodule",
+        "package Alias; class Item; static int value=42; endclass endpackage module Top; typedef Alias::Item Alias; initial $display(Alias::value); endmodule",
+        "module Top; class Item; static int value=42; endclass if (1) begin : g typedef Item Alias; initial $display(Alias::value); end endmodule",
+        "module Top; class Item; static int value=42; endclass class Q; typedef Item Alias; static function int get(); return Alias::value; endfunction endclass endmodule",
+        "package a; typedef int Alias; endpackage package b; typedef byte Alias; endpackage module Top; import a::*; import b::*; class Item; static int value=42; endclass class Q; typedef Item Alias; static function int get(); return Alias::value; endfunction endclass endmodule",
+    ] {
+        analyze_source(source, Path::new("class-alias-qualifier.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+}
+
+#[test]
+fn class_type_alias_scopes_preserve_package_dependencies() {
+    for source in [
+        "module Top; class Item; static int value=42; endclass class Q; typedef Item Alias; endclass localparam int value=Alias::value; endmodule",
+        "module Top; class Item; static int value=42; endclass if (1) begin : g typedef Item Alias; end localparam int value=Alias::value; endmodule",
+        "module Top; class Item; endclass typedef Alias::Item Alias; endmodule",
+    ] {
+        let error = analyze_source(source, Path::new("class-alias-real-package.sv")).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown package `Alias`"),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn class_visibility_accepts_lexical_access_and_shadowing() {
+    for member in [
+        "int x;",
+        "static int x;",
+        "function int x(); return 1; endfunction",
+        "static function int x(); return 1; endfunction",
+    ] {
+        let access = if member.contains("function") {
+            "x()"
+        } else {
+            "x"
+        };
+        for visibility in ["local", "protected"] {
+            let source = format!(
+                "module Top; class C; {visibility} {member} function int read(C other); return other.{access}; endfunction endclass class D extends C; endclass D c; int result; initial begin c=new; result=c.read(c); end endmodule"
+            );
+            analyze_source(&source, Path::new("visibility.sv"))
+                .unwrap_or_else(|e| panic!("{source}: {e}"));
+        }
+        for prefix in ["", "this.", "super."] {
+            let source = format!(
+                "module Top; class C; protected {member} endclass class D extends C; function int read(); return {prefix}{access}; endfunction endclass D c; int result; initial begin c=new; result=c.read(); end endmodule"
+            );
+            analyze_source(&source, Path::new("visibility.sv"))
+                .unwrap_or_else(|e| panic!("{source}: {e}"));
+        }
+    }
+    for storage in ["", "static"] {
+        let source = format!(
+            "module Top; class C; local {storage} int x; endclass class D extends C; int x; function int read(int x); return x; endfunction function int own(); return x; endfunction endclass D c; int result; initial begin c=new; c.x=2; result=c.own(); end endmodule"
+        );
+        analyze_source(&source, Path::new("visibility.sv")).unwrap();
+    }
+}
+
+#[test]
+fn class_visibility_checks_constructors() {
+    for visibility in ["local", "protected"] {
+        let source = format!(
+            "module Top; class C; {visibility} function new(); endfunction endclass C c; initial c=new; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
+        assert!(
+            matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+            "{source}: {error}"
+        );
+        let source = format!(
+            "module Top; class C; {visibility} function new(); endfunction endclass class D extends C; endclass D c; initial c=new; endmodule"
+        );
+        let result = analyze_source(&source, Path::new("visibility.sv"));
+        if visibility == "local" {
+            assert!(matches!(
+                result.unwrap_err(),
+                AnalyzerError::InaccessibleClassMember { .. }
+            ));
+        } else {
+            result.unwrap();
+        }
+    }
+}
+
+#[test]
+fn rejects_invalid_enum_declaration_initializers() {
+    for (declaration, diagnostic) in [
+        (
+            "enum logic [2:0] { Global = 4'h2, Local = 4'h3 } value;",
+            "sized literal width 4 differs from base width 3",
+        ),
+        (
+            "typedef enum logic [2:0] { A = 2'b01 } E;",
+            "sized literal width 2 differs from base width 3",
+        ),
+        (
+            "enum bit [1:0] { a=0, b=2'bxx, c=1 } value;",
+            "X/Z value requires an explicit four-state base type",
+        ),
+        (
+            "enum { a='z } value;",
+            "X/Z value requires an explicit four-state base type",
+        ),
+        (
+            "typedef bit [1:0] B; enum B { a=2'b0z } value;",
+            "X/Z value requires an explicit four-state base type",
+        ),
+        (
+            "enum integer { a=0, b={32{1'bx}}, c } value;",
+            "cannot implicitly increment an X/Z value",
+        ),
+        (
+            "enum logic [1:0] { a='z, b } value;",
+            "cannot implicitly increment an X/Z value",
+        ),
+        (
+            "enum logic [1:0] { a=2'bxx, b=a, c } value;",
+            "cannot implicitly increment an X/Z value",
+        ),
+        (
+            "enum logic [1:0] { a='x, b=a | 2'b00, c } value;",
+            "cannot implicitly increment an X/Z value",
+        ),
+    ] {
+        let source = format!("module Top; {declaration} endmodule");
+        let error =
+            analyze_source(&source, Path::new("invalid_enum_initializers.sv")).expect_err(&source);
+        assert!(error.to_string().contains(diagnostic), "{source}: {error}");
+    }
+}
+
+#[test]
+fn preserves_legal_enum_declaration_initializers() {
+    for declaration in [
+        "enum logic [2:0] { A=3'h2, B=3'h3 } value;",
+        "enum bit [3:0] { bronze='h3, silver, gold='h5 } value;",
+        "enum logic [3:0] { A='1 } value;",
+        "enum integer { a=0, b={32{1'bx}}, c=1, d } value;",
+        "enum logic [1:0] { a=2'bxx, b=2'bzz, c=0 } value;",
+        "enum bit [1:0] { a=(2'bxx & 2'b00), b } value;",
+        "enum logic [1:0] { a=2'bxx, b=2'b01, c } value;",
+        "enum logic [1:0] { a=2'bxx, b=a & 2'b00, c } value;",
+        "localparam P=4'h2; enum logic [2:0] { A=P, B=4'h1+1 } value;",
+        "enum logic [2:0] { A=3'(4'h2) } value;",
+        "enum logic [2:0] { A=3'h2 } value [2];",
+        "typedef enum int { W=3 } E; typedef logic [W'(2):0] B; enum B { A=3'b101 } value;",
+        "localparam W=3; enum logic [W-1:0] { A=3'b101 } value;",
+        "enum logic [2:0] { A=3'h2 } [1:0] value;",
+        "typedef enum logic signed [1:0] { A=2'b10, B } E;",
+    ] {
+        let source = format!("module Top; {declaration} endmodule");
+        analyze_source(&source, Path::new("valid_enum_initializers.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+}
+
+#[test]
+fn final_procedures_preserve_phase_and_active_generate_order() {
+    let ir = analyze_source(
+        r#"module Top;
+            int value = 3;
+            function int read_value(); return value; endfunction
+            initial value = 5;
+            final begin value = read_value(); $display("final %d", value); end
+            if (0) begin: inactive final #1; end
+            for (genvar i = 0; i < 2; i++) begin: active
+                final $display("generated %d", i);
+            end
+        endmodule"#,
+        Path::new("final_procedures.sv"),
+    )
+    .unwrap();
+    assert!(ir.modules()[0].comb_processes().is_empty());
+    assert!(ir.modules()[0].ff_processes().is_empty());
+    let processes = ir.modules()[0].initial_processes();
+    assert_eq!(
+        processes
+            .iter()
+            .filter(|process| process.is_initializer())
+            .count(),
+        1
+    );
+    assert_eq!(
+        processes
+            .iter()
+            .filter(|process| process.is_final())
+            .count(),
+        3
+    );
+    let finals: Vec<_> = processes
+        .iter()
+        .filter(|process| process.is_final())
+        .collect();
+    assert!(
+        finals
+            .windows(2)
+            .all(|pair| pair[0].creation_order() < pair[1].creation_order())
+    );
+    assert!(
+        finals.iter().all(|process| !process.repeats()
+            && !process.is_initializer()
+            && !process.is_synthetic())
+    );
+    assert!(
+        finals
+            .iter()
+            .all(|process| process.kind() == celox_design::ProcessKind::Final)
+    );
+}
+
+#[test]
+fn final_procedures_reject_timing_before_folding() {
+    for statement in [
+        "#1 value = 1;",
+        "@(value) value = 1;",
+        "wait(value) value = 1;",
+        "wait fork;",
+        "fork value = 1; join",
+        "value = #1 2;",
+    ] {
+        for body in [
+            statement.to_string(),
+            format!("if (0) begin {statement} end"),
+        ] {
+            let source = format!("module Top; int value; final begin {body} end endmodule");
+            let error = analyze_source(&source, Path::new("illegal_final.sv")).unwrap_err();
+            assert!(
+                error.to_string().contains("final procedure"),
+                "{source}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn final_procedures_reject_task_and_nba_through_function_calls() {
+    for declarations in [
+        "task work(); endtask",
+        "task work(); #1; endtask",
+        "task t(); endtask function void work(); t(); endfunction",
+        "function void work(); value <= 1; endfunction",
+        "function void bad(); value <= 1; endfunction function void work(); bad(); endfunction",
+    ] {
+        for body in ["work();", "if (0) work();"] {
+            if declarations.contains("<=") && body.starts_with("if (0)") {
+                continue;
+            }
+            let source =
+                format!("module Top; int value; {declarations} final begin {body} end endmodule");
+            let error = analyze_source(&source, Path::new("illegal_final_call.sv")).unwrap_err();
+            if declarations.contains("<=") {
+                assert!(error.to_string().contains("13.4.4"), "{source}: {error}");
+            }
+            assert!(
+                error.to_string().contains("final procedure"),
+                "{source}: {error}"
+            );
+        }
+    }
+    let source = "module Top; int value; function int bad(); value <= 1; return value; endfunction final value = bad(); endmodule";
+    let error = analyze_source(source, Path::new("illegal_final_expression.sv")).unwrap_err();
+    assert!(error.to_string().contains("final procedure"), "{error}");
+    let source = "package p; task work(); endtask endpackage module Top; import p::*; final work(); endmodule";
+    let error = analyze_source(source, Path::new("illegal_imported_final_call.sv")).unwrap_err();
+    assert!(error.to_string().contains("final procedure"), "{error}");
+}
+
+#[test]
+fn final_procedures_preserve_legal_functions_and_finish() {
+    for body in [
+        "value = compute();",
+        "report();",
+        "$finish;",
+        "$stop;",
+        "$fatal;",
+        "$fclose(value);",
+        "$sscanf(\"1\", \"%d\", value);",
+        "begin int local_value; local_value = value; $display(local_value); end",
+    ] {
+        let source = format!(
+            "module Top; int value; function int compute(); return value + 1; endfunction function void report(); $display(value); endfunction final {body} endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("legal_final.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+        assert_eq!(
+            ir.modules()[0]
+                .initial_processes()
+                .iter()
+                .filter(|process| process.is_final())
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn final_procedures_allow_direct_nba_and_unexecuted_scheduling_calls() {
+    for body in ["value <= 1;", "if (0) schedule();", "no_schedule();"] {
+        let source = format!(
+            "module Top; int value; function void schedule(); value <= 1; endfunction function void no_schedule(); if (0) value <= 1; endfunction final {body} endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("final_nba.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+        let process = ir.modules()[0]
+            .initial_processes()
+            .iter()
+            .find(|process| process.is_final())
+            .unwrap();
+        if body == "value <= 1;" {
+            assert!(matches!(
+                process.body(),
+                [ir::Stmt::Assign {
+                    nonblocking: true,
+                    ..
+                }]
+            ));
+        }
+    }
+}
+
+#[test]
+fn detached_children_obey_task_rules_in_functions_and_finals() {
+    for source in [
+        "module Top; final fork #1; join_none endmodule",
+        "module Top; function void f(); fork #1; join_none endfunction initial f(); endmodule",
+    ] {
+        analyze_source(source, Path::new("join_none.sv")).unwrap();
+    }
+}
+
+#[test]
+fn folded_detached_children_keep_their_process_scope() {
+    for child in [
+        "if (0) #1;",
+        "if (1) ; else wait (value);",
+        "if (0) @(value);",
+        "if (0) delay_task();",
+        "fork begin if (0) #1; end join",
+        "if (0) fork #1; join",
+    ] {
+        for context in [
+            format!(
+                "function automatic void f(); fork begin {child} end join_none endfunction initial f();"
+            ),
+            format!("final fork begin {child} end join_none"),
+        ] {
+            let source = format!(
+                "module Top; bit value; task delay_task(); #1; endtask {context} endmodule"
+            );
+            analyze_source(&source, Path::new("folded_detached.sv"))
+                .unwrap_or_else(|error| panic!("{source}: {error}"));
+        }
+    }
+}
+
+#[test]
+fn folded_function_branches_still_reject_blocking_statements() {
+    for statement in [
+        "#1;",
+        "wait (value);",
+        "@(value);",
+        "delay_task();",
+        "fork #1; join",
+        "fork #1; join_any",
+    ] {
+        for branch in [
+            format!("if (0) {statement}"),
+            format!("if (1) ; else {statement}"),
+        ] {
+            let source = format!(
+                "module Top; bit value; task delay_task(); #1; endtask function automatic void f(); {branch} endfunction initial f(); endmodule"
+            );
+            assert!(
+                analyze_source(&source, Path::new("folded_blocking.sv")).is_err(),
+                "{source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn detached_function_scheduling_requires_a_process_caller() {
+    for body in [
+        "final f();",
+        "int initialized = f();",
+        "always_comb value = f();",
+        "always_ff @(posedge clk) value <= f();",
+    ] {
+        let source = format!(
+            "module Top; bit clk; int value; function int f(); fork #1; join_none return 1; endfunction {body} endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("invalid_join_none.sv")).is_err(),
+            "{source}"
+        );
+    }
+    for statement in ["#1;", "wait (1);", "fork #1; join", "fork #1; join_any"] {
+        let source = format!(
+            "module Top; function void f(); {statement} endfunction initial f(); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("blocking_function.sv")).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn final_procedures_only_follow_defaults_for_omitted_arguments() {
+    let declarations = r#"
+        int value;
+        function int schedule(); value <= 1; return 0; endfunction
+        function int take(input int a = schedule(), input int b = 0); return a + b; endfunction
+        function int nested(input int a = take()); return a; endfunction
+        function void explicit_wrapper(); value = take(0); endfunction
+        function void omitted_wrapper(); value = take(); endfunction
+    "#;
+    for (body, rejected) in [
+        ("value = take();", true),
+        ("value = take(, 1);", true),
+        ("value = take(.b(1));", true),
+        ("value = nested();", true),
+        ("omitted_wrapper();", true),
+        ("value = take(0);", false),
+        ("value = take(.a(0));", false),
+        ("value = nested(0);", false),
+        ("explicit_wrapper();", false),
+        ("if (0) value = take();", false),
+    ] {
+        let source = format!("module Top; {declarations} final {body} endmodule");
+        let result = analyze_source(&source, Path::new("final_default_arguments.sv"));
+        if rejected {
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("13.4.4"), "{body}: {error}");
+        } else {
+            result.unwrap_or_else(|error| panic!("{body}: {error}"));
+        }
+    }
+}
+
+#[test]
+fn class_randomize_bounds_nested_membership_expansion() {
+    for levels in [4, 25] {
+        let mut expr = "x".to_owned();
+        for _ in 0..levels {
+            expr = format!("({expr}) inside {{0, 1}}");
+        }
+        let source = format!(
+            "module Top; class C; rand bit x; constraint c {{ {expr}; }} endclass C c; initial begin c = new; c.randomize(); end endmodule"
+        );
+        let result = analyze_source(&source, Path::new("nested_membership.sv"));
+        if levels == 4 {
+            result.expect("small nested membership must remain supported");
+        } else {
+            let error = result
+                .expect_err("expanded membership must be bounded")
+                .to_string();
+            assert!(
+                error.contains("constraint expression expansion limit"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn class_inline_randomize_retains_call_specific_constraints() {
+    let source = r#"module Top;
+        class C; rand int x; constraint c { x < 10; } endclass
+        C obj;
+        initial begin
+            obj = new;
+            if (!(obj.randomize() with { x == 2; })) $fatal;
+            obj.randomize() with { x == 3; };
+        end
+    endmodule"#;
+    analyze_source(source, Path::new("inline_randomize.sv")).unwrap();
+}
+
+#[test]
+fn class_inline_randomize_binds_local_inputs() {
+    let source = r#"module Top;
+        class C; rand bit [7:0] x; endclass
+        C obj;
+        bit [7:0] wanted, x;
+        initial begin
+            obj = new;
+            wanted = 2; x = 3;
+            obj.randomize() with { x == wanted; };
+            obj.randomize() with { x == local::x; };
+        end
+    endmodule"#;
+    analyze_source(source, Path::new("inline_inputs.sv")).unwrap();
+}
+
+#[test]
+fn class_inline_randomize_static_names_do_not_capture_caller_locals() {
+    for (expression, supported) in [("x == limit", false), ("x == local::limit", true)] {
+        let source = format!(
+            r#"module Top;
+            class C; rand bit [7:0] x; static bit [7:0] limit = 5; endclass
+            C obj; bit [7:0] limit;
+            initial begin obj = new; limit = 3; obj.randomize() with {{ {expression}; }}; end
+        endmodule"#
+        );
+        let result = analyze_source(&source, Path::new("inline_static_scope.sv"));
+        if supported {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains("static properties in inline constraints"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn constraint_mode_rejects_invalid_calls() {
+    for (statement, expected) in [
+        ("c.constraint_mode();", "getter requires"),
+        ("c.missing.constraint_mode(0);", "unknown constraint"),
+        ("c.x.constraint_mode();", "unknown constraint"),
+        ("result = c.rule.constraint_mode(1);", "setter is void"),
+        ("c.rule.constraint_mode(1, 0);", "one on_off"),
+    ] {
+        let source = format!(
+            "module Top; class C; rand bit [3:0] x; constraint rule {{ x == 1; }} endclass C c; int result; initial begin c = new; {statement} end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("constraint_mode.sv"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{statement}: {error}");
+    }
+}
+
+#[test]
+fn constraint_mode_cannot_be_overridden() {
+    let source = "module Top; class C; function void constraint_mode(bit flag); endfunction endclass C c; initial c = new; endmodule";
+    let error = analyze_source(source, Path::new("constraint_mode_override.sv"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("overriding"), "{error}");
+}
+
+#[test]
+fn constraint_mode_outside_classes_remains_an_ordinary_function() {
+    let source = "module Top(output int value); function int constraint_mode(); return 42; endfunction initial value = constraint_mode(); endmodule";
+    analyze_source(source, Path::new("constraint_mode_function.sv")).unwrap();
+}
+
+#[test]
+fn constraint_mode_names_do_not_intercept_struct_members() {
+    for source in [
+        "module Top(output int value); struct packed { int constraint_mode; } s; initial value = s.constraint_mode; endmodule",
+        "module Top(output int value); struct packed { struct packed { int constraint_mode; } child; } s; initial value = s.child.constraint_mode; endmodule",
+        "module Top(output int value); class C; function int f(); struct packed { int constraint_mode; } s; s.constraint_mode=37; return s.constraint_mode; endfunction endclass C c; initial begin c=new; value=c.f(); end endmodule",
+    ] {
+        analyze_source(source, Path::new("constraint_mode_struct.sv")).unwrap();
+    }
+}
+
+#[test]
+fn interface_header_members_preserve_parameter_dependent_types() {
+    let source = "interface Bus #(parameter W=8)(input logic [W-1:0] data); modport reader(input data); endinterface";
+    let signatures = crate::interface_prototypes(&[(source, Path::new("bus.sv"))]).unwrap();
+    let port = &signatures[0].module.ports()[0];
+    assert_eq!(port.name(), "h$data");
+    let values = fxhash::FxHashMap::from_iter([("h$W".to_string(), 12)]);
+    assert_eq!(
+        typecheck::eval_const_expr(port.r#type().packed_ranges()[0].left(), &values),
+        Some(11),
+    );
 }

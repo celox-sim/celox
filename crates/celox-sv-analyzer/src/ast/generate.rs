@@ -6,6 +6,8 @@
 use super::*;
 use celox_sv_syntax::ExprId;
 mod elaboration;
+mod memo;
+pub(super) use memo::{CallSites, Revision, memoize};
 
 mod dependency_order;
 use dependency_order::DependencyOrder;
@@ -28,14 +30,17 @@ pub(super) fn with_root_subroutines<T>(
     struct Restore {
         state: std::rc::Rc<AnalysisState>,
         previous: bool,
+        revision: u64,
     }
     impl Drop for Restore {
         fn drop(&mut self) {
             self.state.root_subroutines.set(self.previous);
+            self.state.revision.restore(self.revision);
         }
     }
     let _restore = Restore {
         state: state.clone(),
+        revision: state.revision.change(),
         previous: state.root_subroutines.replace(true),
     };
     f()
@@ -565,6 +570,9 @@ struct Elaborator<'a, 'b> {
     items: Vec<Item>,
 }
 
+/// Elaborations of the module being analyzed, see [`memoize`].
+pub(super) type Memo = memo::State;
+
 pub(super) fn items(
     tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
@@ -592,7 +600,7 @@ pub(super) fn subroutine_items(
     )
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum LiteralUse {
     All,
     Subroutines,
@@ -600,6 +608,17 @@ enum LiteralUse {
 }
 
 fn items_with_literal_use(
+    tree: &AnalysisContext<'_>,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+    literal_use: LiteralUse,
+) -> Result<Vec<Item>, AnalyzerError> {
+    memo::items(tree, env, aliases, literal_use, || {
+        elaborate(tree, env, aliases, literal_use)
+    })
+}
+
+fn elaborate(
     tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,

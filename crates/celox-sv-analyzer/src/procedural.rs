@@ -79,6 +79,11 @@ pub enum StmtBase<E, L> {
         step: Vec<StmtBase<E, L>>,
         body: Vec<StmtBase<E, L>>,
     },
+    /// Concurrent child processes (IEEE 1800-2023 9.3.2).
+    Fork {
+        join: celox_design::ForkJoin,
+        branches: Vec<Vec<StmtBase<E, L>>>,
+    },
     Break,
     Continue,
     Return(Option<E>),
@@ -128,6 +133,8 @@ pub enum StmtBase<E, L> {
     /// the reads: they do not execute here, and [`StmtBase::walk`] does not
     /// visit them.
     WaitImplicit(Vec<StmtBase<E, L>>),
+    WaitFork,
+    DisableFork,
     /// `wait (condition)`: suspend the process until the condition is true
     /// (9.4.3).
     Wait(E),
@@ -312,6 +319,10 @@ impl<E, L> StmtBase<E, L> {
                 step: body(step, fe, fl),
                 body: body(loop_body, fe, fl),
             },
+            StmtBase::Fork { join, branches } => StmtBase::Fork {
+                join,
+                branches: branches.into_iter().map(|b| body(b, fe, fl)).collect(),
+            },
             StmtBase::Break => StmtBase::Break,
             StmtBase::Continue => StmtBase::Continue,
             StmtBase::Return(value) => StmtBase::Return(value.map(fe)),
@@ -366,6 +377,8 @@ impl<E, L> StmtBase<E, L> {
                     })
                     .collect(),
             ),
+            StmtBase::WaitFork => StmtBase::WaitFork,
+            StmtBase::DisableFork => StmtBase::DisableFork,
             StmtBase::Wait(condition) => StmtBase::Wait(fe(condition)),
             StmtBase::WaitImplicit(reads) => StmtBase::WaitImplicit(body(reads, fe, fl)),
         }
@@ -447,6 +460,11 @@ impl<E, L> StmtBase<E, L> {
                 body(step, fe, fl, fname);
                 body(loop_body, fe, fl, fname);
             }
+            StmtBase::Fork { branches, .. } => {
+                for branch in branches {
+                    body(branch, fe, fl, fname);
+                }
+            }
             StmtBase::Break | StmtBase::Continue => {}
             StmtBase::Return(value) => {
                 if let Some(value) = value {
@@ -482,6 +500,7 @@ impl<E, L> StmtBase<E, L> {
                     }
                 }
             }
+            StmtBase::WaitFork | StmtBase::DisableFork => {}
             StmtBase::Wait(condition) => fe(condition),
             StmtBase::WaitImplicit(reads) => body(reads, fe, fl, fname),
         }
@@ -519,16 +538,33 @@ impl<E, L> StmtBase<E, L> {
                 visit(step);
                 visit(body);
             }
+            StmtBase::Fork { branches, .. } => {
+                for branch in branches {
+                    visit(branch);
+                }
+            }
             _ => {}
         }
     }
 
     /// Visit every statement of this tree, outermost first.
     pub fn walk<'a>(&'a self, f: &mut impl FnMut(&'a StmtBase<E, L>)) {
+        self.walk_scoped(f, true);
+    }
+
+    /// Visit every statement except detached fork children.
+    pub(crate) fn walk_without_detached_children<'a>(
+        &'a self,
+        f: &mut impl FnMut(&'a StmtBase<E, L>),
+    ) {
+        self.walk_scoped(f, false);
+    }
+
+    fn walk_scoped<'a>(&'a self, f: &mut impl FnMut(&'a StmtBase<E, L>), detached: bool) {
         f(self);
         let mut visit = |stmts: &'a [StmtBase<E, L>]| {
             for stmt in stmts {
-                stmt.walk(f);
+                stmt.walk_scoped(f, detached);
             }
         };
         match self {
@@ -554,6 +590,15 @@ impl<E, L> StmtBase<E, L> {
                 visit(init);
                 visit(step);
                 visit(body);
+            }
+            StmtBase::Fork {
+                join: celox_design::ForkJoin::None,
+                ..
+            } if !detached => {}
+            StmtBase::Fork { branches, .. } => {
+                for branch in branches {
+                    visit(branch);
+                }
             }
             _ => {}
         }

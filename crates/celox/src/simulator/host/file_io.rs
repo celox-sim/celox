@@ -104,6 +104,7 @@ impl<B: SimBackend> Simulator<B> {
                     location: None,
                     assertion: None,
                     deferred: None,
+                    timestamp_arg: false,
                     arg_widths: Vec::new(),
                     arg_signed: Vec::new(),
                     arg_is_string: Vec::new(),
@@ -253,19 +254,20 @@ impl<B: SimBackend> Simulator<B> {
                         )
                     })
                     .collect();
-                celox_runtime::file_io::FileIo::write_memory(
-                    path,
-                    site.operation == 5,
-                    words.iter().map(|(value, mask)| DisplayFormatArg {
-                        value,
-                        mask: Some(mask),
-                        width,
-                        signed: false,
-                        is_string: false,
-                        float_precision: None,
-                    }),
-                )
-                .map_err(|err| error(format!("$writemem: {err}")))?;
+                self.file_io
+                    .write_memory_with_backend(
+                        path,
+                        site.operation == 5,
+                        words.iter().map(|(value, mask)| DisplayFormatArg {
+                            value,
+                            mask: Some(mask),
+                            width,
+                            signed: false,
+                            is_string: false,
+                            float_precision: None,
+                        }),
+                    )
+                    .map_err(|err| error(format!("$writemem: {err}")))?;
             }
             _ => return Err(error("unknown file I/O request".into())),
         }
@@ -494,7 +496,9 @@ mod queue_tests {
         };
     }
     regressions!(interpreter, build_interpreter);
+    #[cfg(feature = "cranelift")]
     regressions!(cranelift, build_cranelift);
+    #[cfg(feature = "wasm-runtime")]
     regressions!(wasm, build_wasm);
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     regressions!(native, build_native);

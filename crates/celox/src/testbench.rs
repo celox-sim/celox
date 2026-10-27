@@ -116,13 +116,16 @@ pub(crate) fn eval_backend_expr<B: SimBackend>(
         |offset, len| writes.push((offset, len)),
     );
     if let Some(trace) = backend.layout().trace.as_ref() {
-        for (offset, len) in writes {
+        for &(offset, len) in &writes {
             // SAFETY: bound bytecode writes valid locations in this image, and
             // the simulator cannot execute concurrently with this evaluation.
             unsafe {
                 trace.mark_range(memory.cast_mut(), offset, len);
             }
         }
+    }
+    for (offset, len) in writes {
+        backend.mark_settle_range(offset, len);
     }
     value
 }

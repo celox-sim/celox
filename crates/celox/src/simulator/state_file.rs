@@ -14,10 +14,12 @@ use crate::HashMap;
 use celox_runtime::scheduler::SimEvent;
 use celox_runtime::timing::Baseline;
 use celox_runtime::{
-    BaselineRecord, NbaRecord, ProcessRecord, ProcessState, ScheduleParts, ScheduleRecord,
-    ScheduledEvent, StateFile, StateObject, StateRole, WaiterRecord,
+    BaselineRecord, NbaRecord, ProcessRecord, ProcessRef, ProcessState, ScheduleParts,
+    ScheduleRecord, ScheduledEvent, StateFile, StateObject, StateRole, WaiterRecord,
 };
 use num_bigint::BigUint;
+
+mod activations;
 
 use super::checkpoint::CheckpointError;
 use super::host::Simulator;
@@ -36,16 +38,17 @@ pub enum StateError {
     MissingSchedule,
     #[error("evaluating combinational logic failed: {0}")]
     Runtime(RuntimeErrorCode),
-    /// Not returned: state files record suspended processes. Kept so that
-    /// matching code keeps compiling.
-    #[error("the state of the simulation's processes could not be recorded")]
+    /// No longer returned: portable state files include dynamic activations.
+    #[error("state files do not record dynamic fork activations; use a checkpoint instead")]
     Processes,
     /// Not returned: state files record strings by their contents. Kept so
     /// that matching code keeps compiling.
     #[error("state files do not support dynamic testbench strings; use a checkpoint instead")]
     TestbenchStrings,
     /// A variable holds a class object, which state files cannot record.
-    #[error("state files do not record class objects; `{0}` holds one, use a checkpoint instead")]
+    #[error(
+        "state files do not record class objects or dynamic containers; `{0}` holds one, use a checkpoint instead"
+    )]
     Objects(String),
 }
 
@@ -130,6 +133,65 @@ pub struct StateSchema {
 }
 
 impl StateSchema {
+    pub(crate) fn from_design<'a, B: SimBackend>(
+        backend: &B,
+        design: &crate::ir::RuntimeDesign,
+        is_comb: impl Fn(&crate::AbsoluteAddr) -> bool,
+        time_slots: impl Iterator<Item = &'a crate::AbsoluteAddr>,
+    ) -> Self {
+        let time_slots: crate::HashSet<_> = time_slots.collect();
+        // Build-specific partitioned-settle flags are recomputed on load.
+        let settle_flags = backend
+            .layout()
+            .settle
+            .as_ref()
+            .map(|settle| settle.flags_offset);
+        let mut objects: Vec<_> = backend
+            .layout()
+            .offsets
+            .keys()
+            .filter(|address| !time_slots.contains(address))
+            .filter(|address| Some(backend.layout().offsets[*address]) != settle_flags)
+            .map(|&address| (design.get_path(&address), address))
+            .collect();
+        objects.sort_unstable();
+        let mut named = Vec::with_capacity(objects.len());
+        let mut index = 0;
+        while index < objects.len() {
+            let path = &objects[index].0;
+            let end = objects[index..]
+                .iter()
+                .position(|(other, _)| other != path)
+                .map_or(objects.len(), |offset| index + offset);
+            for (ordinal, (path, address)) in objects[index..end].iter().enumerate() {
+                named.push(NamedObject {
+                    path: if end - index == 1 {
+                        path.clone()
+                    } else {
+                        format!("{path}#{ordinal}")
+                    },
+                    signal: backend.resolve_signal(address),
+                    role: if is_comb(address) {
+                        StateRole::Comb
+                    } else {
+                        StateRole::State
+                    },
+                    strings: design.state_objects.get(address).is_some_and(|metadata| {
+                        metadata.value_kind == celox_design::ValueKind::StrRef
+                    }),
+                    objects: design.state_objects.get(address).is_some_and(|metadata| {
+                        metadata.value_kind == celox_design::ValueKind::ObjRef
+                    }),
+                });
+            }
+            index = end;
+        }
+        StateSchema {
+            four_state: backend.layout().four_state,
+            objects: named,
+        }
+    }
+
     /// Save the value of every state object of `backend` as last evaluated.
     ///
     /// Fails if a variable holds a class object.
@@ -301,9 +363,17 @@ impl<B: SimBackend> Simulator<B> {
     /// Save the value of every state object, by path.
     ///
     /// Combinational values are settled first, so the file shows the values
-    /// a read would return.
+    /// a read would return. Unlike [`Self::checkpoint`], this portable format
+    /// does not include a host filesystem snapshot. File/VCD designs can be
+    /// saved for inspection, but loading them is rejected.
     pub fn save_state(&mut self) -> Result<StateFile, StateError> {
-        self.check_host_checkpoint_support()?;
+        self.prepare_save_state()?;
+        self.state_schema().capture(&self.backend)
+    }
+
+    /// Validate support and settle before a timed owner synchronizes termination.
+    /// Capture must follow that synchronization, since final procedures can write state.
+    pub(crate) fn prepare_save_state(&mut self) -> Result<(), StateError> {
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents.into());
         }
@@ -311,7 +381,7 @@ impl<B: SimBackend> Simulator<B> {
             self.eval_comb_checked().map_err(StateError::Runtime)?;
             self.dirty = false;
         }
-        self.state_schema().capture(&self.backend)
+        Ok(())
     }
 
     /// Load the state saved in `file`, matching objects by path.
@@ -337,12 +407,16 @@ impl<B: SimBackend> Simulator<B> {
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents.into());
         }
+        self.check_host_restore_support()?;
         // Evaluating the loaded state can still fail (an oscillating
         // combinational loop), so keep the current state to return to.
         let previous = self.checkpoint()?;
+        let previous_deferred_owners = self.deferred_owner_context();
+        self.stash_runtime_events();
         self.state_schema()
             .load(&mut self.backend, file)
             .map_err(StateError::Mismatch)?;
+        self.replace_deferred_execution();
         for address in &self.program.runtime_schema.time_slots {
             self.backend.set(
                 SignalRef {
@@ -358,7 +432,9 @@ impl<B: SimBackend> Simulator<B> {
         // observers take it as their baseline instead of reporting changes.
         if let Err(error) = self.backend.eval_comb() {
             let error = self.decorate_runtime_error(error);
-            self.restore(&previous)?;
+            let restored = self.restore(&previous);
+            self.restore_deferred_owner_context(previous_deferred_owners);
+            restored?;
             return Err(StateError::Runtime(error));
         }
         self.comb_observer_snapshots = self.snapshot_all_comb_observers();
@@ -373,71 +449,24 @@ impl<B: SimBackend> Simulator<B> {
     /// Name the state objects: the hierarchical path, followed by `#n` when
     /// several objects share it.
     fn build_state_schema(&self) -> StateSchema {
-        let comb_writes = &self.program.runtime_schema.comb_writes;
-        // A timed simulation stores its time into the time slots, and a state
-        // file keeps the time in its schedule; an untimed one reads zero.
-        // A compiled scheduler's slots hold nothing between runs.
-        let time_slots: crate::HashSet<_> = self
-            .program
-            .runtime_schema
-            .time_slots
-            .iter()
-            .chain(
-                self.program
-                    .runtime_schema
-                    .scheduler
-                    .iter()
-                    .flat_map(|scheduler| scheduler.slots.iter()),
-            )
-            .collect();
-        let mut objects: Vec<_> = self
-            .backend
-            .layout()
-            .offsets
-            .keys()
-            .filter(|address| !time_slots.contains(address))
-            .map(|&address| (self.program.get_path(&address), address))
-            .collect();
-        objects.sort_unstable();
-        let mut named = Vec::with_capacity(objects.len());
-        let mut index = 0;
-        while index < objects.len() {
-            let path = &objects[index].0;
-            let end = objects[index..]
+        let schema = &self.program.runtime_schema;
+        StateSchema::from_design(
+            &self.backend,
+            &self.program.design,
+            |address| schema.comb_writes.contains(address),
+            schema
+                .time_slots
                 .iter()
-                .position(|(other, _)| other != path)
-                .map_or(objects.len(), |offset| index + offset);
-            for (ordinal, (path, address)) in objects[index..end].iter().enumerate() {
-                named.push(NamedObject {
-                    path: if end - index == 1 {
-                        path.clone()
-                    } else {
-                        format!("{path}#{ordinal}")
-                    },
-                    signal: self.backend.resolve_signal(address),
-                    role: if comb_writes.contains(address) {
-                        StateRole::Comb
-                    } else {
-                        StateRole::State
-                    },
-                    strings: self.program.design.state_objects.get(address).is_some_and(
-                        |metadata| metadata.value_kind == celox_design::ValueKind::StrRef,
-                    ),
-                    objects: self.program.design.state_objects.get(address).is_some_and(
-                        |metadata| metadata.value_kind == celox_design::ValueKind::ObjRef,
-                    ),
-                });
-            }
-            index = end;
-        }
-        StateSchema {
-            four_state: self.backend.layout().four_state,
-            objects: named,
-        }
+                .chain(schema.scheduler.iter().flat_map(|s| s.slots.iter())),
+        )
     }
 
     /// Express a schedule by event and signal names.
-    pub(crate) fn name_schedule(&self, parts: ScheduleParts<B>) -> ScheduleRecord {
+    pub(crate) fn name_schedule(
+        &self,
+        parts: ScheduleParts<B>,
+        strings: &mut Vec<Vec<u8>>,
+    ) -> Result<ScheduleRecord, StateError> {
         let signal_paths: HashMap<usize, String> = self
             .state_schema()
             .objects
@@ -466,8 +495,8 @@ impl<B: SimBackend> Simulator<B> {
             signal: signal_path(event),
             value: event.next_val,
         };
-        let processes = self.name_processes(&parts, &signal_paths);
-        ScheduleRecord {
+        let processes = self.name_processes(&parts, &signal_paths, strings)?;
+        Ok(ScheduleRecord {
             time: parts.time,
             clocks: parts
                 .clocks
@@ -483,7 +512,7 @@ impl<B: SimBackend> Simulator<B> {
             high_events: parts.high_events.into_iter().map(event_path).collect(),
             unknown_events: parts.unknown_events.into_iter().map(event_path).collect(),
             processes,
-        }
+        })
     }
 
     /// The status slot of each process, by which a state file names it.
@@ -510,7 +539,8 @@ impl<B: SimBackend> Simulator<B> {
         &self,
         parts: &ScheduleParts<B>,
         signal_paths: &HashMap<usize, String>,
-    ) -> ProcessRecord {
+        strings: &mut Vec<Vec<u8>>,
+    ) -> Result<ProcessRecord, StateError> {
         let path = |signal: SignalRef| {
             signal_paths
                 .get(&signal.offset)
@@ -518,9 +548,16 @@ impl<B: SimBackend> Simulator<B> {
                 .unwrap_or_default()
         };
         let statuses = self.process_statuses();
-        let process = |index: usize| path(statuses[index]);
         let state = &parts.process_state;
-        ProcessRecord {
+        let process = |index: usize| {
+            if state.activations.is_empty() {
+                ProcessRef::Kernel(path(statuses[index]))
+            } else {
+                ProcessRef::Activation(index as u64)
+            }
+        };
+        let kernel = |index: usize| state.activations.get(index).map_or(index, |a| a.kernel);
+        let mut record = ProcessRecord {
             wakeups: parts
                 .process_wakeups
                 .iter()
@@ -537,7 +574,7 @@ impl<B: SimBackend> Simulator<B> {
                         .runtime_schema
                         .wait_sites
                         .iter()
-                        .filter(|site| site.process == index)
+                        .filter(|site| site.process == kernel(index))
                         .nth(waiter.site)
                         .map(|site| {
                             site.terms
@@ -624,7 +661,27 @@ impl<B: SimBackend> Simulator<B> {
             host_writes: Vec::new(),
             host_pending: parts.host_pending,
             finished: parts.finished,
-        }
+            reactive: state.reactive.iter().map(|&index| process(index)).collect(),
+            re_inactive: state
+                .re_inactive
+                .iter()
+                .map(|&index| process(index))
+                .collect(),
+            re_nba_queue: state
+                .re_nba_queue
+                .iter()
+                .map(|update| NbaRecord {
+                    target: path(update.target),
+                    lsb: update.lsb as u64,
+                    width: update.width as u64,
+                    value: update.value.0.to_bytes_le(),
+                    mask: update.value.1.to_bytes_le(),
+                })
+                .collect(),
+            ..ProcessRecord::default()
+        };
+        self.capture_activation_values(state, &mut record, strings)?;
+        Ok(record)
     }
 
     /// The host writes a timed simulation has yet to show its waits, by
@@ -681,9 +738,10 @@ impl<B: SimBackend> Simulator<B> {
         &self,
         record: &ProcessRecord,
         signals: &HashMap<String, SignalRef>,
+        strings: &[Vec<u8>],
     ) -> Result<(Vec<(usize, u64)>, ProcessState), Vec<String>> {
         let statuses = self.process_statuses();
-        let processes: HashMap<String, usize> = statuses
+        let mut processes: HashMap<ProcessRef, usize> = statuses
             .iter()
             .enumerate()
             .filter_map(|(index, status)| {
@@ -691,20 +749,25 @@ impl<B: SimBackend> Simulator<B> {
                     .iter()
                     .find(|(_, signal)| signal.offset == status.offset)?
                     .0;
-                Some((path.clone(), index))
+                Some((ProcessRef::Kernel(path.clone()), index))
             })
             .collect();
+        let (activations, cells) =
+            self.resolve_activation_values(record, strings, &mut processes)?;
+        let kernel = |index: usize| activations.get(index).map_or(index, |a| a.kernel);
         let mut unknown: Vec<String> = record
             .wakeups
             .iter()
             .map(|(name, _)| name)
             .chain(&record.ready)
             .chain(&record.inactive)
+            .chain(&record.reactive)
+            .chain(&record.re_inactive)
             .chain(record.waiters.iter().map(|waiter| &waiter.process))
             .filter(|name| !processes.contains_key(*name))
-            .cloned()
+            .map(ToString::to_string)
             .collect();
-        let process = |name: &String| processes.get(name).copied();
+        let process = |name: &ProcessRef| processes.get(name).copied();
         let wakeups: Vec<_> = record
             .wakeups
             .iter()
@@ -712,6 +775,8 @@ impl<B: SimBackend> Simulator<B> {
             .collect();
         let ready = record.ready.iter().filter_map(process).collect();
         let inactive = record.inactive.iter().filter_map(process).collect();
+        let reactive = record.reactive.iter().filter_map(process).collect();
+        let re_inactive = record.re_inactive.iter().filter_map(process).collect();
         let mut waiters = celox_runtime::timing::Waiters::default();
         for waiter in &record.waiters {
             let Some(index) = process(&waiter.process) else {
@@ -722,12 +787,24 @@ impl<B: SimBackend> Simulator<B> {
                 .runtime_schema
                 .wait_sites
                 .iter()
-                .filter(|site| site.process == index)
+                .filter(|site| site.process == kernel(index))
                 .collect::<Vec<_>>();
             let site = usize::try_from(waiter.site).ok();
             // Each baseline has the kind of its term: a counter for a
             // counted signal or a gate with counters, a value otherwise.
             let counted = |signal: &crate::AbsoluteAddr| {
+                if self
+                    .program
+                    .runtime_schema
+                    .process_frames
+                    .get(kernel(index))
+                    .and_then(Option::as_ref)
+                    .is_some_and(|frame| {
+                        frame.locals.contains(signal) || frame.private.contains(signal)
+                    })
+                {
+                    return false;
+                }
                 self.program
                     .runtime_schema
                     .watches
@@ -756,7 +833,7 @@ impl<B: SimBackend> Simulator<B> {
                 .runtime_schema
                 .wait_sites
                 .iter()
-                .filter(|site| site.process == index)
+                .filter(|site| site.process == kernel(index))
                 .nth(site.unwrap_or_default())
                 .is_some_and(|site| {
                     // A gate without counters counts as driven
@@ -823,7 +900,7 @@ impl<B: SimBackend> Simulator<B> {
             );
         }
         let mut nba_queue = Vec::new();
-        for update in &record.nba_queue {
+        for update in record.nba_queue.iter().chain(&record.re_nba_queue) {
             match signals.get(&update.target) {
                 // A queued assignment covers a nonempty range of its target.
                 Some(&target)
@@ -850,6 +927,7 @@ impl<B: SimBackend> Simulator<B> {
                 None => unknown.push(update.target.clone()),
             }
         }
+        let re_nba_queue = nba_queue.split_off(record.nba_queue.len().min(nba_queue.len()));
         let counted = self.counted_signals();
         let mut domain_counters = vec![[0; 3]; counted.len()];
         for (name, counters) in &record.domain_counters {
@@ -861,18 +939,23 @@ impl<B: SimBackend> Simulator<B> {
                 None => unknown.push(name.clone()),
             }
         }
+        self.validate_activation_schedule(record, &processes, &activations, &mut unknown);
         if !unknown.is_empty() {
             return Err(unknown);
         }
         Ok((
             wakeups,
             ProcessState {
+                activations,
+                cells,
                 waiters,
                 ready,
                 inactive,
                 nba_queue,
+                reactive,
+                re_inactive,
+                re_nba_queue,
                 domain_counters,
-                ..ProcessState::default()
             },
         ))
     }
@@ -882,6 +965,7 @@ impl<B: SimBackend> Simulator<B> {
     pub(crate) fn resolve_schedule(
         &self,
         record: &ScheduleRecord,
+        strings: &[Vec<u8>],
     ) -> Result<ScheduleParts<B>, StateError> {
         let events: HashMap<String, B::Event> = self
             .backend
@@ -914,7 +998,7 @@ impl<B: SimBackend> Simulator<B> {
             )
             .cloned()
             .collect();
-        let processes = self.resolve_processes(&record.processes, &signals);
+        let processes = self.resolve_processes(&record.processes, &signals, strings);
         if let Err(names) = &processes {
             unknown.extend(names.iter().cloned());
         }

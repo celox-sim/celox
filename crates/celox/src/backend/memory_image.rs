@@ -134,6 +134,12 @@ impl MemoryImage {
         unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.logical_words) }
     }
 
+    pub(crate) fn as_mut_bytes(&mut self) -> &mut [u8] {
+        let words = self.as_mut_slice();
+        // SAFETY: the words are initialized, and bytes have no alignment.
+        unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast(), words.len() * 8) }
+    }
+
     pub(crate) fn len_words(&self) -> usize {
         self.logical_words
     }

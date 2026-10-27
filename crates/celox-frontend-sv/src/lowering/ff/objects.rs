@@ -24,6 +24,53 @@ impl Ff<'_, '_> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let result = match op {
+            ObjectOp::Randomize(program) => {
+                let object = self.handle(&args[0])?;
+                let check = self.integer_of_width(&args[1], 1, false)?;
+                let bytes = serde_json::to_vec(program).expect("constraint program serialization");
+                let mut buffer = self.heap_call(ops::NEW, &[]);
+                for chunk in bytes.chunks(8) {
+                    let value = chunk
+                        .iter()
+                        .fold(0u64, |value, byte| (value << 8) | u64::from(*byte));
+                    let value = self.constant64(value);
+                    let count = self.constant64(chunk.len() as u64);
+                    buffer = self.heap_call(ops::APPEND_BYTES, &[buffer, value, count]);
+                }
+                let program = self.heap_call(ops::FREEZE, &[buffer]);
+                if args.len() == 2 {
+                    self.heap_call(ops::OBJECT_RANDOMIZE, &[object, program, check])
+                } else {
+                    let mut inputs = self.heap_call(ops::NEW, &[]);
+                    let one = self.constant64(1);
+                    inputs = self.heap_call(ops::APPEND_BYTES, &[inputs, check, one]);
+                    for value in &args[2..] {
+                        let value = self.integer_of_width(value, 64, false)?;
+                        let eight = self.constant64(8);
+                        inputs = self.heap_call(ops::APPEND_BYTES, &[inputs, value, eight]);
+                    }
+                    self.heap_call(ops::OBJECT_RANDOMIZE_INPUTS, &[object, program, inputs])
+                }
+            }
+            ObjectOp::ConstraintModeGet(index) => {
+                let object = self.handle(&args[0])?;
+                self.heap_call(
+                    ops::encode(ops::OBJECT_CONSTRAINT_MODE_GET, u64::from(*index)),
+                    &[object],
+                )
+            }
+            ObjectOp::ConstraintModeSet(index) => {
+                let object = self.handle(&args[0])?;
+                let enabled = self.integer_of_width(&args[1], 1, false)?;
+                self.heap_call(
+                    ops::encode(
+                        ops::OBJECT_CONSTRAINT_MODE_SET,
+                        u64::from(index.unwrap_or(u32::MAX)),
+                    ),
+                    &[object, enabled],
+                )
+            }
+            ObjectOp::Container { .. } => unreachable!("handled by container_call"),
             ObjectOp::New {
                 class,
                 size,
@@ -115,18 +162,26 @@ impl Ff<'_, '_> {
                 let object = self.handle(&args[0])?;
                 self.heap_call(ops::OBJECT_CLASS, &[object])
             }
+            ObjectOp::Copy => {
+                let object = self.handle(&args[0])?;
+                self.heap_call(ops::OBJECT_COPY, &[object])
+            }
         };
         let (width, signed) = op.result_type();
         let value = self.b.alloc_bit(width, signed);
         self.b.emit(SIRInstruction::Slice(value, result, 0, width));
         let (temp, name) = self.m.temp("object", width, signed, false);
         let kind = match op {
-            ObjectOp::New { .. } => Some(celox_design::ValueKind::ObjRef),
+            ObjectOp::Container { .. } => unreachable!("handled by container_call"),
+            ObjectOp::New { .. } | ObjectOp::Copy => Some(celox_design::ValueKind::ObjRef),
             ObjectOp::Load(field) => field.handle.map(|handle| match handle {
                 HandleProperty::String => celox_design::ValueKind::StrRef,
                 HandleProperty::Object => celox_design::ValueKind::ObjRef,
             }),
-            ObjectOp::Store(_)
+            ObjectOp::Randomize(_)
+            | ObjectOp::ConstraintModeGet(_)
+            | ObjectOp::ConstraintModeSet(_)
+            | ObjectOp::Store(_)
             | ObjectOp::ClassOf
             | ObjectOp::Random
             | ObjectOp::RandomCyclic { .. }

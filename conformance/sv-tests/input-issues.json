@@ -1,0 +1,9 @@
+{
+  "revision": "db159ad8e9cbbd62036569d240153f753258f640",
+  "cases": {
+    "generated/uvm-examples/uvm_alu_config_analysis.sv": {
+      "missing_include": "tests/uvm_tb",
+      "reason": "Upstream uvm-examples uses a string instead of a file list and combines two include directories into one entry. Preserve this dashboard input and report the driver's missing-include failure."
+    }
+  }
+}

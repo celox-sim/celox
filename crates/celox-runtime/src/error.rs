@@ -5,6 +5,11 @@ pub enum SimulatorErrorCode {
     DetectedTrueLoopAt {
         signals: Vec<String>,
     },
+    /// `$fatal` also implicitly requests simulation termination.
+    Fatal {
+        message: String,
+        signals: Vec<String>,
+    },
     Runtime {
         message: String,
         signals: Vec<String>,
@@ -36,6 +41,16 @@ impl PartialEq for SimulatorErrorCode {
                     signals: sb,
                 },
             ) => a == b && sa == sb,
+            (
+                Self::Fatal {
+                    message: a,
+                    signals: sa,
+                },
+                Self::Fatal {
+                    message: b,
+                    signals: sb,
+                },
+            ) => a == b && sa == sb,
             (Self::NotAnEvent(a), Self::NotAnEvent(b)) => a == b,
             _ => false,
         }
@@ -54,8 +69,12 @@ impl std::fmt::Display for SimulatorErrorCode {
             Self::DetectedTrueLoopAt { signals } => {
                 write!(f, "Detected True Loop: {}", signals.join(", "))
             }
-            Self::Runtime { message, signals } if signals.is_empty() => write!(f, "{message}"),
-            Self::Runtime { message, signals } => {
+            Self::Fatal { message, signals } | Self::Runtime { message, signals }
+                if signals.is_empty() =>
+            {
+                write!(f, "{message}")
+            }
+            Self::Fatal { message, signals } | Self::Runtime { message, signals } => {
                 write!(f, "{}: {}", message, signals.join(", "))
             }
             Self::InternalError => write!(f, "Internal Error"),

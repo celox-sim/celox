@@ -12,19 +12,14 @@ mod aggregates;
 pub(super) mod binding;
 pub(super) use binding::{bind, expression_type};
 
-/// The historical constructed-declarator path retains ordinary siblings and
-/// does not allocate dynamic arrays or construct class objects.
-/// Whether a variable of a declaration of `data_type` is stored in state
-/// memory: not a dynamic array, and not constructed by `new` unless it is a
-/// class handle (IEEE 1800-2023 8.7), such as a covergroup instance.
+/// Whether this declarator denotes a supported variable rather than a
+/// constructed non-variable declaration (such as a covergroup instance).
 pub(super) fn ordinary_variable(
     variable: &celox_sv_syntax::VariableDeclarator,
     data_type: celox_sv_syntax::TypeId,
     native: &celox_sv_syntax::Declarations,
 ) -> bool {
-    !variable.dimensions.iter().any(|dimension|matches!(dimension.kind,celox_sv_syntax::DimensionKind::Unsized))
-        && (!variable.value.is_some_and(|id|matches!(&native.expression(id).kind,celox_sv_syntax::ExprKind::Name(name) if name.spelling=="new"))
-            || names_class(data_type, native))
+    !variable.value.is_some_and(|id|matches!(&native.expression(id).kind,celox_sv_syntax::ExprKind::Name(name) if name.spelling=="new")) || names_class(data_type, native)
 }
 
 /// Whether `data_type` names a class declared in the source.
@@ -105,10 +100,10 @@ pub(super) fn local_signals(
         if selected_name.is_some_and(|selected| selected != name) {
             continue;
         }
-        let ty = types::type_with_unpacked_ranges(
-            base.clone(),
-            constant_binding::bind_unpacked_ranges(&variable.dimensions, tree, &context)?,
-        );
+        let ty = containers::with_dimensions(base.clone(), &variable.dimensions, tree, &context)?;
+        if declaration.constant && ty.container.is_some() {
+            return Err(unsupported("const dynamic container"));
+        }
         let mut signal = Signal::new(name, ty);
         signal.is_const = declaration.constant;
         signals.push(signal);
@@ -144,11 +139,12 @@ pub(super) fn net_signals(
         if selected_name.is_some_and(|selected| selected != name) {
             continue;
         }
-        let ty = types::type_with_unpacked_ranges(
-            base.clone(),
-            constant_binding::bind_unpacked_ranges(&variable.dimensions, tree, &context)?,
-        );
-        signals.push(Signal::new_net(name, ty));
+        let ty = containers::with_dimensions(base.clone(), &variable.dimensions, tree, &context)?;
+        if ty.container.is_some() {
+            return Err(unsupported("dynamic container net"));
+        }
+        signals
+            .push(Signal::new_net(name, ty).with_unresolved_net(declaration.net_type == "uwire"));
     }
     Ok(signals)
 }
@@ -250,7 +246,7 @@ pub(super) fn alias_base_type(
         return Ok(None);
     }
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
-    binding::bind_in(id, native, tree, &context)
+    binding::bind_alias_in(id, native, tree, &context)
 }
 
 /// Builtin integral identity/width without syntax or aggregate layout.
@@ -301,10 +297,7 @@ pub(super) fn alias_signals(
         if selected_name.is_some_and(|selected| selected != name) {
             continue;
         }
-        let ty = types::type_with_unpacked_ranges(
-            base.clone(),
-            constant_binding::bind_unpacked_ranges(&variable.dimensions, tree, &context)?,
-        );
+        let ty = containers::with_dimensions(base.clone(), &variable.dimensions, tree, &context)?;
         signals.push(Signal::new(name, ty));
     }
     Ok(signals)

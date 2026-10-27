@@ -54,6 +54,13 @@ Verylでは完了前にtick上限に達すると失敗します。
 コンパイルや1ステップ・tick内の処理時間は制限しないため、実時間の制限が必要な場合は
 外部のタイムアウト機能を使ってください。1回の実行で言語を混在させることはできません。
 
+SVのtestbenchでは、`+`で始まる位置引数（または繰り返し指定できる`--plusarg +ARG`）はソースではなくplusargです。
+`$test$plusargs`と`$value$plusargs`はコマンドラインの順に参照します（全バックエンド対応）。
+
+```sh
+celox run tb.v --top tb +iterations=9 --plusarg +trace
+```
+
 両言語とも`--backend native|tiered|interpreter|cranelift|wasm`で実行方式を選べます（既定native）。
 tieredはインタープリターで開始し、待機中のイベントを保ちながら生成コードへ移行します。
 両言語とも`--threads N`（1〜64、既定1）で並列度を指定できます。
@@ -64,6 +71,20 @@ celox run test/Top.sv --top Top --backend tiered --threads 4
 celox run --project /path/to/veryl-project --top smoke --backend tiered --threads 4
 celox run test/Top.veryl --top Top --four-state
 celox run --project /path/to/veryl-project --top smoke --report --unlimited
+```
+
+SVのtestbenchでは、実行中に[状態ファイル](checkpoints.md#状態ファイル)を保存して
+`celox state dump`/`celox state diff`で2つの実行やシミュレーターを比較できます（全バックエンド対応）。
+`--save-state-on SIGNAL`で数える信号（`tb.clk`のような階層パス、トップモジュール名は省略可）を指定し、
+`--save-state-at N[,M...]`で保存するサイクル（1から数える）を指定します。
+サイクルは、終了時に信号が1で、直前のタイムステップの終了時には1でなかったタイムステップです。
+ファイル`<SIGNAL>-<N>.state`はそのタイムステップの全リージョンが終わった直後に書くので、ノンブロッキング代入の更新も含みます。
+`--save-state-at-time T[,U...]`は時刻T以前の処理をすべて終え、Tを越えて進む前の状態を`time-<T>.state`に保存します（単位はデザインのグローバル時間精度）。
+`--save-state-dir DIR`で出力先を指定します（既定はカレントディレクトリ）。
+実行が指定のサイクルに達しなかった場合はエラーです。
+
+```sh
+celox run c906.v --top tb --save-state-on tb.clk --save-state-at 1000,2000 --save-state-dir states
 ```
 
 Veryl用の`--report`は設定・コンパイル時間・実行時間・tiered昇格統計・結果を
@@ -188,10 +209,48 @@ package定義は利用側より先に指定してください。`Veryl.toml`や�
 Verylではプロジェクトの入口となるファイルを1つ指定します。
 `celox-vpi-compile`も同じソース一覧を受け付けます。
 
-設計はcocotbが駆動するため、生成した実行ファイルはHDLのプロセスを実行しません。
-`initial`プロセス、通常の`always`プロセスなど、Celoxがプロセスとして実行する
-手続きを含む設計はコンパイルに失敗し、最初のプロセスを示します。定数の`initial`
-ブロックと宣言初期化子は引き続き初期値を設定します。
+### プロセスを含む設計
+
+遅延やシステムタスクを含む`initial`ブロック、遅延やイベント制御を含む`always`
+ブロック、`always #5 clk = ~clk`のようなクロック生成など、プロセスを含む
+SystemVerilog設計は時間付きシミュレーションとしてコンパイルされます。生成した
+実行ファイルはそのプロセスをcocotbと歩調を合わせて実行します。cocotbのタイマーと
+設計の遅延は同じ時間軸を共有し、設計の`$display`/`$write`出力と`$finish`は
+`celox run`と同様に動作します。プロセスを含まない設計は従来どおりコンパイル
+されます。
+
+1つのタイムステップの中で、cocotbが待つVPIコールバックは次の時点で実行されます。
+
+| cocotbのトリガー(VPIコールバック) | 実行される時点 |
+|---|---|
+| `Timer`(`cbAfterDelay`)、`NextTimeStep`(`cbNextSimTime`) | タイムステップの開始時、設計のプロセスより前 |
+| `RisingEdge`、`FallingEdge`、`Edge`(`cbValueChange`) | 変化の後の次の区切り。ラウンドのプロセスが実行された後で、そのフリップフロップがノンブロッキング更新を行う前。ノンブロッキング更新の各ウェーブとそれに続く組み合わせ回路の評価の後。またはタイムステップが落ち着いた後 |
+| `ReadWrite`(`cbReadWriteSynch`) | タイムステップが落ち着いた後。ここでの書き込みは同じ時刻に再び落ち着かせます |
+| `ReadOnly`(`cbReadOnlySynch`) | タイムステップの終わり。ここでの書き込みは拒否されます |
+
+したがって、クロックやリセットのエッジは、cocotbと設計のどちらが駆動しても、
+それが起動するフリップフロップの確定より前に通知されます。変化は、それを起こした
+ウェーブの区切りで通知されます。そのウェーブの組み合わせ回路の評価の後なので、
+レジスタを読む組み合わせ回路はすでに新しい値を示し、その変化で起こされるプロセスは
+まだ実行されていません。タイムステップ内で設計自身のイベントに対してコールバックを
+どこで実行するかはこの実装の選択です。IEEE 1800-2023 4.7はこれらのイベントを処理
+する順序をシミュレータに委ねており、たとえばIcarus Verilogはレジスタの変化を、
+それを読む組み合わせ回路が追従する前に通知します。同じ理由で、1つのプロセスでの
+`x = 1; x = 0;`のような1ウェーブ内のパルスは通知されません。コールバックが見るのは
+区切りでの値です。
+
+cocotbからの書き込みは現在時刻のブロッキング代入です。タイムステップの領域の外、
+たとえば`Timer`コールバックの中での読み出しは格納された値を返します。同じコール
+バックでの書き込みから組み合わせ回路が導く値は、タイムステップが落ち着くまで
+以前の値のままです。
+
+プロセスを含む設計に対応しているのは`celox vpi build`だけです。`celox-vpi-compile`
+とその`celox-vpi-runtime`は引き続きこれらを拒否します
+([#1983](https://github.com/celox-sim/celox/issues/1983))。
+
+実行ファイルには対話モードがないため、`$stop`は`vpiStop`と同様に実行を終了します。
+一時停止への対応は[#1886](https://github.com/celox-sim/celox/issues/1886)で
+扱っています。
 
 ## cocotbを実行する
 

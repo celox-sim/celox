@@ -46,6 +46,7 @@ pub(super) struct ProcModule<'a> {
     pub constants: &'a HashMap<String, i128>,
     pub parameter_types: &'a HashMap<String, (usize, bool)>,
     pub subroutines: HashMap<String, sv::ir::Subroutine>,
+    pub constant_functions: sv::RuntimeConstantFunctions<'a>,
     /// DPI-C imports of the module, by SystemVerilog name.
     pub dpi_imports: HashMap<String, sv::ir::DpiImport>,
     /// Extern functions the module calls, by local index.
@@ -101,8 +102,11 @@ impl<'a> ProcModule<'a> {
             sv::ir::Expr::Call {
                 callee: sv::ir::Callee::Object(op),
                 ..
-            } => matches!(**op, sv::ir::ObjectOp::Load(field)
-                if field.handle == Some(sv::ir::HandleProperty::String)),
+            } => {
+                matches!(**op, sv::ir::ObjectOp::Load(field)
+                if field.handle == Some(sv::ir::HandleProperty::String))
+                    || matches!(**op, sv::ir::ObjectOp::Container { op: sv::ir::ContainerOp::Get | sv::ir::ContainerOp::PopFront | sv::ir::ContainerOp::PopBack, layout } if layout.handle == Some(sv::ir::HandleProperty::String))
+            }
             sv::ir::Expr::Call {
                 callee: sv::ir::Callee::Subroutine(name),
                 ..
@@ -243,6 +247,7 @@ impl<'a> ProcModule<'a> {
             constants,
             parameter_types,
             subroutines,
+            constant_functions: sv::RuntimeConstantFunctions::new(module, constants, four_state),
             dpi_imports,
             extern_functions: Vec::new(),
             extern_calls: 0,
@@ -373,26 +378,119 @@ impl<'a> ProcModule<'a> {
         names.iter().filter_map(|name| self.id(name)).collect()
     }
 
-    /// Whether `always @(items) body` is `always @* body`: no item has an edge
-    /// or a select, the items name exactly the variables the implicit event
-    /// expression of `body` has (IEEE 1800-2023 9.4.2.2), and the body neither
-    /// suspends nor makes a nonblocking assignment, directly or in a call.
+    /// Whether `always @(items) body` simulates like `always @* body`. The
+    /// body must neither suspend nor make a nonblocking assignment, directly
+    /// or in a call. Then either
+    /// - the items name exactly the variables the implicit event expression
+    ///   of `body` has (IEEE 1800-2023 9.4.2.2), a part-select of a whole
+    ///   variable naming it, or
+    /// - the items cover every bit `body` reads, and running `body` when
+    ///   none of those bits changed is unobservable: it has no side effects,
+    ///   reads no variable it writes, and stores each variable at most once
+    ///   per run, so it writes the values it wrote last time without
+    ///   pulsing a variable for the waiters on it (4.3, 9.4.2).
     pub fn is_implicit_event_list(
         &self,
         items: &[sv::ir::EventItem],
         body: &[sv::ir::Stmt],
     ) -> bool {
-        let mut listed = HashSet::default();
+        if self.suspends_or_defers(body) {
+            return false;
+        }
+        let mut listed: HashSet<VarAtomBase<SourceVarId>> = HashSet::default();
+        let mut exact = true;
         for item in items {
-            let (sv::ir::Expr::Ident(name), None) = (&item.expr, &item.iff) else {
+            if item.iff.is_some() {
                 return false;
+            }
+            let (name, range) = match &item.expr {
+                sv::ir::Expr::Ident(name) => (name, None),
+                sv::ir::Expr::Select {
+                    expr: base,
+                    msb,
+                    lsb,
+                    ..
+                } => {
+                    let sv::ir::Expr::Ident(name) = &**base else {
+                        return false;
+                    };
+                    let Some(range) = sv::typecheck::eval_const_expr_with_types(
+                        msb,
+                        self.constants,
+                        self.parameter_types,
+                    )
+                    .zip(sv::typecheck::eval_const_expr_with_types(
+                        lsb,
+                        self.constants,
+                        self.parameter_types,
+                    ))
+                    .and_then(|(msb, lsb)| {
+                        packed_expr_select_offsets(base, msb, lsb, self.variables, self.name_to_id)
+                    }) else {
+                        return false;
+                    };
+                    (name, Some((range.0.min(range.1), range.0.max(range.1))))
+                }
+                _ => return false,
             };
             let Some(id) = self.id(name).filter(|id| !self.is_hidden(*id)) else {
                 return false;
             };
-            listed.insert(VarAtomBase::new(id, 0, self.var(id).width - 1));
+            let width = self.var(id).width;
+            let (lsb, msb) = range.unwrap_or((0, width - 1));
+            exact &= lsb == 0 && msb == width - 1;
+            listed.insert(VarAtomBase::new(id, lsb, msb));
         }
-        !self.suspends_or_defers(body) && listed == self.implicit_reads(body, false)
+        let reads = self.implicit_reads(body, false);
+        if exact && listed == reads {
+            return true;
+        }
+        if !self.is_pure(body) {
+            return false;
+        }
+        let mut written = HashSet::default();
+        written_names(body, &mut written);
+        let written: HashSet<_> = written
+            .iter()
+            .filter_map(|name| self.id(name))
+            .filter(|id| !self.is_hidden(*id))
+            .collect();
+        if reads.iter().any(|read| written.contains(&read.id)) {
+            return false;
+        }
+        if stores_twice(body, &mut HashSet::default()) {
+            return false;
+        }
+        // Longest static prefixes: constant selects keep their bits.
+        self.implicit_reads(body, true).iter().all(|read| {
+            (read.access.lsb..=read.access.msb).all(|bit| {
+                listed.iter().any(|item| {
+                    item.id == read.id && item.access.lsb <= bit && bit <= item.access.msb
+                })
+            })
+        })
+    }
+
+    /// Whether `body` has no effect but its writes: no system task, no
+    /// subroutine call, no system function that reads the simulation.
+    fn is_pure(&self, body: &[sv::ir::Stmt]) -> bool {
+        let mut pure = true;
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt.walk(&mut |stmt| {
+                pure &= !matches!(
+                    stmt,
+                    sv::ir::Stmt::SystemTask { .. }
+                        | sv::ir::Stmt::Eval(_)
+                        | sv::ir::Stmt::Call { .. }
+                        | sv::ir::Stmt::Return(_)
+                );
+                stmt_calls(stmt, &mut calls);
+            });
+        }
+        pure && calls.iter().all(|(callee, _)| {
+            matches!(callee, sv::ir::Callee::System(function) if !function.reads_simulation_state())
+        })
     }
 
     fn suspends_or_defers(&self, body: &[sv::ir::Stmt]) -> bool {
@@ -884,6 +982,8 @@ impl<'a> ProcModule<'a> {
                 source: None,
                 hidden: true,
                 force_control: None,
+                sampled_from: None,
+                history_of: None,
             },
         );
         self.name_to_id.insert(name, id);
@@ -892,6 +992,35 @@ impl<'a> ProcModule<'a> {
     }
 
     /// A hidden variable with the shape of `id`, two-state when `two_state`.
+    /// The hidden copy that holds the sampled value of variable `id`
+    /// (IEEE 1800-2023 16.5.1), created on first use.
+    pub fn sampled_copy(&mut self, id: SourceVarId) -> String {
+        if let Some((name, _)) = self
+            .name_to_id
+            .iter()
+            .find(|(_, copy)| self.variables[copy].sampled_from == Some(id))
+        {
+            return name.clone();
+        }
+        let (copy, name) = self.shadow(id, "sampled", false);
+        self.variables
+            .get_mut(&copy)
+            .expect("a new copy")
+            .sampled_from = Some(id);
+        name
+    }
+
+    /// A new hidden register of `$past` history for variable `id`, which
+    /// starts with the variable's value.
+    pub fn history_copy(&mut self, id: SourceVarId) -> String {
+        let (copy, name) = self.shadow(id, "past", false);
+        self.variables
+            .get_mut(&copy)
+            .expect("a new copy")
+            .history_of = Some(id);
+        name
+    }
+
     pub fn shadow(
         &mut self,
         id: SourceVarId,
@@ -950,6 +1079,8 @@ impl<'a> ProcModule<'a> {
             source: None,
             hidden: true,
             force_control: None,
+            sampled_from: None,
+            history_of: None,
         };
         let id = next_var_id(&mut self.next_id);
         self.variables.insert(id, variable);
@@ -980,6 +1111,8 @@ impl<'a> ProcModule<'a> {
                 source: None,
                 hidden: true,
                 force_control: None,
+                sampled_from: None,
+                history_of: None,
                 ..variable
             },
         );
@@ -1507,6 +1640,8 @@ pub(super) fn register_locals(
                 source: None,
                 hidden: true,
                 force_control: None,
+                sampled_from: None,
+                history_of: None,
             },
         );
         name_to_id.insert(local.name.clone(), id);
@@ -2081,7 +2216,7 @@ pub(super) fn slt_unknown<A: std::hash::Hash + Eq + Clone>(
 ) -> Result<NodeId, sv::AnalyzerError> {
     let mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
     arena
-        .alloc(SLTNode::Constant(BigUint::default(), mask, width, false))
+        .alloc(SLTNode::Constant(mask.clone(), mask, width, false))
         .map_err(slt_error)
 }
 
@@ -2221,7 +2356,7 @@ pub(super) struct CanonicalLoop {
     pub decreasing: bool,
 }
 
-fn literal_usize(expr: &sv::ir::Expr) -> Option<usize> {
+pub(super) fn literal_usize(expr: &sv::ir::Expr) -> Option<usize> {
     let sv::ir::Expr::Literal(text) = expr else {
         return None;
     };
@@ -2318,6 +2453,36 @@ pub(super) fn canonical_for_loop(
         step_op,
         decreasing,
     })
+}
+
+/// The counted loop a `while` or `do`-`while` loop is when its condition
+/// compares a variable with a bound and its last statement steps that
+/// variable, as the step of a [`canonical_for_loop`] would; the loop starts
+/// from the variable's current value. Also returns the statements before
+/// the step, which must not write the variable or the bound.
+pub(super) fn counted_while_loop<'s>(
+    condition: Option<&sv::ir::Expr>,
+    body: &'s [sv::ir::Stmt],
+) -> Option<(CanonicalLoop, &'s [sv::ir::Stmt])> {
+    let (step, rest) = body.split_last()?;
+    let sv::ir::Stmt::Assign {
+        lhs: sv::ir::LValue::Ident(var),
+        ..
+    } = step
+    else {
+        return None;
+    };
+    let init = [sv::ir::Stmt::Assign {
+        lhs: sv::ir::LValue::Ident(var.clone()),
+        rhs: sv::ir::Expr::Ident(var.clone()),
+        nonblocking: false,
+    }];
+    let canonical = canonical_for_loop(&init, condition, std::slice::from_ref(step))?;
+    let mut written = HashSet::default();
+    written_names(rest, &mut written);
+    let mut bound = HashSet::default();
+    expr_idents(&canonical.end, &mut bound);
+    (!written.contains(&canonical.var) && written.is_disjoint(&bound)).then_some((canonical, rest))
 }
 
 /// The identifiers an expression reads.
@@ -2576,6 +2741,62 @@ pub(super) fn expr_calls(expr: &sv::ir::Expr, is_callee: &dyn Fn(&sv::ir::Callee
 }
 
 /// The names written by the assignments (and through call arguments) of a
+/// Whether a run of `stmts` may store a variable twice, given the variables
+/// `written` on some path before them. Locals are not variables of the
+/// design, and a loop counts as storing twice.
+fn stores_twice(stmts: &[sv::ir::Stmt], written: &mut HashSet<String>) -> bool {
+    let mut locals = HashSet::default();
+    stores_twice_in(stmts, written, &mut locals)
+}
+
+fn stores_twice_in(
+    stmts: &[sv::ir::Stmt],
+    written: &mut HashSet<String>,
+    locals: &mut HashSet<String>,
+) -> bool {
+    for stmt in stmts {
+        match stmt {
+            sv::ir::Stmt::Local { name, .. } => {
+                locals.insert(name.clone());
+            }
+            sv::ir::Stmt::Assign { .. } | sv::ir::Stmt::AssignConcat { .. } => {
+                let mut names = HashSet::default();
+                written_names(std::slice::from_ref(stmt), &mut names);
+                for name in names {
+                    if !locals.contains(&name) && !written.insert(name) {
+                        return true;
+                    }
+                }
+            }
+            sv::ir::Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                let mut other = written.clone();
+                if stores_twice_in(then_body, written, locals)
+                    || stores_twice_in(else_body, &mut other, locals)
+                {
+                    return true;
+                }
+                written.extend(other);
+            }
+            sv::ir::Stmt::Case { items, default, .. } => {
+                let before = written.clone();
+                for body in items.iter().map(|item| &item.body).chain(default.iter()) {
+                    let mut branch = before.clone();
+                    if stores_twice_in(body, &mut branch, locals) {
+                        return true;
+                    }
+                    written.extend(branch);
+                }
+            }
+            _ => return true,
+        }
+    }
+    false
+}
+
 /// statement list.
 pub(super) fn written_names(stmts: &[sv::ir::Stmt], names: &mut HashSet<String>) {
     for stmt in stmts {
@@ -2625,6 +2846,19 @@ pub(super) fn written_system_arguments(
     args.iter()
         .enumerate()
         .filter(|(position, _)| function.writes_argument(*position))
+        .filter_map(|(_, arg)| arg.as_ref().and_then(lvalue_from_expr))
+        .flatten()
+        .collect()
+}
+
+/// State writes performed by heap container calls.
+pub(super) fn written_object_arguments(
+    op: &sv::ir::ObjectOp,
+    args: &[Option<sv::ir::Expr>],
+) -> Vec<sv::ir::LValue> {
+    args.iter()
+        .enumerate()
+        .filter(|(position, _)| op.writes_argument(*position))
         .filter_map(|(_, arg)| arg.as_ref().and_then(lvalue_from_expr))
         .flatten()
         .collect()
@@ -2777,7 +3011,9 @@ fn collect_const_calls(
         ConstExpr::Function { callee, args, .. } => {
             calls.push((
                 callee.clone(),
-                args.iter().map(expr_from_const_expr).collect(),
+                args.iter()
+                    .map(|arg| expr_from_const_expr_with_calls(arg, true))
+                    .collect(),
             ));
             args.iter().for_each(|arg| collect_const_calls(arg, calls));
         }

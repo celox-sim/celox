@@ -22,8 +22,25 @@ impl Parser<'_> {
             .get(cursor + 1)
             .map(|index| self.tokens[*index].text.as_str())
             .unwrap_or("");
-        if token.text == "virtual" && matches!(next, "function" | "task" | "class") {
-            return false;
+        if token.text == "virtual" {
+            // Method qualifiers may follow `virtual` (Syntax 8-1). Look
+            // through them without consuming a virtual interface's type.
+            let mut method = cursor + 1;
+            while self.indices.get(method).is_some_and(|index| {
+                matches!(
+                    self.tokens[*index].text.as_str(),
+                    "protected" | "local" | "static"
+                )
+            }) {
+                method += 1;
+            }
+            if next == "class"
+                || self.indices.get(method).is_some_and(|index| {
+                    matches!(self.tokens[*index].text.as_str(), "function" | "task")
+                })
+            {
+                return false;
+            }
         }
         super::expressions::builtin(&token.text)
             || matches!(
@@ -48,7 +65,7 @@ impl Parser<'_> {
 
     pub(super) fn class_property(&mut self) -> Result<()> {
         let mut qualifiers = ClassQualifiers::default();
-        while self.class_qualifier(&mut qualifiers) {}
+        while self.class_property_qualifier(&mut qualifiers) {}
         let qualified_const =
             self.peek() == "const" && matches!(self.nth(1), "protected" | "local" | "static");
         let mut special_const = false;
@@ -56,11 +73,14 @@ impl Parser<'_> {
             self.at += 1;
             while matches!(self.peek(), "static" | "protected" | "local") {
                 special_const |= matches!(self.peek(), "protected" | "local");
-                self.class_qualifier(&mut qualifiers);
+                self.class_property_qualifier(&mut qualifiers);
             }
         }
         let declaration = self.local_declaration()?;
-        if special_const && let LocalDeclaration::Variables(value) = &declaration {
+        if special_const
+            && let LocalDeclaration::Variables(value) | LocalDeclaration::Constructed(value) =
+                &declaration
+        {
             if value.variables.len() != 1 || !value.variables[0].dimensions.is_empty() {
                 return Err(
                     self.error("qualified const class property requires one scalar declarator")
@@ -70,8 +90,11 @@ impl Parser<'_> {
                 self.validate_constant_operators(value)?;
             }
         }
-        if let (Some(class), LocalDeclaration::Variables(mut declaration)) =
-            (self.class_stack.last_mut(), declaration)
+        if let (
+            Some(class),
+            LocalDeclaration::Variables(mut declaration)
+            | LocalDeclaration::Constructed(mut declaration),
+        ) = (self.class_stack.last_mut(), declaration)
         {
             declaration.constant |= qualified_const;
             class.properties.push(ClassProperty {
@@ -82,13 +105,10 @@ impl Parser<'_> {
         Ok(())
     }
 
-    /// Consume one property or method qualifier, recording it.
-    fn class_qualifier(&mut self, qualifiers: &mut ClassQualifiers) -> bool {
+    /// Consume one property qualifier; `virtual` belongs to the interface type.
+    fn class_property_qualifier(&mut self, qualifiers: &mut ClassQualifiers) -> bool {
         let flag = match self.peek() {
             "static" => &mut qualifiers.is_static,
-            "virtual" => &mut qualifiers.is_virtual,
-            "pure" => &mut qualifiers.is_pure,
-            "extern" => &mut qualifiers.is_extern,
             "local" => &mut qualifiers.local,
             "protected" => &mut qualifiers.protected,
             "rand" => &mut qualifiers.rand,
@@ -132,6 +152,19 @@ impl Parser<'_> {
         }
     }
 
+    /// Record a parameter or type declaration that is an item of the
+    /// innermost open class.
+    pub(super) fn class_item(&mut self, kind: &BodyItemKind) {
+        let Some(class) = self.class_stack.last_mut() else {
+            return;
+        };
+        match kind {
+            BodyItemKind::Parameter(id) => class.parameters.push(*id),
+            BodyItemKind::TypeAlias(id) => class.type_aliases.push(*id),
+            _ => {}
+        }
+    }
+
     /// Complete the innermost open class at its `endclass`.
     pub(super) fn finish_class(&mut self) {
         if let Some(mut class) = self.class_stack.pop() {
@@ -157,6 +190,7 @@ impl Parser<'_> {
         let name = self.name()?;
         let mut base = None;
         let mut interfaces = Vec::new();
+        let mut parameter_ports = None;
         if self.eat("#") {
             let start = self.at;
             self.expect("(")?;
@@ -166,6 +200,7 @@ impl Parser<'_> {
                 parameters,
                 tokens: self.range(start),
             });
+            parameter_ports = Some(id);
             items.push(super::generate::Builder::node(
                 self,
                 start,
@@ -208,6 +243,10 @@ impl Parser<'_> {
             base,
             interfaces,
             has_constraints: false,
+            constraints: Vec::new(),
+            parameter_ports,
+            parameters: Vec::new(),
+            type_aliases: Vec::new(),
             properties: Vec::new(),
             methods: Vec::new(),
             tokens: TokenRange { start, end: start },

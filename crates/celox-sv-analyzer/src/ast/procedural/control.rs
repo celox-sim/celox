@@ -21,6 +21,21 @@ struct CaseState {
 enum Job {
     Enter(StatementId),
     EndScope,
+    ForkNext {
+        items: Vec<StatementId>,
+        index: usize,
+        join: celox_design::ForkJoin,
+        branches: Vec<Vec<Stmt>>,
+    },
+    ForkBranch {
+        items: Vec<StatementId>,
+        index: usize,
+        join: celox_design::ForkJoin,
+        branches: Vec<Vec<Stmt>>,
+        start: usize,
+        sensitivity: usize,
+        parent_body: system_functions::Body,
+    },
     IfNext(IfState),
     IfBranch {
         state: IfState,
@@ -50,7 +65,7 @@ enum Job {
         start: usize,
     },
     Foreach {
-        loops: Vec<(String, i128, i128)>,
+        loops: Vec<ForeachLoop>,
         start: usize,
     },
     /// The end of the statement an `@*` controls, which starts at `start`
@@ -118,10 +133,104 @@ impl BodyBuilder<'_, '_, '_> {
         let mut output = Vec::new();
         while let Some(job) = jobs.pop() {
             match job {
+                Job::ForkNext {
+                    items,
+                    index,
+                    join,
+                    branches,
+                } => {
+                    if let Some(&id) = items.get(index) {
+                        if let StatementKind::Declaration(declaration) = &native.statement(id).kind
+                        {
+                            output.extend(self.block_item_declaration(declaration)?);
+                            jobs.push(Job::ForkNext {
+                                items,
+                                index: index + 1,
+                                join,
+                                branches,
+                            });
+                        } else {
+                            jobs.push(Job::ForkBranch {
+                                items,
+                                index,
+                                join,
+                                branches,
+                                start: output.len(),
+                                sensitivity: self.sensitivity_body.len(),
+                                parent_body: self.body,
+                            });
+                            // Detached children obey task rules, independently
+                            // of the function/final procedure spawning them.
+                            if join == celox_design::ForkJoin::None {
+                                self.body = system_functions::Body::Initial;
+                            }
+                            jobs.push(Job::Enter(id));
+                        }
+                    } else {
+                        self.pop_scope();
+                        output.push(Stmt::Fork { join, branches });
+                    }
+                }
+                Job::ForkBranch {
+                    items,
+                    index,
+                    join,
+                    mut branches,
+                    start,
+                    sensitivity,
+                    parent_body,
+                } => {
+                    self.body = parent_body;
+                    let branch = output.split_off(start);
+                    // Folded-away statements still carry syntactic effects,
+                    // but belong to the child, not its function/final parent.
+                    // Preserve that boundary just as for executable branches.
+                    let discarded = self.sensitivity_body.split_off(sensitivity);
+                    if !discarded.is_empty() {
+                        self.sensitivity_body.push(Stmt::Fork {
+                            join,
+                            branches: vec![discarded],
+                        });
+                    }
+                    let mut returns = false;
+                    for stmt in &branch {
+                        stmt.walk(&mut |s| returns |= matches!(s, Stmt::Return(_)));
+                    }
+                    if returns {
+                        return Err(unsupported("return from a fork-join block"));
+                    }
+                    branches.push(branch);
+                    jobs.push(Job::ForkNext {
+                        items,
+                        index: index + 1,
+                        join,
+                        branches,
+                    });
+                }
                 Job::Enter(id) => match &native.statement(id).kind {
                     StatementKind::Empty => {}
                     StatementKind::Declaration(declaration) => {
                         output.extend(self.block_item_declaration(declaration)?)
+                    }
+                    StatementKind::Parallel { items, join, .. } => {
+                        if join != "join_none"
+                            || matches!(self.body, system_functions::Body::Always)
+                        {
+                            self.allow_timing("fork-join block")?;
+                        }
+                        self.push_scope();
+                        let join = match join.as_str() {
+                            "join" => celox_design::ForkJoin::All,
+                            "join_any" => celox_design::ForkJoin::Any,
+                            "join_none" => celox_design::ForkJoin::None,
+                            _ => return Err(disagreement()),
+                        };
+                        jobs.push(Job::ForkNext {
+                            items: items.clone(),
+                            index: 0,
+                            join,
+                            branches: Vec::new(),
+                        });
                     }
                     StatementKind::Block { items, .. } => {
                         self.push_scope();
@@ -246,6 +355,20 @@ impl BodyBuilder<'_, '_, '_> {
                             unreachable!("matched an immediate header");
                         };
                         let statement = native.statement(id);
+                        // The action of a deferred assertion is one
+                        // subroutine call (IEEE 1800-2023 16.4), not a block.
+                        if deferred.is_some()
+                            && success.iter().chain(failure).any(|&action| {
+                                !matches!(
+                                    native.statement(action).kind,
+                                    StatementKind::Empty | StatementKind::Expression(_)
+                                )
+                            })
+                        {
+                            return Err(unsupported(
+                                "deferred assertion action other than one display or severity task call",
+                            ));
+                        }
                         jobs.push(Job::AssertionThen {
                             condition,
                             keyword: keyword.clone(),

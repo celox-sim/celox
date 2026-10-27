@@ -12,6 +12,9 @@ use std::rc::Rc;
 use super::*;
 use crate::system_functions::{HandleProperty, ObjectField, ObjectOp};
 
+pub(super) mod constraints;
+pub(super) mod specializations;
+
 /// Bit width of a handle, see `celox_design::HANDLE_WIDTH`.
 pub(super) const HANDLE_WIDTH: usize = 32;
 
@@ -58,6 +61,8 @@ impl Property {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StaticProperty {
     pub name: String,
+    pub local: bool,
+    pub protected: bool,
     /// The class that declares the property.
     pub owner: String,
     pub r#type: Type,
@@ -72,8 +77,17 @@ pub(super) struct Method {
     pub name: String,
     /// The class that declares the method.
     pub owner: String,
-    /// The definition, or the prototype of a pure virtual method.
+    /// The definition, or the prototype of a pure virtual method, in the
+    /// source of the scope that declares the class.
     pub native: celox_sv_syntax::SubroutineId,
+    /// The names of its formals, which a class declared in another source
+    /// is called with.
+    pub formals: Vec<Option<String>>,
+    /// A function, not a task.
+    pub is_function: bool,
+    /// Its return type, resolved in the scope of the class: `None` for a
+    /// task, `void` or a constructor, and unknown when it cannot be bound.
+    pub result: Option<Option<Type>>,
     pub qualifiers: celox_sv_syntax::ClassQualifiers,
     /// Declared `virtual` here or in a base: a call through a handle runs
     /// the override of the object's class (IEEE 1800-2023 8.20).
@@ -111,9 +125,14 @@ pub(super) struct Class {
     pub statics: Vec<StaticProperty>,
     /// Methods visible in the class, overrides replacing inherited ones.
     pub methods: Vec<Method>,
+    /// The parameters and typedefs of an interface class, its own and
+    /// those it inherits, each with the class that declares it (IEEE
+    /// 1800-2023 8.26.3).
+    pub declarations: Vec<(String, String)>,
     /// Bytes of an object.
     pub size: u32,
     pub has_constraints: bool,
+    pub constraints: Vec<(String, Result<Vec<celox_heap::randomization::Expr>, String>)>,
 }
 
 /// An internal unsigned packed argument of a generated method.
@@ -133,9 +152,9 @@ impl Class {
     }
 
     /// Validate the supported unconstrained subset before binding a call.
-    pub fn check_randomize(&self, tree: &AnalysisContext<'_>) -> Converted<()> {
+    pub fn check_randomize(&self) -> Converted<()> {
         if self.has_constraints {
-            return Err(unsupported("class randomize with constraints"));
+            self.constraint_program()?;
         }
         for property in &self.properties {
             if property.randc && property.cyclic_domain_size().is_none() {
@@ -154,9 +173,8 @@ impl Class {
         }
         for hook in ["pre_randomize", "post_randomize"] {
             if let Some(method) = self.method(hook) {
-                let native = tree.declarations().subroutine(method.native);
-                if native.kind != celox_sv_syntax::SubroutineKind::Function
-                    || native.ports.as_ref().is_some_and(|ports| !ports.is_empty())
+                if !method.is_function
+                    || !method.formals.is_empty()
                     || method.qualifiers.is_static
                     || method.qualifiers.is_virtual
                 {
@@ -191,16 +209,60 @@ impl Class {
         &self.properties[self.base_properties..]
     }
 
-    /// The number of formals of the constructor, which takes the handle of
-    /// the object it initializes before them.
-    pub fn constructor_formals(&self, native: &celox_sv_syntax::Declarations) -> usize {
-        self.method("new").map_or(0, |method| {
-            native
-                .subroutine(method.native)
-                .ports
-                .as_ref()
-                .map_or(0, Vec::len)
-        })
+    /// The actuals that `arguments` of a constructor call pass to each
+    /// formal of the constructor, by position or by name (IEEE 1800-2023
+    /// 13.5.4), `None` for an omitted one, which takes its default; and the
+    /// formals in the order their actuals are written, then the rest, which
+    /// is the order they are evaluated in.
+    pub fn constructor_arguments(
+        &self,
+        arguments: &[celox_sv_syntax::Argument],
+    ) -> Converted<(Vec<Option<celox_sv_syntax::ExprId>>, Vec<usize>)> {
+        let names = self
+            .method("new")
+            .map_or_else(Vec::new, |method| method.formals.clone());
+        let mut actuals = vec![None; names.len()];
+        let mut order = Vec::new();
+        let mut named = false;
+        for (index, argument) in arguments.iter().enumerate() {
+            let index = match &argument.name {
+                Some(name) => {
+                    named = true;
+                    let name = instances::normalize_identifier(&name.spelling);
+                    names
+                        .iter()
+                        .position(|formal| formal.as_ref() == Some(&name))
+                        .ok_or_else(|| {
+                            unsupported(format!(
+                                "constructor of class `{}` without an argument `{name}`",
+                                self.name
+                            ))
+                        })?
+                }
+                None if named => {
+                    return Err(unsupported("positional argument after named argument"));
+                }
+                None => index,
+            };
+            let Some(actual) = actuals.get_mut(index) else {
+                return Err(unsupported(format!(
+                    "constructor of class `{}` with {} arguments",
+                    self.name,
+                    arguments.len()
+                )));
+            };
+            // An omitted actual `.x()` binds its formal too.
+            if order.contains(&index) {
+                return Err(unsupported("constructor argument passed twice"));
+            }
+            order.push(index);
+            *actual = argument.value;
+        }
+        let unbound = (0..names.len())
+            .filter(|index| !order.contains(index))
+            .collect::<Vec<_>>();
+        order.extend(unbound);
+        Ok((actuals, order))
     }
 
     /// The subroutine name of `method` of `owner`, and the variable name of
@@ -278,15 +340,145 @@ impl Class {
     }
 }
 
-/// The declaration of class `name`, if one exists.
+/// The declaration of class `name`, or of the class it specializes, if one
+/// exists.
 fn declaration<'a>(
     tree: &'a AnalysisContext<'_>,
     name: &str,
 ) -> Option<&'a celox_sv_syntax::ClassDeclaration> {
+    let name = specializations::generic(tree, name);
     tree.declarations()
         .classes
         .iter()
-        .find(|class| instances::normalize_identifier(&class.name.spelling) == name)
+        .find(|class| declared_name(tree, class) == name)
+}
+
+/// The name of class declaration `declaration`: qualified by the package
+/// that declares it, or by `$unit` when it is declared in the compilation
+/// unit outside any module, interface, program or package, so that each
+/// names one class of the design (IEEE 1800-2023 3.12.1, 26.3).
+pub(super) fn declared_name(
+    tree: &AnalysisContext<'_>,
+    declaration: &celox_sv_syntax::ClassDeclaration,
+) -> String {
+    let name = instances::normalize_identifier(&declaration.name.spelling);
+    match enclosing_unit(tree.declarations(), declaration.tokens) {
+        Some(unit) if unit.kind == celox_sv_syntax::UnitKind::Package => format!(
+            "{}::{name}",
+            instances::normalize_identifier(&unit.name.spelling)
+        ),
+        Some(_) => name,
+        None => format!("{}::{name}", packages::UNIT),
+    }
+}
+
+/// The class declarations of the current scope, not those of the scopes
+/// nested in it.
+pub(super) fn scope_declarations<'a>(
+    tree: &'a AnalysisContext<'_>,
+) -> impl Iterator<Item = &'a celox_sv_syntax::ClassDeclaration> {
+    let native = tree.declarations();
+    let scope = tree.root_unit().ok().map(|unit| unit.tokens);
+    native
+        .classes
+        .iter()
+        .filter(move |class| enclosing_unit(native, class.tokens).map(|unit| unit.tokens) == scope)
+}
+
+/// The classes the current scope declares, as they have been laid out, for
+/// the scopes that use it (see `scope::ScopeSymbols::classes`).
+pub(super) fn scope_classes(tree: &AnalysisContext<'_>, env: &HashMap<String, i128>) -> Vec<Class> {
+    let laid_out = tree.state.classes.borrow();
+    scope_declarations(tree)
+        .flat_map(|declaration| specializations_of(tree, declaration))
+        .filter_map(|name| {
+            let mut class = Class::clone(laid_out.get(&name)?);
+            // The types are fixed in the scope that declares the class,
+            // whose names another scope does not see.
+            let (env, _) = specializations::scope(tree, &name, env, &HashMap::default());
+            let resolve = |ty: &mut Type| {
+                if let Some(resolved) = type_parameters::resolve(&tree.state, ty.clone(), &env) {
+                    *ty = resolved;
+                }
+            };
+            for property in &mut class.properties {
+                resolve(&mut property.r#type);
+            }
+            for property in &mut class.statics {
+                resolve(&mut property.r#type);
+            }
+            Some(class)
+        })
+        .collect()
+}
+
+/// The classes the current scope declares as types of the scope, by the
+/// names it declares them with. A parameterized class is a type only with
+/// a specialization.
+pub(super) fn scope_class_types(tree: &AnalysisContext<'_>) -> Vec<(String, Type)> {
+    scope_declarations(tree)
+        .filter(|declaration| declaration.parameter_ports.is_none())
+        .map(|declaration| {
+            (
+                instances::normalize_identifier(&declaration.name.spelling),
+                handle(&declared_name(tree, declaration)),
+            )
+        })
+        .collect()
+}
+
+/// The class that the unqualified name `name` refers to where the current
+/// scope sees it: one the scope declares, or else one the compilation unit
+/// declares (IEEE 1800-2023 3.12.1). Classes of packages are seen through
+/// imports, as types.
+pub(super) fn resolve(tree: &AnalysisContext<'_>, name: &str) -> Option<String> {
+    let native = tree.declarations();
+    let scope = tree.root_unit().ok().map(|unit| unit.tokens);
+    let mut unit_class = None;
+    for class in &native.classes {
+        if instances::normalize_identifier(&class.name.spelling) != name {
+            continue;
+        }
+        let enclosing = enclosing_unit(native, class.tokens).map(|unit| unit.tokens);
+        if enclosing == scope {
+            return Some(declared_name(tree, class));
+        }
+        if enclosing.is_none() {
+            unit_class = Some(declared_name(tree, class));
+        }
+    }
+    // A class an import makes visible (IEEE 1800-2023 26.3).
+    let imported = scope::imported(&tree.state);
+    if let Some(class) = imported.aliases.get(name)
+        && imported.classes.iter().any(|known| &known.name == class)
+    {
+        return Some(class.clone());
+    }
+    unit_class.or_else(|| {
+        let class = format!("{}::{name}", packages::UNIT);
+        imported
+            .classes
+            .iter()
+            .any(|known| known.name == class)
+            .then_some(class)
+    })
+}
+
+/// Whether class `name` is declared in the source of the current scope.
+pub(super) fn is_declared(tree: &AnalysisContext<'_>, name: &str) -> bool {
+    declaration(tree, name).is_some()
+}
+
+/// The innermost module, interface, program or package of `native` whose
+/// declaration contains `tokens`.
+pub(super) fn enclosing_unit(
+    native: &celox_sv_syntax::Declarations,
+    tokens: celox_sv_syntax::TokenRange,
+) -> Option<&celox_sv_syntax::Unit> {
+    native
+        .all_units()
+        .filter(|unit| unit.tokens.start <= tokens.start && tokens.end <= unit.tokens.end)
+        .min_by_key(|unit| unit.tokens.end - unit.tokens.start)
 }
 
 /// Whether `name` is an interface class (IEEE 1800-2023 8.26).
@@ -294,7 +486,15 @@ pub(super) fn is_interface(tree: &AnalysisContext<'_>, name: &str) -> bool {
     declaration(tree, name).is_some_and(|declaration| declaration.interface)
 }
 
-/// The classes and interface classes that body item `item` declares.
+/// Whether `name` is a class declared with a parameter port list (IEEE
+/// 1800-2023 8.25).
+pub(super) fn is_parameterized(tree: &AnalysisContext<'_>, name: &str) -> bool {
+    declaration(tree, name).is_some_and(|class| class.parameter_ports.is_some())
+}
+
+/// The classes and interface classes that body item `item` declares: of a
+/// parameterized class, the specializations made of it (IEEE 1800-2023
+/// 8.25).
 pub(super) fn item_classes(
     item: celox_sv_syntax::BodyItemId,
     tree: &AnalysisContext<'_>,
@@ -311,8 +511,22 @@ pub(super) fn item_classes(
         .filter(|class| {
             item.tokens.start <= class.tokens.start && class.tokens.end <= item.tokens.end
         })
-        .map(|class| instances::normalize_identifier(&class.name.spelling))
+        .flat_map(|class| specializations_of(tree, class))
         .collect()
+}
+
+/// The specializations of class declaration `declaration`: the class itself
+/// when it has no parameter port list.
+pub(super) fn specializations_of(
+    tree: &AnalysisContext<'_>,
+    declaration: &celox_sv_syntax::ClassDeclaration,
+) -> Vec<String> {
+    let name = declared_name(tree, declaration);
+    if declaration.parameter_ports.is_some() {
+        specializations::of(tree, &name)
+    } else {
+        vec![name]
+    }
 }
 
 /// The methods that class `name` implements, with their definitions: the
@@ -337,7 +551,7 @@ pub(super) fn declared_methods(
                 return Ok((method.subroutine, method.qualifiers.is_static));
             }
             let method_name = instances::normalize_identifier(&subroutine.name.spelling);
-            out_of_block_definition(tree, name, &method_name)
+            out_of_block_definition(tree, declaration, &method_name)
                 .map(|id| (id, method.qualifiers.is_static))
                 .ok_or_else(|| {
                     unsupported(format!(
@@ -385,14 +599,42 @@ pub(super) fn base_arguments<'a>(
 
 /// The handle type of class `name`, if it is a class.
 pub(super) fn handle_type(tree: &AnalysisContext<'_>, name: &str) -> Option<Type> {
-    declaration(tree, name)?;
+    (declaration(tree, name).is_some() || imported(tree, name).is_some()).then(|| handle(name))
+}
+
+/// Class `name` as the scope that declares it laid it out, when the current
+/// scope uses that scope (see `scope::ScopeSymbols::classes`).
+fn imported(tree: &AnalysisContext<'_>, name: &str) -> Option<Rc<Class>> {
+    scope::imported(&tree.state)
+        .classes
+        .iter()
+        .find(|class| class.name == name)
+        .map(|class| Rc::new(class.clone()))
+}
+
+/// The classes whose objects the current scope may see: those it declares
+/// and those of the scopes it uses.
+pub(super) fn visible_classes(tree: &AnalysisContext<'_>) -> Vec<String> {
+    let mut names = scope_declarations(tree)
+        .flat_map(|declaration| specializations_of(tree, declaration))
+        .collect::<Vec<_>>();
+    for class in &scope::imported(&tree.state).classes {
+        if !names.contains(&class.name) {
+            names.push(class.name.clone());
+        }
+    }
+    names
+}
+
+/// The handle type of class `name`.
+pub(super) fn handle(name: &str) -> Type {
     let mut ty = Type::new(TypeKind::Object);
     ty.packed_ranges.push(PackedRange::new(
         ConstExpr::Literal((HANDLE_WIDTH - 1).to_string()),
         ConstExpr::Literal("0".into()),
     ));
-    ty.class = Some(name.to_owned());
-    Some(ty)
+    ty.class = Some(Arc::from(name));
+    ty
 }
 
 /// The class `name`, laid out with its bases.
@@ -405,23 +647,61 @@ pub(super) fn class(
     if let Some(class) = tree.state.classes.borrow().get(name) {
         return Ok(class.clone());
     }
-    let declaration =
-        declaration(tree, name).ok_or_else(|| unsupported(format!("class `{name}`")))?;
+    // A class of another scope is laid out in its own scope, where the
+    // names it uses are declared.
+    let declaration = declaration(tree, name).filter(|declaration| {
+        let native = tree.declarations();
+        enclosing_unit(native, declaration.tokens).map(|unit| unit.tokens)
+            == tree.root_unit().ok().map(|unit| unit.tokens)
+    });
+    let Some(declaration) = declaration else {
+        let class = imported(tree, name).ok_or_else(|| unsupported(format!("class `{name}`")))?;
+        tree.state
+            .classes
+            .borrow_mut()
+            .insert(name.to_owned(), class.clone());
+        return Ok(class);
+    };
+    let (env, aliases) = specializations::scope(tree, name, env, aliases);
+    let (env, aliases) = (&env, &aliases);
     let native = tree.declarations();
-    let interfaces = declaration
-        .interfaces
-        .iter()
-        .map(|&interface| interface_name(tree, interface, env, aliases))
-        .collect::<Converted<Vec<_>>>()?;
+    // The specialization of an interface class named the interface classes
+    // it extends where its header is, as a class names its base below.
+    let recorded = declaration
+        .interface
+        .then(|| specializations::lookup(tree, name))
+        .flatten()
+        .map(|specialization| specialization.bases.clone())
+        .filter(|bases| {
+            bases.len() == declaration.interfaces.len()
+                && bases.iter().all(|base| {
+                    self::declaration(tree, base).is_some_and(|declaration| declaration.interface)
+                })
+        });
+    let interfaces = match recorded {
+        Some(bases) => bases,
+        None => declaration
+            .interfaces
+            .iter()
+            .map(|&interface| interface_name(tree, interface, env, aliases))
+            .collect::<Converted<Vec<_>>>()?,
+    };
     if declaration.interface {
         return interface_class(tree, name, declaration, interfaces, env, aliases);
     }
     let base = match &declaration.base {
         None => None,
         Some(base) => {
-            let ty = type_binding::procedural_type(base.data_type, native, tree, env, aliases)?
-                .and_then(|ty| ty.class.clone())
-                .ok_or_else(|| unsupported("base class type"))?;
+            // The specialization named its base where the class header is,
+            // before the declarations it inherits could hide those names.
+            let recorded = specializations::lookup(tree, name)
+                .and_then(|specialization| specialization.bases.first().cloned());
+            let ty = match recorded {
+                Some(ty) => ty,
+                None => type_binding::procedural_type(base.data_type, native, tree, env, aliases)?
+                    .and_then(|ty| ty.class().map(str::to_owned))
+                    .ok_or_else(|| unsupported("base class type"))?,
+            };
             Some(class(tree, &ty, env, aliases)?)
         }
     };
@@ -453,13 +733,24 @@ pub(super) fn class(
         )?
         .ok_or_else(|| unsupported("class property type"))?;
         for variable in &property.declaration.variables {
-            if !variable.dimensions.is_empty() {
+            let ty = containers::with_dimensions(
+                ty.clone(),
+                &variable.dimensions,
+                tree,
+                &PackedDimensions::new(HashMap::default(), env, aliases),
+            )?;
+            if !ty.unpacked_ranges.is_empty() {
                 return Err(unsupported("class property with unpacked dimensions"));
+            }
+            if ty.container.is_some() && property.declaration.constant {
+                return Err(unsupported("const dynamic container class property"));
             }
             let property_name = instances::normalize_identifier(&variable.name.spelling);
             if property.qualifiers.is_static {
                 statics.retain(|known| known.name != property_name);
                 statics.push(StaticProperty {
+                    local: property.qualifiers.local,
+                    protected: property.qualifiers.protected,
                     variable: Class::subroutine_name(name, &property_name),
                     name: property_name,
                     owner: name.to_owned(),
@@ -496,7 +787,10 @@ pub(super) fn class(
     for method in &declaration.methods {
         let subroutine = native.subroutine(method.subroutine);
         let method_name = instances::normalize_identifier(&subroutine.name.spelling);
-        if matches!(method_name.as_str(), "randomize" | "srandom" | "rand_mode") {
+        if matches!(
+            method_name.as_str(),
+            "randomize" | "srandom" | "rand_mode" | "constraint_mode"
+        ) {
             return Err(unsupported(
                 "overriding built-in class randomization methods",
             ));
@@ -509,7 +803,7 @@ pub(super) fn class(
         let native_id = if method.qualifiers.is_pure {
             method.subroutine
         } else if subroutine.prototype {
-            out_of_block_definition(tree, name, &method_name).ok_or_else(|| {
+            out_of_block_definition(tree, declaration, &method_name).ok_or_else(|| {
                 unsupported(format!(
                     "extern method `{name}::{method_name}` without a body"
                 ))
@@ -518,10 +812,15 @@ pub(super) fn class(
             method.subroutine
         };
         methods.retain(|known| known.name != method_name);
+        let (formals, result) = signature(tree, native_id, env, aliases);
         methods.push(Method {
             name: method_name,
             owner: name.to_owned(),
             native: native_id,
+            formals,
+            is_function: native.subroutine(native_id).kind
+                == celox_sv_syntax::SubroutineKind::Function,
+            result,
             qualifiers: method.qualifiers,
             is_virtual,
         });
@@ -535,7 +834,7 @@ pub(super) fn class(
             class(tree, interface, env, aliases)?
                 .methods
                 .iter()
-                .map(|method| (method.name.clone(), method.native)),
+                .map(|method| (method.name.clone(), method.result.clone())),
         );
     }
     for (method_name, prototype) in required {
@@ -546,9 +845,12 @@ pub(super) fn class(
                         "interface class method `{method_name}` implemented by a non-virtual method of a base class"
                     )));
                 }
-                if return_type(tree, method.native, env, aliases)?
-                    != return_type(tree, prototype, env, aliases)?
-                {
+                let (Some(implemented), Some(prototype)) = (&method.result, &prototype) else {
+                    return Err(unsupported(format!(
+                        "return type of interface class method `{method_name}`"
+                    )));
+                };
+                if implemented != prototype {
                     return Err(unsupported(format!(
                         "method `{method_name}` of class `{name}` whose return type differs from its interface class"
                     )));
@@ -572,9 +874,34 @@ pub(super) fn class(
             method.name
         )));
     }
+    let mut constraints = base
+        .as_ref()
+        .map(|base| base.constraints.clone())
+        .unwrap_or_default();
+    for block in &declaration.constraints {
+        let block_name = block.name.spelling.clone();
+
+        let expressions = block
+            .expressions
+            .as_ref()
+            .ok_or_else(|| "unsupported constraint block form".to_owned())
+            .and_then(|expressions| {
+                expressions
+                    .iter()
+                    .map(|&id| constraints::bind(id, tree, &properties, env))
+                    .collect()
+            });
+        // Constraint indices survive overrides, including calls via base handles.
+        if let Some((_, inherited)) = constraints.iter_mut().find(|(name, _)| *name == block_name) {
+            *inherited = expressions;
+        } else {
+            constraints.push((block_name, expressions));
+        }
+    }
     let class = Rc::new(Class {
         name: name.to_owned(),
-        id: class_id(name),
+        id: class_id(tree, name),
+        constraints,
         has_constraints: declaration.has_constraints
             || base.as_ref().is_some_and(|base| base.has_constraints),
         base: base.map(|base| base.name.clone()),
@@ -585,6 +912,7 @@ pub(super) fn class(
         base_properties,
         statics,
         methods,
+        declarations: Vec::new(),
         size: size.max(1),
     });
     tree.state
@@ -604,9 +932,14 @@ fn interface_name(
 ) -> Converted<String> {
     let native = tree.declarations();
     let name = type_binding::procedural_type(interface, native, tree, env, aliases)?
-        .and_then(|ty| ty.class.clone())
+        .and_then(|ty| ty.class().map(str::to_owned))
         .ok_or_else(|| unsupported("implemented interface class type"))?;
-    if !declaration(tree, &name).is_some_and(|declaration| declaration.interface) {
+    // An interface class of another scope is known by its layout.
+    let interface = match imported(tree, &name) {
+        Some(class) => class.is_interface,
+        None => declaration(tree, &name).is_some_and(|declaration| declaration.interface),
+    };
+    if !interface {
         return Err(unsupported(format!(
             "`implements` of `{name}`, not an interface class"
         )));
@@ -626,11 +959,39 @@ fn interface_class(
     aliases: &HashMap<String, Type>,
 ) -> Converted<Rc<Class>> {
     let native = tree.declarations();
+    // The parameters and typedefs it declares hide inherited ones; those it
+    // inherits from one interface class in several ways are one (8.26.6.3).
+    let mut declarations = own_declarations(native, declaration)
+        .into_iter()
+        .map(|own| (own, name.to_owned()))
+        .collect::<Vec<_>>();
+    let own = declarations.len();
     let mut methods: Vec<Method> = Vec::new();
     for interface in &interfaces {
-        for method in &class(tree, interface, env, aliases)?.methods {
+        let interface = class(tree, interface, env, aliases)?;
+        for method in &interface.methods {
             methods.retain(|known| known.name != method.name);
             methods.push(method.clone());
+        }
+        for (inherited, origin) in &interface.declarations {
+            if declarations[..own]
+                .iter()
+                .any(|(known, _)| known == inherited)
+            {
+                continue;
+            }
+            match declarations.iter().find(|(known, _)| known == inherited) {
+                Some((_, first)) if first != origin => {
+                    return Err(AnalyzerError::ConflictingInterfaceClassDeclaration {
+                        class: name.to_owned(),
+                        name: inherited.clone(),
+                        first: first.clone(),
+                        second: origin.clone(),
+                    });
+                }
+                Some(_) => {}
+                None => declarations.push((inherited.clone(), origin.clone())),
+            }
         }
     }
     for method in &declaration.methods {
@@ -646,26 +1007,32 @@ fn interface_class(
         return_type(tree, method.subroutine, env, aliases)?;
         let method_name = instances::normalize_identifier(&subroutine.name.spelling);
         methods.retain(|known| known.name != method_name);
+        let (formals, result) = signature(tree, method.subroutine, env, aliases);
         methods.push(Method {
             name: method_name,
             owner: name.to_owned(),
             native: method.subroutine,
+            formals,
+            is_function: subroutine.kind == celox_sv_syntax::SubroutineKind::Function,
+            result,
             qualifiers: method.qualifiers,
             is_virtual: true,
         });
     }
     let class = Rc::new(Class {
         name: name.to_owned(),
-        id: class_id(name),
+        id: class_id(tree, name),
         base: None,
         interfaces,
         is_abstract: true,
         is_interface: true,
         has_constraints: false,
+        constraints: Vec::new(),
         properties: Vec::new(),
         base_properties: 0,
         statics: Vec::new(),
         methods,
+        declarations,
         size: 1,
     });
     tree.state
@@ -673,6 +1040,53 @@ fn interface_class(
         .borrow_mut()
         .insert(name.to_owned(), class.clone());
     Ok(class)
+}
+
+/// The names of the parameters and typedefs that class `declaration`
+/// declares.
+fn own_declarations(
+    native: &celox_sv_syntax::Declarations,
+    declaration: &celox_sv_syntax::ClassDeclaration,
+) -> Vec<String> {
+    let parameters = declaration
+        .parameter_ports
+        .iter()
+        .chain(&declaration.parameters)
+        .flat_map(|&id| &native.parameter_declaration(id).parameters)
+        .map(|parameter| &parameter.name);
+    let aliases = declaration
+        .type_aliases
+        .iter()
+        .map(|&id| &native.type_alias(id).name);
+    parameters
+        .chain(aliases)
+        .map(|name| instances::normalize_identifier(&name.spelling))
+        .collect()
+}
+
+/// The formal names and the return type of method `id`, see [`Method`].
+fn signature(
+    tree: &AnalysisContext<'_>,
+    id: celox_sv_syntax::SubroutineId,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> (Vec<Option<String>>, Option<Option<Type>>) {
+    let formals = tree
+        .declarations()
+        .subroutine(id)
+        .ports
+        .iter()
+        .flatten()
+        .map(|port| {
+            port.name
+                .as_ref()
+                .map(|name| instances::normalize_identifier(&name.spelling))
+        })
+        .collect();
+    let result = return_type(tree, id, env, aliases)
+        .ok()
+        .map(|ty| ty.and_then(|ty| type_parameters::resolve(&tree.state, ty, env)));
+    (formals, result)
 }
 
 /// The return type of subroutine `id`, `None` for a task or `void`.
@@ -689,19 +1103,23 @@ fn return_type(
     }
 }
 
-/// The definition `function ... class::method` outside class `class`.
+/// The definition `function ... class::method` outside class declaration
+/// `declaration`, in the scope that declares the class (IEEE 1800-2023 8.24).
 fn out_of_block_definition(
     tree: &AnalysisContext<'_>,
-    class: &str,
+    declaration: &celox_sv_syntax::ClassDeclaration,
     method: &str,
 ) -> Option<celox_sv_syntax::SubroutineId> {
     let native = tree.declarations();
+    let class = instances::normalize_identifier(&declaration.name.spelling);
+    let scope = enclosing_unit(native, declaration.tokens).map(|unit| unit.tokens);
     native.subroutine_ids().find(|&id| {
         let subroutine = native.subroutine(id);
         !subroutine.prototype
             && instances::normalize_identifier(&subroutine.name.spelling) == method
-            && matches!(&subroutine.scope[..], [scope]
-                if instances::normalize_identifier(&scope.name.spelling) == class)
+            && matches!(&subroutine.scope[..], [name]
+                if instances::normalize_identifier(&name.name.spelling) == class)
+            && enclosing_unit(native, subroutine.tokens).map(|unit| unit.tokens) == scope
     })
 }
 
@@ -714,6 +1132,7 @@ fn field(
     offset: u32,
 ) -> Converted<ObjectField> {
     let (width, signed, handle) = match ty.kind() {
+        _ if ty.container.is_some() => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::String => (HANDLE_WIDTH, false, Some(HandleProperty::String)),
         TypeKind::Object => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::Bit => {
@@ -741,10 +1160,30 @@ fn field(
 
 /// A run-time identifier of class `name`: an FNV-1a hash, never 0, which
 /// `null` reads as.
-fn class_id(name: &str) -> u32 {
-    let hash = name.bytes().fold(0x811c_9dc5u32, |hash, byte| {
-        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
-    });
+fn class_id(tree: &AnalysisContext<'_>, name: &str) -> u32 {
+    // Classes of the compilation units of two sources may share a name; the
+    // path of the source tells them apart (IEEE 1800-2023 3.12.1).
+    let source = name
+        .starts_with(&format!("{}::", packages::UNIT))
+        .then(|| {
+            let native = tree.declarations();
+            native.tokens.first().map(|token| {
+                native
+                    .sources
+                    .file(token.origin.spelling.file)
+                    .path
+                    .display()
+                    .to_string()
+            })
+        })
+        .flatten()
+        .unwrap_or_default();
+    let hash = name
+        .bytes()
+        .chain(source.bytes())
+        .fold(0x811c_9dc5u32, |hash, byte| {
+            (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+        });
     hash.max(1)
 }
 
@@ -759,15 +1198,14 @@ fn object_classes(
 ) -> Converted<Vec<Rc<Class>>> {
     let mut classes = Vec::new();
     let mut ids = HashMap::default();
-    for declaration in &tree.declarations().classes {
-        if declaration.interface || declaration.virtual_class {
-            continue;
-        }
-        let name = instances::normalize_identifier(&declaration.name.spelling);
+    for name in visible_classes(tree) {
         // A class that cannot be laid out has no objects.
         let Ok(class) = class(tree, &name, env, aliases) else {
             continue;
         };
+        if class.is_abstract || class.is_interface {
+            continue;
+        }
         if !class.derives_from(tree, ancestor, env, aliases) {
             continue;
         }

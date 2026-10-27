@@ -24,6 +24,15 @@ pub trait UnitExecutor {
         Ok(self.backend_mut().run_process(index)?)
     }
 
+    /// Attribute deferred assertion records to this dynamic process execution.
+    fn enter_deferred_assertion_process(&mut self, _process: usize) {}
+    /// Consume this invocation's records before another execution context runs.
+    fn leave_deferred_assertion_process(&mut self) {}
+    /// A naturally completed process retains its pending assertion reports.
+    fn finish_deferred_assertion_process(&mut self, _process: usize) {}
+    /// Disabling a live process flushes its deferred assertion reports (16.4.4).
+    fn cancel_deferred_assertion_process(&mut self, _process: usize) {}
+
     /// Prepare the declaration-only state before runtime static initializers.
     fn reset_declaration_startup(&mut self) -> Result<(), Halt> {
         Ok(())
@@ -125,6 +134,9 @@ pub trait HostBoundary: UnitExecutor {
         CompiledSlots::None
     }
 
+    /// Live values kept in dynamic process frames, outside backend state memory.
+    fn retain_process_values(&mut self, _values: &[(crate::SignalRef, crate::timing::Value)]) {}
+
     /// Called after the state for a simulation timestamp has stabilized.
     fn finish_timed_step(&mut self, _timestamp: u64) {}
 
@@ -135,12 +147,26 @@ pub trait HostBoundary: UnitExecutor {
         Ok(())
     }
 
+    /// Active-region work has drained. Mature Observed deferred assertions
+    /// before entering Reactive, so a later wakeup cannot flush them (16.4.1).
+    fn try_observed_deferred_assertions(&mut self, _timestamp: u64) -> Result<(), Halt> {
+        Ok(())
+    }
+
     /// Called after [`Self::try_finish_timed_step`] when the time slot
     /// `timestamp` is over: no more work is due at that time. A step ends
     /// before its slot does when a process waits for zero time. The
     /// runtime's loop calls it; a host that has work here returns
     /// [`CompiledSlots::None`] from [`Self::compiled_slots`].
     fn try_end_time_slot(&mut self, _timestamp: u64) -> Result<(), Halt> {
+        Ok(())
+    }
+
+    /// Called before a run or a step moves from `timestamp` to a later time:
+    /// before the step of a later slot, and at the end of a run to a time
+    /// without work. An error ends the run there, as an error of a step
+    /// does, and so does a `$finish` the host ran there.
+    fn try_leave_time(&mut self, _timestamp: u64) -> Result<(), Halt> {
         Ok(())
     }
 }

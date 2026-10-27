@@ -55,12 +55,12 @@ compilation unit; choose the top by its SystemVerilog module name.
 | What your test needs | API |
 | --- | --- |
 | Set inputs, evaluate logic and advance clock events from Rust | `Simulator::from_sv_sources` |
-| Advance simulation time and run `initial` and `always` processes with timing controls | `Simulation::from_sv_sources` |
+| Advance simulation time, run timed processes and execute `final` procedures | `Simulation::from_sv_sources` |
 | Include both Veryl and SystemVerilog sources | `Simulator::from_mixed_sources` |
 
 `Simulator::tick` drives the rising edge of the selected event. `Simulation`
 tracks time and runs scheduled edges. Constant initialization applies to both.
-`initial` blocks that read design state or call system tasks, processes with
+`final` procedures, `initial` blocks that read design state or call system tasks, processes with
 timing controls and `always` blocks whose sensitivity list is neither `@*` nor
 [the variables they read](./systemverilog-reference#timing-controls) run as
 processes and need `Simulation`. A `Simulator` runs no process, so building
@@ -84,7 +84,8 @@ The main supported areas are:
 | RTL processes | `assign`, `always_comb`, `always @*`, blocking `always_latch`, edge-triggered `always` and `always_ff` |
 | Timed processes | `initial` and `always` with `#delay` (also time literals such as `#5ns`), `@(...)` on variables, edges, selects, expressions and `@*`, `wait (...)`, nonblocking assignments and task calls with timing controls |
 | Computation | Arithmetic, selects, assignment patterns, branches, loops and functions |
-| Simulation helpers | Immediate assertions, display tasks, `$readmemh` / `$readmemb`, time queries and random numbers |
+| Simulation helpers | Immediate and deferred immediate assertions, display tasks, `$readmemh` / `$readmemb`, time queries and random numbers |
+| Termination | `final` procedures on `$finish`, `$fatal` or explicit `Simulation::finish()`; see [termination semantics](./systemverilog-reference#final-procedures) |
 
 Each area has restrictions. Use the
 [detailed support list](./systemverilog-reference#what-is-supported) to check

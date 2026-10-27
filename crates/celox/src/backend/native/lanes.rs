@@ -13,8 +13,8 @@ use celox_sir_opt::parallel::Footprint;
 use serde::{Deserialize, Serialize};
 
 use super::backend::{
-    CompiledNativeFunction, NativeCodeEntry, NativeCodeSymbol, NativeSimFunc, append_native_code,
-    codegen_message, compile_unit_refs_inspected, native_function_at,
+    CompiledNativeFunction, NativeCodeEntry, NativeCodeSymbol, NativeMergeKind, NativeSimFunc,
+    append_native_code, codegen_message, compile_unit_refs_inspected, native_function_at,
 };
 use super::jit_mem;
 use crate::backend::compile_cancel::CompileCancel;
@@ -242,6 +242,7 @@ pub(super) fn compile_lane_kernels(
                 layout,
                 options.four_state,
                 "lane_task",
+                NativeMergeKind::Partial,
                 None,
                 &lane_options,
                 false,

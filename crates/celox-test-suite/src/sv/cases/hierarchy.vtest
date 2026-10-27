@@ -1463,6 +1463,51 @@
   (assert_eq y (+ (<< 1 128) (+ (<< 2 43) 1)))
   (assert_eq width 129))
 
+; Non-ANSI module ports (IEEE 1800-2023 23.2.2.1): a header of port names,
+; port declarations in the body, and net or variable declarations that
+; complete them (`reg [7:0] q;`, `wire signed [3:0] a;`), including a net
+; declaration assignment, connected by position and by name.
+(case non_ansi_ports_take_body_declarations
+  (source "non_ansi.sv" #"
+        module Reg(clk, rst, d, q, qn);
+            input clk, rst;
+            input [7:0] d;
+            output [7:0] q;
+            output reg [7:0] qn;
+            reg [7:0] q;
+            always @(posedge clk or posedge rst)
+                if (rst) begin q <= 8'd0; qn <= 8'hff; end
+                else begin q <= d; qn <= ~d; end
+        endmodule
+        module Add(a, b, s, neg);
+            input signed [3:0] a;
+            input [3:0] b;
+            output [4:0] s;
+            output neg;
+            wire signed [3:0] a;
+            wire [4:0] s = a + b;
+            assign neg = a < 0;
+        endmodule
+        module Top;
+            reg clk = 0, rst = 1;
+            reg [7:0] d = 8'h5a;
+            wire [7:0] q, qn;
+            wire [4:0] s;
+            wire neg;
+            Reg r(clk, rst, d, q, qn);
+            Add x(.a(4'hd), .b(4'd4), .s(s), .neg(neg));
+            always #5 clk = ~clk;
+            initial begin
+                #2 rst = 0;
+                #10 $display("%h %h %0d %b", q, qn, s, neg);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "5a a5 17 1\n"))
+
 ; A child's output port depends only on the bits of its input port that
 ; the child reads, so a parent may feed other bits of that output back into
 ; the port without a combinational loop (#1955).
@@ -1516,3 +1561,202 @@
   (top Top)
   (run_to_finish)
   (expect_output "59 593\n"))
+
+(case inout_tristate_driver_in_child_reaches_parent
+  (four_state)
+  (source "inout_child_driver.sv" #"
+    module Pad(input logic [7:0] oe, dr, inout wire [7:0] pad,
+               output wire [7:0] ext);
+      for (genvar i = 0; i < 8; i++) begin : g
+        assign ext[i] = pad[i];
+        assign pad[i] = oe[i] ? dr[i] : 1'bz;
+      end
+    endmodule
+    module Block(input logic [7:0] oe, dr, inout wire [7:0] pad,
+                 output wire [7:0] ext);
+      Pad pad_cell(.oe(oe), .dr(dr), .pad(pad), .ext(ext));
+    endmodule
+    module Top(input logic [7:0] oe, dr, output wire [7:0] ext, seen,
+               output logic floating);
+      wire [7:0] pad;
+      Block block(.oe(oe), .dr(dr), .pad(pad), .ext(ext));
+      assign seen = pad;
+      assign floating = (pad[7] === 1'bz);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set oe 0xff) (set dr 0xa5))
+  (assert_eq ext 0xa5)
+  (assert_eq seen 0xa5)
+  (assert_eq floating 0)
+  (modify (set oe 0x0f))
+  (assert_eq ext (fourstate 0x05 0xf0))
+  (assert_eq seen (fourstate 0x05 0xf0))
+  (assert_eq floating 1)
+  (modify (set oe 0))
+  (assert_eq ext (fourstate 0 0xff))
+  (assert_eq seen (fourstate 0 0xff)))
+
+(case inout_tristate_nets_read_zero_in_two_state
+  (source "inout_two_state.sv" #"
+    module Pad(input logic [7:0] oe, dr, inout wire [7:0] pad,
+               output wire [7:0] ext);
+      for (genvar i = 0; i < 8; i++) begin : g
+        assign ext[i] = pad[i];
+        assign pad[i] = oe[i] ? dr[i] : 1'bz;
+      end
+    endmodule
+    module Reader(inout wire [7:0] io, output wire [7:0] y);
+      assign y = io;
+    endmodule
+    module Top(input logic [7:0] oe, dr, input logic en, input logic [7:0] a,
+               output bit [7:0] ext, seen, read);
+      wire [7:0] pad, w;
+      Pad pad_cell(.oe(oe), .dr(dr), .pad(pad), .ext(ext));
+      assign seen = pad;
+      assign w = en ? a : 8'bz;
+      Reader reader(.io(w), .y(read));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set oe 0xff) (set dr 0x5a) (set en 1) (set a 0xc3))
+  (assert_eq ext 0x5a)
+  (assert_eq seen 0x5a)
+  (assert_eq read 0xc3)
+  (modify (set oe 0xf0) (set en 0))
+  (assert_eq ext 0x50)
+  (assert_eq seen 0x50)
+  (assert_eq read 0)
+  (modify (set oe 0))
+  (assert_eq ext 0)
+  (assert_eq seen 0))
+
+(case inout_tristate_driver_in_parent_reaches_child
+  (four_state)
+  (source "inout_parent_driver.sv" #"
+    module Reader(inout wire [3:0] io, output wire [3:0] y);
+      assign y = io;
+    endmodule
+    module Pass(inout wire [3:0] io, output wire [3:0] y);
+      Reader reader(.io(io), .y(y));
+    endmodule
+    module Top(input logic en, input logic [3:0] a,
+               output wire [3:0] direct, nested, open);
+      wire [3:0] w;
+      assign w = en ? a : 4'bz;
+      Reader reader(.io(w), .y(direct));
+      Pass pass(.io(w), .y(nested));
+      Reader unconnected(.y(open));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set en 1) (set a 0x9))
+  (assert_eq direct 0x9)
+  (assert_eq nested 0x9)
+  (assert_eq open (fourstate 0 0xf))
+  (modify (set en 0))
+  (assert_eq direct (fourstate 0 0xf))
+  (assert_eq nested (fourstate 0 0xf)))
+
+(case inout_tristate_drivers_reach_implicit_nets
+  (four_state)
+  (source "inout_implicit_net.sv" #"
+    module Pad(input logic oe, d, inout wire io);
+      assign io = oe ? d : 1'bz;
+    endmodule
+    module Source(input logic d, output wire y);
+      assign y = d;
+    endmodule
+    module Reader(inout wire io, output wire y);
+      assign y = io;
+    endmodule
+    module Top(input logic oe, d, output wire from_pad, from_source);
+      Pad pad(.oe(oe), .d(d), .io(pad_net));
+      Reader pad_reader(.io(pad_net), .y(from_pad));
+      Source source(.d(d), .y(source_net));
+      Reader source_reader(.io(source_net), .y(from_source));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set oe 1) (set d 1))
+  (assert_eq from_pad 1)
+  (assert_eq from_source 1)
+  (modify (set oe 0) (set d 0))
+  (assert_eq from_pad (fourstate 0 1))
+  (assert_eq from_source 0))
+
+
+(case coalesces_repeated_net_aliases
+  (source "repeated_net_aliases.sv" #"
+    module Leaf #(parameter int W = 8)(input logic clk, input logic [W-1:0] d,
+                                     output wire logic [W-1:0] y);
+      logic [W-1:0] state;
+      always_ff @(posedge clk) state <= d;
+      assign y = state;
+      assign y = state;
+    endmodule
+    module Top(input logic clk, input logic [7:0] d,
+               output wire logic [7:0] mirror, q8, output wire logic [3:0] q4);
+      wire [7:0] data;
+      assign data = d;
+      assign data = d;
+      uwire [7:0] single_driver;
+      assign single_driver = data;
+      assign mirror = single_driver;
+      assign mirror = single_driver;
+      Leaf #(.W(8)) wide(clk, data, q8);
+      Leaf #(.W(4)) narrow(clk, data[3:0], q4);
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 0x5a 0xff 1)
+    (modify (set d value))
+    (assert_eq mirror value)
+    (tick clk)
+    (assert_eq q8 value)
+    (assert_eq q4 (trunc 4 value))))
+
+(case repeated_net_aliases_preserve_unknown_and_high_impedance_bits
+  (four_state)
+  (source "repeated_four_state_net_aliases.sv" #"
+    module Top(input logic [7:0] d, output wire logic [7:0] y);
+      wire [7:0] intermediate;
+      assign intermediate = d;
+      assign intermediate = d;
+      assign y = intermediate;
+      assign y = intermediate;
+    endmodule
+  "#)
+  (top Top)
+  (modify (set d 0x5a))
+  (assert_eq y 0x5a)
+  (modify (set d (fourstate 0xff 0xff)))
+  (assert_eq y (fourstate 0xff 0xff))
+  (modify (set d (fourstate 0 0xff)))
+  (assert_eq y (fourstate 0 0xff))
+  (modify (set d (fourstate 0x55 0xa0)))
+  (assert_eq y (fourstate 0x55 0xa0))
+  (modify (set d 0x96))
+  (assert_eq y 0x96))
+
+(case many_sibling_parameter_specializations
+  (source "sibling_specializations.sv" #"
+    module Leaf #(parameter ID=0)(input wire [7:0] x, output wire [7:0] q);
+      assign q=x ^ 8'(ID);
+    endmodule
+    module Top(input wire [7:0] x, output wire [7:0] first, last);
+      wire [7:0] lanes[65];
+      for (genvar n=0; n<65; n=n+1) begin : siblings
+        Leaf #(.ID(n)) u(.x(x), .q(lanes[n]));
+      end
+      assign first=lanes[0];
+      assign last=lanes[64];
+    endmodule
+  "#)
+  (top Top)
+  (modify (set x 60))
+  (assert_eq first 60)
+  (assert_eq last 124)
+  (modify (set x 255))
+  (assert_eq first 255)
+  (assert_eq last 191))

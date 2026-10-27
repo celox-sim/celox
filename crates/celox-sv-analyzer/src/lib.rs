@@ -27,6 +27,7 @@ pub mod syntax;
 pub mod system_functions;
 pub mod typecheck;
 
+pub use ast::const_functions::RuntimeConstantFunctions;
 pub use ast::interfaces::{
     InterfaceMemberPath, InterfaceMemberPaths, NativeInterfacePlan, plan_interfaces,
     plan_interfaces_with_member_paths,
@@ -48,6 +49,9 @@ pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AnalysisOptions {
     pub allow_mixed_timescales: bool,
+    /// Compatibility mode: return zero for every empty array reduction,
+    /// rather than the product/bitwise-AND identity. Disabled by default.
+    pub legacy_empty_reductions: bool,
     /// Default unit/precision exponents; precision also bounds global resolution.
     pub default_timescale: Option<(i32, i32)>,
 }
@@ -66,6 +70,13 @@ pub enum AnalyzerError {
     Parse(String),
     #[error("Unsupported SystemVerilog construct: {0}")]
     Unsupported(String),
+    /// A class member is inaccessible from the lexical scope (IEEE 1800-2023 8.18).
+    #[error("{visibility} class member `{owner}::{name}` is not accessible from this scope")]
+    InaccessibleClassMember {
+        owner: String,
+        name: String,
+        visibility: &'static str,
+    },
     /// A dotted name whose first component names no variable or interface
     /// of the scope: a hierarchical name (IEEE 1800-2023 23.6) that the
     /// caller did not resolve to a signal of another instance.
@@ -172,6 +183,30 @@ pub enum AnalyzerError {
     /// 1800-2023 24.3).
     #[error("{item} in program `{program}`: a program shall not contain it (IEEE 1800-2023 24.3)")]
     IllegalProgramItem { program: String, item: String },
+    /// An interface class that inherits parameters or typedefs named `name`
+    /// from two different interface classes or specializations without
+    /// declaring its own `name` (IEEE 1800-2023 8.26.6.2, 8.26.6.3).
+    #[error(
+        "interface class `{class}` inherits `{name}` from both `{first}` and `{second}` and must declare its own `{name}`"
+    )]
+    ConflictingInterfaceClassDeclaration {
+        class: String,
+        name: String,
+        first: String,
+        second: String,
+    },
+    /// The unadorned name of a parameterized class as the prefix of `::`
+    /// outside the class and its out-of-block methods, where a
+    /// specialization such as `C#()` is required (IEEE 1800-2023 8.25.1).
+    #[error(
+        "`{class}::` outside class `{class}`: a parameterized class needs a specialization such as `{class}#()::`"
+    )]
+    UnspecializedClassScope { class: String },
+    /// A parameter value assignment of a class names a parameter that the
+    /// parameter port list of the class does not declare, or declares local
+    /// (IEEE 1800-2023 8.25).
+    #[error("class `{class}` has no parameter `{name}` that a specialization may assign")]
+    UnknownClassParameter { class: String, name: String },
 }
 
 impl miette::Diagnostic for AnalyzerError {}
@@ -183,7 +218,7 @@ pub const SV_FRONTEND_TRACKING_ISSUE: u32 = 88;
 /// Dedicated tracking issues, keyed by the leading text of the construct name
 /// carried by [`AnalyzerError::Unsupported`].
 const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
-    ("non-ANSI module port declarations", 426),
+    ("non-ANSI port expressions", 1953),
     ("ref port direction", 427),
     ("nonblocking assignment inside always_latch", 431),
     (

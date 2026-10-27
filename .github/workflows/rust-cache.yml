@@ -1,7 +1,8 @@
 name: Warm Rust dependency cache
 
 # PR merge-ref caches cannot be reused by other PRs. Populate the default
-# branch cache once per toolchain/dependency key, without running tests twice.
+# branch cache on dependency changes and periodically repair eviction. Cache hits
+# skip compilation, and warming never executes the test suite.
 on:
   push:
     branches: [master]
@@ -14,6 +15,9 @@ on:
       - ".github/workflows/rust-cache.yml"
       - ".github/workflows/ci.yml"
       - "scripts/run-vtest.mjs"
+  # Eviction does not change Cargo files, so push path filters cannot repair it.
+  schedule:
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -54,7 +58,7 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: >-
           cargo nextest list --locked --workspace --exclude 'lydite*' --message-format json
-          --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
+          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
           > /dev/null
 
   rust-default-tests:

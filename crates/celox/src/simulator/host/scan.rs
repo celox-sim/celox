@@ -1,5 +1,5 @@
 use super::*;
-use celox_design::HostRequestSite;
+use celox_design::{HostRequestSite, ValueKind};
 use celox_runtime::Halt;
 use celox_runtime::scan::{Input, SliceInput};
 use num_bigint::BigUint;
@@ -24,6 +24,12 @@ fn packed_bytes(value: BigUint, width: usize) -> Vec<u8> {
     result.extend(bytes);
     result
 }
+fn trim_packed_padding(bytes: &[u8]) -> &[u8] {
+    bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .map_or(&[], |index| &bytes[index..])
+}
 impl<B: SimBackend> Simulator<B> {
     pub(crate) fn run_scan_request(
         &mut self,
@@ -40,11 +46,21 @@ impl<B: SimBackend> Simulator<B> {
         let (format, format_mask) = self.backend.get_four_state(site.args[1].id);
         let mut count = -1i32;
         if source_mask.is_zero() && format_mask.is_zero() {
-            let format = packed_bytes(format, site.args[1].width);
-            let format = format
-                .iter()
-                .position(|byte| *byte != 0)
-                .map_or(&[][..], |index| &format[index..]);
+            // IEEE 1800-2023 21.3.4.3 permits both packed and string
+            // source/format expressions. String values are heap handles.
+            let format = if site.args[1].value_kind == ValueKind::StrRef {
+                self.backend
+                    .heap()
+                    .string(format.to_u32().unwrap_or_default())
+                    .to_vec()
+            } else {
+                packed_bytes(format, site.args[1].width)
+            };
+            let format = if site.args[1].value_kind == ValueKind::StrRef {
+                format.as_slice()
+            } else {
+                trim_packed_padding(&format)
+            };
             let destinations = site.results[1..]
                 .iter()
                 .map(|value| celox_runtime::scan::Destination {
@@ -55,11 +71,19 @@ impl<B: SimBackend> Simulator<B> {
             let outcome = if site.operation == 0 {
                 // Packed strings are right-aligned; leading zero padding is
                 // outside their textual contents, including for %c.
-                let source = source.to_bytes_be();
-                let source = source
-                    .iter()
-                    .position(|byte| *byte != 0)
-                    .map_or(&[][..], |index| &source[index..]);
+                let source = if site.args[0].value_kind == ValueKind::StrRef {
+                    self.backend
+                        .heap()
+                        .string(source.to_u32().unwrap_or_default())
+                        .to_vec()
+                } else {
+                    source.to_bytes_be()
+                };
+                let source = if site.args[0].value_kind == ValueKind::StrRef {
+                    source.as_slice()
+                } else {
+                    trim_packed_padding(&source)
+                };
                 celox_runtime::scan::scan_typed(
                     &mut SliceInput::new(source),
                     format,

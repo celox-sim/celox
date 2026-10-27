@@ -280,21 +280,24 @@ sv_backends! {
         @build Simulator::from_sv_sources(vec![(source, Path::new("random_sensitivity.sv"))], "Top").four_state(false);
         let a = sim.signal("a");
         let b = sim.signal("b");
+        // Two-state mode runs `always @*` once at time zero, like always_comb.
         let first = sim.get(a);
         assert_ne!(first, 0u8.into());
-        assert_eq!(sim.get(b), 0u8.into());
+        let first_b = sim.get(b);
+        assert_ne!(first_b, 0u8.into());
         let initial_draw = sim.get(sim.signal("initial_draw"));
         assert_ne!(initial_draw, 0u8.into());
-        assert_eq!(sim.get(sim.signal("star_draw")), 0u8.into());
+        let star_draw = sim.get(sim.signal("star_draw"));
+        assert_ne!(star_draw, 0u8.into());
         let global_input = sim.signal("global_input");
         sim.modify(|io| io.set(global_input, 1u8)).unwrap();
         assert_ne!(sim.get(a), first);
-        assert_eq!(sim.get(b), 0u8.into());
+        assert_eq!(sim.get(b), first_b);
         let trigger = sim.signal("trigger");
         sim.modify(|io| io.set(trigger, 1u8)).unwrap();
-        assert_ne!(sim.get(b), 0u8.into());
+        assert_ne!(sim.get(b), first_b);
         assert_eq!(sim.get(sim.signal("initial_draw")), initial_draw);
-        assert_eq!(sim.get(sim.signal("star_draw")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("star_draw")), star_draw);
     }
 
     fn urandom_select_keeps_distinct_source_calls(sim) {
@@ -1404,12 +1407,14 @@ fn readmem_diagnostics_identify_task_and_requested_range() {
     }
 }
 
+/// The action of a deferred cover, like that of a deferred assertion, is
+/// one subroutine call (IEEE 1800-2023 16.4).
 #[test]
-fn rejects_deferred_cover_instead_of_discarding_its_semantics() {
+fn rejects_deferred_cover_actions_other_than_a_task_call() {
     for timing in ["#0", "final"] {
         let source =
             format!("module Top(output logic y); initial cover {timing} (1) y = 1; endmodule");
-        assert!(build_error(&source).contains("deferred immediate cover"));
+        assert!(build_error(&source).contains("deferred assertion action"));
     }
 }
 

@@ -98,6 +98,7 @@ impl Parser<'_> {
         };
         match &self.expressions[id.0].kind {
             ExprKind::Call { expression, .. } => callable(*expression),
+            ExprKind::ArrayMethodWith { .. } | ExprKind::RandomizeWith { .. } => true,
             _ => callable(id),
         }
     }
@@ -130,6 +131,22 @@ impl Parser<'_> {
         let authored_statements = self.body_membership(&[body]);
         self.procedures.push(Procedure {
             kind,
+            body,
+            authored_statements,
+            tokens: self.range(start),
+        });
+        Ok(id)
+    }
+
+    /// A deferred immediate assertion as a module item: an `always_comb`
+    /// procedure whose body is the assertion (IEEE 1800-2023 16.4.3).
+    pub(super) fn static_deferred_assertion(&mut self) -> Result<ProcedureId> {
+        let start = self.at;
+        let body = self.statement_machine()?;
+        let id = ProcedureId(self.procedures.len());
+        let authored_statements = self.body_membership(&[body]);
+        self.procedures.push(Procedure {
+            kind: ProcedureKind::AlwaysComb,
             body,
             authored_statements,
             tokens: self.range(start),
@@ -802,6 +819,11 @@ impl Parser<'_> {
                 _ => break,
             }
         }
+        // A parenthesis-free array method followed by `with` is a call,
+        // not a declaration whose variable happens to be named `with`.
+        if word(cursor) == "with" && matches!(word(cursor + 1), "(" | "{") {
+            return None;
+        }
         self.indices
             .get(cursor)
             .filter(|index| {
@@ -849,13 +871,37 @@ impl Parser<'_> {
             origin: token.origin,
         };
         self.at += 1;
-        if self.eat("[") {
-            self.expression(0)?;
+        if self.peek() == "[" {
+            let callee = self.node(start, ExprKind::Name(name))?;
+            let dimension_start = self.at;
+            self.expect("[")?;
+            let size = self.expression(0)?;
             self.expect("]")?;
+            let array = self.node(
+                start,
+                ExprKind::Select {
+                    expression: callee,
+                    dimension: Box::new(Dimension {
+                        kind: DimensionKind::Index(size),
+                        tokens: self.range(dimension_start),
+                    }),
+                },
+            )?;
             if self.eat("(") {
-                self.expression(0)?;
+                let value = self.expression(0)?;
                 self.expect(")")?;
+                return self.node(
+                    start,
+                    ExprKind::Call {
+                        expression: array,
+                        arguments: vec![Argument {
+                            name: None,
+                            value: Some(value),
+                        }],
+                    },
+                );
             }
+            return Ok(array);
         } else if self.peek() == "(" {
             // A class constructor call keeps its arguments (8.7).
             let callee = self.node(start, ExprKind::Name(name))?;
@@ -872,7 +918,9 @@ impl Parser<'_> {
                 },
             );
         } else if !matches!(self.peek(), ";" | "," | "") {
-            self.expression(0)?;
+            // A shallow copy of an object (8.12).
+            let value = self.expression(0)?;
+            return self.node(start, ExprKind::Copy(value));
         }
         // The declaration retains its explicit Unconverted semantic owner.
         // This range validates allocation grammar without introducing execution.

@@ -1,6 +1,6 @@
 //! Differential check against independent concrete semantics, using actual ir.rs.
 #![allow(dead_code)]
-#[path = "../../crates/lydite-ir/src/term.rs"]
+#[path = "../../crates/aplite/src/term.rs"]
 mod ir;
 use ir::*;
 use std::collections::BTreeMap;

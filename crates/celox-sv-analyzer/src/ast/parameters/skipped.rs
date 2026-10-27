@@ -370,6 +370,12 @@ pub(in crate::ast) fn validate(
                     push(&mut jobs, *value);
                 }
             }
+            ExprKind::Copy(_) => {
+                return Err(unsupported("shallow copy in skipped operand"));
+            }
+            ExprKind::ArrayMethodWith { .. } | ExprKind::RandomizeWith { .. } => {
+                return Err(unsupported("array method with expression"));
+            }
             ExprKind::Parameterized { .. } => {
                 return Err(unsupported("parameterized value in skipped operand"));
             }
@@ -469,6 +475,7 @@ fn pattern_items(
             left.min(right),
             left.max(right),
             VariableDimensions {
+                container: None,
                 real: false,
                 string: false,
                 class: None,
@@ -492,6 +499,7 @@ fn pattern_items(
             left.min(right),
             left.max(right),
             VariableDimensions {
+                container: None,
                 real: false,
                 string: false,
                 class: None,
@@ -506,6 +514,7 @@ fn pattern_items(
             0,
             count as i128 - 1,
             VariableDimensions {
+                container: None,
                 randomizable: true,
                 enum_values: None,
                 real: false,
@@ -578,6 +587,9 @@ pub(in crate::ast) fn literal_widths(
         visited.push(id);
         let add = |jobs: &mut Vec<_>, id| jobs.push((id, evaluated, shape));
         match &native.expression(id).kind {
+            ExprKind::ArrayMethodWith { .. } | ExprKind::RandomizeWith { .. } => {
+                return Err(unsupported("array method with expression"));
+            }
             ExprKind::Literal(text) if evaluated => {
                 if let Some((prefix, _)) = text.split_once('\'')
                     && !prefix.is_empty()
@@ -1152,6 +1164,19 @@ pub(in crate::ast) fn children(
             then_expression,
             else_expression,
         } => children.extend([*condition, *then_expression, *else_expression]),
+        ExprKind::RandomizeWith {
+            expression,
+            constraints,
+        } => {
+            children.push(*expression);
+            children.extend(constraints.iter().flatten());
+        }
+        ExprKind::ArrayMethodWith {
+            expression,
+            predicate,
+        } => {
+            children.extend([*expression, *predicate]);
+        }
         ExprKind::Call {
             expression,
             arguments,

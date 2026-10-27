@@ -16,6 +16,10 @@ use crate::ir::{InstanceId, RegisterType, SIRValue};
 use celox_design::StateObjectId as VarId;
 use num_bigint::BigUint;
 
+thread_local! {
+    pub(super) static COUPLED_BATCH_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn addr(id: usize) -> RegionedAbsoluteAddr {
     RegionedAbsoluteAddr {
         region: 0,

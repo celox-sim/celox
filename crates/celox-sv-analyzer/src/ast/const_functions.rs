@@ -7,6 +7,11 @@
 //! calls that are not system functions. Bodies are interpreted from their
 //! procedural statements.
 
+mod value;
+use value::Value;
+mod runtime;
+pub use runtime::RuntimeConstantFunctions;
+
 use num_bigint::BigUint;
 use std::cell::{Cell, RefCell};
 
@@ -44,7 +49,10 @@ pub(super) struct FunctionErrors {
 #[derive(Default)]
 pub(crate) struct State {
     functions: RefCell<ConstantFunctions>,
+    revision: generate::Revision,
     depth: Cell<usize>,
+    runtime_fuel: Cell<Option<usize>>,
+    runtime_two_state: Cell<Option<bool>>,
     argument_names: RefCell<(
         Arc<ConstantFunctionTable>,
         Arc<HashMap<String, Vec<String>>>,
@@ -53,15 +61,15 @@ pub(crate) struct State {
 
 pub(super) struct Installed {
     previous: ConstantFunctions,
+    revision: u64,
     state: std::rc::Rc<AnalysisState>,
 }
 
 impl Drop for Installed {
     fn drop(&mut self) {
-        replace(
-            &self.state.const_functions,
-            std::mem::take(&mut self.previous),
-        );
+        let functions = &self.state.const_functions;
+        replace(functions, std::mem::take(&mut self.previous));
+        functions.revision.restore(self.revision);
     }
 }
 
@@ -77,6 +85,9 @@ impl ConstantEnvironment for Environment<'_> {
     }
     fn function_state(&self) -> Option<&State> {
         Some(self.functions)
+    }
+    fn literal(&self, name: &str) -> Option<&typecheck::IntegralLiteral> {
+        self.constants.literal(name)
     }
 }
 
@@ -96,15 +107,22 @@ pub(super) fn install(
     functions: ConstantFunctions,
 ) -> Installed {
     let previous = installed(&state.const_functions);
+    let revision = state.const_functions.revision.get();
     replace(&state.const_functions, functions);
     Installed {
         previous,
+        revision,
         state: state.clone(),
     }
 }
 
 pub(super) fn replace(state: &State, functions: ConstantFunctions) {
     *state.functions.borrow_mut() = functions;
+    state.revision.change();
+}
+
+pub(super) fn revision(state: &State) -> &generate::Revision {
+    &state.revision
 }
 
 /// Why an installed function could not be converted for constant evaluation.
@@ -605,10 +623,10 @@ fn simulation_state_readers(functions: &[Subroutine]) -> HashMap<String, Analyze
         }
         let mut callees_in_exprs = Vec::new();
         for expr in exprs {
-            visit_expr_callees(expr, &mut |callee| callees_in_exprs.push(callee));
+            visit_expr_calls(expr, &mut |callee, _| callees_in_exprs.push(callee));
         }
         for selector in selectors {
-            visit_const_callees(selector, &mut |callee| callees_in_exprs.push(callee));
+            visit_const_calls(selector, &mut |callee, _| callees_in_exprs.push(callee));
         }
         let mut reads = None;
         for callee in callees_in_exprs {
@@ -651,91 +669,113 @@ fn simulation_state_readers(functions: &[Subroutine]) -> HashMap<String, Analyze
     }
 }
 
+/// Actual argument presence, including explicit holes in procedural calls.
+#[derive(Clone, Copy)]
+pub(in crate::ast) enum CallArguments<'a> {
+    Expressions(&'a [Option<Expr>]),
+    Constants(&'a [ConstExpr]),
+}
+
+impl CallArguments<'_> {
+    pub(in crate::ast) fn is_present(self, index: usize) -> bool {
+        match self {
+            Self::Expressions(args) => args.get(index).is_some_and(Option::is_some),
+            Self::Constants(args) => index < args.len(),
+        }
+    }
+}
+
 /// Calls in an expression, including the index expressions represented by
 /// ConstExpr. Those indices can contain runtime calls in procedural code.
-fn visit_expr_callees<'a>(expr: &'a Expr, f: &mut impl FnMut(&'a Callee)) {
+pub(in crate::ast) fn visit_expr_calls<'a>(
+    expr: &'a Expr,
+    f: &mut impl FnMut(&'a Callee, CallArguments<'a>),
+) {
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => {}
         Expr::Call { callee, args, .. } => {
-            f(callee);
+            f(callee, CallArguments::Expressions(args));
             for arg in args.iter().flatten() {
-                visit_expr_callees(arg, f);
+                visit_expr_calls(arg, f);
             }
         }
         Expr::Select { expr, msb, lsb, .. } => {
-            visit_expr_callees(expr, f);
-            visit_const_callees(msb, f);
-            visit_const_callees(lsb, f);
+            visit_expr_calls(expr, f);
+            visit_const_calls(msb, f);
+            visit_const_calls(lsb, f);
         }
-        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => visit_expr_callees(expr, f),
+        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => visit_expr_calls(expr, f),
         Expr::Concat(parts) => {
             for part in parts {
-                visit_expr_callees(part, f);
+                visit_expr_calls(part, f);
             }
         }
         Expr::RepeatConcat { count, parts } => {
-            visit_const_callees(count, f);
+            visit_const_calls(count, f);
             for part in parts {
-                visit_expr_callees(part, f);
+                visit_expr_calls(part, f);
             }
         }
         Expr::Binary { left, right, .. } => {
-            visit_expr_callees(left, f);
-            visit_expr_callees(right, f);
+            visit_expr_calls(left, f);
+            visit_expr_calls(right, f);
         }
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => {
-            visit_expr_callees(condition, f);
-            visit_expr_callees(then_expr, f);
-            visit_expr_callees(else_expr, f);
+            visit_expr_calls(condition, f);
+            visit_expr_calls(then_expr, f);
+            visit_expr_calls(else_expr, f);
         }
         Expr::Inside { expr, items } => {
-            visit_expr_callees(expr, f);
+            visit_expr_calls(expr, f);
             for item in items {
                 for expr in item.exprs() {
-                    visit_expr_callees(expr, f);
+                    visit_expr_calls(expr, f);
                 }
             }
         }
     }
 }
 
-fn visit_const_callees<'a>(expr: &'a ConstExpr, f: &mut impl FnMut(&'a Callee)) {
+pub(in crate::ast) fn visit_const_calls<'a>(
+    expr: &'a ConstExpr,
+    f: &mut impl FnMut(&'a Callee, CallArguments<'a>),
+) {
     match expr {
         ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
         ConstExpr::Function { callee, args, .. } => {
-            f(callee);
+            f(callee, CallArguments::Constants(args));
             for arg in args {
-                visit_const_callees(arg, f);
+                visit_const_calls(arg, f);
             }
         }
         ConstExpr::Select { expr, bit } => {
-            visit_const_callees(expr, f);
-            visit_const_callees(bit, f);
+            visit_const_calls(expr, f);
+            visit_const_calls(bit, f);
         }
         ConstExpr::SelectRange { expr, msb, lsb, .. } => {
-            visit_const_callees(expr, f);
-            visit_const_callees(msb, f);
-            visit_const_callees(lsb, f);
+            visit_const_calls(expr, f);
+            visit_const_calls(msb, f);
+            visit_const_calls(lsb, f);
         }
         ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
-            visit_const_callees(expr, f)
+            visit_const_calls(expr, f)
         }
         ConstExpr::Binary { left, right, .. } => {
-            visit_const_callees(left, f);
-            visit_const_callees(right, f);
+            visit_const_calls(left, f);
+            visit_const_calls(right, f);
         }
         ConstExpr::Mux {
             condition,
             then_expr,
             else_expr,
         } => {
-            visit_const_callees(condition, f);
-            visit_const_callees(then_expr, f);
-            visit_const_callees(else_expr, f);
+            visit_const_calls(condition, f);
+            visit_const_calls(then_expr, f);
+            visit_const_calls(else_expr, f);
         }
     }
 }
@@ -799,7 +839,7 @@ pub(super) fn eval_expression_literal(
     constants: &HashMap<String, i128>,
 ) -> Option<typecheck::IntegralLiteral> {
     let Expr::Call {
-        callee: Callee::Subroutine(name),
+        callee: Callee::Subroutine(_),
         ..
     } = expr
     else {
@@ -810,24 +850,7 @@ pub(super) fn eval_expression_literal(
         functions: state,
     };
     let constants: &dyn ConstantEnvironment = &env;
-    let functions = state.functions.borrow().functions.clone();
-    let (_, ty) = functions.get(name)?.return_var.as_ref()?;
-    let width = ty
-        .resolved_width()
-        .or_else(|| typecheck::resolve_packed_width_in_env(ty.packed_ranges(), constants))?;
-    let mut frame = Frame {
-        constants,
-        values: HashMap::default(),
-        types: HashMap::default(),
-        temporaries: 0,
-        iterations: 0,
-    };
-    let value = frame.eval(expr)?;
-    typecheck::parse_integral_literal(&format_typed_parameter_literal(
-        value,
-        width,
-        ty.is_signed(),
-    ))
+    Frame::new(constants).eval(expr).map(Value::into_literal)
 }
 
 /// The value of a call of an installed constant function.
@@ -836,26 +859,24 @@ pub(crate) fn eval_call(
     args: &[crate::ir::ConstExpr],
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
-    let state = constants.function_state()?;
-    let functions = state.functions.borrow().functions.clone();
-    let function = functions.get(name)?;
-    let values = args
-        .iter()
-        .map(|arg| crate::typecheck::eval_const_expr_in_env(arg, constants))
-        .collect::<Option<Vec<_>>>()?;
-    let depth = state.depth.get();
-    if depth >= MAX_DEPTH {
-        return None;
-    }
-    struct DepthGuard<'a>(&'a Cell<usize>, usize);
-    impl Drop for DepthGuard<'_> {
-        fn drop(&mut self) {
-            self.0.set(self.1);
-        }
-    }
-    state.depth.set(depth + 1);
-    let _depth = DepthGuard(&state.depth, depth);
-    call(function, &values, constants)
+    eval_ir_call(name, args, constants)?.number().copied()
+}
+
+fn eval_ir_call(
+    name: &str,
+    args: &[crate::ir::ConstExpr],
+    constants: &dyn ConstantEnvironment,
+) -> Option<Value> {
+    let expr = Expr::Call {
+        callee: Callee::Subroutine(name.into()),
+        args: args
+            .iter()
+            .cloned()
+            .map(|arg| Some(parameters::const_expr_to_expr(arg.into())))
+            .collect(),
+        arg_order: Vec::new(),
+    };
+    Frame::new(constants).eval(&expr)
 }
 
 /// Preserve the declared result type when freezing a caller's function value.
@@ -869,67 +890,82 @@ pub(super) fn eval_call_literal(
         constants,
         functions: state,
     };
-    let constants: &dyn ConstantEnvironment = &env;
-    let functions = state.functions.borrow().functions.clone();
-    let (_, ty) = functions.get(name)?.return_var.as_ref()?;
-    let width = ty
-        .resolved_width()
-        .or_else(|| typecheck::resolve_packed_width_in_env(ty.packed_ranges(), constants))?;
-    let value = eval_call(name, args, constants)?;
-    typecheck::parse_integral_literal(&format_typed_parameter_literal(
-        value,
-        width,
-        ty.is_signed(),
-    ))
+    eval_ir_call(name, args, &env).map(Value::into_literal)
 }
 
+fn call_value(name: &str, args: &[Value], constants: &dyn ConstantEnvironment) -> Option<Value> {
+    let state = constants.function_state()?;
+    runtime::charge(state)?;
+    let functions = state.functions.borrow().functions.clone();
+    let function = functions.get(name)?;
+    let depth = state.depth.get();
+    if depth >= MAX_DEPTH {
+        return None;
+    }
+    struct DepthGuard<'a>(&'a Cell<usize>, usize);
+    impl Drop for DepthGuard<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.1);
+        }
+    }
+    state.depth.set(depth + 1);
+    let _depth = DepthGuard(&state.depth, depth);
+    call_in_frame(function, args, Frame::new(constants))
+}
+
+#[cfg(test)]
 fn call(
     function: &ConstantFunction,
     args: &[i128],
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
-    let mut frame = Frame {
-        constants,
-        values: HashMap::default(),
-        types: HashMap::default(),
-        temporaries: 0,
-        iterations: 0,
-    };
-    let mut values = args.to_vec();
-    for position in args.len()..function.params.len() {
-        values.push(frame.eval(function.argument_defaults[position].as_ref()?)?);
-    }
-    call_in_frame(function, &values, frame)
+    let args = args.iter().copied().map(Value::integer).collect::<Vec<_>>();
+    call_in_frame(function, &args, Frame::new(constants))?
+        .number()
+        .copied()
 }
 
-fn call_in_frame(function: &ConstantFunction, args: &[i128], mut frame: Frame<'_>) -> Option<i128> {
-    if args.len() != function.params.len() {
+fn call_in_frame(
+    function: &ConstantFunction,
+    args: &[Value],
+    mut frame: Frame<'_>,
+) -> Option<Value> {
+    if args.len() > function.params.len() {
         return None;
     }
     #[cfg(test)]
     FUNCTION_CALLS.with(|count| count.set(count.get() + 1));
-    for ((name, r#type), value) in function.params.iter().zip(args) {
+    for (position, (name, r#type)) in function.params.iter().enumerate() {
         frame.declare(name, r#type)?;
-        frame.set(name, *value);
+        let value = match args.get(position) {
+            Some(value) => value.clone(),
+            None => {
+                let width = frame.type_of(name)?.0;
+                frame.assignment_value(function.argument_defaults[position].as_ref()?, width)?
+            }
+        };
+        frame.set(name, value)?;
     }
     let (return_name, return_type) = function.return_var.as_ref()?;
     frame.declare(return_name, return_type)?;
-    frame.set(return_name, 0);
+    frame.return_width = Some(frame.type_of(return_name)?.0);
+    let initial = frame.initial_value(return_name)?;
+    frame.set(return_name, initial)?;
     match frame.block(&function.body)? {
         Flow::Return(Some(value)) => {
-            frame.set(return_name, value);
+            frame.set(return_name, value)?;
         }
         Flow::Next | Flow::Return(None) => {}
         Flow::Break | Flow::Continue => return None,
     }
-    frame.values.get(return_name).copied()
+    frame.values.remove(return_name)
 }
 
 enum Flow {
     Next,
     Break,
     Continue,
-    Return(Option<i128>),
+    Return(Option<Value>),
 }
 
 /// Calls borrow their caller's values; only parameters, locals, the return
@@ -937,23 +973,25 @@ enum Flow {
 /// overlay, preserving the former copied environment's lookup precedence.
 struct Frame<'a> {
     constants: &'a dyn ConstantEnvironment,
-    values: HashMap<String, i128>,
+    values: HashMap<String, Value>,
     types: HashMap<String, (usize, bool)>,
+    two_state: HashSet<String>,
+    return_width: Option<usize>,
     temporaries: usize,
     iterations: usize,
 }
 
 /// `value` as a `width`-bit value of the given signedness.
 fn fit(value: i128, width: usize, signed: bool) -> i128 {
-    if width == 0 || width >= 127 {
+    if width == 0 || width >= 128 {
         return value;
     }
-    let modulus = 1i128 << width;
-    let truncated = value.rem_euclid(modulus);
-    if signed && truncated >= modulus / 2 {
-        truncated - modulus
+    let mask = (1u128 << width) - 1;
+    let truncated = (value as u128) & mask;
+    if signed && truncated & (1u128 << (width - 1)) != 0 {
+        (truncated | !mask) as i128
     } else {
-        truncated
+        truncated as i128
     }
 }
 
@@ -962,11 +1000,32 @@ impl ConstantEnvironment for Frame<'_> {
         self.constants.function_state()
     }
     fn get(&self, name: &str) -> Option<&i128> {
-        self.values.get(name).or_else(|| self.constants.get(name))
+        match self.values.get(name) {
+            Some(value) => value.number(),
+            None => self.constants.get(name),
+        }
+    }
+    fn literal(&self, name: &str) -> Option<&typecheck::IntegralLiteral> {
+        match self.values.get(name) {
+            Some(value) => value.wide(),
+            None => self.constants.literal(name),
+        }
     }
 }
 
-impl Frame<'_> {
+impl<'a> Frame<'a> {
+    fn new(constants: &'a dyn ConstantEnvironment) -> Self {
+        Self {
+            constants,
+            values: HashMap::default(),
+            types: HashMap::default(),
+            two_state: HashSet::default(),
+            return_width: None,
+            temporaries: 0,
+            iterations: 0,
+        }
+    }
+
     fn type_of(&self, name: &str) -> Option<(usize, bool)> {
         self.types.get(name).copied().or_else(|| {
             dimensions::parameter_type_from_lookup(name, &|marker| {
@@ -981,64 +1040,264 @@ impl Frame<'_> {
     }
 
     fn declare(&mut self, name: &str, r#type: &crate::ir::Type) -> Option<()> {
-        if !r#type.unpacked_ranges().is_empty() {
+        if self
+            .constants
+            .function_state()
+            .is_some_and(|state| state.runtime_two_state.get().is_some())
+            && matches!(
+                r#type.kind(),
+                crate::ir::TypeKind::Real
+                    | crate::ir::TypeKind::Shortreal
+                    | crate::ir::TypeKind::String
+                    | crate::ir::TypeKind::Object
+            )
+        {
             return None;
         }
-        let width = r#type
-            .resolved_width()
-            .or_else(|| {
-                crate::typecheck::resolve_packed_width_in_env(r#type.packed_ranges(), self)
-            })?
-            .max(1);
+        if !r#type.unpacked_ranges().is_empty()
+            && self
+                .constants
+                .function_state()?
+                .runtime_two_state
+                .get()
+                .is_none()
+        {
+            return None;
+        }
+        // Resolved runtime types already include unpacked dimensions.
+        // Elaboration types still need their dimensions evaluated here.
+        let width = if let Some(width) = r#type.resolved_width() {
+            width.max(1)
+        } else {
+            let mut width =
+                crate::typecheck::resolve_packed_width_in_env(r#type.packed_ranges(), self)?.max(1);
+            for range in r#type.unpacked_ranges() {
+                let (left, right) = range.resolved_bounds().or_else(|| {
+                    Some((
+                        self.eval_lowered(range.left())?,
+                        self.eval_lowered(range.right())?,
+                    ))
+                })?;
+                let count = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
+                width = width.checked_mul(count)?;
+            }
+            width
+        };
+        if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+            return None;
+        }
+        if r#type.kind() == crate::ir::TypeKind::Bit {
+            self.two_state.insert(name.to_string());
+        }
         self.types
             .insert(name.to_string(), (width, r#type.is_signed()));
         Some(())
     }
 
-    fn set(&mut self, name: &str, value: i128) {
+    fn initial_value(&self, name: &str) -> Option<Value> {
+        let runtime = self
+            .constants
+            .function_state()
+            .and_then(|state| state.runtime_two_state.get());
+        if runtime == Some(true) || self.two_state.contains(name) {
+            return Some(Value::integer(0));
+        }
+        let (width, _) = self.type_of(name)?;
+        typecheck::parse_integral_literal(&format!("{width}'bx")).map(Value::from_literal)
+    }
+
+    fn set(&mut self, name: &str, value: Value) -> Option<()> {
         let value = match self.type_of(name) {
-            Some((width, signed)) => fit(value, width, signed),
+            Some((width, signed)) => value.resize(width, signed)?,
             None => value,
         };
+        let value = if self.two_state.contains(name)
+            || self
+                .constants
+                .function_state()
+                .is_some_and(|state| state.runtime_two_state.get() == Some(true))
+        {
+            value.into_two_state()
+        } else {
+            value
+        };
         self.values.insert(name.to_string(), value);
+        Some(())
     }
 
     fn tick(&mut self) -> Option<()> {
+        if let Some(state) = self.constants.function_state() {
+            runtime::charge(state)?;
+        }
         self.iterations += 1;
         (self.iterations <= MAX_ITERATIONS).then_some(())
     }
 
-    fn eval(&mut self, expr: &Expr) -> Option<i128> {
+    fn eval(&mut self, expr: &Expr) -> Option<Value> {
         let lowered: crate::ir::ConstExpr = self.lower(expr)?.into();
-        // The literal evaluator propagates expression widths; the plain one
-        // covers what it does not model.
         if let Some(literal) =
-            crate::typecheck::eval_const_integral_literal_in_env(&lowered, self, &|name| {
+            typecheck::eval_const_integral_literal_in_env(&lowered, self, &|name| {
                 self.type_of(name)
             })
         {
-            return crate::typecheck::integral_literal_as_i128(&literal, literal.signed);
+            return Some(Value::from_literal(literal));
         }
-        self.eval_lowered(&lowered)
+        self.eval_lowered(&lowered).map(Value::integer)
+    }
+
+    fn assignment_value(&mut self, expr: &Expr, width: usize) -> Option<Value> {
+        if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+            return None;
+        }
+        if let Expr::Literal(text) = expr
+            && text.trim_start().starts_with('\'')
+            && let Some(text) = resize_unbased_fill_literal_for_cast(text, width, false)
+        {
+            return typecheck::parse_integral_literal(&text).map(Value::from_literal);
+        }
+        let lowered: crate::ir::ConstExpr = self.lower(expr)?.into();
+        if let Some(literal) = typecheck::eval_const_assignment_in_env(
+            &lowered,
+            self,
+            &|name| self.type_of(name),
+            width,
+        ) {
+            return Some(Value::from_literal(literal));
+        }
+        self.eval_lowered(&lowered).map(Value::integer)
+    }
+
+    fn case_operand(&mut self, expr: &Expr, context: ExprType) -> Option<Value> {
+        if context.width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+            return None;
+        }
+        let lowered = self.lower(expr)?.into();
+        typecheck::eval_case_operand_in_env(
+            &lowered,
+            self,
+            &|name| self.type_of(name),
+            context.width,
+            context.signed,
+        )
+        .map(Value::from_literal)
+    }
+
+    /// Type queries must not execute a case label or select a conditional arm.
+    fn expression_type(&self, expr: &Expr) -> Option<ExprType> {
+        let ty = |(width, signed)| ExprType { width, signed };
+        let placeholder = |ty: ExprType| ConstExpr::Resize {
+            expr: Box::new(ConstExpr::Literal("0".into())),
+            width: ty.width,
+            signed: ty.signed,
+        };
+        let expression = match expr {
+            Expr::Ident(name) => {
+                return self.type_of(name).map(ty).or_else(|| {
+                    self.constants
+                        .literal(name)
+                        .map(|value| ty((value.width, value.signed)))
+                });
+            }
+            Expr::Literal(text) => {
+                // An unbased unsized fill is one bit in a self-determined
+                // type query; its value fills the eventual case context.
+                if matches!(
+                    text.trim().to_ascii_lowercase().as_str(),
+                    "'0" | "'1" | "'x" | "'z" | "'?"
+                ) {
+                    return Some(ty((1, false)));
+                }
+                return typecheck::integral_literal_type_metadata(text).map(ty);
+            }
+            Expr::Resize { width, signed, .. } => return Some(ty((*width, *signed))),
+            Expr::Inside { .. } => return Some(ty((1, false))),
+            Expr::Select {
+                msb, lsb, signed, ..
+            } => {
+                // Indexed selects have a constant width even when their base
+                // calls a function. Cancel the common base without executing it.
+                let width = typecheck::select_range_width(
+                    &msb.clone().into(),
+                    &lsb.clone().into(),
+                    &HashMap::default(),
+                )
+                .or_else(|| {
+                    let msb = self.eval_lowered(&msb.clone().into())?;
+                    let lsb = self.eval_lowered(&lsb.clone().into())?;
+                    usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)
+                })?;
+                return Some(ty((width, *signed)));
+            }
+            Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => {
+                let width = parts.iter().try_fold(0usize, |width, part| {
+                    width.checked_add(self.expression_type(part)?.width)
+                })?;
+                let count = if let Expr::RepeatConcat { count, .. } = expr {
+                    usize::try_from(self.eval_lowered(&count.clone().into())?).ok()?
+                } else {
+                    1
+                };
+                return Some(ty((width.checked_mul(count)?, false)));
+            }
+            Expr::Call {
+                callee: Callee::Subroutine(name),
+                ..
+            } => {
+                let functions = self.constants.function_state()?.functions.borrow();
+                let (_, result) = functions.functions.get(name)?.return_var.as_ref()?;
+                let width = result.resolved_width().or_else(|| {
+                    typecheck::resolve_packed_width_in_env(result.packed_ranges(), self)
+                })?;
+                return Some(ty((width, result.is_signed())));
+            }
+            Expr::Call { callee, args, .. } => ConstExpr::Function {
+                callee: callee.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| Some(placeholder(self.expression_type(arg.as_ref()?)?)))
+                    .collect::<Option<_>>()?,
+                site: None,
+            },
+            Expr::Unary { op, expr } => ConstExpr::Unary {
+                op: *op,
+                expr: Box::new(placeholder(self.expression_type(expr)?)),
+            },
+            Expr::Binary { left, op, right } => ConstExpr::Binary {
+                left: Box::new(placeholder(self.expression_type(left)?)),
+                op: *op,
+                right: Box::new(placeholder(self.expression_type(right)?)),
+            },
+            Expr::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => ConstExpr::Mux {
+                condition: Box::new(ConstExpr::Literal("0".into())),
+                then_expr: Box::new(placeholder(self.expression_type(then_expr)?)),
+                else_expr: Box::new(placeholder(self.expression_type(else_expr)?)),
+            },
+        };
+        infer_const_expr_type(&expression, &HashMap::default())
     }
 
     fn truth(&mut self, expr: &Expr) -> Option<bool> {
-        Some(self.eval(expr)? != 0)
+        // An unknown procedural condition does not select the then branch.
+        Some(self.eval(expr)?.truth() == Some(true))
     }
 
-    /// A temporary holding `value` with the given type.
-    fn temporary(&mut self, value: i128, width: usize, signed: bool) -> ConstExpr {
+    fn temporary(&mut self, value: Value) -> Option<ConstExpr> {
+        let (width, signed) = value.r#type();
         let name = format!("\0constant_function_temporary{}", self.temporaries);
         self.temporaries += 1;
         self.types.insert(name.clone(), (width.max(1), signed));
-        self.set(&name, value);
-        ConstExpr::Ident(name)
+        self.set(&name, value)?;
+        Some(ConstExpr::Ident(name))
     }
 
     /// `expr` as a constant expression, with the parts the constant
     /// evaluator does not model replaced by typed temporaries.
     fn lower(&mut self, expr: &Expr) -> Option<ConstExpr> {
-        Some(match expr {
+        let lowered = match expr {
             Expr::Ident(name) => ConstExpr::Ident(name.clone()),
             Expr::Literal(value) => ConstExpr::Literal(value.clone()),
             Expr::Unary { op, expr } => ConstExpr::Unary {
@@ -1054,13 +1313,38 @@ impl Frame<'_> {
                 condition,
                 then_expr,
                 else_expr,
+            } => self.lower_mux(condition, then_expr, else_expr)?,
+
+            Expr::Call {
+                callee: Callee::Subroutine(name),
+                args,
+                ..
             } => {
-                // Only the selected arm is evaluated.
-                if self.truth(condition)? {
-                    self.lower(then_expr)?
-                } else {
-                    self.lower(else_expr)?
+                let functions = self
+                    .constants
+                    .function_state()?
+                    .functions
+                    .borrow()
+                    .functions
+                    .clone();
+                let function = functions.get(name)?;
+                let actuals = resolved_arguments(
+                    self.constants.function_state()?,
+                    &Callee::Subroutine(name.clone()),
+                    args,
+                )?;
+                let mut values = Vec::with_capacity(actuals.len());
+                for (arg, (_, ty)) in actuals.iter().zip(&function.params) {
+                    let width = ty.resolved_width().or_else(|| {
+                        typecheck::resolve_packed_width_in_env(ty.packed_ranges(), self)
+                    })?;
+                    values.push(self.assignment_value(arg, width)?);
                 }
+                if actuals.len() > function.params.len() {
+                    return None;
+                }
+                let value = call_value(name, &values, self)?;
+                self.temporary(value)?
             }
             Expr::Call { callee, args, .. } => ConstExpr::Function {
                 callee: callee.clone(),
@@ -1070,60 +1354,153 @@ impl Frame<'_> {
                     .collect::<Option<_>>()?,
                 site: None,
             },
-            Expr::Select { expr, msb, lsb, .. } => {
-                let value = self.eval(expr)?;
+            Expr::Select {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => {
                 let msb = self.eval_lowered(&msb.clone().into())?;
                 let lsb = self.eval_lowered(&lsb.clone().into())?;
-                let (high, low) = (msb.max(lsb), msb.min(lsb));
-                let width = usize::try_from(high - low).ok()? + 1;
-                let shifted = value.checked_shr(u32::try_from(low).ok()?)?;
-                self.temporary(fit(shifted, width, false), width, false)
+                ConstExpr::SelectRange {
+                    expr: Box::new(self.lower(expr)?),
+                    msb: Box::new(const_expr_from_i128(msb)),
+                    lsb: Box::new(const_expr_from_i128(lsb)),
+                    signed: *signed,
+                }
             }
             Expr::Resize {
                 expr,
                 width,
                 signed,
-            } => {
-                let value = self.eval(expr)?;
-                self.temporary(fit(value, *width, *signed), *width, *signed)
-            }
-            Expr::Inside { expr, items } => {
-                let mut found = false;
-                for item in items {
-                    found |= match item {
-                        InsideItem::Value(item) => self.truth(&Expr::Binary {
-                            left: expr.clone(),
-                            op: BinaryOp::EqWildcard,
-                            right: Box::new(item.clone()),
-                        })?,
-                        InsideItem::Range { low, high } => {
-                            self.truth(&Expr::Binary {
-                                left: Box::new(low.clone()),
-                                op: BinaryOp::Le,
-                                right: expr.clone(),
-                            })? && self.truth(&Expr::Binary {
-                                left: expr.clone(),
-                                op: BinaryOp::Le,
-                                right: Box::new(high.clone()),
-                            })?
-                        }
-                    };
-                }
-                ConstExpr::Literal(format!("1'b{}", u8::from(found)))
-            }
+            } => ConstExpr::Resize {
+                expr: Box::new(self.lower(expr)?),
+                width: *width,
+                signed: *signed,
+            },
+            Expr::Inside { expr, items } => self.lower_inside(expr, items)?,
+
             Expr::Concat(_) | Expr::RepeatConcat { .. } => {
                 let literal = self.concat_literal(expr)?;
                 if literal.width == 0 {
                     return None;
                 }
-                let value = crate::typecheck::integral_literal_as_i128(&literal, false)?;
-                self.temporary(value, literal.width, false)
+                self.temporary(Value::from_literal(literal))?
             }
+        };
+        // Runtime two-state evaluation discards X/Z at operation boundaries.
+        // This interpreter uses four-state expression rules. Only reuse a
+        // result when every intermediate is known; otherwise runtime lowering
+        // supplies the state-mode semantics (including out-of-range selects).
+        if self
+            .constants
+            .function_state()
+            .is_some_and(|state| state.runtime_two_state.get() == Some(true))
+        {
+            let literal = typecheck::eval_const_integral_literal_in_env(
+                &lowered.clone().into(),
+                self,
+                &|name| self.type_of(name),
+            )?;
+            if literal.mask != BigUint::default() {
+                return None;
+            }
+        }
+        Some(lowered)
+    }
+
+    fn type_placeholder(&self, expr: &Expr) -> Option<ConstExpr> {
+        let ty = self.expression_type(expr)?;
+        if ty.width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+            return None;
+        }
+        Some(ConstExpr::Resize {
+            expr: Box::new(ConstExpr::Literal("0".into())),
+            width: ty.width,
+            signed: ty.signed,
         })
     }
 
+    #[inline(never)]
+    fn lower_mux(
+        &mut self,
+        condition: &Expr,
+        then_expr: &Expr,
+        else_expr: &Expr,
+    ) -> Option<ConstExpr> {
+        let condition = self.eval(condition)?;
+        let truth = condition.truth();
+        let condition = self.temporary(condition)?;
+        // The skipped arm still contributes its type (11.8.1), but its value
+        // and calls must not be evaluated (11.4.11). Keep the mux so an outer
+        // size context can reach arithmetic inside the selected arm (11.8.2).
+        let (then_expr, else_expr) = match truth {
+            Some(true) => {
+                let skipped = self.type_placeholder(else_expr)?;
+                (self.lower(then_expr)?, skipped)
+            }
+            Some(false) => {
+                let skipped = self.type_placeholder(then_expr)?;
+                (skipped, self.lower(else_expr)?)
+            }
+            None => (self.lower(then_expr)?, self.lower(else_expr)?),
+        };
+        Some(ConstExpr::Mux {
+            condition: Box::new(condition),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        })
+    }
+
+    #[inline(never)]
+    fn lower_inside(&mut self, expr: &Expr, items: &[InsideItem]) -> Option<ConstExpr> {
+        // Keep comparisons as four-state expressions. Procedural truth
+        // would turn an unknown membership result into a known zero.
+        let selector = self.lower(expr)?;
+        let mut result = Some(false);
+        for item in items {
+            let comparison = match item {
+                InsideItem::Value(item) => ConstExpr::Binary {
+                    left: Box::new(selector.clone()),
+                    op: BinaryOp::EqWildcard,
+                    right: Box::new(self.lower(item)?),
+                },
+                InsideItem::Range { low, high } => ConstExpr::Binary {
+                    left: Box::new(ConstExpr::Binary {
+                        left: Box::new(self.lower(low)?),
+                        op: BinaryOp::Le,
+                        right: Box::new(selector.clone()),
+                    }),
+                    op: BinaryOp::LogicAnd,
+                    right: Box::new(ConstExpr::Binary {
+                        left: Box::new(selector.clone()),
+                        op: BinaryOp::Le,
+                        right: Box::new(self.lower(high)?),
+                    }),
+                },
+            };
+            let comparison =
+                typecheck::eval_const_integral_literal_in_env(&comparison.into(), self, &|name| {
+                    self.type_of(name)
+                })?;
+            result = match (result, typecheck::integral_literal_truth(&comparison)) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            };
+        }
+        Some(ConstExpr::Literal(
+            match result {
+                Some(true) => "1'b1",
+                Some(false) => "1'b0",
+                None => "1'bx",
+            }
+            .into(),
+        ))
+    }
+
     /// Fold concatenations with each operand's own width before the surrounding
-    /// assignment can resize the value. This interpreter stores at most 128 bits.
+    /// assignment can resize the value.
     fn concat_literal(&mut self, expr: &Expr) -> Option<crate::typecheck::IntegralLiteral> {
         self.tick()?;
         let (parts, count) = match expr {
@@ -1147,14 +1524,14 @@ impl Frame<'_> {
         for part in parts {
             let literal = self.concat_literal(part)?;
             width = width.checked_add(literal.width)?;
-            if width > 128 {
+            if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
                 return None;
             }
             value = (value << literal.width) | literal.value;
             mask = (mask << literal.width) | literal.mask;
         }
         let total = width.checked_mul(count)?;
-        if total > 128 {
+        if total > constant_folding::MAX_CONSTANT_CONCAT_BITS {
             return None;
         }
         let mut result_value = BigUint::default();
@@ -1182,11 +1559,11 @@ impl Frame<'_> {
         Some(Flow::Next)
     }
 
-    fn assign(&mut self, lhs: &LValue, value: i128) -> Option<()> {
+    fn assign(&mut self, lhs: &LValue, value: Value) -> Option<()> {
         match lhs {
             LValue::Ident(name) => {
                 if self.type_of(name).is_none() {
-                    let r#type = self
+                    let ty = self
                         .constants
                         .function_state()?
                         .functions
@@ -1194,31 +1571,121 @@ impl Frame<'_> {
                         .locals
                         .get(name)
                         .cloned()?;
-                    self.declare(name, &r#type)?;
+                    self.declare(name, &ty)?;
                 }
-                self.set(name, value);
+                self.set(name, value)?;
             }
-            LValue::Select { name, msb, lsb, .. } => {
-                let msb = self.eval_lowered(&msb.clone().into())?;
-                let lsb = self.eval_lowered(&lsb.clone().into())?;
-                let (high, low) = (msb.max(lsb), msb.min(lsb));
-                let width = u32::try_from(high - low).ok()? + 1;
-                let low = u32::try_from(low).ok()?;
-                if low + width >= 127 {
+            LValue::Select {
+                name,
+                msb,
+                lsb,
+                array_slice_width,
+                array_slice_reversed,
+                ..
+            } => {
+                // Aggregate slice ordering needs element-aware assignment;
+                // leave that call to the ordinary runtime lowering.
+                if array_slice_width.is_some() || *array_slice_reversed {
                     return None;
                 }
-                let mask = ((1i128 << width) - 1) << low;
-                let old = *self.get(name)?;
-                self.set(name, (old & !mask) | ((value << low) & mask));
+                let msb = self.eval_lowered(&msb.clone().into())?;
+                let lsb = self.eval_lowered(&lsb.clone().into())?;
+                let old = self.values.get(name)?.clone();
+                let value = old.write(msb.max(lsb), msb.min(lsb), value)?;
+                self.set(name, value)?;
             }
         }
         Some(())
     }
 
+    #[inline(never)]
+    fn case_statement(
+        &mut self,
+        kind: CaseKind,
+        selector: &Expr,
+        items: &[crate::procedural::CaseItemBase<Expr, LValue>],
+        default: Option<&[Stmt]>,
+    ) -> Option<Flow> {
+        if matches!(kind, CaseKind::Z | CaseKind::X) {
+            return None;
+        }
+        // All labels contribute to the common type, including labels
+        // after the first match (12.5). Query their types without
+        // executing them; labels are evaluated only in source order.
+        let mut context = self.expression_type(selector)?;
+        if kind == CaseKind::Exact {
+            for item in items {
+                for label in &item.labels {
+                    let CaseLabel::Value(value) = label else {
+                        return None;
+                    };
+                    let ty = self.expression_type(value)?;
+                    context.width = context.width.max(ty.width);
+                    context.signed &= ty.signed;
+                }
+            }
+        }
+        let selector = if kind == CaseKind::Exact {
+            self.case_operand(selector, context)?
+        } else {
+            self.eval(selector)?
+        };
+        let ConstExpr::Ident(selector) = self.temporary(selector)? else {
+            return None;
+        };
+        for item in items {
+            for label in &item.labels {
+                let comparison = match (&kind, label) {
+                    (CaseKind::Inside, label) => Expr::Inside {
+                        expr: Box::new(Expr::Ident(selector.clone())),
+                        items: vec![match label {
+                            CaseLabel::Value(value) => InsideItem::Value(value.clone()),
+                            CaseLabel::Range { low, high } => InsideItem::Range {
+                                low: low.clone(),
+                                high: high.clone(),
+                            },
+                        }],
+                    },
+                    (_, CaseLabel::Value(value)) => {
+                        let value = self.case_operand(value, context)?;
+                        let ConstExpr::Ident(value) = self.temporary(value)? else {
+                            return None;
+                        };
+                        Expr::Binary {
+                            left: Box::new(Expr::Ident(selector.clone())),
+                            op: BinaryOp::EqCase,
+                            right: Box::new(Expr::Ident(value)),
+                        }
+                    }
+                    (_, CaseLabel::Range { .. }) => return None,
+                };
+                if self.truth(&comparison)? {
+                    return self.block(&item.body);
+                }
+            }
+        }
+        if let Some(default) = default {
+            return self.block(default);
+        }
+        Some(Flow::Next)
+    }
+
     fn stmt(&mut self, stmt: &Stmt) -> Option<Flow> {
+        if let Some(state) = self.constants.function_state() {
+            runtime::charge(state)?;
+        }
         match stmt {
             Stmt::Assign { lhs, rhs, .. } => {
-                let value = self.eval(rhs)?;
+                let width = match lhs {
+                    LValue::Ident(name) => self.type_of(name)?.0,
+                    LValue::Select { msb, lsb, .. } => usize::try_from(
+                        self.eval_lowered(&msb.clone().into())?
+                            .abs_diff(self.eval_lowered(&lsb.clone().into())?),
+                    )
+                    .ok()?
+                    .checked_add(1)?,
+                };
+                let value = self.assignment_value(rhs, width)?;
                 self.assign(lhs, value)?;
             }
             Stmt::Local { name, init } => {
@@ -1232,10 +1699,10 @@ impl Frame<'_> {
                     .cloned()?;
                 self.declare(name, &r#type)?;
                 let value = match init {
-                    Some(init) => self.eval(init)?,
-                    None => 0,
+                    Some(init) => self.assignment_value(init, self.type_of(name)?.0)?,
+                    None => self.initial_value(name)?,
                 };
-                self.set(name, value);
+                self.set(name, value)?;
             }
             Stmt::If {
                 condition,
@@ -1254,41 +1721,9 @@ impl Frame<'_> {
                 items,
                 default,
             } => {
-                if matches!(kind, CaseKind::Z | CaseKind::X) {
-                    return None;
-                }
-                // Each label compares as an equality with the selector, at
-                // their common width (IEEE 1800-2023 12.5).
-                for item in items {
-                    for label in &item.labels {
-                        let comparison = match (kind, label) {
-                            (CaseKind::Inside, label) => Expr::Inside {
-                                expr: Box::new(selector.clone()),
-                                items: vec![match label {
-                                    CaseLabel::Value(value) => InsideItem::Value(value.clone()),
-                                    CaseLabel::Range { low, high } => InsideItem::Range {
-                                        low: low.clone(),
-                                        high: high.clone(),
-                                    },
-                                }],
-                            },
-                            (_, CaseLabel::Value(value)) => Expr::Binary {
-                                left: Box::new(selector.clone()),
-                                op: BinaryOp::Eq,
-                                right: Box::new(value.clone()),
-                            },
-                            (_, CaseLabel::Range { .. }) => return None,
-                        };
-                        let matched = self.truth(&comparison)?;
-                        if matched {
-                            return self.block(&item.body);
-                        }
-                    }
-                }
-                if let Some(default) = default {
-                    return self.block(default);
-                }
+                return self.case_statement(*kind, selector, items, default.as_deref());
             }
+
             Stmt::Loop {
                 kind,
                 init,
@@ -1300,7 +1735,7 @@ impl Frame<'_> {
                     return None;
                 }
                 let mut remaining = match kind {
-                    LoopKind::Repeat(count) => Some(self.eval(count)?),
+                    LoopKind::Repeat(count) => Some(*self.eval(count)?.number()?),
                     _ => None,
                 };
                 let mut first = true;
@@ -1334,7 +1769,10 @@ impl Frame<'_> {
             Stmt::Continue => return Some(Flow::Continue),
             Stmt::Return(value) => {
                 let value = match value {
-                    Some(value) => Some(self.eval(value)?),
+                    Some(value) => {
+                        let width = self.return_width?;
+                        Some(self.assignment_value(value, width)?)
+                    }
                     None => None,
                 };
                 return Some(Flow::Return(value));
@@ -1352,7 +1790,11 @@ impl Frame<'_> {
             Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::WaitImplicit(_) | Stmt::Wait(_) => {
                 return None;
             }
-            Stmt::AssignConcat { .. } | Stmt::Call { .. } => return None,
+            Stmt::Fork { .. }
+            | Stmt::WaitFork
+            | Stmt::DisableFork
+            | Stmt::AssignConcat { .. }
+            | Stmt::Call { .. } => return None,
         }
         Some(Flow::Next)
     }

@@ -70,6 +70,143 @@
   (assert_eq x 7)
   (assert_eq r 2))
 
+; Plain always processes may share a variable, such as a loop index; the last
+; write determines its value (IEEE 1800-2023 6.5, 9.2.2.4). A process reads its
+; own preceding blocking writes. Which process of one edge runs first is not
+; defined, so the assertions avoid reads that depend on it.
+(case edge_processes_share_a_blocking_loop_variable
+  (source "shared_index.sv" #"
+                module Top(input logic clk, input logic en, input logic [7:0] x, input logic [7:0] y,
+                           output logic [7:0] a, output logic [7:0] b,
+                           output integer last_a, output integer last_b, output integer prev,
+                           output integer i_q);
+                    integer i;
+                    logic [7:0] ra = 8'd0;
+                    logic [7:0] rb = 8'd0;
+                    always @(posedge clk) begin
+                        for (i = 0; i < 8; i = i + 1) ra[i] <= x[7 - i];
+                        last_a <= i;
+                    end
+                    always @(posedge clk) begin
+                        prev <= i;
+                        if (en) begin
+                            for (i = 0; i < 4; i = i + 1) rb[i] <= y[i];
+                            last_b <= i;
+                        end
+                    end
+                    assign a = ra;
+                    assign b = rb;
+                    assign i_q = i;
+                endmodule
+            "#)
+  (top Top)
+  (modify (set en 0) (set x 0x01) (set y 0xff))
+  (tick clk)
+  (assert_eq a 0x80)
+  (assert_eq b 0)
+  (assert_eq last_a 8)
+  (assert_eq i_q 8)
+  (tick clk)
+  (assert_eq prev 8 "a read before the process writes sees the earlier write")
+  (modify (set en 1) (set x 0x80))
+  (tick clk)
+  (assert_eq a 0x01)
+  (assert_eq b 0x0f)
+  (assert_eq last_a 8)
+  (assert_eq last_b 4 "a read after the loop sees the process's own write")
+  (assert_eq prev 8)
+  (modify (set en 0) (set y 0x05))
+  (tick clk)
+  (assert_eq i_q 8 "the write stays when the other process does not write")
+  (assert_eq b 0x0f)
+  (tick clk)
+  (assert_eq prev 8)
+  (assert_eq i_q 8))
+
+; Processes of different clocks share a variable. A write at one edge is
+; visible to a process of a later edge, and survives a coincident edge whose
+; process does not write the variable.
+(case edge_processes_of_two_clocks_share_a_blocking_variable
+  (source "shared_clocks.sv" #"
+                module Top(input logic ca, input logic cb, input logic en,
+                           output integer qa, output integer qb, output integer i_q);
+                    integer i;
+                    integer sa = 0;
+                    integer sb = 0;
+                    always @(posedge ca) begin
+                        for (i = 0; i < 3; i = i + 1) sa = sa + i;
+                        qa <= i + sa;
+                    end
+                    always @(posedge cb) begin
+                        qb <= i;
+                        if (en) for (i = 0; i < 5; i = i + 1) sb = sb + i;
+                    end
+                    assign i_q = i;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 0)
+  (modify (set ca 0) (set cb 0) (set en 1))
+  (modify (set ca 1))
+  (run_until 1)
+  (assert_eq qa 6)
+  (assert_eq i_q 3)
+  (modify (set ca 0) (set cb 1))
+  (run_until 2)
+  (assert_eq qb 3 "a later edge sees the other process's write")
+  (assert_eq i_q 5)
+  (modify (set cb 0) (set en 0))
+  (modify (set ca 1) (set cb 1))
+  (run_until 3)
+  (assert_eq qa 9)
+  (assert_eq i_q 3 "a coincident process that does not write keeps the write")
+  (modify (set ca 0) (set cb 0))
+  (modify (set cb 1))
+  (run_until 4)
+  (assert_eq qb 3)
+  (assert_eq i_q 3))
+
+; The loop index of two asynchronously reset processes (from the C906
+; aq_biu_req_arbiter), which select bits of separate registers.
+(case reset_processes_share_a_loop_index
+  (source "shared_reset_index.sv" #"
+                module Top(input logic clk, input logic rst_b, input logic we,
+                           input logic [2:0] ptr, input logic sel, input logic hit,
+                           output logic [7:0] fifo, output logic [7:0] apb);
+                    reg [7:0] wsel_fifo;
+                    reg [7:0] apbif_sel;
+                    integer i;
+                    always @(posedge clk or negedge rst_b)
+                        if (!rst_b)
+                            for (i = 0; i < 8; i = i + 1) wsel_fifo[i] <= 1'b0;
+                        else
+                            for (i = 0; i < 8; i = i + 1)
+                                if (we & ptr == i) wsel_fifo[i] <= sel;
+                                else wsel_fifo[i] <= wsel_fifo[i];
+                    always @(posedge clk or negedge rst_b)
+                        if (!rst_b)
+                            for (i = 0; i < 8; i = i + 1) apbif_sel[i] <= 1'b0;
+                        else
+                            for (i = 0; i < 8; i = i + 1)
+                                if (we & ptr == i) apbif_sel[i] <= hit;
+                                else apbif_sel[i] <= apbif_sel[i];
+                    assign fifo = wsel_fifo;
+                    assign apb = apbif_sel;
+                endmodule
+            "#)
+  (top Top)
+  (modify (set rst_b 1) (set we 0) (set ptr 0) (set sel 0) (set hit 0))
+  (modify (set rst_b 0))
+  (modify (set rst_b 1))
+  (assert_eq fifo 0)
+  (assert_eq apb 0)
+  (for (write position s h f a)
+    (list (1 3 1 0 0x08 0x00) (1 5 0 1 0x08 0x20) (0 1 1 1 0x08 0x20) (1 3 0 1 0x00 0x28))
+    (modify (set we write) (set ptr position) (set sel s) (set hit h))
+    (tick clk)
+    (assert_eq fifo f)
+    (assert_eq apb a)))
+
 (case constant_functions_size_parameters_and_ports
   (source "constant_functions.sv" #"
                 module Child #(parameter int unsigned ENTRIES = 2,
@@ -142,6 +279,65 @@
     (modify (set index i))
     (assert_eq y (+ (* i 3) 1))
     (assert_eq z 0x5a)))
+
+; An initial block whose loops have no static trip count (a condition on
+; another variable than the one the step assigns, `while`, `do`-`while`) runs
+; as a process instead of being unrolled into initial state (#1992).
+(case initial_loops_without_a_static_trip_count_run_as_a_process
+  (source "initial_loops.sv" #"
+                module Ram;
+                    logic [7:0] mem [16];
+                endmodule
+                module Top;
+                    Ram r0(), r1();
+                    logic [31:0] src [32];
+                    logic [7:0] w [8];
+                    integer i, j, n;
+                    initial begin
+                        for (n = 0; n < 32; n = n + 1) src[n] = 32'h01010101 * n;
+                        i = 0;
+                        for (j = 0; i < 16; i = j / 2) begin
+                            r0.mem[i] = src[j][15:8];
+                            j = j + 1;
+                            r1.mem[i] = src[j][31:24];
+                            j = j + 1;
+                        end
+                        n = 0;
+                        while (n < 8) begin
+                            w[n] = 8'(n * 5);
+                            n = n + 1;
+                        end
+                        do n = n - 3; while (n > 0);
+                        #1 $display("%0d %0d %h %h %h %h %h %0d", i, j, r0.mem[0], r0.mem[15],
+                                 r1.mem[0], r1.mem[15], w[7], n);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "16 32 00 1e 01 1f 23 -1\n"))
+
+; The state such an initial block writes is visible like folded initial state.
+(case initial_while_loops_define_the_state
+  (source "initial_while.sv" #"
+                module Top(input logic [1:0] index, output logic [7:0] y);
+                    logic [7:0] mem [4];
+                    int n;
+                    initial begin
+                        n = 0;
+                        while (n < 4) begin
+                            mem[n] = 8'(n * 3 + 1);
+                            n++;
+                        end
+                    end
+                    assign y = mem[index];
+                endmodule
+            "#)
+  (top Top)
+  (for i (range 0 4)
+    (modify (set index i))
+    (assert_eq y (+ (* i 3) 1))))
 
 (case loop_initializer_widens_by_its_own_signedness
   (source "loop_start.sv" #"
@@ -889,6 +1085,234 @@
   (top Top)
   (assert_eq a 255)
   (assert_eq b 15))
+
+(case wide_constant_functions_inside_conditional_parameter_initializers
+  ; IEEE 1800-2023 13.4.3 and 11.4.11: a packed return is assembled
+  ; before its value and declared type participate in the conditional.
+  (source "wide_constant_functions.sv" #"
+    module Layout #(parameter N=4)(output logic [N*32-1:0] selected, direct);
+      localparam [N*32-1:0] WIDTHS={N{32'd24}};
+      function automatic [N-1:0][31:0] offsets(input int unused);
+        logic [31:0] base, size, mask;
+        int width;
+        offsets='0;
+        base='0;
+        for (int i=0; i<N; i++) begin
+          width=WIDTHS[i*32 +: 32];
+          mask={32{1'b1}}>>(32-width);
+          size=mask+1;
+          if (width>0) begin
+            if ((base&mask)!=0) base=base+size-(base&mask);
+            offsets[i]=base;
+            base=base+size;
+          end
+        end
+      endfunction
+      localparam [N*32-1:0] VALUE=1'b0 ? (N*32)'(0) : offsets(0);
+      localparam [N*32-1:0] DIRECT=offsets(0);
+      assign selected=VALUE;
+      assign direct=DIRECT;
+    endmodule
+    module Top(output logic [127:0] selected4, direct4,
+               output logic [95:0] selected3, direct3);
+      Layout #(.N(4)) four(selected4, direct4);
+      Layout #(.N(3)) three(selected3, direct3);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq selected4 0x03000000020000000100000000000000)
+  (assert_eq direct4 0x03000000020000000100000000000000)
+  (assert_eq selected3 0x020000000100000000000000)
+  (assert_eq direct3 0x020000000100000000000000))
+
+(case constant_function_assignments_at_127_and_128_bit_boundaries
+  (source "constant_function_boundaries.sv" #"
+    module Top(output logic [127:0] full, boundary_value, sign_extended, zero_extended,
+               output logic [127:0] fill_return, fill_local);
+      function automatic [127:0] fill(input int unused);
+        fill[127:0]=128'hfedcba98765432100123456789abcdef;
+      endfunction
+      function automatic [127:0] boundary(input int unused);
+        boundary='1;
+        boundary[127]=0;
+        boundary[126]=1;
+        boundary[7:0]=8'ha5;
+      endfunction
+      function automatic signed [126:0] signed_value(input int unused);
+        signed_value='0;
+        signed_value[126]=1;
+        signed_value[7:0]=8'ha5;
+        if (signed_value<0) signed_value[8]=1;
+      endfunction
+      function automatic [126:0] unsigned_value(input int unused);
+        unsigned_value='1;
+        unsigned_value[126:0]='0;
+        unsigned_value[126]=1;
+        unsigned_value[7:0]=8'ha5;
+        if (unsigned_value<0) unsigned_value[8]=1;
+      endfunction
+      function automatic [127:0] return_fill(input int unused);
+        return '1;
+      endfunction
+      function automatic [127:0] local_fill(input int unused);
+        logic [127:0] value='1;
+        return value;
+      endfunction
+      localparam [127:0] RF=return_fill(0), LF=local_fill(0);
+      assign fill_return=RF;
+      assign fill_local=LF;
+      localparam [127:0] F=1'b0 ? 128'(0) : fill(0);
+      localparam [127:0] E=1'b0 ? 128'(0) : boundary(0);
+      localparam signed [126:0] S=1'b0 ? 127'(0) : signed_value(0);
+      localparam [126:0] U=1'b0 ? 127'(0) : unsigned_value(0);
+      assign full=F;
+      assign boundary_value=E;
+      assign sign_extended=S;
+      assign zero_extended=U;
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq full 0xfedcba98765432100123456789abcdef)
+  (assert_eq boundary_value 0x7fffffffffffffffffffffffffffffa5)
+  (assert_eq sign_extended 0xc00000000000000000000000000001a5)
+  (assert_eq zero_extended 0x400000000000000000000000000000a5)
+  (assert_eq fill_return 0xffffffffffffffffffffffffffffffff)
+  (assert_eq fill_local 0xffffffffffffffffffffffffffffffff))
+
+; Wide constants must remain wide both when reading a packed lookup table
+; and when assembling the function result (IEEE 1800-2023 13.4.3).
+(case constant_functions_evaluate_wide_address_tables
+  (source "wide_address_tables.sv" #"
+    module Layout #(parameter N=9, W=20)(output wire [N*W-1:0] selected, direct);
+      localparam [N*32-1:0] WIDTHS={N{32'd16}};
+      function automatic int index_of(input int i); return i; endfunction
+      function automatic [N*W-1:0] offsets(input int unused);
+        logic [W-1:0] base, mask, size;
+        int width;
+        offsets='0;
+        base='0;
+        for (int i=0; i<N; i++) begin
+          width=WIDTHS[index_of(i)*32 +: 32];
+          mask={W{1'b1}}>>(W-width);
+          size=mask+1;
+          if (width>0) begin
+            if ((base&mask)!=0) base=base+size-(base&mask);
+            offsets[i*W +: W]=base;
+            base=base+size;
+          end
+        end
+      endfunction
+      localparam [N*W-1:0] VALUE=1'b0 ? (N*W)'(0) : offsets(0);
+      localparam [N*W-1:0] DIRECT=offsets(0);
+      assign selected=VALUE;
+      assign direct=DIRECT;
+    endmodule
+    module Top(output wire [179:0] selected9, direct9,
+               output wire [94:0] selected5, direct5);
+      Layout nine(selected9,direct9);
+      Layout #(.N(5),.W(19)) five(selected5,direct5);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq selected9 0x800007000060000500004000030000200001000000000)
+  (assert_eq direct9 0x800007000060000500004000030000200001000000000)
+  (assert_eq selected5 0x400006000080000800000000)
+  (assert_eq direct5 0x400006000080000800000000))
+
+(case constant_functions_preserve_wide_arguments_and_signedness
+  (source "wide_function_arguments.sv" #"
+    module Top(output wire [255:0] changed, filled, negative, positive,
+               output wire [255:0] crossing, arithmetic, argument_context,
+               output wire [limit(0)-1:0] width_port);
+      function automatic [159:0] limit(input int unused);
+        return 160'd8;
+      endfunction
+      assign width_port=8'ha5;
+      function automatic [255:0] identity(input logic [255:0] value);
+        return value;
+      endfunction
+      function automatic [255:0] transform(input logic [255:0] value);
+        logic [255:0] scratch=value;
+        scratch[191:128]=64'hfedcba9876543210;
+        return identity({scratch[127:0],scratch[255:128]});
+      endfunction
+      function automatic signed [128:0] signed_value(input int unused);
+        return -129'sd5;
+      endfunction
+      function automatic [127:0] unsigned_value(input int unused);
+        return 128'h80000000000000000000000000000001;
+      endfunction
+      function automatic [255:0] boundary(input int unused);
+        boundary='1;
+        boundary[143:120]=24'h123456;
+        boundary[255:252]=4'h5;
+        boundary[3:0]=4'hb;
+      endfunction
+      function automatic [255:0] shifted(input int unused);
+        return (1 << 159) + 1;
+      endfunction
+      localparam [255:0] A=shifted(0), AC=identity(1 << 200);
+      assign arithmetic=A;
+      assign argument_context=AC;
+      localparam [255:0] C=transform(identity(256'h0123456789abcdef0000000000000000112233445566778899aabbccddeeff00));
+      localparam [255:0] F=identity('1);
+      localparam signed [128:0] S=signed_value(0);
+      localparam [127:0] U=unsigned_value(0);
+      localparam [255:0] B=boundary(0);
+      assign changed=C;
+      assign filled=F;
+      assign negative=S;
+      assign positive=U;
+      assign crossing=B;
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq changed 0x112233445566778899aabbccddeeff000123456789abcdeffedcba9876543210)
+  (assert_eq filled (- (<< 1 256) 1))
+  (assert_eq negative (- (<< 1 256) 5))
+  (assert_eq positive 0x80000000000000000000000000000001)
+  (assert_eq width_port 0xa5)
+  (assert_eq arithmetic (+ (<< 1 159) 1))
+  (assert_eq argument_context (<< 1 200))
+  (assert_eq crossing 0x5fffffffffffffffffffffffffff123456fffffffffffffffffffffffffffffb))
+
+(case constant_functions_preserve_wide_unknown_masks
+  (source "wide_function_masks.sv" #"
+    module Top(output wire [255:0] result, copied, merged, bits_only);
+      function automatic logic [255:0] make_value(input logic [255:0] value);
+        logic [255:0] scratch=value;
+        scratch[159:128]=32'hxxxxzzzz;
+        return scratch;
+      endfunction
+      function automatic logic [255:0] identity(input logic [255:0] value);
+        return value;
+      endfunction
+      function automatic bit [255:0] to_bits(input bit [255:0] value);
+        if ($isunknown(value)) return '1;
+        return value;
+      endfunction
+      function automatic logic [255:0] merge_value(input int unused);
+        return 1'bx ? {128'hffff,128'h1} : {128'hffff,128'h3};
+      endfunction
+      localparam logic [255:0] R=make_value('1);
+      localparam logic [255:0] C=identity(R);
+      localparam logic [255:0] M=merge_value(0);
+      localparam bit [255:0] B=to_bits(R);
+      assign result=R;
+      assign copied=C;
+      assign merged=M;
+      assign bits_only=B;
+    endmodule
+  "#)
+  (top Top)
+  (four_state)
+  (let known (| (<< (- (<< 1 96) 1) 160) (- (<< 1 128) 1)))
+  (let mask (<< 0xffffffff 128))
+  (let value (| known (<< 0xffff0000 128)))
+  (assert_eq result (fourstate value mask))
+  (assert_eq copied (fourstate value mask))
+  (assert_eq merged (fourstate (| (<< 0xffff 128) 3) 2))
+  (assert_eq bits_only known))
 
 (case static_function_locals_share_storage_between_calls
   (source "static_functions.sv" #"

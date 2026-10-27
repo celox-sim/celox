@@ -25,11 +25,38 @@ pub(super) struct AnalysisState {
     interfaces: interface_ast::State,
     dimensions: dimensions::State,
     root_subroutines: std::cell::Cell<bool>,
+    inline_randomizations: RefCell<Vec<classes::constraints::Inline>>,
     next_call_site: std::rc::Rc<std::cell::Cell<usize>>,
     timescales: timescales::State,
     diagnostics: RefCell<Vec<warnings::AnalyzerWarning>>,
+    /// Revision of the imported scope, the analyzed package, the active
+    /// interface instances and the root-subroutine mode.
+    revision: generate::Revision,
+    generate_items: generate::Memo,
     /// Classes laid out so far, by name.
     classes: std::cell::RefCell<HashMap<String, std::rc::Rc<classes::Class>>>,
+    /// The constants and types of the scope that declares each class, which
+    /// its parameter defaults and body see (IEEE 1800-2023 8.25).
+    class_declaration_scopes:
+        std::cell::RefCell<HashMap<String, (HashMap<String, i128>, HashMap<String, Type>)>>,
+    /// The classes declared in a generate block that elaboration repeats,
+    /// which would be a class of their own in each repetition (27.4).
+    class_declarations_repeated: std::cell::RefCell<HashSet<String>>,
+    /// Set once the class methods of the scope being analyzed have their
+    /// signatures, after which a new specialization would have none.
+    class_specializations_frozen: std::cell::Cell<bool>,
+    /// The class specializations being made, which their own declarations
+    /// may name before they are complete.
+    class_specializations_building: std::cell::RefCell<Vec<String>>,
+    /// How many class specializations are being made, one inside another.
+    class_specialization_depth: std::cell::Cell<usize>,
+    /// The specializations of classes made so far, in order.
+    class_specializations: std::cell::RefCell<
+        Vec<(
+            String,
+            std::rc::Rc<classes::specializations::Specialization>,
+        )>,
+    >,
 }
 
 /// Syntax and specialization bindings for one scope within an analysis session.
@@ -94,7 +121,8 @@ impl Deref for AnalysisContext<'_> {
 }
 
 pub use crate::system_functions::{
-    ArrayQuery, Callee, ObjectOp, StringOp, SystemFunction, SystemTask,
+    ArrayQuery, Callee, ContainerKind, ContainerLayout, ContainerOp, ObjectOp, StringOp,
+    SystemFunction, SystemTask,
 };
 use crate::{AnalyzerError, system_functions, typecheck};
 
@@ -136,6 +164,8 @@ mod port_owners;
 mod timing;
 mod type_binding;
 pub(crate) use parameters::unbounded_parameter_marker;
+mod array_reductions;
+mod containers;
 mod patterns;
 mod procedural;
 mod scope;
@@ -332,7 +362,7 @@ impl Source {
                 }
                 celox_sv_syntax::PortStyle::NonAnsi => {
                     return Err(AnalyzerError::Unsupported(
-                        "non-ANSI module port declarations".to_string(),
+                        "non-ANSI port expressions".to_string(),
                     ));
                 }
                 _ => {}
@@ -456,6 +486,7 @@ impl Source {
                             name: signal.name.clone(),
                             r#type: signal.r#type.clone(),
                             is_net: signal.is_net,
+                            unresolved_net: false,
                             package_variable: None,
                             hierarchical: signal.paths.first().cloned(),
                         });
@@ -495,7 +526,7 @@ impl Source {
                 }
                 celox_sv_syntax::PortStyle::NonAnsi if syntax_tree.root_name()? == module_name => {
                     return Err(AnalyzerError::Unsupported(
-                        "non-ANSI module port declarations".to_string(),
+                        "non-ANSI port expressions".to_string(),
                     ));
                 }
                 _ => {}
@@ -580,6 +611,8 @@ pub struct Module {
     /// The package parameters the module sees, by qualified name and by the
     /// names its imports bind.
     imported_parameters: Vec<Parameter>,
+    /// Elaborated interface scopes, including those without data members.
+    interface_scope_names: Vec<String>,
     /// The symbols of a package, for the scopes that use it.
     symbols: Option<scope::ScopeSymbols>,
 }
@@ -662,6 +695,9 @@ impl Module {
         export_symbols: bool,
         header_ports: Option<&port_owners::Selection<'_>>,
     ) -> Result<Self, AnalyzerError> {
+        // The scope makes its class specializations until its class methods
+        // have signatures.
+        syntax_tree.state.class_specializations_frozen.set(false);
         let unit = syntax_tree.scope_handle().unit(syntax_tree.declarations());
         let is_package = unit.is_none_or(|unit| unit.kind == celox_sv_syntax::UnitKind::Package);
         let program = unit.is_some_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Program);
@@ -678,6 +714,8 @@ impl Module {
         let specialization =
             syntax_tree.child(syntax_tree.syntax_tree, applicable_parameter_overrides);
         let syntax_tree = &specialization;
+        // The collectors below each elaborate the same generate scopes.
+        let _elaborations = generate::memoize(syntax_tree);
         let _imported = scope::install(&syntax_tree.state, imported.clone());
         let with_imported = |mut functions: const_functions::ConstantFunctions| {
             functions.extend_missing(&imported.constant_functions);
@@ -766,6 +804,8 @@ impl Module {
             .iter()
             .map(|parameter| parameter.name().to_string())
             .collect();
+        // Class parameter defaults are bound where the class is declared.
+        classes::specializations::declare_scopes(syntax_tree, &const_env, &type_aliases);
         let declaration_subroutines =
             with_imported(const_functions::symbolic_module_constant_functions(
                 syntax_tree,
@@ -897,6 +937,12 @@ impl Module {
         {
             return Err(AnalyzerError::Unsupported("ref port direction".to_string()));
         }
+        // The static properties of each class specialization are variables
+        // of the module (IEEE 1800-2023 8.9, 8.25).
+        classes::specializations::collect(
+            syntax_tree,
+            &PackedDimensions::new(HashMap::default(), &const_env, &type_aliases),
+        );
         let mut signals = signals_from_scope(syntax_tree, &const_env, &type_aliases)?;
         signals.extend(
             array_parameters
@@ -1263,6 +1309,13 @@ impl Module {
                 )?);
                 (subroutines, comb_processes, ff_processes, initial_processes)
             };
+        let (inline_subroutines, inline_randomizations) =
+            procedural::randomization::inline_subroutines(
+                syntax_tree,
+                &mut body_state,
+                &packed_dimensions,
+            )?;
+        subroutines.extend(inline_subroutines);
         // Static locals of the processes that keep their value are variables
         // of the module, initialized once with the declaration initializers.
         let statics: HashMap<String, Type> = body_state.statics.drain(..).collect();
@@ -1292,7 +1345,7 @@ impl Module {
             // Declaration initializers run before the other initial blocks.
             let first_block = initial_processes
                 .iter()
-                .position(|process| !process.initializer)
+                .position(|process| !process.is_initializer())
                 .unwrap_or(initial_processes.len());
             initial_processes.insert(
                 first_block,
@@ -1301,7 +1354,8 @@ impl Module {
                     site: None,
                     condition: None,
                     body: static_initializers,
-                    initializer: true,
+                    kind: celox_design::ProcessKind::Initializer,
+                    validation_body: Vec::new(),
                     synthetic: false,
                     repeats: false,
                 },
@@ -1340,6 +1394,7 @@ impl Module {
             }
             for process in &mut initial_processes {
                 process.body = body(std::mem::take(&mut process.body));
+                process.validation_body = body(std::mem::take(&mut process.validation_body));
             }
             for subroutine in &mut subroutines {
                 *subroutine = rename.subroutine(subroutine.clone());
@@ -1362,13 +1417,21 @@ impl Module {
             .collect();
         // A package keeps its symbols for the scopes that use it.
         let symbols = (is_package || export_symbols).then(|| scope::ScopeSymbols {
+            classes: classes::scope_classes(syntax_tree, &const_env),
+            class_member_types: classes::specializations::export_member_types(syntax_tree),
+            inline_randomizations,
             declarations_only: imported.declarations_only,
             type_parameter_bindings: HashMap::default(),
             pattern_parameter_bindings: HashMap::default(),
             const_env: const_env.clone(),
             parameter_values: parameter_values.clone(),
             parameters: parameters.clone(),
-            type_aliases: type_aliases.clone(),
+            // A class of the scope is a type of it (IEEE 1800-2023 8.3).
+            type_aliases: type_aliases
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.clone()))
+                .chain(classes::scope_class_types(syntax_tree))
+                .collect(),
             enum_constants: enum_constants.clone(),
             functions: functions.clone(),
             function_return_types: packed_dimensions.function_return_types.clone(),
@@ -1468,9 +1531,19 @@ impl Module {
             }
         }
 
+        let mut interface_scope_names = imported
+            .interface_types
+            .keys()
+            .chain(imported.interface_arrays.keys())
+            .cloned()
+            .collect::<Vec<_>>();
+        interface_scope_names.sort_unstable();
+        interface_scope_names.dedup();
+
         Ok(Self {
             name,
             program,
+            interface_scope_names,
             parameters,
             ports,
             signals,
@@ -1488,6 +1561,10 @@ impl Module {
             imported_parameters,
             symbols,
         })
+    }
+
+    pub(crate) fn interface_scope_names(&self) -> &[String] {
+        &self.interface_scope_names
     }
 
     pub fn name(&self) -> &str {
@@ -1758,6 +1835,7 @@ pub struct Port {
     direction: PortDirection,
     r#type: Type,
     is_net: bool,
+    unresolved_net: bool,
     default: Option<ConstExpr>,
 }
 
@@ -1767,6 +1845,7 @@ pub struct Signal {
     name: String,
     r#type: Type,
     is_net: bool,
+    unresolved_net: bool,
     /// The package variable the signal denotes, as `(package, variable)`.
     package_variable: Option<(String, String)>,
     /// The hierarchical name of the signal of another instance the signal
@@ -1780,6 +1859,7 @@ impl Signal {
             name,
             r#type,
             is_net: false,
+            unresolved_net: false,
             is_const: false,
             package_variable: None,
             hierarchical: None,
@@ -1791,6 +1871,7 @@ impl Signal {
             name,
             r#type,
             is_net: true,
+            unresolved_net: false,
             is_const: false,
             package_variable: None,
             hierarchical: None,
@@ -1822,6 +1903,16 @@ impl Signal {
     pub(crate) fn is_net(&self) -> bool {
         self.is_net
     }
+
+    /// Whether this is an unresolved, single-driver `uwire` net (6.6.2).
+    pub(crate) fn is_unresolved_net(&self) -> bool {
+        self.unresolved_net
+    }
+
+    pub(crate) fn with_unresolved_net(mut self, unresolved: bool) -> Self {
+        self.unresolved_net = unresolved;
+        self
+    }
 }
 
 impl Port {
@@ -1832,6 +1923,7 @@ impl Port {
             r#type,
             randomizable: !is_net,
             is_net,
+            unresolved_net: false,
             default: None,
         }
     }
@@ -1850,6 +1942,16 @@ impl Port {
 
     pub fn is_net(&self) -> bool {
         self.is_net
+    }
+
+    /// Whether this is an unresolved, single-driver `uwire` net (6.6.2).
+    pub(crate) fn is_unresolved_net(&self) -> bool {
+        self.unresolved_net
+    }
+
+    pub(crate) fn with_unresolved_net(mut self, unresolved: bool) -> Self {
+        self.unresolved_net = unresolved;
+        self
     }
 
     pub(crate) fn with_default(mut self, default: Option<ConstExpr>) -> Self {
@@ -2038,6 +2140,7 @@ pub enum PortDirection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Type {
+    container: Option<Arc<ContainerType>>,
     is_enum: bool,
     /// Resolved legal values for a scalar enum; None if its domain is unsupported.
     enum_values: Option<Vec<i128>>,
@@ -2051,7 +2154,14 @@ pub struct Type {
     /// 1800-2023 7.4.1).
     signed_element_depth: Option<usize>,
     /// The class of an object handle type.
-    class: Option<String>,
+    class: Option<Arc<str>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ContainerType {
+    key: Option<Type>,
+    layout: system_functions::ContainerLayout,
+    element: Type,
 }
 
 impl Type {
@@ -2066,6 +2176,7 @@ impl Type {
             members: Vec::new(),
             signed_element_depth: None,
             class: None,
+            container: None,
         }
     }
 
@@ -2080,6 +2191,7 @@ impl Type {
             members: Vec::new(),
             signed_element_depth: None,
             class: None,
+            container: None,
         }
     }
 
@@ -2490,14 +2602,16 @@ impl FfProcess {
     }
 }
 
-/// An `initial` process.
+/// A scheduled procedure, including initial/always processes and final procedures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialProcess {
     creation_order: usize,
     site: Option<crate::procedural::ProcessSite>,
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
-    initializer: bool,
+    kind: celox_design::ProcessKind,
+    /// Folded-away statements retained only for final-procedure legality checks.
+    validation_body: Vec<Stmt>,
     synthetic: bool,
     /// An `always` process: its body runs forever.
     repeats: bool,
@@ -2517,6 +2631,16 @@ impl InitialProcess {
         self.condition.as_ref()
     }
 
+    /// The procedure's simulation phase.
+    pub fn kind(&self) -> celox_design::ProcessKind {
+        self.kind
+    }
+
+    /// A final procedure runs once when the simulation finishes (9.2.3).
+    pub fn is_final(&self) -> bool {
+        self.kind == celox_design::ProcessKind::Final
+    }
+
     /// Compiler-generated storage initialization, without a user static process.
     pub fn is_synthetic(&self) -> bool {
         self.synthetic
@@ -2524,7 +2648,7 @@ impl InitialProcess {
 
     /// Whether this process holds variable declaration initializers.
     pub fn is_initializer(&self) -> bool {
-        self.initializer
+        self.kind == celox_design::ProcessKind::Initializer
     }
 
     /// Whether this is an `always` process, which runs its body forever and
@@ -2830,6 +2954,7 @@ struct UnpackedDimension {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VariableDimensions {
+    container: Option<Arc<ContainerType>>,
     randomizable: bool,
     enum_values: Option<Vec<i128>>,
     real: bool,

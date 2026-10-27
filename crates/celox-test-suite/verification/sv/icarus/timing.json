@@ -4,6 +4,62 @@
       "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
+      "name": "timing::always_star_timed_task_calls_assign_nonblocking",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::always_star_timed_task_calls_run_as_processes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 leaves the reads of a branch that constant folding removes out of the event list of an always @*: a change of a, which the default of the call in `if (0) delayed();` reads, does not wake the process. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, so a constant-false branch still contributes. Celox's combinational and process always @* both count it.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_always_star_folded_branches",
+        "observed_version": "Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 leaves the reads of a branch that constant folding removes out of the event list of an always @*: a change of a, which the default of the call in `if (0) delayed();` reads, does not wake the process. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, so a constant-false branch still contributes. Celox's combinational and process always @* both count it.",
+        "upstream": []
+      },
+      "name": "timing::always_star_timed_task_calls_wait_on_folded_branch_reads",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::always_star_timed_task_calls_wait_on_nested_call_defaults",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "timing::always_timed_task_without_inline_timing_executes",
       "phase": "execute",
       "status": "passed",
@@ -93,6 +149,39 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::blocking_ff_woken_waiters_sample_before_continuations",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::blocking_write_edges_read_values_before_nonblocking_updates",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::blocking_write_waiters_rearm_before_nonblocking_updates",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::blocking_write_waiters_run_before_nonblocking_updates",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -510,6 +599,294 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_event_controls_icarus.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_iff_event_controls",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+        "upstream": []
+      },
+      "name": "timing::iff_conditions_apply_to_their_own_items",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_event_controls_icarus.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_iff_event_controls",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+        "upstream": []
+      },
+      "name": "timing::iff_conditions_are_judged_at_the_write",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_event_controls_icarus.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_iff_event_controls",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+        "upstream": []
+      },
+      "name": "timing::iff_conditions_are_judged_before_edge_processes_run",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_event_controls_icarus.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_iff_event_controls",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+        "upstream": []
+      },
+      "name": "timing::iff_conditions_consume_occurrences_while_false",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_event_controls_icarus.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_iff_event_controls",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+        "upstream": []
+      },
+      "name": "timing::iff_conditions_follow_combinational_process_order",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_event_controls_icarus.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_iff_event_controls",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+        "upstream": []
+      },
+      "name": "timing::iff_conditions_follow_nonblocking_update_order",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_event_controls_icarus.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_iff_event_controls",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+        "upstream": []
+      },
+      "name": "timing::iff_conditions_preserve_cross_module_combinational_order",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_event_controls_icarus.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_iff_event_controls",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+        "upstream": []
+      },
+      "name": "timing::iff_conditions_read_automatic_task_arguments",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_event_controls_icarus.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_iff_event_controls",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+        "upstream": []
+      },
+      "name": "timing::iff_conditions_see_writes_before_the_event",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_event_controls_icarus.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_iff_event_controls",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+        "upstream": []
+      },
+      "name": "timing::iff_events_occur_only_while_the_condition_holds",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_event_controls_icarus.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_iff_event_controls",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+        "upstream": []
+      },
+      "name": "timing::iff_forked_automatic_gates_are_separate",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_event_controls_icarus.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_iff_event_controls",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+        "upstream": []
+      },
+      "name": "timing::iff_shared_automatic_gate_uses_edge_time_value",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::implicit_event_controls_in_processes_wait_on_their_reads",
@@ -557,39 +934,6 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::intermediate_combinational_writes_reach_concatenated_ports",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "timing::blocking_write_waiters_run_before_nonblocking_updates",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "timing::blocking_write_waiters_rearm_before_nonblocking_updates",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "timing::blocking_write_edges_read_values_before_nonblocking_updates",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -807,6 +1151,29 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus 13.0 reports a syntax error for an unparenthesized package-scoped delay value such as #delays::D. IEEE 1800-2023 A.6.5 permits a ps_identifier as a delay_value. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_package_delay_value",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports a syntax error for an unparenthesized package-scoped delay value such as #delays::D. IEEE 1800-2023 A.6.5 permits a ps_identifier as a delay_value. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "timing::package_scoped_delay_values_wait_their_value",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::parallel_flip_flop_parts_keep_pulses",
@@ -845,6 +1212,30 @@
       "name": "timing::plain_always_expression_edges_run_as_processes",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_event_controls_icarus.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_iff_event_controls",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+        "upstream": []
+      },
+      "name": "timing::plain_always_iff_events_run_as_processes",
+      "phase": "skip",
+      "status": "ignored",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -1248,6 +1639,30 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_event_controls_icarus.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_iff_event_controls",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+        "upstream": []
+      },
+      "name": "timing::unknown_iff_conditions_are_false",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::untimed_task_copyback_preserves_distinct_activation_times",
@@ -1330,338 +1745,6 @@
       "name": "timing::zero_trip_child_dependencies_ignore_body_and_step",
       "phase": "execute",
       "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "timing::always_star_timed_task_calls_run_as_processes",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "timing::always_star_timed_task_calls_assign_nonblocking",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "timing::always_star_timed_task_calls_wait_on_nested_call_defaults",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Icarus 13.0 leaves the reads of a branch that constant folding removes out of the event list of an always @*: a change of a, which the default of the call in `if (0) delayed();` reads, does not wake the process. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, so a constant-false branch still contributes. Celox's combinational and process always @* both count it.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_disagreement",
-        "evidence": [
-          "verification/sv/limitations/icarus.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_always_star_folded_branches",
-        "observed_version": "Icarus 13.0",
-        "phase": "execute",
-        "reason": "Icarus 13.0 leaves the reads of a branch that constant folding removes out of the event list of an always @*: a change of a, which the default of the call in `if (0) delayed();` reads, does not wake the process. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, so a constant-false branch still contributes. Celox's combinational and process always @* both count it.",
-        "upstream": []
-      },
-      "name": "timing::always_star_timed_task_calls_wait_on_folded_branch_reads",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Icarus 13.0 reports a syntax error for an unparenthesized package-scoped delay value such as #delays::D. IEEE 1800-2023 A.6.5 permits a ps_identifier as a delay_value. Verilator passes the case.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_compile_limitation",
-        "evidence": [
-          "verification/sv/limitations/icarus.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_package_delay_value",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 reports a syntax error for an unparenthesized package-scoped delay value such as #delays::D. IEEE 1800-2023 A.6.5 permits a ps_identifier as a delay_value. Verilator passes the case.",
-        "upstream": []
-      },
-      "name": "timing::package_scoped_delay_values_wait_their_value",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_unsupported",
-        "evidence": [
-          "verification/repros/sv_iff_event_controls_icarus.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_iff_event_controls",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-        "upstream": []
-      },
-      "name": "timing::iff_events_occur_only_while_the_condition_holds",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_unsupported",
-        "evidence": [
-          "verification/repros/sv_iff_event_controls_icarus.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_iff_event_controls",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-        "upstream": []
-      },
-      "name": "timing::iff_conditions_see_writes_before_the_event",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_unsupported",
-        "evidence": [
-          "verification/repros/sv_iff_event_controls_icarus.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_iff_event_controls",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-        "upstream": []
-      },
-      "name": "timing::iff_conditions_apply_to_their_own_items",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_unsupported",
-        "evidence": [
-          "verification/repros/sv_iff_event_controls_icarus.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_iff_event_controls",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-        "upstream": []
-      },
-      "name": "timing::iff_conditions_read_automatic_task_arguments",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_unsupported",
-        "evidence": [
-          "verification/repros/sv_iff_event_controls_icarus.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_iff_event_controls",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-        "upstream": []
-      },
-      "name": "timing::unknown_iff_conditions_are_false",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_unsupported",
-        "evidence": [
-          "verification/repros/sv_iff_event_controls_icarus.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_iff_event_controls",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-        "upstream": []
-      },
-      "name": "timing::plain_always_iff_events_run_as_processes",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_unsupported",
-        "evidence": [
-          "verification/repros/sv_iff_event_controls_icarus.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_iff_event_controls",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-        "upstream": []
-      },
-      "name": "timing::iff_conditions_are_judged_before_edge_processes_run",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_unsupported",
-        "evidence": [
-          "verification/repros/sv_iff_event_controls_icarus.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_iff_event_controls",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-        "upstream": []
-      },
-      "name": "timing::iff_conditions_are_judged_at_the_write",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_unsupported",
-        "evidence": [
-          "verification/repros/sv_iff_event_controls_icarus.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_iff_event_controls",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-        "upstream": []
-      },
-      "name": "timing::iff_conditions_follow_nonblocking_update_order",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_unsupported",
-        "evidence": [
-          "verification/repros/sv_iff_event_controls_icarus.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_iff_event_controls",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-        "upstream": []
-      },
-      "name": "timing::iff_conditions_consume_occurrences_while_false",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_unsupported",
-        "evidence": [
-          "verification/repros/sv_iff_event_controls_icarus.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_iff_event_controls",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; Verilator 5.052 runs the cases and gives the asserted counts.",
-        "upstream": []
-      },
-      "name": "timing::iff_conditions_follow_combinational_process_order",
-      "phase": "skip",
-      "status": "ignored",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

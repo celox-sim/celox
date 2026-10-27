@@ -299,6 +299,7 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
             |builder, (name, value)| builder.param(name, *value),
         );
         return Ok(match backend {
+            "interpreter" => Box::new(TimedBackend::new(builder.build_interpreter()?)),
             "native" => Box::new(TimedBackend::new(builder.build_native()?)),
             // The image goes through its container bytes, as an attached
             // image does, and the simulation takes its metadata from it.
@@ -312,6 +313,7 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
                         .build_native_from_image(image)?,
                 ))
             }
+            #[cfg(feature = "cranelift")]
             "cranelift" => Box::new(TimedBackend::new(builder.build_cranelift()?)),
             "native-parallel" => Box::new(TimedBackend::new(
                 builder
@@ -319,12 +321,14 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
                     .parallel_partition(celox::ParallelPartition::Always)
                     .build_native()?,
             )),
+            #[cfg(feature = "cranelift")]
             "cranelift-parallel" => Box::new(TimedBackend::new(
                 builder
                     .threads(4)
                     .parallel_partition(celox::ParallelPartition::Always)
                     .build_cranelift()?,
             )),
+            #[cfg(feature = "wasm-runtime")]
             "wasm" => Box::new(TimedBackend::new(builder.build_wasm()?)),
             _ => return Err(format!("unknown backend: {backend}").into()),
         });
@@ -365,6 +369,7 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
                     .map_err(rejected)?,
             ))
         }
+        #[cfg(feature = "cranelift")]
         "cranelift" => Box::new(CeloxBackend(builder.build_cranelift().map_err(rejected)?)),
         "native-parallel" => Box::new(CeloxBackend(
             builder
@@ -373,6 +378,7 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
                 .build_native()
                 .map_err(rejected)?,
         )),
+        #[cfg(feature = "cranelift")]
         "cranelift-parallel" => Box::new(CeloxBackend(
             builder
                 .threads(4)
@@ -380,6 +386,7 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
                 .build_cranelift()
                 .map_err(rejected)?,
         )),
+        #[cfg(feature = "wasm-runtime")]
         "wasm" => Box::new(CeloxBackend(builder.build_wasm().map_err(rejected)?)),
         _ => return Err(format!("unknown backend: {backend}").into()),
     })

@@ -14,7 +14,7 @@ pub(in crate::ast) fn statement_root(
     discarded: bool,
     native: &celox_sv_syntax::Declarations,
 ) -> Converted<ExprId> {
-    Ok(if discarded {
+    let root = if discarded {
         let ExprKind::Cast { target, expression } = native.expression(root).kind else {
             return Err(disagreement());
         };
@@ -31,7 +31,14 @@ pub(in crate::ast) fn statement_root(
         expression
     } else {
         root
-    })
+    };
+    if matches!(
+        native.expression(root).kind,
+        ExprKind::ArrayMethodWith { .. }
+    ) {
+        return Err(unsupported("array method with expression"));
+    }
+    Ok(root)
 }
 
 pub(in crate::ast) fn statement(
@@ -73,6 +80,25 @@ pub(in crate::ast) fn statement(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn array_method_with_semantics_are_explicitly_rejected() {
+        for body in [
+            "initial q = a.find(i) with (i > 0);",
+            "initial a.sort with (item);",
+            "initial void'(a.find() with (item > 0));",
+            "localparam N = 0 && a.sum() with (item); initial q = N;",
+        ] {
+            let result = crate::analyze_source(
+                &format!("module M; int a[3], q; {body} endmodule"),
+                Path::new("array-method-with.sv"),
+            );
+            assert!(
+                matches!(result, Err(AnalyzerError::Unsupported(ref construct)) if construct.contains("array method with expression")),
+                "{body}: {result:?}"
+            );
+        }
+    }
 
     #[test]
     fn indexed_interface_statement_calls_keep_the_selected_element() {

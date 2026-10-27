@@ -712,6 +712,389 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "1 8\n1 1\n0 8\n"))
 
+(case specializations_of_parameterized_classes
+  (source "class.sv" #"
+module Top #(parameter int W = 6)(output bit done);
+    class Box #(int N = 4, type T = bit [7:0]);
+        T value;
+        static int made;
+        localparam int Twice = N * 2;
+        function new(T v);
+            value = v;
+            made++;
+        endfunction
+        function T get();
+            T copy = value;
+            return copy + T'(N);
+        endfunction
+        function int twice();
+            return Twice;
+        endfunction
+    endclass
+    class Wide #(int M = 1) extends Box #(M + 1, int);
+        function new();
+            super.new(100);
+        endfunction
+        function int kind();
+            return M * 10 + N;
+        endfunction
+    endclass
+    Box b4;
+    Box #(W) bw;
+    Box #(.T(int), .N(2)) bi;
+    Box #(3, bit [3:0]) bn;
+    Wide #(5) w;
+    Box #(6, int) base;
+    initial begin
+        b4 = new(8'd10);
+        bw = new(8'd1);
+        bi = new(-5);
+        bn = new(4'd14);
+        w = new;
+        $display("%0d %0d %0d %0d", b4.get(), bw.get(), bi.get(), bn.get());
+        $display("%0d %0d %0d %0d", b4.N, bw.twice(), Box#(.T(int), .N(2))::made, Box#()::made);
+        base = w;
+        $display("%0d %0d %0d %0d", base.get(), w.N, w.kind(), Box#(6, int)::made);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "14 7 -3 1\n4 12 1 1\n106 6 56 1\n"))
+
+(case specializations_are_named_by_parameter_values
+  (source "class.sv" #"
+module Top(output bit done);
+    class Box #(int N = 4, type T = bit [7:0]);
+        static int made;
+        function new();
+            made++;
+        endfunction
+    endclass
+    Box #(.T(int), .N(2)) named;
+    initial begin
+        named = new;
+        $display("%0d %0d %0d", Box#(2, int)::made, Box#(.N(2), .T(int))::made, Box#(1 + 1, int)::made);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 1 1\n"))
+
+(case specializations_with_their_own_handles
+  (source "class.sv" #"
+module Top(output bit done);
+    class Box #(int N = 4);
+        virtual function int n();
+            return N;
+        endfunction
+    endclass
+    class Sub #(int N = 4) extends Box #(N);
+        virtual function int n();
+            return N * 10;
+        endfunction
+    endclass
+    Box #(2) two;
+    Box #(3) three;
+    Sub #(2) sub;
+    int ok;
+    initial begin
+        sub = new;
+        two = sub;
+        ok = $cast(three, two);
+        $display("%0d %0d %0d", two.n(), ok, three == null);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "20 0 1\n"))
+
+(case class_scoped_parameters_and_types
+  (source "class.sv" #"
+module Top(output bit done);
+    class C #(int p = 1, type T = int);
+        parameter int q = 5;
+        typedef bit [p:0] word_t;
+        extern static function T f();
+        static function int g();
+            int p = 100;
+            return p + C::p;
+        endfunction
+        static function word_t w();
+            return '1;
+        endfunction
+    endclass
+    function C::T C::f();
+        return p + C::p;
+    endfunction
+    C#(3)::word_t x;
+    C#(.T(bit [2:0]))::T y;
+    initial begin
+        x = C#(3)::w();
+        y = 13;
+        $display("%0d %0d %0d", C#()::f(), C#(5)::f(), C#(3)::g());
+        $display("%0d %0d %0d %0d", x, y, C#()::q, C#(7)::p);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "2 10 103\n15 5 5 7\n"))
+
+(case specializations_of_interface_classes
+  (source "class.sv" #"
+module Top(output bit done);
+    interface class Getter #(type T = int);
+        pure virtual function T get();
+    endclass
+    class IntBox implements Getter#(int);
+        virtual function int get();
+            return -7;
+        endfunction
+    endclass
+    class NibbleBox #(int V = 3) implements Getter#(bit [3:0]);
+        extern virtual function bit [3:0] get();
+    endclass
+    function bit [3:0] NibbleBox::get();
+        return V + 20;
+    endfunction
+    Getter #(int) gi;
+    Getter #(bit [3:0]) gn;
+    Getter gd;
+    IntBox ib;
+    NibbleBox #(5) nb;
+    initial begin
+        ib = new;
+        nb = new;
+        gi = ib;
+        gn = nb;
+        gd = ib;
+        $display("%0d %0d %0d", gi.get(), gn.get(), gd.get());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "-7 9 -7\n"))
+
+(case named_constructor_arguments
+  (source "class.sv" #"
+module Top(output bit done);
+    class Base;
+        int s;
+        function new(int def = 3);
+            s = def;
+        endfunction
+    endclass
+    class Point #(int t = 12) extends Base;
+        int x;
+        int y;
+        function new(int x = 1, int y = 2);
+            super.new(.def(x + y));
+            this.x = x;
+            this.y = y - t;
+        endfunction
+    endclass
+    Base base;
+    Point p;
+    initial begin
+        p = new(.y(30));
+        $display("%0d %0d %0d", p.x, p.y, p.s);
+        base = Point#(.t(23))::new(.y(40), .x(4));
+        $display("%0d", base.s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 18 31\n44\n"))
+
+(case typedefs_of_interface_classes
+  (source "class.sv" #"
+module Top(output bit done);
+    interface class Hello;
+        typedef int count_t;
+        pure virtual function void hello(count_t value);
+    endclass
+    interface class Greeting extends Hello;
+        pure virtual function count_t greet(count_t value);
+    endclass
+    class Greeter implements Greeting;
+        virtual function void hello(Hello::count_t value);
+            $display("%0d", value);
+        endfunction
+        virtual function Greeting::count_t greet(Greeting::count_t value);
+            return value + 1;
+        endfunction
+    endclass
+    Greeter greeter;
+    initial begin
+        greeter = new;
+        greeter.hello(12);
+        $display("%0d", greeter.greet(12));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "12\n13\n"))
+
+(case specializations_in_generate_blocks
+  (source "class.sv" #"
+module Top(output bit done);
+    class Box #(int N = 4);
+        static int made;
+        function new();
+            made++;
+        endfunction
+        function int n();
+            return N;
+        endfunction
+    endclass
+    for (genvar i = 1; i < 3; i++) begin : g
+        Box #(i * 10) kept;
+        initial begin
+            automatic Box #(i) local_box = new;
+            #(i);
+            kept = new;
+            $display("%0d %0d %0d", i, local_box.n(), kept.n() + Box#(i * 10)::made);
+            done = 1;
+        end
+    end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq done 1)
+  (expect_output "1 1 11\n2 2 21\n"))
+
+(case specializations_keep_their_parameter_scopes
+  (source "class.sv" #"
+module Top(output bit done);
+    class Box #(int N = 4);
+        function int n();
+            return N;
+        endfunction
+    endclass
+    class Base #(type T = int);
+    endclass
+    class Derived extends Base #(bit [3:0]);
+        typedef T nibble_t;
+    endclass
+    class Inner #(int N = 1);
+        function int v();
+            return N * 100;
+        endfunction
+    endclass
+    class Outer #(int N = 1);
+        extern function int f();
+    endclass
+    function int Outer::f();
+        Inner #(N) inner;
+        inner = new;
+        return inner.v();
+    endfunction
+    class Counted #(type T = logic [3:0]);
+        static int made;
+        function new();
+            made++;
+        endfunction
+    endclass
+    Derived::nibble_t nibble;
+    Outer #(7) outer;
+    Counted #(logic [3:0]) logic_counted;
+    Counted #(reg [3:0]) reg_counted;
+    for (genvar N = 5; N < 6; N++) begin : g
+        Box #(N) box;
+        initial begin
+            box = new;
+            $display("%0d", box.n());
+        end
+    end
+    initial begin
+        #1;
+        nibble = 20;
+        outer = new;
+        logic_counted = new;
+        reg_counted = new;
+        $display("%0d %0d %0d", nibble, outer.f(), Counted#(logic [3:0])::made);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq done 1)
+  (expect_output "5\n4 700 2\n"))
+
+(case untyped_class_parameters_take_the_type_of_their_value
+  (source "class.sv" #"
+module Top(output bit done);
+    class Sized #(parameter V = 1);
+        function int bits();
+            return $bits(V);
+        endfunction
+    endclass
+    Sized #(8'h1) narrow;
+    Sized #(32'h1) wide;
+    initial begin
+        narrow = new;
+        wide = new;
+        $display("%0d %0d", narrow.bits(), wide.bits());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "8 32\n"))
+
+(case shallow_copies
+  (source "class.sv" #"
+module Top(output bit done);
+    class Inner;
+        int v;
+    endclass
+    class Base;
+        int b = 1;
+    endclass
+    class Item extends Base;
+        int a;
+        string s;
+        Inner inner;
+        static int made;
+        static Item last;
+        function new();
+            inner = new;
+            made++;
+        endfunction
+    endclass
+    Item first;
+    Item second;
+    Item third;
+    Base base;
+    Base copy;
+    initial begin
+        first = new;
+        first.a = 12;
+        first.b = 7;
+        first.s = "hi";
+        first.inner.v = 3;
+        second = new first;
+        first.a = 13;
+        first.s = "bye";
+        first.inner.v = 4;
+        $display("%0d %0d %s %0d %0d %0d", second.a, second.b, second.s, second.inner.v, Item::made, first == second);
+        base = second;
+        copy = new base;
+        $display("%0d %0d %0d %0d", copy.b, $cast(third, copy), third.a, third == second);
+        Item::last = second;
+        third = new Item::last;
+        $display("%0d %0d %0d", third.a, third == second, Item::made);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "12 7 hi 4 1 0\n7 1 12 0\n12 0 1\n"))
+
 (case unconstrained_randomize
   (source "randomize.sv" #"
 module Top(output bit done, output int errors);
@@ -1211,3 +1594,1047 @@ module Top(output bit done, output int errors);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+(case classes_of_packages
+  (source "class.sv" #"
+package shapes;
+    parameter int SCALE = 10;
+    typedef bit [7:0] byte_t;
+    virtual class Shape;
+        byte_t id;
+        static int made;
+        function new(byte_t id);
+            this.id = id;
+            made++;
+        endfunction
+        pure virtual function int area();
+        function int scaled();
+            return area() * SCALE;
+        endfunction
+    endclass
+    class Square extends Shape;
+        int side;
+        function new(int side);
+            super.new(8'd1);
+            this.side = side;
+        endfunction
+        virtual function int area();
+            return side * side;
+        endfunction
+    endclass
+    interface class Named;
+        pure virtual function int name_id();
+    endclass
+    function automatic Shape make(int side);
+        Square square = new(side);
+        return square;
+    endfunction
+    function automatic int ask(Named named);
+        return named.name_id() + 100;
+    endfunction
+endpackage
+module Top(output bit done);
+    import shapes::Shape;
+    import shapes::Square;
+    class Rect extends shapes::Shape implements shapes::Named;
+        int w;
+        int h;
+        function new(int w, int h);
+            super.new(8'd2);
+            this.w = w;
+            this.h = h;
+        endfunction
+        virtual function int area();
+            return w * h;
+        endfunction
+        virtual function int name_id();
+            return 7;
+        endfunction
+    endclass
+    Shape shape;
+    Square square;
+    Rect rect;
+    initial begin
+        shape = shapes::make(3);
+        rect = new(2, 5);
+        $display("%0d %0d %0d %0d", shape.area(), shape.scaled(), shape.id, $cast(square, shape));
+        shape = rect;
+        $display("%0d %0d %0d %0d", shape.area(), rect.scaled(), shapes::ask(rect), shapes::Shape::made);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "9 90 1 1\n10 100 107 2\n"))
+
+(case classes_of_the_compilation_unit
+  (source "class.sv" #"
+class Counter;
+    static int total;
+    int n;
+    function void bump();
+        n++;
+        total++;
+    endfunction
+endclass
+module Child(output int seen);
+    Counter counter;
+    initial begin
+        counter = new;
+        counter.bump();
+        counter.bump();
+        seen = counter.n;
+    end
+endmodule
+module Top(output bit done);
+    int seen;
+    Child child(.seen(seen));
+    initial begin
+        #1 $display("%0d %0d", seen, Counter::total);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq done 1)
+  (expect_output "2 2\n"))
+
+(case class_declarations_bind_in_their_scopes
+  (source "class.sv" #"
+module Top(output bit done);
+    class Ordered;
+        typedef bit [7:0] byte_t;
+        parameter byte_t P = 8'hff;
+        typedef int table_t [2];
+    endclass
+    class Init #(int N = 1);
+        static int value = N * 10;
+    endclass
+    class Named #(string S = "a");
+        function string s();
+            return S;
+        endfunction
+    endclass
+    class Self #(int N = 1);
+        typedef Self self_t;
+        function int n();
+            return N;
+        endfunction
+    endclass
+    class Base #(type T = bit [3:0]);
+    endclass
+    class Derived #(type T = int) extends Base;
+        typedef T own_t;
+    endclass
+    class Wide #(logic [57:0] V = 0);
+        function bit [63:0] v();
+            return V;
+        endfunction
+    endclass
+    class Plain;
+        typedef int T;
+    endclass
+    typedef Plain::T plain_t;
+    Ordered::table_t entries;
+    plain_t plain;
+    Self#(2)::self_t self_handle;
+    Named#("bc") named;
+    Wide#('1) wide;
+    Derived#()::own_t own;
+    initial begin
+        entries[1] = 5;
+        plain = -3;
+        self_handle = new;
+        named = new;
+        wide = new;
+        $display("%0d %0d %0d %0d", Ordered::P, entries[1], plain, $bits(own));
+        $display("%0d %0d %0d %s %h", Init#(2)::value, Init#(3)::value, self_handle.n(), named.s(), wide.v());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "255 5 -3 32\n20 30 1 bc 03ffffffffffffff\n"))
+
+(case parameter_defaults_bind_where_the_class_is_declared
+  (source "class.sv" #"
+module Top #(parameter int X = 1)(output bit done);
+    class Defaulted #(int N = X);
+        function int n();
+            return N;
+        endfunction
+    endclass
+    if (1) begin : g
+        localparam int X = 2;
+        Defaulted#() inner;
+        initial begin
+            inner = new;
+            $display("%0d", inner.n());
+            done = 1;
+        end
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1\n"))
+
+(case specialization_keys_follow_the_bound_parameters
+  (source "class.sv" #"
+module Top(output bit done);
+    localparam int N = 2;
+    typedef bit signed [3:0] S;
+    typedef S [1:0] Signed;
+    typedef bit [1:0][3:0] Unsigned;
+    typedef int Sized[2];
+    typedef int Ranged[0:1];
+    class Box #(type T = int);
+        static int made;
+        function new();
+            made++;
+        endfunction
+    endclass
+    class Outer #(type T = int);
+        typedef T Inner;
+        Box#(Outer::Inner) box;
+        function new();
+            box = new;
+        endfunction
+    endclass
+    class Base #(int N = 1);
+    endclass
+    class Derived #(int N = 2) extends Base;
+        typedef bit [N-1:0] T;
+    endclass
+    class Four #(logic [1:0] N = 0);
+        static int made;
+        function new();
+            made++;
+        endfunction
+    endclass
+    class Real #(real V = 0.0);
+        static function real v();
+            return V;
+        endfunction
+    endclass
+    class Announced #(int N = 1);
+        static int x = N;
+    endclass
+    localparam int K = 2;
+    interface class I #(int N = 0);
+        localparam int K = 1;
+        pure virtual function int n();
+    endclass
+    interface class J extends I#(K);
+    endclass
+    class Impl implements J;
+        virtual function int n();
+            return 7;
+        endfunction
+    endclass
+    Announced#(1) active;
+    if (0) begin : disabled
+        Announced#(2) unused;
+    end
+    initial begin
+        Box#(Sized) sized;
+        Box#(Ranged) ranged;
+        Box#(Signed) signed_elements;
+        Box#(Unsigned) unsigned_elements;
+        Outer#(byte) outer;
+        Four#(2'bxx) unknown;
+        Four#(1) one;
+        Derived#()::T t;
+        Impl impl;
+        I#(2) h;
+        sized = new;
+        ranged = new;
+        signed_elements = new;
+        unsigned_elements = new;
+        outer = new;
+        $display("%0d %0d %0d", Box#(Sized)::made, Box#(Signed)::made, Box#(byte)::made);
+        unknown = new;
+        one = new;
+        $display("%0d %0d", Four#(2'bxx)::made, Four#(1)::made);
+        $display("%0.1f %0.1f", Real#(1.0 + 2.0)::v(), Real#(3.0)::v());
+        $display("%0d", $bits(t));
+        impl = new;
+        h = impl;
+        $display("%0d", h.n());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "2 1 1\n1 1\n3.0 3.0\n2\n7\n"))
+
+(case derived_classes_keep_their_declaration_scopes
+  (source "class.sv" #"
+module Top(output bit done);
+    localparam int K = 2;
+    class Base #(int N = 0);
+    endclass
+    if (1) begin : g
+        localparam int K = 3;
+        class Derived #(int M = 0) extends Base;
+            typedef bit [K-1:0] T;
+        endclass
+        initial begin
+            Derived#()::T t;
+            $display("%0d", $bits(t));
+            done = 1;
+        end
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "3\n"))
+
+(case package_classes_by_their_qualified_names
+  (source "class.sv" #"
+package p;
+    class C;
+        int v = 5;
+    endclass
+    function automatic C make();
+        p::C h;
+        h = p::C::new;
+        return h;
+    endfunction
+endpackage
+module Top(output bit done);
+    initial begin
+        p::C h;
+        h = p::make();
+        $display("%0d", h.v);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "5\n"))
+
+(case constrained_randomize_scalar
+  (source "constraints.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand bit [3:0] x, y;
+        int limit = 4;
+        constraint bounds { x < limit; y < 4; x + y == 5; x >= 0; y > 0; x <= 3; }
+    endclass
+    Packet p;
+    int old_x, old_y;
+    initial begin
+        p = new;
+        p.srandom(17);
+        repeat (8) begin
+            if (!p.randomize()) $fatal(1, "sat failed");
+            if (!(p.x < 4 && p.y < 4 && p.x + p.y == 5)) $fatal(1, "invalid model");
+        end
+        old_x = p.x; old_y = p.y;
+        p.limit = 1;
+        if (p.randomize()) $fatal(1, "unsat succeeded");
+        if (p.x != old_x || p.y != old_y) $fatal(1, "unsat changed fields");
+        p.limit = 4;
+        p.x = 2; p.y = 3;
+        if (!p.randomize(null)) $fatal(1, "check-only failed");
+        p.y = 0;
+        if (p.randomize(null)) $fatal(1, "check-only ignored constraints");
+        p.x.rand_mode(0);
+        if (!p.randomize() || p.x != 2 || p.y != 3) $fatal(1, "disabled rand is not state");
+        p.y = 1;
+        if (p.randomize(x)) $fatal(1, "selection should be unsat");
+        if (p.x.rand_mode() != 0 || p.y.rand_mode() != 1) $fatal(1, "failed selection leaked modes");
+        p.y = 3;
+        if (!p.randomize() || p.x != 2) $fatal(1, "modes not restored");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_width_and_inheritance
+  (source "constraint_widths.sv" #"
+module Top(output bit done);
+    class Base;
+        rand bit signed [7:0] a;
+        rand bit signed [15:0] b;
+        rand bit [31:0] c;
+        constraint values { a == -1; b == 1; c == 256; }
+        constraint sum { (a + b) == c; }
+    endclass
+    class Derived extends Base;
+        constraint values { a == -2; b == 2; c == 256; }
+    endclass
+    Base p;
+    Derived q;
+    initial begin
+        p = new;
+        if (!p.randomize()) $fatal(1, "unsigned context was lost");
+        if (p.a != -1 || p.b != 1 || p.c != 256) $fatal(1, "base values");
+        q = new;
+        p = q;
+        if (!p.randomize()) $fatal(1, "derived constraints were not dispatched");
+        if (q.a != -2 || q.b != 2 || q.c != 256) $fatal(1, "override values");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_hooks
+  (source "constraint_hooks.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand int x;
+        int limit, before_count, after_count;
+        constraint bounds { x == limit; x < 3; }
+        function void pre_randomize(); before_count++; limit = before_count; endfunction
+        function void post_randomize(); after_count++; endfunction
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        if (!p.randomize() || p.x != 1) $fatal(1, "first pre state");
+        if (!p.randomize() || p.x != 2) $fatal(1, "second pre state");
+        if (p.randomize() || p.x != 2) $fatal(1, "unsat changed fields");
+        if (p.before_count != 3 || p.after_count != 2) $fatal(1, "post called on failure");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inside
+  (source "constraint_inside.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand int x, lo, hi;
+        constraint bounds { lo inside {-3, -2}; hi inside {2, 3};
+            x inside {[lo:hi], 9}; !(x inside {0, 9}); }
+    endclass
+    class Empty;
+        rand int x;
+        constraint c { x inside {[3:-3]}; }
+    endclass
+    Packet p;
+    Empty e;
+    initial begin
+        e = new; e.x = 42;
+        if (e.randomize() || e.x != 42) $fatal(1, "empty range changed fields");
+        p = new;
+        repeat (12) begin
+            if (!p.randomize()) $fatal(1, "membership unsat");
+            if (p.lo < -3 || p.lo > -2 || p.hi < 2 || p.hi > 3 ||
+                p.x < p.lo || p.x > p.hi || p.x == 0) $fatal(1, "membership");
+        end
+        p.lo = 3; p.hi = -3;
+        if (p.randomize(x)) $fatal(1, "reversed range must be empty");
+        p.lo = -2; p.hi = 2; p.x = -1;
+        if (!p.randomize(null)) $fatal(1, "negative check-only member");
+        p.x = p.lo;
+        if (!p.randomize(null)) $fatal(1, "low endpoint excluded");
+        p.x = p.hi;
+        if (!p.randomize(null)) $fatal(1, "high endpoint excluded");
+        p.x = 0;
+        if (p.randomize(null)) $fatal(1, "excluded check-only member");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inside_widths
+  (source "constraint_inside_widths.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand bit signed [7:0] x;
+        rand bit [15:0] y;
+        constraint c { x inside {-2, -1}; y inside {x}; }
+    endclass
+    class WideSet;
+        bit [3:0] a, b;
+        constraint c { !((a + b) inside {4'd0, 8'd17}); }
+    endclass
+    class WideRange;
+        bit [3:0] a, b;
+        constraint c { (a + b) inside {[4'd1:8'd16]}; }
+    endclass
+    Packet p;
+    WideSet s;
+    WideRange r;
+    initial begin
+        p = new;
+        if (!p.randomize()) $fatal(1, "mixed width membership");
+        if (p.x != -2 && p.x != -1) $fatal(1, "signed membership");
+        if (p.y != 254 && p.y != 255) $fatal(1, "unsigned comparison context");
+        s = new; s.a = 15; s.b = 1;
+        if (!s.randomize(null)) $fatal(1, "membership-wide sum width");
+        r = new; r.a = 15; r.b = 1;
+        if (!r.randomize(null)) $fatal(1, "range endpoint width");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_conditionals
+  (source "conditional_constraints.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand bit mode;
+        rand int value;
+        int required;
+        constraint c {
+            value == required;
+            if (mode) { value inside {[1:3]}; value != 2; }
+            else value == 8;
+            mode -> { value > 0; if (value == 3) value != 1; }
+        }
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        p.required = 8;
+        if (!p.randomize() || p.mode != 0 || p.value != 8) $fatal(1, "reverse else solve");
+        p.required = 3;
+        if (!p.randomize() || p.mode != 1 || p.value != 3) $fatal(1, "reverse then solve");
+        p.required = 2;
+        if (p.randomize() || p.value != 3) $fatal(1, "block constraint lost");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_nested_guards
+  (source "nested_guards.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand bit a, b;
+        rand int x;
+        constraint c {
+            x == 7;
+            if (a) if (b) x == 1; else x == 7;
+            !a -> x == 2;
+            a -> b -> x == 1;
+            if (1'b0) x == 123;
+        }
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        if (!p.randomize() || p.a != 1 || p.b != 0 || p.x != 7) $fatal(1, "nested guards");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline
+  (source "inline_constraints.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand int x, y;
+        int limit, pre_count, post_count;
+        constraint c { x < 10; }
+        function void pre_randomize(); limit=3; pre_count++; endfunction
+        function void post_randomize(); post_count++; endfunction
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        if (!(p.randomize() with { x inside {[1:limit]}; y == x + 1; }))
+            $fatal(1, "inline success");
+        if (p.x < 1 || p.x > 3 || p.y != p.x + 1) $fatal(1, "inline values");
+        if (p.randomize() with { x == 12; }) $fatal(1, "lost class constraint");
+        if (p.pre_count != 2 || p.post_count != 1) $fatal(1, "inline hooks");
+        if (!(p.randomize() with { x == 7; if (x == 7) y == 8; })) $fatal(1, "inline leaked");
+        if (!p.randomize(null)) $fatal(1, "ordinary check");
+        if (p.randomize(null) with { x == 2; }) $fatal(1, "inline check");
+        if (p.x != 7 || p.y != 8) $fatal(1, "check-only changed fields");
+        if (!(p.randomize(x) with { x == y; })) $fatal(1, "inline selection");
+        if (p.x != 8 || p.y != 8) $fatal(1, "unselected field changed");
+        p.randomize() with { x == 4; y == 5; };
+        if (p.x != 4 || p.y != 5) $fatal(1, "discarded call");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_inheritance
+  (source "inline_inheritance.sv" #"
+module Top(output bit done);
+    class Base;
+        rand int x;
+    endclass
+    class Derived extends Base;
+        rand int x;
+        int hook;
+        constraint c { x == 9; }
+        function void pre_randomize(); hook++; endfunction
+    endclass
+    Base b;
+    Derived d;
+    initial begin
+        d = new; b = d;
+        if (!(b.randomize() with { x == 2; })) $fatal(1, "base inline scope");
+        if (b.x != 2 || d.x != 9 || d.hook != 1) $fatal(1, "static scope or dynamic hooks");
+        if (!(b.randomize() with { x == 5; })) $fatal(1, "second inline");
+        if (b.x != 5 || d.x != 9 || d.hook != 2) $fatal(1, "inline persistence");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_basic
+  (source "inline_basic.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand int x;
+        constraint c { x inside {1, 2}; }
+        function int pick(); return randomize() with { x == 1; }; endfunction
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        if (!(p.randomize() with { x == 2; })) $fatal(1, "inline member");
+        if (p.x != 2) $fatal(1, "inline value");
+        if (!p.pick() || p.x != 1) $fatal(1, "unqualified inline call");
+        if (p.randomize() with { x == 3; }) $fatal(1, "named constraint lost");
+        if (p.x != 1) $fatal(1, "failed inline changed member");
+        if (!(p.randomize() with { x == 2; })) $fatal(1, "inline not per-call");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_package_instances
+  (source "inline_package.sv" #"
+package pkg;
+    class Packet;
+        rand int x;
+        function int pick(); return randomize() with { x == 2; }; endfunction
+    endclass
+endpackage
+module Child(output bit done);
+    class Derived extends pkg::Packet;
+        rand int y;
+        int calls;
+        constraint c { y == 7; }
+        function void pre_randomize(); calls++; endfunction
+    endclass
+    pkg::Packet p;
+    Derived d;
+    if (1) begin : g
+        initial begin
+            p = new;
+            if (!p.pick() || p.x != 2) $fatal(1, "package method inline");
+            if (!(p.randomize() with { x == 3; }) || p.x != 3) $fatal(1, "instance inline");
+            d = new;
+            p = d;
+            if (!p.pick() || p.x != 2 || d.y != 7 || d.calls != 1)
+                $fatal(1, "imported inline subclass dispatch");
+            done = 1;
+        end
+    end
+endmodule
+module Top(output bit done);
+    wire a, b;
+    Child c0(a), c1(b);
+    assign done = a & b;
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_inputs
+  (source "inline_inputs.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand bit signed [7:0] x;
+        rand bit [15:0] y;
+        constraint c { y == 7; }
+    endclass
+    Packet p;
+    bit signed [7:0] wanted;
+    bit signed [7:0] x;
+    initial begin
+        p = new;
+        wanted = -2;
+        x = -3;
+        if (!(p.randomize() with { x == wanted; })) $fatal(1, "fallback input");
+        if (p.x != -2 || p.y != 7 || wanted != -2) $fatal(1, "signed readonly input");
+        if (!(p.randomize() with { x == local::x; })) $fatal(1, "local qualifier");
+        if (p.x != -3 || x != -3) $fatal(1, "shadowed local");
+        wanted = 4;
+        if (!(p.randomize() with { x inside {[wanted:6]}; })) $fatal(1, "input range");
+        if (p.x < 4 || p.x > 6) $fatal(1, "new call input");
+        wanted = p.x;
+        if (!(p.randomize(null) with { x == wanted; })) $fatal(1, "input check");
+        wanted = 12;
+        if (p.randomize(y) with { y == wanted; }) $fatal(1, "input unsat");
+        if (p.x < 4 || p.x > 6 || p.y != 7) $fatal(1, "unsat changed object");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_input_methods
+  (source "inline_input_methods.sv" #"
+package pkg;
+    class Base;
+        rand bit [7:0] x;
+        function int pick(bit [7:0] wanted);
+            return randomize() with { x == wanted; };
+        endfunction
+    endclass
+endpackage
+module Top(output bit done);
+    class Derived extends pkg::Base;
+        rand bit [7:0] y;
+        constraint c { y == 9; }
+    endclass
+    Derived d;
+    pkg::Base b;
+    initial begin
+        d = new; b = d;
+        if (!b.pick(2) || d.x != 2 || d.y != 9) $fatal(1, "imported input");
+        if (!b.pick(5) || d.x != 5 || d.y != 9) $fatal(1, "repeated method input");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_input_hooks
+  (source "inline_input_hooks.sv" #"
+module Top(output bit done);
+    bit [7:0] wanted;
+    class Base;
+        rand bit [7:0] x;
+        int pre_calls, post_calls;
+        function void pre_randomize(); wanted = 5; pre_calls++; endfunction
+        function void post_randomize(); post_calls++; endfunction
+    endclass
+    class Derived extends Base;
+        function void pre_randomize(); wanted = 6; pre_calls++; endfunction
+    endclass
+    Base p;
+    Derived d;
+    initial begin
+        p = new; wanted = 2;
+        if (!(p.randomize(x) with { x == wanted; })) $fatal(1, "hook input solve");
+        if (p.x != 5 || wanted != 5 || p.pre_calls != 1 || p.post_calls != 1)
+            $fatal(1, "input sampled before hook");
+        wanted = 2;
+        if (p.randomize(x) with { x == wanted; x == 2; }) $fatal(1, "hook unsat");
+        if (p.x != 5 || p.pre_calls != 2 || p.post_calls != 1) $fatal(1, "hook failure state");
+        d = new; p = d; wanted = 2;
+        if (!(p.randomize() with { x == wanted; }) || p.x != 6 || p.pre_calls != 1 || p.post_calls != 1)
+            $fatal(1, "dynamic input hook");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_basic
+  (source "constraint_mode_basic.sv" #"
+module Top(output bit done);
+    class C;
+        rand bit [3:0] x;
+        constraint low { x == 2; }
+        constraint high { x == 9; }
+        function void enable_low(); constraint_mode(0); low.constraint_mode(1); endfunction
+    endclass
+    C c, alias_c, other;
+    initial begin
+        c = new; other = new; alias_c = c;
+        if (c.low.constraint_mode() != 1 || c.high.constraint_mode() != 1) $fatal(1, "initial modes");
+        c.x = 7;
+        if (c.randomize() || c.x != 7) $fatal(1, "initial contradiction");
+        alias_c.high.constraint_mode(0);
+        if ((c.high.constraint_mode() != 0) || (other.high.constraint_mode() == 0)) $fatal(1, "alias isolation");
+        if (!c.randomize() || c.x != 2) $fatal(1, "disabled block");
+        c.constraint_mode(0);
+        if (!(c.randomize() with { x == 5; }) || c.x != 5) $fatal(1, "inline remains active");
+        c.high.constraint_mode(1);
+        if (c.randomize(null)) $fatal(1, "check only fails");
+        if (!c.randomize() || c.x != 9 || !c.randomize(null)) $fatal(1, "check only succeeds");
+        c.enable_low();
+        if (!c.randomize() || c.x != 2) $fatal(1, "implicit receiver");
+        c.low.constraint_mode(2);
+        if (c.low.constraint_mode() != 0) $fatal(1, "bit conversion");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_inheritance
+  (source "constraint_mode_inheritance.sv" #"
+package pkg;
+    class Base;
+        rand bit [3:0] x, y;
+        constraint first { x == 1; }
+        constraint second { y == 3; }
+        function void disable_first(); first.constraint_mode(0); endfunction
+    endclass
+endpackage
+module Top(output bit done);
+    class Derived extends pkg::Base;
+        constraint first { x == 7; }
+        constraint third { y == 5; }
+    endclass
+    Derived d;
+    pkg::Base b;
+    initial begin
+        d = new; b = d;
+        b.constraint_mode(0);
+        if ((d.first.constraint_mode() != 0) || (d.second.constraint_mode() != 0) || (d.third.constraint_mode() != 0)) $fatal(1, "dynamic all");
+        b.first.constraint_mode(1);
+        d.third.constraint_mode(1);
+        if ((d.first.constraint_mode() == 0) || (d.second.constraint_mode() != 0) || (d.third.constraint_mode() == 0)) $fatal(1, "override modes");
+        // Package-base randomize dispatch is tracked separately in #1892.
+        if (!d.randomize()) $fatal(1, "override solve");
+        if (d.x != 7 || d.y != 5) $fatal(1, "override values x=%d y=%d", d.x, d.y);
+        b.disable_first();
+        if ((d.first.constraint_mode() != 0) || (d.third.constraint_mode() == 0)) $fatal(1, "inherited method");
+        if (!(d.randomize() with { x == 2; }) || d.x != 2 || d.y != 5) $fatal(1, "disabled override");
+        b.constraint_mode(1);
+        if ((d.first.constraint_mode() == 0) || (d.second.constraint_mode() == 0) || (d.third.constraint_mode() == 0)) $fatal(1, "all enabled");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_hooks
+  (source "constraint_mode_hooks.sv" #"
+module Top(output bit done);
+    class C;
+        rand bit [3:0] x;
+        bit disable_c;
+        constraint c { x == 2; }
+        function void pre_randomize(); c.constraint_mode(!disable_c); endfunction
+    endclass
+    C p;
+    initial begin
+        p = new; p.disable_c = 1;
+        if (!(p.randomize(x) with { x == 7; }) || p.x != 7) $fatal(1, "pre-hook disable");
+        if (p.c.constraint_mode() != 0) $fatal(1, "mode survives selected randomize");
+        p.disable_c = 0;
+        if (p.randomize(x) with { x == 7; }) $fatal(1, "pre-hook enable");
+        if ((p.c.constraint_mode() == 0) || p.x != 7) $fatal(1, "failed solve mode");
+        if (!p.randomize() || p.x != 2) $fatal(1, "subsequent solve");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_base_dispatch
+  (source "constraint_mode_base_dispatch.sv" #"
+module Top(output bit done);
+    class Base;
+        rand bit [3:0] x, y;
+        constraint a { x == 1; }
+        constraint b { y == 3; }
+    endclass
+    class Derived extends Base;
+        constraint a { x == 7; }
+        constraint c { y == 5; }
+    endclass
+    Base b;
+    Derived d;
+    initial begin
+        d = new; b = d;
+        b.b.constraint_mode(0);
+        if (!b.randomize() || d.x != 7 || d.y != 5) $fatal(1, "dynamic override");
+        b.a.constraint_mode(0);
+        if (!(b.randomize() with { x == 2; }) || d.x != 2 || d.y != 5) $fatal(1, "inline dynamic modes");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_ordinary_struct_members
+  (source "constraint_mode_struct.sv" #"
+    module Top(input int data, output int direct_value, nested_value);
+      struct packed { int constraint_mode; } direct_data;
+      struct packed { struct packed { int constraint_mode; } child; } nested_data;
+      always_comb begin
+        direct_data.constraint_mode = data;
+        nested_data.child.constraint_mode = data + 1;
+        direct_value = direct_data.constraint_mode;
+        nested_value = nested_data.child.constraint_mode;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 37 255)
+    (modify (set data value))
+    (assert_eq direct_value value)
+    (assert_eq nested_value (+ value 1))))
+
+(case type_parameter_imports
+  (source "type_parameter_imports.sv" #"
+package p;
+    class Item;
+        static int value = 42;
+        typedef bit [7:0] word_t;
+    endclass
+    class Unused #(type TYPE = Item);
+        typedef TYPE::word_t element_t;
+        static function int get(); return TYPE::value; endfunction
+    endclass
+endpackage
+module Top(output bit done);
+    class Local #(type TYPE = p::Item);
+        extern static function int get();
+    endclass
+    function int Local::get(); return TYPE::value; endfunction
+    initial done = Local#()::get() == 42;
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case type_parameter_shadowing
+  (source "type_parameter_shadowing.sv" #"
+package TYPE;
+    parameter int value = 7;
+endpackage
+module Top(output bit [1:0] flags);
+    class Item; static int value = 42; endclass
+    class Local #(type TYPE = Item);
+        static function int get(); return TYPE::value; endfunction
+    endclass
+    initial begin
+        flags[0] = TYPE::value == 7;
+        flags[1] = Local#()::get() == 42;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 3))
+
+(case type_alias_members
+  (source "class.sv" #"
+package p;
+    class Item #(int N = 42);
+        static int value = N;
+        typedef bit [7:0] word_t;
+        static function int read(); return value; endfunction
+    endclass
+    typedef Item#(23) Alias;
+    class Reader;
+        static function int read(); return Alias::read(); endfunction
+    endclass
+endpackage
+module Top(output int sum, output bit done);
+    import p::*;
+    typedef Alias LocalAlias;
+    class Word;
+        typedef bit [7:0] word_t;
+    endclass
+    typedef Word WordAlias;
+    WordAlias::word_t sample;
+    initial begin
+        sample = 8'hff;
+        sum = Reader::read() + LocalAlias::value + sample;
+        Alias::value = 24;
+        done = Reader::read() == 24 && LocalAlias::value == 24;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 301) (assert_eq done 1))
+
+(case type_alias_lexical_scopes
+  (source "class.sv" #"
+package Alias;
+    parameter int value = 7;
+endpackage
+module Top(output int sum, output bit done);
+    class Item;
+        static int value = 42;
+    endclass
+    class Reader;
+        typedef Item Alias;
+        extern static function int read();
+    endclass
+    function int Reader::read(); return Alias::value; endfunction
+    initial begin
+        sum = Reader::read() + Alias::value;
+        done = sum == 49;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 49) (assert_eq done 1))
+
+(case imported_member_type_dimensions
+  (source "classes.sv" #"
+package p;
+    class Box #(int N = 5);
+        typedef bit [N-1:0] element_t;
+    endclass
+    typedef Box#() Small;
+    typedef Box#(9) Wide;
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum, output bit done);
+    import p::*;
+    localparam int N = 29;
+    Small::element_t sample;
+    Wide::element_t other;
+    initial begin
+        sample = '1;
+        other = '1;
+        sum = sample + other;
+        done = $bits(sample) == 5 && $bits(other) == 9;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 542) (assert_eq done 1))
+
+(case imported_member_type_inheritance
+  (source "classes.sv" #"
+package p;
+    class Base #(type T = byte);
+        typedef T item_t;
+    endclass
+    class Derived #(int N = 9) extends Base#(bit [2:0]); endclass
+    typedef Derived#() Tiny;
+    typedef Base#(bit [6:0]) Other;
+endpackage
+"#)
+  (source "exports.sv" #"
+package q;
+    import p::Tiny;
+    import p::Other;
+    export p::Tiny;
+    export p::Other;
+    class Sub extends Tiny;
+        typedef bit [4:0] item_t;
+        typedef item_t copied_t;
+    endclass
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum, output bit done);
+    import q::*;
+    Sub::copied_t a;
+    Other::T b;
+    Tiny::item_t c;
+    initial begin
+        a = '1;
+        b = '1;
+        c = '1;
+        sum = a + b + c;
+        done = $bits(a) == 5 && $bits(b) == 7 && $bits(c) == 3;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 165) (assert_eq done 1))

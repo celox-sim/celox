@@ -57,3 +57,13 @@ test("guards the repository setting that exposes the title to release automation
     /Revalidate merge group release impact\n\s+if: github\.event_name == 'merge_group' && github\.event\.merge_group\.base_ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)[\s\S]*MERGE_GROUP_BASE_REF:[\s\S]*MERGE_GROUP_HEAD_REF:[\s\S]*MERGE_GROUP_SHA:[\s\S]*run: node scripts\/check-pr-release-impact\.mjs/,
   );
 });
+
+test("title events finish independently without skipping edit validation", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/pr-title.yml", import.meta.url), "utf8");
+  assert.match(workflow, /types: \[opened, edited, synchronize, reopened\]/);
+  // Same-head synchronize/edited events must both reach a validation result.
+  // A non-canceling group also replaces pending runs; disallow job-level groups too.
+  assert.doesNotMatch(workflow, /^\s*concurrency:/m);
+  assert.doesNotMatch(workflow, /github.event.action != 'edited'|queue: max/);
+  assert.match(workflow, /github.event.pull_request.state == 'open'/);
+});

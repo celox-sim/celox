@@ -9,15 +9,24 @@ use std::{
 };
 
 use celox::{
-    NativeProgramImage, NativeProgramInstance, StateDifference, StateFile, StateObject, StateRole,
-    format_state_value,
+    NativeProgramImage, StateDifference, StateFile, StateObject, StateRole, format_state_value,
 };
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
+#[cfg(feature = "systemverilog")]
+#[path = "celox/checkpoint_fs.rs"]
+mod checkpoint_fs;
 #[path = "celox/project.rs"]
 mod project;
 #[path = "celox/runner.rs"]
 mod runner;
+#[cfg(feature = "systemverilog")]
+#[path = "celox/state_signal.rs"]
+mod state_signal;
+#[cfg(feature = "systemverilog")]
+#[path = "celox/system_checkpoint.rs"]
+mod system_checkpoint;
+
 use project::{Design, DesignArgs};
 
 #[derive(Parser)]
@@ -32,6 +41,8 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// Parsed once per process; boxing would only complicate the matches.
+#[allow(clippy::large_enum_variant)]
 enum CliCommand {
     /// Run a SystemVerilog or Veryl native testbench.
     Run(RunArgs),
@@ -53,6 +64,58 @@ struct RunArgs {
     /// Does not bound compilation or work within a single step/tick.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     max_steps: Option<u64>,
+
+    #[command(flatten)]
+    save_state: SaveStateArgs,
+
+    /// Pass a plusarg such as `+iterations=9` to a SystemVerilog testbench
+    /// (repeatable); a positional argument starting with `+` does the same.
+    /// They reach `$test$plusargs` and `$value$plusargs` in command-line
+    /// order.
+    #[arg(long = "plusarg", value_name = "+ARG", allow_hyphen_values = true)]
+    plusarg: Vec<String>,
+    #[arg(skip)]
+    plusargs: Vec<String>,
+}
+
+/// When `celox run` saves state files for `celox state dump/diff`.
+#[derive(Args, Clone, Default)]
+struct SaveStateArgs {
+    /// Count the cycles of this signal for --save-state-at, such as
+    /// `tb.clk`: a cycle is a change of the signal to 1.
+    #[arg(long, value_name = "SIGNAL", requires = "save_state_at")]
+    save_state_on: Option<String>,
+    /// Save the state after these cycles of --save-state-on, counted from 1.
+    #[arg(
+        long,
+        value_name = "N",
+        value_delimiter = ',',
+        requires = "save_state_on",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    save_state_at: Vec<u64>,
+    /// Save the state at these simulation times (SystemVerilog), in units of
+    /// the design's global time precision.
+    #[arg(long, value_name = "T", value_delimiter = ',')]
+    save_state_at_time: Vec<u64>,
+    /// Disable the default SIGUSR1 checkpoint handler (Unix, SystemVerilog).
+    #[arg(long)]
+    no_checkpoint_on_signal: bool,
+    /// Resume a trusted CLI checkpoint with the same design and options.
+    #[arg(long, value_name = "FILE")]
+    restore_checkpoint: Option<PathBuf>,
+    /// The directory of the saved files, `<signal>-<N>.state` and
+    /// `time-<T>.state` or `signal-<PID>-<N>.checkpoint` (default: the current directory).
+    #[arg(long, value_name = "DIR")]
+    save_state_dir: Option<PathBuf>,
+}
+
+impl SaveStateArgs {
+    fn is_empty(&self) -> bool {
+        self.save_state_on.is_none()
+            && self.save_state_at_time.is_empty()
+            && self.restore_checkpoint.is_none()
+    }
 }
 
 struct RunConfig {
@@ -60,6 +123,8 @@ struct RunConfig {
     design: Design,
     opt_level: celox::OptLevel,
     max_steps: u64,
+    save_state: SaveStateArgs,
+    plusargs: Vec<String>,
 }
 
 fn resolve_design(arguments: DesignArgs) -> Design {
@@ -73,11 +138,22 @@ fn resolve_design(arguments: DesignArgs) -> Design {
 fn cli_from_matches(matches: &clap::ArgMatches) -> Result<Cli, clap::Error> {
     let mut cli = Cli::from_arg_matches(matches)?;
     match &mut cli.command {
-        CliCommand::Run(arguments) => arguments.design.capture_input_order(
-            matches
+        CliCommand::Run(arguments) => {
+            let matches = matches
                 .subcommand_matches("run")
-                .expect("parsed run command"),
-        ),
+                .expect("parsed run command");
+            let mut plusargs = arguments.design.take_plusargs(matches);
+            plusargs.extend(
+                matches
+                    .indices_of("plusarg")
+                    .into_iter()
+                    .flatten()
+                    .zip(std::mem::take(&mut arguments.plusarg)),
+            );
+            plusargs.sort_by_key(|&(position, _)| position);
+            arguments.plusargs = plusargs.into_iter().map(|(_, plusarg)| plusarg).collect();
+            arguments.design.capture_input_order(matches);
+        }
         CliCommand::Vpi(VpiArgs {
             command: VpiCommand::Build(arguments),
         }) => {
@@ -114,6 +190,8 @@ fn resolve_run_config(arguments: RunArgs) -> RunConfig {
             .or(design.max_steps)
             .unwrap_or(1_000_000),
         design,
+        save_state: arguments.save_state,
+        plusargs: arguments.plusargs,
     }
 }
 
@@ -137,6 +215,15 @@ fn run_testbench(arguments: RunArgs) -> Result<(), String> {
     {
         return Err("pass .sv/.v sources, or Veryl project sources".into());
     }
+    if !arguments.plusargs.is_empty() {
+        return Err("plusargs currently require a SystemVerilog testbench".into());
+    }
+    if !arguments.save_state.is_empty() {
+        return Err(
+            "--save-state-on, --save-state-at-time and --restore-checkpoint currently require a SystemVerilog testbench"
+                .into(),
+        );
+    }
     runner::run(arguments.execution, arguments.design, arguments.max_steps).map_err(|error| {
         if let runner::RunError::InvalidConfiguration { .. } = &error {
             clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, error.to_string()).exit();
@@ -150,6 +237,11 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     arguments.execution.validate_sv().unwrap_or_else(|message| {
         clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, message).exit()
     });
+    // Install before compiling so requests received during compilation are
+    // deferred until the first safe simulation boundary.
+    let signal = (cfg!(unix) && !arguments.save_state.no_checkpoint_on_signal)
+        .then(state_signal::StateSignal::install)
+        .transpose()?;
     let sources = arguments.design.sv_sources()?;
     let source_refs = sources
         .iter()
@@ -161,7 +253,14 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .opt_level(arguments.opt_level)
         .diagnostic_policy(arguments.design.diagnostics.clone())
         .sv_timescale(arguments.design.timescale)
-        .signal_access(arguments.design.signal_access.clone());
+        .signal_access(arguments.design.signal_access.clone())
+        .plusargs(arguments.plusargs.iter().cloned())
+        .defer_initialization(arguments.save_state.restore_checkpoint.is_some());
+    let builder = if signal.is_some() || arguments.save_state.restore_checkpoint.is_some() {
+        builder.file_system(|| Box::<checkpoint_fs::CheckpointFs>::default())
+    } else {
+        builder
+    };
     let builder = arguments.design.apply_parameters(builder);
     let max_steps = if arguments.execution.unlimited {
         u64::MAX
@@ -170,17 +269,33 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     };
     macro_rules! execute {
         ($build:ident) => {{
-            let simulation = builder
+            let mut simulation = builder
                 .$build()
                 .map_err(|error| format!("compilation failed:\n{error}"))?;
             report_warnings(simulation.warnings())?;
-            simulate_sv(simulation, max_steps, &mut std::io::stdout().lock())
+            let progress = if let Some(path) = &arguments.save_state.restore_checkpoint {
+                Some(system_checkpoint::restore(&mut simulation, path)?)
+            } else {
+                None
+            };
+            let mut saves = StateSaves::new(
+                &simulation,
+                &arguments.design.top,
+                &arguments.save_state,
+                signal,
+            )?;
+            if let Some(progress) = progress {
+                saves.restore_progress(&simulation, &arguments.design.top, progress)?;
+            }
+            simulate_sv(simulation, max_steps, saves, &mut std::io::stdout().lock())
         }};
     }
-    match arguments.execution.backend {
+    match arguments.execution.backend() {
         runner::Backend::Native => execute!(build),
+        #[cfg(feature = "cranelift")]
         runner::Backend::Cranelift => execute!(build_cranelift),
         runner::Backend::Interpreter => execute!(build_interpreter),
+        #[cfg(feature = "wasm-runtime")]
         runner::Backend::Wasm => execute!(build_wasm),
         runner::Backend::Tiered => execute!(build_tiered),
     }
@@ -190,28 +305,333 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
 fn simulate_sv<B: celox::SimBackend>(
     mut simulation: celox::Simulation<B>,
     max_steps: u64,
+    mut saves: StateSaves,
     output: &mut impl Write,
 ) -> Result<(), String> {
-    let mut failed = false;
     let initial = simulation.eval_comb();
-    drain_sv_output(&mut simulation, output, &mut failed)?;
+    drain_sv_output(&mut simulation, output, &mut saves.failed)?;
     initial.map_err(|error| error.to_string())?;
+    saves.start(&mut simulation);
+    saves.service_signal(&mut simulation);
     let mut steps = 0;
-    while !simulation.is_finished() && simulation.next_event_time().is_some() {
+    while !simulation.is_finished()
+        && let Some(next) = simulation.next_event_time()
+    {
         if steps == max_steps {
             return Err(format!("simulation exceeded --max-steps {}", max_steps));
         }
+        saves.before(&mut simulation, next)?;
         let step = simulation.step();
-        drain_sv_output(&mut simulation, output, &mut failed)?;
+        drain_sv_output(&mut simulation, output, &mut saves.failed)?;
         if step.map_err(|error| error.to_string())?.is_none() {
             break;
         }
+        saves.after_step(&mut simulation)?;
         steps += 1;
     }
-    if failed {
+    let finished = simulation.finish();
+    drain_sv_output(&mut simulation, output, &mut saves.failed)?;
+    finished.map_err(|error| error.to_string())?;
+    saves.finish(&mut simulation)?;
+    if saves.failed {
         return Err("SystemVerilog testbench reported an assertion failure or $error".to_string());
     }
     Ok(())
+}
+
+/// The state files a SystemVerilog run saves (`--save-state-*`).
+///
+/// A cycle of the counted signal is a time step at whose end the signal is
+/// 1 while it was not at the end of the previous one (or after the initial
+/// settle). Its file is saved right after that time step, with every region
+/// of the time done. A file for time `T` holds the state after everything
+/// due at times up to `T`, saved before the run advances past `T`.
+#[cfg(feature = "systemverilog")]
+#[derive(Default)]
+struct StateSaves {
+    counted: Option<(String, celox::SignalRef)>,
+    /// The cycles still to save, in descending order.
+    cycles: Vec<u64>,
+    count: u64,
+    high: bool,
+    /// The times still to save, in descending order.
+    times: Vec<u64>,
+    directory: PathBuf,
+    signal: Option<state_signal::StateSignal>,
+    signal_sequence: u64,
+    failed: bool,
+    started: bool,
+}
+
+/// Persistent CLI bookkeeping; signal registration and output directory are local.
+#[cfg(feature = "systemverilog")]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SavedStateSaves {
+    counted: Option<String>,
+    cycles: Vec<u64>,
+    count: u64,
+    high: bool,
+    times: Vec<u64>,
+    signal_sequence: u64,
+    failed: bool,
+    started: bool,
+}
+
+#[cfg(feature = "systemverilog")]
+impl StateSaves {
+    fn progress(&self) -> SavedStateSaves {
+        SavedStateSaves {
+            counted: self.counted.as_ref().map(|(name, _)| name.clone()),
+            cycles: self.cycles.clone(),
+            count: self.count,
+            high: self.high,
+            times: self.times.clone(),
+            signal_sequence: self.signal_sequence,
+            failed: self.failed,
+            started: self.started,
+        }
+    }
+
+    fn restore_progress<B: celox::SimBackend>(
+        &mut self,
+        simulation: &celox::Simulation<B>,
+        top: &str,
+        saved: SavedStateSaves,
+    ) -> Result<(), String> {
+        self.counted = saved
+            .counted
+            .map(|name| resolve_signal_path(simulation, top, &name).map(|signal| (name, signal)))
+            .transpose()?;
+        self.cycles = saved.cycles;
+        self.count = saved.count;
+        self.high = saved.high;
+        self.times = saved.times;
+        self.signal_sequence = saved.signal_sequence;
+        self.failed = saved.failed;
+        self.started = saved.started;
+        Ok(())
+    }
+
+    fn new<B: celox::SimBackend>(
+        simulation: &celox::Simulation<B>,
+        top: &str,
+        arguments: &SaveStateArgs,
+        signal: Option<state_signal::StateSignal>,
+    ) -> Result<Self, String> {
+        let counted = match &arguments.save_state_on {
+            Some(path) => Some((path.clone(), resolve_signal_path(simulation, top, path)?)),
+            None => None,
+        };
+        let descending = |values: &[u64]| {
+            let mut values = values.to_vec();
+            values.sort_unstable_by(|a, b| b.cmp(a));
+            values.dedup();
+            values
+        };
+        let directory = arguments
+            .save_state_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."));
+        if !arguments.is_empty() || signal.is_some() {
+            std::fs::create_dir_all(&directory)
+                .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
+        }
+        if signal.is_some() {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "SIGUSR1 checkpoint ready (pid {}): {}",
+                std::process::id(),
+                directory.display()
+            );
+        }
+        Ok(Self {
+            signal,
+            signal_sequence: 0,
+            failed: false,
+            started: false,
+            counted,
+            cycles: descending(&arguments.save_state_at),
+            count: 0,
+            high: false,
+            times: descending(&arguments.save_state_at_time),
+            directory,
+        })
+    }
+
+    fn level<B: celox::SimBackend>(
+        simulation: &mut celox::Simulation<B>,
+        signal: celox::SignalRef,
+    ) -> bool {
+        let (value, mask) = simulation.get_four_state(signal);
+        value == 1u8.into() && mask == 0u8.into()
+    }
+
+    fn start<B: celox::SimBackend>(&mut self, simulation: &mut celox::Simulation<B>) {
+        if !self.started {
+            if let Some((_, signal)) = self.counted {
+                self.high = Self::level(simulation, signal);
+            }
+            self.started = true;
+        }
+    }
+
+    /// Save the times before `next`, the time the next step runs.
+    fn before<B: celox::SimBackend>(
+        &mut self,
+        simulation: &mut celox::Simulation<B>,
+        next: u64,
+    ) -> Result<(), String> {
+        self.service_signal(simulation);
+        while let Some(&time) = self.times.last()
+            && time < next
+        {
+            self.times.pop();
+            self.save(simulation, format!("time-{time}.state"))?;
+        }
+        Ok(())
+    }
+
+    fn after_step<B: celox::SimBackend>(
+        &mut self,
+        simulation: &mut celox::Simulation<B>,
+    ) -> Result<(), String> {
+        let Some((name, signal)) = &self.counted else {
+            self.service_signal(simulation);
+            return Ok(());
+        };
+        let (name, signal) = (name.clone(), *signal);
+        let high = Self::level(simulation, signal);
+        let rose = high && !self.high;
+        self.high = high;
+        if rose {
+            self.count += 1;
+            if self.cycles.last() == Some(&self.count) {
+                self.cycles.pop();
+                self.save(simulation, format!("{name}-{}.state", self.count))?;
+            }
+        }
+        self.service_signal(simulation);
+        Ok(())
+    }
+
+    /// After the run: nothing changes any more, so the state at a later
+    /// time is the final one; a cycle not reached is an error.
+    fn finish<B: celox::SimBackend>(
+        &mut self,
+        simulation: &mut celox::Simulation<B>,
+    ) -> Result<(), String> {
+        self.before(simulation, u64::MAX)?;
+        if let Some(cycle) = self.cycles.last() {
+            let (name, _) = self.counted.as_ref().expect("cycles count a signal");
+            return Err(format!(
+                "the run ended after {} cycles of {name}, before cycle {cycle} of --save-state-at",
+                self.count
+            ));
+        }
+        Ok(())
+    }
+
+    /// A signal request must never turn a diagnostic failure into loss of the
+    /// ongoing run. Keep requests pending across `$stop` suspensions.
+    fn service_signal<B: celox::SimBackend>(&mut self, simulation: &mut celox::Simulation<B>) {
+        if simulation.is_stopped()
+            || !self
+                .signal
+                .as_ref()
+                .is_some_and(|signal| signal.take_request())
+        {
+            return;
+        }
+        let Some(sequence) = self.signal_sequence.checked_add(1) else {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "cannot save SIGUSR1 checkpoint: request sequence exhausted"
+            );
+            return;
+        };
+        self.signal_sequence = sequence;
+        let path = self.directory.join(format!(
+            "signal-{}-{sequence}.checkpoint",
+            std::process::id()
+        ));
+        let result = (|| -> Result<(), String> {
+            let state = system_checkpoint::capture(simulation, self)?;
+            // Publish only complete files, without overwriting earlier captures.
+            let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)
+                .map_err(|error| error.to_string())?;
+            temporary
+                .as_file_mut()
+                .write_all(&state)
+                .map_err(|error| error.to_string())?;
+            temporary
+                .as_file_mut()
+                .sync_all()
+                .map_err(|error| error.to_string())?;
+            temporary
+                .persist_noclobber(&path)
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })();
+        let _ = match result {
+            Ok(()) => writeln!(
+                std::io::stderr().lock(),
+                "saved SIGUSR1 checkpoint: {} (time {})",
+                path.display(),
+                simulation.time()
+            ),
+            Err(error) => writeln!(
+                std::io::stderr().lock(),
+                "cannot save SIGUSR1 checkpoint {}: {error}; continuing simulation",
+                path.display()
+            ),
+        };
+    }
+
+    fn save<B: celox::SimBackend>(
+        &self,
+        simulation: &mut celox::Simulation<B>,
+        name: String,
+    ) -> Result<(), String> {
+        let path = self.directory.join(name);
+        let state = simulation
+            .save_state()
+            .map_err(|error| format!("cannot save {}: {error}", path.display()))?;
+        let mut bytes = Vec::new();
+        state
+            .write_to(&mut bytes)
+            .and_then(|()| std::fs::write(&path, bytes))
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))
+    }
+}
+
+/// Resolve `path`, a hierarchical signal name such as `tb.cpu.clk` or
+/// `cpu[1].clk`, which may start with the top module's name.
+#[cfg(feature = "systemverilog")]
+fn resolve_signal_path<B: celox::SimBackend>(
+    simulation: &celox::Simulation<B>,
+    top: &str,
+    path: &str,
+) -> Result<celox::SignalRef, String> {
+    let mut segments: Vec<&str> = path.split('.').collect();
+    if segments.len() > 1 && segments[0] == top {
+        segments.remove(0);
+    }
+    let var = segments.pop().unwrap_or_default();
+    let instances = segments
+        .iter()
+        .map(
+            |segment| match segment.strip_suffix(']').and_then(|s| s.split_once('[')) {
+                Some((name, index)) => index
+                    .parse()
+                    .map(|index| (name, index))
+                    .map_err(|_| format!("invalid instance index in `{path}`")),
+                None => Ok((*segment, 0)),
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    simulation
+        .try_child_signal(&instances, var)
+        .map_err(|error| format!("--save-state-on {path}: {error}"))
 }
 
 #[cfg(feature = "systemverilog")]
@@ -395,27 +815,43 @@ fn build(arguments: BuildArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// The SystemVerilog compilation options of `design`.
+#[cfg(feature = "systemverilog")]
+fn configure_sv<'a, T>(
+    design: &'a Design,
+    builder: celox::SimulatorBuilder<'a, T>,
+) -> celox::SimulatorBuilder<'a, T> {
+    let builder = builder
+        .four_state(design.four_state.unwrap_or(false))
+        .diagnostic_policy(design.diagnostics.clone())
+        .sv_timescale(design.timescale)
+        .signal_access(design.signal_access.clone())
+        .opt_level(design.opt_level.unwrap_or(celox::OptLevel::O1));
+    design.apply_parameters(builder)
+}
+
 fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> {
     if design.is_sv() {
         #[cfg(feature = "systemverilog")]
         {
             let sources = design.sv_sources()?;
-            let refs = sources
+            let refs: Vec<_> = sources
                 .iter()
                 .map(|(text, path)| (text.as_str(), path.as_path()))
                 .collect();
-            let builder = celox::Simulator::from_sv_sources(refs, &design.top)
-                .four_state(design.four_state.unwrap_or(false))
-                .diagnostic_policy(design.diagnostics.clone())
-                .sv_timescale(design.timescale)
-                .signal_access(design.signal_access.clone())
-                .opt_level(design.opt_level.unwrap_or(celox::OptLevel::O1));
-            let simulator = design
-                .apply_parameters(builder)
-                .compile_native()
-                .map_err(|error| format!("compilation failed:\n{error}"))?;
-            report_warnings(simulator.warnings())?;
-            return Ok(simulator.into_program_image());
+            // VPI advances time and dispatches callbacks even for a process-free
+            // DUT. Compile its process-capable image directly, rather than first
+            // compiling an untimed image and repeating analysis and optimization
+            // when that builder discovers a process.
+            let simulation = configure_sv(
+                design,
+                celox::Simulation::from_sv_sources(refs, &design.top),
+            )
+            .compile_native()
+            .map_err(|error| format!("compilation failed:\n{error}"))?;
+            report_warnings(simulation.warnings())?;
+            let image = simulation.into_program_image();
+            return Ok(image);
         }
         #[cfg(not(feature = "systemverilog"))]
         return Err(
@@ -677,6 +1113,12 @@ fn run_simulation(image: NativeProgramImage, arguments: SimulationArgs) -> Resul
     if let Some(gpi_users) = gpi_users {
         set_environment("GPI_USERS", gpi_users);
     }
+    // Zero-delay inertial deposits are applied after the current callback/
+    // domain round. Let cocotb bypass its Python write scheduler and use its
+    // C++ clock by default, while retaining an explicit user opt-out.
+    if env::var_os("COCOTB_TRUST_INERTIAL_WRITES").is_none() {
+        set_environment("COCOTB_TRUST_INERTIAL_WRITES", "1");
+    }
     set_environment("COCOTB_TOPLEVEL", top);
     set_environment("COCOTB_TEST_MODULES", test_module);
     set_environment("TOPLEVEL_LANG", "verilog");
@@ -690,10 +1132,7 @@ fn run_simulation(image: NativeProgramImage, arguments: SimulationArgs) -> Resul
     }
     set_environment("COCOTB_RESULTS_FILE", &results_file);
 
-    // Safety: the image is compiler-produced data attached to this executable.
-    let instance = unsafe { NativeProgramInstance::from_image(image) }
-        .map_err(|error| format!("failed to load attached design: {error}"))?;
-    celox_vpi::driver::run_cocotb(instance, &vpi)?;
+    celox_vpi::driver::run_cocotb_image(image, &vpi)?;
     check_results(&python, &results_file)
 }
 
@@ -914,17 +1353,37 @@ mod tests {
     #[cfg(feature = "systemverilog")]
     #[test]
     fn sv_scheduler_limit_fails_and_preserves_scheduled_output() {
-        let source =
-            "module Top(input bit clk); always @(posedge clk) $display(\"tick\"); endmodule";
+        let source = "module Top(input bit clk); always @(posedge clk) $display(\"tick\"); final $display(\"finalized\"); endmodule";
         let mut simulation =
             celox::Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
                 .build()
                 .unwrap();
         simulation.add_clock("clk", 2, 1);
         let mut output = Vec::new();
-        let error = simulate_sv(simulation, 3, &mut output).unwrap_err();
+        let error = simulate_sv(simulation, 3, StateSaves::default(), &mut output).unwrap_err();
         assert!(error.contains("exceeded --max-steps 3"));
-        assert!(String::from_utf8(output).unwrap().contains("tick"));
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("tick"));
+        assert!(!output.contains("finalized"));
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn sv_batch_runs_final_output_on_quiescence_and_finish() {
+        for ending in ["", "$finish;"] {
+            let source = format!(
+                "module Top; int value; initial begin value=42; {ending} end final $display(\"final=%0d\", value); endmodule"
+            );
+            let simulation = celox::Simulation::from_sv_sources(
+                vec![(source.as_str(), Path::new("top.sv"))],
+                "Top",
+            )
+            .build()
+            .unwrap();
+            let mut output = Vec::new();
+            simulate_sv(simulation, 10, StateSaves::default(), &mut output).unwrap();
+            assert_eq!(String::from_utf8(output).unwrap(), "final=42\n");
+        }
     }
 
     /// Only `$error` and `$fatal` fail a run; every report is printed with
@@ -941,7 +1400,7 @@ mod tests {
             .build()
             .unwrap();
             let mut output = Vec::new();
-            let result = simulate_sv(simulation, 10, &mut output);
+            let result = simulate_sv(simulation, 10, StateSaves::default(), &mut output);
             (result, String::from_utf8(output).unwrap())
         };
         let (result, output) = run("$info");

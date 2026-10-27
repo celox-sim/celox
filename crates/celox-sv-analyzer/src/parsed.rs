@@ -740,7 +740,7 @@ mod tests {
             module \escaped.name (output logic y); assign y = 1'b0; endmodule
             module Duplicate; endmodule
             module Duplicate; endmodule
-            module Legacy(y); output y; endmodule
+            module Legacy({y}); output y; endmodule
         "#,
             Path::new("index.sv"),
         )
@@ -1339,7 +1339,7 @@ mod declaration_tests {
                     &ModuleInterfaces::default(),
                     &packages
                 )
-                .is_err()
+                .is_ok()
         );
         let ir = source
             .analyze_module_declarations("Top", &overrides, &packages)

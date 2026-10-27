@@ -121,17 +121,13 @@ impl std::fmt::Debug for Checkpoint {
 /// Reasons a checkpoint cannot be taken or restored.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CheckpointError {
-    /// External component instances hold opaque state. They currently exist
-    /// only while a testbench runs, when no checkpoint can be taken.
-    #[error(
-        "checkpoints are not supported for designs with external components, whose state Celox cannot capture"
-    )]
+    /// Portable state-file APIs exclude opaque external component instances.
+    /// Core checkpoint capture and restore do not depend on their state.
+    #[error("portable state files do not capture opaque external component state")]
     ExternalComponents,
     /// Source-driven files and waveform controls have host state that is
     /// not represented in the saved HDL memory image.
-    #[error(
-        "checkpoints and state files are not supported for designs with SystemVerilog file I/O or VCD control tasks"
-    )]
+    #[error("the saved state does not include restorable external file I/O or VCD control state")]
     ExternalSystemTasks,
     #[error("the checkpoint was taken from a different design")]
     DesignMismatch,
@@ -154,13 +150,13 @@ pub enum CheckpointError {
 impl<B: SimBackend> Simulator<B> {
     /// Save the current design state.
     ///
+    /// This captures only core execution state. Effect handlers, including file
+    /// I/O and VPI, retain their own state. The embedding system coordinates
+    /// their checkpoints with this one at a quiescent execution boundary.
+    ///
     /// Inputs written since the last evaluation are part of the saved state;
     /// combinational logic is settled again after a restore.
     pub fn checkpoint(&self) -> Result<Checkpoint, CheckpointError> {
-        self.check_host_checkpoint_support()?;
-        if !self.components.is_empty() {
-            return Err(CheckpointError::ExternalComponents);
-        }
         Ok(Checkpoint {
             image: StateImage::capture(&self.backend, self.state_fingerprint()),
             comb_observer_snapshots: self.comb_observer_snapshots.clone(),
@@ -177,11 +173,20 @@ impl<B: SimBackend> Simulator<B> {
     /// simulation, continue in a new file with [`Self::switch_vcd`].
     pub fn restore(&mut self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
         self.validate_restore(checkpoint)?;
+        self.restore_checkpoint_prepared(checkpoint)
+    }
+
+    pub(crate) fn restore_checkpoint_prepared(
+        &mut self,
+        checkpoint: &Checkpoint,
+    ) -> Result<(), CheckpointError> {
         let fingerprint = self.state_fingerprint();
+        self.stash_runtime_events();
         self.frozen = checkpoint.frozen;
         checkpoint
             .image
             .restore_into(&mut self.backend, fingerprint)?;
+        self.replace_deferred_execution();
         self.comb_observer_snapshots
             .clone_from(&checkpoint.comb_observer_snapshots);
         self.comb_observer_initial_eval = checkpoint.comb_observer_initial_eval;
@@ -195,17 +200,24 @@ impl<B: SimBackend> Simulator<B> {
 
     /// Check every precondition of [`Self::restore`] without changing state.
     pub(crate) fn validate_restore(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
-        self.check_host_checkpoint_support()?;
-        if !self.components.is_empty() {
-            return Err(CheckpointError::ExternalComponents);
-        }
         if !checkpoint.image.matches(self.state_fingerprint()) {
             return Err(CheckpointError::DesignMismatch);
         }
         Ok(())
     }
 
-    pub(crate) fn check_host_checkpoint_support(&self) -> Result<(), CheckpointError> {
+    /// The file-I/O effect handler. Its state is deliberately outside core
+    /// checkpoints; an embedding system may snapshot it separately.
+    pub fn file_io(&self) -> &celox_runtime::file_io::FileIo {
+        &self.file_io
+    }
+
+    /// Replace the file-I/O effect handler at a host execution boundary.
+    pub fn replace_file_io(&mut self, file_io: celox_runtime::file_io::FileIo) {
+        self.file_io = file_io;
+    }
+
+    pub(crate) fn check_host_restore_support(&self) -> Result<(), CheckpointError> {
         if self
             .program
             .runtime_schema
@@ -229,5 +241,52 @@ impl<B: SimBackend> Simulator<B> {
         *self
             .checkpoint_fingerprint
             .get_or_init(|| crate::ir::state_fingerprint(self.backend.layout(), &self.program))
+    }
+}
+
+// Only this private wire type implements Deserialize: a safe API must not be
+// able to construct a Checkpoint containing arbitrary memory offsets.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct PersistedCheckpoint {
+    fingerprint: u64,
+    bytes: Box<[u8]>,
+    heap: celox_heap::Heap,
+    observers: Vec<crate::comb_activation::ObserverSnapshot>,
+    initial_eval: bool,
+    frozen: bool,
+}
+impl Checkpoint {
+    pub(crate) fn persisted(&self) -> PersistedCheckpoint {
+        PersistedCheckpoint {
+            fingerprint: self.image.fingerprint,
+            bytes: self.image.bytes.clone(),
+            heap: self.image.heap.clone(),
+            observers: self.comb_observer_snapshots.clone(),
+            initial_eval: self.comb_observer_initial_eval,
+            frozen: self.frozen,
+        }
+    }
+}
+impl PersistedCheckpoint {
+    pub(crate) fn bind<B: SimBackend>(
+        self,
+        simulator: &Simulator<B>,
+    ) -> Result<Checkpoint, CheckpointError> {
+        if self.fingerprint != simulator.state_fingerprint()
+            || self.bytes.len() != state_range(&simulator.backend).len()
+            || self.observers.len() != simulator.comb_observer_snapshots.len()
+        {
+            return Err(CheckpointError::DesignMismatch);
+        }
+        Ok(Checkpoint {
+            image: StateImage {
+                fingerprint: self.fingerprint,
+                bytes: self.bytes,
+                heap: self.heap,
+            },
+            comb_observer_snapshots: self.observers,
+            comb_observer_initial_eval: self.initial_eval,
+            frozen: self.frozen,
+        })
     }
 }

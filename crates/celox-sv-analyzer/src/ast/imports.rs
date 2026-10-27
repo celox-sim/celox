@@ -49,6 +49,8 @@ impl ScopeImports {
         let mut imports = Self::default();
         let blocks = generate_scopes(tree)?;
         let nested = nested_declarations(tree);
+        let class_types = class_type_parameter_scopes(tree);
+        let aliases = type_alias_scopes(tree, &blocks);
         for view in package_owners::scope(tree)? {
             let binding = tree.declarations().package_binding(view.id);
             for native in &binding.items {
@@ -123,17 +125,27 @@ impl ScopeImports {
                 if package == "std" && normalize_identifier(&name.spelling) == "randomize" {
                     continue;
                 }
+                // Inline constraint local:: lookup bypasses the receiver class,
+                // not through a package dependency (18.7.1).
+                if package == "local" {
+                    continue;
+                }
                 // `C::name` names a member of class `C` (IEEE 1800-2023 8.23).
-                if native
-                    .classes
-                    .iter()
-                    .any(|class| normalize_identifier(&class.name.spelling) == package)
+                if visible_class(tree, &package)
+                    || aliases.iter().any(|(start, end, name)| {
+                        (*start..*end).contains(&expression.tokens.start) && name == &package
+                    })
                 {
                     continue;
                 }
-                if !nested.iter().any(|(start, end, names)| {
-                    (*start..*end).contains(&expression.tokens.start) && names.contains(&package)
-                }) {
+                if !nested
+                    .iter()
+                    .chain(&class_types)
+                    .any(|(start, end, names)| {
+                        (*start..*end).contains(&expression.tokens.start)
+                            && names.contains(&package)
+                    })
+                {
                     imports
                         .qualified
                         .push((package, normalize_identifier(&name.spelling)));
@@ -145,6 +157,16 @@ impl ScopeImports {
             if in_ranges(ty.tokens.start, &ranges)
                 && let celox_sv_syntax::DataTypeKind::Named(path) = &ty.kind
                 && let [package, name] = path.as_slice()
+                // `C::T` names a type of class `C` (IEEE 1800-2023 8.23).
+                && !visible_class(tree, &normalize_identifier(&package.name.spelling))
+                && !aliases.iter().any(|(start, end, name)| {
+                    (*start..*end).contains(&ty.tokens.start)
+                        && name == &normalize_identifier(&package.name.spelling)
+                })
+                && !class_types.iter().any(|(start, end, names)| {
+                    (*start..*end).contains(&ty.tokens.start)
+                        && names.contains(&normalize_identifier(&package.name.spelling))
+                })
             {
                 imports.qualified.push((
                     normalize_identifier(&package.name.spelling),
@@ -163,6 +185,66 @@ impl ScopeImports {
         imports.wildcard.retain(|name| seen.insert(name.clone()));
         Ok(imports)
     }
+}
+
+/// Whether a class named `name` is declared in the current scope or in the
+/// compilation unit, where the scope sees it (IEEE 1800-2023 3.12.1).
+fn visible_class(tree: &SyntaxTree, name: &str) -> bool {
+    let native = tree.declarations();
+    let scope = tree.root_unit().ok().map(|unit| unit.tokens);
+    native.classes.iter().any(|class| {
+        normalize_identifier(&class.name.spelling) == name && {
+            let unit = super::classes::enclosing_unit(native, class.tokens).map(|unit| unit.tokens);
+            unit.is_none() || unit == scope
+        }
+    })
+}
+
+/// A typedef's name becomes visible after its declaration, within its
+/// lexical scope (6.18). A class alias can qualify members too (8.23).
+fn type_alias_scopes(tree: &SyntaxTree, blocks: &[GenerateScope]) -> Vec<(usize, usize, String)> {
+    use celox_sv_syntax::BodyItemKind;
+    let native = tree.declarations();
+    let Ok(items) = body_items(tree) else {
+        return Vec::new();
+    };
+    let scope_end = tree.root_unit().map_or(usize::MAX, |unit| unit.tokens.end);
+    let mut result = Vec::new();
+    for id in items {
+        let BodyItemKind::TypeAlias(id) = native.body_item(id).kind else {
+            continue;
+        };
+        let alias = native.type_alias(id);
+        let name = normalize_identifier(&alias.name.spelling);
+        let class = native
+            .classes
+            .iter()
+            .filter(|class| {
+                class.tokens.start <= alias.tokens.start && alias.tokens.end <= class.tokens.end
+            })
+            .min_by_key(|class| class.tokens.end - class.tokens.start);
+        let end = blocks
+            .iter()
+            .filter(|block| block.contains(alias.tokens.start))
+            .map(|block| block.end)
+            .chain(class.map(|class| class.tokens.end))
+            .fold(scope_end, usize::min);
+        result.push((alias.tokens.end, end, name.clone()));
+        if let Some(class) = class {
+            let owner =
+                super::classes::enclosing_unit(native, class.tokens).map(|unit| unit.tokens);
+            for id in native.subroutine_ids() {
+                let sub = native.subroutine(id);
+                if matches!(&sub.scope[..], [scope] if normalize_identifier(&scope.name.spelling) == normalize_identifier(&class.name.spelling))
+                    && super::classes::enclosing_unit(native, sub.tokens).map(|unit| unit.tokens)
+                        == owner
+                {
+                    result.push((sub.tokens.start, sub.tokens.end, name.clone()));
+                }
+            }
+        }
+    }
+    result
 }
 
 /// The names declared directly in a module or package scope: its ports and
@@ -215,6 +297,15 @@ pub(super) fn item_names(id: celox_sv_syntax::BodyItemId, tree: &SyntaxTree) -> 
         BodyItemKind::Instance(id) => {
             for instance in &native.instantiation(*id).instances {
                 add(&instance.name);
+            }
+        }
+        // The classes a class item declares (IEEE 1800-2023 8.3).
+        BodyItemKind::Unconverted { category, .. } if category == "class" => {
+            let tokens = native.body_item(id).tokens;
+            for class in &native.classes {
+                if tokens.start <= class.tokens.start && class.tokens.end <= tokens.end {
+                    add(&class.name);
+                }
             }
         }
         _ => {}
@@ -368,7 +459,7 @@ pub(crate) struct Facts {
 
 impl Facts {
     fn of(tree: &SyntaxTree) -> &Self {
-        use celox_sv_syntax::ExprKind;
+        use celox_sv_syntax::{DataTypeKind, ExprKind};
         tree.spans().imports.get_or_init(|| {
             let native = tree.declarations();
             let name = |id| {
@@ -386,6 +477,10 @@ impl Facts {
                     } if separator == "::" => name(*expression),
                     _ => None,
                 })
+                .chain(native.types.iter().filter_map(|ty| {
+                    matches!(&ty.kind, DataTypeKind::Named(path) if path.len() > 1)
+                        .then_some(ty.tokens)
+                }))
                 .map(|tokens| (tokens.start, tokens.end))
                 .collect();
             // Bare pattern keys name members; they do not bind wildcard imports.
@@ -416,11 +511,10 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
     let Ok(ranges) = active_ranges(tree) else {
         return HashMap::default();
     };
-    let nested = nested_declarations(tree);
-    let Facts {
-        qualified_bases,
-        pattern_keys,
-    } = Facts::of(tree);
+    let mut nested = nested_declarations(tree);
+    nested.extend(class_type_parameter_scopes(tree));
+    let aliases = type_alias_scopes(tree, &generate_scopes(tree).unwrap_or_default());
+    let Facts { pattern_keys, .. } = Facts::of(tree);
     let mut names: HashMap<String, Vec<usize>> = HashMap::default();
     let mut add = |name: &str, offset| {
         let name = normalize_identifier(name);
@@ -428,16 +522,21 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
             && !nested.iter().any(|(start, end, declared)| {
                 (*start..*end).contains(&offset) && declared.contains(&name)
             })
+            && !aliases
+                .iter()
+                .any(|(start, end, declared)| (*start..*end).contains(&offset) && declared == &name)
         {
             names.entry(name).or_default().push(offset);
         }
     };
+    // The scope of `C::x` is a name too: it may be a class that a wildcard
+    // import makes visible (IEEE 1800-2023 8.23, 26.3), while a package name
+    // binds nothing.
     let spans = tree.spans();
     for id in spans.expressions.within(&ranges) {
         let expression = native.expression(id);
         if let ExprKind::Name(name) = &expression.kind
             && !pattern_keys.contains(&expression.tokens.start)
-            && !qualified_bases.contains(&(expression.tokens.start, expression.tokens.end))
         {
             add(&name.spelling, expression.tokens.start);
         }
@@ -445,7 +544,7 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
     for id in spans.types.within(&ranges) {
         let ty = native.data_type(id);
         if let DataTypeKind::Named(path) = &ty.kind
-            && let [name] = path.as_slice()
+            && let Some(name) = path.first()
         {
             add(&name.name.spelling, ty.tokens.start);
         }
@@ -455,6 +554,15 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
         offsets.dedup();
     }
     names
+}
+
+/// The positions of the names that are the scope of `s::x`.
+fn qualifier_offsets(tree: &SyntaxTree) -> HashSet<usize> {
+    Facts::of(tree)
+        .qualified_bases
+        .iter()
+        .map(|(start, _)| *start)
+        .collect()
 }
 
 /// Native generate scopes, keyed by their authored body owner.
@@ -678,6 +786,56 @@ fn scope_lookup(
         }
     }
     Ok(ScopeLookup::Outside)
+}
+
+/// Lexical class type-parameter scopes, including out-of-block methods.
+/// These prefixes name types rather than package dependencies (6.20.3, 8.25).
+fn class_type_parameter_scopes(tree: &SyntaxTree) -> Vec<(usize, usize, HashSet<String>)> {
+    use celox_sv_syntax::{BodyItemKind, ParameterKind};
+    let native = tree.declarations();
+    let mut result = Vec::new();
+    let Ok(items) = body_items(tree) else {
+        return result;
+    };
+    for id in items {
+        if !matches!(&native.body_item(id).kind, BodyItemKind::Unconverted { category, .. } if category == "class")
+        {
+            continue;
+        }
+        let owner = native.body_item(id).tokens;
+        for class in native
+            .classes
+            .iter()
+            .filter(|class| owner.start <= class.tokens.start && class.tokens.end <= owner.end)
+        {
+            let names: HashSet<String> = class
+                .parameter_ports
+                .iter()
+                .chain(&class.parameters)
+                .flat_map(|id| &native.parameter_declaration(*id).parameters)
+                .filter(|parameter| matches!(parameter.kind, ParameterKind::Type { .. }))
+                .map(|parameter| normalize_identifier(&parameter.name.spelling))
+                .collect();
+            if names.is_empty() {
+                continue;
+            }
+            result.push((class.tokens.start, class.tokens.end, names.clone()));
+            // Out-of-block definitions have their class's lexical type scope
+            // only within that class's declaring scope (8.24, 8.25.1).
+            let class_scope =
+                super::classes::enclosing_unit(native, class.tokens).map(|unit| unit.tokens);
+            for id in native.subroutine_ids() {
+                let sub = native.subroutine(id);
+                if matches!(&sub.scope[..], [scope] if normalize_identifier(&scope.name.spelling) == normalize_identifier(&class.name.spelling))
+                    && super::classes::enclosing_unit(native, sub.tokens).map(|unit| unit.tokens)
+                        == class_scope
+                {
+                    result.push((sub.tokens.start, sub.tokens.end, names.clone()));
+                }
+            }
+        }
+    }
+    result
 }
 
 fn nested_declarations(tree: &SyntaxTree) -> Vec<(usize, usize, HashSet<String>)> {
@@ -905,6 +1063,21 @@ pub(super) fn resolve_imports(
         // A qualified name names a declaration of the package, or one it
         // exports: `q::x` then denotes the declaration `x` denotes in `q`
         // (IEEE 1800-2023 26.6).
+        // `C::x` names a member of a class `C` that an import makes visible
+        // (IEEE 1800-2023 8.23, 26.3).
+        if packages.get(package_name).is_none()
+            && (imports
+                .explicit
+                .iter()
+                .any(|(_, item)| item == package_name)
+                || imports.wildcard.iter().any(|imported| {
+                    packages
+                        .get(imported)
+                        .is_some_and(|imported| imported.provides(package_name).is_some())
+                }))
+        {
+            continue;
+        }
         let package_symbols = package(package_name)?;
         if !package_symbols.declares(name) {
             let target = package_symbols.provides(name).ok_or_else(|| {
@@ -1031,6 +1204,14 @@ pub(super) fn resolve_imports(
     } else {
         unqualified_names(tree)
     };
+    // The scope of `p::x` that names a package refers to no item.
+    let qualifiers = qualifier_offsets(tree);
+    referenced.retain(|name, offsets| {
+        if packages.get(name).is_some() {
+            offsets.retain(|offset| !qualifiers.contains(offset));
+        }
+        !offsets.is_empty()
+    });
     // A reference in a generate block is looked up in that block and the
     // blocks around it first (IEEE 1800-2023 26.3): the references the
     // imports of a block bind, by name, with the block and the declaration.

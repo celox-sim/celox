@@ -18,7 +18,9 @@ pub type SimFunc = unsafe extern "C" fn(*mut u8) -> u64;
 #[derive(Clone, Copy)]
 pub struct EventRef {
     pub func: SimFunc,
-    pub comb_apply_func: SimFunc,
+    /// The event's combined comb-then-FF program, or `None` when the tick
+    /// runs the shared comb function and then `func`.
+    pub comb_apply_func: Option<SimFunc>,
     pub addr: AbsoluteAddr,
     pub id: usize,
 }
@@ -27,7 +29,10 @@ impl std::fmt::Debug for EventRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EventRef")
             .field("func", &(self.func as usize))
-            .field("comb_apply_func", &(self.comb_apply_func as usize))
+            .field(
+                "comb_apply_func",
+                &self.comb_apply_func.map(|func| func as usize),
+            )
             .field("addr", &self.addr)
             .field("id", &self.id)
             .finish()
@@ -495,7 +500,7 @@ impl JitBackend {
                     *clock,
                     EventRef {
                         func,
-                        comb_apply_func: func,
+                        comb_apply_func: None,
                         addr: *clock,
                         id,
                     },
@@ -530,14 +535,16 @@ impl JitBackend {
         // Deferred testbench ticks require the scheduler's combined comb/FF
         // program. Calling independently compiled comb and FF functions can
         // observe a different pre-edge snapshot around reset and NBA regions.
-        for (clock, ff_units) in &sir.sir.eval_apply_ffs {
+        for clock in sir.sir.eval_apply_ffs.keys() {
             let mut combined_units;
-            let units = if let Some(fused) = sir.sir.eval_comb_apply_ffs.get(clock) {
-                fused.as_slice()
-            } else {
-                combined_units = sir.sir.eval_comb.clone();
-                combined_units.extend(ff_units.iter().cloned());
-                combined_units.as_slice()
+            let units = match sir.sir.comb_apply(clock) {
+                Some(celox_sir::CombApply::Fused(fused)) => fused,
+                Some(celox_sir::CombApply::Merged { comb, ff }) => {
+                    combined_units = comb.to_vec();
+                    combined_units.extend(ff.iter().cloned());
+                    combined_units.as_slice()
+                }
+                Some(celox_sir::CombApply::Shared) | None => continue,
             };
             let ptr = engine
                 .compile_units(units, None, None, None)
@@ -546,7 +553,7 @@ impl JitBackend {
             event_map
                 .get_mut(clock)
                 .expect("compiled clock event is present")
-                .comb_apply_func = comb_apply_func;
+                .comb_apply_func = Some(comb_apply_func);
         }
 
         let process_funcs = sir
@@ -905,7 +912,18 @@ impl JitBackend {
                 |backend| backend.run_sim_func(comb_func),
             );
         }
-        self.run_sim_func(self.comb_func)
+        let comb_func = self.comb_func;
+        if self.shared.layout.settle_check() {
+            let shared = Arc::clone(&self.shared);
+            return crate::settle::run_checked(
+                self,
+                shared.layout.settle.as_ref().expect("checked settle"),
+                shared.layout.total_size,
+                |backend| backend.memory.as_mut_bytes(),
+                |backend| backend.run_sim_func(comb_func),
+            );
+        }
+        self.run_sim_func(comb_func)
     }
 
     /// Resolves an `AbsoluteAddr` into a performance-optimized [`SignalRef`].
@@ -1155,6 +1173,10 @@ impl JitBackend {
     /// Settle combinational logic and evaluate one event, letting partitioned
     /// phases compete with the fused sequential function.
     pub fn eval_comb_apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
+        let Some(comb_apply_func) = event.comb_apply_func else {
+            self.eval_comb()?;
+            return self.eval_apply_ff_at(event);
+        };
         let fused = self.shared.lane_kernels.as_ref().is_some_and(|kernels| {
             kernels
                 .fused
@@ -1173,7 +1195,7 @@ impl JitBackend {
                 super::lanes::LaneKernelSlot::Fused(event.id),
                 super::lanes::kernel_selection(&shared.options),
                 |backend| backend.run_lane_kernel(kernels.lanes, kernel),
-                |backend| backend.run_sim_func(event.comb_apply_func),
+                |backend| backend.run_sim_func(comb_apply_func),
             );
         }
         if self.has_lane_comb_kernel() || self.has_lane_event_kernel(&event) {
@@ -1187,10 +1209,10 @@ impl JitBackend {
                     backend.eval_comb()?;
                     backend.eval_apply_ff_at(event)
                 },
-                |backend| backend.run_sim_func(event.comb_apply_func),
+                |backend| backend.run_sim_func(comb_apply_func),
             );
         }
-        self.run_sim_func(event.comb_apply_func)
+        self.run_sim_func(comb_apply_func)
     }
 
     pub fn eval_only_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
@@ -1219,7 +1241,9 @@ impl JitBackend {
     /// Returns a mutable raw pointer to the JIT memory and its total size in bytes.
     pub fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         let size = self.shared.layout.merged_total_size;
-        (self.memory.expose_mut_ptr() as *mut u8, size)
+        let view = (self.memory.expose_mut_ptr() as *mut u8, size);
+        celox_runtime::backend::SimBackend::mark_settle_untracked(self);
+        view
     }
 
     pub fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
@@ -1404,6 +1428,10 @@ impl super::SimBackend for JitBackend {
 
     fn write_memory(&mut self, offset: usize, bytes: &[u8]) {
         self.memory.write_bytes(offset, bytes);
+        self.mark_settle_range(offset, bytes.len());
+        if !self.memory.vcd_tracking_enabled() {
+            self.mark_settle_untracked();
+        }
     }
 
     fn vcd_tracking_enabled(&self) -> bool {
@@ -1420,6 +1448,13 @@ impl super::SimBackend for JitBackend {
 
     fn set_comb_capture_event_enabled(&mut self, active_sites: &[bool]) {
         self.set_comb_capture_event_enabled(active_sites);
+    }
+
+    fn comb_capture_event_enabled(&self) -> Vec<bool> {
+        self.comb_capture_enabled
+            .iter()
+            .map(|&enabled| enabled != 0)
+            .collect()
     }
 
     fn stable_region_size(&self) -> usize {

@@ -105,3 +105,281 @@
   (modify (set a 10))
   (assert_eq y 15)
   (assert_eq z 5))
+
+; In two-state mode, `always @*` and a sensitivity list run once at time
+; zero, after the initial blocks, as Verilator settles them: C906's memory
+; enable would otherwise start as a real 0, a write enable (#2021). IEEE
+; 1800-2023 9.2.2.2 has them wait for a change, which four-state mode keeps.
+(case two_state_sensitivity_lists_run_at_time_zero
+  (tags two_state_time_zero_settle)
+  (source "time_zero.sv" #"
+        module Top;
+            localparam logic [1:0] READ = 2'd1;
+            logic [1:0] cur_state;
+            logic wvalid, wready;
+            logic [15:0] wstrb;
+            logic cen;
+            logic [15:0] wen;
+            logic [3:0] st = 4'd2;
+            logic hit;
+            always @(cur_state or wvalid or wready or wstrb[15:0]) begin
+                if (cur_state == READ) begin
+                    cen = 1'b0;
+                    wen = 16'hffff;
+                end else if (wvalid && wready) begin
+                    cen = 1'b0;
+                    wen = ~wstrb;
+                end else begin
+                    cen = 1'b1;
+                    wen = 16'hffff;
+                end
+            end
+            always @* hit = (st == 4'd2);
+            initial begin
+                #1 $display("%b %h %b", cen, wen, hit);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "1 ffff 1\n"))
+
+; Two-state mode also runs a sensitivity list that does not name exactly the
+; reads of its statement once at time zero, after the initial blocks, and then
+; waits at it, as Verilator settles it (#2026): `y` lists a variable it does
+; not read, and `z` reads `b` without listing it.
+(case two_state_other_sensitivity_lists_run_at_time_zero
+  (tags two_state_time_zero_settle)
+  (source "time_zero_lists.sv" #"
+        module Top;
+            logic [3:0] a, b;
+            logic [3:0] y, z;
+            always @(a or b) y = a + 4'd1;
+            always @(a) z = a + b + 4'd2;
+            initial begin
+                b = 4'd5;
+                #1 $display("%0d %0d", y, z);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "1 7\n"))
+
+; A sensitivity list that covers every bit its statement reads, through
+; part-selects narrower than the variables, simulates like `always @*` when
+; running the statement more often is unobservable: no side effects, no
+; feedback, and each variable stored at most once per run (#2079). The
+; untimed harness builds a `Simulator`, which runs no processes.
+(case covering_sensitivity_lists_settle_like_a_wildcard
+  (source "covering_lists.sv" #"
+        module Top(input logic [7:0] x, input logic [3:0] s,
+                   output logic [2:0] y, output logic [3:0] z);
+            always @(x[2:0]) y = x[2:0] + 3'd1;
+            always @(x[7:4] or s) begin
+                case (s)
+                    4'd0: z = x[7:4];
+                    default: z = ~x[7:4];
+                endcase
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify (set x 0x15) (set s 0))
+  (assert_eq y 6) (assert_eq z 1)
+  (modify (set x 0x35))
+  (assert_eq y 6) (assert_eq z 3)
+  (modify (set x 0x36) (set s 1))
+  (assert_eq y 7) (assert_eq z 0xc))
+
+(case covering_sensitivity_lists_settle_like_a_wildcard_in_four_state
+  (source "covering_lists.sv" #"
+        module Top(input logic [7:0] x, input logic [3:0] s,
+                   output logic [2:0] y, output logic [3:0] z);
+            always @(x[2:0]) y = x[2:0] + 3'd1;
+            always @(x[7:4] or s) begin
+                case (s)
+                    4'd0: z = x[7:4];
+                    default: z = ~x[7:4];
+                endcase
+            end
+        endmodule
+    "#)
+  (top Top)
+  (four_state)
+  (modify (set x 0x15) (set s 0))
+  (assert_eq y 6) (assert_eq z 1)
+  (modify (set x 0x35))
+  (assert_eq y 6) (assert_eq z 3)
+  (modify (set x 0x36) (set s 1))
+  (assert_eq y 7) (assert_eq z 0xc))
+
+; A block with a covering list that stores a variable twice per run stays a
+; process: run on a change of an unlisted bit, it would pulse `p` and wake
+; the edge waiter (4.3, 9.4.2).
+(case multi_store_blocks_with_covering_lists_stay_processes
+  (source "multi_store_list.sv" #"
+        module Top;
+            logic [7:0] x;
+            logic p;
+            int n;
+            always @(x[0]) begin
+                p = 1'b0;
+                if (x[0]) p = 1'b1;
+            end
+            initial n = 0;
+            always @(posedge p) n = n + 1;
+            initial begin
+                x = 8'h15;
+                #1 $display("%b %0d", p, n);
+                x = 8'h35;
+                #1 $display("%b %0d", p, n);
+                x = 8'h36;
+                #1 $display("%b %0d", p, n);
+                $finish;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "1 1\n1 1\n0 1\n"))
+
+
+(case settles_feedback_through_chained_concat
+  (source "chained_concat.sv" #"
+    module Top(input logic a, s, output wire x, output wire [2:0] w);
+      wire [1:0] v; assign v = {a, x}; assign w = {v, 1'b0}; assign x = w[2];
+    endmodule
+  "#)
+  (top Top)
+  (modify (set s 1))
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1))
+  (assert_eq x 1)
+  (assert_eq w 6)
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+)
+
+(case settles_feedback_through_chained_mux
+  (source "chained_mux.sv" #"
+    module Top(input logic a, s, output wire x, output wire [1:0] w);
+      wire [1:0] v; assign v = {a, x}; assign w = s ? v : 2'b0; assign x = w[1];
+    endmodule
+  "#)
+  (top Top)
+  (modify (set s 1))
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1))
+  (assert_eq x 1)
+  (assert_eq w 3)
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1) (set s 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set s 1))
+  (assert_eq x 1)
+)
+
+(case settles_feedback_through_chained_qspi
+  (source "chained_qspi.sv" #"
+    module Top(input logic a, s, output wire x, output wire [2:0] w);
+      wire [1:0] v; wire [2:0] c, m; assign v = {a, x}; assign c = {v, x}; assign m = s ? c : 3'b0; assign w = m | 3'b0; assign x = w[2];
+    endmodule
+  "#)
+  (top Top)
+  (modify (set s 1))
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1))
+  (assert_eq x 1)
+  (assert_eq w 7)
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1) (set s 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set s 1))
+  (assert_eq x 1)
+)
+
+(case settles_feedback_through_chained_concat_four_state
+  (source "chained_concat.sv" #"
+    module Top(input logic a, s, output wire x, output wire [2:0] w);
+      wire [1:0] v; assign v = {a, x}; assign w = {v, 1'b0}; assign x = w[2];
+    endmodule
+  "#)
+  (top Top)
+  (four_state)
+  (modify (set s 1))
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1))
+  (assert_eq x 1)
+  (assert_eq w 6)
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+)
+
+(case settles_feedback_through_chained_mux_four_state
+  (source "chained_mux.sv" #"
+    module Top(input logic a, s, output wire x, output wire [1:0] w);
+      wire [1:0] v; assign v = {a, x}; assign w = s ? v : 2'b0; assign x = w[1];
+    endmodule
+  "#)
+  (top Top)
+  (four_state)
+  (modify (set s 1))
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1))
+  (assert_eq x 1)
+  (assert_eq w 3)
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1) (set s 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set s 1))
+  (assert_eq x 1)
+)
+
+(case settles_feedback_through_chained_qspi_four_state
+  (source "chained_qspi.sv" #"
+    module Top(input logic a, s, output wire x, output wire [2:0] w);
+      wire [1:0] v; wire [2:0] c, m; assign v = {a, x}; assign c = {v, x}; assign m = s ? c : 3'b0; assign w = m | 3'b0; assign x = w[2];
+    endmodule
+  "#)
+  (top Top)
+  (four_state)
+  (modify (set s 1))
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1))
+  (assert_eq x 1)
+  (assert_eq w 7)
+  (modify (set a 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set a 1) (set s 0))
+  (assert_eq x 0)
+  (assert_eq w 0)
+  (modify (set s 1))
+  (assert_eq x 1)
+)

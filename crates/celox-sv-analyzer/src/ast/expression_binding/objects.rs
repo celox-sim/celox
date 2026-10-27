@@ -35,10 +35,22 @@ pub(in crate::ast) fn native_class(
         dimension,
     } = &expression.kind
         && matches!(dimension.kind, celox_sv_syntax::DimensionKind::Index(_))
-        && let ExprKind::Name(name) = &native.expression(ungroup(*expression, native)).kind
     {
+        if let Some(ty) = containers::native_type(*expression, native, tree, dimensions)
+            .ok()
+            .flatten()
+        {
+            return ty.element.class().map(str::to_owned);
+        }
+        let ExprKind::Name(name) = &native.expression(ungroup(*expression, native)).kind else {
+            return None;
+        };
         let ty = dimensions.get(&instances::normalize_identifier(&name.spelling))?;
-        return ty.class.clone().filter(|_| !ty.unpacked.is_empty());
+        return ty
+            .container
+            .as_ref()
+            .and_then(|ty| ty.element.class().map(str::to_owned))
+            .or_else(|| ty.class.clone().filter(|_| !ty.unpacked.is_empty()));
     }
     if let ExprKind::Name(name) = &expression.kind {
         let name = instances::normalize_identifier(&name.spelling);
@@ -51,6 +63,38 @@ pub(in crate::ast) fn native_class(
     }
     let (property, _) = property(tree, id, native, dimensions).ok()??;
     property.r#type.class().map(str::to_owned)
+}
+
+/// Access depends on the lexical class, not the class of the receiver (8.18).
+pub(in crate::ast) fn check_access(
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    owner: &str,
+    name: &str,
+    local: bool,
+    protected: bool,
+) -> Converted<()> {
+    if !local && !protected {
+        return Ok(());
+    }
+    if let Some(scope) = dimensions.class_scope.as_deref() {
+        if scope == owner
+            || (!local
+                && class(tree, dimensions, scope)?.derives_from(
+                    tree,
+                    owner,
+                    &dimensions.const_env,
+                    &dimensions.type_aliases,
+                ))
+        {
+            return Ok(());
+        }
+    }
+    Err(AnalyzerError::InaccessibleClassMember {
+        owner: owner.to_owned(),
+        name: name.to_owned(),
+        visibility: if local { "local" } else { "protected" },
+    })
 }
 
 /// The class whose method is being bound, whose properties and methods
@@ -76,18 +120,125 @@ fn is_super(id: ExprId, native: &Declarations) -> bool {
         ExprKind::Name(name) if name.spelling == "super")
 }
 
-/// The class that native expression `id` names, as the scope of `C::name`.
+/// The class that native expression `id` names, as the scope of `C::name`:
+/// a class, or the specialization that a parameter value assignment or the
+/// defaults of a parameterized class make (IEEE 1800-2023 8.25.1).
 fn named_class(
     tree: &AnalysisContext<'_>,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
-) -> Option<String> {
-    let ExprKind::Name(name) = &native.expression(ungroup(id, native)).kind else {
-        return None;
+) -> Converted<Option<String>> {
+    let (name, arguments) = match &native.expression(ungroup(id, native)).kind {
+        // A class of a package, `p::C` (IEEE 1800-2023 26.3).
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "::" => {
+            let ExprKind::Name(package) = &native.expression(*expression).kind else {
+                return Ok(None);
+            };
+            let class = scope::qualified_name(
+                &tree.state,
+                &instances::normalize_identifier(&package.spelling),
+                &instances::normalize_identifier(&name.spelling),
+            );
+            // A typedef of the package may name a class or a specialization.
+            if let Some(aliased) = dimensions
+                .type_aliases
+                .get(&class)
+                .and_then(|ty| ty.class().map(str::to_owned))
+            {
+                return Ok(Some(aliased));
+            }
+            if classes::handle_type(tree, &class).is_some() {
+                return Ok(Some(class));
+            }
+            // Inside its package, `p::C` is a name of the package itself,
+            // whose classes are declared under their qualified names.
+            return Ok(classes::resolve(tree, &class)
+                .filter(|class| classes::handle_type(tree, class).is_some()));
+        }
+        ExprKind::Name(name) => (name, None),
+        ExprKind::Parameterized {
+            expression,
+            arguments,
+        } => match &native.expression(*expression).kind {
+            ExprKind::Name(name) => (name, Some(&arguments[..])),
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
     };
     let name = instances::normalize_identifier(&name.spelling);
-    (dimensions.get(&name).is_none() && classes::handle_type(tree, &name).is_some()).then_some(name)
+    if dimensions.get(&name).is_some() {
+        return Ok(None);
+    }
+    // Inside a parameterized class and its out-of-block methods, its name
+    // alone refers to the specialization.
+    if arguments.is_none()
+        && let Some(class) = dimensions
+            .type_aliases
+            .get(&classes::specializations::scope_key(&name))
+            .or_else(|| {
+                // A class of a package is declared under its qualified name.
+                let class = classes::resolve(tree, &name)?;
+                dimensions
+                    .type_aliases
+                    .get(&classes::specializations::scope_key(&class))
+            })
+            .or_else(|| dimensions.type_aliases.get(&name))
+            .and_then(|ty| ty.class().map(str::to_owned))
+    {
+        return Ok(Some(class));
+    }
+    let Some(name) = classes::resolve(tree, &name) else {
+        return Ok(None);
+    };
+    if !classes::is_parameterized(tree, &name) {
+        if arguments.is_some_and(|arguments| !arguments.is_empty()) {
+            return Err(unsupported(format!(
+                "parameter value assignment of class `{name}`, which has no parameters"
+            )));
+        }
+        return Ok(Some(name));
+    }
+    // Elsewhere a parameterized class needs a specialization, `C#()` for
+    // the default one.
+    let Some(arguments) = arguments else {
+        return Err(AnalyzerError::UnspecializedClassScope { class: name });
+    };
+    classes::specializations::specialize(tree, &name, arguments, dimensions).map(Some)
+}
+
+/// The value of the class parameter that native expression `id` names,
+/// `h.p` or `C::p` (IEEE 1800-2023 8.25), as a literal.
+pub(in crate::ast) fn class_parameter(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<Expr>> {
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(ungroup(id, native)).kind
+    else {
+        return Ok(None);
+    };
+    let class = match separator.as_str() {
+        "." => native_class(tree, *expression, native, dimensions),
+        "::" => named_class(tree, *expression, native, dimensions)?,
+        _ => None,
+    };
+    Ok(class.and_then(|class| {
+        classes::specializations::parameter(
+            tree,
+            &class,
+            &instances::normalize_identifier(&name.spelling),
+        )
+    }))
 }
 
 /// The variable of the static property that native expression `id` names:
@@ -109,7 +260,47 @@ pub(in crate::ast) fn static_property(
     };
     let class_name = match separator.as_str() {
         "." => native_class(tree, *expression, native, dimensions),
-        "::" => named_class(tree, *expression, native, dimensions),
+        "::" => named_class(tree, *expression, native, dimensions)?,
+        _ => None,
+    };
+    let Some(class_name) = class_name else {
+        return Ok(None);
+    };
+    let class = class(tree, dimensions, &class_name)?;
+    let Some(property) = class.static_property(&instances::normalize_identifier(&name.spelling))
+    else {
+        return Ok(None);
+    };
+    check_access(
+        tree,
+        dimensions,
+        &property.owner,
+        &property.name,
+        property.local,
+        property.protected,
+    )?;
+    Ok(Some(property.variable.clone()))
+}
+
+/// The class of the handle that the static property native expression `id`
+/// names holds, `h.p` or `C::p`.
+fn static_property_class(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<String>> {
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(ungroup(id, native)).kind
+    else {
+        return Ok(None);
+    };
+    let class_name = match separator.as_str() {
+        "." => native_class(tree, *expression, native, dimensions),
+        "::" => named_class(tree, *expression, native, dimensions)?,
         _ => None,
     };
     let Some(class_name) = class_name else {
@@ -117,7 +308,7 @@ pub(in crate::ast) fn static_property(
     };
     Ok(class(tree, dimensions, &class_name)?
         .static_property(&instances::normalize_identifier(&name.spelling))
-        .map(|property| property.variable.clone()))
+        .and_then(|property| property.r#type.class().map(str::to_owned)))
 }
 
 /// The property that native expression `id` names, `h.p` or an unqualified
@@ -157,9 +348,28 @@ pub(in crate::ast) fn property(
         _ => return Ok(None),
     };
     let class = class(tree, dimensions, &class_name)?;
-    let Some(property) = class.property(&instances::normalize_identifier(&name.spelling)) else {
+    let name = instances::normalize_identifier(&name.spelling);
+    let Some(property) = class.property(&name) else {
+        if let Some(property) = class.static_property(&name) {
+            check_access(
+                tree,
+                dimensions,
+                &property.owner,
+                &property.name,
+                property.local,
+                property.protected,
+            )?;
+        }
         return Ok(None);
     };
+    check_access(
+        tree,
+        dimensions,
+        &property.owner,
+        &property.name,
+        property.local,
+        property.protected,
+    )?;
     if receiver.is_none() && dimensions.get(THIS).is_none() {
         return Err(unsupported(format!(
             "non-static property `{}` in a static method",
@@ -202,8 +412,26 @@ pub(in crate::ast) fn unqualified_property(
     };
     let class = class(tree, dimensions, &class_name)?;
     let Some(property) = class.property(name) else {
+        if let Some(property) = class.static_property(name) {
+            check_access(
+                tree,
+                dimensions,
+                &property.owner,
+                &property.name,
+                property.local,
+                property.protected,
+            )?;
+        }
         return Ok(None);
     };
+    check_access(
+        tree,
+        dimensions,
+        &property.owner,
+        &property.name,
+        property.local,
+        property.protected,
+    )?;
     if dimensions.get(THIS).is_none() {
         return Err(unsupported(format!(
             "non-static property `{name}` in a static method"
@@ -253,7 +481,7 @@ pub(in crate::ast) fn method(
             expression,
             separator,
             name,
-        } if separator == "::" => match named_class(tree, *expression, native, dimensions) {
+        } if separator == "::" => match named_class(tree, *expression, native, dimensions)? {
             Some(class) => (class, name, Receiver::Static),
             None => return Ok(None),
         },
@@ -289,7 +517,7 @@ pub(in crate::ast) fn method(
             ));
         }
         if method_name == "randomize" {
-            class.check_randomize(tree)?;
+            class.check_randomize()?;
         }
         return Ok(Some((
             Class::subroutine_name(&class_name, &method_name),
@@ -300,6 +528,14 @@ pub(in crate::ast) fn method(
     let Some(method) = class.method(&method_name) else {
         return Ok(None);
     };
+    check_access(
+        tree,
+        dimensions,
+        &method.owner,
+        &method.name,
+        method.qualifiers.local,
+        method.qualifiers.protected,
+    )?;
     if through_super && method.is_pure() {
         return Err(unsupported(format!(
             "pure virtual method `{}` called through `super`",
@@ -325,11 +561,7 @@ pub(in crate::ast) fn method(
             receiver => receiver,
         }
     };
-    let formals = native
-        .subroutine(method.native)
-        .ports
-        .as_ref()
-        .map_or(0, Vec::len);
+    let formals = method.formals.len();
     let subroutine = if method.is_virtual && !through_super && receiver != Receiver::Static {
         Class::dispatcher_name(&method.owner, &method.name)
     } else {
@@ -453,6 +685,29 @@ pub(in crate::ast) fn constructor(
     dimensions: &PackedDimensions,
     class_name: &str,
 ) -> Converted<Option<Expr>> {
+    // `new h` copies the properties of the object of `h` into a new object
+    // of its class; handles are copied, not the objects they refer to (IEEE
+    // 1800-2023 8.12).
+    if let ExprKind::Copy(source) = &native.expression(ungroup(id, native)).kind {
+        let source_class = match native_class(tree, *source, native, dimensions) {
+            Some(class) => Some(class),
+            None => static_property_class(tree, *source, native, dimensions)?,
+        };
+        let Some(source_class) = source_class else {
+            return Err(unsupported(
+                "shallow copy of a value that is not a class handle",
+            ));
+        };
+        if !derives_from(tree, dimensions, &source_class, class_name)? {
+            return Err(AnalyzerError::IncompatibleClassHandle {
+                context: "shallow copy".to_owned(),
+                actual: source_class,
+                target: class_name.to_owned(),
+            });
+        }
+        let handle = bind_value(*source, native, tree, dimensions, None)?;
+        return Ok(Some(classes::object_call(ObjectOp::Copy, vec![handle])));
+    }
     let (callee, arguments): (ExprId, &[celox_sv_syntax::Argument]) =
         match &native.expression(ungroup(id, native)).kind {
             ExprKind::Call {
@@ -468,7 +723,7 @@ pub(in crate::ast) fn constructor(
             separator,
             name,
         } if separator == "::" && name.spelling == "new" => {
-            match named_class(tree, *expression, native, dimensions) {
+            match named_class(tree, *expression, native, dimensions)? {
                 Some(class) => {
                     if !derives_from(tree, dimensions, &class, class_name)? {
                         return Err(AnalyzerError::IncompatibleClassHandle {
@@ -485,35 +740,38 @@ pub(in crate::ast) fn constructor(
         _ => return Ok(None),
     };
     let class = class(tree, dimensions, &class_name)?;
+    if let Some(method) = class.method("new") {
+        check_access(
+            tree,
+            dimensions,
+            &method.owner,
+            &method.name,
+            method.qualifiers.local,
+            method.qualifiers.protected,
+        )?;
+    }
     if class.is_abstract {
         return Err(unsupported(format!(
             "object of abstract class `{class_name}`"
         )));
     }
-    let formals = class.constructor_formals(native);
     let mut args = vec![Some(class.allocation())];
-    for argument in arguments {
-        if argument.name.is_some() {
-            return Err(unsupported("named constructor argument"));
-        }
+    let (actuals, order) = class.constructor_arguments(arguments)?;
+    for actual in actuals {
         args.push(
-            argument
-                .value
+            actual
                 .map(|value| bind_value(value, native, tree, dimensions, None))
                 .transpose()?,
         );
     }
-    if args.len() > formals + 1 {
-        return Err(unsupported(format!(
-            "constructor of class `{class_name}` with {} arguments",
-            args.len() - 1
-        )));
-    }
-    args.resize(formals + 1, None);
     Ok(Some(Expr::Call {
         callee: Callee::Subroutine(Class::subroutine_name(&class_name, "new")),
         args,
-        arg_order: Vec::new(),
+        // The allocation is passed first; the actuals are evaluated in the
+        // order they are written (13.5.4).
+        arg_order: std::iter::once(0)
+            .chain(order.into_iter().map(|index| index + 1))
+            .collect(),
     }))
 }
 
@@ -576,6 +834,123 @@ pub(super) fn random_selection(
         "{}'b{}",
         bits.len(),
         bits.into_iter().rev().collect::<String>()
+    )))
+}
+
+/// Constraint block modes are independent of member rand_mode and inline constraints (18.9).
+pub(in crate::ast) fn constraint_mode_call(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+    allow_set: bool,
+) -> Converted<Option<Expr>> {
+    let (callee, args) = match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Call {
+            expression,
+            arguments,
+        } => (*expression, arguments.as_slice()),
+        _ => (id, &[][..]),
+    };
+    let (owner, block, handle) = match &native.expression(ungroup(callee, native)).kind {
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "." && name.spelling == "constraint_mode" => {
+            if let Some(owner) = native_class(tree, *expression, native, dimensions) {
+                (
+                    owner,
+                    None,
+                    receiver(tree, Some(*expression), native, dimensions)?,
+                )
+            } else {
+                match &native.expression(ungroup(*expression, native)).kind {
+                    ExprKind::Member {
+                        expression: object,
+                        separator,
+                        name,
+                    } if separator == "." => {
+                        let Some(owner) = native_class(tree, *object, native, dimensions) else {
+                            return Ok(None);
+                        };
+                        (
+                            owner,
+                            Some(name.spelling.clone()),
+                            receiver(tree, Some(*object), native, dimensions)?,
+                        )
+                    }
+                    ExprKind::Name(name)
+                        if scope_class(dimensions).is_some()
+                            && dimensions.get(THIS).is_some()
+                            && dimensions.get(&name.spelling).is_none() =>
+                    {
+                        (
+                            scope_class(dimensions).unwrap(),
+                            Some(name.spelling.clone()),
+                            this(),
+                        )
+                    }
+                    _ => return Ok(None),
+                }
+            }
+        }
+        ExprKind::Name(name)
+            if name.spelling == "constraint_mode"
+                && dimensions.get("constraint_mode").is_none() =>
+        {
+            let Some(owner) = scope_class(dimensions) else {
+                return Ok(None);
+            };
+            if dimensions.get(THIS).is_none() {
+                return Err(unsupported("constraint_mode requires an object receiver"));
+            }
+            (owner, None, this())
+        }
+        _ => return Ok(None),
+    };
+    let class = class(tree, dimensions, &owner)?;
+    if class.constraints.iter().any(|(_, block)| {
+        block
+            .as_ref()
+            .is_err_and(|reason| reason == "unsupported constraint block form")
+    }) {
+        return Err(unsupported(
+            "constraint_mode for external or static constraint blocks",
+        ));
+    }
+    let index = block
+        .map(|name| {
+            class
+                .constraints
+                .iter()
+                .position(|(block, _)| *block == name)
+                .map(|index| index as u32)
+                .ok_or_else(|| unsupported(format!("unknown constraint block {name}")))
+        })
+        .transpose()?;
+    if args.is_empty() {
+        let index = index
+            .ok_or_else(|| unsupported("constraint_mode getter requires one named constraint"))?;
+        return Ok(Some(classes::object_call(
+            ObjectOp::ConstraintModeGet(index),
+            vec![handle],
+        )));
+    }
+    if !allow_set {
+        return Err(unsupported(
+            "constraint_mode setter is void and cannot be used as a value",
+        ));
+    }
+    if args.len() != 1 || args[0].name.is_some() || args[0].value.is_none() {
+        return Err(unsupported(
+            "constraint_mode setter requires one on_off argument",
+        ));
+    }
+    let enabled = bind_value(args[0].value.unwrap(), native, tree, dimensions, None)?;
+    Ok(Some(classes::object_call(
+        ObjectOp::ConstraintModeSet(index),
+        vec![handle, enabled],
     )))
 }
 
@@ -674,28 +1049,160 @@ fn check_random_access(
     dimensions: &PackedDimensions,
     property: &classes::Property,
 ) -> Converted<()> {
-    let scope = scope_class(dimensions);
-    let accessible = if property.local {
-        scope.as_deref() == Some(&property.owner)
-    } else if property.protected {
-        scope
-            .and_then(|name| class(tree, dimensions, &name).ok())
-            .is_some_and(|class| {
-                class.derives_from(
-                    tree,
-                    &property.owner,
-                    &dimensions.const_env,
-                    &dimensions.type_aliases,
-                )
-            })
-    } else {
-        true
+    check_access(
+        tree,
+        dimensions,
+        &property.owner,
+        &property.name,
+        property.local,
+        property.protected,
+    )
+}
+
+pub(super) fn randomize_with(
+    tree: &AnalysisContext<'_>,
+    expression: ExprId,
+    constraints: Option<&[ExprId]>,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Expr> {
+    let (callee, arguments) = match &native.expression(ungroup(expression, native)).kind {
+        ExprKind::Call {
+            expression,
+            arguments,
+        } => (*expression, arguments.as_slice()),
+        _ => (expression, &[][..]),
     };
-    if !accessible {
-        return Err(unsupported(format!(
-            "randomization access to non-public property `{}`",
-            property.name
-        )));
+    let (method_name, _, receiver) = method(tree, callee, native, dimensions)?
+        .filter(|(name, _, _)| name.ends_with("::randomize"))
+        .ok_or_else(|| unsupported("inline constraints require class randomize"))?;
+    let owner = method_name.strip_suffix("::randomize").unwrap();
+    let class = class(tree, dimensions, owner)?;
+    // Inline constraints need the solver even on otherwise unconstrained classes.
+    class.constraint_program()?;
+    let constraint_ids = constraints.ok_or_else(|| unsupported("inline constraint form"))?;
+    let mut inputs = HashMap::default();
+    let mut input_types = Vec::new();
+    let mut input_values = Vec::new();
+    let mut pending = constraint_ids.to_vec();
+    while let Some(id) = pending.pop() {
+        let candidate = match &native.expression(id).kind {
+            ExprKind::Name(name) => {
+                let name = instances::normalize_identifier(&name.spelling);
+                if class.properties.iter().any(|p| p.name == name) {
+                    None
+                } else if class.statics.iter().any(|p| p.name == name) {
+                    return Err(unsupported("static properties in inline constraints"));
+                } else {
+                    Some((name.clone(), name))
+                }
+            }
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "::"
+                && matches!(&native.expression(*expression).kind, ExprKind::Name(root) if root.spelling == "local") =>
+            {
+                let name = instances::normalize_identifier(&name.spelling);
+                Some((format!("local::{name}"), name))
+            }
+            ExprKind::Group(id) | ExprKind::Unary { expression: id, .. } => {
+                pending.push(*id);
+                None
+            }
+            ExprKind::Binary { left, right, .. } => {
+                pending.extend([*right, *left]);
+                None
+            }
+            ExprKind::Set(items) => {
+                for item in items {
+                    match item.kind {
+                        celox_sv_syntax::DimensionKind::Index(id) => pending.push(id),
+                        celox_sv_syntax::DimensionKind::Range { left, right } => {
+                            pending.extend([right, left])
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            _ => None,
+        };
+        let Some((key, name)) = candidate else {
+            continue;
+        };
+        if inputs.contains_key(&key) {
+            continue;
+        }
+        let variable = dimensions
+            .get(&name)
+            .ok_or_else(|| unsupported(format!("inline local variable `{name}`")))?;
+        if variable.real
+            || variable.string
+            || variable.class.is_some()
+            || variable.container.is_some()
+            || !variable.unpacked.is_empty()
+            || !variable.is_2state
+        {
+            return Err(unsupported(
+                "inline inputs require two-state scalar variables",
+            ));
+        }
+        let value = Expr::Ident(name);
+        let width = expr_static_width(&tree.state, &value, dimensions)
+            .filter(|width| (1..=64).contains(width))
+            .ok_or_else(|| unsupported("inline input width"))?;
+        let mut ty = classes::unsigned_type(width);
+        ty.is_signed = variable.signed;
+        inputs.insert(key, (input_types.len(), width as u32, variable.signed));
+        input_types.push(ty);
+        input_values.push(Some(value));
     }
-    Ok(())
+    let constraints = constraint_ids
+        .iter()
+        .map(|&id| {
+            classes::constraints::bind_inputs(
+                id,
+                tree,
+                &class.properties,
+                &dimensions.const_env,
+                &inputs,
+            )
+            .map_err(|reason| unsupported(format!("inline constraints: {reason}")))
+        })
+        .collect::<Converted<Vec<_>>>()?;
+    let selection = random_selection(tree, dimensions, &method_name, arguments, native)?;
+    let handle = match receiver {
+        Receiver::Handle(id) => bind_value(id, native, tree, dimensions, None)?,
+        Receiver::This => this(),
+        Receiver::Static => return Err(unsupported("inline randomize object receiver")),
+    };
+    let key = tree.state.next_call_site.get();
+    tree.state.next_call_site.set(key + 1);
+    let inline = classes::constraints::Inline {
+        key,
+        class,
+        constraints,
+        inputs: input_types,
+        dimensions: dimensions.clone(),
+    };
+    let name = inline.name(owner);
+    // Argument evaluation is left-to-right. Prepare the receiver and run its
+    // pre-hook before sampling any caller-scope input. Evaluate the receiver once.
+    let handle = if input_values.is_empty() {
+        handle
+    } else {
+        Expr::Call {
+            callee: Callee::Subroutine(inline.prepare_name(owner)),
+            args: vec![Some(handle), Some(selection.clone())],
+            arg_order: Vec::new(),
+        }
+    };
+    tree.state.inline_randomizations.borrow_mut().push(inline);
+    Ok(Expr::Call {
+        callee: Callee::Subroutine(name),
+        args: [vec![Some(handle), Some(selection)], input_values].concat(),
+        arg_order: Vec::new(),
+    })
 }

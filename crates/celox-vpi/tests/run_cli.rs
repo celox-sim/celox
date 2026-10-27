@@ -335,7 +335,15 @@ fn sv_stop_is_not_reported_as_successful_completion() {
 fn veryl_backends_share_cli_execution_and_opt_in_reports() {
     let source =
         "#[test(Top)] module Top { inst clk: $tb::clock_gen; initial { clk.next(4); $finish(); } }";
-    for backend in ["native", "tiered", "interpreter", "cranelift", "wasm"] {
+    for backend in [
+        "native",
+        "tiered",
+        "interpreter",
+        #[cfg(feature = "cranelift")]
+        "cranelift",
+        #[cfg(feature = "wasm-runtime")]
+        "wasm",
+    ] {
         for four_state in [false, true] {
             let mut args = vec!["--backend", backend, "--threads", "2", "--report"];
             if four_state {
@@ -363,6 +371,25 @@ fn veryl_backends_share_cli_execution_and_opt_in_reports() {
     let output = run(&[("top.veryl", source)], &[]);
     assert!(output.status.success(), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
+}
+
+#[cfg(not(any(
+    all(target_arch = "x86_64", feature = "arm64-codegen"),
+    all(target_arch = "aarch64", feature = "x86_64-codegen")
+)))]
+#[test]
+fn backend_defaults_to_tiered_unless_native_code_is_requested() {
+    let source =
+        "#[test(Top)] module Top { inst clk: $tb::clock_gen; initial { clk.next(4); $finish(); } }";
+    let output = run(&[("top.veryl", source)], &["--report"]);
+    assert!(output.status.success(), "{output:?}");
+    let report = String::from_utf8(output.stdout).unwrap();
+    assert!(report.contains("backend=tiered "), "{report}");
+
+    let output = run(&[("top.veryl", source)], &["--report", "--compile-only"]);
+    assert!(output.status.success(), "{output:?}");
+    let report = String::from_utf8(output.stdout).unwrap();
+    assert!(report.contains("backend=native "), "{report}");
 }
 
 #[cfg(feature = "systemverilog")]
@@ -454,7 +481,15 @@ fn sv_backends_preserve_timed_nba_execution_and_failures() {
             end
         endmodule
     "#;
-    for backend in ["native", "cranelift", "interpreter", "wasm", "tiered"] {
+    for backend in [
+        "native",
+        #[cfg(feature = "cranelift")]
+        "cranelift",
+        "interpreter",
+        #[cfg(feature = "wasm-runtime")]
+        "wasm",
+        "tiered",
+    ] {
         for four_state in [false, true] {
             let mut args = vec!["--backend", backend, "--threads", "2"];
             if four_state {
@@ -599,5 +634,297 @@ fn interface_array_query_policy_flows_through_manifest_and_cli_overrides() {
         } else {
             assert!(stderr.contains("interface_array_query"), "{stderr}");
         }
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn sv_saves_state_files_at_cycles_and_times() {
+    let source = "`timescale 1ns/1ns
+module Top;
+  logic clk = 0;
+  logic [7:0] count = 0;
+  always #5 clk = ~clk;
+  always_ff @(posedge clk) count <= count + 8'd1;
+  initial #100 $finish;
+endmodule
+";
+    let states = tempfile::tempdir().unwrap();
+    let directory = states.path().to_str().unwrap();
+    for backend in ["tiered", "interpreter", "native"] {
+        let output = run(
+            &[("top.sv", source)],
+            &[
+                "--backend",
+                backend,
+                "--save-state-on",
+                "Top.clk",
+                "--save-state-at",
+                "2,5",
+                "--save-state-at-time",
+                "32",
+                "--save-state-dir",
+                directory,
+            ],
+        );
+        assert!(output.status.success(), "{backend}: {output:?}");
+        // Cycle N is the N-th rising edge of clk, at 10N - 5; the file holds
+        // the state after that time step, its nonblocking updates included.
+        for (file, time, count) in [
+            ("Top.clk-2.state", 15, 2),
+            ("Top.clk-5.state", 45, 5),
+            // Time 32 has no activity; the state is that after time 30.
+            ("time-32.state", 30, 3),
+        ] {
+            let dump = std::process::Command::new(env!("CARGO_BIN_EXE_celox"))
+                .args(["state", "dump"])
+                .arg(states.path().join(file))
+                .output()
+                .unwrap();
+            assert!(dump.status.success(), "{backend} {file}: {dump:?}");
+            let text = String::from_utf8_lossy(&dump.stdout);
+            assert!(
+                text.contains(&format!("count[8] = {count:02x}\n")),
+                "{backend} {file}:\n{text}"
+            );
+            assert!(
+                text.contains(&format!("time: {time}\n")),
+                "{backend} {file}:\n{text}"
+            );
+        }
+    }
+    let output = run(
+        &[("top.sv", source)],
+        &[
+            "--save-state-on",
+            "clk",
+            "--save-state-at",
+            "50",
+            "--save-state-dir",
+            directory,
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("before cycle 50"),
+        "{output:?}"
+    );
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn sv_plusargs_reach_the_testbench_in_order() {
+    let source = r#"module Top;
+  int iterations;
+  logic [8*8-1:0] mode;
+  int verbose;
+  initial begin
+    if (!$value$plusargs("iterations=%d", iterations)) $fatal(1, "no iterations");
+    if (!$value$plusargs("mode=%s", mode)) $fatal(1, "no mode");
+    verbose = $test$plusargs("verbose");
+    $display("iterations=%0d mode=%0s verbose=%0d", iterations, mode, verbose);
+  end
+endmodule
+"#;
+    for backend in ["tiered", "interpreter", "native"] {
+        // The first match wins, so the order of the two kinds matters.
+        let output = run(
+            &[("top.sv", source)],
+            &[
+                "+iterations=9",
+                "--plusarg",
+                "+mode=fast",
+                "+iterations=7000",
+                "--plusarg=+verbose",
+                "--backend",
+                backend,
+            ],
+        );
+        assert!(output.status.success(), "{backend}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "iterations=9 mode=fast verbose=1\n",
+            "{backend}"
+        );
+    }
+    let output = run(
+        &[("top.sv", source)],
+        &["--plusarg", "+mode=slow", "+iterations=7000"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "iterations=7000 mode=slow verbose=0\n"
+    );
+}
+
+#[cfg(all(unix, feature = "systemverilog"))]
+#[test]
+fn sigusr1_checkpoints_by_default_and_resumes_in_a_new_process() {
+    use std::{
+        io::BufRead,
+        process::{Child, Stdio},
+        sync::mpsc,
+        time::Duration,
+    };
+    struct Running(Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    for backend in [
+        "interpreter",
+        "native",
+        "tiered",
+        #[cfg(feature = "cranelift")]
+        "cranelift",
+        #[cfg(feature = "wasm-runtime")]
+        "wasm",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("top.sv");
+        let output_path = dir.path().join("output.log");
+        let waveform_path = dir.path().join("trace.vcd");
+        std::fs::write(
+            &source,
+            format!(
+                r#"
+module Top(output longint unsigned count);
+ timeunit 1ns; timeprecision 1ns;
+ int fd = $fopen("{}", "w");
+ initial begin $dumpfile("{}"); $dumpvars(0, Top); end
+ always #1 begin count++; $display("%0d", count); end
+endmodule
+"#,
+                output_path.display(),
+                waveform_path.display()
+            ),
+        )
+        .unwrap();
+        let mut process = Running(
+            Command::new(env!("CARGO_BIN_EXE_celox"))
+                .arg("run")
+                .arg(&source)
+                .args([
+                    "--top",
+                    "Top",
+                    "--backend",
+                    backend,
+                    "--unlimited",
+                    "--save-state-dir",
+                ])
+                .arg(dir.path())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let stderr = process.0.stderr.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stderr).lines() {
+                if tx.send(line.unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        let wait = |message: &str| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            let mut logs = String::new();
+            loop {
+                let line = rx
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or_else(|error| panic!("{backend}: {message}: {error}; {logs}"));
+                logs.push_str(&line);
+                logs.push('\n');
+                if line.contains(message) {
+                    break;
+                }
+            }
+        };
+        wait("SIGUSR1 checkpoint ready");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !waveform_path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waveform did not start: {backend}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid = process.0.id();
+        // SAFETY: signal a live child owned by this test.
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR1) }, 0);
+        wait("saved SIGUSR1 checkpoint");
+        assert!(process.0.try_wait().unwrap().is_none());
+        let checkpoint = dir.path().join(format!("signal-{pid}-1.checkpoint"));
+        let state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&checkpoint).unwrap()).unwrap();
+        let time = state["time"].as_u64().unwrap();
+        // A failed request must leave the old file and running simulation intact.
+        let collision = dir.path().join(format!("signal-{pid}-2.checkpoint"));
+        std::fs::write(&collision, b"keep").unwrap();
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR1) }, 0);
+        wait("cannot save SIGUSR1 checkpoint");
+        assert_eq!(std::fs::read(&collision).unwrap(), b"keep");
+        assert!(process.0.try_wait().unwrap().is_none());
+        drop(process);
+        reader.join().unwrap();
+        std::fs::write(&output_path, b"delivered after checkpoint").unwrap();
+        let original_waveform = std::fs::read(&waveform_path).unwrap();
+        let resumed = Command::new(env!("CARGO_BIN_EXE_celox"))
+            .arg("run")
+            .arg(&source)
+            .args([
+                "--top",
+                "Top",
+                "--backend",
+                backend,
+                "--max-steps",
+                "3",
+                "--no-checkpoint-on-signal",
+                "--restore-checkpoint",
+            ])
+            .arg(&checkpoint)
+            .output()
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&output_path).unwrap(),
+            b"delivered after checkpoint"
+        );
+        assert_eq!(std::fs::read(&waveform_path).unwrap(), original_waveform);
+        let segments = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("trace.vcd.resume-")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            segments.len(),
+            1,
+            "{backend}: {}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        let waveform = std::fs::read_to_string(segments[0].path()).unwrap();
+        assert!(waveform.contains("$enddefinitions $end"), "{waveform}");
+        assert!(
+            waveform.contains(&format!("#{}\n", time + 3)),
+            "{backend}: {waveform}"
+        );
+        let output = String::from_utf8(resumed.stdout).unwrap();
+        let counts: Vec<u64> = output.lines().map(|line| line.parse().unwrap()).collect();
+        // A checkpoint before the initial time-zero slot needs one step to
+        // start the always process; otherwise all three steps advance time.
+        assert!((2..=3).contains(&counts.len()), "{output}");
+        assert_eq!(
+            counts,
+            (time + 1..=time + counts.len() as u64).collect::<Vec<_>>()
+        );
+        assert!(String::from_utf8_lossy(&resumed.stderr).contains("exceeded --max-steps 3"));
     }
 }

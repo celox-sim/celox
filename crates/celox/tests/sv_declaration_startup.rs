@@ -5,6 +5,9 @@ use std::path::Path;
 
 // IEEE 1800-2023 6.8 initializes static declarations before initial/always
 // procedures, including initializers that require runtime evaluation.
+// `always @*` waits for a change only in four-state mode; in two-state mode it
+// runs once at time zero (#2021), so the tests of its startup guard build
+// four-state simulations.
 const RANDOM_DECLARATION: &str = r#"
 module Top;
   int a = $urandom | 1;
@@ -245,19 +248,56 @@ macro_rules! declaration_backend {
         mod $module {
             use super::*;
 
+            // IEEE 1800-2023 16.5.1: time-zero samples use declaration values.
             #[test]
-            fn runtime_declaration_does_not_wake_wildcard() {
+            fn deferred_startup_samples_runtime_initializers_and_restore_keeps_samples() {
+                let source = r#"module Top(output int observed, output int a);
+                    int seed = $test$plusargs("on");
+                    assign a = seed;
+                    initial begin observed = $sampled(seed); #1; $finish; end
+                endmodule"#;
                 for four_state in [false, true] {
-                    finishes(
+                    let build = |defer| {
                         Simulation::from_sv_sources(
-                            vec![(RANDOM_DECLARATION, Path::new("runtime_declaration.sv"))],
+                            vec![(source, Path::new("deferred_sample.sv"))],
                             "Top",
                         )
                         .four_state(four_state)
+                        .plusargs(["+on"])
+                        .live_signal(Vec::new(), vec!["seed".into()])
+                        .defer_initialization(defer)
                         .$build()
-                        .unwrap(),
-                    );
+                        .unwrap()
+                    };
+                    let mut deferred = build(true);
+                    deferred.run_until(0).unwrap();
+                    assert_eq!(deferred.get(deferred.signal("observed")), 1u8.into());
+
+                    let mut original = build(false);
+                    let seed = original.signal("seed");
+                    original.modify(|io| io.set(seed, 7u8)).unwrap();
+                    let bytes = original.checkpoint().unwrap().to_bytes().unwrap();
+                    let mut restored = build(true);
+                    // SAFETY: just captured from the same compiled design/options.
+                    let checkpoint = unsafe { restored.checkpoint_from_bytes(&bytes) }.unwrap();
+                    restored.restore(&checkpoint).unwrap();
+                    restored.run_until(0).unwrap();
+                    assert_eq!(restored.get(restored.signal("a")), 7u8.into());
+                    assert_eq!(restored.get(restored.signal("observed")), 1u8.into());
                 }
+            }
+
+            #[test]
+            fn runtime_declaration_does_not_wake_wildcard() {
+                finishes(
+                    Simulation::from_sv_sources(
+                        vec![(RANDOM_DECLARATION, Path::new("runtime_declaration.sv"))],
+                        "Top",
+                    )
+                    .four_state(true)
+                    .$build()
+                    .unwrap(),
+                );
             }
 
             #[test]
@@ -317,35 +357,31 @@ macro_rules! declaration_backend {
 
             #[test]
             fn host_request_declaration_finishes_before_wildcard_registration() {
-                for four_state in [false, true] {
-                    finishes(
-                        Simulation::from_sv_sources(
-                            vec![(HOST_DECLARATION, Path::new("declaration_plusargs.sv"))],
-                            "Top",
-                        )
-                        .four_state(four_state)
-                        .plusargs(["+on"])
-                        .$build()
-                        .unwrap(),
-                    );
-                }
+                finishes(
+                    Simulation::from_sv_sources(
+                        vec![(HOST_DECLARATION, Path::new("declaration_plusargs.sv"))],
+                        "Top",
+                    )
+                    .four_state(true)
+                    .plusargs(["+on"])
+                    .$build()
+                    .unwrap(),
+                );
             }
 
             #[test]
             fn host_reads_and_eval_do_not_activate_a_stopped_declaration() {
-                for four_state in [false, true] {
-                    stopped_declaration_keeps_comb_inert(
-                        Simulation::from_sv_sources(
-                            vec![(STOPPED_DECLARATION, Path::new("declaration_stop.sv"))],
-                            "Top",
-                        )
-                        .four_state(four_state)
-                        .live_signal(Vec::new(), vec!["a".into()])
-                        .live_signal(Vec::new(), vec!["q".into()])
-                        .$build()
-                        .unwrap(),
-                    );
-                }
+                stopped_declaration_keeps_comb_inert(
+                    Simulation::from_sv_sources(
+                        vec![(STOPPED_DECLARATION, Path::new("declaration_stop.sv"))],
+                        "Top",
+                    )
+                    .four_state(true)
+                    .live_signal(Vec::new(), vec!["a".into()])
+                    .live_signal(Vec::new(), vec!["q".into()])
+                    .$build()
+                    .unwrap(),
+                );
             }
 
             #[test]
@@ -391,19 +427,17 @@ macro_rules! declaration_backend {
 
             #[test]
             fn checkpoint_restores_the_armed_startup_guard() {
-                for four_state in [false, true] {
-                    restored_guard_remains_inert(
-                        Simulation::from_sv_sources(
-                            vec![(HOST_WRITES, Path::new("declaration_checkpoint.sv"))],
-                            "Top",
-                        )
-                        .four_state(four_state)
-                        .live_signal(Vec::new(), vec!["a".into()])
-                        .live_signal(Vec::new(), vec!["q".into()])
-                        .$build()
-                        .unwrap(),
-                    );
-                }
+                restored_guard_remains_inert(
+                    Simulation::from_sv_sources(
+                        vec![(HOST_WRITES, Path::new("declaration_checkpoint.sv"))],
+                        "Top",
+                    )
+                    .four_state(true)
+                    .live_signal(Vec::new(), vec!["a".into()])
+                    .live_signal(Vec::new(), vec!["q".into()])
+                    .$build()
+                    .unwrap(),
+                );
             }
         }
     };
@@ -425,18 +459,16 @@ declaration_backend!(wasm, build_wasm);
 ))]
 fn native_runtime_declaration_startup_at_o0_and_o2() {
     for level in [celox::OptLevel::O0, celox::OptLevel::O2] {
-        for four_state in [false, true] {
-            finishes(
-                Simulation::from_sv_sources(
-                    vec![(RANDOM_DECLARATION, Path::new("declaration_opt_level.sv"))],
-                    "Top",
-                )
-                .four_state(four_state)
-                .opt_level(level)
-                .build_native()
-                .unwrap(),
-            );
-        }
+        finishes(
+            Simulation::from_sv_sources(
+                vec![(RANDOM_DECLARATION, Path::new("declaration_opt_level.sv"))],
+                "Top",
+            )
+            .four_state(true)
+            .opt_level(level)
+            .build_native()
+            .unwrap(),
+        );
     }
 }
 
@@ -462,4 +494,28 @@ fn plain_simulator_rejects_initial_kernels() {
         origin.location.as_deref(),
         Some("declaration_plain_simulator.sv:3:3")
     );
+}
+
+#[test]
+fn deferred_declarations_run_on_the_first_step_if_no_checkpoint_is_loaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("declaration.log");
+    std::fs::write(&output, b"untouched").unwrap();
+    let source = format!(
+        r#"module Top(output int fd);
+        int opened = $fopen("{}", "w");
+        assign fd = opened;
+        initial begin #1; $finish; end
+    endmodule"#,
+        output.display()
+    );
+    let mut simulation =
+        Simulation::from_sv_sources(vec![(&source, Path::new("deferred.sv"))], "Top")
+            .defer_initialization(true)
+            .build_interpreter()
+            .unwrap();
+    assert_eq!(std::fs::read(&output).unwrap(), b"untouched");
+    simulation.run_until(0).unwrap();
+    assert_eq!(std::fs::read(&output).unwrap(), b"");
+    assert_ne!(simulation.get(simulation.signal("fd")), 0u32.into());
 }

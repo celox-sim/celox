@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -92,10 +93,10 @@ test("a test file change runs only that binary and nothing downstream", () => {
   assert.deepEqual(rustTestScope(["crates/celox/tests/flip_flop.rs"], workspace), {
     full: false,
     packages: ["celox"],
-    features: ["celox/systemverilog"],
+    features: ["celox/systemverilog", "celox/cranelift", "celox/wasm-runtime", "celox/wasm-component", "celox/veryl-reference"],
     filter: "binary_id(celox::flip_flop)",
     targets: ["flip_flop"],
-    builds: [{ packages: ["celox"], targets: ["flip_flop"], features: ["celox/systemverilog"] }],
+    builds: [{ packages: ["celox"], targets: ["flip_flop"], features: ["celox/systemverilog", "celox/cranelift", "celox/wasm-runtime", "celox/wasm-component", "celox/veryl-reference"] }],
     libraries: [],
     libraryFeatures: [],
   });
@@ -282,7 +283,7 @@ test("multiple packages keep their own Cargo test targets and omit unused adapte
     [["celox"], ["flip_flop"]], [["consumer"], ["e2e"]],
   ]);
   const real = rustTestScope(["crates/celox/tests/param_override.rs"], readWorkspace(root));
-  assert.deepEqual(real.features, ["celox/systemverilog"]);
+  assert.deepEqual(real.features, ["celox/systemverilog", "celox/cranelift", "celox/wasm-runtime", "celox/wasm-component", "celox/veryl-reference"]);
 });
 
 test("a shared case does not turn a simultaneous SV fix into every backend", () => {
@@ -295,4 +296,12 @@ test("a shared case does not turn a simultaneous SV fix into every backend", () 
   assert.ok(scope.filter.includes("test(/::(sv)$/)"), scope.filter);
   assert.ok(scope.filter.includes("binary_id(celox::param_override)"), scope.filter);
   assert.ok(scope.filter.includes("binary_id(celox::systemverilog)"), scope.filter);
+});
+
+test("default application builds and tests do not pull optional compilers", () => {
+  const tree = execFileSync("cargo", [
+    "tree", "--locked", "-e", "normal,build,dev", "--prefix", "none",
+  ], { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  assert.doesNotMatch(tree, /^(?:wasmtime|cranelift)(?:-| )/m);
+  assert.doesNotMatch(tree, /^(?:celox-backend-cranelift|veryl-simulator) /m);
 });

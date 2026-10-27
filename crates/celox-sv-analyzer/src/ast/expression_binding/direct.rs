@@ -296,6 +296,20 @@ pub(in crate::ast) fn bind_value(
                         ));
                     }
                 }
+                if let Some((value, _)) = array_reductions::bind(id, native, tree, dimensions)? {
+                    values.push(value);
+                    continue;
+                }
+                if let Some(value) = containers::value(id, native, tree, dimensions, false)? {
+                    values.push(value);
+                    continue;
+                }
+                if let Some(call) =
+                    objects::constraint_mode_call(tree, id, native, dimensions, false)?
+                {
+                    values.push(call);
+                    continue;
+                }
                 if let Some(call) = objects::rand_mode_call(tree, id, native, dimensions, false)? {
                     values.push(call);
                     continue;
@@ -801,6 +815,15 @@ pub(in crate::ast) fn bind_value(
                         )
                     }
                     ExprKind::Member { .. }
+                        if objects::class_parameter(tree, id, native, dimensions)?.is_some() =>
+                    {
+                        values.push(
+                            objects::class_parameter(tree, id, native, dimensions)?
+                                .expect("checked by the guard"),
+                        );
+                        continue;
+                    }
+                    ExprKind::Member { .. }
                         if objects::property(tree, id, native, dimensions)?.is_some() =>
                     {
                         let (property, receiver) = objects::property(tree, id, native, dimensions)?
@@ -886,6 +909,22 @@ pub(in crate::ast) fn bind_value(
                     ExprKind::Concatenation(_) => {
                         return Err(unsupported("empty unpacked array concatenation"));
                     }
+                    ExprKind::RandomizeWith {
+                        expression,
+                        constraints,
+                    } => {
+                        values.push(objects::randomize_with(
+                            tree,
+                            *expression,
+                            constraints.as_deref(),
+                            native,
+                            dimensions,
+                        )?);
+                        continue;
+                    }
+                    ExprKind::ArrayMethodWith { .. } => {
+                        return Err(unsupported("array method with expression"));
+                    }
                     ExprKind::MinTypMax { .. } => return Err(unsupported("mintypmax expression")),
                     _ => return Err(unsupported("primary expression")),
                 };
@@ -944,14 +983,39 @@ pub(in crate::ast) fn bind_value(
                                     | ">="
                                     | "&&"
                                     | "||"
+                                    | "->"
+                                    | "<->"
                             )
                         {
                             return Err(unsupported("operator on a real operand"));
                         }
+                        let implication = op == "->";
+                        let equivalence = op == "<->";
+                        let left = if implication || equivalence {
+                            Expr::Unary {
+                                op: UnaryOp::LogicNot,
+                                expr: Box::new(left),
+                            }
+                        } else {
+                            left
+                        };
+                        // Each truth-value conversion evaluates its operand once (11.4.7).
+                        let right = if equivalence {
+                            Expr::Unary {
+                                op: UnaryOp::LogicNot,
+                                expr: Box::new(right),
+                            }
+                        } else {
+                            right
+                        };
                         let xnor = matches!(op.as_str(), "~^" | "^~");
                         let value = Expr::Binary {
                             left: Box::new(left),
-                            op: if xnor {
+                            op: if equivalence {
+                                BinaryOp::Eq
+                            } else if implication {
+                                BinaryOp::LogicOr
+                            } else if xnor {
                                 BinaryOp::BitXor
                             } else {
                                 constants::binary_op_from_text(&op)
@@ -1256,6 +1320,15 @@ pub(in crate::ast) fn bind_value(
                                     arg_order: Vec::new(),
                                 }
                             } else {
+                                let mut operands = operands;
+                                // An omitted number of ticks of `$past` is
+                                // one (IEEE 1800-2023 16.9.3); the gate stays
+                                // the third argument.
+                                if function == SystemFunction::Past
+                                    && args.get(1).is_some_and(Option::is_none)
+                                {
+                                    operands.insert(1, Expr::Literal("1".into()));
+                                }
                                 expressions::numeric_system_function(
                                     &tree.state,
                                     function,
@@ -1364,6 +1437,7 @@ fn path(
     tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<(Vec<String>, Option<String>)> {
+    let authored = root;
     // A static class property is a variable of the module.
     if let Some(variable) = objects::static_property(tree, root, native, dimensions)? {
         return Ok((vec![variable], None));
@@ -1401,12 +1475,25 @@ fn path(
                 let last = prefix.last_mut().ok_or_else(disagreement)?;
                 last.push_str(&format!("[{value}]"));
                 prefix.extend(parts.into_iter().rev());
+                if base.is_none()
+                    && let Some(name) =
+                        interface_binding::unindexed_parameter(&prefix, tree, dimensions, authored)
+                {
+                    return Ok((vec![name], None));
+                }
                 return Ok((prefix, base));
             }
             _ => return Err(unsupported("member receiver")),
         }
     }
     parts.reverse();
+    if qualified.is_none()
+        && let Some(name) =
+            interface_binding::unindexed_parameter(&parts, tree, dimensions, authored)
+    {
+        return Ok((vec![name], None));
+    }
+
     if let Some(length) = qualified {
         if parts.len() == length + 1 {
             let base = parts[..2].join("::");
@@ -1778,6 +1865,12 @@ pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> 
             .functions
             .get(name)
             .is_some_and(|function| function.return_real),
+        // A sampled value has the type of its operand.
+        Expr::Call {
+            callee: Callee::System(SystemFunction::Sampled | SystemFunction::Past),
+            args,
+            ..
+        } => matches!(args.first(), Some(Some(operand)) if real_value(operand, dimensions)),
         Expr::Unary {
             op: UnaryOp::Plus | UnaryOp::Minus | UnaryOp::ToTwoState,
             expr,

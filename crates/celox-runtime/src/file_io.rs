@@ -1,10 +1,12 @@
 //! SystemVerilog file descriptors and multichannel descriptors (IEEE 1800-2023 21.3).
 //!
 //! A manager belongs to one simulation. No process-global descriptor table is used.
+use crate::file_io_backend::{FileMode, FileSystem, HostFileSystem};
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use celox_testbench::{DisplayFormatArg, FieldSpec, format_sv_display_arg};
 
@@ -12,7 +14,8 @@ const FD_FLAG: u32 = 0x8000_0000;
 
 #[derive(Debug)]
 pub struct FileIo {
-    channels: BTreeMap<u32, File>,
+    backend: Arc<Mutex<Box<dyn FileSystem>>>,
+    channels: BTreeMap<u32, BackendFile>,
     descriptors: BTreeMap<u32, InputFile>,
     stdin_input: InputState,
     stdin_open: bool,
@@ -20,7 +23,7 @@ pub struct FileIo {
     stderr_open: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 struct InputState {
     eof: bool,
     pushed: Option<u8>,
@@ -28,14 +31,21 @@ struct InputState {
 
 #[derive(Debug)]
 struct InputFile {
-    file: File,
+    file: BackendFile,
     readable: bool,
     input: InputState,
 }
 
 impl Default for FileIo {
     fn default() -> Self {
+        Self::new(Box::<HostFileSystem>::default())
+    }
+}
+
+impl FileIo {
+    pub fn new(backend: Box<dyn FileSystem>) -> Self {
         Self {
+            backend: Arc::new(Mutex::new(backend)),
             channels: BTreeMap::new(),
             descriptors: BTreeMap::new(),
             stdin_input: InputState::default(),
@@ -44,34 +54,105 @@ impl Default for FileIo {
             stderr_open: true,
         }
     }
-}
 
-impl FileIo {
+    /// Capture Celox's bookkeeping and the backend's opaque state. Unsupported
+    /// backend capture is retained as a restore error, allowing inspection.
+    pub fn snapshot(&self) -> FileIoSnapshot {
+        let backend = self.backend.lock().unwrap();
+        let state = backend
+            .snapshot()
+            .and_then(|bytes| {
+                if backend.snapshot_format().is_empty() {
+                    return Err(io::Error::other(
+                        "snapshot backend must declare a format identity",
+                    ));
+                }
+                Ok((backend.snapshot_format().to_owned(), bytes))
+            })
+            .map_err(|error| error.to_string());
+        FileIoSnapshot {
+            state,
+            channels: self
+                .channels
+                .iter()
+                .map(|(&key, file)| (key, file.id))
+                .collect(),
+            descriptors: self
+                .descriptors
+                .iter()
+                .map(|(&key, file)| (key, file.file.id, file.readable, file.input.clone()))
+                .collect(),
+            stdin_input: self.stdin_input.clone(),
+            standard_open: [self.stdin_open, self.stdout_open, self.stderr_open],
+        }
+    }
+
+    /// Capture a resumable handler state, reporting backend capture failures.
+    /// System-level checkpoint writers use this rather than publishing a
+    /// diagnostic snapshot containing an error.
+    pub fn try_snapshot(&self) -> io::Result<FileIoSnapshot> {
+        let snapshot = self.snapshot();
+        snapshot
+            .state
+            .as_ref()
+            .map_err(|error| io::Error::other(error.clone()))?;
+        Ok(snapshot)
+    }
+
+    /// Prepare a replacement without changing this manager or its backend.
+    pub fn prepare_restore(&self, snapshot: &FileIoSnapshot) -> io::Result<Self> {
+        let (format, bytes) = snapshot
+            .state
+            .as_ref()
+            .map_err(|error| io::Error::other(error.clone()))?;
+        let backend = self.backend.lock().unwrap();
+        if backend.snapshot_format() != format {
+            return Err(io::Error::other(
+                "file I/O snapshot backend format mismatch",
+            ));
+        }
+        let restored = backend.restore(bytes)?;
+        if restored.snapshot_format() != format {
+            return Err(io::Error::other(
+                "restored file I/O backend format mismatch",
+            ));
+        }
+        let mut manager = Self::new(restored);
+        for &(key, id) in &snapshot.channels {
+            manager.channels.insert(
+                key,
+                BackendFile {
+                    id,
+                    closed: false,
+                    backend: manager.backend.clone(),
+                },
+            );
+        }
+        for (key, id, readable, input) in &snapshot.descriptors {
+            manager.descriptors.insert(
+                *key,
+                InputFile {
+                    file: BackendFile {
+                        id: *id,
+                        closed: false,
+                        backend: manager.backend.clone(),
+                    },
+                    readable: *readable,
+                    input: input.clone(),
+                },
+            );
+        }
+        manager.stdin_input = snapshot.stdin_input.clone();
+        [manager.stdin_open, manager.stdout_open, manager.stderr_open] = snapshot.standard_open;
+        Ok(manager)
+    }
+
     /// Open an MCD when mode is absent, otherwise an FD. Failure returns zero,
     /// as specified by 21.3.1. Closed channel numbers are reused.
     pub fn open(&mut self, path: impl AsRef<Path>, mode: Option<&str>) -> u32 {
-        let mut options = OpenOptions::new();
-        match mode.unwrap_or("w") {
-            "r" | "rb" => {
-                options.read(true);
-            }
-            "w" | "wb" => {
-                options.write(true).create(true).truncate(true);
-            }
-            "a" | "ab" => {
-                options.append(true).create(true);
-            }
-            "r+" | "r+b" | "rb+" => {
-                options.read(true).write(true);
-            }
-            "w+" | "w+b" | "wb+" => {
-                options.read(true).write(true).create(true).truncate(true);
-            }
-            "a+" | "a+b" | "ab+" => {
-                options.read(true).append(true).create(true);
-            }
-            _ => return 0,
-        }
+        let Some(options) = FileMode::parse(mode.unwrap_or("w")) else {
+            return 0;
+        };
         let key = if mode.is_some() {
             let Some(key) = (3..FD_FLAG).find(|key| !self.descriptors.contains_key(key)) else {
                 return 0;
@@ -86,8 +167,13 @@ impl FileIo {
             };
             key
         };
-        let Ok(mut file) = options.open(path) else {
+        let Ok(id) = self.backend.lock().unwrap().open(path.as_ref(), options) else {
             return 0;
+        };
+        let mut file = BackendFile {
+            id,
+            closed: false,
+            backend: self.backend.clone(),
         };
         if let Some(mode) = mode {
             // Table 21-6 places the initial position at EOF for append modes,
@@ -131,10 +217,10 @@ impl FileIo {
                     Err(invalid_descriptor())
                 };
             }
-            let Some(mut file) = self.descriptors.remove(&key) else {
+            let Some(file) = self.descriptors.remove(&key) else {
                 return Err(invalid_descriptor());
             };
-            return file.file.flush();
+            return file.file.close();
         }
         let mut error = None;
         if descriptor & 1 != 0 && !std::mem::replace(&mut self.stdout_open, false) {
@@ -144,8 +230,8 @@ impl FileIo {
             let key = 1u32 << bit;
             if descriptor & key != 0 {
                 match self.channels.remove(&key) {
-                    Some(mut file) => {
-                        if let Err(err) = file.flush() {
+                    Some(file) => {
+                        if let Err(err) = file.close() {
                             error = Some(err);
                         }
                     }
@@ -171,7 +257,7 @@ impl FileIo {
                 )),
                 1 if self.stdout_open => Ok(true),
                 2 if self.stderr_open => {
-                    io::stderr().lock().write_all(bytes)?;
+                    self.backend.lock().unwrap().write_stderr(bytes)?;
                     Ok(false)
                 }
                 key => {
@@ -217,7 +303,7 @@ impl FileIo {
     /// a pushed-back byte is returned before the underlying file is read.
     pub fn read_byte(&mut self, descriptor: u32) -> io::Result<Option<u8>> {
         if descriptor == FD_FLAG && self.stdin_open {
-            return read_input_byte(&mut io::stdin().lock(), &mut self.stdin_input);
+            return read_input_byte(&mut BackendStdin(&self.backend), &mut self.stdin_input);
         }
         let file = self.readable_file(descriptor)?;
         read_input_byte(&mut file.file, &mut file.input)
@@ -316,8 +402,8 @@ impl FileIo {
             if descriptor & FD_FLAG != 0 {
                 return match descriptor & !FD_FLAG {
                     0 if self.stdin_open => Ok(()),
-                    1 if self.stdout_open => io::stdout().lock().flush(),
-                    2 if self.stderr_open => io::stderr().lock().flush(),
+                    1 if self.stdout_open => self.backend.lock().unwrap().flush_stdout(),
+                    2 if self.stderr_open => self.backend.lock().unwrap().flush_stderr(),
                     _ => self.positioned_file(descriptor)?.file.flush(),
                 };
             }
@@ -330,13 +416,13 @@ impl FileIo {
         };
         if descriptor.is_none() || descriptor.is_some_and(|bits| bits & 1 != 0) {
             if self.stdout_open {
-                attempt(io::stdout().lock().flush());
+                attempt(self.backend.lock().unwrap().flush_stdout());
             } else if descriptor.is_some() {
                 attempt(Err(invalid_descriptor()));
             }
         }
         if descriptor.is_none() && self.stderr_open {
-            attempt(io::stderr().lock().flush());
+            attempt(self.backend.lock().unwrap().flush_stderr());
         }
         for bit in 1..31 {
             let key = 1u32 << bit;
@@ -376,6 +462,27 @@ impl FileIo {
         Ok(file)
     }
 
+    /// Write memory through the injected backend, including its snapshot policy.
+    pub fn write_memory_with_backend<'a>(
+        &mut self,
+        path: impl AsRef<Path>,
+        binary: bool,
+        words: impl IntoIterator<Item = DisplayFormatArg<'a>>,
+    ) -> io::Result<()> {
+        let id = self
+            .backend
+            .lock()
+            .unwrap()
+            .open(path.as_ref(), FileMode::parse("w").unwrap())?;
+        let mut file = BackendFile {
+            id,
+            closed: false,
+            backend: self.backend.clone(),
+        };
+        write_memory_words(&mut file, binary, words)?;
+        file.close()
+    }
+
     /// Write a static unpacked memory snapshot, without address specifiers
     /// (21.5.3). The caller supplies elements in the requested address order.
     pub fn write_memory<'a>(
@@ -384,15 +491,83 @@ impl FileIo {
         words: impl IntoIterator<Item = DisplayFormatArg<'a>>,
     ) -> io::Result<()> {
         let mut file = File::create(path)?;
-        for word in words {
-            file.write_all(&format_sv_display_arg(
-                &word,
-                if binary { 'b' } else { 'h' },
-                FieldSpec::default(),
-            ))?;
-            file.write_all(b"\n")?;
+        write_memory_words(&mut file, binary, words)
+    }
+}
+
+fn write_memory_words<'a>(
+    file: &mut impl Write,
+    binary: bool,
+    words: impl IntoIterator<Item = DisplayFormatArg<'a>>,
+) -> io::Result<()> {
+    for word in words {
+        file.write_all(&format_sv_display_arg(
+            &word,
+            if binary { 'b' } else { 'h' },
+            FieldSpec::default(),
+        ))?;
+        file.write_all(b"\n")?;
+    }
+    file.flush()
+}
+
+/// Host-owned I/O snapshot, separate from core checkpoints. Backend bytes are opaque; descriptor
+/// bookkeeping cannot be edited independently of them.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileIoSnapshot {
+    state: Result<(String, Vec<u8>), String>,
+    channels: Vec<(u32, u64)>,
+    descriptors: Vec<(u32, u64, bool, InputState)>,
+    stdin_input: InputState,
+    standard_open: [bool; 3],
+}
+
+#[derive(Debug)]
+struct BackendFile {
+    id: u64,
+    closed: bool,
+    backend: Arc<Mutex<Box<dyn FileSystem>>>,
+}
+impl BackendFile {
+    fn close(mut self) -> io::Result<()> {
+        self.closed = true;
+        self.backend.lock().unwrap().close(self.id)
+    }
+}
+impl Read for BackendFile {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.backend.lock().unwrap().read(self.id, buffer)
+    }
+}
+impl Write for BackendFile {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.backend.lock().unwrap().write(self.id, buffer)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.backend.lock().unwrap().flush(self.id)
+    }
+}
+impl Seek for BackendFile {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.backend.lock().unwrap().seek(self.id, position)
+    }
+}
+impl Drop for BackendFile {
+    fn drop(&mut self) {
+        if self.closed {
+            return;
         }
-        file.flush()
+        let _ = self
+            .backend
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .close(self.id);
+    }
+}
+struct BackendStdin<'a>(&'a Arc<Mutex<Box<dyn FileSystem>>>);
+impl Read for BackendStdin<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().read_stdin(buffer)
     }
 }
 

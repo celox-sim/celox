@@ -50,6 +50,16 @@ fn native_merged_optimization_preserves_large_and_wide_array_boundaries() {
 }
 
 sv_backends! {
+    fn constant_functions_evaluate_wide_address_tables(sim) {
+        @case "procedural::constant_functions_evaluate_wide_address_tables";
+    }
+    fn constant_functions_preserve_wide_arguments_and_signedness(sim) {
+        @case "procedural::constant_functions_preserve_wide_arguments_and_signedness";
+    }
+    fn constant_functions_preserve_wide_unknown_masks(sim) {
+        @case "procedural::constant_functions_preserve_wide_unknown_masks";
+    }
+
     fn static_function_partial_writes_preserve_last_write(sim) {
         @case "procedural::static_function_partial_writes_preserve_last_write";
     }
@@ -60,6 +70,14 @@ sv_backends! {
 
     fn constant_functions_inside_selected_parameter_initializers(sim) {
         @case "procedural::constant_functions_inside_selected_parameter_initializers";
+    }
+
+    fn wide_constant_functions_inside_conditional_parameter_initializers(sim) {
+        @case "procedural::wide_constant_functions_inside_conditional_parameter_initializers";
+    }
+
+    fn constant_function_assignments_at_127_and_128_bit_boundaries(sim) {
+        @case "procedural::constant_function_assignments_at_127_and_128_bit_boundaries";
     }
 
     fn constant_functions_preserve_concat_operand_widths(sim) {
@@ -96,6 +114,18 @@ sv_backends! {
 
     fn mixed_blocking_and_nonblocking_writes_keep_their_regions(sim) {
         @case "procedural::mixed_blocking_and_nonblocking_writes_keep_their_regions";
+    }
+
+    fn edge_processes_share_a_blocking_loop_variable(sim) {
+        @case "procedural::edge_processes_share_a_blocking_loop_variable";
+    }
+
+    fn edge_processes_of_two_clocks_share_a_blocking_variable(sim) {
+        @case "procedural::edge_processes_of_two_clocks_share_a_blocking_variable";
+    }
+
+    fn reset_processes_share_a_loop_index(sim) {
+        @case "procedural::reset_processes_share_a_loop_index";
     }
 
     fn constant_functions_size_parameters_and_ports(sim) {
@@ -239,5 +269,14 @@ sv_backends! {
 sv_backends! {
     fn static_function_wide_packed_storage_keeps_all_bits(sim) {
         @case "procedural::static_function_wide_packed_storage_keeps_all_bits";
+    }
+}
+
+sv_backends! {
+    fn initial_loops_without_a_static_trip_count_run_as_a_process(sim) {
+        @case "procedural::initial_loops_without_a_static_trip_count_run_as_a_process";
+    }
+    fn initial_while_loops_define_the_state(sim) {
+        @case "procedural::initial_while_loops_define_the_state";
     }
 }
