@@ -1,6 +1,1 @@
-Revision history for #2293:
-
-rev 2 (content) 2026-10-27 16:14 UTC — Retain reviewed Icarus and xezim failures for the new alias cases so full external-suite validation can account for them
-rev 1 (initial) 2026-10-27 16:14 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2293,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"4f2aa6d8785c2450befcdb7a1f2883bc982dbec6","timestamp_iso":"2026-10-27T16:14:12Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"4f2aa6d8785c2450befcdb7a1f2883bc982dbec6","new_sha":"e95bdb699f28cb36087cabb97ed9dfae51e1d68e","timestamp_iso":"2026-10-27T16:14:12Z","reason":"Retain reviewed Icarus and xezim failures for the new alias cases so full external-suite validation can account for them","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/4f2aa6d8785c2450befcdb7a1f2883bc982dbec6...e95bdb699f28cb36087cabb97ed9dfae51e1d68e"}]} -->
+Resolve overlap with merged type-parameter qualifier fix while keeping both implementations, tests and retained external evidence
