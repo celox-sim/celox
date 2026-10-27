@@ -1,8 +1,9 @@
 //! Constant variable inlining for combinational logic paths.
 //!
 //! Detects variables whose *every* LogicPath target is a constant expression
-//! (no runtime inputs), then rewrites all `SLTNode::Input` references to those
-//! variables with `SLTNode::Constant` nodes containing the precomputed value.
+//! (no runtime inputs), whose reads are all covered by those drivers, then
+//! rewrites their `SLTNode::Input` references to precomputed constants.
+//! Variables with reads of undriven ranges retain their state dependencies.
 //! This eliminates the Store→Load memory roundtrip for compile-time constants
 //! such as genvar-expanded parity-check matrices.
 
@@ -226,6 +227,17 @@ struct ConstVar {
     payload: BigUint,
     /// Combined 4-state mask.
     mask: BigUint,
+    /// Sorted, merged driven ranges. Bits outside them retain their state.
+    written: Vec<BitAccess>,
+}
+
+impl ConstVar {
+    fn covers(&self, access: BitAccess) -> bool {
+        let index = self.written.partition_point(|range| range.msb < access.lsb);
+        self.written
+            .get(index)
+            .is_some_and(|range| range.lsb <= access.lsb && range.msb >= access.msb)
+    }
 }
 
 /// Inline constant variables: rewrite Input references → Constant nodes.
@@ -305,9 +317,42 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
         if mask != BigUint::from(0u32) {
             continue;
         }
-        const_vars.insert(var.clone(), ConstVar { payload, mask });
+        // Do not invent zeroes for undriven bits. Keep coverage as ranges,
+        // so a sparse driver does not allocate a mask up to its bit offset.
+        let mut written: Vec<_> = entries.iter().map(|(access, _)| *access).collect();
+        written.sort_unstable_by_key(|access| access.lsb);
+        written.dedup_by(|next, previous| {
+            if next.lsb <= previous.msb.saturating_add(1) {
+                previous.msb = previous.msb.max(next.msb);
+                true
+            } else {
+                false
+            }
+        });
+        const_vars.insert(
+            var.clone(),
+            ConstVar {
+                payload,
+                mask,
+                written,
+            },
+        );
     }
 
+    // All reads must be covered before removing a variable's dependency
+    // edges. A read can include undriven bits even above the highest driver,
+    // or a hole between drivers; those bits retain their initial state.
+    for node in arena.iter() {
+        if let SLTNode::Input {
+            variable, access, ..
+        } = node
+            && const_vars
+                .get(variable)
+                .is_some_and(|cv| !cv.covers(*access))
+        {
+            const_vars.remove(variable);
+        }
+    }
     if const_vars.is_empty() {
         return Ok(false);
     }
@@ -558,6 +603,99 @@ mod tests {
     use num_bigint::BigUint;
 
     use super::eval_const_expr;
+
+    #[test]
+    fn only_inlines_reads_covered_by_constant_drivers() {
+        use crate::{LogicPath, LogicPathTarget};
+        use celox_design::{BitAccess, VarAtomBase};
+
+        for bridge_gap in [false, true] {
+            for access in [
+                BitAccess::new(2, 3),
+                BitAccess::new(0, 3),
+                BitAccess::new(4, 7),
+                BitAccess::new(0, 7),
+            ] {
+                let mut arena = SLTNodeArena::<u32>::new();
+                let one = arena
+                    .alloc(SLTNode::Constant(1u8.into(), 0u8.into(), 1, false))
+                    .unwrap();
+                let zero = arena
+                    .alloc(SLTNode::Constant(0u8.into(), 0u8.into(), 1, false))
+                    .unwrap();
+                let three = arena
+                    .alloc(SLTNode::Constant(3u8.into(), 0u8.into(), 2, false))
+                    .unwrap();
+                let make_path = |variable, access, expr, sources: crate::HashSet<_>| LogicPath {
+                    transparent_copy: false,
+                    target: LogicPathTarget::Var(VarAtomBase {
+                        id: variable,
+                        access,
+                    }),
+                    previous_sources: sources.clone(),
+                    address_sources: sources.clone(),
+                    sources,
+                    local_inputs: vec![],
+                    order_before: Default::default(),
+                    comb_capture_enable_sites: vec![],
+                    comb_capture_enable_always: false,
+                    pre_lower_nodes: vec![],
+                    expr,
+                };
+                // Non-sorted fragments. Filling bit 1 makes 0..=3 contiguous,
+                // but never covers higher bits. Unobserved gaps do not stop
+                // reads confined to the driven bits from being inlined.
+                let mut paths = vec![
+                    make_path(1, BitAccess::new(2, 3), three, Default::default()),
+                    make_path(1, BitAccess::new(0, 0), one, Default::default()),
+                ];
+                if bridge_gap {
+                    paths.push(make_path(1, BitAccess::new(1, 1), zero, Default::default()));
+                }
+                let input = arena
+                    .alloc(SLTNode::Input {
+                        variable: 1,
+                        signed: false,
+                        index: vec![],
+                        access,
+                    })
+                    .unwrap();
+                let source = VarAtomBase { id: 1, access };
+                paths.push(make_path(
+                    2,
+                    BitAccess::new(0, access.msb - access.lsb),
+                    input,
+                    [source].into_iter().collect(),
+                ));
+                let inlined = access == BitAccess::new(2, 3)
+                    || (access == BitAccess::new(0, 3) && bridge_gap);
+                assert_eq!(
+                    super::inline_constant_variables(&mut paths, &mut arena).unwrap(),
+                    inlined
+                );
+                let path = paths.last().unwrap();
+                if inlined {
+                    let expected = if access.lsb == 2 { 3u8 } else { 13u8 };
+                    assert_eq!(
+                        super::eval_const_expr(path.expr, &arena),
+                        (expected.into(), 0u8.into(), access.msb - access.lsb + 1)
+                    );
+                } else {
+                    assert_eq!(
+                        path.expr, input,
+                        "read of an undriven bit became a constant"
+                    );
+                }
+                for edges in [&path.sources, &path.previous_sources, &path.address_sources] {
+                    assert_eq!(
+                        edges.contains(&source),
+                        !inlined,
+                        "dependency of an unrewritten read was removed"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn floating_operations_fold_ieee_payloads_and_result_widths() {
