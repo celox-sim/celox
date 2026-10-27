@@ -548,6 +548,11 @@ different interface classes or specializations must declare its own
 scopes of a module name before it runs, binding an assignment inside a generate
 block once for each of its instances.
 
+Class type parameters are visible in class bodies and their out-of-block
+method definitions. Qualified references such as `TYPE::value` and typedefs
+using `TYPE::word_t` do not require a package named `TYPE`, including in
+unused generic classes (6.20.3, 8.25.1).
+
 A class declared in a package or the compilation unit is laid out and its
 methods are lowered where it is declared, once (IEEE 1800-2023 3.12.1, 26.3):
 a module uses it through an import, as `p::C`, or by its name when the

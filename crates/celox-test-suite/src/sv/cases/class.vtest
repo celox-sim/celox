@@ -2479,3 +2479,43 @@ endmodule
     (modify (set data value))
     (assert_eq direct_value value)
     (assert_eq nested_value (+ value 1))))
+
+(case type_parameter_imports
+  (source "type_parameter_imports.sv" #"
+package p;
+    class Item;
+        static int value = 42;
+        typedef bit [7:0] word_t;
+    endclass
+    class Unused #(type TYPE = Item);
+        typedef TYPE::word_t element_t;
+        static function int get(); return TYPE::value; endfunction
+    endclass
+endpackage
+module Top(output bit done);
+    class Local #(type TYPE = p::Item);
+        extern static function int get();
+    endclass
+    function int Local::get(); return TYPE::value; endfunction
+    initial done = Local#()::get() == 42;
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case type_parameter_shadowing
+  (source "type_parameter_shadowing.sv" #"
+package TYPE;
+    parameter int value = 7;
+endpackage
+module Top(output bit [1:0] flags);
+    class Item; static int value = 42; endclass
+    class Local #(type TYPE = Item);
+        static function int get(); return TYPE::value; endfunction
+    endclass
+    initial begin
+        flags[0] = TYPE::value == 7;
+        flags[1] = Local#()::get() == 42;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 3))

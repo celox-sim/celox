@@ -49,6 +49,7 @@ impl ScopeImports {
         let mut imports = Self::default();
         let blocks = generate_scopes(tree)?;
         let nested = nested_declarations(tree);
+        let class_types = class_type_parameter_scopes(tree);
         for view in package_owners::scope(tree)? {
             let binding = tree.declarations().package_binding(view.id);
             for native in &binding.items {
@@ -132,9 +133,14 @@ impl ScopeImports {
                 if visible_class(tree, &package) {
                     continue;
                 }
-                if !nested.iter().any(|(start, end, names)| {
-                    (*start..*end).contains(&expression.tokens.start) && names.contains(&package)
-                }) {
+                if !nested
+                    .iter()
+                    .chain(&class_types)
+                    .any(|(start, end, names)| {
+                        (*start..*end).contains(&expression.tokens.start)
+                            && names.contains(&package)
+                    })
+                {
                     imports
                         .qualified
                         .push((package, normalize_identifier(&name.spelling)));
@@ -148,6 +154,10 @@ impl ScopeImports {
                 && let [package, name] = path.as_slice()
                 // `C::T` names a type of class `C` (IEEE 1800-2023 8.23).
                 && !visible_class(tree, &normalize_identifier(&package.name.spelling))
+                && !class_types.iter().any(|(start, end, names)| {
+                    (*start..*end).contains(&ty.tokens.start)
+                        && names.contains(&normalize_identifier(&package.name.spelling))
+                })
             {
                 imports.qualified.push((
                     normalize_identifier(&package.name.spelling),
@@ -441,7 +451,8 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
     let Ok(ranges) = active_ranges(tree) else {
         return HashMap::default();
     };
-    let nested = nested_declarations(tree);
+    let mut nested = nested_declarations(tree);
+    nested.extend(class_type_parameter_scopes(tree));
     let Facts { pattern_keys, .. } = Facts::of(tree);
     let mut names: HashMap<String, Vec<usize>> = HashMap::default();
     let mut add = |name: &str, offset| {
@@ -711,6 +722,56 @@ fn scope_lookup(
         }
     }
     Ok(ScopeLookup::Outside)
+}
+
+/// Lexical class type-parameter scopes, including out-of-block methods.
+/// These prefixes name types rather than package dependencies (6.20.3, 8.25).
+fn class_type_parameter_scopes(tree: &SyntaxTree) -> Vec<(usize, usize, HashSet<String>)> {
+    use celox_sv_syntax::{BodyItemKind, ParameterKind};
+    let native = tree.declarations();
+    let mut result = Vec::new();
+    let Ok(items) = body_items(tree) else {
+        return result;
+    };
+    for id in items {
+        if !matches!(&native.body_item(id).kind, BodyItemKind::Unconverted { category, .. } if category == "class")
+        {
+            continue;
+        }
+        let owner = native.body_item(id).tokens;
+        for class in native
+            .classes
+            .iter()
+            .filter(|class| owner.start <= class.tokens.start && class.tokens.end <= owner.end)
+        {
+            let names: HashSet<String> = class
+                .parameter_ports
+                .iter()
+                .chain(&class.parameters)
+                .flat_map(|id| &native.parameter_declaration(*id).parameters)
+                .filter(|parameter| matches!(parameter.kind, ParameterKind::Type { .. }))
+                .map(|parameter| normalize_identifier(&parameter.name.spelling))
+                .collect();
+            if names.is_empty() {
+                continue;
+            }
+            result.push((class.tokens.start, class.tokens.end, names.clone()));
+            // Out-of-block definitions have their class's lexical type scope
+            // only within that class's declaring scope (8.24, 8.25.1).
+            let class_scope =
+                super::classes::enclosing_unit(native, class.tokens).map(|unit| unit.tokens);
+            for id in native.subroutine_ids() {
+                let sub = native.subroutine(id);
+                if matches!(&sub.scope[..], [scope] if normalize_identifier(&scope.name.spelling) == normalize_identifier(&class.name.spelling))
+                    && super::classes::enclosing_unit(native, sub.tokens).map(|unit| unit.tokens)
+                        == class_scope
+                {
+                    result.push((sub.tokens.start, sub.tokens.end, names.clone()));
+                }
+            }
+        }
+    }
+    result
 }
 
 fn nested_declarations(tree: &SyntaxTree) -> Vec<(usize, usize, HashSet<String>)> {

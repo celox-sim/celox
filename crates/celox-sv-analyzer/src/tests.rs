@@ -6915,6 +6915,55 @@ fn class_visibility_rejects_inaccessible_members() {
 }
 
 #[test]
+fn class_type_parameter_qualifiers_are_not_package_dependencies() {
+    for body in [
+        "static function int get(); return TYPE::value; endfunction",
+        "typedef TYPE::word_t element_t;",
+        "localparam type element_t = TYPE::word_t;",
+        "extern static function int get();",
+    ] {
+        let out_of_block = if body.starts_with("extern") {
+            "function int Q::get(); return TYPE::value; endfunction"
+        } else {
+            ""
+        };
+        let source = format!(
+            "package p; class Item; static int value=42; typedef bit[7:0] word_t; endclass class Q#(type TYPE=Item); {body} endclass {out_of_block} endpackage module Top; endmodule"
+        );
+        analyze_source(&source, Path::new("class-type-qualifier.sv"))
+            .unwrap_or_else(|error| panic!("{body}: {error}"));
+    }
+}
+
+#[test]
+fn class_type_parameter_scopes_do_not_hide_unknown_packages() {
+    for (body, outside, name) in [
+        (
+            "static function int get(); return missing::value; endfunction",
+            "",
+            "missing",
+        ),
+        ("", "localparam int value=TYPE::value;", "TYPE"),
+        (
+            "typedef TYPE Alias;",
+            "localparam int value=Alias::value;",
+            "Alias",
+        ),
+    ] {
+        let source = format!(
+            "package p; class Item; endclass class Q#(type TYPE=Item); {body} endclass endpackage module Top; {outside} endmodule"
+        );
+        let error = analyze_source(&source, Path::new("class-type-real-package.sv")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("unknown package `{name}`")),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
 fn class_visibility_accepts_lexical_access_and_shadowing() {
     for member in [
         "int x;",

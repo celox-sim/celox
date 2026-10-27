@@ -891,3 +891,24 @@ instead of converting the setter argument to `bit` zero, and does not apply
 base-handle mode changes to an overridden constraint. See
 [the retained observations](verification/repros/sv_constraint_modes.json).
 Celox runs these assertions on all registered backends.
+
+### Class type-parameter qualifiers
+
+The two `class::type_parameter_*` cases keep `TYPE::value` bound to the
+class selected by the type parameter, including an out-of-block method; a
+real package named `TYPE` remains visible outside that class (IEEE 1800-2023
+6.20.3, 8.23, 8.24 and 8.25.1). Icarus 13.0 rejects both during compilation.
+Their exact diagnostics remain executed failures in
+[the Icarus class report](verification/sv/icarus/class.json), with individual
+case checks in `retained_reports.rs`. No assertion or exclusion changes.
+
+The xezim 0.11.3 source pinned at `5eab5f2` still loses the class static
+member lookup. Its exact mismatch remains an executed failure in
+[the xezim class report](verification/sv/xezim/class.json), reviewed against
+IEEE 1800-2023 6.20.3, 8.23, 8.24, 8.25.1 in
+[the xezim review](verification/xezim-review.json). The
+[adapter-free source](verification/repros/sv_class_type_parameter_xezim.sv) and
+[observations](verification/repros/sv_class_type_parameter_xezim.json)
+retain the separate top and wrapped runs. The validation build regenerated
+the dependency lock in an isolated Nix package because the repository lock
+names a different xezim-core revision. No simulator source changes were used.
