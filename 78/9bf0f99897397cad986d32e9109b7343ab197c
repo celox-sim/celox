@@ -1,0 +1,6 @@
+Revision history for #2308:
+
+rev 2 (rebase) 2026-10-27 19:09 UTC — Reapply the VPI performance change above the inertial resumed-run correction from review r4392840008 and update validation counts.
+rev 1 (initial) 2026-10-27 19:09 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2308,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"50a5597c0be8f930d1bf6f823715ac7c71c23581","timestamp_iso":"2026-10-27T19:09:57Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"50a5597c0be8f930d1bf6f823715ac7c71c23581","new_sha":"e3a401a1ed7cfaf4196d073ec21c97b8594ea9e2","timestamp_iso":"2026-10-27T19:09:57Z","reason":"Reapply the VPI performance change above the inertial resumed-run correction from review r4392840008 and update validation counts.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/50a5597c0be8f930d1bf6f823715ac7c71c23581...e3a401a1ed7cfaf4196d073ec21c97b8594ea9e2"}]} -->
