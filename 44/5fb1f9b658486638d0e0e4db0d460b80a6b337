@@ -1,0 +1,1 @@
+Keep both appended operator suites when rebasing onto master4616658b13; analyzer858, frontend11, SV5964 and suite54 tests pass, with clippy and fmt.
