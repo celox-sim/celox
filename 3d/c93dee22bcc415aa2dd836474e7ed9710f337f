@@ -1,1 +1,6 @@
-Address all three #2322 review findings; support final procedures and complete final-output checking in the shared harness as requested; accept only the eight confirmed sv-tests fail-to-pass improvements.
+Revision history for #2322:
+
+rev 2 (content) 2026-10-27 20:40 UTC — Address all three #2322 review findings; support final procedures and complete final-output checking in the shared harness as requested; accept only the eight confirmed sv-tests fail-to-pass improvements.
+rev 1 (initial) 2026-10-27 20:40 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2322,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"1d34ff42ca40bc5781fe8b9d664f2e6a532774d0","timestamp_iso":"2026-10-27T20:40:43Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"1d34ff42ca40bc5781fe8b9d664f2e6a532774d0","new_sha":"3dc93dee22bcc415aa2dd836474e7ed9710f337f","timestamp_iso":"2026-10-27T20:40:43Z","reason":"Address all three #2322 review findings; support final procedures and complete final-output checking in the shared harness as requested; accept only the eight confirmed sv-tests fail-to-pass improvements.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/1d34ff42ca40bc5781fe8b9d664f2e6a532774d0...3dc93dee22bcc415aa2dd836474e7ed9710f337f"}]} -->
