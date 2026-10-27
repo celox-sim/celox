@@ -1,1 +1,6 @@
-Fix CI retained_reports consistency: synchronize the added Icarus evidence reference in all existing rows sharing sv_icarus_interfaces; all four retained-report tests pass.
+Revision history for #2277:
+
+rev 2 (content) 2026-10-27 13:53 UTC — Fix CI retained_reports consistency: synchronize the added Icarus evidence reference in all existing rows sharing sv_icarus_interfaces; all four retained-report tests pass.
+rev 1 (initial) 2026-10-27 13:53 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2277,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"e142e151f8d2837419dd618ae6a451d7e8d84380","timestamp_iso":"2026-10-27T13:53:34Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"e142e151f8d2837419dd618ae6a451d7e8d84380","new_sha":"ec35fedc7a3eeeec3bd2e98a8148002b622a1e7d","timestamp_iso":"2026-10-27T13:53:34Z","reason":"Fix CI retained_reports consistency: synchronize the added Icarus evidence reference in all existing rows sharing sv_icarus_interfaces; all four retained-report tests pass.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/e142e151f8d2837419dd618ae6a451d7e8d84380...ec35fedc7a3eeeec3bd2e98a8148002b622a1e7d"}]} -->
