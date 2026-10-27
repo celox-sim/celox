@@ -1,0 +1,1 @@
+Fix review r4392840008: pending inertial deposits must reopen a quiescent timed session at the current time; add resumed-run coverage while preserving closed ReadOnly timers.
