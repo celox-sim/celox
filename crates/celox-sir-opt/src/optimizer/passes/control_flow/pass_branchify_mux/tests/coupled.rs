@@ -1,5 +1,97 @@
 use super::*;
 
+#[cfg(debug_assertions)]
+#[test]
+fn coupled_rewrites_verify_once_across_many_source_blocks() {
+    const COUNT: usize = 16;
+    for priority_chain in [false, true] {
+        let blocks = (0..COUNT)
+            .map(|lane| {
+                let base = 6 + lane * 4;
+                BasicBlock {
+                    id: BlockId(lane),
+                    params: if lane == 0 {
+                        (0..6).map(RegisterId).collect()
+                    } else {
+                        Vec::new()
+                    },
+                    instructions: vec![
+                        SIRInstruction::Mux(
+                            RegisterId(base),
+                            RegisterId(0),
+                            RegisterId(4),
+                            RegisterId(2),
+                        ),
+                        SIRInstruction::Mux(
+                            RegisterId(base + 1),
+                            RegisterId(0),
+                            RegisterId(5),
+                            RegisterId(3),
+                        ),
+                        SIRInstruction::Mux(
+                            RegisterId(base + 2),
+                            RegisterId(1),
+                            RegisterId(4),
+                            RegisterId(base),
+                        ),
+                        SIRInstruction::Mux(
+                            RegisterId(base + 3),
+                            RegisterId(1),
+                            RegisterId(5),
+                            RegisterId(base + 1),
+                        ),
+                        store(lane * 2, base + 2),
+                        store(lane * 2 + 1, base + 3),
+                    ],
+                    terminator: if lane + 1 == COUNT {
+                        SIRTerminator::Return
+                    } else {
+                        SIRTerminator::Jump(BlockId(lane + 1), Vec::new())
+                    },
+                }
+            })
+            .collect();
+        let mut eu = cfg_unit(6 + COUNT * 4, &[0, 1], blocks);
+        eu.verify_result().unwrap();
+        let counts = count_uses(&eu);
+        let mut next_block = COUNT;
+        let mut next_register = 5 + COUNT * 4;
+        COUPLED_BATCH_VERIFICATIONS.with(|count| count.set(0));
+        let applied = if priority_chain {
+            super::super::coupled::branchify_coupled_priority_chains(
+                &mut eu,
+                &counts,
+                &mut next_block,
+                &mut next_register,
+            )
+        } else {
+            super::super::coupled::branchify_coupled_state_updates(
+                &mut eu,
+                &counts,
+                &mut next_block,
+                &mut next_register,
+            )
+        };
+        assert_eq!(applied, COUNT * if priority_chain { 1 } else { 2 });
+        assert_eq!(COUPLED_BATCH_VERIFICATIONS.with(|count| count.get()), 1);
+        eu.verify_result().unwrap();
+        assert!(!eu.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, SIRInstruction::Mux(..)))
+        }));
+        assert_eq!(
+            eu.blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter(|inst| matches!(inst, SIRInstruction::Store(..)))
+                .count(),
+            COUNT * 2
+        );
+    }
+}
+
 #[test]
 fn branchifies_coupled_state_updates_with_interleaved_conditions() {
     let mut eu = cfg_unit(
