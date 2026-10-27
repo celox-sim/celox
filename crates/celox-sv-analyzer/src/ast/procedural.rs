@@ -12,7 +12,7 @@ mod control;
 mod final_procedures;
 mod foreach;
 use foreach::ForeachLoop;
-mod randomization;
+pub(super) mod randomization;
 pub(super) mod timed_tasks;
 mod timing;
 use crate::procedural::{
@@ -1253,6 +1253,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             {
                 self.rename_expr(&mut value);
                 return Ok(vec![Stmt::Eval(value)]);
+            }
+            if matches!(
+                native.expression(query_root).kind,
+                celox_sv_syntax::ExprKind::RandomizeWith { .. }
+            ) {
+                let mut call = self.native_value(query_root)?;
+                self.rename_expr(&mut call);
+                return Ok(vec![Stmt::Eval(call)]);
             }
             if let Some(call) = self.method_call_statement(query_root)? {
                 return Ok(vec![call]);

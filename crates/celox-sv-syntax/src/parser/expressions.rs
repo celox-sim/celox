@@ -372,6 +372,13 @@ impl Parser<'_> {
                     pending.extend(expressions);
                 }
                 ExprKind::Tagged { value, .. } => pending.extend(value),
+                ExprKind::RandomizeWith {
+                    expression,
+                    constraints,
+                } => {
+                    pending.push(*expression);
+                    pending.extend(constraints.iter().flatten());
+                }
                 ExprKind::ArrayMethodWith {
                     expression,
                     predicate,
@@ -780,6 +787,38 @@ impl Parser<'_> {
                             parameterized,
                         });
                         jobs.push(Job::Arguments);
+                    }
+                    "with" if self.nth(1) == "{" => {
+                        let callee = match &self.expressions[left.0].kind {
+                            ExprKind::Call { expression, .. } => *expression,
+                            _ => left,
+                        };
+                        let is_randomize = match &self.expressions[callee.0].kind {
+                            ExprKind::Name(name) | ExprKind::Member { name, .. } => {
+                                name.value() == "randomize"
+                            }
+                            _ => false,
+                        };
+                        if !is_randomize {
+                            return Err(self.error("constraint with block requires randomize"));
+                        }
+                        self.at += 1;
+                        if self.inline_constraint_depth != 0 {
+                            return Err(self.unsupported("inline constraint nesting limit"));
+                        }
+                        self.inline_constraint_depth += 1;
+                        let constraints = self.constraint_block();
+                        self.inline_constraint_depth -= 1;
+                        let constraints = constraints?;
+                        self.tail(
+                            &mut jobs,
+                            start,
+                            minimum,
+                            ExprKind::RandomizeWith {
+                                expression: left,
+                                constraints,
+                            },
+                        )?;
                     }
                     "with" if self.nth(1) == "(" => {
                         let method = match &self.expressions[left.0].kind {
