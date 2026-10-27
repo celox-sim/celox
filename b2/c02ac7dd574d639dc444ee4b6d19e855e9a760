@@ -1,0 +1,6 @@
+Revision history for #2232:
+
+rev 2 (content) 2026-10-27 06:18 UTC — Use the explicit generated-callee arena reservation helper introduced for review4385415960; retain the existing disjoint placement and avoid duplicating the footprint calculation.
+rev 1 (initial) 2026-10-27 06:18 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2232,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"92821852a9a10b3e4a419185a8b07d76a36e40a9","timestamp_iso":"2026-10-27T06:18:57Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"92821852a9a10b3e4a419185a8b07d76a36e40a9","new_sha":"b7ebe764c4ea392e35df79220aa58327255c7b63","timestamp_iso":"2026-10-27T06:18:57Z","reason":"Use the explicit generated-callee arena reservation helper introduced for review4385415960; retain the existing disjoint placement and avoid duplicating the footprint calculation.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/92821852a9a10b3e4a419185a8b07d76a36e40a9...b7ebe764c4ea392e35df79220aa58327255c7b63"}]} -->
