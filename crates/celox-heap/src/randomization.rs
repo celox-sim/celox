@@ -16,6 +16,11 @@ pub struct Field {
 pub enum Expr {
     Literal(u32, u64),
     Field(usize),
+    /// Read-only scalar supplied by this call, never a solver variable.
+    Input {
+        index: usize,
+        width: u32,
+    },
     Resize {
         value: Box<Expr>,
         width: u32,
@@ -50,9 +55,18 @@ fn boolean(value: Term) -> Term {
 }
 
 impl Expr {
-    fn term(&self, fields: &[Term]) -> Result<Term, String> {
+    fn term(&self, fields: &[Term], inputs: &[u64]) -> Result<Term, String> {
         Ok(match self {
             Self::Literal(width, value) => bv(*width, *value),
+            Self::Input { index, width } => {
+                if !(1..=64).contains(width) {
+                    return Err("invalid constraint input width".into());
+                }
+                bv(
+                    *width,
+                    *inputs.get(*index).ok_or("missing constraint input")?,
+                )
+            }
             Self::Field(index) => fields
                 .get(*index)
                 .ok_or("invalid constraint field")?
@@ -62,7 +76,7 @@ impl Expr {
                 width,
                 signed,
             } => {
-                let value = value.term(fields)?;
+                let value = value.term(fields, inputs)?;
                 let Sort::Bv(old) = value.0.sort else {
                     unreachable!()
                 };
@@ -82,7 +96,7 @@ impl Expr {
                 }
             }
             Self::Unary { op, value } => {
-                let value = value.term(fields)?;
+                let value = value.term(fields, inputs)?;
                 match op.as_str() {
                     "!" => boolean(not(truth(value))),
                     "~" => node(value.0.sort.clone(), "bvnot", vec![value]),
@@ -101,8 +115,8 @@ impl Expr {
                 right,
                 signed,
             } => {
-                let a = left.term(fields)?;
-                let b = right.term(fields)?;
+                let a = left.term(fields, inputs)?;
+                let b = right.term(fields, inputs)?;
                 let relation = match op.as_str() {
                     "==" => Some(eq(a.clone(), b.clone())),
                     "!=" => Some(not(eq(a.clone(), b.clone()))),
@@ -155,7 +169,19 @@ impl Heap {
         program: &Program,
         check_only: bool,
     ) -> bool {
-        self.randomize_object_with_limits(handle, program, check_only, Limits::default())
+        self.randomize_object_with_inputs(handle, program, check_only, &[])
+    }
+
+    /// Solve using call-local, read-only scalar values. Inputs are not retained
+    /// in the object or its RNG state and are never included in the projection.
+    pub fn randomize_object_with_inputs(
+        &mut self,
+        handle: Handle,
+        program: &Program,
+        check_only: bool,
+        inputs: &[u64],
+    ) -> bool {
+        self.randomize_object_with_limits(handle, program, check_only, inputs, Limits::default())
     }
 
     fn randomize_object_with_limits(
@@ -163,6 +189,7 @@ impl Heap {
         handle: Handle,
         program: &Program,
         check_only: bool,
+        inputs: &[u64],
         limits: Limits,
     ) -> bool {
         if !self.check_object(handle, 0) {
@@ -194,7 +221,7 @@ impl Heap {
                 terms.push(term);
             }
             for constraint in &program.constraints {
-                formula = and(formula, truth(constraint.term(&terms)?));
+                formula = and(formula, truth(constraint.term(&terms, inputs)?));
             }
             let seed = if projection.is_empty() {
                 0
@@ -262,6 +289,62 @@ mod tests {
     }
 
     #[test]
+    fn per_call_inputs_are_read_only_checked_and_not_retained() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 1);
+        let mut program = program();
+        program.constraints = vec![Expr::Binary {
+            op: "==".into(),
+            left: Box::new(Expr::Field(0)),
+            right: Box::new(Expr::Input { index: 0, width: 4 }),
+            signed: false,
+        }];
+        for value in [3, 12] {
+            assert!(heap.randomize_object_with_inputs(object, &program, false, &[value]));
+            assert_eq!(heap.load(object, 0, 1), value);
+        }
+        let mut before = heap.clone();
+        assert!(!heap.randomize_object_with_inputs(object, &program, true, &[3]));
+        assert_eq!(heap.load(object, 0, 1), 12);
+        assert_eq!(heap.random_object(object), before.random_object(object));
+        assert!(!heap.randomize_object(object, &program, false));
+        assert!(matches!(
+            heap.take_fault(),
+            Some(Fault::ConstraintRandomization(_))
+        ));
+        let json = heap.intern(&serde_json::to_vec(&program).unwrap());
+        let mut bytes = vec![0];
+        bytes.extend(5u64.to_be_bytes());
+        let inputs = heap.new_buffer(bytes);
+        assert_eq!(
+            heap.call(
+                crate::ops::OBJECT_RANDOMIZE_INPUTS,
+                object.into(),
+                json.into(),
+                inputs
+            ),
+            1,
+            "{:?}",
+            heap.take_fault()
+        );
+        assert_eq!(heap.load(object, 0, 1), 5);
+        let bad = heap.new_buffer(vec![0, 1]);
+        assert_eq!(
+            heap.call(
+                crate::ops::OBJECT_RANDOMIZE_INPUTS,
+                object.into(),
+                json.into(),
+                bad
+            ),
+            0
+        );
+        assert!(matches!(
+            heap.take_fault(),
+            Some(Fault::ConstraintRandomization(_))
+        ));
+    }
+
+    #[test]
     fn modes_unsat_faults_and_snapshot_replay() {
         let mut heap = Heap::new();
         let object = heap.new_object(1, 1);
@@ -279,7 +362,7 @@ mod tests {
             max_work: 0,
             ..Limits::default()
         };
-        assert!(!heap.randomize_object_with_limits(object, &program, false, limits));
+        assert!(!heap.randomize_object_with_limits(object, &program, false, &[], limits));
         assert_eq!(heap.load(object, 0, 1), 9);
         assert!(matches!(
             heap.take_fault(),
