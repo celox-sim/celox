@@ -1126,7 +1126,9 @@ fn instruction_blocks_writeback_motion(
                 bit_offset: other_offset,
                 ..
             } => ranges_overlap(offset, width, *other_offset, other_width),
-            SIROffset::Dynamic(_) | SIROffset::Element { .. } => true,
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
+                true
+            }
         }
     };
     instruction.is_host_interaction()
