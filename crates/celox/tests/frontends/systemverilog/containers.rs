@@ -1,6 +1,13 @@
 use super::*;
 
 sv_backends! {
+    fn class_container_inheritance_static(sim) { @case "containers::class_container_inheritance_static"; }
+    fn class_container_receiver_evaluation(sim) { @case "containers::class_container_receiver_evaluation"; }
+    fn class_container_properties(sim) { @case "containers::class_container_properties"; }
+    fn class_container_queue_pool(sim) { @case "containers::class_container_queue_pool"; }
+    fn class_container_strings_handles(sim) { @case "containers::class_container_strings_handles"; }
+    fn class_container_four_state(sim) { @case "containers::class_container_four_state"; }
+    fn class_container_copy_and_gc(sim) { @case "containers::class_container_copy_and_gc"; }
     fn ordering_integral(sim) { @case "containers::ordering_integral"; }
     fn ordering_strings(sim) { @case "containers::ordering_strings"; }
     fn ordering_four_state(sim) { @case "containers::ordering_four_state"; }
@@ -145,6 +152,74 @@ fn ordering_survives_native_images_and_serialized_checkpoints() {
     assert_eq!(sim.get(value), BigUint::from(3u8));
     sim.run_until(35).unwrap();
     assert_eq!(sim.get(value), BigUint::from(1u8));
+}
+
+#[test]
+fn class_container_native_images_and_checkpoints_preserve_object_graphs() {
+    let source = r#"module Top(output int value);
+        timeunit 1ps / 1ps;
+        class Store; int data[], q[$], map[string]; endclass
+        Store s;
+        initial begin
+            s = new; s.data = '{1, 2}; s.q.push_back(3); s.map["key"] = 4;
+            #10 value = s.data[0] + s.q[0] + s.map["key"];
+            #10 s.data[0] = 5; s.q.push_back(6); s.map["key"] = 7;
+            #10 value = s.data[0] + s.q[1] + s.map["key"];
+        end
+    endmodule"#;
+    for four_state in [false, true] {
+        let mut interpreted = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("class-container-interpreter.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build_interpreter()
+        .unwrap();
+        interpreted.run_until(35).unwrap();
+        assert_eq!(
+            interpreted.get(interpreted.signal("value")),
+            BigUint::from(18u8)
+        );
+        let image = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("class-container-image.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+        let image =
+            celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+                .unwrap();
+        let mut sim = celox::Simulation::from_sv_sources(Vec::new(), "Top")
+            .build_native_from_image(image)
+            .unwrap();
+        sim.run_until(15).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(8u8));
+        let bytes = sim.checkpoint().unwrap().to_bytes().unwrap();
+        // SAFETY: bytes came from this simulator's checkpoint.
+        let checkpoint = unsafe { sim.checkpoint_from_bytes(&bytes) }.unwrap();
+        sim.run_until(35).unwrap();
+        assert_eq!(sim.get(value), BigUint::from(18u8));
+        sim.restore(&checkpoint).unwrap();
+        sim.run_until(35).unwrap();
+        assert_eq!(sim.get(value), BigUint::from(18u8));
+    }
+}
+
+#[test]
+fn class_container_methods_reject_null_receivers() {
+    let source =
+        "module Top; class Store; int q[$]; endclass Store s; initial s.q.push_back(1); endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, Path::new("null-class-container.sv"))],
+        "Top",
+    )
+    .build_native()
+    .unwrap();
+    let error = sim.run_until(0).unwrap_err().to_string();
+    assert!(error.contains("null object handle"), "{error}");
 }
 
 const EMPTY_REDUCTION_MODES: &str = r#"

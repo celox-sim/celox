@@ -682,6 +682,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let bind = |right| {
             expression_binding::bind_value(right, native, self.tree, &self.dims, Some(&target))
         };
+        if let Some(container) = property.r#type.container.as_deref() {
+            if op != "=" {
+                return Err(unsupported("compound assignment to a container property"));
+            }
+            let value = containers::assignment(right, self.tree, &self.dims, container)?;
+            return self.property_store(&property, handle, op, value).map(Some);
+        }
         let mut value = match property.r#type.class() {
             Some(class) if op == "=" => {
                 match expression_binding::object_constructor(
@@ -2297,6 +2304,9 @@ pub(super) fn lower_subroutine(
     builder.push_scope();
     if let Some(class) = class {
         builder.enter_class_scope(class);
+        // Method formals and locals may shadow properties, but not another
+        // declaration in the method's own lexical scope (8.5, 6.21).
+        builder.push_scope();
     }
     // Defaults bind in the enclosing declaration scope, before
     // any formal can shadow those names (IEEE 1800-2023 13.5.3).
@@ -2401,6 +2411,9 @@ pub(super) fn lower_subroutine(
         None => body.extend(builder.native_body(&items, &native.authored_statements)?),
     }
     builder.pop_scope();
+    if class.is_some() {
+        builder.pop_scope();
+    }
     let static_types: HashMap<String, Type> = builder
         .state
         .statics
@@ -2715,6 +2728,16 @@ impl BodyBuilder<'_, '_, '_> {
             let Some(initializer) = property.initializer else {
                 continue;
             };
+            if let Some(container) = property.r#type.container.as_deref() {
+                let mut value =
+                    containers::assignment(initializer, self.tree, &self.dims, container)?;
+                self.rename_expr(&mut value);
+                body.push(Stmt::Eval(classes::object_call(
+                    system_functions::ObjectOp::Store(property.field),
+                    vec![Expr::Ident(this.to_owned()), value],
+                )));
+                continue;
+            }
             let mut value = match property.r#type.class() {
                 Some(class) => expression_binding::object_constructor(
                     self.tree,
