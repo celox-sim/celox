@@ -641,3 +641,39 @@ fn preliminary_literal_queries_do_not_discover_scope_declarations() {
     assert_eq!(direct, discovered);
     assert_eq!(SYNTAX_TYPE_DISCOVERIES.with(|count| count.get()), 0);
 }
+
+#[test]
+fn discovery_prefix_does_not_copy_a_growing_symbol_overlay() {
+    const COUNT: usize = 128;
+    let declarations = (0..COUNT)
+        .map(|index| format!("logic [7:0] v{index};"))
+        .collect::<String>();
+    let code = format!(
+        "module Top; {declarations} localparam int WIDTH=$bits(v{}); endmodule",
+        COUNT - 1
+    );
+    let native =
+        crate::source_tree::parse_scope_fixture(&code, Path::new("query-prefix-copies.sv"))
+            .unwrap();
+    let calls = native_calls(&native);
+    assert_eq!(calls.len(), 1);
+    let tree = AnalysisContext::unspecialized(&native);
+    super::super::scoped_map::COPIED_OVERLAY_BINDINGS.with(|count| count.set(0));
+    SYNTAX_TYPE_DISCOVERIES.with(|count| count.set(0));
+    assert_eq!(
+        query_number(
+            calls[0],
+            &tree,
+            &HashMap::default(),
+            &HashMap::default(),
+            None
+        ),
+        Some(8)
+    );
+    assert!(SYNTAX_TYPE_DISCOVERIES.with(|count| count.get()) > 0);
+    let copied = super::super::scoped_map::COPIED_OVERLAY_BINDINGS.with(|count| count.get());
+    assert!(
+        copied <= COUNT * 8,
+        "{copied} copied bindings for {COUNT} declarations"
+    );
+}
