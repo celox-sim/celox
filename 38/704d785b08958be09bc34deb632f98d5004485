@@ -1,0 +1,1 @@
+Address review 5674234599: suppress unchanged Pending notifications, retire externally killed frames while preserving RNG, and avoid implicit program finish during finalization; add bounded-progress/storage/final regressions.
