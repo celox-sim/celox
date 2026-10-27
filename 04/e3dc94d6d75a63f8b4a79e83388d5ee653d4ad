@@ -1,0 +1,1 @@
+Address review 4385415960: require an explicit generated-callee arena footprint, reserve disjoint caller storage, and test real generated spill-heavy nested callees rather than only a Rust surrogate.
