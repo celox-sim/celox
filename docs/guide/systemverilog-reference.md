@@ -229,7 +229,11 @@ signedness before arithmetic evaluation. Excessive predicate expansion is reject
 during analysis, including repeated nested membership. Array sets, X/Z wildcard items and `$` bounds are not
 yet supported. Membership uses the same seeded solver policy described above.
 
-Constrained enums and `randc`, conditional/foreach/soft constraints,
+Conditional constraints support `if` / `else` and implication (`->`), including
+nested blocks. Both sides participate in solving: a required result can constrain
+the condition. These constructs do not choose a branch before solving.
+
+Constrained enums and `randc`, foreach/soft constraints,
 `dist`, `solve before`, constraint modes, external/static blocks, typed parameters
 in constraints, and inline `with` remain unsupported. Larger unconstrained `randc`
 domains, static random properties and random array/object/string properties also

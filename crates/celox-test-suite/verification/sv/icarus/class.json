@@ -193,7 +193,33 @@
         "evidence": [
           "verification/repros/sv_scalar_constraints.json",
           "LIMITATIONS.md#systemverilog-suite",
-          "verification/repros/sv_inside_constraints.json"
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json"
+        ],
+        "id": "sv_icarus_scalar_constraints",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "phase": "compile",
+        "reason": "Icarus rejects constraint declarations before elaboration. IEEE 1800-2023 18.5 defines these blocks. Celox retains all assertions; Verilator passes the scalar and width/inheritance cases.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_conditionals",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations before elaboration. IEEE 1800-2023 18.5 defines these blocks. Celox retains all assertions; Verilator passes the scalar and width/inheritance cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json"
         ],
         "id": "sv_icarus_scalar_constraints",
         "observed_version": "Icarus Verilog version 13.0 (devel)",
@@ -217,7 +243,8 @@
         "evidence": [
           "verification/repros/sv_scalar_constraints.json",
           "LIMITATIONS.md#systemverilog-suite",
-          "verification/repros/sv_inside_constraints.json"
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json"
         ],
         "id": "sv_icarus_scalar_constraints",
         "observed_version": "Icarus Verilog version 13.0 (devel)",
@@ -241,7 +268,8 @@
         "evidence": [
           "verification/repros/sv_scalar_constraints.json",
           "LIMITATIONS.md#systemverilog-suite",
-          "verification/repros/sv_inside_constraints.json"
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json"
         ],
         "id": "sv_icarus_scalar_constraints",
         "observed_version": "Icarus Verilog version 13.0 (devel)",
@@ -265,7 +293,33 @@
         "evidence": [
           "verification/repros/sv_scalar_constraints.json",
           "LIMITATIONS.md#systemverilog-suite",
-          "verification/repros/sv_inside_constraints.json"
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json"
+        ],
+        "id": "sv_icarus_scalar_constraints",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "phase": "compile",
+        "reason": "Icarus rejects constraint declarations before elaboration. IEEE 1800-2023 18.5 defines these blocks. Celox retains all assertions; Verilator passes the scalar and width/inheritance cases.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_nested_guards",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations before elaboration. IEEE 1800-2023 18.5 defines these blocks. Celox retains all assertions; Verilator passes the scalar and width/inheritance cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json"
         ],
         "id": "sv_icarus_scalar_constraints",
         "observed_version": "Icarus Verilog version 13.0 (devel)",
@@ -289,7 +343,8 @@
         "evidence": [
           "verification/repros/sv_scalar_constraints.json",
           "LIMITATIONS.md#systemverilog-suite",
-          "verification/repros/sv_inside_constraints.json"
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json"
         ],
         "id": "sv_icarus_scalar_constraints",
         "observed_version": "Icarus Verilog version 13.0 (devel)",
