@@ -1,5 +1,217 @@
 (group containers (category types))
 
+(case class_container_inheritance_static
+  (source "class_containers.sv" #"
+module Top(output bit [3:0] flags);
+    class Base;
+        protected int q[$];
+        static int counts[string];
+        function void push(int value); q.push_back(value); endfunction
+        function int count(); return q.size(); endfunction
+    endclass
+    class Derived extends Base;
+        function int pop(); return super.q.pop_front(); endfunction
+        function void shadow();
+            int q[$];
+            q.push_back(99);
+            this.q.push_back(7);
+        endfunction
+    endclass
+    Derived d;
+    Base alias_d;
+    int value;
+    initial begin
+        d = new; alias_d = d; d.push(3); d.shadow();
+        flags[0] = alias_d.count() == 2;
+        value = d.pop();
+        flags[1] = value == 3 && d.count() == 1;
+        Base::counts["shared"] = 4;
+        flags[2] = d.counts["shared"] == 4;
+        d.counts["shared"] = 8;
+        flags[3] = Base::counts.num() == 1 && alias_d.counts["shared"] == 8;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 15))
+
+(case class_container_receiver_evaluation
+  (source "class_containers.sv" #"
+module Top(output bit [2:0] flags);
+    class Store; int q[$]; endclass
+    Store first, second, stores[$];
+    int calls;
+    function automatic int next_index(); calls++; return 0; endfunction
+    initial begin
+        first = new; second = new; stores = {first, second};
+        stores[next_index()].q.push_back(5);
+        flags[0] = calls == 1 && first.q.size() == 1 && second.q.size() == 0;
+        flags[1] = first.q[0] == 5;
+        first.q = {1, 2}; first.q.push_back(first.q.pop_front());
+        flags[2] = first.q.size() == 2 && first.q[0] == 2 && first.q[1] == 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 7))
+
+(case class_container_properties
+  (source "class_containers.sv" #"
+module Top(output bit [8:0] flags);
+    class Store;
+        int data[] = new[2];
+        int q[$], map[string];
+        function void add(int value); q.push_back(value); endfunction
+        function int take(); return q.pop_front(); endfunction
+        function int count(); return this.q.size(); endfunction
+    endclass
+    Store s, alias_s;
+    int copy_values[], value;
+    initial begin
+        s = new; alias_s = s;
+        flags[0] = s.data.size() == 2 && s.q.size() == 0 && s.map.num() == 0;
+        s.data[0] = 4; s.data[1] = 5; copy_values = s.data;
+        s.data[0] = 9;
+        flags[1] = copy_values[0] == 4 && copy_values[1] == 5 && alias_s.data[0] == 9;
+        s.add(1); s.add(2); s.q.push_back(s.q.pop_front());
+        flags[2] = s.count() == 2 && s.q[0] == 2 && s.q[1] == 1;
+        value = alias_s.take();
+        flags[3] = value == 2 && s.q.size() == 1;
+        s.map["first"] = 10; alias_s.map["second"] = 20;
+        flags[4] = s.map.num() == 2 && s.map.exists("second") && s.map["first"] == 10;
+        s.data = '{6, 7, 8}; s.data = new[4](s.data);
+        flags[5] = s.data.size() == 4 && s.data[0] == 6 && s.data[2] == 8;
+        flags[6] = s.data.sum() == 21 && $size(s.data) == 4 && $bits(s.q.pop_front()) == 32 && s.q.size() == 1;
+        s.q.push_back(3); s.q.reverse();
+        flags[8] = s.q[0] == 3 && s.q[1] == 1;
+        s.q.sort(); flags[8] = flags[8] && s.q[0] == 1 && s.q[1] == 3;
+        s.q.rsort(); flags[8] = flags[8] && s.q[0] == 3 && s.q[1] == 1;
+        s.data.delete(); s.q.delete(); s.map.delete("first");
+        flags[7] = s.data.size() == 0 && alias_s.q.size() == 0 && s.map.size() == 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 511))
+
+(case class_container_queue_pool
+  (source "class_containers.sv" #"
+module Top(output bit [5:0] flags);
+    class Queue #(type T = int);
+        protected T queue[$];
+        virtual function void push_back(T value); queue.push_back(value); endfunction
+        virtual function T pop_front(); return queue.pop_front(); endfunction
+        virtual function T get(int index); return queue[index]; endfunction
+        virtual function int size(); return queue.size(); endfunction
+    endclass
+    class Pool #(type KEY = string, type T = int);
+        protected T pool[KEY];
+        virtual function void add(KEY key, T value); pool[key] = value; endfunction
+        virtual function T get(KEY key); return pool[key]; endfunction
+        virtual function int num(); return pool.num(); endfunction
+        virtual function int total();
+            int result = 0;
+            foreach (pool[key]) result += pool[key];
+            return result;
+        endfunction
+    endclass
+    Queue #(int) numbers;
+    Queue #(string) words;
+    Pool #(string, int) pool;
+    int value;
+    initial begin
+        numbers = new; words = new; pool = new;
+        numbers.push_back(11); numbers.push_back(22);
+        flags[0] = numbers.size() == 2 && numbers.get(1) == 22;
+        value = numbers.pop_front();
+        flags[1] = value == 11 && numbers.size() == 1;
+        words.push_back("alpha"); words.push_back("beta");
+        flags[2] = words.pop_front() == "alpha" && words.get(0) == "beta";
+        pool.add("first", 30); pool.add("second", 40);
+        flags[3] = pool.num() == 2 && pool.get("second") == 40;
+        flags[4] = pool.total() == 70;
+        pool.add("first", 50);
+        flags[5] = pool.num() == 2 && pool.total() == 90;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 63))
+
+(case class_container_strings_handles
+  (source "class_containers.sv" #"
+module Top(output bit [3:0] flags);
+    class Cell; bit [31:0] value; endclass
+    class Store;
+        string words[$];
+        Cell cells[int];
+    endclass
+    Store s;
+    Cell c, selected;
+    string text;
+    initial begin
+        s = new; c = new; c.value = 7;
+        s.words.push_back("kept"); s.words.push_back("last");
+        text = s.words.pop_front();
+        flags[0] = text == "kept" && s.words[0] == "last";
+        s.cells[3] = c; selected = s.cells[3]; selected.value = 9;
+        flags[1] = s.cells[3] == c && s.cells[3].value == 9;
+        c = null; selected = null;
+        #1;
+        flags[2] = s.words.pop_back() == "last" && s.words.size() == 0;
+        selected = s.cells[3];
+        flags[3] = selected.value == 9;
+    end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq flags 15))
+
+(case class_container_four_state
+  (source "class_containers.sv" #"
+module Top(output bit [3:0] flags);
+    class Store; logic [3:0] data[], q[$], map[int]; endclass
+    Store s;
+    logic [3:0] value;
+    initial begin
+        s = new; s.data = new[2];
+        flags[0] = s.data[0] === 4'bxxxx;
+        s.data[0] = 4'b1xz0; s.q.push_back(s.data[0]);
+        value = s.q.pop_front();
+        flags[1] = value === 4'b1xz0 && s.q.size() == 0;
+        s.map[-1] = value;
+        flags[2] = s.map[-1] === 4'b1xz0 && s.map[5] === 4'bxxxx;
+        s.q.push_back(4'bz01x);
+        flags[3] = $bits(s.q.pop_front) == 4 && s.q.size() == 1 && s.q[0] === 4'bz01x;
+    end
+endmodule
+"#)
+  (four_state)
+  (top Top) (run_until 0) (assert_eq flags 15))
+
+(case class_container_copy_and_gc
+  (source "class_containers.sv" #"
+module Top(output bit [3:0] flags);
+    class Store;
+        string words[$];
+        int data[];
+        function void append(string value); words.push_back(value); endfunction
+    endclass
+    Store original, copy_object, garbage;
+    int i;
+    initial begin
+        original = new; original.append("live"); original.data = '{1, 2};
+        copy_object = new original;
+        copy_object.words.push_back("copy"); copy_object.data[0] = 9;
+        flags[0] = original.words.size() == 1 && original.words[0] == "live";
+        flags[1] = original.data[0] == 1 && copy_object.data[0] == 9;
+        original = null;
+        for (i = 0; i < 1100; i++) garbage = new;
+        garbage = null;
+        #1;
+        flags[2] = copy_object.words[0] == "live" && copy_object.words[1] == "copy";
+        copy_object.append("third");
+        flags[3] = copy_object.words.size() == 3 && copy_object.words[2] == "third";
+    end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq flags 15))
+
 (case ordering_integral
   (source "ordering.sv" #"
 module Top(output bit [10:0] flags);

@@ -726,7 +726,8 @@ pub(in crate::ast) fn shape(
                 if let ExprKind::Member {
                     expression, name, ..
                 } = &native.expression(callee).kind
-                    && let Some(container) = containers::native_type(*expression, native, context)
+                    && let Some(container) =
+                        containers::native_type(*expression, native, tree, context)?
                 {
                     // Validate the call without executing it. Pop returns the
                     // declared element type, including packed dimensions and

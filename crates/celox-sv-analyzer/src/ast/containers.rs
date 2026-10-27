@@ -109,20 +109,28 @@ pub(super) fn with_dimensions(
     Ok(ty)
 }
 
-pub(super) fn native_type<'a>(
+pub(super) fn native_type(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
-    dims: &'a PackedDimensions,
-) -> Option<&'a ContainerType> {
-    let ExprKind::Name(name) = &native
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+) -> Converted<Option<Arc<ContainerType>>> {
+    if let ExprKind::Name(name) = &native
         .expression(expression_binding::ungroup(id, native))
         .kind
-    else {
-        return None;
-    };
-    dims.get(&instances::normalize_identifier(&name.spelling))?
-        .container
-        .as_deref()
+        && let Some(shape) = dims.get(&instances::normalize_identifier(&name.spelling))
+    {
+        return Ok(shape.container.clone());
+    }
+    if let Some((property, _)) = expression_binding::object_property(tree, id, native, dims)? {
+        return Ok(property.r#type.container);
+    }
+    if let Some(name) = expression_binding::object_static_property(tree, id, native, dims)?
+        && let Some(shape) = dims.get(&name)
+    {
+        return Ok(shape.container.clone());
+    }
+    Ok(None)
 }
 
 pub(super) fn call(op: ContainerOp, layout: ContainerLayout, args: Vec<Expr>) -> Expr {
@@ -162,7 +170,7 @@ pub(super) fn assignment(
         let size = expression_binding::value(size, native, tree, dims)?;
         let init = match initializer {
             Some(id) => {
-                check_compatible(id, native, dims, target)?;
+                check_compatible(id, native, tree, dims, target)?;
                 expression_binding::value(id, native, tree, dims)?
             }
             None => Expr::Literal("0".into()),
@@ -189,7 +197,7 @@ pub(super) fn assignment(
             .collect::<Converted<Vec<_>>>()?;
         return Ok(call(ContainerOp::Literal, target.layout, values));
     }
-    check_compatible(root, native, dims, target)?;
+    check_compatible(root, native, tree, dims, target)?;
     Ok(call(
         ContainerOp::Convert,
         target.layout,
@@ -199,10 +207,11 @@ pub(super) fn assignment(
 fn check_compatible(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
     target: &ContainerType,
 ) -> Converted<()> {
-    let Some(source) = native_type(id, native, dims) else {
+    let Some(source) = native_type(id, native, tree, dims)? else {
         return Err(unsupported(
             "container assignment requires a compatible container",
         ));
@@ -228,7 +237,7 @@ fn element_value(
     target: &ContainerType,
 ) -> Converted<Expr> {
     let native = tree.declarations();
-    if native_type(id, native, dims).is_some() {
+    if native_type(id, native, tree, dims)?.is_some() {
         return Err(unsupported("container used as an element"));
     }
     if let Some(class) = target.element.class.as_deref() {
@@ -325,14 +334,14 @@ pub(super) fn value(
             left,
             operator,
             right,
-        } if native_type(*left, native, dims).is_some()
-            || native_type(*right, native, dims).is_some() =>
+        } if native_type(*left, native, tree, dims)?.is_some()
+            || native_type(*right, native, tree, dims)?.is_some() =>
         {
-            let Some(target) = native_type(*left, native, dims) else {
+            let Some(target) = native_type(*left, native, tree, dims)? else {
                 return Err(unsupported("container comparison requires two containers"));
             };
-            check_compatible(*right, native, dims, target)?;
-            let source = native_type(*right, native, dims).expect("checked compatibility");
+            check_compatible(*right, native, tree, dims, &target)?;
+            let source = native_type(*right, native, tree, dims)?.expect("checked compatibility");
             if std::mem::discriminant(&source.layout.kind)
                 != std::mem::discriminant(&target.layout.kind)
             {
@@ -367,7 +376,7 @@ pub(super) fn value(
             expression,
             dimension,
         } => {
-            let Some(target) = native_type(*expression, native, dims) else {
+            let Some(target) = native_type(*expression, native, tree, dims)? else {
                 return Ok(None);
             };
             let index = match dimension.kind {
@@ -385,7 +394,7 @@ pub(super) fn value(
                 vec![
                     expression_binding::value(*expression, native, tree, dims)?,
                     match index {
-                        Some(index) => index_value(index, *expression, tree, dims, target)?,
+                        Some(index) => index_value(index, *expression, tree, dims, &target)?,
                         None => Expr::Binary {
                             left: Box::new(call(
                                 ContainerOp::Size,
@@ -417,7 +426,7 @@ pub(super) fn value(
             else {
                 return Ok(None);
             };
-            let Some(target) = native_type(*base, native, dims) else {
+            let Some(target) = native_type(*base, native, tree, dims)? else {
                 return Ok(None);
             };
             if separator != "." {
@@ -533,9 +542,9 @@ pub(super) fn value(
                 } else if matches!(op, ContainerOp::PushFront | ContainerOp::PushBack)
                     || op == ContainerOp::Insert && index == 1
                 {
-                    args.push(element_value(id, tree, dims, target)?);
+                    args.push(element_value(id, tree, dims, &target)?);
                 } else {
-                    args.push(index_value(id, *base, tree, dims, target)?);
+                    args.push(index_value(id, *base, tree, dims, &target)?);
                 }
             }
             Ok(Some(call(op, target.layout, args)))
@@ -577,7 +586,7 @@ fn query(
     let Some(base) = arguments.first().and_then(|a| a.value) else {
         return Ok(None);
     };
-    let Some(target) = native_type(base, native, dims) else {
+    let Some(target) = native_type(base, native, tree, dims)? else {
         return Ok(None);
     };
     if arguments
@@ -667,7 +676,7 @@ pub(super) fn set(
     else {
         return Ok(None);
     };
-    let Some(target) = native_type(*expression, native, dims) else {
+    let Some(target) = native_type(*expression, native, tree, dims)? else {
         return Ok(None);
     };
     if op != "=" || nonblocking {
@@ -676,7 +685,7 @@ pub(super) fn set(
         ));
     }
     let index = match dimension.kind {
-        DimensionKind::Index(index) => index_value(index, *expression, tree, dims, target)?,
+        DimensionKind::Index(index) => index_value(index, *expression, tree, dims, &target)?,
         DimensionKind::Queue(None) if matches!(target.layout.kind, ContainerKind::Queue { .. }) => {
             Expr::Binary {
                 left: Box::new(call(
@@ -696,7 +705,7 @@ pub(super) fn set(
         vec![
             expression_binding::value(*expression, native, tree, dims)?,
             index,
-            element_value(right, tree, dims, target)?,
+            element_value(right, tree, dims, &target)?,
         ],
     ))))
 }
@@ -704,6 +713,41 @@ pub(super) fn set(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn class_containers_preserve_access_and_compatibility_checks() {
+        for (source, expected) in [
+            (
+                "module Top; class C; local int q[$]; endclass C c; initial begin c=new; c.q.push_back(1); end endmodule",
+                "local",
+            ),
+            (
+                "module Top; class C; protected int q[$]; endclass C c; int v; initial begin c=new; v=$size(c.q); end endmodule",
+                "protected",
+            ),
+            (
+                "module Top; class C; const int q[$]; endclass C c; initial c=new; endmodule",
+                "const dynamic",
+            ),
+            (
+                "module Top; class C; int q[$]; byte a[]; endclass C c; initial begin c=new; c.q=c.a; end endmodule",
+                "incompatible",
+            ),
+            (
+                "module Top; class C; int q[$]; endclass C c; initial begin c=new; c.q[0]<=1; end endmodule",
+                "nonblocking",
+            ),
+            (
+                "module Top; class C; int q[2]; endclass C c; initial c=new; endmodule",
+                "unpacked dimensions",
+            ),
+        ] {
+            let error = crate::analyze_source(source, Path::new("class-container-rejection.sv"))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{source}: {error}");
+        }
+    }
+
     #[test]
     fn unsupported_container_forms_fail_before_lowering() {
         for (source, expected) in [
