@@ -1,1 +1,6 @@
-Address review discussion_r4393160264: preserve declared SV instance-array indices in reset connections and add a mixed-language regression.
+Revision history for #2313:
+
+rev 2 (content) 2026-10-27 19:45 UTC — Address review discussion_r4393160264: preserve declared SV instance-array indices in reset connections and add a mixed-language regression.
+rev 1 (initial) 2026-10-27 19:45 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2313,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"e1159ecf8d7d34df1b0a4276882fdc82308b0d68","timestamp_iso":"2026-10-27T19:45:59Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"e1159ecf8d7d34df1b0a4276882fdc82308b0d68","new_sha":"4523eec632a5ec9e4a4a4d83d3c4969070520f73","timestamp_iso":"2026-10-27T19:45:59Z","reason":"Address review discussion_r4393160264: preserve declared SV instance-array indices in reset connections and add a mixed-language regression.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/e1159ecf8d7d34df1b0a4276882fdc82308b0d68...4523eec632a5ec9e4a4a4d83d3c4969070520f73"}]} -->
