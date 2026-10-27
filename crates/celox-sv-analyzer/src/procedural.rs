@@ -140,11 +140,14 @@ pub enum StmtBase<E, L> {
     Wait(E),
 }
 
-/// One item of an event control, `[edge] expr`.
+/// One item of an event control, `[edge] expr [iff condition]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventItemBase<E> {
     pub edge: EventEdge,
     pub expr: E,
+    /// The `iff` condition: an occurrence of `expr` is an event only if it
+    /// holds when the occurrence happens (9.4.2.3).
+    pub iff: Option<E>,
 }
 
 /// Which transitions of an event expression are events (IEEE 1800-2023
@@ -370,6 +373,7 @@ impl<E, L> StmtBase<E, L> {
                     .map(|item| EventItemBase {
                         edge: item.edge,
                         expr: fe(item.expr),
+                        iff: item.iff.map(&mut *fe),
                     })
                     .collect(),
             ),
@@ -491,6 +495,9 @@ impl<E, L> StmtBase<E, L> {
             StmtBase::WaitEvent(items) => {
                 for item in items {
                     fe(&mut item.expr);
+                    if let Some(iff) = &mut item.iff {
+                        fe(iff);
+                    }
                 }
             }
             StmtBase::WaitFork | StmtBase::DisableFork => {}

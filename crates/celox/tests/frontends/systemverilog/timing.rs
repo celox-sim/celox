@@ -200,6 +200,24 @@ timed_cases! {
     fn derived_clocks_follow_superseded_publications = "timing::derived_clocks_follow_superseded_publications";
 }
 
+// A second list: one invocation expands one item per recursion level.
+timed_cases! {
+    fn iff_events_occur_only_while_the_condition_holds = "timing::iff_events_occur_only_while_the_condition_holds";
+    fn iff_conditions_see_writes_before_the_event = "timing::iff_conditions_see_writes_before_the_event";
+    fn iff_conditions_apply_to_their_own_items = "timing::iff_conditions_apply_to_their_own_items";
+    fn iff_conditions_read_automatic_task_arguments = "timing::iff_conditions_read_automatic_task_arguments";
+    fn unknown_iff_conditions_are_false = "timing::unknown_iff_conditions_are_false";
+    fn plain_always_iff_events_run_as_processes = "timing::plain_always_iff_events_run_as_processes";
+    fn iff_conditions_are_judged_before_edge_processes_run = "timing::iff_conditions_are_judged_before_edge_processes_run";
+    fn iff_conditions_are_judged_at_the_write = "timing::iff_conditions_are_judged_at_the_write";
+    fn iff_conditions_follow_nonblocking_update_order = "timing::iff_conditions_follow_nonblocking_update_order";
+    fn iff_conditions_consume_occurrences_while_false = "timing::iff_conditions_consume_occurrences_while_false";
+    fn iff_conditions_preserve_cross_module_combinational_order = "timing::iff_conditions_preserve_cross_module_combinational_order";
+    fn iff_shared_automatic_gate_uses_edge_time_value = "timing::iff_shared_automatic_gate_uses_edge_time_value";
+    fn iff_forked_automatic_gates_are_separate = "timing::iff_forked_automatic_gates_are_separate";
+    fn iff_conditions_follow_combinational_process_order = "timing::iff_conditions_follow_combinational_process_order";
+}
+
 #[test]
 fn timed_task_activations_survive_each_optimization_level() {
     let source = r#"
@@ -460,7 +478,6 @@ fn event_expressions_with_effects_are_rejected() {
 #[test]
 fn unimplemented_timing_features_are_rejected() {
     for (body, construct, issue) in [
-        ("bit a; initial @(a iff a);", "iff-qualified event", 1444),
         ("event e; initial -> e;", "named event", 88),
         (
             "bit a, b; initial a = #1 b;",
@@ -1162,6 +1179,395 @@ fn design_processes_a_program_wakes_run_before_the_nonblocking_updates() {
     }
 }
 
+/// An `iff` wait on a clock only the scheduler drives: the occurrence is
+/// judged with the condition after the edge settles, on every backend.
+#[test]
+fn iff_waits_on_scheduled_clocks_see_their_condition() {
+    let source = r#"
+        module Top(input bit clk, output int n, m);
+            timeunit 1ns / 1ns;
+            bit en, q;
+            wire gate = en & 1'b1;
+            always_ff @(posedge clk) q <= ~q;
+            initial forever begin @(posedge clk iff gate); n++; end
+            initial forever begin @(posedge clk); m++; end
+            initial begin
+                #25 en = 1;
+                #40 en = 0;
+            end
+        endmodule
+    "#;
+    let mut backends = vec!["cranelift", "cranelift-parallel"];
+    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+        backends.extend(["native", "native-parallel"]);
+    }
+    for backend in backends {
+        let builder = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("iff_clock.sv"))],
+            "Top",
+        );
+        let builder = if backend.ends_with("-parallel") {
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+        } else {
+            builder
+        };
+        // The backends build different simulation types.
+        macro_rules! check {
+            ($sim:expr) => {{
+                let mut sim = $sim.unwrap();
+                // Rising edges at 0, 10, ..., 90; the waits begin after the
+                // first. `en` is 1 from 25 to 65.
+                sim.add_clock("clk", 10, 0);
+                sim.run_until(95).unwrap();
+                let [n, m] = ["n", "m"].map(|name| sim.signal(name));
+                assert_eq!(sim.get(m), 9u32.into(), "{backend}");
+                assert_eq!(sim.get(n), 4u32.into(), "{backend}");
+            }};
+        }
+        if backend.starts_with("native") {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check!(builder.build_native());
+        } else {
+            check!(builder.build_cranelift());
+        }
+    }
+}
+
+/// An `iff` wait on a clock only the scheduler drives, with a gate the host
+/// writes: each edge is judged with the gate the host left, on every
+/// backend.
+#[test]
+fn iff_waits_on_scheduled_clocks_judge_host_written_gates() {
+    let source = r#"
+        module Top(input bit clk, input bit en, output int n);
+            timeunit 1ns / 1ns;
+            bit q;
+            always_ff @(posedge clk) q <= ~q;
+            initial forever begin @(posedge clk iff en); n++; end
+        endmodule
+    "#;
+    let mut backends = vec!["cranelift", "cranelift-parallel"];
+    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+        backends.extend(["native", "native-parallel"]);
+    }
+    for backend in backends {
+        let builder = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("iff_host_gate.sv"))],
+            "Top",
+        );
+        let builder = if backend.ends_with("-parallel") {
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+        } else {
+            builder
+        };
+        // The backends build different simulation types.
+        macro_rules! check {
+            ($sim:expr) => {{
+                let mut sim = $sim.unwrap();
+                let [en, n] = ["en", "n"].map(|name| sim.signal(name));
+                // Rising edges at 0, 10, ..., 90; `en` is 1 from 25 to 65.
+                sim.add_clock("clk", 10, 0);
+                sim.run_until(25).unwrap();
+                sim.modify(|io| io.set(en, 1u8)).unwrap();
+                sim.run_until(65).unwrap();
+                sim.modify(|io| io.set(en, 0u8)).unwrap();
+                sim.run_until(95).unwrap();
+                assert_eq!(sim.get(n), 4u32.into(), "{backend}");
+            }};
+        }
+        if backend.starts_with("native") {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check!(builder.build_native());
+        } else {
+            check!(builder.build_cranelift());
+        }
+    }
+}
+
+/// The baselines of `iff` waits whose gate is judged at the write survive a
+/// state file: a simulation loaded between edges wakes as the uninterrupted
+/// one does, and saves the same baselines again.
+#[test]
+fn gated_wait_baselines_survive_a_state_file() {
+    let source = r#"
+        module Top(output int n);
+            timeunit 1ns / 1ns;
+            bit clk, en;
+            initial forever begin @(posedge clk iff en); n++; end
+            initial begin
+                #1 en = 1;
+                #1 clk = 1; en = 0;
+                #1 clk = 0;
+                #1 en = 1;
+                #1 clk = 1;
+                #1 clk = 0; en = 0;
+                #1 clk = 1;
+            end
+        endmodule
+    "#;
+    let build = || {
+        celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("gated_state.sv"))],
+            "Top",
+        )
+        .build()
+        .unwrap()
+    };
+    let through_bytes = |file: &celox::StateFile| {
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        celox::StateFile::read_from(bytes.as_slice()).unwrap()
+    };
+    let count = |sim: &mut celox::Simulation| {
+        let n = sim.signal("n");
+        sim.get(n)
+    };
+    let mut whole = build();
+    whole.run_until(10).unwrap();
+    assert_eq!(count(&mut whole), 2u32.into());
+    for at in [2, 4] {
+        let mut first = build();
+        first.run_until(at).unwrap();
+        let file = through_bytes(&first.save_state().unwrap());
+        let mut loaded = build();
+        loaded.load_state(&file).unwrap();
+        assert_eq!(
+            through_bytes(&loaded.save_state().unwrap()),
+            file,
+            "at {at}"
+        );
+        loaded.run_until(10).unwrap();
+        assert_eq!(count(&mut loaded), 2u32.into(), "at {at}");
+    }
+}
+
+/// A host pulse `clk = 1; clk = 0;` between two steps, while the `iff`
+/// condition holds, is one event of the wait (IEEE 1800-2023 9.4.2.3).
+#[test]
+fn host_pulses_of_iff_gated_clocks_wake_once() {
+    let source = r#"
+        module Top(input bit clk, input bit en, output int n);
+            timeunit 1ns / 1ns;
+            initial forever begin @(posedge clk iff en); n++; end
+        endmodule
+    "#;
+    let mut backends = vec!["cranelift", "cranelift-parallel"];
+    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+        backends.extend(["native", "native-parallel"]);
+    }
+    for backend in backends {
+        let builder = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("iff_host_pulse.sv"))],
+            "Top",
+        );
+        let builder = if backend.ends_with("-parallel") {
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+        } else {
+            builder
+        };
+        // The backends build different simulation types.
+        macro_rules! check {
+            ($sim:expr) => {{
+                let mut sim = $sim.unwrap();
+                let [clk, en, n] = ["clk", "en", "n"].map(|name| sim.signal(name));
+                sim.run_until(1).unwrap();
+                sim.modify(|io| io.set(en, 1u8)).unwrap();
+                sim.run_until(2).unwrap();
+                sim.modify(|io| {
+                    io.set(clk, 1u8);
+                    io.set(clk, 0u8);
+                })
+                .unwrap();
+                sim.run_until(3).unwrap();
+                assert_eq!(sim.get(n), 1u32.into(), "{backend}");
+            }};
+        }
+        if backend.starts_with("native") {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check!(builder.build_native());
+        } else {
+            check!(builder.build_cranelift());
+        }
+    }
+}
+
+const IFF_HOST_GATE: &str = r#"
+    module Top(input bit clk, input bit en, output int n);
+        timeunit 1ns / 1ns;
+        initial forever begin @(posedge clk iff en); n++; end
+    endmodule
+"#;
+
+fn iff_host_gate() -> celox::Simulation {
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(IFF_HOST_GATE, std::path::Path::new("iff_host_gate.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(1).unwrap();
+    sim
+}
+
+/// A state file saved between host writes keeps what the writes already
+/// counted: `clk = 1` while `en` is 0 is no event, and `en = 1` after it
+/// does not turn it into one, in the loaded simulation as in the saved one.
+#[test]
+fn state_files_keep_occurrences_an_iff_gate_rejected() {
+    let mut whole = iff_host_gate();
+    let [clk, en, n] = ["clk", "en", "n"].map(|name| whole.signal(name));
+    whole.modify(|io| io.set(clk, 1u8)).unwrap();
+    whole.modify(|io| io.set(en, 1u8)).unwrap();
+    let file = whole.save_state().unwrap();
+    whole.run_until(2).unwrap();
+    assert_eq!(whole.get(n), 0u32.into());
+
+    let mut bytes = Vec::new();
+    file.write_to(&mut bytes).unwrap();
+    let file = celox::StateFile::read_from(bytes.as_slice()).unwrap();
+    let mut loaded = iff_host_gate();
+    loaded.load_state(&file).unwrap();
+    loaded.run_until(2).unwrap();
+    assert_eq!(loaded.get(n), 0u32.into());
+}
+
+/// A raw write after tracked host writes is judged from where they left
+/// the signal: a rejected pulse `clk = 1; clk = 0;` while `en` is 0, then
+/// raw writes of `en = 1` and `clk = 1`, wake the wait once.
+#[test]
+fn raw_edges_after_rejected_host_pulses_wake_iff_waits() {
+    let mut sim = iff_host_gate();
+    let [clk, en, n] = ["clk", "en", "n"].map(|name| sim.signal(name));
+    sim.modify(|io| {
+        io.set(clk, 1u8);
+        io.set(clk, 0u8);
+    })
+    .unwrap();
+    let (memory, size) = sim.memory_as_mut_ptr();
+    assert!(clk.offset < size && en.offset < size);
+    // Safety: clk and en are live one-bit inputs within the allocation.
+    unsafe {
+        memory.add(en.offset).write(1);
+        memory.add(clk.offset).write(1);
+    }
+    sim.note_raw_writes();
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(n), 1u32.into());
+}
+
+/// What the host does between and at the steps of an `iff` wait.
+#[derive(Clone, Copy, Debug)]
+enum HostOp {
+    Run(u64),
+    Set(&'static str, u8),
+    Raw(&'static str, u8),
+    NoteRaw,
+}
+
+const IFF_HOST_OPS: &[HostOp] = &[
+    HostOp::Run(1),
+    // An edge while the gate is 0 is no event; the gate rising after it is
+    // none either, nor is an unrelated raw write.
+    HostOp::Set("clk", 1),
+    HostOp::Set("en", 1),
+    HostOp::Raw("u", 1),
+    HostOp::NoteRaw,
+    HostOp::Run(2),
+    // A host pulse while the gate holds is one event.
+    HostOp::Set("clk", 0),
+    HostOp::Set("clk", 1),
+    HostOp::Set("clk", 0),
+    HostOp::Run(3),
+    // Raw edges: a rejected one, then one while the gate holds.
+    HostOp::Set("en", 0),
+    HostOp::Raw("clk", 1),
+    HostOp::NoteRaw,
+    HostOp::Raw("clk", 0),
+    HostOp::Set("en", 1),
+    HostOp::Raw("clk", 1),
+    HostOp::NoteRaw,
+    HostOp::Run(4),
+];
+
+/// The count after each step of `ops`.
+fn apply_host_ops(sim: &mut celox::Simulation, ops: &[HostOp], counts: &mut Vec<u32>) {
+    for &op in ops {
+        match op {
+            HostOp::Run(time) => {
+                sim.run_until(time).unwrap();
+                let n = sim.signal("n");
+                counts.push(u32::try_from(sim.get(n)).unwrap());
+            }
+            HostOp::Set(name, value) => {
+                let signal = sim.signal(name);
+                sim.modify(|io| io.set(signal, value)).unwrap();
+            }
+            HostOp::Raw(name, value) => {
+                let signal = sim.signal(name);
+                let (memory, size) = sim.memory_as_mut_ptr();
+                assert!(signal.offset < size);
+                // Safety: a live one-bit input within the allocation.
+                unsafe { memory.add(signal.offset).write(value) };
+            }
+            HostOp::NoteRaw => sim.note_raw_writes(),
+        }
+    }
+}
+
+/// Every piece of the state of an `iff` wait, its gate counters and the
+/// host's tracked and raw writes survives a state file and a checkpoint at
+/// any point: the rest of the run gives the same counts as without them.
+#[test]
+fn iff_wait_state_survives_saves_between_host_writes() {
+    let source = r#"
+        module Top(input bit clk, input bit en, input bit u, output int n);
+            timeunit 1ns / 1ns;
+            initial forever begin @(posedge clk iff en); n++; end
+        endmodule
+    "#;
+    let build = || {
+        celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("iff_host_ops.sv"))],
+            "Top",
+        )
+        .build()
+        .unwrap()
+    };
+    let mut expected = Vec::new();
+    apply_host_ops(&mut build(), IFF_HOST_OPS, &mut expected);
+    assert_eq!(expected, [0, 0, 1, 2], "the uninterrupted run");
+    for at in 1..IFF_HOST_OPS.len() {
+        let (before, after) = IFF_HOST_OPS.split_at(at);
+        let mut first = build();
+        let mut counts = Vec::new();
+        apply_host_ops(&mut first, before, &mut counts);
+        let mut bytes = Vec::new();
+        first.save_state().unwrap().write_to(&mut bytes).unwrap();
+        let file = celox::StateFile::read_from(bytes.as_slice()).unwrap();
+        let checkpoint = first.checkpoint().unwrap();
+
+        let mut loaded = build();
+        loaded.load_state(&file).unwrap();
+        let mut loaded_counts = counts.clone();
+        apply_host_ops(&mut loaded, after, &mut loaded_counts);
+        assert_eq!(loaded_counts, expected, "state file saved after {before:?}");
+
+        let mut continued = counts.clone();
+        apply_host_ops(&mut first, after, &mut continued);
+        assert_eq!(continued, expected, "the run saved after {before:?}");
+        first.restore(&checkpoint).unwrap();
+        let mut restored = counts;
+        apply_host_ops(&mut first, after, &mut restored);
+        assert_eq!(restored, expected, "checkpoint taken after {before:?}");
+    }
+}
+
 // Forked child activations and join boundaries.
 timed_cases! {
     fn fork_join_any_keeps_other_children_running = "fork::join_any_keeps_other_children_running";
@@ -1390,4 +1796,154 @@ fn fork_deferred_interpreter() {
     ] {
         crate::suite::run_case(&format!("fork_deferred::{name}"), "interpreter");
     }
+}
+
+#[test]
+fn iff_fork_waits_keep_gates_across_state_files() {
+    let source = r#"
+        module Top(output int accepted, rejected, global_seen);
+            timeunit 1ns / 1ns;
+            bit first, second, clk, en;
+            initial begin
+                automatic bit enable = 1;
+                fork
+                    begin @(posedge first iff enable); accepted++; end
+                    begin @(posedge second iff enable); rejected++; end
+                    begin @(posedge clk iff en); global_seen++; end
+                    begin @(posedge clk iff en); global_seen++; end
+                    begin #2 first=1; enable=0; second=1; en=1; clk=1; en=0; end
+                join_none
+                #4;
+            end
+        endmodule
+    "#;
+    let builder = || {
+        celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("iff_fork_state.sv"))],
+            "Top",
+        )
+    };
+    let mut original = builder().build_interpreter().unwrap();
+    original.run_until(1).unwrap();
+    let mut bytes = Vec::new();
+    original.save_state().unwrap().write_to(&mut bytes).unwrap();
+    let file = celox::StateFile::read_from(bytes.as_slice()).unwrap();
+    let mut loaded = builder().build_native().unwrap();
+    loaded.load_state(&file).unwrap();
+    original.run_until(4).unwrap();
+    loaded.run_until(4).unwrap();
+    for (name, expected) in [("accepted", 1u32), ("rejected", 0), ("global_seen", 2)] {
+        assert_eq!(
+            original.get(original.signal(name)),
+            expected.into(),
+            "{name}"
+        );
+        assert_eq!(loaded.get(loaded.signal(name)), expected.into(), "{name}");
+    }
+}
+
+timed_cases! {
+    fn iff_automatic_clock_preserves_enabled_pulses = "timing::iff_automatic_clock_preserves_enabled_pulses";
+}
+
+#[test]
+fn iff_automatic_gate_rejects_unobserved_function_writes() {
+    let source = r#"
+        module Top(output int n);
+            bit clk;
+            function automatic int pulse(output bit gate);
+                clk=1; gate=0; return 0;
+            endfunction
+            initial begin
+                automatic bit enable=1;
+                int unused;
+                fork
+                    begin @(posedge clk iff enable); n++; end
+                    begin #1; unused=pulse(enable); end
+                join_none
+                #3;
+            end
+        endmodule
+    "#;
+    let error = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("iff_function_write.sv"))],
+        "Top",
+    )
+    .build()
+    .err()
+    .unwrap_or_else(|| panic!("implicit function writes require observation boundaries"))
+    .to_string();
+    assert!(
+        error.contains("implicit write to an activation-local event operand"),
+        "{error}"
+    );
+    let unrelated = source
+        .replace("bit clk;", "bit clk, other;")
+        .replace("clk=1; gate=0;", "other=1; gate=0;")
+        .replace(
+            "automatic bit enable=1;",
+            "automatic bit enable=1, other_gate=0;",
+        )
+        .replace("pulse(enable)", "pulse(other_gate)");
+    assert!(
+        celox::Simulation::from_sv_sources(
+            vec![(
+                unrelated.as_str(),
+                std::path::Path::new("iff_unrelated_function.sv")
+            )],
+            "Top"
+        )
+        .build()
+        .is_ok()
+    );
+}
+
+#[test]
+fn iff_host_pulses_use_the_waiting_automatic_gate() {
+    let source = r#"
+        module Top(input bit clk, output int accepted, rejected);
+            timeunit 1ns / 1ns;
+            initial begin
+                automatic bit enabled=1, disabled=0;
+                fork
+                    begin @(posedge clk iff enabled); accepted++; end
+                    begin @(posedge clk iff disabled); rejected++; end
+                join_none
+                #4;
+            end
+        endmodule
+    "#;
+    let build = || {
+        celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("iff_local_host_pulse.sv"))],
+            "Top",
+        )
+    };
+    macro_rules! check {
+        ($sim:expr) => {{
+            let mut sim = $sim.unwrap();
+            sim.run_until(1).unwrap();
+            let clk = sim.signal("clk");
+            sim.modify(|io| {
+                io.set(clk, 1u8);
+                io.set(clk, 0u8);
+            })
+            .unwrap();
+            let mut bytes = Vec::new();
+            sim.save_state().unwrap().write_to(&mut bytes).unwrap();
+            let file = celox::StateFile::read_from(bytes.as_slice()).unwrap();
+            for restored in [false, true] {
+                if restored {
+                    sim.load_state(&file).unwrap();
+                }
+                sim.run_until(2).unwrap();
+                assert_eq!(sim.get(sim.signal("accepted")), 1u32.into());
+                assert_eq!(sim.get(sim.signal("rejected")), 0u32.into());
+            }
+        }};
+    }
+    check!(build().build_interpreter());
+    check!(build().build_native());
+    check!(build().build_cranelift());
+    check!(build().build_wasm());
 }

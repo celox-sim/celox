@@ -400,6 +400,9 @@ impl<'a> ProcModule<'a> {
         let mut listed: HashSet<VarAtomBase<SourceVarId>> = HashSet::default();
         let mut exact = true;
         for item in items {
+            if item.iff.is_some() {
+                return false;
+            }
             let (name, range) = match &item.expr {
                 sv::ir::Expr::Ident(name) => (name, None),
                 sv::ir::Expr::Select {

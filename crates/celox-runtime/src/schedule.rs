@@ -6,7 +6,10 @@ use fxhash::{FxHashMap, FxHashSet};
 use crate::{
     AbsoluteAddr, EventDomain, EventInfo, HostWatch, SignalRef,
     backend::{EventHandle, SimBackend},
-    timing::{CountedDomainRefs, CountedRefs, NbaSiteRefs, ProbeRefs, ProcessRefs, TermRefs},
+    timing::{
+        CountedDomainRefs, CountedRefs, GateCounterRefs, GateRefs, GatedWriteRefs, NbaSiteRefs,
+        ProbeRefs, ProcessRefs, TermRefs,
+    },
 };
 
 /// The facts a timed simulation keeps but never changes: event signals,
@@ -23,6 +26,12 @@ pub struct ResolvedSchedule<B: SimBackend> {
     pub(crate) processes: Vec<ProcessRefs>,
     /// The kernels of program instances, in declaration order.
     pub(crate) program_processes: Vec<usize>,
+    /// The `iff` gate of each term by process, wait site and term; empty
+    /// when no wait has one, and a site without one has no entries.
+    pub(crate) wait_gates: Vec<Vec<Vec<Option<GateRefs>>>>,
+    /// The gated terms with counters by the offset of their signal, which
+    /// the runtime's writes of the signal bump.
+    pub(crate) gated_writes: FxHashMap<usize, Vec<GatedWriteRefs>>,
     /// Counted signals and the domains their counters trigger.
     pub(crate) counted: Vec<CountedDomainRefs>,
     pub(crate) counted_by_offset: FxHashMap<usize, usize>,
@@ -196,6 +205,63 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                 .find(|counted| counted.refs.signal == signal)
                 .map(|counted| counted.refs.counter(kind))
         };
+        let gate_refs = |gate: &celox_design::WaitGate<AbsoluteAddr>| GateRefs {
+            signal: resolve(&gate.signal),
+            at_write: gate.at_write,
+            counters: gate.counters.map(|counters| GateCounterRefs {
+                gated: resolve(&counters.gated),
+                all: resolve(&counters.all),
+            }),
+        };
+        let mut gated_writes: FxHashMap<usize, Vec<GatedWriteRefs>> = FxHashMap::default();
+        for term in model
+            .processes
+            .iter()
+            .flat_map(|process| process.waits.iter().flatten())
+        {
+            let Some(gate) = term.gate.as_ref().map(gate_refs) else {
+                continue;
+            };
+            if let Some(counters) = gate.counters {
+                gated_writes
+                    .entry(resolve(&term.signal).offset)
+                    .or_default()
+                    .push(GatedWriteRefs {
+                        signal: resolve(&term.signal),
+                        kind: term.kind,
+                        gate: gate.signal,
+                        counters,
+                    });
+            }
+        }
+        let wait_gates: Vec<Vec<Vec<Option<GateRefs>>>> = if model
+            .processes
+            .iter()
+            .flat_map(|process| process.waits.iter().flatten())
+            .any(|term| term.gate.is_some())
+        {
+            model
+                .processes
+                .iter()
+                .map(|process| {
+                    process
+                        .waits
+                        .iter()
+                        .map(|terms| {
+                            if terms.iter().all(|term| term.gate.is_none()) {
+                                return Vec::new();
+                            }
+                            terms
+                                .iter()
+                                .map(|term| term.gate.as_ref().map(gate_refs))
+                                .collect()
+                        })
+                        .collect()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let processes: Vec<ProcessRefs> = model
             .processes
             .iter()
@@ -335,6 +401,8 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                 .map(|(index, _)| index)
                 .collect(),
             processes,
+            wait_gates,
+            gated_writes,
             counted,
             counted_by_offset,
             counted_triggers,
@@ -483,6 +551,30 @@ fn counted_refs<B: SimBackend>(
 /// Host writes a timed simulation of a design observes one at a time: those
 /// of counted signals and of signals a wait watches.
 pub fn host_watch<B: SimBackend>(backend: &B, model: &ScheduleModel<AbsoluteAddr>) -> HostWatch {
+    let mut gated: FxHashMap<usize, Vec<GatedWriteRefs>> = FxHashMap::default();
+    for term in model
+        .processes
+        .iter()
+        .flat_map(|process| process.waits.iter().flatten())
+    {
+        let Some(gate) = &term.gate else {
+            continue;
+        };
+        if let Some(counters) = gate.counters {
+            gated
+                .entry(backend.resolve_signal(&term.signal).offset)
+                .or_default()
+                .push(GatedWriteRefs {
+                    signal: backend.resolve_signal(&term.signal),
+                    kind: term.kind,
+                    gate: backend.resolve_signal(&gate.signal),
+                    counters: GateCounterRefs {
+                        gated: backend.resolve_signal(&counters.gated),
+                        all: backend.resolve_signal(&counters.all),
+                    },
+                });
+        }
+    }
     HostWatch::new(
         model
             .counted
@@ -494,4 +586,5 @@ pub fn host_watch<B: SimBackend>(backend: &B, model: &ScheduleModel<AbsoluteAddr
             .map(|signal| backend.resolve_signal(signal).offset)
             .collect::<FxHashSet<usize>>(),
     )
+    .with_gated(gated)
 }

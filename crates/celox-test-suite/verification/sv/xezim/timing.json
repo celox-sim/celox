@@ -629,6 +629,72 @@
     },
     {
       "category": "Sequential",
+      "detail": "timing::iff_automatic_clock_preserves_enabled_pulses at 2999:25: assert_eq rejected: expected 0x0, got 0x1",
+      "expectation": "Simulation",
+      "name": "timing::iff_automatic_clock_preserves_enabled_pulses",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "timing::iff_conditions_are_judged_at_the_write at 2864:3: expect_output: expected [110, 61, 49, 10], got [110, 61, 48, 10]",
+      "expectation": "Simulation",
+      "name": "timing::iff_conditions_are_judged_at_the_write",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "timing::iff_conditions_follow_combinational_process_order at 2932:3: expect_output: expected [110, 61, 49, 10], got [110, 61, 48, 10]",
+      "expectation": "Simulation",
+      "name": "timing::iff_conditions_follow_combinational_process_order",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "timing::iff_conditions_follow_nonblocking_update_order at 2888:3: expect_output: expected [110, 61, 50, 10], got [110, 61, 49, 10]",
+      "expectation": "Simulation",
+      "name": "timing::iff_conditions_follow_nonblocking_update_order",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "timing::iff_conditions_preserve_cross_module_combinational_order at 2953:2: assert_eq rejected: expected 0x0, got 0x2",
+      "expectation": "Simulation",
+      "name": "timing::iff_conditions_preserve_cross_module_combinational_order",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "timing::iff_shared_automatic_gate_uses_edge_time_value at 2982:25: assert_eq rejected: expected 0x0, got 0x1",
+      "expectation": "Simulation",
+      "name": "timing::iff_shared_automatic_gate_uses_edge_time_value",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::implicit_event_controls_in_processes_wait_on_their_reads",

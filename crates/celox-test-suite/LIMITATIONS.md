@@ -618,6 +618,8 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_program_exit` | execute | icarus | 1 | Icarus 13.0 does not define `$exit`; IEEE 1800-2023 24.7 ends the calling program's `initial` procedures. |
 | `sv_verilator_program_exit` | execute | verilator | 1 | Verilator 5.052 continues after `$exit` and keeps the program's other `initial` procedures (24.7). Icarus does not run the case; xezim 0.11.3 agrees with the expected output. |
 | `sv_verilator_program_items` | compile | verilator | 2 | Verilator 5.052 rejects an `always` procedure and a module instance in a program with syntax errors, which the run cannot count as language rejections. Both are illegal (IEEE 1800-2023 24.3); Icarus 13.0 rejects them with diagnostics that name the rule. |
+| `sv_icarus_iff_event_controls` | compile | icarus | 15 | Icarus 13.0 rejects `iff` in an event control with "syntax error" and "Malformed event control expression." IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; [Standalone probe](verification/repros/sv_iff_event_controls_icarus.json); Verilator 5.052 runs the cases and gives the asserted counts. |
+| `sv_verilator_iff_late_conditions` | execute | verilator | 4 | Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. [Standalone probes](verification/repros/sv_iff_late_conditions_verilator.json) print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. |
 
 The [system-function edge-case evidence](verification/repros/system_function_edge_cases.json)
 retains the failed Icarus runs and minimal sources. Cover comparisons enable
@@ -958,3 +960,15 @@ and [observations](verification/repros/sv_imported_member_types_inheritance_xezi
 retain Top and Wrapped runs. The xezim validation build used the existing Nix
 recipe with a regenerated dependency lock, with no simulator source changes.
 Assertions and exclusions are unchanged.
+
+### Conditional events across hierarchy and automatic fork scopes
+
+The four additional `timing::iff_*` regressions preserve strict event-time
+conditions (IEEE 1800-2023 9.4.2.3) and shared automatic lifetimes (6.21).
+[Standalone Top and Wrapped probes](verification/repros/sv_iff_hierarchy_automatic.json)
+reproduce Verilator 5.052's late hierarchical gate and shared-local LIFETIME rejection,
+and Icarus 13.0's unsupported event syntax. The installed xezim 0.11.3 build
+misorders gates and does not reflect the shared automatic gate update. Its six
+failures remain executed evidence, not exclusions. The current flake pin could
+not be built because the dependency lock references a different xezim-core revision;
+the evidence identifies the installed binary and does not claim current-pin coverage.

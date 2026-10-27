@@ -670,6 +670,18 @@
     "sv_class-X14": {
       "title": "Imported class member typedefs sized by a value parameter lose their specialization dimensions for the default specialization and in a non-top module",
       "standard": "IEEE 1800-2023 6.18, 8.23, 8.25, 20.6.2"
+    },
+    "sv_iff_order": {
+      "title": "iff conditions see writes after the event instead of the value at the triggering write",
+      "standard": "IEEE 1800-2023 9.4.2.3, 10.4.2"
+    },
+    "sv_iff_shared_automatic": {
+      "title": "fork children do not observe updates to their shared automatic iff gate",
+      "standard": "IEEE 1800-2023 6.21, 9.3.2, 9.4.2.3"
+    },
+    "sv_iff_automatic_clock": {
+      "title": "A wait on an automatic clock keeps an enabled iff gate after the gate was cleared",
+      "standard": "IEEE 1800-2023 9.4.2.3"
     }
   },
   "cases": [
@@ -740,7 +752,7 @@
       "name": "comb_observer::test_comb_function_direct_array_argument_converts_each_element",
       "status": "compile_error",
       "classification": "suite_issue",
-      "note": "The emitted SV passes `narrow` (logic signed [3:0] narrow[2]) to formal `logic signed [7:0] x[2]` of `pick`. Input arguments are copied as by assignment (13.5.1), and unpacked arrays are assignment compatible only when element types are equivalent (7.6); logic [3:0] and logic [7:0] are not (6.22.2). xezim correctly rejects it: \"16:26: cannot assign logic signed [3:0] $[2] to argument 'x' of 'pick' of type logic signed [7:0] $[2]: element types logic signed [7:0] and logic signed [3:0] are not equivalent (IEEE 1800-2017 §6.22.2, §7.6)\". The Veryl emitter must emit an element-wise conversion (or the case must not expect an SV simulation)."
+      "note": "The emitted SV passes `narrow` (logic signed [3:0] narrow[2]) to formal `logic signed [7:0] x[2]` of `pick`. Input arguments are copied as by assignment (13.5.1), and unpacked arrays are assignment compatible only when element types are equivalent (7.6); logic [3:0] and logic [7:0] are not (6.22.2). xezim correctly rejects it: \"16:26: cannot assign logic signed [3:0] $[2] to argument 'x' of 'pick' of type logic signed [7:0] $[2]: element types logic signed [7:0] and logic signed [3:0] are not equivalent (IEEE 1800-2017 \u00a76.22.2, \u00a77.6)\". The Veryl emitter must emit an element-wise conversion (or the case must not expect an SV simulation)."
     },
     {
       "suite": "veryl",
@@ -778,7 +790,7 @@
       "name": "comb_observer::test_comb_statement_function_direct_array_argument_converts_each_element",
       "status": "compile_error",
       "classification": "suite_issue",
-      "note": "The emitted SV passes `narrow` (logic signed [3:0] narrow[2]) to formal `logic signed [7:0] x[2]` of task-like function `capture`. Input arguments are copied as by assignment (13.5.1), and unpacked arrays are assignment compatible only when element types are equivalent (7.6); logic [3:0] and logic [7:0] are not (6.22.2). xezim correctly rejects it: \"15:17: cannot assign logic signed [3:0] $[2] to argument 'x' of 'capture' of type logic signed [7:0] $[2]: element types logic signed [7:0] and logic signed [3:0] are not equivalent (IEEE 1800-2017 §6.22.2, §7.6)\". The Veryl emitter must emit an element-wise conversion (or the case must not expect an SV simulation)."
+      "note": "The emitted SV passes `narrow` (logic signed [3:0] narrow[2]) to formal `logic signed [7:0] x[2]` of task-like function `capture`. Input arguments are copied as by assignment (13.5.1), and unpacked arrays are assignment compatible only when element types are equivalent (7.6); logic [3:0] and logic [7:0] are not (6.22.2). xezim correctly rejects it: \"15:17: cannot assign logic signed [3:0] $[2] to argument 'x' of 'capture' of type logic signed [7:0] $[2]: element types logic signed [7:0] and logic signed [3:0] are not equivalent (IEEE 1800-2017 \u00a76.22.2, \u00a77.6)\". The Veryl emitter must emit an element-wise conversion (or the case must not expect an SV simulation)."
     },
     {
       "suite": "veryl",
@@ -801,7 +813,7 @@
       "name": "enum_type::test_enum_assign_and_compare",
       "status": "compile_error",
       "classification": "suite_issue",
-      "note": "The emitted SV `always_comb c = i;` assigns a `logic [1:0]` input directly to a variable of enum type `Color`. Enumerated types are strongly typed and such an assignment requires an explicit cast (6.19.3, example `c = 1; // Invalid assignment`), so xezim correctly rejects it: \"cannot assign logic [1:0] to 'c' of type enum Color: an enum takes only its own members, values of its own type, or an explicit cast (IEEE 1800-2017 §6.19.3)\". The Veryl emitter should emit `c = Color'(i);`."
+      "note": "The emitted SV `always_comb c = i;` assigns a `logic [1:0]` input directly to a variable of enum type `Color`. Enumerated types are strongly typed and such an assignment requires an explicit cast (6.19.3, example `c = 1; // Invalid assignment`), so xezim correctly rejects it: \"cannot assign logic [1:0] to 'c' of type enum Color: an enum takes only its own members, values of its own type, or an explicit cast (IEEE 1800-2017 \u00a76.19.3)\". The Veryl emitter should emit `c = Color'(i);`."
     },
     {
       "suite": "veryl",
@@ -887,14 +899,14 @@
       "name": "flip_flop::test_ff_function_call_converts_array_literal_view_for_wider_nested_formal",
       "status": "compile_error",
       "classification": "suite_issue",
-      "note": "The emitted SV passes `outer`'s formal `logic [3:0] x[2]` on to `inner(x, index)` whose formal is `logic [7:0] x[2]`. Input arguments are copied as by assignment (13.5.1), and unpacked arrays are assignment compatible only when element types are equivalent (7.6); logic [3:0] and logic [7:0] are not (6.22.2). xezim correctly rejects it: \"16:22: cannot assign logic [3:0] $[2] to argument 'x' of 'inner' of type logic [7:0] $[2]: element types logic [7:0] and logic [3:0] are not equivalent (IEEE 1800-2017 §6.22.2, §7.6)\". The Veryl emitter must emit an element-wise conversion (or the case must not expect an SV simulation)."
+      "note": "The emitted SV passes `outer`'s formal `logic [3:0] x[2]` on to `inner(x, index)` whose formal is `logic [7:0] x[2]`. Input arguments are copied as by assignment (13.5.1), and unpacked arrays are assignment compatible only when element types are equivalent (7.6); logic [3:0] and logic [7:0] are not (6.22.2). xezim correctly rejects it: \"16:22: cannot assign logic [3:0] $[2] to argument 'x' of 'inner' of type logic [7:0] $[2]: element types logic [7:0] and logic [3:0] are not equivalent (IEEE 1800-2017 \u00a76.22.2, \u00a77.6)\". The Veryl emitter must emit an element-wise conversion (or the case must not expect an SV simulation)."
     },
     {
       "suite": "veryl",
       "name": "flip_flop::test_ff_function_call_converts_forwarded_static_array_element",
       "status": "compile_error",
       "classification": "suite_issue",
-      "note": "The emitted SV passes `outer`'s formal `logic [3:0] x[2]` on to `inner(x)` whose formal is `logic [7:0] x[2]`. Input arguments are copied as by assignment (13.5.1), and unpacked arrays are assignment compatible only when element types are equivalent (7.6); logic [3:0] and logic [7:0] are not (6.22.2). xezim correctly rejects it: \"13:22: cannot assign logic [3:0] $[2] to argument 'x' of 'inner' of type logic [7:0] $[2]: element types logic [7:0] and logic [3:0] are not equivalent (IEEE 1800-2017 §6.22.2, §7.6)\". The Veryl emitter must emit an element-wise conversion (or the case must not expect an SV simulation)."
+      "note": "The emitted SV passes `outer`'s formal `logic [3:0] x[2]` on to `inner(x)` whose formal is `logic [7:0] x[2]`. Input arguments are copied as by assignment (13.5.1), and unpacked arrays are assignment compatible only when element types are equivalent (7.6); logic [3:0] and logic [7:0] are not (6.22.2). xezim correctly rejects it: \"13:22: cannot assign logic [3:0] $[2] to argument 'x' of 'inner' of type logic [7:0] $[2]: element types logic [7:0] and logic [3:0] are not equivalent (IEEE 1800-2017 \u00a76.22.2, \u00a77.6)\". The Veryl emitter must emit an element-wise conversion (or the case must not expect an SV simulation)."
     },
     {
       "suite": "veryl",
@@ -1108,7 +1120,7 @@
       "status": "compile_error",
       "classification": "xezim_bug",
       "bug": "G",
-      "note": "Native Veryl testbench; xezim's preprocessor rejects the one-argument macro call with an empty actual: `CELOX_SUITE_FINISH();` -> \"error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 §22.5.1)\". IEEE 1800-2023 22.5.1 allows an empty actual argument, so the build fails before simulation."
+      "note": "Native Veryl testbench; xezim's preprocessor rejects the one-argument macro call with an empty actual: `CELOX_SUITE_FINISH();` -> \"error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 \u00a722.5.1)\". IEEE 1800-2023 22.5.1 allows an empty actual argument, so the build fails before simulation."
     },
     {
       "suite": "veryl",
@@ -1116,7 +1128,7 @@
       "status": "compile_error",
       "classification": "xezim_bug",
       "bug": "G",
-      "note": "Native Veryl testbench; xezim's preprocessor rejects the one-argument macro call with an empty actual: `CELOX_SUITE_FINISH();` -> \"error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 §22.5.1)\". IEEE 1800-2023 22.5.1 allows an empty actual argument, so the build fails before simulation."
+      "note": "Native Veryl testbench; xezim's preprocessor rejects the one-argument macro call with an empty actual: `CELOX_SUITE_FINISH();` -> \"error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 \u00a722.5.1)\". IEEE 1800-2023 22.5.1 allows an empty actual argument, so the build fails before simulation."
     },
     {
       "suite": "veryl",
@@ -1448,7 +1460,7 @@
       "status": "compile_error",
       "classification": "xezim_bug",
       "bug": "G",
-      "note": "Native Veryl testbench; xezim's preprocessor rejects the one-argument macro call with an empty actual: `CELOX_SUITE_FINISH();` -> \"error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 §22.5.1)\". IEEE 1800-2023 22.5.1 allows an empty actual argument, so the build fails before simulation."
+      "note": "Native Veryl testbench; xezim's preprocessor rejects the one-argument macro call with an empty actual: `CELOX_SUITE_FINISH();` -> \"error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 \u00a722.5.1)\". IEEE 1800-2023 22.5.1 allows an empty actual argument, so the build fails before simulation."
     },
     {
       "suite": "veryl",
@@ -1456,7 +1468,7 @@
       "status": "compile_error",
       "classification": "xezim_bug",
       "bug": "G",
-      "note": "Native Veryl testbench; xezim's preprocessor rejects the one-argument macro call with an empty actual: `CELOX_SUITE_FINISH();` -> \"error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 §22.5.1)\". IEEE 1800-2023 22.5.1 allows an empty actual argument, so the build fails before simulation."
+      "note": "Native Veryl testbench; xezim's preprocessor rejects the one-argument macro call with an empty actual: `CELOX_SUITE_FINISH();` -> \"error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 \u00a722.5.1)\". IEEE 1800-2023 22.5.1 allows an empty actual argument, so the build fails before simulation."
     },
     {
       "suite": "veryl",
@@ -1464,7 +1476,7 @@
       "status": "compile_error",
       "classification": "xezim_bug",
       "bug": "G",
-      "note": "Native Veryl testbench; xezim's preprocessor rejects the one-argument macro call with an empty actual: `CELOX_SUITE_FINISH();` -> \"error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 §22.5.1)\". IEEE 1800-2023 22.5.1 allows an empty actual argument, so the build fails before simulation."
+      "note": "Native Veryl testbench; xezim's preprocessor rejects the one-argument macro call with an empty actual: `CELOX_SUITE_FINISH();` -> \"error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 \u00a722.5.1)\". IEEE 1800-2023 22.5.1 allows an empty actual argument, so the build fails before simulation."
     },
     {
       "suite": "veryl",
@@ -1472,7 +1484,7 @@
       "status": "compile_error",
       "classification": "xezim_bug",
       "bug": "G",
-      "note": "Native Veryl testbench; xezim's preprocessor rejects the one-argument macro call with an empty actual: `CELOX_SUITE_FINISH();` -> \"error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 §22.5.1)\". IEEE 1800-2023 22.5.1 allows an empty actual argument, so the build fails before simulation."
+      "note": "Native Veryl testbench; xezim's preprocessor rejects the one-argument macro call with an empty actual: `CELOX_SUITE_FINISH();` -> \"error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 \u00a722.5.1)\". IEEE 1800-2023 22.5.1 allows an empty actual argument, so the build fails before simulation."
     },
     {
       "suite": "veryl",
@@ -1480,7 +1492,7 @@
       "status": "compile_error",
       "classification": "xezim_bug",
       "bug": "G",
-      "note": "Native Veryl testbench; xezim's preprocessor rejects the one-argument macro call with an empty actual: `CELOX_SUITE_FINISH();` -> \"error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 §22.5.1)\". IEEE 1800-2023 22.5.1 allows an empty actual argument, so the build fails before simulation."
+      "note": "Native Veryl testbench; xezim's preprocessor rejects the one-argument macro call with an empty actual: `CELOX_SUITE_FINISH();` -> \"error: macro `CELOX_SUITE_FINISH` missing required argument `unused` (IEEE 1800-2017 \u00a722.5.1)\". IEEE 1800-2023 22.5.1 allows an empty actual argument, so the build fails before simulation."
     },
     {
       "suite": "veryl",
@@ -2277,7 +2289,7 @@
       "status": "mismatch",
       "classification": "xezim_bug",
       "bug": "sv_hier-X20",
-      "note": "packed_down/packed_up/outer_down/outer_up/selected_bit are 0/1 instead of 0xb/0xb/0xa/0xa/1: selects of OFFSET [2:1][7:4] and UP [1:2][4:7] ignore the declared ranges (X20). invalid_is_x=0 and overhang_checks=0 are the out-of-range→x defect (X21). signed_value=1 / unsigned_part=0 (expected -1/15) come from SIGNED[0][0] of nibble_t [1:0][1:0] selecting one bit instead of a signed nibble element (X26, also wrong procedurally)."
+      "note": "packed_down/packed_up/outer_down/outer_up/selected_bit are 0/1 instead of 0xb/0xb/0xa/0xa/1: selects of OFFSET [2:1][7:4] and UP [1:2][4:7] ignore the declared ranges (X20). invalid_is_x=0 and overhang_checks=0 are the out-of-range\u2192x defect (X21). signed_value=1 / unsigned_part=0 (expected -1/15) come from SIGNED[0][0] of nibble_t [1:0][1:0] selecting one bit instead of a signed nibble element (X26, also wrong procedurally)."
     },
     {
       "suite": "sv",
@@ -3196,7 +3208,7 @@
       "status": "compile_error",
       "classification": "xezim_bug",
       "bug": "sysfn-X13",
-      "note": "xezim rejects the `resetall on line 13 with \"`resetall is illegal inside a design element (IEEE 1800-2017 §22.3)\", but that line follows endmodule and is outside every design element. The false detection comes from the earlier one-line modules (`module A(); timeunit 10ns; endmodule`). After splitting them onto two lines in a copy (cases/<name>/split.sv) the case compiles but still gets ok=0 from the argument and current-scope query bugs."
+      "note": "xezim rejects the `resetall on line 13 with \"`resetall is illegal inside a design element (IEEE 1800-2017 \u00a722.3)\", but that line follows endmodule and is outside every design element. The false detection comes from the earlier one-line modules (`module A(); timeunit 10ns; endmodule`). After splitting them onto two lines in a copy (cases/<name>/split.sv) the case compiles but still gets ok=0 from the argument and current-scope query bugs."
     },
     {
       "suite": "sv",
@@ -4119,6 +4131,54 @@
       "classification": "xezim_bug",
       "bug": "sv_class-X2",
       "note": "Other::T must be the bound bit[6:0] type (7 bits), and Tiny::item_t must be the inherited Base#(bit[2:0]) typedef (3 bits). Sub::copied_t correctly follows the local item_t override (5 bits). Expected all-one sum is 31+127+7=165; xezim gives b/c 32-bit signed types and sum 29. Both adapter-free Top and Wrapped reproduce widths 5/32/32 and sum 29. Source 5eab5f2/core 1947ac68, with an isolated regenerated lock. Repro and observations: verification/repros/sv_imported_member_types_inheritance_xezim.sv and .json."
+    },
+    {
+      "suite": "sv",
+      "name": "timing::iff_conditions_are_judged_at_the_write",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_iff_order",
+      "note": "The gate must be judged at the event occurrence, preserving procedural and NBA update order. Independent standalone reproductions and exact installed build provenance are in verification/repros/sv_iff_hierarchy_automatic.json. Current flake-pin build was unavailable; these observations are from the installed xezim 0.11.3 build."
+    },
+    {
+      "suite": "sv",
+      "name": "timing::iff_conditions_follow_combinational_process_order",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_iff_order",
+      "note": "The gate must be judged at the event occurrence, preserving procedural and NBA update order. Independent standalone reproductions and exact installed build provenance are in verification/repros/sv_iff_hierarchy_automatic.json. Current flake-pin build was unavailable; these observations are from the installed xezim 0.11.3 build."
+    },
+    {
+      "suite": "sv",
+      "name": "timing::iff_conditions_follow_nonblocking_update_order",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_iff_order",
+      "note": "The gate must be judged at the event occurrence, preserving procedural and NBA update order. Independent standalone reproductions and exact installed build provenance are in verification/repros/sv_iff_hierarchy_automatic.json. Current flake-pin build was unavailable; these observations are from the installed xezim 0.11.3 build."
+    },
+    {
+      "suite": "sv",
+      "name": "timing::iff_conditions_preserve_cross_module_combinational_order",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_iff_order",
+      "note": "The gate must be judged at the event occurrence, preserving procedural and NBA update order. Independent standalone reproductions and exact installed build provenance are in verification/repros/sv_iff_hierarchy_automatic.json. Current flake-pin build was unavailable; these observations are from the installed xezim 0.11.3 build."
+    },
+    {
+      "suite": "sv",
+      "name": "timing::iff_shared_automatic_gate_uses_edge_time_value",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_iff_shared_automatic",
+      "note": "The shared automatic enable becomes 0 before second rises, but rejected=1 instead of 0. Independent standalone reproductions and exact installed build provenance are in verification/repros/sv_iff_hierarchy_automatic.json. Current flake-pin build was unavailable; these observations are from the installed xezim 0.11.3 build."
+    },
+    {
+      "suite": "sv",
+      "name": "timing::iff_automatic_clock_preserves_enabled_pulses",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_iff_automatic_clock",
+      "note": "The module gate enable is cleared between the rising and falling writes to the shared automatic clock. Standalone Top/Wrapped print accepted=1 rejected=1; 9.4.2.3 requires accepted=1 rejected=0. See verification/repros/sv_iff_hierarchy_automatic.json for exact installed-build provenance and source; this is not current-pin validation."
     }
   ]
 }
