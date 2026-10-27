@@ -497,6 +497,28 @@
     },
     {
       "category": "Types",
+      "detail": "class::type_parameter_imports at 2503:27: assert_eq done: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "class::type_parameter_imports",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::type_parameter_shadowing at 2521:27: assert_eq flags: expected 0x3, got 0x1",
+      "expectation": "Simulation",
+      "name": "class::type_parameter_shadowing",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::typedefs_of_interface_classes",

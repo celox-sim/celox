@@ -301,6 +301,12 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "functions cannot have delay statements.",
                         ),
+                        ("icarus", "class::type_parameter_imports") => {
+                            ("compile_error", "compile", "source_0.sv:7: syntax error")
+                        }
+                        ("icarus", "class::type_parameter_shadowing") => {
+                            ("compile_error", "compile", "Invalid module item")
+                        }
                         ("icarus", "unions::packed_mixed_state") => (
                             "mismatch",
                             "execute",

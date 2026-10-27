@@ -6,6 +6,8 @@ sv_backends! {
     fn constraint_mode_ordinary_struct_members(sim) {
         @case "class::constraint_mode_ordinary_struct_members";
     }
+    fn class_type_parameter_imports(sim) { @case "class::type_parameter_imports"; }
+    fn class_type_parameter_shadowing(sim) { @case "class::type_parameter_shadowing"; }
     fn class_objects_properties_and_methods(sim) { @case "class::objects_properties_and_methods"; }
 }
 

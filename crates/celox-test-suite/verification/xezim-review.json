@@ -658,6 +658,10 @@
     "sv_fork_deferred": {
       "title": "Deferred assertion reports do not follow process ownership and flush-point rules",
       "standard": "IEEE 1800-2023 16.4.1, 16.4.2, 16.4.4"
+    },
+    "sv_class-X12": {
+      "title": "A class type-parameter qualifier in a static method resolves to a same-named package or zero instead of the selected class static property",
+      "standard": "IEEE 1800-2023 6.20.3, 8.23, 8.24, 8.25.1"
     }
   },
   "cases": [
@@ -4067,6 +4071,22 @@
       "classification": "xezim_bug",
       "bug": "sv_fork_deferred",
       "note": "The Observed report must mature before the Reactive program wakes the waiter; that wakeup can flush only its still-pending Final report. xezim emits neither."
+    },
+    {
+      "suite": "sv",
+      "name": "class::type_parameter_imports",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X12",
+      "note": "TYPE defaults to Item, whose static value is initialized to 42. TYPE::value inside Local must read 42; the unrelated package TYPE::value stays 7 outside Local. The shared imports case reports done=0 instead of 1; the shadowing case reports flags=1 instead of 3. The adapter-free fixture prints direct=42 result=7 pkg=7 for both Top and Wrapped, instead of result=42. Pinned source 5eab5f2, core 1947ac68. Repro: verification/repros/sv_class_type_parameter_xezim.sv; observations: verification/repros/sv_class_type_parameter_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "class::type_parameter_shadowing",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X12",
+      "note": "TYPE defaults to Item, whose static value is initialized to 42. TYPE::value inside Local must read 42; the unrelated package TYPE::value stays 7 outside Local. The shared imports case reports done=0 instead of 1; the shadowing case reports flags=1 instead of 3. The adapter-free fixture prints direct=42 result=7 pkg=7 for both Top and Wrapped, instead of result=42. Pinned source 5eab5f2, core 1947ac68. Repro: verification/repros/sv_class_type_parameter_xezim.sv; observations: verification/repros/sv_class_type_parameter_xezim.json."
     }
   ]
 }
