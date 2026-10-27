@@ -39,6 +39,26 @@ pub(super) fn bind(
             _ => op,
         };
     }
+    if let Some(container) = containers::native_type(*base, native, tree, dims)? {
+        if let ExprKind::Call { arguments, .. } = &native.expression(id).kind
+            && !arguments.is_empty()
+        {
+            return Err(unsupported(
+                "array reduction arguments require a with expression",
+            ));
+        }
+        if container.layout.handle.is_some() {
+            return Err(unsupported("array reduction requires integral elements"));
+        }
+        return Ok(Some((
+            containers::call(
+                op,
+                container.layout,
+                vec![expression_binding::value(*base, native, tree, dims)?],
+            ),
+            procedural::dimensions_from_type(&container.element),
+        )));
+    }
     let ExprKind::Name(receiver) = &native
         .expression(expression_binding::ungroup(*base, native))
         .kind
@@ -58,15 +78,6 @@ pub(super) fn bind(
         return Err(unsupported(
             "array reduction arguments require a with expression",
         ));
-    }
-    if let Some(container) = shape.container.as_deref() {
-        if container.layout.handle.is_some() {
-            return Err(unsupported("array reduction requires integral elements"));
-        }
-        return Ok(Some((
-            containers::call(op, container.layout, vec![Expr::Ident(receiver)]),
-            procedural::dimensions_from_type(&container.element),
-        )));
     }
     if shape.unpacked.len() != 1 || shape.real || shape.string || shape.class.is_some() {
         return Err(unsupported(
