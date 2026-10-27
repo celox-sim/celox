@@ -113,12 +113,22 @@ jobs:
         with:
           ref: ${{ needs.validate.outputs.source_sha }}
 
+      # Publisher fixes come from this workflow revision; product files stay
+      # at the immutable, qualified source SHA checked out above.
+      - name: Check out publisher tooling
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: work/publisher-tooling
+          sparse-checkout: scripts
+          persist-credentials: false
+
       - uses: ./.github/actions/setup-rust
 
       - name: Validate every public crate package
         run: |
           node scripts/check-package-includes.mjs
-          ./scripts/publish-crates.sh package
+          bash work/publisher-tooling/scripts/publish-crates.sh package
 
       - name: Test the public frontend path
         run: |
@@ -150,6 +160,16 @@ jobs:
         with:
           ref: ${{ needs.validate.outputs.source_sha }}
 
+      # Publisher fixes come from this workflow revision; product files stay
+      # at the immutable, qualified source SHA checked out above.
+      - name: Check out publisher tooling
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: work/publisher-tooling
+          sparse-checkout: scripts
+          persist-credentials: false
+
       - uses: ./.github/actions/setup-rust
 
       - name: Authenticate to crates.io
@@ -159,4 +179,4 @@ jobs:
       - name: Publish crates in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates_io_auth.outputs.token }}
-        run: ./scripts/publish-crates.sh publish
+        run: bash work/publisher-tooling/scripts/publish-crates.sh publish

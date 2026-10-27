@@ -66,3 +66,18 @@ test("actual tag validation pins source and rejects mismatches during workflow r
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("repaired publisher scripts execute against the qualified product checkout", () => {
+  for (const name of ["package", "publish"]) {
+    const blocks = workflow.split(/^  ([\w-]+):\n/m);
+    const block = blocks[blocks.indexOf(name) + 1];
+    assert.match(block, /ref: \$\{\{ needs.validate.outputs.source_sha \}\}/);
+    const tools = block.split("      - name: Check out publisher tooling")[1].split("      - uses: ./.github/actions/setup-rust")[0];
+    assert.match(tools, /ref: \$\{\{ github.sha \}\}/);
+    assert.match(tools, /path: work\/publisher-tooling/);
+    assert.match(tools, /sparse-checkout: scripts/);
+    assert.match(tools, /persist-credentials: false/);
+    assert.ok(block.includes(`bash work/publisher-tooling/scripts/publish-crates.sh ${name}`));
+    assert.doesNotMatch(block, /working-directory:.*publisher-tooling/);
+  }
+});

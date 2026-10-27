@@ -292,7 +292,10 @@ configuration error, merge the workflow fix on master and create a numbered
 tag with `source_tag=vX.Y.Z`. This uses the repaired workflow while packaging
 the original immutable source tag. All package jobs and the qualification check
 use the resolved source SHA; the repair commit does not become package source.
-The existing tag and published versions are never replaced.
+The publisher script is checked out separately from the workflow revision,
+while package commands run in the qualified source checkout. This lets publisher
+script fixes apply without editing product files. The existing tag and published
+versions are never replaced.
 
 If package source must change, use the numbered source recovery procedure in
 CONTRIBUTING.md instead, including full qualification of that new source SHA.
