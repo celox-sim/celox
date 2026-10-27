@@ -35,8 +35,16 @@ pub(in crate::ast) fn native_class(
         dimension,
     } = &expression.kind
         && matches!(dimension.kind, celox_sv_syntax::DimensionKind::Index(_))
-        && let ExprKind::Name(name) = &native.expression(ungroup(*expression, native)).kind
     {
+        if let Some(ty) = containers::native_type(*expression, native, tree, dimensions)
+            .ok()
+            .flatten()
+        {
+            return ty.element.class().map(str::to_owned);
+        }
+        let ExprKind::Name(name) = &native.expression(ungroup(*expression, native)).kind else {
+            return None;
+        };
         let ty = dimensions.get(&instances::normalize_identifier(&name.spelling))?;
         return ty
             .container

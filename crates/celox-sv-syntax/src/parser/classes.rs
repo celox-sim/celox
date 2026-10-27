@@ -77,7 +77,10 @@ impl Parser<'_> {
             }
         }
         let declaration = self.local_declaration()?;
-        if special_const && let LocalDeclaration::Variables(value) = &declaration {
+        if special_const
+            && let LocalDeclaration::Variables(value) | LocalDeclaration::Constructed(value) =
+                &declaration
+        {
             if value.variables.len() != 1 || !value.variables[0].dimensions.is_empty() {
                 return Err(
                     self.error("qualified const class property requires one scalar declarator")
@@ -87,8 +90,11 @@ impl Parser<'_> {
                 self.validate_constant_operators(value)?;
             }
         }
-        if let (Some(class), LocalDeclaration::Variables(mut declaration)) =
-            (self.class_stack.last_mut(), declaration)
+        if let (
+            Some(class),
+            LocalDeclaration::Variables(mut declaration)
+            | LocalDeclaration::Constructed(mut declaration),
+        ) = (self.class_stack.last_mut(), declaration)
         {
             declaration.constant |= qualified_const;
             class.properties.push(ClassProperty {
