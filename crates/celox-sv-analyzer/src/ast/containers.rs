@@ -424,6 +424,23 @@ pub(super) fn value(
                 return Err(unsupported("container scoped call"));
             }
             let (op, count) = match name.spelling.as_str() {
+                "reverse" | "sort" | "rsort"
+                    if !matches!(target.layout.kind, ContainerKind::Associative { .. }) =>
+                {
+                    let op = match name.spelling.as_str() {
+                        "reverse" => ContainerOp::Reverse,
+                        "sort" => ContainerOp::Sort,
+                        _ => ContainerOp::Rsort,
+                    };
+                    if op != ContainerOp::Reverse
+                        && target.layout.handle == Some(HandleProperty::Object)
+                    {
+                        return Err(unsupported(
+                            "sorting class handles requires a with expression",
+                        ));
+                    }
+                    (op, 0)
+                }
                 "size" | "num"
                     if name.spelling == "size"
                         || matches!(target.layout.kind, ContainerKind::Associative { .. }) =>
@@ -743,6 +760,50 @@ mod tests {
 #[cfg(test)]
 mod method_call_tests {
     use super::*;
+
+    #[test]
+    fn ordering_methods_reject_unsupported_receivers_arguments_and_void_values() {
+        for statement in [
+            "map.sort;",
+            "map.rsort();",
+            "map.reverse;",
+            "objects.sort();",
+            "objects.rsort;",
+            "q.sort(1);",
+            "q.reverse(.item(1));",
+            "q.rsort(item);",
+            "value = q.sort;",
+            "value = a.reverse();",
+            "value = $bits(q.rsort());",
+            "value = $dimensions(a.sort);",
+        ] {
+            let source = format!(
+                "module Top; int q[$], a[], map[int], value;
+                 class Cell; int n; endclass Cell objects[$];
+                 initial begin {statement} end endmodule"
+            );
+            let result = crate::analyze_source(&source, Path::new("ordering-rejection.sv"));
+            assert!(
+                matches!(result, Err(AnalyzerError::Unsupported(_))),
+                "{statement}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordering_with_clauses_are_not_silently_ignored() {
+        for call in [
+            "a.sort with (-item)",
+            "a.rsort(x) with (x)",
+            "a.reverse with (item)",
+        ] {
+            let source = format!("module Top; int a[]; initial {call}; endmodule");
+            assert!(
+                crate::analyze_source(&source, Path::new("ordering-with.sv")).is_err(),
+                "{call}"
+            );
+        }
+    }
 
     #[test]
     fn bare_methods_keep_argument_and_void_result_checks() {

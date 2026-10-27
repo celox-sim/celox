@@ -1,5 +1,142 @@
 (group containers (category types))
 
+(case ordering_integral
+  (source "ordering.sv" #"
+module Top(output bit [10:0] flags);
+    byte values[], copy_values[], bounded[$:3];
+    bit [63:0] unsigned_values[$];
+    longint signed_values[];
+    initial begin
+        values = '{127, -128, 3, -1, 3}; copy_values = values;
+        values.sort;
+        flags[0] = values.size() == 5 && values[0] == -128 && values[1] == -1
+            && values[2] == 3 && values[3] == 3 && values[4] == 127;
+        flags[1] = copy_values[0] == 127 && copy_values[1] == -128;
+        values.rsort();
+        flags[2] = values[0] == 127 && values[1] == 3 && values[2] == 3
+            && values[3] == -1 && values[4] == -128;
+        void'(values.reverse());
+        flags[3] = values[0] == -128 && values[4] == 127;
+        bounded = {3, -1, 2, -128}; bounded.sort();
+        flags[4] = bounded.size() == 4 && bounded[0] == -128 && bounded[1] == -1
+            && bounded[2] == 2 && bounded[3] == 3;
+        bounded.reverse; bounded.rsort;
+        flags[5] = bounded[0] == 3 && bounded[3] == -128;
+        unsigned_values = {64'hffffffffffffffff, 64'd1, 64'h8000000000000000, 64'd0};
+        unsigned_values.sort;
+        flags[6] = unsigned_values[0] == 0 && unsigned_values[1] == 1
+            && unsigned_values[2] == 64'h8000000000000000 && unsigned_values[3] == 64'hffffffffffffffff;
+        signed_values = '{64'sh7fffffffffffffff, -1, 64'sh8000000000000000, 0};
+        signed_values.sort();
+        flags[7] = signed_values[0] == 64'sh8000000000000000 && signed_values[1] == -1
+            && signed_values[2] == 0 && signed_values[3] == 64'sh7fffffffffffffff;
+        values.delete(); values.reverse; values.sort; values.rsort;
+        flags[8] = values.size() == 0;
+        values = '{-7}; values.sort; values.rsort; values.reverse;
+        flags[9] = values.size() == 1 && values[0] == -7;
+        begin
+            automatic byte values[] = '{2, -1};
+            values.sort();
+            flags[10] = values[0] == -1 && values[1] == 2;
+        end
+        flags[10] = flags[10] && values[0] == -7;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 2047))
+
+(case ordering_strings
+  (source "ordering.sv" #"
+module Top(output bit [4:0] flags);
+    string words[], copy_words[], q[$];
+    initial begin
+        words = '{"z", "", "aa", "A", "a", "aa"}; copy_words = words;
+        words.sort();
+        flags[0] = words[0] == "" && words[1] == "A" && words[2] == "a"
+            && words[3] == "aa" && words[4] == "aa" && words[5] == "z";
+        flags[1] = copy_words[0] == "z" && copy_words[1] == "" && copy_words[5] == "aa";
+        q = words; q.rsort;
+        flags[2] = q[0] == "z" && q[1] == "aa" && q[2] == "aa"
+            && q[3] == "a" && q[4] == "A" && q[5] == "";
+        q.reverse();
+        flags[3] = q[0] == words[0] && q[5] == words[5] && q.size() == 6;
+        words.delete(); copy_words.delete();
+        #1;
+        flags[4] = q[1] == "A" && q[4] == "aa" && q[5] == "z";
+    end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq flags 31))
+
+(case ordering_four_state
+  (source "ordering.sv" #"
+module Top(output bit [3:0] flags);
+    logic [3:0] values[], q[$];
+    logic signed [3:0] known_values[];
+    int xs, zs, zeros, ones;
+    initial begin
+        values = '{4'bx01z, 4'bz10x, 4'b0001}; q = values;
+        values.reverse;
+        flags[0] = values[0] === 4'b0001 && values[1] === 4'bz10x && values[2] === 4'bx01z;
+        q.reverse(); q.reverse();
+        flags[1] = q[0] === 4'bx01z && q[1] === 4'bz10x && q[2] === 4'b0001;
+        known_values = '{-1, 2, -8, 7}; known_values.sort;
+        flags[2] = known_values[0] === -4'sd8 && known_values[1] === -4'sd1
+            && known_values[2] === 4'sd2 && known_values[3] === 4'sd7;
+        values = '{4'bxxxx, 4'b1111, 4'bzzzz, 4'b0000};
+        values.sort(); values.rsort();
+        foreach (values[i]) begin
+            if (values[i] === 4'bxxxx) xs++;
+            if (values[i] === 4'bzzzz) zs++;
+            if (values[i] === 4'b0000) zeros++;
+            if (values[i] === 4'b1111) ones++;
+        end
+        flags[3] = values.size() == 4 && xs == 1 && zs == 1 && zeros == 1 && ones == 1;
+    end
+endmodule
+"#)
+  (four_state)
+  (top Top) (run_until 0) (assert_eq flags 15))
+
+(case ordering_handles
+  (source "ordering.sv" #"
+module Top(output bit [3:0] flags);
+    class Cell; int value; endclass
+    Cell values[], copy_values[], q[$], left, right, selected;
+    initial begin
+        left = new; left.value = 1; right = new; right.value = 2;
+        values = new[3]; values[0] = left; values[1] = right; values[2] = null;
+        copy_values = values; values.reverse;
+        flags[0] = values[0] == null && values[1] == right && values[2] == left;
+        flags[1] = copy_values[0] == left && copy_values[1] == right && copy_values[2] == null;
+        q = values; q.reverse(); selected = q[0]; selected.value = 9;
+        flags[2] = left.value == 9 && q[0] == left && q[1] == right && q[2] == null;
+        values.delete(); copy_values.delete(); left = null; right = null; selected = null;
+        #1 selected = q[0];
+        flags[3] = selected.value == 9;
+    end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq flags 15))
+
+(case ordering_events
+  (source "ordering.sv" #"
+module Top(output bit [2:0] flags);
+    int values[], count, before_count;
+    initial begin
+        values = '{1, 2, 3};
+        #1 before_count = count; values.sort;
+        #1 flags[0] = count == before_count;
+        values.rsort;
+        #1 flags[1] = count == before_count + 1;
+        before_count = count; values.rsort();
+        #1 flags[2] = count == before_count;
+    end
+    always @(values[0]) count = count + 1;
+endmodule
+"#)
+  (top Top) (run_until 4) (assert_eq flags 7))
+
 (case dynamic_resize_and_copy
   (source "containers.sv" #"
 module Top(output bit [7:0] flags);

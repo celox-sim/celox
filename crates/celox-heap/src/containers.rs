@@ -25,6 +25,12 @@ pub const PREV: u64 = 93;
 pub const ITER_VALID: u64 = 94;
 pub const EQUAL: u64 = 95;
 pub const CASE_EQUAL: u64 = 96;
+/// Reverse sequence a, preserving element values and X/Z masks.
+pub const REVERSE: u64 = 97;
+/// Sort sequence a ascending; b selects signed integral comparison.
+pub const SORT: u64 = 98;
+/// Sort sequence a descending; b selects signed integral comparison.
+pub const RSORT: u64 = 99;
 
 /// The operation parameter encodes the element width (bits 0..6), whether
 /// it is two-state (7), its handle kind (8..9: none/string/object), container
@@ -362,6 +368,31 @@ impl Heap {
                     return a;
                 };
                 match op {
+                    REVERSE => v.make_contiguous().reverse(),
+                    SORT | RSORT => {
+                        let strings = (layout.0 >> 8) & 3 == 1;
+                        let sign = if b != 0 && !strings {
+                            1 << ((layout.0 & 127) - 1)
+                        } else {
+                            0
+                        };
+                        let compare = |left: &Element, right: &Element| {
+                            let order = if strings {
+                                self.string(left.value as Handle)
+                                    .cmp(self.string(right.value as Handle))
+                            } else {
+                                (left.value ^ sign).cmp(&(right.value ^ sign))
+                            };
+                            if op == RSORT { order.reverse() } else { order }
+                        };
+                        let values = v.make_contiguous();
+                        // X/Z comparisons yield X (11.4.4). Preserve those
+                        // elements and sort the fully known runs between them;
+                        // Rust's sort requires a total comparison within a run.
+                        for known in values.split_mut(|value| value.mask != 0) {
+                            known.sort_by(&compare);
+                        }
+                    }
                     SET if index < v.len() => v[index] = value,
                     SET if layout.kind() == 1 && index == v.len() && index < layout.capacity() => {
                         v.push_back(value)
@@ -448,6 +479,32 @@ mod tests {
         assert_eq!(call(&mut heap, GET, p, c, 1, 0), 20);
         assert_eq!(call(&mut heap, GET, p, b, 1, 0), 10);
         assert_eq!(call(&mut heap, INSERT, p, c, 2, 40), c);
+    }
+
+    #[test]
+    fn ordering_interns_unchanged_values_and_retains_nested_string_roots() {
+        let mut heap = Heap::new();
+        let p = parameter(32, true, 1, 1, 0, false, false);
+        let z = heap.intern(b"z") as u64;
+        let a = heap.intern(b"a") as u64;
+        let first = call(&mut heap, INSERT, p, 0, 0, z);
+        let first = call(&mut heap, SET_MASK, p, first, 0, 0);
+        let source = call(&mut heap, INSERT, p, first, 1, a);
+        let source = call(&mut heap, SET_MASK, p, source, 1, 0);
+        let sorted = call(&mut heap, SORT, p, source, 0, 0);
+        assert_ne!(source, sorted);
+        assert_eq!(call(&mut heap, GET, p, source, 0, 0), z);
+        assert_eq!(call(&mut heap, GET, p, sorted, 0, 0), a);
+        assert_eq!(call(&mut heap, SORT, p, sorted, 0, 0), sorted);
+        assert_eq!(call(&mut heap, RSORT, p, sorted, 0, 0), source);
+        assert_eq!(call(&mut heap, REVERSE, p, sorted, 0, 0), source);
+        heap.collect([Root::object(sorted as Handle)]);
+        assert!(heap.contains(z as Handle));
+        assert!(heap.contains(a as Handle));
+        assert!(!heap.containers.contains_key(&(source as Handle)));
+        heap.collect([]);
+        assert!(!heap.contains(z as Handle));
+        assert!(!heap.contains(a as Handle));
     }
     #[test]
     fn associative_order_and_gc_follow_element_handles() {

@@ -194,6 +194,19 @@ arrays and do not distinguish these modes.
 `with` expressions, iterator arguments and
 multidimensional unpacked receivers remain unsupported.
 
+Dynamic arrays and queues support `reverse`, `sort` and `rsort` (7.12.2),
+including the bare method form. The three unmodified upstream
+`chapter-7/arrays/unpacked/ordering-methods` cases pass the official simulation
+runner in both state modes. Exactly these six expectations change from `fail`
+to `pass`; the neighboring `shuffle` case remains a failure in both modes.
+This is a focused eight-verdict run, not a full-corpus measurement.
+Shared cases additionally check negative and unsigned integral values through
+64 bits, string ordering, bounded queues, empty/singleton arrays, local
+shadowing, value copies, class identity, X/Z preservation and scalar element
+change events. Native-image/checkpoint tests cover the new runtime operations.
+Associative ordering is prohibited by 7.12.2; fixed-array ordering, `shuffle`,
+`with` expressions and iterator arguments remain unsupported.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.
