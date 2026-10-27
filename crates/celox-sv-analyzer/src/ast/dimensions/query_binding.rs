@@ -715,6 +715,10 @@ pub(in crate::ast) fn shape(
     while let Some(job) = jobs.pop() {
         match job {
             Job::Enter(id) => {
+                if let Some((_, shape)) = array_reductions::bind(id, native, tree, context)? {
+                    values.push(shape);
+                    continue;
+                }
                 let callee = match native.expression(id).kind {
                     ExprKind::Call { expression, .. } => expression,
                     _ => id,

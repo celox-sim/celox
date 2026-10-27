@@ -5,6 +5,12 @@ sv_backends! {
     fn optional_parentheses(sim) { @case "containers::optional_parentheses"; }
     fn optional_parentheses_queries(sim) { @case "containers::optional_parentheses_queries"; }
     fn optional_parentheses_four_state(sim) { @case "containers::optional_parentheses_four_state"; }
+    fn array_reduction_empty_identities(sim) { @case "containers::array_reduction_empty_identities"; }
+    fn array_reduction_type_queries(sim) { @case "containers::array_reduction_type_queries"; }
+    fn array_reduction_fixed(sim) { @case "containers::array_reduction_fixed"; }
+    fn array_reduction_dynamic_queue(sim) { @case "containers::array_reduction_dynamic_queue"; }
+    fn array_reduction_associative(sim) { @case "containers::array_reduction_associative"; }
+    fn array_reduction_four_state(sim) { @case "containers::array_reduction_four_state"; }
     fn queue_argument_side_effects(sim) { @case "containers::queue_argument_side_effects"; }
     fn queue_argument_four_state(sim) { @case "containers::queue_argument_four_state"; }
     fn string_associative_foreach(sim) { @case "containers::string_associative_foreach"; }
@@ -60,5 +66,110 @@ sv_backends! {
         @build celox::Simulation::from_sv_sources(vec![(source, Path::new("negative_array.sv"))], "Top");
         let error = sim.run_until(0).unwrap_err().to_string();
         assert!(error.contains("negative dynamic array size"), "{error}");
+    }
+}
+
+const EMPTY_REDUCTION_MODES: &str = r#"
+module Top(output bit [63:0] dp, da, qp, qa, ap, aa, sp, sa, output bit [3:0] flags);
+    bit [63:0] values[], q[$], numbers[int], words[string];
+    initial begin
+        dp = values.product(); da = values.and();
+        qp = q.product(); qa = q.and();
+        ap = numbers.product(); aa = numbers.and();
+        sp = words.product(); sa = words.and();
+        flags[0] = values.sum() == 0 && values.or() == 0 && values.xor() == 0;
+        q = {6, 3};
+        flags[1] = q.product() == 18 && q.and() == 2;
+        numbers[-5] = 6; numbers[10] = 3;
+        flags[2] = numbers.product() == 18 && numbers.and() == 2;
+        words["alpha"] = 6; words["beta"] = 3;
+        flags[3] = words.product() == 18 && words.and() == 2;
+    end
+endmodule
+"#;
+
+fn check_empty_reduction_mode<B: celox::SimBackend>(mut sim: celox::Simulation<B>, legacy: bool) {
+    sim.run_until(0).unwrap();
+    for name in ["dp", "qp", "ap", "sp"] {
+        assert_eq!(
+            sim.get(sim.signal(name)),
+            BigUint::from(u8::from(!legacy)),
+            "{name}, legacy={legacy}"
+        );
+    }
+    for name in ["da", "qa", "aa", "sa"] {
+        assert_eq!(
+            sim.get(sim.signal(name)),
+            BigUint::from(if legacy { 0 } else { u64::MAX }),
+            "{name}, legacy={legacy}"
+        );
+    }
+    assert_eq!(sim.get(sim.signal("flags")), BigUint::from(15u8));
+}
+
+#[test]
+fn empty_reduction_compatibility_is_local_to_each_build() {
+    // Alternate modes with identical source text, including defaults after opt-in.
+    for legacy in [false, true, false] {
+        for four_state in [false, true] {
+            let build = || {
+                celox::Simulation::from_sv_sources(
+                    vec![(EMPTY_REDUCTION_MODES, Path::new("empty_modes.sv"))],
+                    "Top",
+                )
+                .legacy_empty_reductions(legacy)
+                .four_state(four_state)
+            };
+            check_empty_reduction_mode(build().build_interpreter().unwrap(), legacy);
+            check_empty_reduction_mode(build().build_cranelift().unwrap(), legacy);
+            check_empty_reduction_mode(build().build_wasm().unwrap(), legacy);
+            check_empty_reduction_mode(build().build_native().unwrap(), legacy);
+            check_empty_reduction_mode(
+                build()
+                    .threads(4)
+                    .parallel_partition(celox::ParallelPartition::Always)
+                    .build_native()
+                    .unwrap(),
+                legacy,
+            );
+        }
+    }
+}
+
+#[test]
+fn empty_reduction_compatibility_survives_native_images() {
+    for legacy in [false, true] {
+        let image = celox::Simulation::from_sv_sources(
+            vec![(EMPTY_REDUCTION_MODES, Path::new("empty_modes.sv"))],
+            "Top",
+        )
+        .legacy_empty_reductions(legacy)
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+        let image =
+            celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+                .unwrap();
+        check_empty_reduction_mode(
+            celox::Simulation::from_sv_sources(Vec::new(), "Top")
+                .build_native_from_image(image)
+                .unwrap(),
+            legacy,
+        );
+    }
+}
+
+#[test]
+fn empty_reduction_compatibility_reaches_mixed_hierarchies() {
+    for legacy in [false, true] {
+        let sim = celox::Simulation::from_sources(
+            vec![("module Unused {}", Path::new("unused.veryl"))],
+            "Top",
+        )
+        .with_sv_sources(vec![(EMPTY_REDUCTION_MODES, Path::new("empty_modes.sv"))])
+        .legacy_empty_reductions(legacy)
+        .build_native()
+        .unwrap();
+        check_empty_reduction_mode(sim, legacy);
     }
 }
