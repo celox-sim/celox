@@ -3288,6 +3288,17 @@ impl<'p, 'a> Comb<'p, 'a> {
         args: &[Option<sv::ir::Expr>],
         arg_order: &[usize],
     ) -> Result<Option<Value>, sv::AnalyzerError> {
+        if args.is_empty()
+            && let Some(literal) = self.m.constant_functions.value(name)
+        {
+            let node = self.alloc(SLTNode::Constant(
+                literal.value,
+                literal.mask,
+                literal.width,
+                literal.signed,
+            ))?;
+            return Ok(Some((node, Sources::default())));
+        }
         let subroutine = self
             .m
             .subroutine(name)

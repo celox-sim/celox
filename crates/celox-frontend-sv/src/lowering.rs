@@ -10687,6 +10687,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stateless_function_scratch_loops_do_not_become_runtime_loops() {
+        let source = r#"module Top(input wire [255:0] d, output wire [255:0] q);
+            function [15:0][15:0] pattern();
+                logic [15:0] words [15:0];
+                for (int i=0; i<16; i++) words[i] = 16'b1 << i;
+                for (int i=0; i<16; i++) for (int j=0; j<16; j++) pattern[i][j] = words[i][j];
+            endfunction
+            assign q = d ^ pattern();
+        endmodule"#;
+        for four_state in [false, true] {
+            let output = schedule_sources(
+                &[(source, Path::new("top.sv"))],
+                "Top",
+                &[],
+                &[],
+                &[],
+                four_state,
+                &celox_frontend_core::ParallelScheduleOptions::default(),
+                &FrontendTraceOptions::default(),
+                None,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            let instructions: usize = output
+                .scheduled
+                .sir
+                .eval_comb
+                .iter()
+                .flat_map(|unit| unit.blocks.values())
+                .map(|block| block.instructions.len())
+                .sum();
+            assert!(
+                instructions < 32,
+                "constant scratch loops produced {instructions} runtime instructions"
+            );
+        }
+    }
+
+    #[test]
     fn bit_select_width_does_not_evaluate_a_runtime_zero_sample() {
         let index = sv::ir::ConstExpr::Ident("index".into());
         let bound = sv::ir::ConstExpr::Binary {

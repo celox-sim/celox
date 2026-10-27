@@ -46,6 +46,7 @@ pub(super) struct ProcModule<'a> {
     pub constants: &'a HashMap<String, i128>,
     pub parameter_types: &'a HashMap<String, (usize, bool)>,
     pub subroutines: HashMap<String, sv::ir::Subroutine>,
+    pub constant_functions: sv::RuntimeConstantFunctions<'a>,
     /// DPI-C imports of the module, by SystemVerilog name.
     pub dpi_imports: HashMap<String, sv::ir::DpiImport>,
     /// Extern functions the module calls, by local index.
@@ -246,6 +247,7 @@ impl<'a> ProcModule<'a> {
             constants,
             parameter_types,
             subroutines,
+            constant_functions: sv::RuntimeConstantFunctions::new(module, constants, four_state),
             dpi_imports,
             extern_functions: Vec::new(),
             extern_calls: 0,
