@@ -50,7 +50,7 @@ test("every full-validation checkout uses the requested immutable source", () =>
 });
 
 test("both stable publishers verify release-branch qualification of their actual build SHA", () => {
-  for (const [file, source] of [["publish-crates.yml", "github.sha"], ["ci-napi.yml", "needs.validate-release.outputs.build_sha"]]) {
+  for (const [file, source] of [["publish-crates.yml", "needs.validate.outputs.source_sha"], ["ci-napi.yml", "needs.validate-release.outputs.build_sha"]]) {
     const text = readFileSync(new URL(`../.github/workflows/${file}`, import.meta.url), "utf8");
     const qualification = job(text, "qualify");
     assert.match(qualification, /run: node scripts\/check-release-qualification.mjs/);
