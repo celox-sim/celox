@@ -942,3 +942,16 @@ sv_backends! {
     fn constrained_randomize_conditionals(sim) { @case "class::constrained_randomize_conditionals"; }
     fn constrained_randomize_nested_guards(sim) { @case "class::constrained_randomize_nested_guards"; }
 }
+
+sv_backends! {
+    fn constrained_randomize_inline(sim) { @case "class::constrained_randomize_inline"; }
+    fn constrained_randomize_inline_inheritance(sim) { @case "class::constrained_randomize_inline_inheritance"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inline_basic(sim) { @case "class::constrained_randomize_inline_basic"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inline_package_instances(sim) { @case "class::constrained_randomize_inline_package_instances"; }
+}
