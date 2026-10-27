@@ -932,3 +932,8 @@ sv_backends! {
 sv_backends! {
     fn constrained_randomize_hooks(sim) { @case "class::constrained_randomize_hooks"; }
 }
+
+sv_backends! {
+    fn constrained_randomize_inside(sim) { @case "class::constrained_randomize_inside"; }
+    fn constrained_randomize_inside_widths(sim) { @case "class::constrained_randomize_inside_widths"; }
+}
