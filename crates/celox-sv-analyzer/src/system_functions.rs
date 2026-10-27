@@ -844,6 +844,9 @@ pub enum ContainerKind {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContainerOp {
+    Reverse,
+    Sort,
+    Rsort,
     ReduceSum,
     ReduceProduct,
     ReduceAnd,
@@ -887,7 +890,10 @@ impl ContainerOp {
     pub fn mutates(self) -> bool {
         matches!(
             self,
-            Self::Set
+            Self::Reverse
+                | Self::Sort
+                | Self::Rsort
+                | Self::Set
                 | Self::Clear
                 | Self::Delete
                 | Self::Insert
