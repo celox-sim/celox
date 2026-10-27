@@ -578,3 +578,29 @@ test("sv-tests generates the pinned main corpus before running and retains its s
   assert.ok(sv.indexOf("conformance/sv-tests/prepare.py") < sv.indexOf("conformance/sv-tests/run.py"));
   assert.match(sv, /sv-tests-report\.summary\.json/);
 });
+
+
+test("release builds share download-only caches and cannot retain target matrices", () => {
+  const release = readFileSync(new URL("../.github/workflows/ci-napi.yml", import.meta.url), "utf8");
+  const caches = [...release.matchAll(/      - uses: Swatinem\/rust-cache@v2\n([\s\S]*?)(?=\n      -|$)/g)];
+  assert.equal(caches.length, 1);
+  const cache = caches[0][1];
+  assert.match(cache, /prefix-key: celox-napi-downloads-v1/);
+  assert.match(cache, /shared-key: napi-downloads/);
+  assert.match(cache, /cache-targets: false/);
+  assert.match(cache, /cache-bin: false/);
+  assert.match(cache, /save-if: \$\{\{ github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\) \}\}/);
+  assert.doesNotMatch(cache, /matrix.target|refs\/heads\/develop/);
+});
+
+test("evicted default-branch dependency caches recover without dependency changes", () => {
+  const warm = readFileSync(new URL("../.github/workflows/rust-cache.yml", import.meta.url), "utf8");
+  assert.match(warm, /schedule:\n    - cron: "17 \* \* \* \*"/);
+  assert.match(warm, /workflow_dispatch:/);
+  for (const id of ["rust-tests", "rust-default-tests", "napi-windows"]) {
+    const block = warm.split(`  ${id}:\n`)[1].split(/\n  [a-z][a-z-]*:/)[0];
+    assert.match(block, /if: github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\)/);
+    assert.match(block, /if: steps.cache.outputs.cache-hit != 'true'/);
+  }
+  assert.doesNotMatch(warm, /pull_request_target:|workflow_run:/);
+});
