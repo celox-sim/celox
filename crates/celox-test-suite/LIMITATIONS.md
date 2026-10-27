@@ -825,17 +825,17 @@ needs a specification ruling and is tracked in
 confirmed conformance defect. Equality behavior is unchanged pending that
 investigation.
 
+## veryl-native-queue-components
 
-### Detached children of functions in Icarus
+The `tb_queue` cases exercise Veryl HEAD's native `$tb::queue` component
+(introduced in Veryl PR #3558, revision `1cd88389745b`). The shared SV adapter
+cannot emit these handles: emission panics with `internal error: entered
+unreachable code` before invoking either external simulator. Verilator also
+cannot run the four-state case, which its adapter reports as unsupported.
 
-IEEE 1800-2023 13.4.4 permits `fork ... join_none` inside a function,
-including delays and task calls in its detached children. The six
-`fork_control::function_join_none_*` cases exercise these exceptions while
-keeping the function itself nonblocking. Icarus 13.0 rejects all six with
-`functions cannot have delay statements`; the timed-task child also reports
-`Functions cannot enable/call tasks`. The exact compile failures remain
-executed evidence in [the Icarus report](verification/sv/icarus/fork_control.json),
-not exclusions or passing assertions. Pinned xezim 0.11.3 passes all six;
-Verilator 5.052 passes the five two-state cases and its adapter does not support
-the four-state case. Reproduce with `verify-sv-icarus --filter
-fork_control::function_join_none_`.
+The focused [Verilator report](verification/repros/tb_queue_verilator.json) and
+[Icarus report](verification/repros/tb_queue_icarus.json) retain the attempted
+cases. Reproduce with `--include-ignored --filter tb_queue::` on the respective
+verification runner. These exclusions apply only to external emission; Celox
+runs every case on all four backends, including native and Cranelift parallel
+configurations.
