@@ -38,7 +38,19 @@ impl Ff<'_, '_> {
                     buffer = self.heap_call(ops::APPEND_BYTES, &[buffer, value, count]);
                 }
                 let program = self.heap_call(ops::FREEZE, &[buffer]);
-                self.heap_call(ops::OBJECT_RANDOMIZE, &[object, program, check])
+                if args.len() == 2 {
+                    self.heap_call(ops::OBJECT_RANDOMIZE, &[object, program, check])
+                } else {
+                    let mut inputs = self.heap_call(ops::NEW, &[]);
+                    let one = self.constant64(1);
+                    inputs = self.heap_call(ops::APPEND_BYTES, &[inputs, check, one]);
+                    for value in &args[2..] {
+                        let value = self.integer_of_width(value, 64, false)?;
+                        let eight = self.constant64(8);
+                        inputs = self.heap_call(ops::APPEND_BYTES, &[inputs, value, eight]);
+                    }
+                    self.heap_call(ops::OBJECT_RANDOMIZE_INPUTS, &[object, program, inputs])
+                }
             }
             ObjectOp::Container { .. } => unreachable!("handled by container_call"),
             ObjectOp::New {

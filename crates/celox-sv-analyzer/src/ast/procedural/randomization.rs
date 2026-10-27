@@ -13,7 +13,7 @@ pub(super) fn lower(
     state: &mut BodyState<'_>,
     item: &generate::Item,
 ) -> Converted<Vec<Subroutine>> {
-    lower_methods(class, tree, dimensions, state, Some(item), None)
+    lower_methods(class, tree, dimensions, state, Some(item), None, false)
 }
 
 fn lower_methods(
@@ -23,6 +23,7 @@ fn lower_methods(
     state: &mut BodyState<'_>,
     item: Option<&generate::Item>,
     inline: Option<&classes::constraints::Inline>,
+    prepare: bool,
 ) -> Converted<Vec<Subroutine>> {
     let env = item.map(|item| &*item.env).unwrap_or(&dimensions.const_env);
     let aliases = item
@@ -30,7 +31,11 @@ fn lower_methods(
         .unwrap_or_else(|| std::borrow::Cow::Borrowed(&dimensions.type_aliases));
     let method_name = |class: &str, method: &str| {
         if let Some(inline) = inline {
-            inline.name(class)
+            if prepare {
+                inline.prepare_name(class)
+            } else {
+                inline.name(class)
+            }
         } else {
             let name = classes::Class::subroutine_name(class, method);
             item.map(|item| item.name(&name)).unwrap_or(name)
@@ -66,7 +71,7 @@ fn lower_methods(
             _ => ("on_off", classes::unsigned_type(1)),
         };
         let argument = builder.declare(argument, argument_type.clone());
-        let params = vec![
+        let mut params = vec![
             SubroutineParam {
                 name: this.clone(),
                 source_name: classes::THIS.into(),
@@ -82,6 +87,20 @@ fn lower_methods(
                 default: None,
             },
         ];
+        let mut input_values = Vec::new();
+        if let Some(inline) = inline.filter(|_| !prepare) {
+            for (index, ty) in inline.inputs.iter().enumerate() {
+                let name = builder.declare(&format!("$input{index}"), ty.clone());
+                params.push(SubroutineParam {
+                    name: name.clone(),
+                    source_name: name.clone(),
+                    direction: ParamDirection::Input,
+                    r#type: convert_type(ty.clone()),
+                    default: None,
+                });
+                input_values.push(Expr::Ident(name));
+            }
+        }
         // Faults are consumed after the kernel completes. Return immediately
         // on rejection, before hooks, draws or property/mode updates.
         let mut body = vec![Stmt::If {
@@ -153,93 +172,105 @@ fn lower_methods(
                         vec![Expr::Ident(this.clone()), selected],
                     )));
                 }
-                body.push(Stmt::If {
-                    condition: Expr::Ident(argument.clone()),
-                    then_body: select,
-                    else_body: Vec::new(),
-                });
-                body.extend(hook("pre_randomize"));
-                if class.has_constraints || inline.is_some() {
-                    let mut program = class.constraint_program()?;
-                    if let Some(inline) = inline {
-                        program.constraints.extend(inline.constraints.clone());
-                    }
-                    let success = builder.declare("$constraint_success", int_type());
-                    body.push(Stmt::Assign {
-                        lhs: LValue::Ident(success.clone()),
-                        rhs: classes::object_call(
-                            ObjectOp::Randomize(program),
-                            vec![
-                                Expr::Ident(this.clone()),
-                                Expr::Binary {
-                                    left: Box::new(Expr::Ident(argument.clone())),
-                                    op: BinaryOp::Eq,
-                                    right: Box::new(Expr::Literal("1".into())),
+                if prepare || inline.is_none_or(|inline| inline.inputs.is_empty()) {
+                    body.push(Stmt::If {
+                        condition: Expr::Ident(argument.clone()),
+                        then_body: select,
+                        else_body: Vec::new(),
+                    });
+                    body.extend(hook("pre_randomize"));
+                }
+                if prepare {
+                    body.push(Stmt::Return(Some(Expr::Ident(this.clone()))));
+                    Some(builder.declare("$prepared", handle.clone()))
+                } else {
+                    if class.has_constraints || inline.is_some() {
+                        let mut program = class.constraint_program()?;
+                        if let Some(inline) = inline {
+                            program.constraints.extend(inline.constraints.clone());
+                        }
+                        let success = builder.declare("$constraint_success", int_type());
+                        body.push(Stmt::Assign {
+                            lhs: LValue::Ident(success.clone()),
+                            rhs: classes::object_call(
+                                ObjectOp::Randomize(program),
+                                [
+                                    vec![
+                                        Expr::Ident(this.clone()),
+                                        Expr::Binary {
+                                            left: Box::new(Expr::Ident(argument.clone())),
+                                            op: BinaryOp::Eq,
+                                            right: Box::new(Expr::Literal("1".into())),
+                                        },
+                                    ],
+                                    input_values.clone(),
+                                ]
+                                .concat(),
+                            ),
+                            nonblocking: false,
+                        });
+                        body.push(Stmt::If {
+                            condition: Expr::Ident(success),
+                            then_body: Vec::new(),
+                            else_body: vec![
+                                Stmt::If {
+                                    condition: Expr::Ident(argument.clone()),
+                                    then_body: vec![Stmt::Eval(classes::object_call(
+                                        ObjectOp::ModePop,
+                                        vec![Expr::Ident(this.clone())],
+                                    ))],
+                                    else_body: Vec::new(),
                                 },
+                                Stmt::Return(Some(Expr::Literal("32'sd0".into()))),
                             ],
-                        ),
+                        });
+                    } else {
+                        for property in &class.properties {
+                            if property.constant
+                                || property.field.handle.is_some()
+                                || (property.r#type.is_enum
+                                    && property.r#type.enum_values.is_none())
+                            {
+                                continue;
+                            }
+                            body.push(Stmt::If {
+                                condition: Expr::Binary {
+                                    left: Box::new(Expr::Binary {
+                                        left: Box::new(Expr::Ident(argument.clone())),
+                                        op: BinaryOp::Ne,
+                                        right: Box::new(Expr::Literal("1".into())),
+                                    }),
+                                    op: BinaryOp::LogicAnd,
+                                    right: Box::new(classes::object_call(
+                                        ObjectOp::ModeGet(
+                                            property.field.offset,
+                                            property.rand || property.randc,
+                                        ),
+                                        vec![Expr::Ident(this.clone())],
+                                    )),
+                                },
+                                then_body: random_property(&mut builder, property, &this),
+                                else_body: Vec::new(),
+                            });
+                        }
+                    }
+                    body.extend(hook("post_randomize"));
+                    body.push(Stmt::If {
+                        condition: Expr::Ident(argument.clone()),
+                        then_body: vec![Stmt::Eval(classes::object_call(
+                            ObjectOp::ModePop,
+                            vec![Expr::Ident(this.clone())],
+                        ))],
+                        else_body: Vec::new(),
+                    });
+                    let returned = builder.declare("randomize", int_type());
+                    body.push(Stmt::Assign {
+                        lhs: LValue::Ident(returned.clone()),
+                        rhs: Expr::Literal("32'sd1".into()),
                         nonblocking: false,
                     });
-                    body.push(Stmt::If {
-                        condition: Expr::Ident(success),
-                        then_body: Vec::new(),
-                        else_body: vec![
-                            Stmt::If {
-                                condition: Expr::Ident(argument.clone()),
-                                then_body: vec![Stmt::Eval(classes::object_call(
-                                    ObjectOp::ModePop,
-                                    vec![Expr::Ident(this.clone())],
-                                ))],
-                                else_body: Vec::new(),
-                            },
-                            Stmt::Return(Some(Expr::Literal("32'sd0".into()))),
-                        ],
-                    });
-                } else {
-                    for property in &class.properties {
-                        if property.constant
-                            || property.field.handle.is_some()
-                            || (property.r#type.is_enum && property.r#type.enum_values.is_none())
-                        {
-                            continue;
-                        }
-                        body.push(Stmt::If {
-                            condition: Expr::Binary {
-                                left: Box::new(Expr::Binary {
-                                    left: Box::new(Expr::Ident(argument.clone())),
-                                    op: BinaryOp::Ne,
-                                    right: Box::new(Expr::Literal("1".into())),
-                                }),
-                                op: BinaryOp::LogicAnd,
-                                right: Box::new(classes::object_call(
-                                    ObjectOp::ModeGet(
-                                        property.field.offset,
-                                        property.rand || property.randc,
-                                    ),
-                                    vec![Expr::Ident(this.clone())],
-                                )),
-                            },
-                            then_body: random_property(&mut builder, property, &this),
-                            else_body: Vec::new(),
-                        });
-                    }
+                    Some(returned)
                 }
-                body.extend(hook("post_randomize"));
-                body.push(Stmt::If {
-                    condition: Expr::Ident(argument.clone()),
-                    then_body: vec![Stmt::Eval(classes::object_call(
-                        ObjectOp::ModePop,
-                        vec![Expr::Ident(this.clone())],
-                    ))],
-                    else_body: Vec::new(),
-                });
-                let returned = builder.declare("randomize", int_type());
-                body.push(Stmt::Assign {
-                    lhs: LValue::Ident(returned.clone()),
-                    rhs: Expr::Literal("32'sd1".into()),
-                    nonblocking: false,
-                });
-                Some(returned)
             }
         };
         if method != "srandom" {
@@ -262,10 +293,11 @@ fn lower_methods(
                 {
                     continue;
                 }
-                let args = vec![
+                let mut args = vec![
                     Some(Expr::Ident(this.clone())),
                     Some(Expr::Ident(argument.clone())),
                 ];
+                args.extend(input_values.iter().cloned().map(Some));
                 let name = method_name(&name, method);
                 let call = if method == "randomize" {
                     vec![Stmt::Return(Some(Expr::Call {
@@ -317,7 +349,9 @@ fn lower_methods(
                 .map(|local| local.name.clone())
                 .collect(),
             persistent_locals: Vec::new(),
-            return_type: return_var.as_ref().map(|_| convert_type(int_type())),
+            return_type: return_var
+                .as_ref()
+                .map(|_| convert_type(if prepare { handle.clone() } else { int_type() })),
             params,
             return_var,
             body,
@@ -427,6 +461,7 @@ pub(in crate::ast) fn inline_subroutines(
                 key: request.key,
                 class: std::rc::Rc::new(request.class.clone()),
                 constraints: request.constraints.clone(),
+                inputs: request.inputs.clone(),
                 dimensions: dimensions.clone(),
             });
         }
@@ -468,7 +503,19 @@ pub(in crate::ast) fn inline_subroutines(
                 state,
                 None,
                 Some(&inline),
+                false,
             )?);
+            if !inline.inputs.is_empty() {
+                result.extend(lower_methods(
+                    &class,
+                    tree,
+                    dims,
+                    state,
+                    None,
+                    Some(&inline),
+                    true,
+                )?);
+            }
         }
     }
     Ok((result, exported))
