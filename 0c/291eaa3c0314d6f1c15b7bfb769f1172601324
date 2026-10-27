@@ -1,0 +1,1 @@
+Resolve PR2235 conflict against merged #2244 exact-comparison changes and current master; retain constant-function caching and state-mode semantics.
