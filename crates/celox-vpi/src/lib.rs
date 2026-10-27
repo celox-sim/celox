@@ -1,7 +1,8 @@
 //! Minimal IEEE VPI compatibility layer backed by an attached Celox image.
 //!
 //! This first layer intentionally implements object discovery, hierarchy
-//! iteration, properties, and immediate signal values. Callback scheduling is
+//! iteration, properties, immediate values, and zero-delay inertial deposits.
+//! Callback scheduling is
 //! kept separate because it must share the runtime's simulation-region loop.
 
 #![cfg_attr(
@@ -368,6 +369,8 @@ struct VpiHost {
     runtime: RefCell<Option<Runtime>>,
     forced_values: RefCell<HashMap<VpiSignalIdentity, ForcedValue>>,
     pending_writes: RefCell<PendingWrites>,
+    // Zero-delay inertial deposits become visible in the next update round.
+    inertial_writes: RefCell<HashMap<VpiSignalIdentity, PendingDeposit>>,
     callbacks: RefCell<callbacks::CallbackState>,
     vlog: RefCell<Option<callbacks::VlogStorage>>,
 }
@@ -1704,6 +1707,33 @@ pub unsafe extern "C" fn vpi_put_value(
             mask = 0u8.into();
         }
     }
+    if flags == VPI_INERTIAL_DELAY {
+        with_host(|host| {
+            host.inertial_writes.borrow_mut().insert(
+                identity,
+                PendingDeposit {
+                    id,
+                    value: bits,
+                    mask,
+                },
+            );
+        });
+        return reference;
+    }
+    if apply_signal_value(id, identity, bits, mask, flags) {
+        reference
+    } else {
+        ptr::null_mut()
+    }
+}
+
+fn apply_signal_value(
+    id: SignalSelection,
+    identity: VpiSignalIdentity,
+    bits: BigUint,
+    mask: BigUint,
+    flags: i32,
+) -> bool {
     let force_deposited = if flags == VPI_FORCE_FLAG {
         let deposited = with_host(|host| {
             borrow_cell(&host.forced_values, |forced| {
@@ -1719,7 +1749,7 @@ pub unsafe extern "C" fn vpi_put_value(
             with_runtime(|runtime| Some(runtime.get_four_state(id.signal(runtime)?))).flatten()
         });
         let Some((deposited_value, deposited_mask)) = deposited else {
-            return ptr::null_mut();
+            return false;
         };
         Some((deposited_value, deposited_mask))
     } else if with_host(|host| {
@@ -1731,7 +1761,7 @@ pub unsafe extern "C" fn vpi_put_value(
             })
         })
     }) {
-        return reference;
+        return true;
     } else {
         None
     };
@@ -1788,12 +1818,35 @@ pub unsafe extern "C" fn vpi_put_value(
             });
         }
     }
-    let succeeded = succeeded && (callbacks::is_running() || flush_pending_writes());
-    if succeeded {
-        reference
-    } else {
-        ptr::null_mut()
+    succeeded && (callbacks::is_running() || flush_pending_writes())
+}
+
+fn has_inertial_writes() -> bool {
+    with_host(|host| !host.inertial_writes.borrow().is_empty())
+}
+
+/// Apply one inertial update round after the current callbacks and domains.
+/// A callback on an edge generated here can enqueue the next round, but its
+/// deposits must not change the values sampled by that edge's FF kernel.
+fn flush_inertial_writes() -> bool {
+    let writes = with_host(|host| std::mem::take(&mut *host.inertial_writes.borrow_mut()));
+    if writes.is_empty() {
+        return false;
     }
+    for (identity, deposit) in writes {
+        if !apply_signal_value(
+            deposit.id,
+            identity,
+            deposit.value,
+            deposit.mask,
+            VPI_NO_DELAY,
+        ) {
+            callbacks::fail("failed to apply an inertial VPI write".into());
+            return true;
+        }
+    }
+    flush_pending_writes();
+    true
 }
 
 fn flush_pending_writes() -> bool {

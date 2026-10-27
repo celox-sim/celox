@@ -1113,6 +1113,12 @@ fn run_simulation(image: NativeProgramImage, arguments: SimulationArgs) -> Resul
     if let Some(gpi_users) = gpi_users {
         set_environment("GPI_USERS", gpi_users);
     }
+    // Zero-delay inertial deposits are applied after the current callback/
+    // domain round. Let cocotb bypass its Python write scheduler and use its
+    // C++ clock by default, while retaining an explicit user opt-out.
+    if env::var_os("COCOTB_TRUST_INERTIAL_WRITES").is_none() {
+        set_environment("COCOTB_TRUST_INERTIAL_WRITES", "1");
+    }
     set_environment("COCOTB_TOPLEVEL", top);
     set_environment("COCOTB_TEST_MODULES", test_module);
     set_environment("TOPLEVEL_LANG", "verilog");

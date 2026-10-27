@@ -334,6 +334,21 @@ pub(super) fn run() -> bool {
                 }
                 continue;
             }
+            if super::flush_inertial_writes() {
+                iterations += 1;
+                if iterations > 1_000_000 {
+                    fail(
+                        "VPI inertial updates exceeded 1000000 rounds without advancing time"
+                            .into(),
+                    );
+                    break 'scheduler;
+                }
+                progressed = true;
+                if finish_requested() {
+                    break 'scheduler;
+                }
+                continue;
+            }
             let read_write = registration_ids(CB_READ_WRITE_SYNCH);
             if !read_write.is_empty() {
                 for id in read_write {
@@ -525,6 +540,9 @@ fn settled_regions() -> Regions {
             }
             continue;
         }
+        if super::flush_inertial_writes() {
+            return Regions::Wrote;
+        }
         let read_write = registration_ids(CB_READ_WRITE_SYNCH);
         if read_write.is_empty() {
             break;
@@ -633,7 +651,8 @@ pub(super) fn run_timed() -> bool {
             })
         });
         let event = with_simulation(|simulation| simulation.next_event_time()).flatten();
-        let Some(time) = due.into_iter().chain(event).min() else {
+        let inertial = super::has_inertial_writes().then(current_time);
+        let Some(time) = due.into_iter().chain(event).chain(inertial).min() else {
             break;
         };
         if time > current_time() {
@@ -646,6 +665,7 @@ pub(super) fn run_timed() -> bool {
         } else if with_host(|host| borrow_cell(&host.callbacks, |state| state.read_only_at))
             == Some(time)
             && event != Some(time)
+            && inertial != Some(time)
         {
             // A zero-delay timer that a ReadOnly callback registered runs,
             // still read-only: the time step's regions do not open again.
