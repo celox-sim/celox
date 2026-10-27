@@ -185,13 +185,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Keep compiled dependencies, but start a separate publication cache.
-          prefix-key: celox-napi-release-v1
-          shared-key: napi-${{ matrix.target }}
-          # Reinstall Cargo tools instead of restoring executable binaries.
+          # Release target matrices previously consumed most of the repository
+          # quota and evicted the shared Rust Tests cache. Share downloads only;
+          # never retain target/ artifacts for each release target and lane.
+          prefix-key: celox-napi-downloads-v1
+          shared-key: napi-downloads
+          cache-targets: false
           cache-bin: false
-          # Tag/ad-hoc branch runs may restore, but only release lanes populate it.
-          save-if: ${{ (github.event_name == 'repository_dispatch' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop')) }}
+          # All lanes can restore the default-branch cache. Avoid develop copies.
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Install ziglang (musl targets)
         if: matrix.zigbuild
