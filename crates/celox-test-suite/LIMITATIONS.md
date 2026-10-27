@@ -881,3 +881,13 @@ Their actual compile diagnostics are retained in
 [the Verilator operators report](verification/sv/verilator/operators.json);
 they remain executed cases rather than exclusions. Reproduce with
 `verify-sv-verilator --filter two_state_case_equality --jobs 1`.
+
+### Constraint modes
+
+The `class::constraint_mode_*` cases keep the assertions required by IEEE
+1800-2023 18.9 and 18.5.2. Icarus 13.0 rejects constraint declarations.
+Verilator 5.052 passes the pre-hook mode case, but treats integer `2` as enabled
+instead of converting the setter argument to `bit` zero, and does not apply
+base-handle mode changes to an overridden constraint. See
+[the retained observations](verification/repros/sv_constraint_modes.json).
+Celox runs these assertions on all registered backends.

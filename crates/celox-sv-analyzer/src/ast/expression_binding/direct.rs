@@ -304,6 +304,12 @@ pub(in crate::ast) fn bind_value(
                     values.push(value);
                     continue;
                 }
+                if let Some(call) =
+                    objects::constraint_mode_call(tree, id, native, dimensions, false)?
+                {
+                    values.push(call);
+                    continue;
+                }
                 if let Some(call) = objects::rand_mode_call(tree, id, native, dimensions, false)? {
                     values.push(call);
                     continue;

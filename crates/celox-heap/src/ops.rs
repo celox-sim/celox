@@ -88,6 +88,9 @@ pub const OBJECT_RANDOMIZE: u64 = 64;
 /// Program b for object a; c is an input buffer (check-only byte followed by
 /// big-endian u64 values). The buffer is consumed, including on failure.
 pub const OBJECT_RANDOMIZE_INPUTS: u64 = 65;
+/// Constraint index is encoded in the parameter; set-all uses u32::MAX.
+pub const OBJECT_CONSTRAINT_MODE_GET: u64 = 66;
+pub const OBJECT_CONSTRAINT_MODE_SET: u64 = 67;
 
 /// The opcode word of `op` with parameter `parameter`.
 pub const fn encode(op: u64, parameter: u64) -> u64 {
@@ -248,6 +251,17 @@ impl Heap {
                 0
             }
             OBJECT_CHECK => u64::from(self.check_object(a as Handle, parameter as u32)),
+            OBJECT_CONSTRAINT_MODE_GET => {
+                self.constraint_mode(a as Handle, parameter as u32) as u64
+            }
+            OBJECT_CONSTRAINT_MODE_SET => {
+                self.set_constraint_mode(
+                    a as Handle,
+                    (parameter != u64::from(u32::MAX)).then_some(parameter as u32),
+                    b & 1 != 0,
+                );
+                0
+            }
             OBJECT_MODE_GET => {
                 u64::from(self.random_mode(a as Handle, parameter as u32, parameter >> 32 != 0))
             }

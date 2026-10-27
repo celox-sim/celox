@@ -1,0 +1,53 @@
+{
+  "specification": "IEEE 1800-2023 18.9, 18.5.2",
+  "observations": [
+    {
+      "tool": "icarus",
+      "case": "class::constraint_mode_base_dispatch",
+      "status": "compile_error",
+      "log": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:5: sorry: Constraint declarations not supported.\n<case>/source_0.sv:6: sorry: Constraint declarations not supported.\n<case>/source_0.sv:9: sorry: Constraint declarations not supported.\n<case>/source_0.sv:10: sorry: Constraint declarations not supported.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Operand of unary ! is not a primary expression.\n<case>/source_0.sv:19: error: Malformed statement\n<case>/source_0.sv:19: error: Malformed conditional expression.\n"
+    },
+    {
+      "tool": "icarus",
+      "case": "class::constraint_mode_basic",
+      "status": "compile_error",
+      "log": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:5: sorry: Constraint declarations not supported.\n<case>/source_0.sv:6: sorry: Constraint declarations not supported.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Operand of unary ! is not a primary expression.\n<case>/source_0.sv:19: error: Malformed statement\n<case>/source_0.sv:19: error: Malformed conditional expression.\n"
+    },
+    {
+      "tool": "icarus",
+      "case": "class::constraint_mode_hooks",
+      "status": "compile_error",
+      "log": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:6: sorry: Constraint declarations not supported.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Operand of unary ! is not a primary expression.\n<case>/source_0.sv:12: error: Malformed statement\n<case>/source_0.sv:12: error: Malformed conditional expression.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Malformed conditional expression.\n"
+    },
+    {
+      "tool": "icarus",
+      "case": "class::constraint_mode_inheritance",
+      "status": "compile_error",
+      "log": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:5: sorry: Constraint declarations not supported.\n<case>/source_0.sv:6: sorry: Constraint declarations not supported.\n<case>/source_0.sv:12: sorry: Constraint declarations not supported.\n<case>/source_0.sv:13: sorry: Constraint declarations not supported.\n<case>/source_0.sv:29: syntax error\n<case>/source_0.sv:29: error: Operand of unary ! is not a primary expression.\n<case>/source_0.sv:29: error: Malformed statement\n<case>/source_0.sv:29: error: Malformed conditional expression.\n"
+    },
+    {
+      "tool": "verilator",
+      "case": "class::constraint_mode_base_dispatch",
+      "status": "runtime_error",
+      "log": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n"
+    },
+    {
+      "tool": "verilator",
+      "case": "class::constraint_mode_basic",
+      "status": "runtime_error",
+      "log": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n"
+    },
+    {
+      "tool": "verilator",
+      "case": "class::constraint_mode_hooks",
+      "status": "passed",
+      "log": ""
+    },
+    {
+      "tool": "verilator",
+      "case": "class::constraint_mode_inheritance",
+      "status": "runtime_error",
+      "log": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n"
+    }
+  ]
+}

@@ -2682,5 +2682,57 @@
         "class::constrained_randomize_inline_input_hooks"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_constraint_mode_bit_argument",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "IEEE 1800-2023 18.9 declares constraint_mode(bit on_off). Passing integer 2 converts to bit zero and disables the block. Verilator keeps it enabled; the regression preserves the mode query assertion.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_constraint_modes.json"
+    ],
+    "cases": {
+      "verilator": [
+        "class::constraint_mode_basic"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_constraint_mode_override",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_constraint_modes.json"
+    ],
+    "cases": {
+      "verilator": [
+        "class::constraint_mode_inheritance",
+        "class::constraint_mode_base_dispatch"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_constraint_modes",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (devel)",
+    "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_constraint_modes.json"
+    ],
+    "cases": {
+      "icarus": [
+        "class::constraint_mode_base_dispatch",
+        "class::constraint_mode_basic",
+        "class::constraint_mode_hooks",
+        "class::constraint_mode_inheritance"
+      ]
+    }
   }
 ]

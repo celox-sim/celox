@@ -143,8 +143,17 @@ seedを使って解を探索し、成功時だけ対象プロパティをまと�
 値を保持して`0`を返し、postフックを呼びません（18.6.3）。探索予算切れは実行時エラーです。
 この初期実装は一様分布を保証しません。分布の改善は[#2187](https://github.com/celox-sim/celox/issues/2187)で追跡します。
 
-制約付きenum・`randc`、`inside`、条件付き・foreach・soft制約、`dist`、`solve before`、
-制約モード、外部・static制約ブロック、制約中の型付きパラメーター、inline `with` は未対応です。
+`object.block.constraint_mode()` は制約ブロックの有効状態を `int` で返し、
+`object.block.constraint_mode(bit)` は指定ブロックを切り替えます。
+`object.constraint_mode(bit)` は動的なオブジェクトの全制約を切り替えます。
+初期状態はすべて有効で、継承・同名制約の上書き・別名ハンドルに対応します。
+`pre_randomize()` 内の変更はその回の solve に適用され、成功・失敗後も残ります。
+`rand_mode`、メンバー選択、inline 制約とは独立し、チェックポイントで復元されます
+（IEEE 1800-2023 18.9、18.5.2）。ヒープ形式が変わるため、以前のビルドで保存した
+シリアライズ済みヒープ・チェックポイントは再生成してください。
+
+制約付きenum・`randc`、foreach・soft制約、`dist`、`solve before`、
+外部・static制約ブロック、制約中の型付きパラメーターは未対応です。
 上記の上限を超える制約なし`randc`、staticな乱数プロパティ、配列・オブジェクト・文字列の
 乱数化も未対応です。未対応の子クラスは乱数生成前に拒否します。
 `null` を通した呼び出しは実行時エラーです。

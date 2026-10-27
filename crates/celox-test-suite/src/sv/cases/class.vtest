@@ -2339,3 +2339,143 @@ module Top(output bit done);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_basic
+  (source "constraint_mode_basic.sv" #"
+module Top(output bit done);
+    class C;
+        rand bit [3:0] x;
+        constraint low { x == 2; }
+        constraint high { x == 9; }
+        function void enable_low(); constraint_mode(0); low.constraint_mode(1); endfunction
+    endclass
+    C c, alias_c, other;
+    initial begin
+        c = new; other = new; alias_c = c;
+        if (c.low.constraint_mode() != 1 || c.high.constraint_mode() != 1) $fatal(1, "initial modes");
+        c.x = 7;
+        if (c.randomize() || c.x != 7) $fatal(1, "initial contradiction");
+        alias_c.high.constraint_mode(0);
+        if ((c.high.constraint_mode() != 0) || (other.high.constraint_mode() == 0)) $fatal(1, "alias isolation");
+        if (!c.randomize() || c.x != 2) $fatal(1, "disabled block");
+        c.constraint_mode(0);
+        if (!(c.randomize() with { x == 5; }) || c.x != 5) $fatal(1, "inline remains active");
+        c.high.constraint_mode(1);
+        if (c.randomize(null)) $fatal(1, "check only fails");
+        if (!c.randomize() || c.x != 9 || !c.randomize(null)) $fatal(1, "check only succeeds");
+        c.enable_low();
+        if (!c.randomize() || c.x != 2) $fatal(1, "implicit receiver");
+        c.low.constraint_mode(2);
+        if (c.low.constraint_mode() != 0) $fatal(1, "bit conversion");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_inheritance
+  (source "constraint_mode_inheritance.sv" #"
+package pkg;
+    class Base;
+        rand bit [3:0] x, y;
+        constraint first { x == 1; }
+        constraint second { y == 3; }
+        function void disable_first(); first.constraint_mode(0); endfunction
+    endclass
+endpackage
+module Top(output bit done);
+    class Derived extends pkg::Base;
+        constraint first { x == 7; }
+        constraint third { y == 5; }
+    endclass
+    Derived d;
+    pkg::Base b;
+    initial begin
+        d = new; b = d;
+        b.constraint_mode(0);
+        if ((d.first.constraint_mode() != 0) || (d.second.constraint_mode() != 0) || (d.third.constraint_mode() != 0)) $fatal(1, "dynamic all");
+        b.first.constraint_mode(1);
+        d.third.constraint_mode(1);
+        if ((d.first.constraint_mode() == 0) || (d.second.constraint_mode() != 0) || (d.third.constraint_mode() == 0)) $fatal(1, "override modes");
+        // Package-base randomize dispatch is tracked separately in #1892.
+        if (!d.randomize()) $fatal(1, "override solve");
+        if (d.x != 7 || d.y != 5) $fatal(1, "override values x=%d y=%d", d.x, d.y);
+        b.disable_first();
+        if ((d.first.constraint_mode() != 0) || (d.third.constraint_mode() == 0)) $fatal(1, "inherited method");
+        if (!(d.randomize() with { x == 2; }) || d.x != 2 || d.y != 5) $fatal(1, "disabled override");
+        b.constraint_mode(1);
+        if ((d.first.constraint_mode() == 0) || (d.second.constraint_mode() == 0) || (d.third.constraint_mode() == 0)) $fatal(1, "all enabled");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_hooks
+  (source "constraint_mode_hooks.sv" #"
+module Top(output bit done);
+    class C;
+        rand bit [3:0] x;
+        bit disable_c;
+        constraint c { x == 2; }
+        function void pre_randomize(); c.constraint_mode(!disable_c); endfunction
+    endclass
+    C p;
+    initial begin
+        p = new; p.disable_c = 1;
+        if (!(p.randomize(x) with { x == 7; }) || p.x != 7) $fatal(1, "pre-hook disable");
+        if (p.c.constraint_mode() != 0) $fatal(1, "mode survives selected randomize");
+        p.disable_c = 0;
+        if (p.randomize(x) with { x == 7; }) $fatal(1, "pre-hook enable");
+        if ((p.c.constraint_mode() == 0) || p.x != 7) $fatal(1, "failed solve mode");
+        if (!p.randomize() || p.x != 2) $fatal(1, "subsequent solve");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_base_dispatch
+  (source "constraint_mode_base_dispatch.sv" #"
+module Top(output bit done);
+    class Base;
+        rand bit [3:0] x, y;
+        constraint a { x == 1; }
+        constraint b { y == 3; }
+    endclass
+    class Derived extends Base;
+        constraint a { x == 7; }
+        constraint c { y == 5; }
+    endclass
+    Base b;
+    Derived d;
+    initial begin
+        d = new; b = d;
+        b.b.constraint_mode(0);
+        if (!b.randomize() || d.x != 7 || d.y != 5) $fatal(1, "dynamic override");
+        b.a.constraint_mode(0);
+        if (!(b.randomize() with { x == 2; }) || d.x != 2 || d.y != 5) $fatal(1, "inline dynamic modes");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_ordinary_struct_members
+  (source "constraint_mode_struct.sv" #"
+    module Top(input int data, output int direct_value, nested_value);
+      struct packed { int constraint_mode; } direct_data;
+      struct packed { struct packed { int constraint_mode; } child; } nested_data;
+      always_comb begin
+        direct_data.constraint_mode = data;
+        nested_data.child.constraint_mode = data + 1;
+        direct_value = direct_data.constraint_mode;
+        nested_value = nested_data.child.constraint_mode;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 37 255)
+    (modify (set data value))
+    (assert_eq direct_value value)
+    (assert_eq nested_value (+ value 1))))

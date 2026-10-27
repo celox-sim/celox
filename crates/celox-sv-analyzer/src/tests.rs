@@ -7413,3 +7413,48 @@ fn class_inline_randomize_static_names_do_not_capture_caller_locals() {
         }
     }
 }
+
+#[test]
+fn constraint_mode_rejects_invalid_calls() {
+    for (statement, expected) in [
+        ("c.constraint_mode();", "getter requires"),
+        ("c.missing.constraint_mode(0);", "unknown constraint"),
+        ("c.x.constraint_mode();", "unknown constraint"),
+        ("result = c.rule.constraint_mode(1);", "setter is void"),
+        ("c.rule.constraint_mode(1, 0);", "one on_off"),
+    ] {
+        let source = format!(
+            "module Top; class C; rand bit [3:0] x; constraint rule {{ x == 1; }} endclass C c; int result; initial begin c = new; {statement} end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("constraint_mode.sv"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{statement}: {error}");
+    }
+}
+
+#[test]
+fn constraint_mode_cannot_be_overridden() {
+    let source = "module Top; class C; function void constraint_mode(bit flag); endfunction endclass C c; initial c = new; endmodule";
+    let error = analyze_source(source, Path::new("constraint_mode_override.sv"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("overriding"), "{error}");
+}
+
+#[test]
+fn constraint_mode_outside_classes_remains_an_ordinary_function() {
+    let source = "module Top(output int value); function int constraint_mode(); return 42; endfunction initial value = constraint_mode(); endmodule";
+    analyze_source(source, Path::new("constraint_mode_function.sv")).unwrap();
+}
+
+#[test]
+fn constraint_mode_names_do_not_intercept_struct_members() {
+    for source in [
+        "module Top(output int value); struct packed { int constraint_mode; } s; initial value = s.constraint_mode; endmodule",
+        "module Top(output int value); struct packed { struct packed { int constraint_mode; } child; } s; initial value = s.child.constraint_mode; endmodule",
+        "module Top(output int value); class C; function int f(); struct packed { int constraint_mode; } s; s.constraint_mode=37; return s.constraint_mode; endfunction endclass C c; initial begin c=new; value=c.f(); end endmodule",
+    ] {
+        analyze_source(source, Path::new("constraint_mode_struct.sv")).unwrap();
+    }
+}

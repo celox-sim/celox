@@ -762,9 +762,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         root: celox_sv_syntax::ExprId,
     ) -> Result<Option<Stmt>, AnalyzerError> {
         let native = self.tree.declarations();
-        if let Some(mut call) =
-            expression_binding::object_rand_mode_call(self.tree, root, native, &self.dims, true)?
-        {
+        if let Some(mut call) = expression_binding::object_constraint_mode_call(
+            self.tree, root, native, &self.dims, true,
+        )?
+        .or(expression_binding::object_rand_mode_call(
+            self.tree, root, native, &self.dims, true,
+        )?) {
             self.rename_expr(&mut call);
             return Ok(Some(match call {
                 Expr::Call {
