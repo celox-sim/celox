@@ -322,6 +322,20 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "packed array parameters are not supported yet",
                         ),
+                        (
+                            "verilator",
+                            "operators::two_state_case_equality_compares_literal_structure"
+                            | "operators::two_state_case_equality_preserves_conditional_unknowns"
+                            | "operators::two_state_case_equality_keeps_unknown_expression_bits",
+                        ) => ("compile_error", "compile", "Unsupported tristate construct"),
+                        (
+                            "verilator",
+                            "operators::two_state_case_equality_preserves_unknown_literals",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: tristate in top-level IO",
+                        ),
                         _ => panic!("unreviewed failure: {tool} {name}: {status}"),
                     };
                     assert_eq!(status, expected_status, "{name}");
