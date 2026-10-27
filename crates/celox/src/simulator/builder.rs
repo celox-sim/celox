@@ -2809,6 +2809,7 @@ mod host {
         fn into_laid_out_program(
             self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+            defer_derived_edges: bool,
         ) -> Result<
             (
                 crate::ir::LaidOutProgram,
@@ -2819,13 +2820,14 @@ mod host {
             ),
             SimulatorError,
         > {
-            self.into_laid_out_program_with_trace(layout_mode, None)
+            self.into_laid_out_program_with_trace(layout_mode, None, defer_derived_edges)
         }
 
         fn into_laid_out_program_with_trace(
             mut self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
             trace: Option<&mut crate::debug::CompilationTrace>,
+            defer_derived_edges: bool,
         ) -> Result<
             (
                 crate::ir::LaidOutProgram,
@@ -2983,7 +2985,11 @@ mod host {
                 .optimize_options
                 .is_enabled(crate::optimizer::SirPass::DerivedEdgeUnits)
             {
-                crate::derived_edge::attach(&mut laid_out);
+                if defer_derived_edges {
+                    crate::derived_edge::attach_deferred(&mut laid_out);
+                } else {
+                    crate::derived_edge::attach(&mut laid_out);
+                }
             }
             #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
             if let Some(sink) = &self.options.derived_edge_units {
@@ -3039,7 +3045,10 @@ mod host {
             let phase_start = phase_timing.then(crate::timing::now);
 
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
-                .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+                .into_laid_out_program(
+                    crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                    false,
+                )?;
             validate_untimed_processes(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
@@ -3109,7 +3118,10 @@ mod host {
             let phase_start = phase_timing.then(crate::timing::now);
 
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
-                .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+                .into_laid_out_program(
+                    crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                    false,
+                )?;
             validate_untimed_processes(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
@@ -3165,9 +3177,10 @@ mod host {
 
             let (laid_out, warnings, options, vcd_path, injected_components) = {
                 let vcd_recording = self.vcd_path.is_some();
-                self.into_laid_out_program(crate::backend::tiered::tiered_layout_mode(
-                    vcd_recording,
-                ))?
+                self.into_laid_out_program(
+                    crate::backend::tiered::tiered_layout_mode(vcd_recording),
+                    false,
+                )?
             };
             validate_untimed_processes(laid_out.runtime())?;
 
@@ -3236,9 +3249,10 @@ mod host {
 
             let (laid_out, warnings, options, vcd_path, injected_components) = {
                 let vcd_recording = self.vcd_path.is_some();
-                self.into_laid_out_program(crate::backend::tiered::tiered_layout_mode(
-                    vcd_recording,
-                ))?
+                self.into_laid_out_program(
+                    crate::backend::tiered::tiered_layout_mode(vcd_recording),
+                    false,
+                )?
             };
             validate_untimed_processes(laid_out.runtime())?;
 
@@ -3290,6 +3304,7 @@ mod host {
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+                    true,
                 )?;
             validate_untimed_processes(laid_out.runtime())?;
             if let Some(start) = sir_start {
@@ -3335,6 +3350,7 @@ mod host {
                 .into_laid_out_program_with_trace(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                     Some(&mut trace),
+                    true,
                 )?;
             validate_untimed_processes(laid_out.runtime())?;
             if let Some(start) = sir_start {
@@ -3463,7 +3479,10 @@ mod host {
             self,
         ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
-                .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+                .into_laid_out_program(
+                    crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                    false,
+                )?;
             validate_untimed_processes(laid_out.runtime())?;
             let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)
                 .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
@@ -3838,6 +3857,7 @@ mod host {
         pub fn build_cranelift(self) -> Result<crate::Simulation<JitBackend>, SimulatorError> {
             self.build_with_backend(
                 crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                false,
                 |program, options| {
                     let mut trace = crate::debug::CompilationTrace::default();
                     let wants_trace = options.trace.pre_optimized_clif
@@ -3864,6 +3884,7 @@ mod host {
         {
             self.build_with_backend(
                 crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+                true,
                 crate::backend::native::NativeBackend::new,
             )
         }
@@ -3884,6 +3905,7 @@ mod host {
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+                    true,
                 )?;
             let image = crate::backend::native::NativeBackend::compile_image(&laid_out, &options)
                 .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
@@ -3938,6 +3960,7 @@ mod host {
         {
             self.build_with_backend(
                 crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                false,
                 crate::backend::wasm_runtime::WasmBackend::new,
             )
         }
@@ -3948,6 +3971,7 @@ mod host {
         ) -> Result<crate::Simulation<crate::backend::InterpBackend>, SimulatorError> {
             self.build_with_backend(
                 crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                false,
                 crate::backend::InterpBackend::new,
             )
         }
@@ -3958,7 +3982,7 @@ mod host {
             self,
         ) -> Result<crate::Simulation<crate::backend::TieredBackend>, SimulatorError> {
             let layout = crate::backend::tiered::tiered_layout_mode(self.vcd_path.is_some());
-            self.build_with_backend(layout, |program, options| {
+            self.build_with_backend(layout, false, |program, options| {
                 Ok(crate::backend::TieredBackend::new(program, options))
             })
         }
@@ -3966,11 +3990,12 @@ mod host {
         fn build_with_backend<B: crate::SimBackend>(
             mut self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+            defer_derived_edges: bool,
             compile: impl Fn(&crate::ir::LaidOutProgram, &SimulatorOptions) -> Result<B, SimulatorError>,
         ) -> Result<crate::Simulation<B>, SimulatorError> {
             self.options.emit_triggers = true;
             let (laid_out, mut warnings, options, vcd_path, injected_components) =
-                self.into_laid_out_program(layout_mode)?;
+                self.into_laid_out_program(layout_mode, defer_derived_edges)?;
             let backend = compile(&laid_out, &options)
                 .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             let shadow = Self::start_shadow(
@@ -4182,6 +4207,217 @@ mod host {
     #[cfg(all(
         test,
         feature = "systemverilog",
+        any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            feature = "arm64-codegen"
+        )
+    ))]
+    #[test]
+    fn deferred_edges_preserve_expanded_ir_and_reserve_only_small_entries() {
+        let source = r#"module Top(input bit clk, input bit en, output bit [7:0] q);
+            bit [7:0] r = 0, a = 0, b = 0, c = 0;
+            wire gated = clk & en;
+            wire inverted = ~clk;
+            wire second = gated & r[0];
+            always_ff @(posedge clk) r <= r + 1;
+            always_ff @(posedge gated) a <= a + r;
+            always_ff @(posedge inverted) b <= b + a;
+            always_ff @(posedge second) c <= c + b;
+            assign q = a + b + c;
+        endmodule"#;
+        for partitioned in [false, true] {
+            let builder = crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("deferred_edges.sv"))],
+                "Top",
+            )
+            .emit_triggers()
+            .opt_level(crate::OptLevel::O1)
+            .disable_pass(crate::SirPass::DerivedEdgeUnits);
+            let builder = if partitioned {
+                builder.settle_partition(crate::SettlePartition::Always)
+            } else {
+                builder
+            };
+            let (base, _, options, _, _) = builder
+                .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+                .unwrap();
+            let first = base.sir.processes.len();
+            let mut expanded = base.clone();
+            crate::derived_edge::attach(&mut expanded);
+            crate::settle::instrument_processes_from(&mut expanded, first, false);
+            let mut deferred = base;
+            crate::derived_edge::attach_deferred(&mut deferred);
+            crate::settle::instrument_processes_from(&mut deferred, first, false);
+            assert!(deferred.deferred_derived_edges.len() >= 4);
+            assert_eq!(expanded.sir.processes.len(), deferred.sir.processes.len());
+            assert_eq!(
+                expanded.runtime().runtime_schema.derived_edges,
+                deferred.runtime().runtime_schema.derived_edges,
+            );
+            if partitioned {
+                assert!(deferred.layout().settle.is_some());
+            }
+            let model = celox_design::schedule::ScheduleModel::derive(
+                &deferred.design,
+                &deferred.runtime().runtime_schema,
+            );
+            for (&index, edge) in &deferred.deferred_derived_edges {
+                let reserved = &deferred.sir.processes[index];
+                assert_eq!(reserved.blocks.len(), 1);
+                assert!(reserved.register_map.is_empty());
+                assert!(reserved.blocks.values().all(|block| {
+                    block.instructions.is_empty()
+                        && matches!(block.terminator, crate::ir::SIRTerminator::Return)
+                }));
+                let generated = edge.generate(&deferred, &model).unwrap();
+                generated.verify_result().unwrap();
+                assert!(edge.blocks >= generated.blocks.len());
+                assert!(
+                    edge.instructions
+                        >= generated
+                            .blocks
+                            .values()
+                            .map(|block| block.instructions.len())
+                            .sum::<usize>()
+                );
+                assert_eq!(generated.blocks, expanded.sir.processes[index].blocks);
+                assert_eq!(
+                    generated.register_map,
+                    expanded.sir.processes[index].register_map
+                );
+            }
+            let expanded_image =
+                crate::backend::native::NativeBackend::compile_image(&expanded, &options).unwrap();
+            let deferred_image =
+                crate::backend::native::NativeBackend::compile_image(&deferred, &options).unwrap();
+            assert_eq!(expanded_image.code_image(), deferred_image.code_image());
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            {
+                let outlined_image =
+                    crate::backend::native::NativeBackend::compile_outlined_image_for_test(
+                        &deferred, &options,
+                    )
+                    .unwrap();
+                // Exercise pointer-free serialization before relocating both
+                // images into independent executable mappings.
+                let bytes = outlined_image.to_container_bytes().unwrap();
+                let outlined_image: crate::backend::native::NativeProgramImage =
+                    crate::backend::native::NativeProgramImage::from_container_bytes(&bytes)
+                        .unwrap();
+                let mut simulations = [deferred_image, outlined_image].map(|image| {
+                    let runtime = image.runtime_program();
+                    // SAFETY: these images were compiled from this fixture.
+                    let backend =
+                        unsafe { crate::backend::native::NativeBackend::from_image(image) }
+                            .unwrap();
+                    let mut sim = crate::Simulator::with_backend_and_program_for_simulation(
+                        backend,
+                        runtime,
+                        Vec::new(),
+                    );
+                    sim.apply_initial_values();
+                    sim.modify(|_| {}).unwrap();
+                    sim
+                });
+                for step in 0..80 {
+                    for sim in &mut simulations {
+                        let enable = sim.signal("en");
+                        sim.modify(|io| io.set(enable, u8::from(step % 3 != 0)))
+                            .unwrap();
+                        let clk = sim.event("clk");
+                        if step % 5 == 0 {
+                            sim.edge(clk, crate::Edge::Falling).unwrap();
+                        } else {
+                            sim.tick(clk).unwrap();
+                        }
+                    }
+                    for name in ["q", "r", "a", "b", "c"] {
+                        assert_eq!(
+                            simulations[0].get(simulations[0].signal(name)),
+                            simulations[1].get(simulations[1].signal(name)),
+                            "partitioned={partitioned}, step={step}, signal={name}"
+                        );
+                    }
+                }
+            }
+            let baseline = crate::derived_edge::without_units(&deferred);
+            assert!(baseline.deferred_derived_edges.is_empty());
+            assert!(baseline.runtime().runtime_schema.derived_edges.is_empty());
+        }
+    }
+
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn native_comb_chunks_preserve_cross_unit_state_through_image_roundtrip() {
+        let source = r#"module Top(input bit [7:0] a,
+            output bit [7:0] mid, out, mirror);
+            assign mid = a + 8'h11;
+            assign out = mid ^ 8'ha5;
+            assign mirror = out + mid;
+        endmodule"#;
+        let (mut program, _, options, _, _) = crate::Simulator::from_sv_sources(
+            vec![(source, std::path::Path::new("chunks.sv"))],
+            "Top",
+        )
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+        .unwrap();
+        crate::backend::native::NativeBackend::split_comb_units_for_test(&mut program);
+        assert!(program.sir.eval_comb.len() > 1);
+        let merged =
+            crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
+        let chunked = crate::backend::native::NativeBackend::compile_outlined_image_for_test(
+            &program, &options,
+        )
+        .unwrap();
+        assert!(
+            chunked
+                .code_entries()
+                .iter()
+                .filter(|entry| entry.name.starts_with("eval_comb_chunk["))
+                .count()
+                > 1
+        );
+        for image in [merged, chunked] {
+            let image = crate::NativeProgramImage::from_container_bytes(
+                &image.to_container_bytes().unwrap(),
+            )
+            .unwrap();
+            let runtime = image.runtime_program();
+            // SAFETY: this image was compiled from this fixture.
+            let backend = unsafe { crate::NativeBackend::from_image(image) }.unwrap();
+            let mut sim = crate::Simulator::with_backend_and_program_for_simulation(
+                backend,
+                runtime,
+                Vec::new(),
+            );
+            sim.apply_initial_values();
+            for step in 0..80u8 {
+                let value = step.wrapping_mul(17);
+                let a = sim.signal("a");
+                sim.modify(|io| io.set(a, value)).unwrap();
+                let mid = value.wrapping_add(0x11);
+                let out = mid ^ 0xa5;
+                for (name, expected) in [
+                    ("mid", mid),
+                    ("out", out),
+                    ("mirror", out.wrapping_add(mid)),
+                ] {
+                    let signal = sim.signal(name);
+                    assert_eq!(sim.get(signal), num_bigint::BigUint::from(expected));
+                }
+            }
+        }
+    }
+
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
         target_arch = "x86_64",
         not(feature = "arm64-codegen")
     ))]
@@ -4204,7 +4440,7 @@ endmodule"#;
         let (mut program, warnings, options, _, _) =
             crate::Simulation::from_sv_sources(sources, "Top")
                 .emit_triggers()
-                .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided)
+                .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
                 .unwrap();
         let schema = &mut program.runtime.runtime_schema;
         let count = schema.processes.len();
@@ -4264,7 +4500,7 @@ endmodule"#;
             "Top",
         )
         .emit_triggers()
-        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided)
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
         .unwrap();
         let image =
             crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
@@ -4314,7 +4550,7 @@ endmodule"#;
             vec![(&source, std::path::Path::new("native-vcd.sv"))],
             "Top",
         )
-        .into_laid_out_program(crate::MemoryLayoutMode::Packed)
+        .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
         .unwrap();
         let image =
             crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
@@ -4376,7 +4612,7 @@ endmodule"#;
                 "Top",
             )
             .four_state(four_state)
-            .into_laid_out_program(crate::MemoryLayoutMode::Packed)
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
             .unwrap();
             let image =
                 crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
