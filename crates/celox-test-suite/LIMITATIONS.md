@@ -912,3 +912,24 @@ IEEE 1800-2023 6.20.3, 8.23, 8.24, 8.25.1 in
 retain the separate top and wrapped runs. The validation build regenerated
 the dependency lock in an isolated Nix package because the repository lock
 names a different xezim-core revision. No simulator source changes were used.
+
+### Class typedef qualifiers
+
+The two `class::type_alias_*` cases keep class aliases usable before `::`,
+including alias chains, static state identity and a class-local alias visible
+in an out-of-block method (IEEE 1800-2023 6.18, 8.23 and 8.24). Icarus 13.0
+rejects the generic-class case with a syntax error and the lexical-scope case
+with typedef/external-method diagnostics. Both remain executed failures in
+[the Icarus class report](verification/sv/icarus/class.json), with individual
+case checks in `retained_reports.rs`. No assertion or exclusion changes.
+
+The xezim 0.11.3 source pinned at `5eab5f2` passes `type_alias_members`,
+but still loses the class static member lookup in `type_alias_lexical_scopes`. Its exact mismatch remains an executed failure in
+[the xezim class report](verification/sv/xezim/class.json), reviewed against
+IEEE 1800-2023 6.18, 8.23, 8.24 in
+[the xezim review](verification/xezim-review.json). The
+[adapter-free source](verification/repros/sv_class_type_alias_xezim.sv) and
+[observations](verification/repros/sv_class_type_alias_xezim.json)
+retain the separate top and wrapped runs. The validation build regenerated
+the dependency lock in an isolated Nix package because the repository lock
+names a different xezim-core revision. No simulator source changes were used.

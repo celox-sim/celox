@@ -3,6 +3,8 @@
 use super::*;
 
 sv_backends! {
+    fn class_type_alias_members(sim) { @case "class::type_alias_members"; }
+    fn class_type_alias_lexical_scopes(sim) { @case "class::type_alias_lexical_scopes"; }
     fn constraint_mode_ordinary_struct_members(sim) {
         @case "class::constraint_mode_ordinary_struct_members";
     }
