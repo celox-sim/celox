@@ -959,6 +959,9 @@ impl<'a> ModuleParser<'a> {
             ))
         });
         if self.allow_inferred_latches && !continuous {
+            let proven_combinational = crate::logic_tree::proves_combinational(&paths, &self.arena);
+            let proven_binary_combinational = !proven_combinational
+                && crate::logic_tree::proves_binary_combinational(&paths, &self.arena);
             self.comb_process_ranges.push(crate::artifact::CombProcess {
                 paths: self.comb_blocks.len()..self.comb_blocks.len() + paths.len(),
                 reads: crate::logic_tree::sensitivity::implicit_reads(
@@ -986,7 +989,8 @@ impl<'a> ModuleParser<'a> {
                         range
                     })
                     .unwrap_or(self.module.token),
-                proven_combinational: crate::logic_tree::proves_combinational(&paths, &self.arena),
+                proven_combinational,
+                proven_binary_combinational,
             });
         }
         self.comb_blocks.extend(paths);
