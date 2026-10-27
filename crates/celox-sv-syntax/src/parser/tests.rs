@@ -3060,3 +3060,26 @@ fn constraints_retain_simple_expressions_and_mark_other_forms() {
     assert!(blocks[2].expressions.is_none());
     assert!(blocks[3].expressions.as_ref().unwrap().is_empty());
 }
+
+#[test]
+fn inline_constraints_retain_ownership_and_bound_nested_calls() {
+    let syntax =
+        parse("module M; initial obj.randomize() with { if (x) y == 1; else y == 2; }; endmodule");
+    assert!(
+        syntax
+            .expression_nodes()
+            .any(|(_, node)| matches!(&node.kind,
+        ExprKind::RandomizeWith { constraints: Some(values), .. } if values.len() == 2))
+    );
+    let source = format!(
+        "module M; initial {}1;{} endmodule",
+        "obj.randomize() with { ".repeat(100),
+        " };".repeat(100)
+    );
+    assert!(
+        Declarations::parse(&source, Path::new("nested_inline.sv"))
+            .unwrap_err()
+            .to_string()
+            .contains("inline constraint nesting limit")
+    );
+}
