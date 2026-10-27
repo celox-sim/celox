@@ -736,7 +736,7 @@ pub fn get_access_width(
 /// Build a read-modify-write expression for a static partial assignment.
 ///
 /// For `dst[lsb..=msb] = rhs`, produces:
-///   `(old_value & ~(mask << lsb)) | (rhs << lsb)`
+///   `(old_value & ~(mask << lsb)) | ((rhs & mask) << lsb)`
 /// where `mask = (1 << access_width) - 1`.
 ///
 /// `old_value` is the current whole-variable expression from the symbolic state.
@@ -765,6 +765,11 @@ pub fn build_partial_assign_expr(
         Expression::create_value(Value::new_biguint(mask_big, total_width, false), token);
 
     let ct = || Box::new(Comptime::create_unknown(token));
+
+    // The merge gives the RHS the whole variable's context width. In
+    // particular, ~ on a selected bit can then set bits outside the write.
+    // Constrain the value before shifting, just as for dynamic partial writes.
+    let rhs = Expression::Binary(Box::new(rhs), Op::BitAnd, Box::new(mask_expr.clone()), ct());
 
     // Build: shifted_mask = mask << lsb  (skip shift when lsb == 0)
     let shifted_mask = if lsb == 0 {
