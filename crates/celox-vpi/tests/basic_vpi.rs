@@ -3116,16 +3116,28 @@ fn sessions_release_on_unwind_and_reject_nested_or_foreign_hosts() {
     let image = simulator.shared_code().program_image().clone();
     let session = install_runtime(trusted_instance(image.clone())).unwrap();
     assert!(install_runtime(trusted_instance(image.clone())).is_err());
-    std::thread::spawn(|| {
+    // Keep the owner's handle live while a foreign C caller attempts a read.
+    let address = unsafe { vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut()) } as usize;
+    assert_ne!(address, 0);
+    let foreign_image = image.clone();
+    std::thread::spawn(move || {
+        assert!(install_runtime(trusted_instance(foreign_image)).is_err());
         // A foreign thread must not see or clear the owner's runtime.
         clear_runtime();
         unsafe {
+            let mut value = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: -1 },
+            };
+            vpi_get_value(address as VpiHandle, &mut value);
+            assert_eq!(value.value.integer, -1);
             assert!(vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut()).is_null());
         }
     })
     .join()
     .unwrap();
     unsafe {
+        assert_eq!(vpi_free_object(address as VpiHandle), 1);
         let signal = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
         assert!(!signal.is_null());
         vpi_free_object(signal);
