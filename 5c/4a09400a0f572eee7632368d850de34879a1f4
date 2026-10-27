@@ -1,0 +1,1 @@
+Address review4397062818: reject post-finish signal checks when design finals may have effects, using emitted/preprocessed SV with conservative literal/time-only output exceptions; add staging and corpus regressions.
