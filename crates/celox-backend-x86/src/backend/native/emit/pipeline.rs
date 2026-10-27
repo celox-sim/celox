@@ -336,12 +336,19 @@ fn emit_prepared_eu_inner(
     let state_size = options
         .arena_base
         .map_or(semantic_size, |base| base.max(semantic_size));
+    let native_callee_end = [options.arena_base.unwrap_or(0)];
+    let callee_ends = if options.arena_base.is_some() {
+        &native_callee_end[..]
+    } else {
+        &[]
+    };
     let result = if label == "eval_comb_apply_ff" && options.native_tick_loop {
         emit_with_plan_tick_loop(
             &mfunc,
             &ra.assignment,
             ra.spill_frame_size,
             state_size,
+            callee_ends,
             &ssa_destruction,
             check_runtime_events,
         )?
@@ -351,6 +358,7 @@ fn emit_prepared_eu_inner(
             &ra.assignment,
             ra.spill_frame_size,
             state_size,
+            callee_ends,
             &ssa_destruction,
         )?
     };
