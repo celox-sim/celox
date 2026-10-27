@@ -187,7 +187,8 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 ロードマップ [#88](https://github.com/celox-sim/celox/issues/88) を指します。
 
 - [対応範囲](#classes)外のクラスの機能：クラスハンドル以外の変数への `$cast`、クラス内で宣言した列挙定数、クラスパラメータの値としての列挙型・構造体型・共用体型と名前付きの 4 値・文字列定数、宣言した package やコンパイル単位の外でのパラメータ付きクラスの特殊化、4 値・`real`・配列・64 ビットを超えるプロパティ。時間待ちを含む task の static ローカル宣言、再帰呼び出し、`ref` 引数。
-- interface のポート、`inout` / `ref` / 式を使う modport、virtual interface など。
+- `inout` / `ref` / 式を使う modport、virtual interface など。
+  ANSI ヘッダーのポートは、クロック入力やパラメータ依存の幅も含めて modport 経由で渡せます。
   interface 自体と入れ子の interface は対応しています。型パラメータはインスタンスごとに解決し、modport ポート経由でも伝搬します。
   再帰する特殊化と64段を超える入れ子は拒否します。細かな制約は[英語版の一覧](/guide/systemverilog-reference#interface-restrictions)を参照してください。
 - 振る舞い記述・検証向けの構文：`final`、代入内のタイミング制御（`a = #1 b`）、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、

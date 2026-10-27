@@ -1,6 +1,9 @@
 use super::*;
 
 sv_backends! {
+    fn forwards_header_ports_through_modports(sim) {
+        @case "interfaces::forwards_header_ports_through_modports";
+    }
     fn defers_interface_dependent_declarations_before_binding_array_ports(sim) {
         @case "interfaces::defers_interface_dependent_declarations_before_binding_array_ports";
     }
