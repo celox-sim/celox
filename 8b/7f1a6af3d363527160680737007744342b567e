@@ -1,0 +1,1 @@
+Address review5678153040: pre-scan nested and default process calls for level waits, resample automatic event probes on resume, and prevent resume of program-exit activations. Add shared/checkpoint/queue regressions and exact external evidence.
