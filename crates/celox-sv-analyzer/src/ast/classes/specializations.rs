@@ -180,6 +180,11 @@ fn inherit(
     env: &mut HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) {
+    if lookup(tree, name).is_none()
+        && let Some(members) = scope::imported(&tree.state).class_member_types.get(name)
+    {
+        aliases.extend(members.clone());
+    }
     for specialization in lineage(tree, name) {
         for (key, value) in &specialization.declared_env {
             match value {
@@ -243,12 +248,55 @@ pub(in crate::ast) fn member_type(
     member: &str,
 ) -> Option<Type> {
     let generic = generic(tree, name);
-    lineage(tree, name).iter().rev().find_map(|specialization| {
-        // The class name itself is not a member.
-        (member != scope_key(&specialization.generic) && member != scope_key(&generic))
-            .then(|| specialization.aliases.get(member).cloned())
-            .flatten()
-    })
+    lineage(tree, name)
+        .iter()
+        .rev()
+        .find_map(|specialization| {
+            // The class name itself is not a member.
+            (member != scope_key(&specialization.generic) && member != scope_key(&generic))
+                .then(|| specialization.aliases.get(member).cloned())
+                .flatten()
+        })
+        .or_else(|| {
+            scope::imported(&tree.state)
+                .class_member_types
+                .get(name)?
+                .get(member)
+                .cloned()
+        })
+}
+
+/// Only types declared by a class and its bases cross the scope boundary.
+/// Resolve bounds in their owning specialization, before caller names can
+/// reinterpret them (6.18, 8.13, 8.23, 8.25).
+pub(in crate::ast) fn export_member_types(
+    tree: &AnalysisContext<'_>,
+) -> HashMap<String, HashMap<String, Type>> {
+    let imported = scope::imported(&tree.state);
+    let mut result = imported.class_member_types.clone();
+    for declaration in super::scope_declarations(tree) {
+        for name in super::specializations_of(tree, declaration) {
+            let mut members = HashMap::default();
+            for specialization in lineage(tree, &name) {
+                for base in &specialization.bases {
+                    if lookup(tree, base).is_none()
+                        && let Some(inherited) = imported.class_member_types.get(base)
+                    {
+                        members.extend(inherited.clone());
+                    }
+                }
+                for (member, ty) in &specialization.declared_aliases {
+                    if let Some(ty) =
+                        type_parameters::resolve(&tree.state, ty.clone(), &specialization.env)
+                    {
+                        members.insert(member.clone(), ty);
+                    }
+                }
+            }
+            result.insert(name, members);
+        }
+    }
+    result
 }
 
 /// The specialization of class `generic` that `arguments`, bound in

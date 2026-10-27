@@ -666,6 +666,10 @@
     "sv_class-X13": {
       "title": "A class-local typedef qualifier in an out-of-block static method fails to shadow a same-named package",
       "standard": "IEEE 1800-2023 6.18, 8.23, 8.24"
+    },
+    "sv_class-X14": {
+      "title": "Imported class member typedefs sized by a value parameter lose their specialization dimensions for the default specialization and in a non-top module",
+      "standard": "IEEE 1800-2023 6.18, 8.23, 8.25, 20.6.2"
     }
   },
   "cases": [
@@ -4099,6 +4103,22 @@
       "classification": "xezim_bug",
       "bug": "sv_class-X13",
       "note": "Reader::get must see its class-local typedef Alias=Item, so Alias::value reads Item::value=42; the package Alias::value outside the class stays 7. The shared case reports sum=7 instead of 49. The adapter-free fixture prints direct=42 result=7 pkg=7 as Top, demonstrating the incorrect package lookup without a generated testbench; as Wrapped it returns result=0, exposing the additional non-top extern-method lookup problem. Pinned source 5eab5f2, core 1947ac68. Repro: verification/repros/sv_class_type_alias_xezim.sv; observations: verification/repros/sv_class_type_alias_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "class::imported_member_type_dimensions",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X14",
+      "note": "Small is Box#() with N=5; Wide is Box#(9). Their element_t typedefs must keep widths 5 and 9 irrespective of the importing module N=29 (8.23, 8.25), so all-one values add to 31+511=542. The shared wrapped case gives widths 1 and 1 and sum 2. Adapter-free Top gives widths 1 and 9 and sum 512; Wrapped gives 1 and 1 and sum 2. Source 5eab5f2/core 1947ac68, built with an isolated regenerated lock. Repro and observations: verification/repros/sv_imported_member_types_dimensions_xezim.sv and .json."
+    },
+    {
+      "suite": "sv",
+      "name": "class::imported_member_type_inheritance",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X2",
+      "note": "Other::T must be the bound bit[6:0] type (7 bits), and Tiny::item_t must be the inherited Base#(bit[2:0]) typedef (3 bits). Sub::copied_t correctly follows the local item_t override (5 bits). Expected all-one sum is 31+127+7=165; xezim gives b/c 32-bit signed types and sum 29. Both adapter-free Top and Wrapped reproduce widths 5/32/32 and sum 29. Source 5eab5f2/core 1947ac68, with an isolated regenerated lock. Repro and observations: verification/repros/sv_imported_member_types_inheritance_xezim.sv and .json."
     }
   ]
 }

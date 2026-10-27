@@ -933,3 +933,28 @@ IEEE 1800-2023 6.18, 8.23, 8.24 in
 retain the separate top and wrapped runs. The validation build regenerated
 the dependency lock in an isolated Nix package because the repository lock
 names a different xezim-core revision. No simulator source changes were used.
+
+### Imported class member types
+
+The `class::imported_member_type_*` cases check typedefs and type parameters
+of concrete package-class specializations, inherited types, re-exports and
+local typedef overrides (IEEE 1800-2023 6.18, 8.13, 8.23, 8.25).
+The declaring specialization fixes each type; a caller's same-named
+parameter does not resize it. Verilator 5.052 passes both cases.
+
+Icarus 13.0 rejects both generic class declarations during parsing. The
+xezim 0.11.3 sources pinned at `5eab5f2` lose the default Box specialization's
+member width and, in a non-top module, both value-dependent member widths.
+They also resolve the inherited/type-parameter members to 32-bit types instead
+of 3 and 7 bits. The exact failures remain executed evidence in the
+[Icarus class report](verification/sv/icarus/class.json) and
+[xezim class report](verification/sv/xezim/class.json), with specification
+review in [the xezim review](verification/xezim-review.json).
+
+Adapter-free [dimension source](verification/repros/sv_imported_member_types_dimensions_xezim.sv)
+and [observations](verification/repros/sv_imported_member_types_dimensions_xezim.json),
+and [inheritance source](verification/repros/sv_imported_member_types_inheritance_xezim.sv)
+and [observations](verification/repros/sv_imported_member_types_inheritance_xezim.json)
+retain Top and Wrapped runs. The xezim validation build used the existing Nix
+recipe with a regenerated dependency lock, with no simulator source changes.
+Assertions and exclusions are unchanged.
