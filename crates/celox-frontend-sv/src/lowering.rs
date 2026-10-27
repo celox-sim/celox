@@ -37,6 +37,7 @@ use celox_sv_analyzer as sv;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use num_bigint::BigUint;
 
+mod case_equality;
 mod comb;
 mod comb_retention;
 mod ff;
@@ -5015,6 +5016,17 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
             op: *op,
             expr: Box::new(expr_for_state_mode(expr, four_state)),
         },
+        sv::ir::Expr::Binary { left, op, right }
+            if !four_state && matches!(op, sv::ir::BinaryOp::EqCase | sv::ir::BinaryOp::NeCase) =>
+        {
+            // Storage remains two-state; exact comparison operands retain
+            // literal X/Z until value and mask are compared (11.4.5).
+            sv::ir::Expr::Binary {
+                left: Box::new(expr_for_state_mode(left, true)),
+                op: *op,
+                right: Box::new(expr_for_state_mode(right, true)),
+            }
+        }
         sv::ir::Expr::Binary { left, op, right } => sv::ir::Expr::Binary {
             left: Box::new(expr_for_state_mode(left, four_state)),
             op: *op,

@@ -969,6 +969,27 @@ impl<'p, 'a> Ff<'p, 'a> {
                 stable(*id)
             }
         };
+        if !self.m.four_state {
+            // Node IDs are topological. Cache exact comparisons before mapping
+            // their parents, reusing the existing graph/loop remapper.
+            for (index, expression) in arena.iter().enumerate() {
+                if let SLTNode::Binary(left, op @ (BinaryOp::EqCase | BinaryOp::NeCase), right) =
+                    expression
+                {
+                    let left = arena
+                        .get(*left)
+                        .map_addr(*left, arena, &mut mapped_arena, &mut cache, &map)
+                        .map_err(slt_error)?;
+                    let right = arena
+                        .get(*right)
+                        .map_addr(*right, arena, &mut mapped_arena, &mut cache, &map)
+                        .map_err(slt_error)?;
+                    let equal = super::case_equality::compare(&mut mapped_arena, left, *op, right)
+                        .map_err(slt_error)?;
+                    cache.insert(NodeId(index), equal);
+                }
+            }
+        }
         let mapped = arena
             .get(node)
             .map_addr(node, arena, &mut mapped_arena, &mut cache, &map)

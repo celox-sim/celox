@@ -869,3 +869,15 @@ Verilator 5.052 records 2 passes, 3 mismatches, 3 compiler faults, and
 1 unsupported four-state case; Icarus 13.0 records 9 compile errors.
 In the Reactive-wakeup case, xezim loses the matured Observed report,
 while Verilator also emits the Final report that the wait resumption must flush.
+
+### Z expressions inside exact comparisons in Verilator
+
+The `operators::two_state_case_equality_*` regressions keep runtime storage
+two-state while testing literal X/Z in expressions (IEEE 1800-2023 11.4.5
+and 12.5; issue #2136). Icarus 13.0 passes all five cases. Verilator 5.052
+passes `keeps_call_effects_and_loaded_bytes`, but rejects the other four
+with `Unsupported tristate construct` or `Unsupported: tristate in top-level IO`.
+Their actual compile diagnostics are retained in
+[the Verilator operators report](verification/sv/verilator/operators.json);
+they remain executed cases rather than exclusions. Reproduce with
+`verify-sv-verilator --filter two_state_case_equality --jobs 1`.
