@@ -246,9 +246,19 @@ object constraints and hooks still apply. A failed solve preserves properties,
 skips the post-hook and restores temporary selection modes. Inline constraints
 do not remain installed for later calls.
 
-This initial inline subset accepts unqualified instance-property references.
-Caller-local captures, `local::`, `this` / `super` qualified references, restricted
-`with (names)` lookup and scope `std::randomize(...) with` remain unsupported.
+If an unqualified name is not an instance property, inline lookup falls back to
+scalar variables and arguments in the calling scope. `local::name` bypasses the
+receiver's properties explicitly (18.7, 18.7.1). These read-only call inputs support
+1–64-bit two-state integral values, including signed values. They are read after
+`pre_randomize()` and are not randomized or retained on the object. Package methods preserve their inputs through dynamic
+dispatch to subclasses defined by the consumer.
+
+Receiver static-property references are currently rejected; they do not fall back
+to caller variables of the same name.
+
+Four-state and aggregate inputs, typed parameter inputs, qualified `this` / `super`
+references, restricted `with (names)` lookup and scope `std::randomize(...) with`
+remain unsupported.
 
 A call through `null` is a runtime error.
 

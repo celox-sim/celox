@@ -2608,7 +2608,9 @@
       "LIMITATIONS.md#systemverilog-suite",
       "verification/repros/sv_inside_constraints.json",
       "verification/repros/sv_conditional_constraints.json",
-      "verification/repros/sv_inline_constraints.json"
+      "verification/repros/sv_inline_constraints.json",
+      "verification/repros/sv_inline_input_icarus.json",
+      "verification/repros/sv_inline_input_hooks.json"
     ],
     "cases": {
       "icarus": [
@@ -2622,7 +2624,10 @@
         "class::constrained_randomize_inline",
         "class::constrained_randomize_inline_inheritance",
         "class::constrained_randomize_inline_basic",
-        "class::constrained_randomize_inline_package_instances"
+        "class::constrained_randomize_inline_package_instances",
+        "class::constrained_randomize_inline_inputs",
+        "class::constrained_randomize_inline_input_methods",
+        "class::constrained_randomize_inline_input_hooks"
       ]
     }
   },
@@ -2659,6 +2664,22 @@
     "cases": {
       "verilator": [
         "class::constrained_randomize_inline_inheritance"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_inline_inputs_before_pre_hook",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator copies caller-scope inline inputs into its generated helper before pre_randomize. When the hook changes wanted from 2 to 5, the solve still assigns x = 2. IEEE 1800-2023 18.6.2 invokes the pre-hook before randomization, and 18.7 permits references to caller-scope state variables. The regression retains the post-hook value and single-invocation assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_inline_input_hooks.json"
+    ],
+    "cases": {
+      "verilator": [
+        "class::constrained_randomize_inline_input_hooks"
       ]
     }
   }

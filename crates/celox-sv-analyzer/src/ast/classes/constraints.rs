@@ -116,11 +116,22 @@ pub(in crate::ast) fn bind(
     properties: &[Property],
     env: &HashMap<String, i128>,
 ) -> Result<ConstraintExpr, String> {
+    bind_inputs(id, tree, properties, env, &HashMap::default())
+}
+
+pub(in crate::ast) fn bind_inputs(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    properties: &[Property],
+    env: &HashMap<String, i128>,
+    inputs: &HashMap<String, (usize, u32, bool)>,
+) -> Result<ConstraintExpr, String> {
     fn expression(
         id: ExprId,
         tree: &AnalysisContext<'_>,
         properties: &[Property],
         env: &HashMap<String, i128>,
+        inputs: &HashMap<String, (usize, u32, bool)>,
         depth: usize,
         budget: &std::cell::Cell<usize>,
     ) -> Result<Typed, String> {
@@ -128,7 +139,7 @@ pub(in crate::ast) fn bind(
             return Err("constraint expression nesting limit".into());
         }
         charge(budget)?;
-        let recurse = |id| expression(id, tree, properties, env, depth + 1, budget);
+        let recurse = |id| expression(id, tree, properties, env, inputs, depth + 1, budget);
         let native = tree.declarations();
         Ok(match &native.expression(id).kind {
             ExprKind::Group(id) => return recurse(*id),
@@ -145,12 +156,33 @@ pub(in crate::ast) fn bind(
                         width: property.field.width,
                         signed: property.field.signed,
                     }
+                } else if let Some(&(index, width, signed)) = inputs.get(&name) {
+                    Typed {
+                        kind: Kind::Leaf(ConstraintExpr::Input { index, width }),
+                        width,
+                        signed,
+                    }
                 } else if env.contains_key(&name) {
                     // Parameter type reconstruction belongs to the general expression binder.
                     // Do not guess its width/sign here.
                     return Err("typed parameters in constraints".into());
                 } else {
                     return Err(format!("constraint variable `{name}`"));
+                }
+            }
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "::"
+                && matches!(&native.expression(*expression).kind, ExprKind::Name(root) if root.spelling == "local") =>
+            {
+                let key = format!("local::{}", instances::normalize_identifier(&name.spelling));
+                let &(index, width, signed) = inputs.get(&key).ok_or("inline local variable")?;
+                Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Input { index, width }),
+                    width,
+                    signed,
                 }
             }
             ExprKind::Literal(text) => {
@@ -286,8 +318,16 @@ pub(in crate::ast) fn bind(
             _ => return Err("unsupported scalar constraint expression".into()),
         })
     }
-    expression(id, tree, properties, env, 0, &std::cell::Cell::new(16_384))
-        .map(|value| emit(value, None))
+    expression(
+        id,
+        tree,
+        properties,
+        env,
+        inputs,
+        0,
+        &std::cell::Cell::new(16_384),
+    )
+    .map(|value| emit(value, None))
 }
 
 impl Class {
@@ -332,10 +372,15 @@ pub(in crate::ast) struct Inline {
     pub key: usize,
     pub class: std::rc::Rc<Class>,
     pub constraints: Vec<ConstraintExpr>,
+    pub inputs: Vec<Type>,
     pub dimensions: PackedDimensions,
 }
 
 impl Inline {
+    pub fn prepare_name(&self, class: &str) -> String {
+        format!("{}$prepare", self.name(class))
+    }
+
     pub fn name(&self, class: &str) -> String {
         format!("{class}::$inline_randomize@{}", self.key)
     }
@@ -348,6 +393,7 @@ pub(in crate::ast) struct InlineRequest {
     pub key: usize,
     pub class: Class,
     pub constraints: Vec<ConstraintExpr>,
+    pub inputs: Vec<Type>,
 }
 
 impl Inline {
@@ -356,6 +402,7 @@ impl Inline {
             key: self.key,
             class: (*self.class).clone(),
             constraints: self.constraints.clone(),
+            inputs: self.inputs.clone(),
         }
     }
 }
