@@ -85,6 +85,9 @@ pub const OBJECT_RANDOM_CYCLIC: u64 = 62;
 pub const OBJECT_COPY: u64 = 63;
 /// Solve the scalar constraint program in string b for object a; c selects check-only.
 pub const OBJECT_RANDOMIZE: u64 = 64;
+/// Program b for object a; c is an input buffer (check-only byte followed by
+/// big-endian u64 values). The buffer is consumed, including on failure.
+pub const OBJECT_RANDOMIZE_INPUTS: u64 = 65;
 
 /// The opcode word of `op` with parameter `parameter`.
 pub const fn encode(op: u64, parameter: u64) -> u64 {
@@ -195,16 +198,45 @@ impl Heap {
                 0
             }
             OBJECT_CLASS => self.class_of(a as Handle).into(),
-            OBJECT_RANDOMIZE => {
-                match serde_json::from_slice::<crate::randomization::Program>(
-                    self.string(b as Handle),
-                ) {
-                    Ok(program) => u64::from(self.randomize_object(a as Handle, &program, c != 0)),
+            op @ (OBJECT_RANDOMIZE | OBJECT_RANDOMIZE_INPUTS) => {
+                let input_bytes = (op == OBJECT_RANDOMIZE_INPUTS).then(|| self.take_buffer(c));
+                let result = (|| -> Result<_, String> {
+                    let program = serde_json::from_slice::<crate::randomization::Program>(
+                        self.string(b as Handle),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let (check_only, inputs) = if op == OBJECT_RANDOMIZE_INPUTS {
+                        let bytes = input_bytes.as_ref().unwrap();
+                        let (&check, values) = bytes
+                            .split_first()
+                            .ok_or("missing constraint input buffer")?;
+                        if check > 1 || values.len() % 8 != 0 {
+                            return Err("invalid constraint input buffer".into());
+                        }
+                        (
+                            check != 0,
+                            values
+                                .as_chunks::<8>()
+                                .0
+                                .iter()
+                                .map(|chunk| u64::from_be_bytes(*chunk))
+                                .collect::<Vec<_>>(),
+                        )
+                    } else {
+                        (c != 0, Vec::new())
+                    };
+                    Ok(self.randomize_object_with_inputs(
+                        a as Handle,
+                        &program,
+                        check_only,
+                        &inputs,
+                    ))
+                })();
+                match result {
+                    Ok(success) => u64::from(success),
                     Err(error) => {
                         self.fault
-                            .get_or_insert(crate::Fault::ConstraintRandomization(
-                                error.to_string(),
-                            ));
+                            .get_or_insert(crate::Fault::ConstraintRandomization(error));
                         0
                     }
                 }
