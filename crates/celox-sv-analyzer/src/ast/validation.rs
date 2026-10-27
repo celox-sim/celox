@@ -74,6 +74,7 @@ fn has_timing_control(
         if matches!(
             statement.kind,
             StatementKind::Timing { .. }
+                | StatementKind::Parallel { .. }
                 | StatementKind::Wait { .. }
                 | StatementKind::WaitFork
                 | StatementKind::WaitOrder { .. }
@@ -126,7 +127,7 @@ fn validate_procedure(
     use celox_sv_syntax::{EventControl, ProcedureKind, StatementKind, TimingControlKind};
     let kind = match procedure.kind {
         ProcedureKind::Initial => return Ok(()),
-        ProcedureKind::Final => return Err(unsupported("final construct")),
+        ProcedureKind::Final => return validate_final(procedure.body, native),
         _ => always_kind(procedure, native)?,
     };
     let mut pending = vec![procedure.body];
@@ -160,6 +161,45 @@ fn validate_procedure(
                 }
             }
             _ => {}
+        }
+        pending.extend(statement.kind.children());
+    }
+    Ok(())
+}
+
+/// Final restrictions are syntactic, so even branches later folded away
+/// must obey the function-statement rules (IEEE 1800-2023 9.2.3, 13.4).
+fn validate_final(
+    root: celox_sv_syntax::StatementId,
+    native: &celox_sv_syntax::Declarations,
+) -> Converted<()> {
+    use celox_sv_syntax::StatementKind;
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        let statement = native.statement(id);
+        let forbidden = match &statement.kind {
+            StatementKind::Assignment {
+                timing: Some(_), ..
+            }
+            | StatementKind::Assignment {
+                event_control: Some(_),
+                ..
+            }
+            | StatementKind::Timing { .. } => Some("timing control"),
+            StatementKind::Wait { .. }
+            | StatementKind::WaitFork
+            | StatementKind::WaitOrder { .. } => Some("wait statement"),
+            StatementKind::Parallel { join, .. } if join != "join_none" => Some("fork-join block"),
+            // 13.4.4 permits join_none in functions. Its child statements
+            // obey task rules rather than the parent's function restrictions.
+            StatementKind::Parallel { .. } => continue,
+            StatementKind::Assertion { keyword, .. } if keyword == "expect" => {
+                Some("expect statement")
+            }
+            _ => None,
+        };
+        if let Some(construct) = forbidden {
+            return Err(unsupported(format!("{construct} in a final procedure")));
         }
         pending.extend(statement.kind.children());
     }

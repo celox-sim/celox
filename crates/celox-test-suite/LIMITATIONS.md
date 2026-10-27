@@ -345,6 +345,16 @@ records the native-runner result; the case stays enabled on all Celox backends.
 
 ## SystemVerilog suite
 
+The scalar class-constraint cases are rejected by Icarus 13.0 because constraint
+blocks are unsupported. Verilator 5.052 passes the scalar modes and mixed-width
+inheritance cases, but calls `post_randomize` even when ordinary `randomize`
+returns failure. IEEE 1800-2023 18.6.3 requires skipping that hook. The focused
+`class::constrained_randomize_hooks` assertion stays enabled in Celox and is
+excluded only for Verilator. [Recorded diagnostics](verification/repros/sv_scalar_constraints.json)
+retain both tool limitations; reproduce with `--include-ignored --filter
+class::constrained_randomize`.
+
+
 Verilator 5.052 rejects a string variable or string method expression as the
 `$sscanf` format, requiring a literal instead. IEEE 1800-2023 21.3.4.3 permits
 string expressions here. Only `scan::sscanf_string_format_expression` is
@@ -542,12 +552,16 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_unpacked_subroutine_ports` | compile | icarus | 2 | Icarus 13.0 reports that subroutine ports with unpacked dimensions are not yet supported. Verilator passes the valid case. |
 | `sv_icarus_classes` | compile | icarus | 5 | Icarus 13.0 does not support extern methods ("sorry: External methods are not yet supported") or string methods called on a class property ("Can't find task itoa in class Named") or comparisons of class handles ("SORRY: Compare class handles not implemented"), aborts on a failed assertion in dup_expr.cc while compiling objects_referring_to_objects, and crashes with a segmentation fault while compiling implicit_constructors_and_this. IEEE 1800-2023 8.4, 8.7, 8.8 and 8.24 define these constructs. Verilator passes all but the string-method case, see sv_verilator_class_property_string_methods. |
 | `sv_icarus_nested_class_members` | execute | icarus | 1 | Icarus 13.0 reads an empty string through a nested property path (kept.inner.text) after reporting "sorry: Nested member path not yet supported for class properties" for its assignment. IEEE 1800-2023 8.5 permits accessing a property of an object referred to by a property. Verilator passes the case. |
-| `sv_icarus_class_scope_resolution` | compile | icarus | 1 | Icarus 13.0 rejects class scope resolution with a syntax error: reading a static property (Counter::created), calling a static method (Counter::next()) and assigning a static property (Counter::last = "set"). IEEE 1800-2023 8.9, 8.10 and 8.23 define these accesses. Verilator passes the case. |
+| `sv_icarus_class_scope_resolution` | compile | icarus | 3 | Icarus 13.0 rejects class scope resolution with a syntax error: reading a static property (Counter::created), calling a static method (Counter::next()) and assigning a static property (Counter::last = "set"). IEEE 1800-2023 8.9, 8.10 and 8.23 define these accesses. Verilator passes both cases. |
 | `sv_icarus_virtual_dispatch` | execute | icarus | 1 | Icarus 13.0 binds a virtual function called through a base-class handle to the handle's class instead of the object's: the shared case prints area=0 for every shape, and the adapter-free source prints 1 1 1 3 where IEEE 1800-2023 8.20 requires 2 3 4 4. Verilator and Celox print 2 3 4 4 and pass the case. |
-| `sv_icarus_abstract_and_interface_classes` | compile | icarus | 6 | Icarus 13.0 rejects pure virtual method declarations and interface classes with syntax errors ("Invalid class item", "Invalid module item") and fails code generation without a diagnostic ("Code generation had 2 error(s)") for a method called on an element of an array of class handles. IEEE 1800-2023 8.21 and 8.26 define pure virtual methods and interface classes, and 7.4 and 8.4 permit arrays of class handles. Verilator passes the first three cases; see sv_verilator_interface_class_casts and sv_verilator_extended_interface_class_methods for the others. |
+| `sv_icarus_abstract_and_interface_classes` | compile | icarus | 8 | Icarus 13.0 rejects pure virtual method declarations and interface classes with syntax errors ("Invalid class item", "Invalid module item") and fails code generation without a diagnostic ("Code generation had 2 error(s)") for a method called on an element of an array of class handles. IEEE 1800-2023 8.21 and 8.26 define pure virtual methods and interface classes, and 7.4 and 8.4 permit arrays of class handles. Verilator passes all but two cases; see sv_verilator_interface_class_casts and sv_verilator_extended_interface_class_methods. |
 | `sv_verilator_interface_class_casts` | execute | verilator | 1 | Verilator 5.052 returns 0 from $cast of a handle of one interface class to a variable of another interface class that the object's class also implements, so the case dereferences the unassigned null handle; the adapter-free source prints 0 1 where IEEE 1800-2023 8.16 and 8.26.5 require 1 1. Celox prints 1 1. Icarus rejects interface classes, see sv_icarus_abstract_and_interface_classes. |
 | `sv_verilator_extended_interface_class_methods` | compile | verilator | 1 | Verilator 5.052 does not find a method that an interface class inherits from an interface class it extends when the method is called through a handle of the extending class ("Class method 'sides' not found in class 'NamedShape'"). IEEE 1800-2023 8.26.3 makes the methods of the extended interface classes members of the extending one. Icarus rejects interface classes, see sv_icarus_abstract_and_interface_classes. |
 | `sv_icarus_cast` | execute | icarus | 1 | Icarus 13.0 does not implement $cast ("System task/function $cast() is not defined by any module"), which IEEE 1800-2023 6.24.2 and 8.16 define. Verilator passes the case. |
+| `sv_verilator_class_specialization_identity` | execute | verilator | 1 | Verilator 5.052 makes a separate specialization of a parameterized class for each way a parameter value assignment is written, so Box#(2, int)::made and Box#(.N(2), .T(int))::made read 0 after an object of Box#(.T(int), .N(2)) was constructed; the adapter-free source prints 0 1 0 where IEEE 1800-2023 8.25 requires 1 1 1, as the three assignments give the same values. Celox prints 1 1 1. Icarus rejects parameterized classes, see sv_icarus_parameterized_classes. |
+| `sv_verilator_untyped_class_parameters` | execute | verilator | 1 | Verilator 5.052 gives a class parameter declared without a type the 32-bit type of its default even when a specialization assigns it a sized value, so $bits(V) of Sized#(8'h1) is 32; the adapter-free source prints 32 32 where IEEE 1800-2023 6.20.2 requires 8 32, as the parameter takes the type of its final value after overrides. Celox prints 8 32. Icarus rejects parameterized classes, see sv_icarus_parameterized_classes. |
+| `sv_icarus_parameterized_classes` | compile | icarus | 13 | Icarus 13.0 does not parse a parameter port list of a class (class Box #(int N = 4); is a syntax error), which IEEE 1800-2023 8.25 defines; each case declares a parameterized class. Verilator passes all but two cases, see sv_verilator_class_specialization_identity and sv_verilator_untyped_class_parameters. |
+| `sv_icarus_shallow_copies` | compile | icarus | 1 | Icarus 13.0 does not parse a shallow copy (second = new first; is a syntax error, "Malformed statement"), which IEEE 1800-2023 8.12 defines; the case also compares class handles, which Icarus does not implement, see sv_icarus_classes. Verilator passes the case. |
 | `sv_verilator_class_property_string_methods` | compile | verilator | 1 | Verilator 5.052 stops with an internal error ("AstNode is not of expected type, but instead has type 'MEMBERSEL'") on a string method called on a class property, n.name.itoa(42), which IEEE 1800-2023 6.16 and 8.5 permit. Icarus rejects the case too, see sv_icarus_classes. |
 | `sv_icarus_unpacked_array_patterns` | compile | icarus | 1 | Icarus 13.0 reports that an assignment pattern with unpacked array items assigned to a multidimensional unpacked array is not yet supported ("Procedural assignment of array or array slice"), so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 7.6, 10.8). |
 | `sv_icarus_display_field_width` | execute | icarus | 1 | Icarus 13.0 zero-pads a value wider than an explicit field width of %h or %o to the argument's full width (%3h of 32'h1234 prints 00001234); IEEE 1800-2023 21.2.1.2 expands the field to the value without leading zeros (1234). Verilator agrees with the expected value. |
@@ -810,6 +824,21 @@ needs a specification ruling and is tracked in
 [issue #1889](https://github.com/celox-sim/celox/issues/1889); it is not yet a
 confirmed conformance defect. Equality behavior is unchanged pending that
 investigation.
+
+
+### Detached children of functions in Icarus
+
+IEEE 1800-2023 13.4.4 permits `fork ... join_none` inside a function,
+including delays and task calls in its detached children. The six
+`fork_control::function_join_none_*` cases exercise these exceptions while
+keeping the function itself nonblocking. Icarus 13.0 rejects all six with
+`functions cannot have delay statements`; the timed-task child also reports
+`Functions cannot enable/call tasks`. The exact compile failures remain
+executed evidence in [the Icarus report](verification/sv/icarus/fork_control.json),
+not exclusions or passing assertions. Pinned xezim 0.11.3 passes all six;
+Verilator 5.052 passes the five two-state cases and its adapter does not support
+the four-state case. Reproduce with `verify-sv-icarus --filter
+fork_control::function_join_none_`.
 
 ## veryl-native-queue-components
 

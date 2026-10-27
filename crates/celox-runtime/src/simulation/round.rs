@@ -384,7 +384,7 @@ impl<B: SimBackend> SimulationState<B> {
                         executor.apply_ff_at(event)?;
                     }
                     self.record_transitions(executor.backend(), round);
-                    self.observe_driven(executor.backend());
+                    self.observe_driven(executor.backend_mut())?;
                 }
             }
             restore_working_image(executor.backend_mut(), &live);
@@ -441,12 +441,10 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        self.publish_time(executor.backend_mut(), current_time);
+        self.advance_time(executor.backend_mut(), current_time);
         if !self.model.timed {
             return self.batch_round(executor, current_time, events_to_process);
         }
-        self.scheduler.time = current_time;
-
         // Host writes the waits must see one at a time.
         for (signal, value) in executor.take_host_writes() {
             self.observe_host_write(signal, &value);
@@ -471,13 +469,13 @@ impl<B: SimBackend> SimulationState<B> {
                     .iter()
                     .any(|later| later.signal == signal)
             {
-                self.observe(executor.backend(), Some(signal));
+                self.observe(executor.backend_mut(), Some(signal))?;
             }
         }
         if !self.process_state.waiters.is_empty() && !events_to_process.is_empty() {
             // The scheduled values wake their processes before the process
             // phase runs.
-            self.observe(executor.backend(), None);
+            self.observe(executor.backend_mut(), None)?;
         }
 
         let mut round = self.scratch.take().unwrap_or_default();
@@ -550,7 +548,7 @@ impl<B: SimBackend> SimulationState<B> {
                     self.observe_host_write(signal, &value);
                 }
                 executor.eval_comb()?;
-                self.observe_driven(executor.backend());
+                self.observe_driven(executor.backend_mut())?;
             }
 
             loop {
@@ -572,7 +570,7 @@ impl<B: SimBackend> SimulationState<B> {
                             executor.stage_external_event(event, current_time)?;
                             executor.eval_apply_ff_at(event)?;
                             executor.fire_external_event(event, current_time)?;
-                            self.publish_nba(executor, &mut round);
+                            self.publish_nba(executor, &mut round)?;
                             executor.eval_comb()?;
                             if round.track_stable_edges {
                                 self.replace_triggers_with_stable_edges(executor.backend_mut());
@@ -587,7 +585,7 @@ impl<B: SimBackend> SimulationState<B> {
                             }
                             // Each update is seen by the waits on it
                             // (IEEE 1800-2023 4.5).
-                            self.observe_driven(executor.backend());
+                            self.observe_driven(executor.backend_mut())?;
                             comb_already_done = true;
                             break;
                         }
@@ -660,11 +658,11 @@ impl<B: SimBackend> SimulationState<B> {
             if newly_triggered.is_empty() && !any_new_outer_loop_trigger {
                 if published {
                     self.finish_publications(executor.backend_mut(), &mut round);
-                    self.observe_driven(executor.backend());
+                    self.observe_driven(executor.backend_mut())?;
                 }
                 // The NBA region still publishes the processes' assignments,
                 // which may trigger further domains.
-                if self.publish_nba(executor, &mut round) || published {
+                if self.publish_nba(executor, &mut round)? || published {
                     self.settle_marked(executor, &mut round)?;
                     continue;
                 }
@@ -678,14 +676,14 @@ impl<B: SimBackend> SimulationState<B> {
             }
             if round.publishing {
                 self.finish_publications(executor.backend_mut(), &mut round);
-                self.observe_driven(executor.backend());
+                self.observe_driven(executor.backend_mut())?;
             }
             for id in &newly_triggered {
                 if let Some(event) = self.model.event_info[*id].eval_ff_event {
                     executor.fire_external_event(event, current_time)?;
                 }
             }
-            self.publish_nba(executor, &mut round);
+            self.publish_nba(executor, &mut round)?;
 
             if comb_already_done {
                 comb_already_done = false;
@@ -702,14 +700,14 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 // A combinational value between two waves of domains is
                 // an update the waits see (IEEE 1800-2023 4.5).
-                self.observe_driven(executor.backend());
+                self.observe_driven(executor.backend_mut())?;
             }
         }
 
         self.resample_clock_values(executor.backend());
 
         // Processes the published values wake run in the next round.
-        self.observe_driven(executor.backend());
+        self.observe_driven(executor.backend_mut())?;
 
         self.rearm_clocks(current_time, &events_to_process)?;
 

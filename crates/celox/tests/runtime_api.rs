@@ -13,7 +13,7 @@ all_backends! {
         @build Simulator::builder(r#"
 module Top { always_comb { $assert(1'd0, "site zero"); } }
 "#, "Top");
-        assert!(matches!(sim.eval_comb(), Err(RuntimeErrorCode::Runtime { message, .. }) if message == "site zero"));
+        assert!(matches!(sim.eval_comb(), Err(RuntimeErrorCode::Fatal { message, .. }) if message == "site zero"));
         assert_eq!(bare(sim.drain_runtime_events()), vec![RuntimeEvent::Report(Report::new(Severity::Fatal, b"site zero".to_vec()))]);
         assert!(bare(sim.drain_runtime_events()).is_empty());
     }
@@ -30,7 +30,7 @@ module Top {
     }
 }
 "#, "Top");
-        assert!(matches!(sim.eval_comb(), Err(RuntimeErrorCode::Runtime { message, .. }) if message == "site two"));
+        assert!(matches!(sim.eval_comb(), Err(RuntimeErrorCode::Fatal { message, .. }) if message == "site two"));
         assert_eq!(bare(sim.drain_runtime_events()), vec![
             RuntimeEvent::Display { message: b"first".to_vec() },
             RuntimeEvent::Display { message: b"second".to_vec() },

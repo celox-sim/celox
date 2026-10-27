@@ -394,7 +394,9 @@ export interface SimulatorOptions {
 	 * split_coalesced_stores, partial_forward, identity_store_bypass, tail_call_split,
 	 * derived_edge_units (generated units for the edges of gated and divided
 	 * clocks; "-sir:derived_edge_units" walks their plans instead, which
-	 * builds faster and ticks slower)
+	 * builds faster and ticks slower), partitioned_settle (settle only the
+	 * partitions of the combinational logic whose inputs changed; off unless
+	 * enabled with "+sir:partitioned_settle")
 	 *
 	 * @example ["-sir:reschedule", "+sir:gvn"]
 	 */

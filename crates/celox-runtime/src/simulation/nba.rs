@@ -51,12 +51,16 @@ impl<B: SimBackend> SimulationState<B> {
     /// Publish the queued and flagged nonblocking assignments of process
     /// kernels (the NBA region, IEEE 1800-2023 4.5): the queued ones in
     /// issue order, then the flagged ones.
-    pub(super) fn publish_nba<E>(&mut self, executor: &mut E, round: &mut Round) -> bool
+    pub(super) fn publish_nba<E>(
+        &mut self,
+        executor: &mut E,
+        round: &mut Round,
+    ) -> Result<bool, Halt>
     where
         E: SimulationExecutor<Backend = B>,
     {
         if round.nba_published {
-            return false;
+            return Ok(false);
         }
         round.nba_published = true;
         let flagged = if round.kernels_ran && self.model.has_pending_nba_sites {
@@ -75,7 +79,7 @@ impl<B: SimBackend> SimulationState<B> {
         let mut queued = std::mem::take(&mut self.process_state.nba_queue);
         if queued.is_empty() && flagged == 0 {
             self.process_state.nba_queue = queued;
-            return false;
+            return Ok(false);
         }
         // Several updates may pulse an event signal: each is an update the
         // event domains see, not only the final value.
@@ -84,12 +88,12 @@ impl<B: SimBackend> SimulationState<B> {
             self.event_values(executor.backend(), &mut round.before);
             round.transitions.clear();
         }
-        self.publish_queued(executor, round, &queued, several);
+        self.publish_queued(executor, round, &queued, several)?;
         // Keep the queue's storage for the next time slot.
         queued.clear();
         self.process_state.nba_queue = queued;
         if flagged > 0 {
-            self.publish_flagged(executor, round, false, several);
+            self.publish_flagged(executor, round, false, several)?;
         }
         if several {
             let transitions = std::mem::take(&mut round.transitions);
@@ -98,7 +102,7 @@ impl<B: SimBackend> SimulationState<B> {
             round.transitions.clear();
         }
         round.track_stable_edges = true;
-        true
+        Ok(true)
     }
 
     /// Publish the nonblocking assignments of program processes (the Re-NBA
@@ -106,7 +110,11 @@ impl<B: SimBackend> SimulationState<B> {
     /// the flagged ones. Like the writes of a process run, each is recorded
     /// in `round.transitions` for the caller to settle. Returns whether any
     /// was published.
-    pub(super) fn publish_re_nba<E>(&mut self, executor: &mut E, round: &mut Round) -> bool
+    pub(super) fn publish_re_nba<E>(
+        &mut self,
+        executor: &mut E,
+        round: &mut Round,
+    ) -> Result<bool, Halt>
     where
         E: SimulationExecutor<Backend = B>,
     {
@@ -120,18 +128,18 @@ impl<B: SimBackend> SimulationState<B> {
                 .any(|pending| backend.get_as::<u8>(pending) != 0)
         };
         if self.process_state.re_nba_queue.is_empty() && !any_flagged {
-            return false;
+            return Ok(false);
         }
         self.event_values(executor.backend(), &mut round.before);
         let mut queued = std::mem::take(&mut self.process_state.re_nba_queue);
-        self.publish_queued(executor, round, &queued, true);
+        self.publish_queued(executor, round, &queued, true)?;
         // Keep the queue's storage for the next time slot.
         queued.clear();
         self.process_state.re_nba_queue = queued;
         if any_flagged {
-            self.publish_flagged(executor, round, true, true);
+            self.publish_flagged(executor, round, true, true)?;
         }
-        true
+        Ok(true)
     }
 
     /// Publish `queued` in issue order, recording the transitions of each in
@@ -142,16 +150,18 @@ impl<B: SimBackend> SimulationState<B> {
         round: &mut Round,
         queued: &[NbaUpdate],
         record: bool,
-    ) where
+    ) -> Result<(), Halt>
+    where
         E: SimulationExecutor<Backend = B>,
     {
         for update in queued {
             let new = NbaValue::Queued(&update.value);
-            self.publish_update(executor.backend_mut(), update, new);
+            self.publish_update(executor.backend_mut(), update, new)?;
             if record {
                 self.record_transitions(executor.backend(), round);
             }
         }
+        Ok(())
     }
 
     /// Publish the flagged nonblocking sites of the program processes if
@@ -163,7 +173,8 @@ impl<B: SimBackend> SimulationState<B> {
         round: &mut Round,
         program: bool,
         record: bool,
-    ) where
+    ) -> Result<(), Halt>
+    where
         E: SimulationExecutor<Backend = B>,
     {
         for process in 0..self.model.processes.len() {
@@ -190,18 +201,24 @@ impl<B: SimBackend> SimulationState<B> {
                     width,
                     value: Value::default(),
                 };
-                self.publish_update(backend, &update, NbaValue::Staged(value));
+                self.publish_update(backend, &update, NbaValue::Staged(value))?;
                 if record {
                     self.record_transitions(executor.backend(), round);
                 }
             }
         }
+        Ok(())
     }
 
     /// Write `update`, whose value is `new`, into its target. An update
     /// inside a target of at most 64 bits with one state plane is merged as
     /// `u64`; any other as [`Value`].
-    fn publish_update(&mut self, backend: &mut B, update: &NbaUpdate, new: NbaValue<'_>) {
+    fn publish_update(
+        &mut self,
+        backend: &mut B,
+        update: &NbaUpdate,
+        new: NbaValue<'_>,
+    ) -> Result<(), Halt> {
         let target = update.target;
         let narrow = |signal: SignalRef| {
             signal.width <= 64
@@ -220,7 +237,7 @@ impl<B: SimBackend> SimulationState<B> {
                 let all = low_bits(target.width);
                 let old = backend.get_as::<u64>(target) & all;
                 let merged = update.merge_narrow(old, new);
-                self.write_signal(backend, target, |backend| backend.set(target, merged));
+                self.write_signal(backend, target, |backend| backend.set(target, merged))?;
             }
             Err(value) => {
                 let merged = NbaUpdate { value, ..*update }.merge_into(&read(backend, target));
@@ -230,9 +247,10 @@ impl<B: SimBackend> SimulationState<B> {
                     } else {
                         backend.set_wide(target, merged.0);
                     }
-                });
+                })?;
             }
         }
+        Ok(())
     }
 }
 
@@ -279,7 +297,7 @@ pub(super) fn restore_working_image<B: SimBackend>(backend: &mut B, image: &[u8]
 }
 
 /// A nonblocking assignment waiting for the NBA region.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NbaUpdate {
     pub target: SignalRef,
     /// Bit position of the assigned range in the target.

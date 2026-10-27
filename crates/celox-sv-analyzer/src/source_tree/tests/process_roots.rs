@@ -204,7 +204,7 @@ fn native_process_restrictions_apply_only_to_active_generate_items() {
 #[test]
 fn native_direct_nested_unit_restrictions_are_preserved_for_selected_parent() {
     for (process, expected) in [
-        ("final begin end", "final construct"),
+        ("final #1;", "timing control in a final procedure"),
         (
             "always_latch begin int y;y<=1;end",
             "nonblocking assignment inside always_latch",
@@ -229,7 +229,7 @@ fn native_direct_nested_unit_restrictions_are_preserved_for_selected_parent() {
 #[test]
 fn unconverted_checker_processes_retain_existing_restriction_diagnostics() {
     for (process, expected) in [
-        ("final begin end", "final construct"),
+        ("final #1;", "timing control in a final procedure"),
         (
             "always_latch begin int y;y<=1;end",
             "nonblocking assignment inside always_latch",
@@ -248,26 +248,17 @@ fn unconverted_checker_processes_retain_existing_restriction_diagnostics() {
 #[test]
 fn checker_and_nested_unit_validation_keep_the_legacy_root_and_active_leaf_contract() {
     for (body, rejected) in [
-        ("checker C;final begin end endchecker", true),
-        ("checker C;if(0)final begin end endchecker", true),
+        ("checker C;final #1; endchecker", true),
+        ("checker C;if(0)final #1; endchecker", true),
+        ("if(0)begin:g checker C;final #1; endchecker end", false),
+        ("if(1)begin:g checker C;final #1; endchecker end", true),
+        ("module N;checker C;final #1; endchecker endmodule", true),
         (
-            "if(0)begin:g checker C;final begin end endchecker end",
+            "module N;checker C;if(0)final #1; endchecker endmodule",
             false,
         ),
         (
-            "if(1)begin:g checker C;final begin end endchecker end",
-            true,
-        ),
-        (
-            "module N;checker C;final begin end endchecker endmodule",
-            true,
-        ),
-        (
-            "module N;checker C;if(0)final begin end endchecker endmodule",
-            false,
-        ),
-        (
-            "module N;checker C;if(1)final begin end endchecker endmodule",
+            "module N;checker C;if(1)final #1; endchecker endmodule",
             false,
         ),
     ] {
@@ -281,7 +272,9 @@ fn checker_and_nested_unit_validation_keep_the_legacy_root_and_active_leaf_contr
         if rejected {
             let error = result.unwrap_err();
             assert!(
-                error.to_string().contains("final construct"),
+                error
+                    .to_string()
+                    .contains("timing control in a final procedure"),
                 "{body}: {error}"
             );
         } else {

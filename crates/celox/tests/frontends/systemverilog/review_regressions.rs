@@ -5487,14 +5487,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "final construct",
-            r#"
-            module Top(input logic done);
-                final assert (done);
-            endmodule
-        "#,
-        ),
-        (
             "non-ANSI port expressions",
             r#"
             module Top({y, z}); output y, z; assign y = 1'b1; assign z = 1'b0; endmodule
@@ -8729,9 +8721,12 @@ fn timed_task_edge_drivers_are_checked_against_child_outputs() {
 }
 
 #[test]
-fn timed_task_edge_drivers_of_package_variables_are_checked_across_instances() {
-    let error = cranelift_build_error(
-        r#"
+fn timed_task_edge_processes_of_several_instances_may_write_a_package_variable() {
+    // `always` processes, unlike `always_ff`, may share their variables
+    // (IEEE 1800-2023 6.5, 9.2.2.4).
+    celox::Simulation::from_sv_sources(
+        vec![(
+            r#"
         package p; bit q; endpackage
         module Child(input bit clk);
             task automatic pause; #1; endtask
@@ -8741,11 +8736,12 @@ fn timed_task_edge_drivers_of_package_variables_are_checked_across_instances() {
             Child first(clk), second(clk);
         endmodule
     "#,
-    );
-    assert!(
-        error.contains("multiple drivers of package variable `p::q`"),
-        "{error}"
-    );
+            Path::new("timed_task_package_writers.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .unwrap_or_else(|error| panic!("{error}"));
 }
 
 mod aggregate_regressions {
@@ -8940,4 +8936,80 @@ fn masked_reads_preserve_observer_sensitivity_and_real_self_dependencies() {
             }]
         );
     }
+}
+
+#[test]
+fn net_alias_coalescing_retains_distinct_and_variable_drivers() {
+    for (source, diagnostic) in [
+        (
+            "module Top(input logic a, output uwire y); assign y=a; assign y=a; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(input logic a, output wire y); uwire n; assign n=a; assign n=a; assign y=n; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(input logic a, output uwire first, y); assign first=a; assign y=a; assign y=a; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(input logic a, output logic y); assign y=a; assign y=a; endmodule",
+            "multiple variable drivers",
+        ),
+        (
+            "module Top(input logic a,b, output wire y); assign y=a; assign y=a; assign y=b; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(output wire [31:0] y); assign y=$random; assign y=$random; endmodule",
+            "multiple net drivers",
+        ),
+    ] {
+        let error =
+            Simulator::from_sv_sources(vec![(source, Path::new("alias_drivers.sv"))], "Top")
+                .build_native()
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains(diagnostic), "{error}");
+    }
+}
+
+#[test]
+fn single_bit_array_driver_windows_still_reject_overlaps() {
+    for source in [
+        "module Top(input logic index, input logic a, b, output logic [0:0] q[2]);
+          always_comb begin q[0]='0; q[0][index]=a; end
+          always_comb begin q[0]='0; q[0][index]=b; end endmodule",
+        "module Top(input logic index, input logic a, b, output logic [0:0] q[2]);
+          always_comb q[index]=a;
+          always_comb q[0]=b; endmodule",
+    ] {
+        let error = cranelift_build_error(source);
+        assert!(error.contains("multiple variable drivers"), "{error}");
+    }
+}
+
+#[test]
+fn mixed_hierarchies_accept_many_sibling_specializations() {
+    let veryl = "module Top(x: input logic<8>, y: output logic<8>) { inst tree: $sv::Root(x, y); }";
+    let sv = "module Leaf #(parameter ID=0)(input wire [7:0] x, output wire [7:0] y);
+        assign y=x ^ 8'(ID); endmodule
+        module Root(input wire [7:0] x, output wire [7:0] y);
+        wire [7:0] lanes[65];
+        for(genvar n=0;n<65;n=n+1) begin: g
+            Leaf #(.ID(n)) u(.x(x),.y(lanes[n]));
+        end
+        assign y=lanes[64]; endmodule";
+    let mut sim = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("siblings.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(x, 60u8)).unwrap();
+    assert_eq!(sim.get(y), BigUint::from(124u8));
 }

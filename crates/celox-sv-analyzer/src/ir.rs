@@ -8,8 +8,8 @@ pub use crate::procedural::{
     SystemTaskArg,
 };
 pub use crate::system_functions::{
-    ArrayQuery, Callee, HandleProperty, MemoryFormat, ObjectField, ObjectOp, Radix, Severity,
-    StringOp, SystemFunction, SystemTask, VcdTask,
+    ArrayQuery, Callee, ContainerKind, ContainerLayout, ContainerOp, HandleProperty, MemoryFormat,
+    ObjectField, ObjectOp, Radix, Severity, StringOp, SystemFunction, SystemTask, VcdTask,
 };
 
 /// A procedural statement of the analyzed IR.
@@ -72,6 +72,7 @@ pub struct Module {
     declaration_subroutines: Vec<Subroutine>,
     dpi_imports: Vec<DpiImport>,
     imported_parameters: Vec<Parameter>,
+    interface_scope_names: Vec<String>,
     program: bool,
 }
 
@@ -125,14 +126,14 @@ impl Module {
                     step: Vec::new(),
                     body,
                 }],
-                initializer: false,
+                kind: celox_design::ProcessKind::Regular,
                 synthetic: false,
                 repeats: true,
             });
         }
         self.ff_processes = retained;
         self.initial_processes
-            .sort_by_key(|process| (!process.initializer, process.creation_order));
+            .sort_by_key(|process| (!process.is_initializer(), process.creation_order));
         self
     }
 
@@ -196,7 +197,18 @@ impl Module {
             dpi_imports: Vec::new(),
             imported_parameters: Vec::new(),
             program: false,
+            interface_scope_names: Vec::new(),
         }
+    }
+
+    /// Elaborated interface instance and port scopes, including empty interfaces.
+    pub fn interface_scope_names(&self) -> &[String] {
+        &self.interface_scope_names
+    }
+
+    pub(crate) fn with_interface_scope_names(mut self, names: Vec<String>) -> Self {
+        self.interface_scope_names = names;
+        self
     }
 
     pub(crate) fn with_program(mut self, program: bool) -> Self {
@@ -386,6 +398,7 @@ pub struct Port {
     direction: PortDirection,
     r#type: Type,
     is_net: bool,
+    unresolved_net: bool,
     default: Option<ConstExpr>,
     pattern_target: Option<crate::ast::Type>,
 }
@@ -395,6 +408,7 @@ pub struct Signal {
     name: String,
     r#type: Type,
     is_net: bool,
+    unresolved_net: bool,
     package_variable: Option<(String, String)>,
     hierarchical: Option<String>,
 }
@@ -405,6 +419,7 @@ impl Signal {
             name,
             r#type,
             is_net,
+            unresolved_net: false,
             package_variable: None,
             hierarchical: None,
         }
@@ -450,6 +465,16 @@ impl Signal {
     pub fn is_net(&self) -> bool {
         self.is_net
     }
+
+    /// Whether this is an unresolved, single-driver `uwire` net (6.6.2).
+    pub fn is_unresolved_net(&self) -> bool {
+        self.unresolved_net
+    }
+
+    pub(crate) fn with_unresolved_net(mut self, unresolved: bool) -> Self {
+        self.unresolved_net = unresolved;
+        self
+    }
 }
 
 impl Port {
@@ -459,6 +484,7 @@ impl Port {
             direction,
             r#type,
             is_net,
+            unresolved_net: false,
             default: None,
             pattern_target: None,
         }
@@ -494,6 +520,16 @@ impl Port {
 
     pub fn is_net(&self) -> bool {
         self.is_net
+    }
+
+    /// Whether this is an unresolved, single-driver `uwire` net (6.6.2).
+    pub fn is_unresolved_net(&self) -> bool {
+        self.unresolved_net
+    }
+
+    pub(crate) fn with_unresolved_net(mut self, unresolved: bool) -> Self {
+        self.unresolved_net = unresolved;
+        self
     }
 
     pub(crate) fn with_default(mut self, default: Option<ConstExpr>) -> Self {
@@ -1146,7 +1182,7 @@ impl FfProcess {
     }
 }
 
-/// An `initial` process.
+/// A scheduled procedure, including initial/always processes and final procedures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialProcess {
     creation_order: usize,
@@ -1154,7 +1190,7 @@ pub struct InitialProcess {
     scheduled_edge: bool,
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
-    initializer: bool,
+    kind: celox_design::ProcessKind,
     synthetic: bool,
     /// An `always` process: its body runs forever.
     repeats: bool,
@@ -1176,17 +1212,31 @@ impl InitialProcess {
         self.site.as_ref()
     }
 
-    pub(crate) fn new(condition: Option<ConstExpr>, body: Vec<Stmt>, initializer: bool) -> Self {
+    pub(crate) fn new(
+        condition: Option<ConstExpr>,
+        body: Vec<Stmt>,
+        kind: celox_design::ProcessKind,
+    ) -> Self {
         Self {
             creation_order: 0,
             site: None,
             scheduled_edge: false,
             condition,
             body,
-            initializer,
+            kind,
             synthetic: false,
             repeats: false,
         }
+    }
+
+    /// The procedure's simulation phase.
+    pub fn kind(&self) -> celox_design::ProcessKind {
+        self.kind
+    }
+
+    /// A final procedure runs once when the simulation finishes (9.2.3).
+    pub fn is_final(&self) -> bool {
+        self.kind == celox_design::ProcessKind::Final
     }
 
     /// Compiler-generated storage initialization, without a user static process.
@@ -1197,7 +1247,7 @@ impl InitialProcess {
     /// Whether this process holds variable declaration initializers, which
     /// run before every `initial` and `always` procedure.
     pub fn is_initializer(&self) -> bool {
-        self.initializer
+        self.kind == celox_design::ProcessKind::Initializer
     }
 
     /// Whether this is an `always` process, which runs its body forever and
@@ -1602,7 +1652,7 @@ impl From<ast::InitialProcess> for InitialProcess {
                 .cloned()
                 .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
                 .collect(),
-            process.is_initializer(),
+            process.kind(),
         );
         result.creation_order = process.creation_order();
         result.site = process.site().cloned();

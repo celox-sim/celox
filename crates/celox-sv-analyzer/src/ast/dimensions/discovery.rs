@@ -138,10 +138,7 @@ fn type_with_dimensions(
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
 ) -> Converted<Type> {
-    Ok(types::type_with_unpacked_ranges(
-        ty,
-        constant_binding::bind_unpacked_ranges(dimensions, tree, context)?,
-    ))
+    containers::with_dimensions(ty, dimensions, tree, context)
 }
 fn shape(context: &mut PackedDimensions, name: String, ty: &Type, local: bool) {
     let value = procedural::dimensions_from_type(ty);
@@ -423,13 +420,23 @@ fn return_type(
 /// initialized it (IEEE 1800-2023 8.6, 8.7, 8.10).
 fn class_signatures(
     class: &celox_sv_syntax::ClassDeclaration,
+    class_name: &str,
     tree: &AnalysisContext<'_>,
     context: &mut PackedDimensions,
 ) -> Converted<()> {
-    let class_name = name(&class.name);
-    let Some(handle) = classes::handle_type(tree, &class_name) else {
+    let Some(handle) = classes::handle_type(tree, class_name) else {
         return Ok(());
     };
+    // Formals and results are bound in the scope of the specialization.
+    let mut scope = context.clone();
+    let (env, aliases) = classes::specializations::scope(
+        tree,
+        class_name,
+        &context.const_env,
+        &context.type_aliases,
+    );
+    scope.const_env = env.into();
+    scope.type_aliases = aliases;
     let this = (
         FunctionArgumentMetadata {
             name: classes::THIS.into(),
@@ -441,7 +448,7 @@ fn class_signatures(
     let mut constructor = false;
     for method in &class.methods {
         let subroutine = tree.declarations().subroutine(method.subroutine);
-        let mut formals = formal_types(subroutine, tree, context)?;
+        let mut formals = formal_types(subroutine, tree, &scope)?;
         if !method.qualifiers.is_static {
             formals.insert(0, this.clone());
         }
@@ -449,12 +456,12 @@ fn class_signatures(
             constructor = true;
             Some(Some(handle.clone()))
         } else {
-            return_type(subroutine, tree, context)?
+            return_type(subroutine, tree, &scope)?
         };
         // A method that may be virtual also has a dispatcher (8.20).
         if !method.qualifiers.is_static && subroutine.kind != SubroutineKind::Constructor {
             publish_signature(
-                classes::Class::dispatcher_name(&class_name, &name(&subroutine.name)),
+                classes::Class::dispatcher_name(class_name, &name(&subroutine.name)),
                 formals.clone(),
                 result.clone(),
                 tree,
@@ -462,7 +469,7 @@ fn class_signatures(
             );
         }
         publish_signature(
-            classes::Class::subroutine_name(&class_name, &name(&subroutine.name)),
+            classes::Class::subroutine_name(class_name, &name(&subroutine.name)),
             formals,
             result,
             tree,
@@ -484,7 +491,7 @@ fn class_signatures(
                 // Signature discovery must not require an otherwise unused class
                 // to have a supported layout. A call validates the layout before
                 // using this selection formal; lowering reports layout errors.
-                classes::class(tree, &class_name, &context.const_env, &context.type_aliases)
+                classes::class(tree, class_name, &context.const_env, &context.type_aliases)
                     .map_or_else(
                         |_| classes::unsigned_type(1),
                         |layout| layout.selection_type(),
@@ -502,7 +509,7 @@ fn class_signatures(
             ty,
         ));
         publish_signature(
-            classes::Class::subroutine_name(&class_name, method),
+            classes::Class::subroutine_name(class_name, method),
             formals,
             Some((method == "randomize").then(procedural::int_type)),
             tree,
@@ -511,7 +518,7 @@ fn class_signatures(
     }
     if !constructor && !class.interface {
         publish_signature(
-            classes::Class::subroutine_name(&class_name, "new"),
+            classes::Class::subroutine_name(class_name, "new"),
             vec![this],
             Some(Some(handle.clone())),
             tree,
@@ -530,7 +537,7 @@ fn class_signatures(
         )
     };
     publish_signature(
-        classes::Class::cast_name(&class_name),
+        classes::Class::cast_name(class_name),
         vec![
             formal(procedural::CAST_DESTINATION, ParamDirection::Inout),
             formal(procedural::CAST_SOURCE, ParamDirection::Input),
@@ -541,14 +548,21 @@ fn class_signatures(
     );
     Ok(())
 }
-/// Publish the signatures of the methods of every class in the source.
+/// Publish the signatures of the methods of every class the current scope
+/// declares, of each specialization of a parameterized class that the scope
+/// names (IEEE 1800-2023 8.25).
 pub(in crate::ast) fn all_class_signatures(
     tree: &AnalysisContext<'_>,
     context: &mut PackedDimensions,
 ) {
-    for class in &tree.declarations().classes {
-        let _ = class_signatures(class, tree, context);
+    classes::specializations::collect(tree, context);
+    // The classes of other scopes keep the signatures their scopes publish.
+    for class in classes::scope_declarations(tree) {
+        for class_name in classes::specializations_of(tree, class) {
+            let _ = class_signatures(class, &class_name, tree, context);
+        }
     }
+    tree.state.class_specializations_frozen.set(true);
 }
 fn publish_signature(
     n: String,
@@ -983,6 +997,6 @@ mod tests {
             width(&tree.state, context.get("ordinary").unwrap(), &context),
             Some(32)
         );
-        assert!(context.get("dyn").is_none());
+        assert!(context.get("dyn").unwrap().container.is_some());
     }
 }

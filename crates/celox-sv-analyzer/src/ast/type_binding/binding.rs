@@ -81,7 +81,68 @@ fn bind_in_with_validation(
                         values.push(ty);
                     }
                     DataTypeKind::Named(path) => {
+                        // A class with a parameter value assignment, or one
+                        // whose defaults the name alone refers to (IEEE
+                        // 1800-2023 8.25).
+                        if let [part] = path.as_slice() {
+                            let name = normalize_identifier(&part.name.spelling);
+                            if (part.arguments.is_some()
+                                || !context.type_aliases.contains_key(&name))
+                                && let Some(name) = super::super::classes::resolve(tree, &name)
+                                && super::super::classes::is_parameterized(tree, &name)
+                            {
+                                let name = super::super::classes::specializations::specialize(
+                                    tree,
+                                    &name,
+                                    part.arguments.as_deref().unwrap_or_default(),
+                                    context,
+                                )?;
+                                values.push(super::super::classes::handle(&name));
+                                continue;
+                            }
+                        }
+                        // A type that a class declares, `C::T` (IEEE 1800-2023
+                        // 8.23, 8.25.1).
+                        if let [scope, member] = path.as_slice()
+                            && let Some(class) = class_scope(scope, tree, context)?
+                        {
+                            let member = normalize_identifier(&member.name.spelling);
+                            let ty = super::super::classes::specializations::member_type(
+                                tree, &class, &member,
+                            )
+                            .ok_or_else(|| {
+                                unsupported(format!("type `{member}` of class `{class}`"))
+                            })?;
+                            values.push(types::enclose_aliased_packed_type(ty, ranges));
+                            continue;
+                        }
                         if path.iter().any(|part| part.arguments.is_some()) {
+                            // A specialization is made where the class is
+                            // declared, from its declaration.
+                            let imported = scope::imported(&tree.state);
+                            let class = match path.as_slice() {
+                                [part] => imported
+                                    .aliases
+                                    .get(&normalize_identifier(&part.name.spelling))
+                                    .cloned(),
+                                [package, member] => Some(scope::qualified_name(
+                                    &tree.state,
+                                    &normalize_identifier(&package.name.spelling),
+                                    &normalize_identifier(&member.name.spelling),
+                                )),
+                                _ => None,
+                            };
+                            if let Some(class) = class.filter(|class| {
+                                imported
+                                    .classes
+                                    .iter()
+                                    .any(|known| known.name.starts_with(&format!("{class}#(")))
+                                    || imported.aliases.values().any(|known| known == class)
+                            }) {
+                                return Err(unsupported(format!(
+                                    "specialization of parameterized class `{class}` outside the scope that declares it"
+                                )));
+                            }
                             return Ok(None);
                         }
                         let name = match path.as_slice() {
@@ -94,7 +155,18 @@ fn bind_in_with_validation(
                             _ => return Ok(None),
                         };
                         let Some(ty) = context.type_aliases.get(&name) else {
-                            if let Some(class) = super::super::classes::handle_type(tree, &name) {
+                            // Inside its package, `p::C` is a name of the
+                            // package itself, whose classes are declared
+                            // under their qualified names.
+                            let class = match path.as_slice() {
+                                [_] => super::super::classes::resolve(tree, &name),
+                                _ => super::super::classes::handle_type(tree, &name)
+                                    .map(|_| name.clone())
+                                    .or_else(|| super::super::classes::resolve(tree, &name)),
+                            };
+                            if let Some(class) = class
+                                .and_then(|class| super::super::classes::handle_type(tree, &class))
+                            {
                                 values.push(class);
                                 continue;
                             }
@@ -308,6 +380,59 @@ fn bind_ranges(
         }
     }
     Ok(result)
+}
+
+/// The class that `scope` of a class-scoped type `C::T` names: inside a
+/// parameterized class its name alone refers to the specialization, and
+/// elsewhere a parameterized class needs one (IEEE 1800-2023 8.25.1).
+fn class_scope(
+    scope: &celox_sv_syntax::TypeSegment,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+) -> Converted<Option<String>> {
+    let name = normalize_identifier(&scope.name.spelling);
+    if scope.arguments.is_none()
+        && let Some(class) = context
+            .type_aliases
+            .get(&super::super::classes::specializations::scope_key(&name))
+            .or_else(|| {
+                // A class of a package is declared under its qualified name.
+                let class = super::super::classes::resolve(tree, &name)?;
+                context
+                    .type_aliases
+                    .get(&super::super::classes::specializations::scope_key(&class))
+            })
+            .or_else(|| context.type_aliases.get(&name))
+            .and_then(|ty| ty.class().map(str::to_owned))
+    {
+        return Ok(Some(class));
+    }
+    let Some(name) = super::super::classes::resolve(tree, &name) else {
+        return Ok(None);
+    };
+    if !super::super::classes::is_parameterized(tree, &name) {
+        if scope
+            .arguments
+            .as_ref()
+            .is_some_and(|arguments| !arguments.is_empty())
+        {
+            return Err(unsupported(format!(
+                "parameter value assignment of class `{name}`, which has no parameters"
+            )));
+        }
+        // Its members are those of its one specialization.
+        if super::super::classes::handle_type(tree, &name).is_some()
+            && super::super::classes::specializations::lookup(tree, &name).is_none()
+            && super::super::classes::is_declared(tree, &name)
+        {
+            super::super::classes::specializations::specialize(tree, &name, &[], context)?;
+        }
+        return Ok(Some(name));
+    }
+    let Some(arguments) = &scope.arguments else {
+        return Err(AnalyzerError::UnspecializedClassScope { class: name });
+    };
+    super::super::classes::specializations::specialize(tree, &name, arguments, context).map(Some)
 }
 
 pub(in crate::ast) fn expression_type(

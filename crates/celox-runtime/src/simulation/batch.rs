@@ -119,8 +119,6 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        self.scheduler.time = current_time;
-
         let num_events = executor.backend().num_events();
         let counted = !self.model.counted.is_empty();
         for event in &events_to_process {

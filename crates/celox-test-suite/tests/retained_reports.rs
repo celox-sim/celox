@@ -207,8 +207,31 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                     assert_eq!(row["phase"], phase, "{name}");
                     assert_eq!(case.expectation, expectation, "{name}");
                 }
-                "compile_error" | "mismatch" => {
+                "compile_error" | "mismatch" | "runtime_error" => {
                     let (expected_status, phase, diagnostic) = match (tool, name) {
+                        ("verilator", "fork::compound_event_activations_outlive_parent") => (
+                            "runtime_error",
+                            "execute",
+                            "native testbench failed: exit status: 1",
+                        ),
+                        (
+                            "icarus",
+                            "fork::compound_event_activations_outlive_parent"
+                            | "fork::compound_event_function_scratch_isolated",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "complex event expressions are not yet supported in automatic tasks",
+                        ),
+                        (
+                            "icarus",
+                            "fork::compound_event_tracks_result_not_operands"
+                            | "fork::compound_event_four_state_lsb_edges",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Overriding the default variable lifetime is not yet supported",
+                        ),
                         (
                             "verilator",
                             "tagged_unions::conditional_struct_payload"
@@ -231,6 +254,19 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             | "tagged_unions::nested_and_void_constructors"
                             | "tagged_unions::wide_four_state_payload",
                         ) => ("compile_error", "compile", "syntax error"),
+                        (
+                            "icarus",
+                            "fork_control::function_join_none_automatic_values_outlive_returns"
+                            | "fork_control::function_join_none_calls_in_defaults_need_process_frames"
+                            | "fork_control::function_join_none_children_can_call_timed_tasks"
+                            | "fork_control::function_join_none_event_driven_caller"
+                            | "fork_control::function_join_none_preserves_expression_temporaries"
+                            | "fork_control::function_join_none_retains_child_only_class_handle",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "functions cannot have delay statements.",
+                        ),
                         ("icarus", "unions::packed_mixed_state") => (
                             "mismatch",
                             "execute",

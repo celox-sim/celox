@@ -27,6 +27,22 @@ pub struct ParallelScheduleOptions {
     /// Smallest accepted estimated speedup of a partitioned phase, in
     /// percent of its single-lane cost.
     pub minimum_speedup_percent: u64,
+    /// Whether the combinational settle may be split into partitions that
+    /// run only when what they read changed. Only a host that reports its
+    /// writes and instruments the units it generates may request it.
+    pub settle: SettlePartitionMode,
+}
+
+/// Whether a settle is partitioned ([`ParallelScheduleOptions::settle`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SettlePartitionMode {
+    /// One pass over the whole combinational program.
+    #[default]
+    Off,
+    /// Partition designs with many event domains and a large program.
+    Estimated,
+    /// Partition every program into the smallest partitions. For tests.
+    Always,
 }
 
 impl ParallelScheduleOptions {
@@ -35,6 +51,7 @@ impl ParallelScheduleOptions {
         lanes: 1,
         synchronization_cost: 400,
         minimum_speedup_percent: 125,
+        settle: SettlePartitionMode::Off,
     };
 
     /// Request `lanes` simulation lanes with the default cost model.

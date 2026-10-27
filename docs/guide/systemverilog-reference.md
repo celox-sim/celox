@@ -31,8 +31,9 @@ synthesis and is tested at the design level.
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
+| Dynamic containers | one-dimensional dynamic arrays, queues (including bounded queues), and associative arrays with integral or string keys; element access, value assignment, equality, `foreach` and built-in container methods. See [dynamic containers](#dynamic-containers) |
 | Strings | `string` variables, function arguments and results: assignment of strings, string literals and casts (`string'(x)`), `==`, `!=` and ordering comparisons, concatenation and replication (with a run-time count), character reads and writes (`s[i]`), and the methods `len`, `getc`, `putc`, `toupper`, `tolower`, `compare`, `icompare`, `substr`, `atoi` / `atohex` / `atooct` / `atobin` and `itoa` / `hextoa` / `octtoa` / `bintoa`; `%s` and format-less display of string values. See [strings](#strings) |
-| Classes | classes declared in a module: properties of 2-state integral types up to 64 bits, `string` and class handle types, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes and method calls through interface class handles; `$cast` of class handles, as a function and as a task; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles. See [classes](#classes) |
+| Classes | classes declared in a module, a package or the compilation unit: properties of 2-state integral types up to 64 bits, `string` and class handle types, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes and method calls through interface class handles; `$cast` of class handles, as a function and as a task; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles; parameterized classes with value and type parameters, parameters read through a handle or `C#(...)::`, typedefs of classes and interface classes and `C::T`; named constructor arguments; shallow copies (`new h`). See [classes](#classes) |
 | Parameters | integral parameters and overrides preserving widths beyond 128 bits and X/Z values, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 
 ### Processes and control flow
@@ -60,9 +61,14 @@ In a timed `Simulation`, `initial` and plain `always` processes can suspend:
 An `always` whose sensitivity list names exactly the variables its statement
 reads, as `@*` would (IEEE 1800-2023 9.4.2.2), simulates like `always @*` in
 both `Simulator` and `Simulation`: `always @(a or b) y = a + b;` or
-`always @(b, a) y = a + b;`. The statement must not contain a timing control
-or a nonblocking assignment. Any other sensitivity list without edges runs as
-a process: `always @(a) y = a + b;` leaves `y` unchanged when only `b`
+`always @(b, a) y = a + b;`. So does a list that covers every bit the
+statement reads through part-selects, such as `always @(x[2:0]) y = x[2:0] + 1;`,
+when running the statement more often cannot be observed: it calls no
+subroutine or system task, reads no variable it writes, and stores each
+variable at most once per run, so an extra run writes the same values without
+pulsing a variable for its waiters (IEEE 1800-2023 4.3, 9.4.2). The statement
+must not contain a timing control or a nonblocking assignment. Any other
+sensitivity list without edges runs as a process: `always @(a) y = a + b;` leaves `y` unchanged when only `b`
 changes. So does a list that, as `always @*`, would close a combinational
 loop with other logic. So does an edge-sensitive `always`
 that does not have the shape of a flip-flop: one with an edge of a select or
@@ -114,6 +120,60 @@ to enums as well. Mixed enum and integer argument lists are supported.
 Constraints (`with`), enums with unsupported or unresolved domains, unpacked arrays, nets,
 constants, selects and concatenation arguments are unsupported and rejected.
 
+### Parallel processes
+
+`fork ... join`, `join_any` and `join_none` create concurrent child processes
+in `initial` / `always` procedures and tasks. `join` waits for every child;
+`join_any` waits for one child and leaves the others running; `join_none`
+continues without waiting. Children start when their parent blocks or ends,
+not at compiler or host-service yields (IEEE 1800-2023 9.3.2).
+
+Forks can be nested or executed repeatedly while earlier children remain
+alive. Automatic variables are shared with children of that activation and
+remain alive after the parent returns; re-entering their declaration allocates
+new storage. Static variables retain shared storage. Child random streams are
+seeded from the parent's stream. Execution uses the simulation scheduler, not
+one OS thread per child.
+
+`wait fork` waits for all live immediate children of the calling process,
+including earlier forks and children spawned by called tasks. It does not wait
+for grandchildren whose parents have already ended (9.6.1). With no live children
+it continues immediately. `disable fork` terminates all descendants, including
+those of completed children, without stopping its caller or siblings (9.6.3).
+It removes pending starts, event waits and scheduled resumptions; a subsequent
+fork can reuse their activation storage. Calls through tasks and functions keep
+the calling process's identity; `wait fork` remains forbidden in functions.
+
+Checkpoints and layout-independent state files preserve children, their locals,
+random streams and pending joins. State files also preserve strings held only
+by suspended children or shared automatic locals. Non-null class objects or dynamic containers and
+nonempty string/object values in pending NBA writes, host writes or event-wait
+baselines remain unsupported in activation state files; use
+`checkpoint()` / `restore()` for those states. Deferred assertions in a process containing forks remain unsupported.
+
+Direct event controls, `wait` conditions, and compound event expressions over
+fork-shared automatic locals are supported. Compound expressions may use constants
+and pure local functions. Each activation compares its own expression result,
+including X/Z transitions and the least-significant bit for edge controls
+(IEEE 1800-2023 9.4.2). Blocking assignments, loop steps, and output/inout copy-out
+from statement calls expose intermediate results without switching the writer or
+starting pending `join_none` children. These baselines survive checkpoints and
+portable state files.
+
+Mixed global/static dependencies, foreign calls, and functions retaining scratch
+state are rejected in this compound-expression path. An implicit write to a watched
+automatic operand from a function expression, a seed/plusargs result, or a system
+task such as `$readmemh` is also rejected; these paths do not yet expose safe
+per-update observation boundaries. Function default arguments are inspected
+conservatively, including defaults replaced by supplied arguments.
+
+Functions may use `fork ... join_none` when called from an `initial` or plain
+`always` process. Their detached children may call tasks and suspend; automatic
+arguments and locals survive the function return (13.4.4). Blocking operations
+in the function itself remain forbidden. Scheduling calls in declaration
+initializers, `final`, `always_comb`, and `always_ff` are diagnosed; the latter
+two contexts do not currently provide a process kernel for such calls.
+
 ### Class randomization
 
 `object.randomize()` randomizes enabled `rand` properties and returns signed
@@ -140,8 +200,8 @@ including supported properties not declared `rand`. Names are resolved in the
 receiver's class, not the caller's scope; expressions and inaccessible members
 are rejected. The temporary modes are installed before the pre-hook and restored
 after the post-hook; hooks can inspect and change them. `randomize(null)` runs
-the hooks without drawing or assigning random values (18.11). Constraints are
-not supported even for this checker form.
+the pre-hook and checks constraints without drawing or assigning random values;
+the post-hook runs only on success (18.11).
 
 Each object has an independent random stream, seeded from its creating process.
 `object.srandom(seed)` resets it using a 32-bit seed; checkpoints preserve both
@@ -152,9 +212,21 @@ members. Each property visits every value once before starting another cycle
 Disabled properties retain their cycle; checkpoints restore it. `srandom`
 reseeds the RNG without making already consumed values eligible again.
 
-Constraints, `with`, larger `randc` domains, static random properties, and random
-array/object/string properties remain unsupported. A constrained dynamic
-subclass is rejected rather than silently randomizing only its base properties.
+Named constraint blocks support 1–64-bit two-state scalar integer properties,
+comparisons, logical and bitwise operations, addition, subtraction and multiplication.
+Inherited blocks apply, and a derived block with the same name replaces its base
+block. Disabled and unselected properties are state inputs read after the pre-hook.
+Aplite searches for a satisfying assignment using the object's seed, then updates
+all selected properties together. Proved infeasibility returns `0`, preserves the
+properties and skips the post-hook (18.6.3). Resource exhaustion is a runtime error.
+This initial seeded-search policy does not guarantee a uniform distribution;
+distribution improvements are tracked in [#2187](https://github.com/celox-sim/celox/issues/2187).
+
+Constrained enums and `randc`, `inside`, conditional/foreach/soft constraints,
+`dist`, `solve before`, constraint modes, external/static blocks, typed parameters
+in constraints, and inline `with` remain unsupported. Larger unconstrained `randc`
+domains, static random properties and random array/object/string properties also
+remain unsupported. Unsupported dynamic subclasses are rejected before draws.
 A call through `null` is a runtime error.
 
 ### Time literal delays {#time-literal-delays}
@@ -173,6 +245,7 @@ waits zero.
 | System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | Random numbers | `$urandom`, `$urandom_range`, `$random` and `$dist_uniform` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
 | Simulation time | `$time`, `$stime` and `$realtime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
+| Sampled values | `$sampled` in processes, combinational logic and the subroutines they call; `$past`, `$rose`, `$fell`, `$stable` and `$changed` in edge-triggered processes whose clock they infer and the subroutines those call; see [Sampled values](#sampled-values) |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop`, `$exit` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | Runtime I/O | `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb`, and [VCD controls](./vcd#systemverilog-source-controls) in timed processes |
 | State | two-state and four-state simulation |
@@ -187,10 +260,10 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, typedefs and parameters of interface classes, classes declared in packages, parameterized classes, named constructor arguments, shallow copies (`new h`), and properties that are 4-state, `real`, arrays or wider than 64 bits. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
-- Behavioral and verification constructs: `final`, intra-assignment timing controls (`a = #1 b`),
+- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, enumeration constants declared in a class, enumeration, struct and union types and named four-state or string constants as class parameter values, specializations of a parameterized class outside the package or compilation unit that declares it, and properties that are 4-state, `real`, arrays or wider than 64 bits. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
+- Behavioral and verification constructs: intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
-  named events and `->`, `fork` / `join`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
+  named events and `->`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
 - Timing controls in processes: `iff` qualifiers ([#1444](https://github.com/celox-sim/celox/issues/1444)),
   impure function calls in event expressions, and
   `wait` or event expressions reading a static task argument.
@@ -290,6 +363,53 @@ Not yet supported: `$sformat` / `$sformatf`, `atoreal` / `realtoa`, string
 arguments of `$value$plusargs`, file I/O and DPI-C, and string values in VPI,
 VCD output and the TypeScript API.
 
+### Dynamic containers
+
+Dynamic arrays (`T a[]`) support `new[n]`, `new[n](a)`, `size()` and
+`delete()` (IEEE 1800-2023 7.5). Queues (`T q[$]`, `T q[$:N]`) support
+`size`, `insert`, `delete`, `push_front`, `push_back`, `pop_front` and
+`pop_back`. Queue indices may use `$` and `$+1`.
+Associative arrays support integral keys up to 64 bits or `string` keys,
+`num` / `size`, `exists`, `delete`, and `first` / `last` / `next` / `prev`
+(7.8–7.10). Traversal leaves its index unchanged when no key is found.
+
+The empty parentheses on zero-argument container methods are optional:
+`a.size`, `q.pop_front`, `map.num` and `map.delete` have the same behavior as
+their parenthesized forms. A bare `delete` clears the container. Queue pop
+results may be discarded with `void'(...)`; type queries such as
+`$bits(q.pop_front)` inspect the result without removing an element.
+Integral pop result queries preserve the element's packed dimensions and
+declared bounds. Queries on string- or class-valued pop results remain unsupported.
+
+Elements may be packed integral values up to 64 bits, strings or class
+handles. Positional assignment patterns and element concatenations construct
+sequences; assignments between dynamic arrays and queues copy values and
+respect the destination queue's bound. Associative assignment requires the
+same key type. Equality (`==`, `!=`, `===`, `!==`) between equivalent container types compares contents,
+including X/Z for four-state elements. `foreach` visits sequence positions
+or associative keys in order. Range errors read the element type's default
+and ignore writes; unknown indices never create associative entries.
+
+Containers work in procedural code as module variables or locals. Automatic
+local initializers and module declaration initializers may allocate with
+`new[]`. Checkpoints, including serialized checkpoints, preserve contents;
+portable state files require a checkpoint instead. Strings and class objects
+held in elements remain reachable during heap collection. Array assignment
+copies elements while class handles retain their usual reference semantics.
+
+Multidimensional containers, elements wider than 64 bits, real elements,
+wildcard or class keys, slices, array manipulation methods, keyed patterns,
+container operands within concatenations, compound or nonblocking element
+assignments, container ports / subroutine parameters / class properties and
+const containers remain unsupported. A `new[]` initializer currently requires
+another compatible dynamic array or queue; fixed-size arrays are unsupported.
+Static local initializers retain the existing constant-initializer restriction.
+`$size` queries the current outer dimension. Sequence `$left`, `$right`,
+`$low`, `$high`, `$increment`, and dimension counts are also supported.
+Queries of element dimensions and associative bounds remain unsupported.
+For string-indexed associative arrays, use the `size()` method. Native images
+and serialized checkpoints from earlier container versions must be regenerated.
+
 ### Classes {#classes}
 
 A class variable holds a handle of an object in the simulator's heap, `null`
@@ -322,7 +442,37 @@ A constructor calls the constructor of the base class first, with the
 arguments of `super.new(...)` or of the `extends` clause, then runs the
 initializers of the properties its class declares, then its body (IEEE
 1800-2023 8.17). A static property is a variable of the module that declares
-the class, so each instance of the module has its own.
+the class, so each instance of the module has its own. `new h` creates an
+object of the class of the object `h` refers to with a copy of its properties,
+without running a constructor; a property holding a handle is copied, so both
+objects refer to the same object (8.12). Copying `null` is a runtime error.
+
+Each set of parameter values and types of a parameterized class is a
+specialization, a class of its own with its own static properties (IEEE
+1800-2023 8.25): `C#(2, int)` and `C#(.T(int), .N(2))` are one specialization,
+and a handle of `C#(2)` cannot be assigned to a variable of `C#(3)`. A
+parameter value assignment is evaluated where it is written, so the values may
+depend on parameters of the module. As a type, the class name alone denotes
+the default specialization `C#()`, inside the class too; as the prefix of
+`::` inside the class and its out-of-block methods it refers to the
+specialization being declared, and elsewhere `C#()::` is required (8.25.1). An interface class inherits the parameters and typedefs of the
+interface classes it extends, and one that inherits the same name from two
+different interface classes or specializations must declare its own
+(8.26.6.2, 8.26.6.3). Celox makes the specializations that the types and
+scopes of a module name before it runs, binding an assignment inside a generate
+block once for each of its instances.
+
+A class declared in a package or the compilation unit is laid out and its
+methods are lowered where it is declared, once (IEEE 1800-2023 3.12.1, 26.3):
+a module uses it through an import, as `p::C`, or by its name when the
+compilation unit declares it, also from another source file. Its static
+properties are variables of the package, shared by every module that uses
+the class. A module class may extend it and override its virtual
+methods; calls of those methods through handles in the module then also reach
+the overrides of the module's classes. A specialization of a parameterized class
+is made where the class is declared, so outside that scope only the
+specializations it names can be used. Sources of packages and compilation-unit
+items alone elaborate those scopes.
 
 Checkpoints keep objects. State files record strings but not objects, so
 saving a state file fails while any variable holds an object.
@@ -358,8 +508,10 @@ An import in a generate block makes names visible in that block (and the
 blocks inside it), ahead of the module's own declarations and imports.
 A package variable is one object shared by every module that uses it,
 including SystemVerilog modules instantiated from Veryl, and keeps its
-initializer. `sim.signal("p::v")` names it. Several drivers of one package
-variable are rejected, counting every instance of a module that writes it.
+initializer. `sim.signal("p::v")` names it. Any processes may write it, also
+those of several instances; a continuous assignment, `always_comb` or
+`always_ff` that writes it must be its only writer (IEEE 1800-2023 6.5, 9.2.2),
+counting every instance of the module that holds it.
 A package variable cannot be a clock or reset yet, and its initializer must
 be constant. `export` declarations (26.6) make imported declarations
 visible to the importers of a package: `export p::*;` exports only the
@@ -484,7 +636,9 @@ unsupported, including when the inference option is enabled.
   After `b = 1; a = 1;`, `a ^ b` has not changed, and a pulse
   `a = 1; a = 0;` wakes `@(a)` but not `@(a ^ b)`; write `#0` between the
   writes to make the pulse visible. IEEE 1800-2023 4.7 permits this order;
-  Icarus evaluates the expression at each write.
+  Icarus evaluates the expression at each write. Compound waits on fork-shared
+  automatic cells instead observe each supported blocking assignment or statement
+  call copy-out, as described above.
 - A waiter sees every value that one evaluation of `always_comb`,
   `always @*`, an edge-triggered `always` or `always_ff` writes, including
   one that a later write overwrites: with `a` at 1, `y = 0; if (a) y = 1;`
@@ -528,8 +682,8 @@ initialization process. Constant function calls use
 fresh values and do not affect runtime storage (13.4.3).
 
 Task locals that keep their values and nonconstant static initializers remain
-unsupported; declare those locals `automatic`. Package function state follows
-the existing package-variable restrictions on multiple procedural drivers.
+unsupported; declare those locals `automatic`. Package function state is a
+package variable, which the processes of every instance may write.
 An interface whose default lifetime (`interface automatic`) differs from that of the
 module it is used in is rejected.
 
@@ -562,6 +716,30 @@ simulation is suspended (`CheckpointError::Stopped`). In an `always` process, `$
 Its diagnostic level argument prints nothing. Batch hosts without an
 interactive mode, such as the VPI host, end the run at `$stop`.
 
+### Final procedures {#final-procedures}
+
+`final` procedures require `Simulation`. They run once, sequentially at the
+termination time, on `$finish`, `$fatal` or an explicit `Simulation::finish()`
+call (IEEE 1800-2023 9.2.3, 20.10). Their relative order is deterministic but
+unspecified. The CLI and sv-tests batch driver finish when scheduled work runs
+out. An idle `step()` or the end of `run_until()` does not terminate the reusable
+Rust simulation; a host can supply more inputs or call `finish()`.
+
+Ordinary `$stop` does not run final procedures. A `$stop` inside a final
+procedure suspends finalization, and a later step or `finish()` resumes it.
+`$finish` inside a final procedure immediately ends that procedure and skips
+all remaining finals. The original `$fatal` error is preserved when it starts
+termination.
+
+No scheduled HDL events run after final procedures. In particular, a
+nonblocking assignment made directly in a final procedure never applies its
+queued update. Timing controls and calls to user tasks are rejected, including
+through functions. Calls to functions that schedule events after returning
+require an initial/always process context and are rejected from final
+procedures (13.4.4). Direct `fork ... join_none` declarations initialize during
+the final procedure, but its detached children never start: finals execute
+without blocking and no scheduled events execute afterward (9.2.3, 9.3.2).
+
 ### Programs {#programs}
 
 A `program` (IEEE 1800-2023 Clause 24) is declared and instantiated like a
@@ -589,8 +767,8 @@ so a program that resumes after `#0` reads their new values, whereas 4.5
 evaluates them only once the reactive region set is empty; programs
 nested in modules and anonymous programs are rejected; a program that no
 module instantiates is not an implicit top level next to the design's top
-module; `final` procedures and clocking blocks are unsupported in programs as
-everywhere.
+module; clocking blocks are unsupported. Program `final` procedures run during
+termination, including the implicit `$finish` after the last initial procedure.
 
 ### `$exit`
 
@@ -612,11 +790,49 @@ severity, its message, the file and line of the call as `` `__FILE__ `` and
 action block of an immediate assertion also names that assertion: its
 statement label, `assert`, `assume` or `cover`, and whether the pass or the
 fail action issued it. Severity tasks in subroutines the action block calls
-are not attributed. `time` is the time the drain's context gives, as the VPI
-host does at each callback, or the time step of the report while
-`Simulation::set_fail_on` is set. `Report::render` formats a report as the VPI host
+are not attributed. `time` is the simulation time at which the report was
+issued, however late the host drains it, unless the drain's context gives a
+time, as the VPI host does at each callback; a `Simulator` has no time and
+uses only the context's.
+`Report::render` formats a report as the VPI host
 and the `celox` command print it. Only `$error` and `$fatal` fail a `celox`
 run; `$fatal` also ends the simulation with an error.
+
+### Sampled values {#sampled-values}
+
+`$sampled(e)` is the value `e` has in the Preponed region of the time slot:
+the value at the end of the previous slot, and in the first slot the declared
+or default value (IEEE 1800-2023 4.4.2.1, 16.5.1). Each static variable the
+operand reads, the indices of its selects and the arguments of its calls
+included, is read from a copy that the timed simulation updates before advancing
+to a later timestamp. Returning to the host and resuming at the same timestamp
+retains that copy, including across host writes. Automatic variables keep their current value; a static local is
+sampled like a module variable. A `Simulator` call is a time slot. In
+combinational logic (`always_comb`, `always_latch`, an `always` lowered as
+combinational logic, a continuous assignment) the process reruns when the
+operand's variables change, not when their sampled values do, and keeps the
+sampled value it read until then (4.5). A design that uses `$sampled` runs the
+compiled scheduler one slot at a time.
+
+`$past(e, k, gate)` is the sampled value of `e` at the `k`-th previous tick of
+its clock at which `gate` held, the `iff` of the clock (9.4.2.3), and `$rose`, `$fell`, `$stable`
+and `$changed` compare the sampled value of their operand with the one at the
+previous tick, with case equality for integral values and numeric equality for
+`real`/`shortreal` (`$rose` and `$fell` look at the least
+significant bit). Before enough ticks, the past value is the declared or
+default value (16.9.3). `k` is a positive constant. The clock is inferred
+(16.14.6): in an `always_ff` or `always` process whose only timing control is
+its event control, it is the clock edge when that is the only event whose
+signal the body reads nowhere else, as with an asynchronous reset that the
+body tests. A subroutine the process calls, also from the default of an
+omitted argument, infers the same clock. The process keeps a history register
+for each variable of the operand and updates it with nonblocking assignments at
+the end of each run that is a tick of the clock. With an asynchronous reset, a
+run is a tick when the clock has left the level it had before the time slot: a
+clock that returns to that level within the slot, as `clk = 0; #0 clk = 1;`
+from 1, does not move the history. An explicit clocking event argument, calls
+without a clock to infer, nested calls such as `$past($past(a))` and operands
+that read an unpacked array are rejected.
 
 ### Deferred assertions
 

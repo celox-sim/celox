@@ -1,6 +1,6 @@
 mod builder;
 #[cfg(feature = "host-runtime")]
-mod checkpoint;
+pub(crate) mod checkpoint;
 mod error;
 #[cfg(feature = "host-runtime")]
 mod heap;
@@ -69,7 +69,7 @@ mod host {
     };
     use num_bigint::BigUint;
 
-    #[derive(Default)]
+    #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
     pub(crate) struct SvVcdControl {
         pub path: Option<std::path::PathBuf>,
         pub started: Option<u64>,
@@ -129,7 +129,8 @@ mod host {
         /// Set while handles live outside state memory, where no collection
         /// may run: between the polls of concurrent testbench processes.
         pub(crate) heap_safepoints_blocked: bool,
-        file_io: celox_runtime::file_io::FileIo,
+        pub(crate) process_heap_roots: Vec<celox_heap::Root>,
+        pub(super) file_io: celox_runtime::file_io::FileIo,
         pending_host_events: Arc<std::sync::Mutex<PendingRuntimeEvents>>,
         pub(crate) program: RuntimeProgram,
         /// The program's scheduling facts.
@@ -160,6 +161,14 @@ mod host {
         /// A timed simulation owns this simulator: a time slot ends when its
         /// scheduler says so, not when combinational logic settles.
         pub(crate) timed: bool,
+        /// Sampled variables and their copies
+        /// (`RuntimeSchema::sample_shadows`).
+        sample_shadows: Vec<(SignalRef, SignalRef)>,
+        /// Deferred assertions or sampled copies have work when a host
+        /// call's time slot is over.
+        pub(crate) host_slot_work: bool,
+        /// Some report site reads the time it issues its report at.
+        pub(crate) timestamped_reports: bool,
         /// Identity of the state layout, computed on first checkpoint use.
         pub(super) checkpoint_fingerprint: std::sync::OnceLock<u64>,
         /// State objects as state files name them, built on first use.
@@ -297,6 +306,7 @@ mod host {
     }
 
     pub struct RuntimeEventDrain {
+        timed: bool,
         buffer: Arc<RuntimeEventBuffer>,
         layout: MemoryLayout,
         sites: Vec<RuntimeEventSite>,
@@ -327,6 +337,7 @@ mod host {
             events
                 .into_iter()
                 .filter_map(|raw| render_raw_runtime_event(raw, &self.sites, ctx))
+                .map(|event| untimed_report(event, self.timed, ctx))
                 .collect()
         }
     }
@@ -624,6 +635,7 @@ mod host {
         args: &[RuntimeEventArgValue],
         ctx: RuntimeFormatContext<'_>,
     ) -> Vec<u8> {
+        let args = formatted_args(site, args);
         let Some(template) = site.template.as_deref() else {
             let default_spec = match site.kind {
                 // Veryl prints arguments without a format string in hexadecimal.
@@ -744,11 +756,48 @@ mod host {
         }
     }
 
+    /// Without a scheduler the simulation has no time: a report has the
+    /// time the host gives, not the one its site read.
+    fn untimed_report(
+        event: RuntimeEvent,
+        timed: bool,
+        ctx: RuntimeFormatContext<'_>,
+    ) -> RuntimeEvent {
+        match event {
+            RuntimeEvent::Report(report) if !timed => RuntimeEvent::Report(Report {
+                time: ctx.tb_time,
+                ..report
+            }),
+            event => event,
+        }
+    }
+
+    /// The arguments of an event that its message formats: all but the
+    /// time of a timestamped site.
+    fn formatted_args<'a>(
+        site: &RuntimeEventSite,
+        args: &'a [RuntimeEventArgValue],
+    ) -> &'a [RuntimeEventArgValue] {
+        match (site.timestamp_arg, args.split_last()) {
+            (true, Some((_, args))) => args,
+            _ => args,
+        }
+    }
+
     fn render_runtime_event(
         site: &RuntimeEventSite,
         args: &[RuntimeEventArgValue],
         ctx: RuntimeFormatContext<'_>,
     ) -> RuntimeEvent {
+        // The time the site issued the event, unless the host gives one.
+        let issued = site
+            .timestamp_arg
+            .then(|| args.last().and_then(|time| time.values.first().copied()))
+            .flatten();
+        let ctx = RuntimeFormatContext {
+            tb_time: ctx.tb_time.or(issued),
+            ..ctx
+        };
         let message = render_runtime_event_message(site, args, ctx);
         match site.kind {
             RuntimeEventKind::Display => RuntimeEvent::Display { message },
@@ -952,7 +1001,7 @@ mod host {
             match err {
                 RuntimeErrorCode::DetectedTrueLoopCode(code) => {
                     if self.comb_fatal_site(code).is_some() {
-                        return RuntimeErrorCode::Runtime {
+                        return RuntimeErrorCode::Fatal {
                             message: "Fatal assertion (runtime event record overwritten)"
                                 .to_string(),
                             signals: Vec::new(),
@@ -1018,6 +1067,7 @@ mod host {
                 &program.runtime_schema.comb_observers,
             );
             let sites = &program.runtime_schema.runtime_event_sites;
+            let timestamped_reports = sites.iter().any(|site| site.timestamp_arg);
             let deferred_sites = if sites.iter().any(|site| site.deferred.is_some()) {
                 sites
                     .iter()
@@ -1029,6 +1079,17 @@ mod host {
             } else {
                 Vec::new()
             };
+            let sample_shadows: Vec<(SignalRef, SignalRef)> = program
+                .runtime_schema
+                .sample_shadows
+                .iter()
+                .map(|(variable, copy)| {
+                    (
+                        backend.resolve_signal(variable),
+                        backend.resolve_signal(copy),
+                    )
+                })
+                .collect();
             let mut comb_deferred_groups: Vec<(u32, usize)> = Vec::new();
             for observer in &program.runtime_schema.comb_observers {
                 if matches!(
@@ -1053,6 +1114,7 @@ mod host {
                 warnings,
                 handle_slots: Default::default(),
                 heap_safepoints_blocked: false,
+                process_heap_roots: Vec::new(),
                 file_io: Default::default(),
                 pending_host_events: Arc::new(std::sync::Mutex::new(PendingRuntimeEvents {
                     deferred: DeferredQueues {
@@ -1064,6 +1126,9 @@ mod host {
                 deferred_assertions: !deferred_sites.is_empty(),
                 comb_deferred_groups,
                 timed: false,
+                host_slot_work: !deferred_sites.is_empty() || !sample_shadows.is_empty(),
+                timestamped_reports,
+                sample_shadows,
                 components: Default::default(),
                 component_simulation: None,
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
@@ -1091,6 +1156,7 @@ mod host {
                 finish_sites: false,
                 event_edges,
             };
+            sim.initialize_copies();
             sim.comb_observer_snapshots = sim.snapshot_all_comb_observers();
             sim
         }
@@ -1288,6 +1354,7 @@ mod host {
                     );
                 }
             }
+            self.backend.mark_settle_range(signal.offset, 1);
         }
 
         /// Drain runtime events, lazily evaluating dirty combinational logic.
@@ -1318,13 +1385,12 @@ mod host {
             }
         }
 
-        /// Without a scheduler, a host call is a time slot: mature the
-        /// deferred assertions it ran.
+        /// Without a scheduler, a host call is a time slot: end it.
         fn end_untimed_slot(&mut self) -> Result<(), RuntimeErrorCode> {
             if self.timed {
                 return Ok(());
             }
-            self.mature_deferred_assertions()
+            self.end_host_slot()
         }
 
         pub(crate) fn drain_runtime_events_deferred_with_context(
@@ -1407,6 +1473,7 @@ mod host {
                         ctx,
                     )
                 })
+                .map(|event| untimed_report(event, self.timed, ctx))
                 .collect()
         }
 
@@ -1466,11 +1533,75 @@ mod host {
             self.host_watch.set_log(other.host_watch.log().to_vec());
         }
 
+        /// A host call without a scheduler is a time slot, which is over:
+        /// deferred assertions mature, then the sampled copies are made.
+        #[inline]
+        fn end_host_slot(&mut self) -> Result<(), RuntimeErrorCode> {
+            if !self.host_slot_work {
+                return Ok(());
+            }
+            self.finish_host_slot()
+        }
+
+        /// A host call without a scheduler begins a time slot. Logic that
+        /// host writes since the previous call left dirty settles first, in
+        /// the previous slot, which then ends: the call's domains sample the
+        /// values it settled to, and settles within the call do not change
+        /// them.
+        #[inline]
+        fn begin_host_slot(&mut self) -> Result<(), RuntimeErrorCode> {
+            if !self.host_slot_work || !self.dirty || self.timed {
+                return Ok(());
+            }
+            self.settle_host_slot()
+        }
+
+        #[cold]
+        #[inline(never)]
+        fn settle_host_slot(&mut self) -> Result<(), RuntimeErrorCode> {
+            self.eval_comb_checked()?;
+            self.dirty = false;
+            self.finish_host_slot()
+        }
+
+        #[cold]
+        #[inline(never)]
+        fn finish_host_slot(&mut self) -> Result<(), RuntimeErrorCode> {
+            self.mature_deferred_assertions()?;
+            self.sample_values();
+            Ok(())
+        }
+
+        /// Before the first time slot, start the `$past` histories and the
+        /// sampled copies with the values of their variables, the default
+        /// sampled values (IEEE 1800-2023 16.5.1).
+        pub(crate) fn initialize_copies(&mut self) {
+            if !self.host_slot_work && self.program.runtime_schema.initial_copies.is_empty() {
+                return;
+            }
+            for (variable, copy) in self.program.runtime_schema.initial_copies.clone() {
+                let variable = self.backend.resolve_signal(&variable);
+                let copy = self.backend.resolve_signal(&copy);
+                celox_runtime::copy_signal(&mut self.backend, variable, copy);
+            }
+            self.sample_values();
+        }
+
+        /// Copy each sampled variable into its copy (IEEE 1800-2023
+        /// 16.5.1).
+        pub(crate) fn sample_values(&mut self) {
+            for &(variable, copy) in &self.sample_shadows {
+                celox_runtime::copy_signal(&mut self.backend, variable, copy);
+            }
+        }
+
         /// The time slot ends: the actions of deferred assertions that their
         /// process did not flush mature, `#0` before `final` (IEEE 1800-2023
         /// 16.4). A fatal one ends the simulation with an error.
         pub(crate) fn mature_deferred_assertions(&mut self) -> Result<(), RuntimeErrorCode> {
-            if !self.deferred_assertions {
+            // Terminal output draining must not execute actions left in the
+            // Observed/Postponed queues after final procedures (9.2.3).
+            if self.frozen || !self.deferred_assertions {
                 return Ok(());
             }
             self.stash_runtime_events();
@@ -1493,7 +1624,7 @@ mod host {
             }) else {
                 return Ok(());
             };
-            Err(RuntimeErrorCode::Runtime {
+            Err(RuntimeErrorCode::Fatal {
                 message: message_diagnostic(&report.message),
                 signals: Vec::new(),
             })
@@ -1584,6 +1715,9 @@ mod host {
         }
 
         fn runtime_event_write_seq(&self) -> u64 {
+            if self.program.runtime_schema.runtime_event_sites.is_empty() {
+                return 0;
+            }
             if let Some(buffer) = self.backend.runtime_event_buffer() {
                 buffer.load_atomic_u64(0, std::sync::atomic::Ordering::Acquire)
             } else {
@@ -1626,6 +1760,7 @@ mod host {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .ok()?;
             Some(RuntimeEventDrain {
+                timed: self.timed,
                 buffer,
                 layout: self.backend.layout().clone(),
                 sites: self.program.runtime_schema.runtime_event_sites.clone(),
@@ -1822,7 +1957,7 @@ mod host {
                 return Err(error);
             }
             if fatal_status {
-                return Err(RuntimeErrorCode::Runtime {
+                return Err(RuntimeErrorCode::Fatal {
                     message: "Fatal assertion (runtime event record overwritten)".to_string(),
                     signals: Vec::new(),
                 });
@@ -1835,7 +1970,9 @@ mod host {
         ) -> (Result<(), RuntimeErrorCode>, Vec<RawRuntimeEvent>) {
             // Event-drain writes use this entry directly instead of the
             // checked facade. Leave observers and runtime events untouched.
-            if self.declaration_phase {
+            // A boundary observer may have marked the state dirty immediately
+            // before freezing; draining output must not activate HDL afterwards.
+            if self.frozen || self.declaration_phase {
                 return (Ok(()), Vec::new());
             }
             if self.program.runtime_schema.runtime_event_sites.is_empty() {
@@ -1931,7 +2068,7 @@ mod host {
                 if !site.kind.is_fatal() || site.deferred.is_some() {
                     return None;
                 }
-                Some(RuntimeErrorCode::Runtime {
+                Some(RuntimeErrorCode::Fatal {
                     message: message_diagnostic(&render_runtime_event_message(
                         site,
                         args,
@@ -1942,40 +2079,62 @@ mod host {
             })
         }
 
+        /// Keep a fatal report distinct from ordinary runtime faults before its
+        /// backend status is decorated into a diagnostic.
+        fn checked_kernel_result(
+            &self,
+            result: Result<(), RuntimeErrorCode>,
+            start: u64,
+        ) -> Result<(), RuntimeErrorCode> {
+            result.map_err(|error| {
+                if self.program.runtime_schema.runtime_event_sites.is_empty() {
+                    return self.decorate_runtime_error(error);
+                }
+                self.fatal_comb_capture_error(&self.peek_backend_runtime_events_from(start))
+                    .unwrap_or_else(|| self.decorate_runtime_error(error))
+            })
+        }
+
+        pub(crate) fn run_process_checked(&mut self, index: usize) -> Result<(), RuntimeErrorCode> {
+            let start = self.runtime_event_write_seq();
+            let result = self.backend.run_process(index);
+            self.checked_kernel_result(result, start)
+        }
+
         pub(crate) fn eval_apply_ff_at_checked(
             &mut self,
             event: B::Event,
         ) -> Result<(), RuntimeErrorCode> {
-            self.backend
-                .eval_apply_ff_at(event)
-                .map_err(|e| self.decorate_runtime_error(e))
+            let start = self.runtime_event_write_seq();
+            let result = self.backend.eval_apply_ff_at(event);
+            self.checked_kernel_result(result, start)
         }
 
         pub(crate) fn eval_comb_apply_ff_at_checked(
             &mut self,
             event: B::Event,
         ) -> Result<(), RuntimeErrorCode> {
-            self.backend
-                .eval_comb_apply_ff_at(event)
-                .map_err(|e| self.decorate_runtime_error(e))
+            let start = self.runtime_event_write_seq();
+            let result = self.backend.eval_comb_apply_ff_at(event);
+            self.checked_kernel_result(result, start)
         }
 
         pub(crate) fn eval_only_ff_at_checked(
             &mut self,
             event: B::Event,
         ) -> Result<(), RuntimeErrorCode> {
-            self.backend
-                .eval_only_ff_at(event)
-                .map_err(|e| self.decorate_runtime_error(e))
+            let start = self.runtime_event_write_seq();
+            let result = self.backend.eval_only_ff_at(event);
+            self.checked_kernel_result(result, start)
         }
 
         pub(crate) fn apply_ff_at_checked(
             &mut self,
             event: B::Event,
         ) -> Result<(), RuntimeErrorCode> {
-            self.backend
-                .apply_ff_at(event)
-                .map_err(|e| self.decorate_runtime_error(e))
+            let start = self.runtime_event_write_seq();
+            let result = self.backend.apply_ff_at(event);
+            self.checked_kernel_result(result, start)
         }
 
         /// One clock period of an event's signal: its active edge, then its
@@ -2022,8 +2181,10 @@ mod host {
                 // Nothing the domain runs reads the level, which is the
                 // inactive one before and after the period: both stores are
                 // unobservable, and the period is one run of the domain.
-                return self.fire(event);
+                // The call begins its slot in the domain's run.
+                return self.fire_from::<true>(event);
             }
+            self.begin_host_slot()?;
             let moved = celox_runtime::move_signal(
                 &mut self.backend,
                 &info,
@@ -2067,13 +2228,27 @@ mod host {
         /// Run the event's domain as its active edge does, with the signal
         /// left as it is: the unit of the edge APIs.
         fn fire(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-            let result = self.fire_unit(event);
-            self.heap_safepoint();
-            result.and(self.take_heap_fault())?;
-            self.mature_deferred_assertions()
+            self.fire_from::<false>(event)
         }
 
-        fn fire_unit(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+        /// [`Self::fire`]; with `BEGIN`, also the start of the host call,
+        /// whose slot [`Self::begin_host_slot`] begins in the domain's run,
+        /// where the clock that nothing reads has already moved.
+        #[inline]
+        fn fire_from<const BEGIN: bool>(
+            &mut self,
+            event: B::Event,
+        ) -> Result<(), RuntimeErrorCode> {
+            let result = self.fire_unit::<BEGIN>(event);
+            self.heap_safepoint();
+            result.and(self.take_heap_fault())?;
+            self.end_host_slot()
+        }
+
+        fn fire_unit<const BEGIN: bool>(
+            &mut self,
+            event: B::Event,
+        ) -> Result<(), RuntimeErrorCode> {
             if let Some(Some(_)) = self.derived_ticks.get(event.id()) {
                 return self.tick_derived(event);
             }
@@ -2081,7 +2256,10 @@ mod host {
             let mut eval_comb_ns = 0u64;
             let mut eval_apply_ns = 0u64;
             if self.dirty {
-                if timing_enabled {
+                if BEGIN && self.host_slot_work && !self.timed {
+                    self.settle_host_slot()?;
+                    self.eval_apply_ff_at_checked(event)?;
+                } else if timing_enabled {
                     let start = crate::timing::now();
                     self.eval_comb_checked()?;
                     eval_comb_ns = eval_comb_ns.saturating_add(start.elapsed().as_nanos() as u64);
@@ -2148,7 +2326,12 @@ mod host {
                     return Ok(());
                 }
                 // No derived domains: move the signal, then run the event's
-                // domain.
+                // domain. Logic that reads the signal settles before it
+                // moves; otherwise the call begins its slot in the domain's
+                // run.
+                if info.comb_read {
+                    self.begin_host_slot()?;
+                }
                 let write = watched_write(&mut self.host_watch);
                 let Some(old) = celox_runtime::move_signal(&mut self.backend, &info, edge, write)
                 else {
@@ -2158,13 +2341,18 @@ mod host {
                     self.dirty = true;
                 }
                 if info.fires(old, edge) {
-                    return self.fire(event);
+                    return if info.comb_read {
+                        self.fire(event)
+                    } else {
+                        self.fire_from::<true>(event)
+                    };
                 }
                 if !self.program.runtime_schema.comb_observers.is_empty() {
                     self.dirty = true;
                 }
                 return Ok(());
             }
+            self.begin_host_slot()?;
             if let Some(Some(unit)) = self.derived_units.get(event.id()).copied()
                 && !self.finish_sites
                 && self.backend.runs_derived_edge_units()
@@ -2232,8 +2420,7 @@ mod host {
         }
 
         /// Settle the outcome of [`celox_runtime::run_edge`] or
-        /// [`celox_runtime::run_edges`], and mature the deferred assertions
-        /// they ran.
+        /// [`celox_runtime::run_edges`], and end the time slot they ran.
         fn note_edge(
             &mut self,
             outcome: Result<celox_runtime::EdgeOutcome, celox_runtime::Halt>,
@@ -2256,7 +2443,7 @@ mod host {
                 Err(celox_runtime::Halt::Error(error)) => return Err(error),
             }
             // The edges are a time slot, as a tick is.
-            self.mature_deferred_assertions()
+            self.end_host_slot()
         }
 
         /// A rising edge of `event`'s signal; see [`Self::edge`].
@@ -2296,6 +2483,7 @@ mod host {
             if self.frozen {
                 return Ok(());
             }
+            self.begin_host_slot()?;
             let plans = std::sync::Arc::clone(&self.derived_ticks);
             let edges = std::sync::Arc::clone(&self.event_edges);
             let mut scratch = self.derived_scratch.take().unwrap_or_default();
@@ -2400,6 +2588,7 @@ mod host {
             if self.frozen {
                 return Ok(());
             }
+            self.begin_host_slot()?;
             if let [event] = events {
                 return self.tick(*event);
             }
@@ -2460,7 +2649,7 @@ mod host {
             let result = self.tick_events_unit(&fired);
             self.heap_safepoint();
             result.and(self.take_heap_fault())?;
-            self.mature_deferred_assertions()?;
+            self.end_host_slot()?;
             for &event in events {
                 let info = self.event_edges[event.id()];
                 self.backend
@@ -2562,8 +2751,11 @@ mod host {
         ) -> Result<(), RuntimeErrorCode> {
             if !self.program.runtime_schema.comb_observers.is_empty()
                 || matches!(self.derived_ticks.get(event.id()), Some(Some(_)))
+                || self.host_slot_work
             {
-                // Derived domains need the settled state to see their edges.
+                // Derived domains need the settled state to see their edges,
+                // and each tick of a design with slot work is a host call.
+                self.begin_host_slot()?;
                 return self.fire(event);
             }
             if self.dirty {
@@ -2602,6 +2794,7 @@ mod host {
             if !self.program.runtime_schema.comb_observers.is_empty()
                 || !self.dirty
                 || matches!(self.derived_ticks.get(event.id()), Some(Some(_)))
+                || self.host_slot_work
             {
                 return (1, self.tick_deferred_comb(event));
             }
@@ -3349,6 +3542,46 @@ mod host {
         }
 
         #[test]
+        fn signal_copy_accepts_an_aliased_four_state_view() {
+            let mut sim = Simulator::builder("module Top (data: input logic<32>) {}", "Top")
+                .four_state(true)
+                .build_interpreter()
+                .unwrap();
+            let signal = sim.try_child_signal(&[], "data").unwrap();
+            let value = BigUint::from(0x1234u32);
+            let mask = BigUint::from(0x00ffu32);
+            sim.backend
+                .set_four_state(signal, value.clone(), mask.clone());
+            celox_runtime::copy_signal(&mut sim.backend, signal, signal);
+            assert_eq!(sim.backend.get_four_state(signal), (value, mask));
+        }
+
+        /// Batched testbench ticks end each tick's slot in a design with
+        /// sampled values: a register capturing `$sampled(count)` follows
+        /// the preceding tick.
+        #[cfg(feature = "systemverilog")]
+        #[test]
+        fn batched_testbench_ticks_end_each_slot() {
+            let source = "module Top(input bit clk, output bit [7:0] count, output bit [7:0] seen);\n  \
+                          always_ff @(posedge clk) begin count <= count + 1; seen <= $sampled(count); end\n\
+                          endmodule";
+            let mut sim =
+                Simulator::from_sv_sources(vec![(source, std::path::Path::new("t.sv"))], "Top")
+                    .build()
+                    .unwrap();
+            let clk = sim.event("clk");
+            sim.dirty = true;
+            let mut done = 0;
+            while done < 3 {
+                let (ran, result) = sim.tick_deferred_comb_many(clk, 3 - done);
+                result.unwrap();
+                done += ran;
+            }
+            let seen = sim.signal("seen");
+            assert_eq!(sim.get(seen), BigUint::from(2u8));
+        }
+
+        #[test]
         fn edges_leave_a_finished_simulation_unchanged() {
             let mut sim = Simulator::builder(GATED_COUNTER, "Top").build().unwrap();
             let (clk, en) = (sim.event("clk"), sim.signal("en"));
@@ -3535,7 +3768,7 @@ mod host {
             assert!(sim.fatal_comb_capture_error(&events).is_none());
             assert!(sim.check_comb_backend_result(result.clone()).is_ok());
             assert!(matches!(sim.decorate_runtime_error(result.unwrap_err()),
-                RuntimeErrorCode::Runtime { message, .. } if message.contains("overwritten")));
+                RuntimeErrorCode::Fatal { message, .. } if message.contains("overwritten")));
             let drained = sim.drain_runtime_events();
             assert!(matches!(
                 drained.first(),

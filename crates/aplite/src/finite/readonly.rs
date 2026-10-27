@@ -8,7 +8,7 @@
 //! default then extends every positive equality and preserves every negative equality. This is not a
 //! certificate; both reduction and independent original-array replay are trusted.
 use super::*;
-use lydite_ir::{and, boolv, eq, ite, node, not, var};
+use crate::{and, boolv, eq, ite, node, not, var};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArrayModel {
@@ -435,8 +435,7 @@ pub(super) fn solve(formula: &Term, context: &Env, limits: Limits, hint: SearchH
             if x == y {
                 r.charge(&mut b)?;
                 r.charge(&mut b)?;
-                r.equality
-                    .insert(t.clone(), (boolv(true), lydite_ir::bv(1, 0)));
+                r.equality.insert(t.clone(), (boolv(true), crate::bv(1, 0)));
                 continue;
             }
             active_equalities.push(t.clone());
@@ -750,7 +749,7 @@ pub(super) fn strengthen(formula: &Term, b: &mut Budget) -> Res<Term> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lydite_ir::bv;
+    use crate::bv;
     fn mem(n: &str) -> Term {
         var(n.into(), Sort::Mem(1, 1))
     }

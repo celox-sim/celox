@@ -1,0 +1,40 @@
+{
+  "schema_version": 3,
+  "suite_version": "0.11.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "class::untyped_class_parameters_take_the_type_of_their_value at 1045:3: expect_output: expected [56, 32, 51, 50, 10], got [51, 50, 32, 51, 50, 10]",
+      "expectation": "Simulation",
+      "name": "class::untyped_class_parameters_take_the_type_of_their_value",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "passed": 0,
+    "mismatch": 1,
+    "compile_error": 0,
+    "emission_error": 0,
+    "ignored": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "include_ignored": true,
+  "exclude_stronger_than_sv": false,
+  "standard": "IEEE 1800-2023 6.20.2 and 8.25: a parameter declared without a type or range takes the type and range of its final value after overrides, including the value a class specialization assigns.",
+  "adapter_free": {
+    "source": "verification/repros/untyped_class_parameters.sv",
+    "verilator_command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <build-dir> untyped_class_parameters.sv",
+    "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "verilator_output": "32 32",
+    "expected_output": "8 32"
+  }
+}

@@ -46,7 +46,7 @@ mod procedural;
 
 type RegionedVarAddr = RegionedVarAddrBase<SourceVarId>;
 type GlueBlock = GlueBlockBase<SourceVarId>;
-const MAX_SV_SPECIALIZATIONS_PER_MODULE: usize = 64;
+const MAX_SV_RECURSIVE_SPECIALIZATIONS: usize = 64;
 /// The name of a module's [`SimModule::time_slot`].
 const TIME_SLOT: &str = "$time";
 
@@ -87,6 +87,12 @@ struct SvVariable {
     hidden: bool,
     /// Compiler-generated external override slot: (target, is_enable).
     force_control: Option<(SourceVarId, bool)>,
+    /// The variable whose sampled value this hidden copy holds
+    /// (`SimModule::sample_shadows`).
+    sampled_from: Option<SourceVarId>,
+    /// The variable whose past sampled values this hidden register holds;
+    /// it starts with the variable's value (`SimModule::initial_copies`).
+    history_of: Option<SourceVarId>,
 }
 
 /// Whether `expr` reads a string variable: after its calls are hoisted, a
@@ -126,13 +132,16 @@ impl SvVariable {
     }
 
     /// A hidden variable other than the time slot, whose value the lowered
-    /// code computes. The time slot is state the scheduler writes, and an
-    /// event expression's variables are state its process and its
+    /// code computes. The time slot and the sampled copies are state the
+    /// scheduler writes, `$past` histories are state their process keeps,
+    /// and an event expression's variables are state its process and its
     /// continuous assignment share.
     fn is_scratch(&self) -> bool {
         self.hidden
             && self.path != [TIME_SLOT]
             && self.force_control.is_none()
+            && self.sampled_from.is_none()
+            && self.history_of.is_none()
             && !self.path[0].starts_with(EVENT_PREFIX)
     }
 }
@@ -1043,11 +1052,25 @@ fn validate_package_variable_drivers<'a>(
     for root in roots {
         count(root, 1, module_ids, modules, &mut instances);
     }
-    // A driver is one process or child output of one instance; a process may
-    // assign the variable several times.
-    type Driver = (ModuleId, usize, bool, usize);
-    let mut drivers: HashMap<(String, String), Vec<(Driver, Option<(i128, i128)>)>> =
-        HashMap::default();
+    // A driver is one process, child output or initial block of one
+    // instance; a process may assign the variable several times.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Source {
+        Process,
+        Child,
+        Initial,
+    }
+    type Driver = (ModuleId, usize, Source, usize);
+    struct Writer {
+        driver: Driver,
+        range: Option<(i128, i128)>,
+        /// Treated as the only writer of what it writes.
+        exclusive: bool,
+        /// The only writer the standard allows, which an initial block
+        /// must not write either.
+        restricted: bool,
+    }
+    let mut drivers: HashMap<(String, String), Vec<Writer>> = HashMap::default();
     for (&module_id, module) in modules {
         let multiplicity = instances.get(&module_id).copied().unwrap_or(0);
         if module.package_variables.is_empty() {
@@ -1060,24 +1083,62 @@ fn validate_package_variable_drivers<'a>(
             let name = &module.variables[var_id].path[0];
             let local = module_drivers.local(name);
             let children = child_output_driver_ranges(module, &child_drivers, name);
+            // One-shot initial blocks; repeating ones are among `local`.
+            let initial = module_drivers
+                .initial(name)
+                .into_iter()
+                .filter(|(driver, _)| !module.source.initial_processes()[*driver].repeats())
+                .collect::<Vec<_>>();
             let entry = drivers
                 .entry((package.clone(), variable.clone()))
                 .or_default();
             for copy in 0..multiplicity {
                 for &(driver, range) in &local {
-                    entry.push(((module_id, copy, false, driver), range));
+                    entry.push(Writer {
+                        driver: (module_id, copy, Source::Process, driver),
+                        range,
+                        exclusive: exclusive_driver(&module.source, driver),
+                        restricted: restricted_driver(&module.source, driver),
+                    });
                 }
                 for &(driver, range) in &children {
-                    entry.push(((module_id, copy, true, driver), range));
+                    entry.push(Writer {
+                        driver: (module_id, copy, Source::Child, driver),
+                        range,
+                        exclusive: true,
+                        restricted: true,
+                    });
+                }
+                for &(driver, range) in &initial {
+                    entry.push(Writer {
+                        driver: (module_id, copy, Source::Initial, driver),
+                        range,
+                        exclusive: false,
+                        restricted: false,
+                    });
                 }
             }
         }
     }
-    for ((package, variable), ranges) in drivers {
-        let overlap = ranges.iter().enumerate().any(|(index, (driver, range))| {
-            ranges[index + 1..].iter().any(|(other, other_range)| {
-                other != driver && net_driver_ranges_overlap(*range, *other_range)
-            })
+    // Processes of several instances may write a package variable, as any
+    // processes may write a variable, unless one of them must be its only
+    // writer (IEEE 1800-2023 6.5, 9.2.2); an initial block conflicts only
+    // with a writer the standard restricts.
+    for ((package, variable), writers) in drivers {
+        let conflict = |left: &Writer, right: &Writer| {
+            let initial = left.driver.2 == Source::Initial || right.driver.2 == Source::Initial;
+            left.driver != right.driver
+                && if initial {
+                    left.restricted || right.restricted
+                } else {
+                    left.exclusive || right.exclusive
+                }
+                && net_driver_ranges_overlap(left.range, right.range)
+        };
+        let overlap = writers.iter().enumerate().any(|(index, left)| {
+            writers[index + 1..]
+                .iter()
+                .any(|right| conflict(left, right))
         });
         if overlap {
             return Err(sv::AnalyzerError::Unsupported(format!(
@@ -1296,7 +1357,7 @@ fn kernel_window_writes(
     for process in module
         .initial_processes()
         .iter()
-        .filter(|process| !process.is_initializer())
+        .filter(|process| !process.is_initializer() && !process.is_final())
     {
         let body = process.body();
         let first = if process.repeats() {
@@ -1385,6 +1446,13 @@ fn kernel_written_names(
         });
     }
     while let Some((callee, args)) = calls.pop() {
+        if let sv::ir::Callee::Object(op) = &callee {
+            names.extend(
+                procedural::written_object_arguments(op, &args)
+                    .iter()
+                    .map(|lhs| lhs.name().to_string()),
+            );
+        }
         let name = match callee {
             sv::ir::Callee::System(function) => {
                 names.extend(
@@ -1586,6 +1654,11 @@ impl DriverScan<'_> {
             });
         }
         while let Some((callee, args)) = calls.pop() {
+            if let sv::ir::Callee::Object(op) = &callee {
+                for lhs in procedural::written_object_arguments(op, &args) {
+                    record(&lhs);
+                }
+            }
             let name = match callee {
                 sv::ir::Callee::System(function) => {
                     for lvalue in procedural::written_system_arguments(function, &args) {
@@ -1648,6 +1721,52 @@ struct DriverWrite {
     /// The bits of the element of an array a run-time select inside one
     /// element drives, when the select is not constant.
     element: Option<(i128, i128)>,
+}
+
+/// Repeated zero-delay aliases of a declared net have one effective value
+/// (IEEE 1800-2023 6.5, 6.6.1). Keep the authored process indices so removing
+/// an alias does not renumber the random streams of later processes.
+/// Only whole-net identifier reads qualify: calls, slices, variables and
+/// conditional assignments retain their independent driver identities.
+fn redundant_net_aliases(module: &sv::ir::Module) -> HashSet<usize> {
+    let nets: HashSet<_> = module
+        .signals()
+        .iter()
+        .filter(|signal| {
+            signal.is_net() && !signal.is_unresolved_net() && signal.hierarchical().is_none()
+        })
+        .map(|signal| signal.name())
+        .chain(
+            module
+                .ports()
+                .iter()
+                .filter(|port| port.is_net() && !port.is_unresolved_net())
+                .map(|port| port.name()),
+        )
+        .collect();
+    let mut aliases = HashSet::default();
+    let mut redundant = HashSet::default();
+    for (index, process) in module.comb_processes().iter().enumerate() {
+        if process.kind() != sv::ir::CombProcessKind::ContinuousAssign
+            || process.condition().is_some()
+        {
+            continue;
+        }
+        let [
+            sv::ir::Stmt::Assign {
+                lhs: sv::ir::LValue::Ident(target),
+                rhs: sv::ir::Expr::Ident(source),
+                nonblocking: false,
+            },
+        ] = process.body()
+        else {
+            continue;
+        };
+        if nets.contains(target.as_str()) && !aliases.insert((target.as_str(), source.as_str())) {
+            redundant.insert(index);
+        }
+    }
+    redundant
 }
 
 /// The drivers of the variables of a module, by variable name, found by one
@@ -1737,7 +1856,11 @@ impl ModuleDrivers {
         };
         let comb = module.comb_processes();
         let ff = module.ff_processes();
+        let redundant = redundant_net_aliases(module);
         for (index, process) in comb.iter().enumerate() {
+            if redundant.contains(&index) {
+                continue;
+            }
             let active = condition_is_active(process.condition(), constants, parameter_types);
             walk(
                 process.body(),
@@ -1801,6 +1924,49 @@ impl ModuleDrivers {
     fn initial(&self, signal_name: &str) -> Vec<(usize, Option<(i128, i128)>)> {
         self.drivers(signal_name, |write| Some((write.initial?, write.range)))
     }
+}
+
+/// Whether process `driver` of [`ModuleDrivers::local`] must be the only writer of
+/// the variables it writes: an `always_comb` or continuous assignment, an
+/// edge procedure, or an `always_ff` run as a process, but not another
+/// ordinary `always` process (IEEE 1800-2023 6.5, 9.2.2).
+fn exclusive_driver(module: &sv::ir::Module, driver: usize) -> bool {
+    let edge = module.comb_processes().len() + module.ff_processes().len();
+    driver < edge || {
+        let process = module
+            .initial_processes()
+            .iter()
+            .filter(|process| process.repeats())
+            .nth(driver - edge);
+        process.is_some_and(|process| {
+            process.is_scheduled_edge()
+                || process
+                    .site()
+                    .is_some_and(|site| site.construct == "always_ff")
+        })
+    }
+}
+
+/// Whether process `driver` of [`ModuleDrivers::local`] is one the standard lets
+/// no other process write to the variables it writes: `always_comb`,
+/// `always_latch`, `always_ff` or a continuous assignment (IEEE 1800-2023
+/// 6.5, 9.2.2).
+fn restricted_driver(module: &sv::ir::Module, driver: usize) -> bool {
+    let combinational = module.comb_processes().len();
+    let edge = combinational + module.ff_processes().len();
+    if let Some(process) = module.comb_processes().get(driver) {
+        return process.kind() != sv::ir::CombProcessKind::AlwaysStar;
+    }
+    if driver < edge {
+        return module.ff_processes()[driver - combinational].is_always_ff();
+    }
+    module
+        .initial_processes()
+        .iter()
+        .filter(|process| process.repeats())
+        .nth(driver - edge)
+        .and_then(|process| process.site())
+        .is_some_and(|site| matches!(site.construct, "always_ff" | "always_comb" | "always_latch"))
 }
 
 fn net_lvalue_range(
@@ -2053,6 +2219,8 @@ fn prepare_external_hierarchy_collecting(
                         source: variable.source.clone(),
                         hidden: !variable.module_affiliated,
                         force_control: None,
+                        sampled_from: None,
+                        history_of: None,
                     },
                 )
             })
@@ -2100,7 +2268,7 @@ fn prepare_external_hierarchy_collecting(
     names.sort();
 
     let mut module_ids = HashMap::default();
-    let mut module_specialization_counts = HashMap::default();
+    let mut specialization_parents = HashMap::default();
     let mut queue = Vec::new();
     let mut requested_roots = HashMap::default();
     for name in names {
@@ -2141,7 +2309,6 @@ fn prepare_external_hierarchy_collecting(
         }
         let module_id = ModuleId(module_ids.len());
         module_ids.insert(key.clone(), module_id);
-        module_specialization_counts.insert(name.clone(), 1usize);
         queue.push(key);
     }
 
@@ -2206,7 +2373,6 @@ fn prepare_external_hierarchy_collecting(
                 if !module_ids.contains_key(&dependency) {
                     let id = ModuleId(module_ids.len());
                     module_ids.insert(dependency.clone(), id);
-                    module_specialization_counts.insert(name.clone(), 1);
                     queue.push(dependency);
                 }
             }
@@ -2232,13 +2398,7 @@ fn prepare_external_hierarchy_collecting(
                 continue;
             }
             if !module_ids.contains_key(&child_key) {
-                let specialization_count = module_specialization_counts
-                    .entry(child_key.name.clone())
-                    .or_insert(0);
-                if *specialization_count >= MAX_SV_SPECIALIZATIONS_PER_MODULE {
-                    return Err(sv_specialization_limit_error(child_key.name.clone()).into());
-                }
-                *specialization_count += 1;
+                register_specialization_parent(&child_key, &key, &mut specialization_parents)?;
                 let child_id = ModuleId(module_ids.len());
                 module_ids.insert(child_key.clone(), child_id);
                 queue.push(child_key);
@@ -2717,8 +2877,7 @@ fn schedule_sources_collecting(
     let root_id = ModuleId(0);
     let mut module_ids = HashMap::default();
     module_ids.insert(root_key.clone(), root_id);
-    let mut module_specialization_counts = HashMap::default();
-    module_specialization_counts.insert(root_key.name.clone(), 1usize);
+    let mut specialization_parents = HashMap::default();
     let mut queue = vec![root_key.clone()];
     let mut index = 0;
     let mut elaborated = HashMap::default();
@@ -2755,13 +2914,7 @@ fn schedule_sources_collecting(
                 return Err(unsupported_sv_instance(child_key.name.clone()).into());
             }
             if !module_ids.contains_key(&child_key) {
-                let specialization_count = module_specialization_counts
-                    .entry(child_key.name.clone())
-                    .or_insert(0);
-                if *specialization_count >= MAX_SV_SPECIALIZATIONS_PER_MODULE {
-                    return Err(sv_specialization_limit_error(child_key.name.clone()).into());
-                }
-                *specialization_count += 1;
+                register_specialization_parent(&child_key, &key, &mut specialization_parents)?;
                 let child_id = ModuleId(module_ids.len());
                 module_ids.insert(child_key.clone(), child_id);
                 queue.push(child_key);
@@ -3040,6 +3193,29 @@ fn restore_interface_member_paths(module: &mut SimModule, source: &AnalyzedSvMod
             })
             .collect();
     }
+}
+
+/// Bound parameter-changing recursion along one instantiation path. Independent
+/// siblings may have any number of distinct parameter specializations. Repeated
+/// identical keys are handled by the hierarchy cycle checks.
+fn register_specialization_parent(
+    child: &LoweredSvModuleKey,
+    parent: &LoweredSvModuleKey,
+    parents: &mut HashMap<LoweredSvModuleKey, LoweredSvModuleKey>,
+) -> Result<(), ParserError> {
+    let mut ancestor = Some(parent);
+    let mut occurrences = 1usize;
+    while let Some(key) = ancestor {
+        if key.name == child.name {
+            occurrences += 1;
+            if occurrences > MAX_SV_RECURSIVE_SPECIALIZATIONS {
+                return Err(sv_specialization_limit_error(child.name.clone()));
+            }
+        }
+        ancestor = parents.get(key);
+    }
+    parents.insert(child.clone(), parent.clone());
+    Ok(())
 }
 
 fn sv_specialization_limit_error(name: String) -> ParserError {
@@ -3484,6 +3660,8 @@ fn lower_module_with_overrides(
             source: None,
             hidden: false,
             force_control: None,
+            sampled_from: None,
+            history_of: None,
         };
         name_to_id.insert(port.name().to_string(), id);
         port_order.push(id);
@@ -3568,6 +3746,8 @@ fn lower_module_with_overrides(
             source: None,
             hidden: false,
             force_control: None,
+            sampled_from: None,
+            history_of: None,
         };
         name_to_id.insert(signal.name().to_string(), id);
         // The package's object, or the other instance's, has its own
@@ -3648,6 +3828,8 @@ fn lower_module_with_overrides(
                 source: None,
                 hidden: false,
                 force_control: None,
+                sampled_from: None,
+                history_of: None,
             },
         );
     }
@@ -3860,6 +4042,8 @@ fn lower_module_with_overrides(
             nba_switches,
             host_request_sites,
             time_slot: name_to_id.get(TIME_SLOT).copied(),
+            sample_shadows: Vec::new(),
+            initial_copies: Vec::new(),
         },
         variables,
         port_order,
@@ -4648,6 +4832,18 @@ pub(crate) fn attach_instance_glue(
     }
     // Combinational processes may read the time too.
     module.time_slot = signal_names.get(TIME_SLOT).copied();
+    let mut sample_shadows: Vec<_> = parent_variables
+        .iter()
+        .filter_map(|(&copy, variable)| variable.sampled_from.map(|variable| (variable, copy)))
+        .collect();
+    sample_shadows.sort_by_key(|&(variable, copy)| (variable.0, copy.0));
+    module.sample_shadows = sample_shadows;
+    let mut initial_copies: Vec<_> = parent_variables
+        .iter()
+        .filter_map(|(&copy, variable)| variable.history_of.map(|variable| (variable, copy)))
+        .collect();
+    initial_copies.sort_by_key(|&(variable, copy)| (variable.0, copy.0));
+    module.initial_copies = initial_copies;
     for (instance, child_id, child, connections) in resolved_instances {
         let glue = build_instance_glue(
             &parent_variables,
@@ -4676,6 +4872,19 @@ pub(crate) fn attach_instance_glue(
         }
     }
     module.comb_alternatives = comb_alternatives;
+    // Probe results are activation-local values, never global occurrences.
+    let probe_results: HashSet<_> = module
+        .processes
+        .iter()
+        .filter_map(|process| process.frame.as_ref())
+        .flat_map(|frame| {
+            frame
+                .event_probes
+                .iter()
+                .flat_map(|probe| probe.scratch.iter().copied())
+        })
+        .collect();
+    candidates.retain(|signal| !probe_results.contains(signal));
     module.counter_slots =
         celox_frontend_core::watch::declare_counter_slots(&mut module.variables, candidates);
     if waits {
@@ -4883,6 +5092,7 @@ fn process_origin(process: &sv::ir::InitialProcess) -> celox_design::ProcessOrig
     let construct = match process.site() {
         Some(site) => site.construct,
         None if process.is_initializer() => "declaration initializer",
+        None if process.is_final() => "final",
         None if process.repeats() => "always",
         None => "initial",
     };
@@ -4893,9 +5103,9 @@ fn process_origin(process: &sv::ir::InitialProcess) -> celox_design::ProcessOrig
     }
 }
 
-/// The `initial` blocks and declaration initializers (IEEE 1800-2023 9.2.1,
-/// 10.5): the initial state they define, and the processes that run the
-/// others from time zero.
+/// Lower declaration initializers and procedural kernels. Final procedures
+/// retain kernels but execute only at simulation termination (9.2.3); they
+/// must never contribute folded initial state.
 ///
 /// A block whose writes have constant values defines initial state, with
 /// the hidden variables used while executing it discarded. Declaration
@@ -4967,7 +5177,10 @@ fn lower_initial_processes(
         // initial state. A program's `initial` procedure runs in the reactive
         // region set (IEEE 1800-2023 24.3.1), after the design's processes of
         // time zero, so it is not folded either.
-        if process.repeats() || (module.is_program() && !process.is_initializer()) {
+        if process.is_final()
+            || process.repeats()
+            || (module.is_program() && !process.is_initializer())
+        {
             runtime.push((process, random_seed));
             continue;
         }
@@ -5038,13 +5251,15 @@ fn lower_initial_processes(
                         // Control slots are not signals of the design.
                         hidden: true,
                         force_control: None,
+                        sampled_from: None,
+                        history_of: None,
                     },
                 );
                 id
             };
             ProcessSlots {
-                is_initializer: process.is_initializer(),
-                requires_timed_simulation: process.is_scheduled_edge(),
+                kind: process.kind(),
+                requires_timed_simulation: process.is_scheduled_edge() || process.is_final(),
                 const_delays: false,
                 program: None,
                 resume: declare("resume", PROCESS_RESUME_WIDTH),
@@ -5060,10 +5275,10 @@ fn lower_initial_processes(
         let program = slots
             .iter()
             .zip(&runtime)
-            .find(|(_, (process, _))| !process.is_initializer())
+            .find(|(_, (process, _))| !process.is_initializer() && !process.is_final())
             .map(|(slots, _)| slots.status);
         for (slots, (process, _)) in slots.iter_mut().zip(&runtime) {
-            if !process.is_initializer() {
+            if !process.is_initializer() && !process.is_final() {
                 slots.program = program;
             }
         }
@@ -5131,6 +5346,7 @@ fn lower_initial_processes(
             }));
             Ok(SymbolicProcess {
                 kernel: kernel.unit,
+                frame: kernel.frame,
                 slots: kernel.slots,
                 origin: process_origin(process),
             })
@@ -5194,9 +5410,13 @@ fn lower_comb_processes(
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
     let random_seeds = process_random_seeds(module);
+    let redundant = redundant_net_aliases(module);
     let watchable =
         watch_seeds.map(|seeds| watchable_variables(&pm, module, port_assignments, seeds));
     for (index, process) in module.comb_processes().iter().enumerate() {
+        if redundant.contains(&index) {
+            continue;
+        }
         if let Some(condition) = process.condition() {
             let condition =
                 sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
@@ -5677,6 +5897,8 @@ fn ensure_parent_output_signals(
             source: None,
             hidden: false,
             force_control: None,
+            sampled_from: None,
+            history_of: None,
         };
         parent
             .variables
@@ -7249,6 +7471,90 @@ struct DynamicPackedWrite {
     window: Option<BitAccess>,
 }
 
+/// Recover a constant outer element for a checked dynamic bit select of a
+/// one-bit packed element. Its only valid inner index is its declared bound.
+/// An arbitrary dynamic unpacked element permits more than one index and must
+/// retain its dynamic element addressing.
+fn single_bit_select_window(
+    lsb: &sv::ir::ConstExpr,
+    width: usize,
+    constants: &HashMap<String, i128>,
+    types: &HashMap<String, (usize, bool)>,
+) -> Option<BitAccess> {
+    use sv::ir::{BinaryOp, ConstExpr};
+    fn selected<'a>(
+        mut expr: &'a ConstExpr,
+        constants: &HashMap<String, i128>,
+        types: &HashMap<String, (usize, bool)>,
+    ) -> &'a ConstExpr {
+        while let ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } = expr
+        {
+            match sv::typecheck::eval_const_expr_with_types(condition, constants, types) {
+                Some(0) => expr = else_expr,
+                Some(_) => expr = then_expr,
+                None => break,
+            }
+        }
+        expr
+    }
+    let (base, offset) = split_dynamic_array_offset(lsb, constants, types)?;
+    let ConstExpr::Mux {
+        condition,
+        then_expr,
+        else_expr,
+    } = selected(base, constants, types)
+    else {
+        return None;
+    };
+    let ConstExpr::Binary {
+        left,
+        op: BinaryOp::LogicAnd,
+        right,
+    } = selected(condition, constants, types)
+    else {
+        return None;
+    };
+    let bound = |expr, expected| {
+        let ConstExpr::Binary { left, op, right } = selected(expr, constants, types) else {
+            return None;
+        };
+        let ConstExpr::Ident(name) = left.as_ref() else {
+            return None;
+        };
+        if *op != expected {
+            return None;
+        }
+        Some((
+            name,
+            sv::typecheck::eval_const_expr_with_types(right, constants, types)?,
+        ))
+    };
+    let lower = bound(left, BinaryOp::Ge)?;
+    let upper = bound(right, BinaryOp::Le)?;
+    if lower != upper {
+        return None;
+    }
+    let invalid = sv::typecheck::eval_const_expr_with_types(else_expr, constants, types)?
+        .checked_add(offset)?;
+    let width = i128::try_from(width).ok()?;
+    if (0..width).contains(&invalid) {
+        return None;
+    }
+    let mut checked_index = constants.clone();
+    checked_index.insert(lower.0.clone(), lower.1);
+    let position = sv::typecheck::eval_const_expr_with_types(then_expr, &checked_index, types)?
+        .checked_add(offset)?;
+    if !(0..width).contains(&position) {
+        return None;
+    }
+    let position = usize::try_from(position).ok()?;
+    Some(BitAccess::new(position, position))
+}
+
 /// For a run-time select inside one element of an unpacked array, such as
 /// `mem[1][i]`, the bits of that element: the constant part of the flattened
 /// position names the element, and the run-time part moves within it.
@@ -7259,9 +7565,13 @@ fn runtime_select_window(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<BitAccess> {
-    // One-bit elements have no bits within an element, and their run-time
-    // index has no stride to recognize.
-    if element_width <= 1 || element_width == width {
+    // A checked bit select inside a one-bit element can only write its zero
+    // bit. Preserve the constant outer element in both driver analysis and
+    // lowering; an arbitrary run-time array index remains unconstrained.
+    if element_width == 1 {
+        return single_bit_select_window(lsb, width, constants, parameter_types);
+    }
+    if element_width == 0 || element_width == width {
         return None;
     }
     let (base, offset) = split_dynamic_array_offset(lsb, constants, parameter_types)?;
@@ -7559,6 +7869,12 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         | SystemFunction::Isunbounded
         | SystemFunction::Signed
         | SystemFunction::Unsigned
+        | SystemFunction::Sampled
+        | SystemFunction::Past
+        | SystemFunction::Rose
+        | SystemFunction::Fell
+        | SystemFunction::Stable
+        | SystemFunction::Changed
         | SystemFunction::Bits
         | SystemFunction::Size
         | SystemFunction::Dimensions
@@ -8620,6 +8936,12 @@ fn runtime_select_width(
     if constant(msb).is_some() && constant(lsb).is_some() {
         return None;
     }
+    // A bit select has width one regardless of its runtime position. Sampling
+    // both bounds evaluates the same (potentially inlined) expression twice,
+    // and the zero sample need not even be a valid index computation.
+    if msb == lsb {
+        return Some(1);
+    }
     // The width is the same for every value of the runtime operands.
     let mut sample = constants.clone();
     for name in name_to_id.keys() {
@@ -8923,6 +9245,15 @@ fn runtime_select_as_shift(
 }
 
 fn expr_from_const_expr(expr: &sv::ir::ConstExpr) -> Option<sv::ir::Expr> {
+    expr_from_const_expr_with_calls(expr, false)
+}
+
+/// Reconstruct a select operand, optionally retaining nested runtime calls.
+fn expr_from_const_expr_with_calls(
+    expr: &sv::ir::ConstExpr,
+    allow_calls: bool,
+) -> Option<sv::ir::Expr> {
+    let convert = |expr| expr_from_const_expr_with_calls(expr, allow_calls);
     Some(match expr {
         sv::ir::ConstExpr::Literal(value) => sv::ir::Expr::Literal(value.clone()),
         sv::ir::ConstExpr::Ident(name) => sv::ir::Expr::Ident(name.clone()),
@@ -8932,13 +9263,13 @@ fn expr_from_const_expr(expr: &sv::ir::ConstExpr) -> Option<sv::ir::Expr> {
             lsb,
             signed,
         } => sv::ir::Expr::Select {
-            expr: Box::new(expr_from_const_expr(expr)?),
+            expr: Box::new(convert(expr)?),
             msb: (**msb).clone(),
             lsb: (**lsb).clone(),
             signed: *signed,
         },
         sv::ir::ConstExpr::Select { expr, bit } => sv::ir::Expr::Select {
-            expr: Box::new(expr_from_const_expr(expr)?),
+            expr: Box::new(convert(expr)?),
             msb: (**bit).clone(),
             lsb: (**bit).clone(),
             signed: false,
@@ -8948,28 +9279,36 @@ fn expr_from_const_expr(expr: &sv::ir::ConstExpr) -> Option<sv::ir::Expr> {
             width,
             signed,
         } => sv::ir::Expr::Resize {
-            expr: Box::new(expr_from_const_expr(expr)?),
+            expr: Box::new(convert(expr)?),
             width: *width,
             signed: *signed,
+        },
+        sv::ir::ConstExpr::Function { callee, args, .. } if allow_calls => sv::ir::Expr::Call {
+            callee: callee.clone(),
+            arg_order: Vec::new(),
+            args: args
+                .iter()
+                .map(|arg| convert(arg).map(Some))
+                .collect::<Option<_>>()?,
         },
         sv::ir::ConstExpr::Function { .. } => return None,
         sv::ir::ConstExpr::Unary { op, expr } => sv::ir::Expr::Unary {
             op: *op,
-            expr: Box::new(expr_from_const_expr(expr)?),
+            expr: Box::new(convert(expr)?),
         },
         sv::ir::ConstExpr::Binary { left, op, right } => sv::ir::Expr::Binary {
-            left: Box::new(expr_from_const_expr(left)?),
+            left: Box::new(convert(left)?),
             op: *op,
-            right: Box::new(expr_from_const_expr(right)?),
+            right: Box::new(convert(right)?),
         },
         sv::ir::ConstExpr::Mux {
             condition,
             then_expr,
             else_expr,
         } => sv::ir::Expr::Mux {
-            condition: Box::new(expr_from_const_expr(condition)?),
-            then_expr: Box::new(expr_from_const_expr(then_expr)?),
-            else_expr: Box::new(expr_from_const_expr(else_expr)?),
+            condition: Box::new(convert(condition)?),
+            then_expr: Box::new(convert(then_expr)?),
+            else_expr: Box::new(convert(else_expr)?),
         },
     })
 }
@@ -8993,6 +9332,14 @@ fn dynamic_array_element_subselection(
         .is_none()
         || sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types).is_none();
     if !is_dynamic {
+        return None;
+    }
+    // This is a dynamic bit inside one constant one-bit element, rather
+    // than a dynamic element of the whole array. Let the packed lowering
+    // retain the checked element window.
+    if packed_element_width == 1
+        && single_bit_select_window(lsb, variable.width, constants, parameter_types).is_some()
+    {
         return None;
     }
     let (msb_base, msb_offset) = split_dynamic_array_offset(msb, constants, parameter_types)?;
@@ -9127,6 +9474,14 @@ fn dynamic_array_element_lvalue(
         .is_none()
         || sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types).is_none();
     if !is_dynamic {
+        return None;
+    }
+    // This is a dynamic bit inside one constant one-bit element, rather
+    // than a dynamic element of the whole array. Let the packed lowering
+    // retain the checked element window.
+    if packed_element_width == 1
+        && single_bit_select_window(lsb, variable.width, constants, parameter_types).is_some()
+    {
         return None;
     }
     let (msb_base, msb_offset) = split_dynamic_array_offset(msb, constants, parameter_types)?;
@@ -9520,6 +9875,7 @@ fn lower_ff_processes(
         }
         let sites_before = pm.runtime_event_sites.len();
         let extern_calls_before = pm.extern_calls;
+        let clock = inferred_clock(pm, process);
         let ff::FfProcessUnits {
             eval: eval_only,
             apply,
@@ -9532,6 +9888,7 @@ fn lower_ff_processes(
             .with_shared_variables(shared_variables)
             .with_sparse_candidates(&edge_memories)
             .with_window_writes(&window_writes)
+            .with_inferred_clock(clock)
             .lower_process(process.body())?;
         repeated_writes.extend(repeated_ff_writes(&eval_only, &staged));
         // A process without writes still runs for its runtime events and
@@ -10249,9 +10606,71 @@ pub(crate) fn unsupported_sv_inout(path: String) -> ParserError {
     )
 }
 
+/// The clock that the sampled value functions of an edge-triggered process
+/// infer (IEEE 1800-2023 16.14.6): its event expression of the clock, when
+/// it is the only one whose signal the body reads nowhere else. With an
+/// asynchronous reset the body reads the reset, so the clock remains.
+fn inferred_clock(
+    pm: &procedural::ProcModule<'_>,
+    process: &sv::ir::FfProcess,
+) -> Option<ff::Clock> {
+    let clock = clock_event_from_ff_process(process)?;
+    let reads: HashSet<SourceVarId> = pm
+        .implicit_reads(process.body(), true)
+        .into_iter()
+        .map(|atom| atom.id)
+        .collect();
+    let unread: Vec<_> = process
+        .events()
+        .iter()
+        .filter(|event| pm.id(event.signal()).is_none_or(|id| !reads.contains(&id)))
+        .collect();
+    match unread.as_slice() {
+        [only] if only.signal() == clock.signal() && only.edge() == clock.edge() => {
+            Some(ff::Clock {
+                signal: clock.signal().to_owned(),
+                rising: clock.edge() == sv::ir::FfEdge::Pos,
+                alone: process.events().len() == 1,
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bit_select_width_does_not_evaluate_a_runtime_zero_sample() {
+        let index = sv::ir::ConstExpr::Ident("index".into());
+        let bound = sv::ir::ConstExpr::Binary {
+            left: Box::new(sv::ir::ConstExpr::Literal("255".into())),
+            op: sv::ir::BinaryOp::Div,
+            right: Box::new(index.clone()),
+        };
+        let names = HashMap::from_iter([("index".into(), SourceVarId(0))]);
+        let constants = HashMap::default();
+        let types = HashMap::default();
+        assert_eq!(
+            runtime_select_width(&bound, &bound, &names, &constants, &types),
+            Some(1)
+        );
+        let high = sv::ir::ConstExpr::Binary {
+            left: Box::new(index.clone()),
+            op: sv::ir::BinaryOp::Add,
+            right: Box::new(sv::ir::ConstExpr::Literal("7".into())),
+        };
+        assert_eq!(
+            runtime_select_width(&high, &index, &names, &constants, &types),
+            Some(8)
+        );
+        let constant = sv::ir::ConstExpr::Literal("3".into());
+        assert_eq!(
+            runtime_select_width(&constant, &constant, &names, &constants, &types),
+            None
+        );
+    }
 
     /// The per-name driver scan [`ModuleDrivers`] replaced, which walks every
     /// process for each name.
@@ -10311,6 +10730,11 @@ mod tests {
                     });
                 }
                 while let Some((callee, args)) = calls.pop() {
+                    if let sv::ir::Callee::Object(op) = &callee {
+                        for lhs in procedural::written_object_arguments(op, &args) {
+                            record(drivers, &lhs);
+                        }
+                    }
                     let name = match callee {
                         sv::ir::Callee::System(function) => {
                             for lvalue in procedural::written_system_arguments(function, &args) {
@@ -10630,7 +11054,7 @@ endmodule
             .runtime_schema
             .processes
             .iter()
-            .filter(|process| !process.is_initializer)
+            .filter(|process| process.kind != celox_design::ProcessKind::Initializer)
             .count()
     }
 
