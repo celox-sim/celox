@@ -1,1 +1,1 @@
-Rebase PR #2244 onto current master and resolve conflicts with logical-equivalence frontend and shared-case additions; preserve both behaviors and rerun affected SV validation.
+Resolve master conflicts by retaining both logical-equivalence and X/Z comparison fixtures and limitations. Rebased onto 07ec9d9650; 330 operator backend tests, 9 frontend and 32 suite units, clippy and formatting pass. X/Z fixture source unchanged from external verification.
