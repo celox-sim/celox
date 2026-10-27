@@ -1849,3 +1849,54 @@ endmodule
   (top Top)
   (assert_eq hit 0)
   (assert_eq y 1))
+
+(case logical_equivalence
+  (source "logical_equivalence.sv" #"
+    module Top(input logic [3:0] a, b, output logic y, output logic c);
+      localparam bit C = 4 <-> 2;
+      assign y = a <-> b;
+      assign c = C;
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0) (set b 0))
+  (assert_eq y 1)
+  (assert_eq c 1)
+  (modify (set a 2) (set b 0))
+  (assert_eq y 0)
+  (modify (set a 2) (set b 4))
+  (assert_eq y 1)
+  (modify (set a 0) (set b 4))
+  (assert_eq y 0))
+
+(case logical_equivalence_unknown
+  (four_state)
+  (source "logical_equivalence_unknown.sv" #"
+    module Top(input logic [1:0] a, b, output logic y);
+      assign y = a <-> b;
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a (fourstate 1 1)) (set b 0))
+  (assert_eq y (fourstate 1 1))
+  (set b 1)
+  (assert_eq y (fourstate 1 1))
+  (set a (fourstate 3 1))
+  (assert_eq y 1))
+
+(case logical_equivalence_evaluates_operands_once
+  (source "logical_equivalence_calls.sv" #"
+    module Top(output logic [7:0] a_count, b_count, output logic y);
+      function automatic logic left(); a_count = a_count + 1; return 0; endfunction
+      function automatic logic right(); b_count = b_count + 1; return 1; endfunction
+      initial begin
+        a_count = 0;
+        b_count = 0;
+        y = left() <-> right();
+      end
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq a_count 1)
+  (assert_eq b_count 1)
+  (assert_eq y 0))
