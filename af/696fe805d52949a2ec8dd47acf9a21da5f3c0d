@@ -1,0 +1,6 @@
+Revision history for #2251:
+
+rev 2 (content) 2026-10-27 08:28 UTC — Fix review 5663715698: sample inline inputs after pre_randomize, reject receiver static names before fallback, and accept observed sv-tests improvement
+rev 1 (initial) 2026-10-27 08:28 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2251,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"53f983e2600b90f78903b95476949b1132475305","timestamp_iso":"2026-10-27T08:28:26Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"53f983e2600b90f78903b95476949b1132475305","new_sha":"570d80ff32bcfe5e72dda5d16f332fa13d53380d","timestamp_iso":"2026-10-27T08:28:26Z","reason":"Fix review 5663715698: sample inline inputs after pre_randomize, reject receiver static names before fallback, and accept observed sv-tests improvement","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/53f983e2600b90f78903b95476949b1132475305...570d80ff32bcfe5e72dda5d16f332fa13d53380d"}]} -->
