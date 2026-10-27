@@ -2128,3 +2128,70 @@ endmodule
   (top Top)
   (assert_eq q 1)
   (assert_eq p 1))
+
+
+(case constant_function_conditional_types
+  (source "constant_conditional_types.sv" #"
+    module Top(input bit choose, output logic [255:0] folded, elaborated,
+               output logic [31:0] runtime_sign);
+      function automatic int sign_true(); return 1'b1 ? 8'shff : 8'h00; endfunction
+      function automatic int sign_false(); return 1'b0 ? 8'h00 : 8'shff; endfunction
+      function automatic logic [31:0] concat_true();
+        return {8'hab, (1'b1 ? 8'hff : 16'h0), 8'hcd};
+      endfunction
+      function automatic logic [31:0] concat_false();
+        return {8'hab, (1'b0 ? 16'h0 : 8'hff), 8'hcd};
+      endfunction
+      function automatic logic [31:0] arm_carry();
+        return {(1'b1 ? (8'hff + 8'h01) : 16'h0)};
+      endfunction
+      function automatic int mixed_shift(); return 1'b1 ? (8'sh80 >>> 1) : 8'h00; endfunction
+      function automatic int assignment_carry(); return 1'b1 ? (8'hff + 8'h01) : 8'h0; endfunction
+      function automatic int all_signed(); return 1'b1 ? 8'shff : 16'sh0; endfunction
+      function automatic int runtime_value(input bit condition);
+        return condition ? 8'shff : 8'h00;
+      endfunction
+      localparam logic [255:0] P = {
+        all_signed(), assignment_carry(), mixed_shift(), arm_carry(),
+        concat_false(), concat_true(), sign_false(), sign_true()
+      };
+      assign folded = {
+        all_signed(), assignment_carry(), mixed_shift(), arm_carry(),
+        concat_false(), concat_true(), sign_false(), sign_true()
+      };
+      assign elaborated = P;
+      assign runtime_sign = runtime_value(choose);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set choose 0))
+  (assert_eq runtime_sign 0)
+  (assert_eq folded 0xffffffff000001000000004000000100ab00ffcdab00ffcd000000ff000000ff)
+  (assert_eq elaborated 0xffffffff000001000000004000000100ab00ffcdab00ffcd000000ff000000ff)
+  (modify (set choose 1))
+  (assert_eq runtime_sign 255)
+  (modify (set choose 0))
+  (assert_eq runtime_sign 0))
+
+(case constant_function_conditional_unknown_types
+  (four_state)
+  (source "constant_conditional_unknown_types.sv" #"
+    module Top(output logic [95:0] folded, elaborated);
+      function automatic logic predicate(); return 1'bx; endfunction
+      function automatic logic [31:0] same_value();
+        return {8'hab, (predicate() ? 8'hff : 16'h00ff), 8'hcd};
+      endfunction
+      function automatic logic [31:0] different_bits();
+        return {8'hab, (predicate() ? 8'shff : 16'h00fe), 8'hcd};
+      endfunction
+      function automatic logic [31:0] arithmetic_context();
+        return {8'hab, (predicate() ? (8'hff + 8'h01) : 16'h0100), 8'hcd};
+      endfunction
+      localparam logic [95:0] P = {arithmetic_context(), different_bits(), same_value()};
+      assign folded = {arithmetic_context(), different_bits(), same_value()};
+      assign elaborated = P;
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq folded (fourstate 0xab0100cdab00ffcdab00ffcd 0x000000000000010000000000))
+  (assert_eq elaborated (fourstate 0xab0100cdab00ffcdab00ffcd 0x000000000000010000000000)))
