@@ -1,1 +1,1 @@
-Resolve PR2235 conflict against merged #2244 exact-comparison changes and current master; retain constant-function caching and state-mode semantics.
+Keep both appended operator suites when rebasing onto master4616658b13; analyzer858, frontend11, SV5964 and suite54 tests pass, with clippy and fmt.
