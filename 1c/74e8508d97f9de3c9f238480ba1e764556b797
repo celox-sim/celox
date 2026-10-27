@@ -1,1 +1,6 @@
-Update the release policy document to match separate product qualification and external comparisons.
+Revision history for #2288:
+
+rev 2 (content) 2026-10-27 15:13 UTC — Update the release policy document to match separate product qualification and external comparisons.
+rev 1 (initial) 2026-10-27 15:13 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2288,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"3d4d2fc31186eb867b1ef287ffb0ee65235d15fb","timestamp_iso":"2026-10-27T15:13:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"3d4d2fc31186eb867b1ef287ffb0ee65235d15fb","new_sha":"1c74e8508d97f9de3c9f238480ba1e764556b797","timestamp_iso":"2026-10-27T15:13:30Z","reason":"Update the release policy document to match separate product qualification and external comparisons.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/3d4d2fc31186eb867b1ef287ffb0ee65235d15fb...1c74e8508d97f9de3c9f238480ba1e764556b797"}]} -->
