@@ -27,6 +27,7 @@ pub mod syntax;
 pub mod system_functions;
 pub mod typecheck;
 
+pub use ast::const_functions::RuntimeConstantFunctions;
 pub use ast::interfaces::{
     InterfaceMemberPath, InterfaceMemberPaths, NativeInterfacePlan, plan_interfaces,
     plan_interfaces_with_member_paths,
