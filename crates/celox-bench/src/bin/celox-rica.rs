@@ -29,6 +29,9 @@ struct Cli {
     /// Rica `riscv/` project directory (contains `src/` and `platform-user.json`).
     #[arg(long)]
     project: PathBuf,
+    /// Export self-checking Veryl native TB projects instead of running a host loop.
+    #[arg(long)]
+    emit_native_tb: Option<PathBuf>,
     /// RV64 ELF files to run, each on a fresh simulator over the same compiled model.
     #[arg(long = "elf", required = true)]
     elfs: Vec<PathBuf>,
@@ -316,35 +319,48 @@ struct ModelConfig {
     fast_lsu: u64,
 }
 
+fn model_parameters(
+    cli: &Cli,
+    platform: Platform,
+    config: &ModelConfig,
+) -> Vec<(&'static str, u64)> {
+    vec![
+        ("PMP_DATA_STAGES", platform.pmp_data_stages),
+        ("EARLY_ALU", u64::from(platform.early_alu)),
+        ("DIRECT_LOAD_RETURN", u64::from(platform.direct_load_return)),
+        ("MEMORY_HZ", platform.memory_hz),
+        ("PREDICTOR_MODE", config.predictor_config / 2),
+        ("ICACHE_INDEX_BITS", config.icache_index_bits),
+        ("FAST_LSU", config.fast_lsu),
+        ("ENABLE_M", 1),
+        ("M_USE_DSP", 1),
+        ("ENABLE_ZBA", 1),
+        ("ENABLE_ZBB", 1),
+        ("ENABLE_ZBS", 1),
+        ("EARLY_BITMANIP", 1),
+        ("EARLY_TAKEN_FETCH", 1),
+        ("EARLY_DIVIDE", 1),
+        ("ENABLE_INTERRUPTS", 1),
+        ("STRICT_MEMORY", 1),
+        ("ENABLE_A", u64::from(cli.a_extension)),
+        ("ENABLE_U", u64::from(cli.enable_u())),
+        ("ENABLE_S", u64::from(cli.enable_s())),
+        ("ENABLE_SV39", u64::from(cli.sv39)),
+        ("ENABLE_CONSOLE", u64::from(cli.machine_console)),
+    ]
+}
+
 fn builder<'a, B>(
     builder: SimulatorBuilder<'a, B>,
     cli: &Cli,
     platform: Platform,
     config: &ModelConfig,
 ) -> SimulatorBuilder<'a, B> {
+    let mut builder = builder;
+    for (name, value) in model_parameters(cli, platform, config) {
+        builder = builder.param(name, value);
+    }
     let mut builder = builder
-        .param("PMP_DATA_STAGES", platform.pmp_data_stages)
-        .param("EARLY_ALU", u64::from(platform.early_alu))
-        .param("DIRECT_LOAD_RETURN", u64::from(platform.direct_load_return))
-        .param("MEMORY_HZ", platform.memory_hz)
-        .param("PREDICTOR_MODE", config.predictor_config / 2)
-        .param("ICACHE_INDEX_BITS", config.icache_index_bits)
-        .param("FAST_LSU", config.fast_lsu)
-        .param("ENABLE_M", 1)
-        .param("M_USE_DSP", 1)
-        .param("ENABLE_ZBA", 1)
-        .param("ENABLE_ZBB", 1)
-        .param("ENABLE_ZBS", 1)
-        .param("EARLY_BITMANIP", 1)
-        .param("EARLY_TAKEN_FETCH", 1)
-        .param("EARLY_DIVIDE", 1)
-        .param("ENABLE_INTERRUPTS", 1)
-        .param("STRICT_MEMORY", 1)
-        .param("ENABLE_A", u64::from(cli.a_extension))
-        .param("ENABLE_U", u64::from(cli.enable_u()))
-        .param("ENABLE_S", u64::from(cli.enable_s()))
-        .param("ENABLE_SV39", u64::from(cli.sv39))
-        .param("ENABLE_CONSOLE", u64::from(cli.machine_console))
         .opt_level(match cli.opt_level {
             OptimizationLevel::O0 => OptLevel::O0,
             OptimizationLevel::O1 => OptLevel::O1,
@@ -819,6 +835,10 @@ fn run(cli: Cli) -> Result<(), RicaError> {
         .map(|elf| ElfImage::load(elf))
         .collect::<Result<Vec<_>, _>>()?;
 
+    if let Some(directory) = &cli.emit_native_tb {
+        return emit_native_testbenches(directory, &source, &images, platform, &cli, &config);
+    }
+
     if cli.model == Model::Timed {
         if cli.harness != Harness::Resolved {
             return Err(message("--model timed supports only --harness resolved"));
@@ -922,4 +942,136 @@ fn run(cli: Cli) -> Result<(), RicaError> {
         }
     }
     Ok(())
+}
+
+fn emit_native_testbenches(
+    directory: &Path,
+    source: &str,
+    images: &[ElfImage],
+    platform: Platform,
+    cli: &Cli,
+    config: &ModelConfig,
+) -> Result<(), RicaError> {
+    if cli.model != Model::Coincident {
+        return Err(message(
+            "native TB export uses coincident clock edges; select --model coincident",
+        ));
+    }
+    let parameters = model_parameters(cli, platform, config)
+        .into_iter()
+        .map(|(name, value)| format!("        {name}: {value},"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::create_dir(directory)?;
+    for image in images {
+        if image.memory.is_empty()
+            || !image
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(message(
+                "native TB export requires a nonempty image and a simple ELF file stem",
+            ));
+        }
+        let project = directory.join(&image.name);
+        fs::create_dir(&project)?;
+        fs::write(
+            project.join("Veryl.toml"),
+            "[project]\nname = \"rica_bench\"\nversion = \"0.1.0\"\n",
+        )?;
+        fs::write(project.join("dut.veryl"), source)?;
+        let template = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../benchmarks/rica/native.veryl.in"
+        ));
+        let tb = template
+            .replace("@PARAMETERS@", &parameters)
+            .replace(
+                "@MEMORY_PERIOD@",
+                &(platform.memory_divisor() * 2).to_string(),
+            )
+            .replace("@IMAGE_LENGTH@", &image.memory.len().to_string())
+            .replace("@MAX_CYCLES@", &cli.max_cycles.to_string())
+            .replace("@TOHOST@", &format!("{:016x}", image.tohost))
+            .replace("@NAME@", &image.name);
+        fs::write(project.join("test_rica.veryl"), tb)?;
+        let hex = image
+            .memory
+            .iter()
+            .map(|(address, byte)| format!("{address:08x}{byte:02x}\n"))
+            .collect::<String>();
+        fs::write(project.join("image.hex"), hex)?;
+        println!(
+            "RICA_NATIVE_TB project={} top=test_rica workload=board-kernel-native-tb-v1",
+            project.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod native_tb_tests {
+    use super::*;
+
+    #[test]
+    fn export_preserves_image_addresses_profile_and_clock_ratio() {
+        let cli = Cli::parse_from([
+            "celox-rica",
+            "--project",
+            ".",
+            "--elf",
+            "kernel.elf",
+            "--sv39",
+            "--a-extension",
+            "--max-cycles",
+            "123",
+        ]);
+        let platform = Platform {
+            cpu_hz: 100,
+            memory_hz: 50,
+            pmp_data_stages: 2,
+            early_alu: true,
+            direct_load_return: false,
+        };
+        let config = ModelConfig {
+            predictor_config: 8,
+            icache_index_bits: 6,
+            fast_lsu: 1,
+        };
+        let image = ElfImage {
+            name: "kernel".into(),
+            tohost: 0x80001000,
+            memory: BTreeMap::from([(0, 0x13), (0x80000000, 0xab)]),
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("projects");
+        emit_native_testbenches(
+            &output,
+            "// unchanged DUT",
+            &[image],
+            platform,
+            &cli,
+            &config,
+        )
+        .unwrap();
+        let project = output.join("kernel");
+        assert_eq!(
+            fs::read_to_string(project.join("dut.veryl")).unwrap(),
+            "// unchanged DUT"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("image.hex")).unwrap(),
+            "0000000013\n80000000ab\n"
+        );
+        let tb = fs::read_to_string(project.join("test_rica.veryl")).unwrap();
+        assert!(!tb.contains('@'));
+        assert!(tb.contains("clk_mem: $tb::clock_gen #(period: 4)"));
+        assert!(tb.contains("ENABLE_SV39: 1"));
+        assert!(tb.contains("ENABLE_A: 1"));
+        assert!(tb.contains("for cycle in 0..123"));
+        assert!(tb.contains("64'h0000000080001000"));
+        // Existing projects must never silently reuse or overwrite prior evidence.
+        assert!(emit_native_testbenches(&output, "", &[], platform, &cli, &config).is_err());
+    }
 }

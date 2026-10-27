@@ -14,7 +14,7 @@ and standard-library microbenchmarks remain available in the
 | tarunes | Qualified headless video/audio probe; measurement pending | CPU, video and audio together |
 
 Heliodor retains its [existing comparison suite](./heliodor.md). rica retains
-`scripts/run-rica-bench.sh`; its results are currently local, not a published
+`scripts/run-rica-bench.sh`, now using a [Veryl native TB](https://github.com/celox-sim/celox/tree/master/benchmarks/rica) by default; its results are currently local, not a published
 collection history. tarunes has no accepted performance samples yet. Its synthetic-ROM
 qualification probe agrees with Verilator, including HDMI RGB, but still needs a
 fixed measurement recipe and collection runner.
