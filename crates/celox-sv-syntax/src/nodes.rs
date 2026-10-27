@@ -94,6 +94,11 @@ pub enum ExprKind {
         expression: ExprId,
         predicate: ExprId,
     },
+    /// Per-call class constraints (IEEE 1800-2023 18.7).
+    RandomizeWith {
+        expression: ExprId,
+        constraints: Option<Vec<ExprId>>,
+    },
     Parameterized {
         expression: ExprId,
         arguments: Vec<Argument>,
