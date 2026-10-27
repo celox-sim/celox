@@ -47,37 +47,31 @@ produce a patch version while the changelog still displays a title containing
 ## Automated release train
 
 Release Please maintains one release pull request against `master`. Every Monday
-(and on manual dispatch), the release workflow adds `merge-ready` and waits for
-Mergify's `queued` acknowledgment. A timeout or `dequeued` result fails the job.
-While the open release PR carries `merge-ready` or `queued`, Release Please
-stops updating its branch on every workflow trigger, including scheduled and
-manual runs. This keeps its head stable for the merge queue and PRs tested
-behind it. Tag and GitHub Release creation remain enabled.
-To refresh a failed or withdrawn release, remove `merge-ready` and dequeue it
-before rerunning Release Management; the manual run refreshes it before
-requesting queueing again.
-`release:hold` prevents queueing and merging; a hold observed while waiting also
-removes `merge-ready`. The release PR runs full CI and external comparisons
-before it can merge, including after Mergify updates it with the target branch.
+(and on manual dispatch), the release workflow requests Mergify queueing.
+`release:hold` prevents queueing and merging. While the open release PR carries
+`merge-ready` or `queued`, Release Please freezes its head for the queue.
 
-The commit that introduces this policy is the release-history baseline. Earlier
-commits after `v0.1.34` are intentionally not retroactively classified; release
-automation starts with pull requests merged after this policy lands.
+The release PR uses the lightweight merge queue. After it merges,
+`stage-release-candidate.yml` advances `release` to that exact merge commit.
+`release-candidate.yml` runs full Celox validation on that immutable candidate:
+Rust, language conformance, platform builds, NAPI, JS and browser tests.
+All required product checks must pass before promotion creates a stable tag
+and GitHub Release and dispatches npm and Rust publication.
 
-Add the `release:hold` label to the release pull request to keep it out of the
-weekly train. Run the **Release Management** workflow manually to queue an
-unheld release immediately.
+External simulator comparisons run separately in
+`external-comparisons.yml`, daily and on demand. They retain reports and open
+their own failure issue; external tool availability and compatibility do not
+gate Celox release qualification. Dispatch that workflow separately when
+investigating external compatibility.
 
-Merging the release pull request changes `.release-please-manifest.json`; that
-push, rather than a tag push, starts the NAPI build and npm publication workflow.
-Release Please may still create an immutable version tag and GitHub Release as
-release metadata, but tags are not deployment triggers.
+A failed candidate is not published. A replacement release PR must include any
+fixes and pass the queue and full candidate validation again. A published stable
+tag is immutable. See CONTRIBUTING.md for numbered crate recovery procedures.
 
 ## crates.io publication
 
 The same tagged stable release is published to crates.io. Nightly channels stay
-npm-only because crates.io has no mutable distribution tags. The release
-management workflow dispatches **Publish Rust Crates** at that tag after it
+npm-only because crates.io has no mutable distribution tags. The qualified candidate's promotion job dispatches **Publish Rust Crates** at that tag after it
 verifies that the tag points at the current release commit and that the GitHub
 Release is public.
 The Rust workflow repeats those checks, verifies every package archive, runs the
