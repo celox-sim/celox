@@ -247,6 +247,9 @@ pub(in crate::ast) fn member_type(
     name: &str,
     member: &str,
 ) -> Option<Type> {
+    if name == super::super::processes::CLASS {
+        return (member == "state").then(super::super::processes::state_type);
+    }
     let generic = generic(tree, name);
     lineage(tree, name)
         .iter()
@@ -893,7 +896,10 @@ fn type_argument(
                     } else {
                         let qualified = scope::qualified_name(&tree.state, &scope, &member);
                         return finish(
-                            context.type_aliases.get(&qualified).cloned(),
+                            context.type_aliases.get(&qualified).cloned().or_else(|| {
+                                (qualified == "std::process")
+                                    .then(|| super::handle(super::super::processes::CLASS))
+                            }),
                             context,
                             tree,
                         );
@@ -1002,6 +1008,7 @@ fn spelling(ty: &Type) -> String {
         (None, TypeKind::Shortreal) => "shortreal".to_owned(),
         (None, TypeKind::String) => "string".to_owned(),
         (None, TypeKind::Object) => "object".to_owned(),
+        (None, TypeKind::Process) => "process".to_owned(),
         (None, TypeKind::Bit) => "bit".to_owned(),
         // `reg` is `logic` (6.11.2).
         (None, TypeKind::Logic | TypeKind::Implicit | TypeKind::Reg) => "logic".to_owned(),
@@ -1009,7 +1016,11 @@ fn spelling(ty: &Type) -> String {
     let integral = ty.class().is_none()
         && !matches!(
             ty.kind(),
-            TypeKind::Real | TypeKind::Shortreal | TypeKind::String | TypeKind::Object
+            TypeKind::Real
+                | TypeKind::Shortreal
+                | TypeKind::String
+                | TypeKind::Object
+                | TypeKind::Process
         );
     if integral && ty.is_signed() {
         spelled.push_str(" signed");

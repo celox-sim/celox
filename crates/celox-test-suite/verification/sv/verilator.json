@@ -4,6 +4,7 @@
     "verilator/class.json",
     "verilator/concurrent_assertions.json",
     "verilator/fork.json",
+    "verilator/fork_control.json",
     "verilator/fork_deferred.json",
     "verilator/generate.json",
     "verilator/hierarchical_references.json",

@@ -690,6 +690,42 @@
     "sv_concurrent_observed_reactive": {
       "title": "A concurrent assertion action executes before another assertion finishes its Observed decision",
       "standard": "IEEE 1800-2023 16.5, 16.14.1"
+    },
+    "sv_process-X1": {
+      "title": "kill() changes a finished parent to KILLED and leaves its live descendants running",
+      "standard": "IEEE 1800-2023 9.7"
+    },
+    "sv_process-X2": {
+      "title": "Self-suspend returns immediately; controls on a finished process change its terminal state",
+      "standard": "IEEE 1800-2023 9.7"
+    },
+    "sv_process-X3": {
+      "title": "Resuming an event wait consumes an edge that occurred while the process was suspended",
+      "standard": "IEEE 1800-2023 9.7"
+    },
+    "sv_process-X4": {
+      "title": "A user package process::self call resolves to the built-in process method",
+      "standard": "IEEE 1800-2023 26.7"
+    },
+    "sv_process-X5": {
+      "title": "Completion or cancellation of the last program initial does not implicitly finish simulation",
+      "standard": "IEEE 1800-2023 24.3, 9.2.3, 9.7"
+    },
+    "sv_process-X6": {
+      "title": "$exit terminates simulation while another program is still live",
+      "standard": "IEEE 1800-2023 24.7, 24.3"
+    },
+    "sv_process-X7": {
+      "title": "Killing an ancestor marks the calling child KILLED but continues executing it",
+      "standard": "IEEE 1800-2023 9.7"
+    },
+    "sv_process-X8": {
+      "title": "Final procedures expose different process identities and random streams",
+      "standard": "IEEE 1800-2023 9.2.3, 9.7, 18.13.3-18.13.5"
+    },
+    "sv_process-X9": {
+      "title": "A compound event on shared automatic operands wakes at time zero without a value change",
+      "standard": "IEEE 1800-2023 9.4.2, 6.21"
     }
   },
   "cases": [
@@ -4227,6 +4263,102 @@
       "classification": "xezim_bug",
       "bug": "sv_concurrent_observed_reactive",
       "note": "The first assertion action sets reset=1 in Reactive. The second assertion must already have decided with reset=0 in Observed, so both counters must be 1. Installed xezim produces first=1 second=0; Verilator gives 1/1. Reproduced without the suite harness in Top and Wrapped. Exact source, commands and installed-build limitation are in verification/repros/sv_concurrent_regions.json."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_finished_parent_kills_descendants",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X1",
+      "note": "At time 2 parent is FINISHED and leaf is WAITING. kill() must leave parent FINISHED, terminate leaf and let both awaits return immediately; checks=15 and late=0 at 12. xezim instead changes parent to KILLED, leaves leaf running (late=1), and reports checks=1. The adapter-free Top and Wrapped observations retain the state codes before and after kill. See verification/repros/sv_process_finished_parent_kills_descendants.sv and .json. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_self_suspend_and_await",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X2",
+      "note": "The child suspends itself at 0. Its parent resumes it at 2, so its following #3 ends at 5; status remains FINISHED after suspend/resume/kill on the finished child. xezim does not block self-suspend: finished_at=3, checks=2, terminal state KILLED. Adapter-free Top and Wrapped agree. See verification/repros/sv_process_self_suspend_and_await.sv and .json. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_suspend_and_resume_waits",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X3",
+      "note": "All three waits are suspended at 1 and resumed at 7. The delay expired at 5 and the level became true at 3, so both resume at 7. The event edge at 3 happened while desensitized: that waiter must wait until the new edge at 9. xezim consumes the old edge on resume, giving event_time=7 and checks=5, also without the adapter as Top/Wrapped. See verification/repros/sv_process_suspend_and_resume_waits.sv and .json. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_package_constants_keep_their_scope",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X4",
+      "note": "The five user package constants compare correctly, but process::self() does not call the user function returning 13: checks=31 instead of 63. IEEE 26.7 permits user declarations to shadow the implicit std wildcard import. The adapter-free Top/Wrapped source sv_process_package_scope.sv reproduces this; Verilator gives 63. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_self_kill_finishes_program",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X5",
+      "note": "The only program initial kills itself at 3. IEEE 24.3 requires implicit finish at 3 and its final output; the design clock continues until the fallback at 10 instead. Adapter-free Top/Wrapped observations in sv_process_program_self_kill.sv use a fallback at 11 and also show final at 11 instead of 3. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_external_kill_finishes_program",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X5",
+      "note": "A module kills the only live program initial at 3 through an imported process handle. The simulation must finish immediately at 3. It instead runs to the fallback. Adapter-free Top/Wrapped observations in sv_process_program_external_kill.sv reproduce final at 11 instead of 3. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "timing::final_procedure_output_survives_program_completion",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X5",
+      "note": "The sole program initial returns normally at 3; the generated testbench times out instead of receiving the implicit finish required by 24.3. No auxiliary settler program is instantiated for a script beginning with run_to_finish. Adapter-free Top/Wrapped observations in sv_process_program_normal_completion.sv confirm final at fallback 11 instead of 3. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_program_exit_wakes_sibling_observers",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X6",
+      "note": "Producer calls $exit at 3; it must end only its own initial procedures and descendants. The Consumer program remains live through 23, and its await/status observers must resume at 3. xezim instead finishes the whole simulation at 3, before the shared script reaches its checks at 5. Adapter-free Top/Wrapped observations in sv_process_program_exit_observers.sv/.json confirm final at 3 instead of the expected checks=3, awaited_at=observed_at=3, late=0, final at 5. Verilator also finishes at 3. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_ancestor_kill_preserves_caller_rng",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X7",
+      "note": "The child draws once after srandom(42) then kills its ancestor without a host boundary in between. Both must be KILLED, no following statement may execute, and restoring its state into the surviving root must continue at the second draw. xezim preserves that draw but continues to late=1 despite reporting both handles KILLED (checks=15 instead of31). IEEE9.7 requires all descendants to terminate before kill returns. Adapter-free Top/Wrapped in sv_process_ancestor_kill_rng.sv/.json confirm this; Verilator also continues the child, reporting checks11/late1/childFINISHED. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_final_procedures_share_identity_and_rng",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X8",
+      "note": "All finals execute in one process (9.2.3), so their self handles and RNG continuation must match regardless of final ordering. The saved handle/state are explicitly initialized by the initial procedure before finish. xezim passes the first visit, then exposes different handles and RNG states in the other two visits (same=0, continuity=0); individual RNG replay remains correct. Adapter-free Top/Wrapped sv_process_final_identity.sv/.json records all three visits. Verilator matches the required shared identity/RNG behavior. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_resume_resamples_automatic_event_expression",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X9",
+      "note": "The shared automatic x and y are initialized to zero before the fork children start; x first changes at2. IEEE9.4.2 requires an expression value change to wake @(x^y). xezim already reports hits=1/event_at=0 at1, before suspend can interact with a change; it remains1/0 at3,5,8. The expected observations are0/0 at1,3,5 and1/6 at8, since resume at4 discards the change at2 (9.7). Adapter-free Top/Wrapped sv_process_resume_automatic_event.sv/.json reproduces this startup mismatch; it does not establish that xezim consumed a suspended change. The enclosing automatic scope outlives fork children (6.21). Assertions/exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_resume_after_program_exit_is_noop",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X6",
+      "note": "Producer exits at2 after suspending a delay waiter. Consumer remains live until10, resumes its FINISHED handle at3, and checks it after the original deadline at6. IEEE24.7 ends only Producer and9.7 makes resume a no-op on a finished process. xezim instead ends the whole simulation at2, before Consumer or the shared checks at9. Adapter-free Top/Wrapped sv_process_resume_after_program_exit.sv/.json reproduces final at2 instead of late=0/checks=3/state=0 and final at9. Assertions/exclusions are unchanged."
     }
   ]
 }

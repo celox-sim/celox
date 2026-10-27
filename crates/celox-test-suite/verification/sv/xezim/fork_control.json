@@ -1,0 +1,125 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_finished_parent_kills_descendants at 355:27: assert_eq checks: expected 0xf, got 0x1",
+      "expectation": "Simulation",
+      "name": "fork_control::process_finished_parent_kills_descendants",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_self_suspend_and_await at 395:26: assert_eq checks: expected 0x7, got 0x2",
+      "expectation": "Simulation",
+      "name": "fork_control::process_self_suspend_and_await",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_suspend_and_resume_waits at 378:27: assert_eq checks: expected 0x7, got 0x5",
+      "expectation": "Simulation",
+      "name": "fork_control::process_suspend_and_resume_waits",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_external_kill_finishes_program at 484:28: assert_eq ticks: expected 0x1, got 0x4",
+      "expectation": "Simulation",
+      "name": "fork_control::process_external_kill_finishes_program",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_package_constants_keep_their_scope at 450:26: assert_eq checks: expected 0x3f, got 0x1f",
+      "expectation": "Simulation",
+      "name": "fork_control::process_package_constants_keep_their_scope",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_self_kill_finishes_program at 468:28: assert_eq ticks: expected 0x1, got 0x4",
+      "expectation": "Simulation",
+      "name": "fork_control::process_self_kill_finishes_program",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "the simulation ended before the script did",
+      "expectation": "Simulation",
+      "name": "fork_control::process_program_exit_wakes_sibling_observers",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_final_procedures_share_identity_and_rng at 606:28: expect_output: expected [111, 107, 59, 111, 107, 59, 111, 107, 59], got [111, 107, 59, 98, 97, 100, 59, 98, 97, 100, 59]",
+      "expectation": "Simulation",
+      "name": "fork_control::process_final_procedures_share_identity_and_rng",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_ancestor_kill_preserves_caller_rng at 636:26: assert_eq checks: expected 0x1f, got 0xf",
+      "expectation": "Simulation",
+      "name": "fork_control::process_ancestor_kill_preserves_caller_rng",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_resume_resamples_automatic_event_expression at 680:26: assert_eq hits: expected 0x0, got 0x1",
+      "expectation": "Simulation",
+      "name": "fork_control::process_resume_resamples_automatic_event_expression",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "the simulation ended before the script did",
+      "expectation": "Simulation",
+      "name": "fork_control::process_resume_after_program_exit_is_noop",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

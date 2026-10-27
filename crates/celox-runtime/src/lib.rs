@@ -37,8 +37,9 @@ pub use reflection::{
 pub use schedule::{ResolvedSchedule, host_watch};
 pub use simulation::{
     Activation, CompiledSlots, EventInfo, HostBoundary, KernelSchedule,
-    PersistedSimulationSnapshot, ScheduleKey, ScheduleParts, SchedulerMode, SchedulerStats,
-    SimulationExecutor, SimulationSnapshot, SimulationState, StepObserver, UnitExecutor,
+    PersistedSimulationSnapshot, ProcessControl, ScheduleKey, ScheduleParts, SchedulerMode,
+    SchedulerStats, SimulationExecutor, SimulationSnapshot, SimulationState, StepObserver,
+    SuspendedProcess, UnitExecutor,
 };
 pub use state_file::{
     ActivationRecord, BaselineRecord, FrameValueKind, FrameValueRecord, NbaRecord, ProcessRecord,

@@ -119,6 +119,10 @@ fn bind_in_mode(
                         values.push(ty);
                     }
                     DataTypeKind::Named(path) => {
+                        if let Some(ty) = super::super::processes::qualified_type(path) {
+                            values.push(types::enclose_aliased_packed_type(ty, ranges));
+                            continue;
+                        }
                         // A class with a parameter value assignment, or one
                         // whose defaults the name alone refers to (IEEE
                         // 1800-2023 8.25).
@@ -449,9 +453,17 @@ fn class_scope(
     {
         return Ok(Some(class));
     }
-    let Some(name) = super::super::classes::resolve(tree, &name) else {
+    let Some(class) = super::super::classes::resolve(tree, &name) else {
         return Ok(None);
     };
+    // Resolve a user package before std's implicit class fallback for this
+    // qualified type; explicit std::process remains unambiguous (26.7).
+    if class == super::super::processes::CLASS
+        && scope::imported(&tree.state).package_scopes.contains(&name)
+    {
+        return Ok(None);
+    }
+    let name = class;
     if !super::super::classes::is_parameterized(tree, &name) {
         if scope
             .arguments

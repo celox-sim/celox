@@ -124,19 +124,25 @@ fn xezim(limit: &str) -> Command {
 /// Whether `stdout` ends with xezim's notice of a run that ended with
 /// `$finish`. xezim prints its notice last, after a partial line of the
 /// design's output if there is one.
-fn finished(stdout: &[u8]) -> bool {
+fn finish_notice_offset(stdout: &[u8]) -> Option<usize> {
     const NOTICE: &[u8] = b"Simulation finished at time ";
-    let Some(text) = stdout.strip_suffix(b"\n") else {
-        return false;
-    };
+    let text = stdout.strip_suffix(b"\n")?;
     let line = text
         .rsplit(|byte| *byte == b'\n')
         .next()
         .unwrap_or_default();
     line.windows(NOTICE.len())
         .rposition(|window| window == NOTICE)
-        .and_then(|at| line[at + NOTICE.len()..].strip_suffix(b" ($finish called)"))
-        .is_some_and(|time| !time.is_empty() && time.iter().all(u8::is_ascii_digit))
+        .filter(|&at| {
+            line[at + NOTICE.len()..]
+                .strip_suffix(b" ($finish called)")
+                .is_some_and(|time| !time.is_empty() && time.iter().all(u8::is_ascii_digit))
+        })
+        .map(|at| text.len() - line.len() + at)
+}
+
+fn finished(stdout: &[u8]) -> bool {
+    finish_notice_offset(stdout).is_some()
 }
 
 /// `stdout` without xezim's start-up banner, which is not design output.
@@ -255,7 +261,8 @@ impl Backend for Xezim {
             )?))
             .output()?;
         let stdout = without_banner(&output.stdout);
-        fs::write(self.directory.join("protocol.log"), stdout)?;
+        let protocol = &stdout[..finish_notice_offset(stdout).unwrap_or(stdout.len())];
+        fs::write(self.directory.join("protocol.log"), protocol)?;
         // A run that ends any other way than `$finish` (the time limit, no
         // further events, an internal error) fails, whatever it printed.
         let finished = finished(stdout);
@@ -295,6 +302,11 @@ mod tests {
         assert!(finished(
             b"a\npartialSimulation finished at time 1250 ($finish called)\n"
         ));
+        let partial = b"a\npartialSimulation finished at time 1250 ($finish called)\n";
+        assert_eq!(
+            &partial[..finish_notice_offset(partial).unwrap()],
+            b"a\npartial"
+        );
         assert!(!finished(b"Simulation finished at time 10\n"));
         assert!(!finished(
             b"Simulation finished at time  ($finish called)\n"

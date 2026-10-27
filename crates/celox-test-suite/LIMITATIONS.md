@@ -972,6 +972,110 @@ misorders gates and does not reflect the shared automatic gate update. Its six
 failures remain executed evidence, not exclusions. The current flake pin could
 not be built because the dependency lock references a different xezim-core revision;
 the evidence identifies the installed binary and does not claim current-pin coverage.
+
+### Fine-grain process control
+
+The six `fork_control::process_*` cases exercise the built-in `process` class
+(IEEE 1800-2023 9.7, and 18.13.3–18.13.5 for RNG state). Output variables are
+explicitly initialized. They retain identity after completion, preserve finished
+states, cancel descendants through completed parents, wait for completion,
+suspend/rearm delay/event/level waits, and preserve process RNG state through
+class properties and queues. Icarus 13.0 rejects all six process declarations;
+the exact compile diagnostics remain executed failures in
+[the Icarus report](verification/sv/icarus/fork_control.json).
+
+Verilator 5.052 passes identity/status and RNG/handle storage. Its built-in
+`verilated_std.sv` explicitly reports `std::process::suspend() not supported`,
+causing the two suspend cases to fail at runtime. It also fails the finished
+parent/descendant and status-wait cases. These four executed failures remain in
+[the Verilator report](verification/sv/verilator/fork_control.json).
+
+Pinned xezim 0.11.3 (`5eab5f2`, core `1947ac68`) passes three cases. The other
+three show a finished parent changed to KILLED while its descendants continue,
+self-suspend returning without blocking and finished-state changes, and a resumed
+event waiter consuming an edge from its suspended interval. These are recorded
+as `sv_process-X1`, `sv_process-X2` and `sv_process-X3` in
+[the review](verification/xezim-review.json) and remain executed mismatches in
+[the report](verification/sv/xezim/fork_control.json).
+
+Adapter-free Top/Wrapped sources and observations accompany each discrepancy:
+[finished parent](verification/repros/sv_process_finished_parent_kills_descendants.sv),
+[self suspend](verification/repros/sv_process_self_suspend_and_await.sv),
+[status wait](verification/repros/sv_process_status_wait_and_disable.sv), and
+[resumed waits](verification/repros/sv_process_suspend_and_resume_waits.sv),
+each with a neighboring JSON file. The probes observe after the shared case's
+deadline to avoid races. xezim was built from the pinned sources with the existing
+Nix recipe and a regenerated dependency lock in an isolated validation package;
+no simulator source changes were used. No assertions or exclusions are weakened.
+
+The review regressions also cover a user package named `process`, implicit
+program completion after self/external `kill()`, and output from `final`
+procedures. Explicit-finish final output passes all three external tools.
+Verilator and Icarus resolve the user package correctly; xezim replaces the
+package's `self()` call with the built-in method (`sv_process-X4`). Icarus
+rejects the two process-kill cases during compilation. Verilator and xezim
+continue the design clock after cancellation of the last program initial;
+all three tools also miss normal program completion in the added final case
+(24.3). The generated testbench introduces no auxiliary program when a script
+starts with `run_to_finish`. Adapter-free Top/Wrapped observations confirm the
+namespace and completion discrepancies:
+[package scope](verification/repros/sv_process_package_scope.sv),
+[self kill](verification/repros/sv_process_program_self_kill.sv),
+[external kill](verification/repros/sv_process_program_external_kill.sv), and
+[normal completion](verification/repros/sv_process_program_normal_completion.sv).
+The ten exact new failures remain executed, retained results, with no change
+to existing rows or assertions; the four xezim mismatches are reviewed as
+`sv_process-X4` and `sv_process-X5`.
+
+`fork_control::process_program_exit_wakes_sibling_observers` checks that `$exit`
+notifies await/status observers in another program (24.7). Verilator and xezim
+instead end the entire simulation at the Producer's `$exit`, although Consumer
+is still live; Icarus rejects the process handle declaration. The three exact
+failures remain executed results. The adapter-free
+[program-exit observer source](verification/repros/sv_process_program_exit_observers.sv)
+and its adjacent JSON reproduce premature completion as Top and Wrapped;
+xezim is reviewed as `sv_process-X6`.
+
+The mutual status-wait regression must advance to the cancellation at 3 and
+report `checks=2`, `observed_at=3`. xezim passes; Verilator reports zero for both
+outputs, also in the adapter-free
+[mutual-wait source](verification/repros/sv_process_mutual_status_waits.sv).
+Cleanup after a final procedure kills the last program passes Verilator and
+xezim. Icarus rejects both new process declarations. Only these three exact
+failures are appended; existing rows, assertions and exclusions are unchanged.
+
+The qualified-type regression preserves a user package's 64-bit `state` and
+128-bit `payload` typedefs and passes all three external tools. The shared-final
+identity/RNG regression passes Verilator; xezim exposes different handles and
+RNG continuations on its second and third final visits (`sv_process-X8`). The
+saved handle/state are explicitly initialized before finish. The ancestor-kill
+case checks the caller's RNG through a surviving process; Verilator and xezim
+continue the child past its ancestor's kill (`sv_process-X7` in xezim).
+Adapter-free Top/Wrapped observations are retained for
+[final identity](verification/repros/sv_process_final_identity.sv) and
+[ancestor cancellation](verification/repros/sv_process_ancestor_kill_rng.sv).
+Icarus rejects the two process-handle cases. Only these five exact failures
+are appended, with the original assertions and existing rows preserved.
+
+Three further resume regressions cover process calls nested after a level wait,
+an automatic compound event changed during suspension, and a finished program
+process whose handle is resumed after `$exit` (9.7, 24.7). The nested level-wait
+case passes pinned xezim. Verilator reports unsupported `suspend()` in the level
+and program-exit cases, and rejects the shared automatic event operands with
+`LIFETIME`, despite the enclosing scope lasting through its fork children (6.21).
+Icarus rejects all three process-handle declarations. Their six exact failures
+remain executed results.
+
+xezim already wakes the automatic-expression waiter at time 0, before either
+operand changes: `hits=1, event_at=0` at times 1, 3 and 5 instead of `0, 0`
+(`sv_process-X9`, 9.4.2). This fails before the intended resume check. It also exits
+the whole simulation at the Producer's `$exit` at 2 (`sv_process-X6`). The
+adapter-free [automatic-event source](verification/repros/sv_process_resume_automatic_event.sv)
+and [program-exit source](verification/repros/sv_process_resume_after_program_exit.sv),
+with adjacent JSON observations, reproduce both as Top and Wrapped. Celox
+passes both tops in both state modes, including the expected event at 6 and
+finished-handle no-op at the original delay deadline. Only the eight new exact
+external failures are appended; prior rows, assertions and exclusions remain.
 ### Package constants in class defaults
 
 `class::package_constant_class_defaults` binds class parameter defaults and
