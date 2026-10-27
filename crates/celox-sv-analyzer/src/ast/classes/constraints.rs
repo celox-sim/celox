@@ -3,16 +3,59 @@ use super::*;
 use celox_heap::randomization::{Expr as ConstraintExpr, Field, Program};
 use celox_sv_syntax::{ExprId, ExprKind};
 
+#[derive(Clone)]
 struct Typed {
     kind: Kind,
     width: u32,
     signed: bool,
 }
+#[derive(Clone)]
 enum Kind {
     Leaf(ConstraintExpr),
+    Context(Box<Typed>),
     Unary(String, Box<Typed>),
     Binary(String, Box<Typed>, Box<Typed>),
 }
+fn relation(op: &str, left: Typed, right: Typed) -> Typed {
+    Typed {
+        kind: Kind::Binary(op.into(), Box::new(left), Box::new(right)),
+        width: 1,
+        signed: false,
+    }
+}
+
+// Charge copies before allocating them: source nesting alone does not bound
+// the expanded tree of nested membership predicates.
+fn bounded_clone(value: &Typed, budget: &std::cell::Cell<usize>) -> Result<Typed, String> {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        charge(budget)?;
+        match &value.kind {
+            Kind::Leaf(_) => {}
+            Kind::Context(child) | Kind::Unary(_, child) => pending.push(child),
+            Kind::Binary(_, a, b) => pending.extend([a.as_ref(), b.as_ref()]),
+        }
+    }
+    Ok(value.clone())
+}
+
+fn charge(budget: &std::cell::Cell<usize>) -> Result<(), String> {
+    let remaining = budget
+        .get()
+        .checked_sub(1)
+        .ok_or("constraint expression expansion limit")?;
+    budget.set(remaining);
+    Ok(())
+}
+
+fn sized(value: Typed, width: u32, signed: bool) -> Typed {
+    Typed {
+        kind: Kind::Context(Box::new(value)),
+        width,
+        signed,
+    }
+}
+
 fn comparison(op: &str) -> bool {
     matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||")
 }
@@ -24,6 +67,7 @@ fn emit(value: Typed, context: Option<(u32, bool)>) -> ConstraintExpr {
     let (width, signed) = context.unwrap_or((value.width, value.signed));
     let (expr, result_width) = match value.kind {
         Kind::Leaf(expr) => (expr, value.width),
+        Kind::Context(child) => (emit(*child, Some((value.width, value.signed))), value.width),
         Kind::Unary(op, child) => {
             let logical = op == "!";
             (
@@ -78,11 +122,13 @@ pub(super) fn bind(
         properties: &[Property],
         env: &HashMap<String, i128>,
         depth: usize,
+        budget: &std::cell::Cell<usize>,
     ) -> Result<Typed, String> {
         if depth > 64 {
             return Err("constraint expression nesting limit".into());
         }
-        let recurse = |id| expression(id, tree, properties, env, depth + 1);
+        charge(budget)?;
+        let recurse = |id| expression(id, tree, properties, env, depth + 1, budget);
         let native = tree.declarations();
         Ok(match &native.expression(id).kind {
             ExprKind::Group(id) => return recurse(*id),
@@ -142,6 +188,71 @@ pub(super) fn bind(
                 left,
                 operator,
                 right,
+            } if operator == "inside" => {
+                let value = recurse(*left)?;
+                let ExprKind::Set(items) = &native.expression(*right).kind else {
+                    return Err("constraint inside set".into());
+                };
+                // Determine the context across every member and range endpoint
+                // before expanding comparisons, so arithmetic cannot truncate
+                // differently depending on which alternative is being tested.
+                let mut members = Vec::new();
+                let mut width = value.width;
+                let mut signed = value.signed;
+                for item in items {
+                    use celox_sv_syntax::DimensionKind;
+                    let (low, high) = match item.kind {
+                        DimensionKind::Index(id) => (recurse(id)?, None),
+                        DimensionKind::Range { left, right } => {
+                            (recurse(left)?, Some(recurse(right)?))
+                        }
+                        _ => return Err("constraint inside range".into()),
+                    };
+                    for operand in std::iter::once(&low).chain(high.iter()) {
+                        width = width.max(operand.width);
+                        signed &= operand.signed;
+                    }
+                    members.push((low, high));
+                }
+                let value = sized(value, width, signed);
+                let mut alternatives = Vec::new();
+                for (low, high) in members {
+                    charge(budget)?;
+                    let left = bounded_clone(&value, budget)?;
+                    let low = sized(low, width, signed);
+                    let predicate = if let Some(high) = high {
+                        relation(
+                            "&&",
+                            relation(">=", left, low),
+                            relation(
+                                "<=",
+                                bounded_clone(&value, budget)?,
+                                sized(high, width, signed),
+                            ),
+                        )
+                    } else {
+                        relation("==", left, low)
+                    };
+                    alternatives.push(predicate);
+                }
+                // A balanced OR tree bounds recursion for large membership sets.
+                while alternatives.len() > 1 {
+                    let mut next = Vec::new();
+                    let mut items = alternatives.into_iter();
+                    while let Some(a) = items.next() {
+                        next.push(match items.next() {
+                            Some(b) => relation("||", a, b),
+                            None => a,
+                        });
+                    }
+                    alternatives = next;
+                }
+                alternatives.pop().ok_or("empty constraint inside set")?
+            }
+            ExprKind::Binary {
+                left,
+                operator,
+                right,
             } if matches!(
                 operator.as_str(),
                 "+" | "-"
@@ -175,7 +286,8 @@ pub(super) fn bind(
             _ => return Err("unsupported scalar constraint expression".into()),
         })
     }
-    expression(id, tree, properties, env, 0).map(|value| emit(value, None))
+    expression(id, tree, properties, env, 0, &std::cell::Cell::new(16_384))
+        .map(|value| emit(value, None))
 }
 
 impl Class {

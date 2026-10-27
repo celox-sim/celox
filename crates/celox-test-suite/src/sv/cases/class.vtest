@@ -2002,3 +2002,76 @@ module Top(output bit done);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inside
+  (source "constraint_inside.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand int x, lo, hi;
+        constraint bounds { lo inside {-3, -2}; hi inside {2, 3};
+            x inside {[lo:hi], 9}; !(x inside {0, 9}); }
+    endclass
+    class Empty;
+        rand int x;
+        constraint c { x inside {[3:-3]}; }
+    endclass
+    Packet p;
+    Empty e;
+    initial begin
+        e = new; e.x = 42;
+        if (e.randomize() || e.x != 42) $fatal(1, "empty range changed fields");
+        p = new;
+        repeat (12) begin
+            if (!p.randomize()) $fatal(1, "membership unsat");
+            if (p.lo < -3 || p.lo > -2 || p.hi < 2 || p.hi > 3 ||
+                p.x < p.lo || p.x > p.hi || p.x == 0) $fatal(1, "membership");
+        end
+        p.lo = 3; p.hi = -3;
+        if (p.randomize(x)) $fatal(1, "reversed range must be empty");
+        p.lo = -2; p.hi = 2; p.x = -1;
+        if (!p.randomize(null)) $fatal(1, "negative check-only member");
+        p.x = p.lo;
+        if (!p.randomize(null)) $fatal(1, "low endpoint excluded");
+        p.x = p.hi;
+        if (!p.randomize(null)) $fatal(1, "high endpoint excluded");
+        p.x = 0;
+        if (p.randomize(null)) $fatal(1, "excluded check-only member");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inside_widths
+  (source "constraint_inside_widths.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand bit signed [7:0] x;
+        rand bit [15:0] y;
+        constraint c { x inside {-2, -1}; y inside {x}; }
+    endclass
+    class WideSet;
+        bit [3:0] a, b;
+        constraint c { !((a + b) inside {4'd0, 8'd17}); }
+    endclass
+    class WideRange;
+        bit [3:0] a, b;
+        constraint c { (a + b) inside {[4'd1:8'd16]}; }
+    endclass
+    Packet p;
+    WideSet s;
+    WideRange r;
+    initial begin
+        p = new;
+        if (!p.randomize()) $fatal(1, "mixed width membership");
+        if (p.x != -2 && p.x != -1) $fatal(1, "signed membership");
+        if (p.y != 254 && p.y != 255) $fatal(1, "unsigned comparison context");
+        s = new; s.a = 15; s.b = 1;
+        if (!s.randomize(null)) $fatal(1, "membership-wide sum width");
+        r = new; r.a = 15; r.b = 1;
+        if (!r.randomize(null)) $fatal(1, "range endpoint width");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
