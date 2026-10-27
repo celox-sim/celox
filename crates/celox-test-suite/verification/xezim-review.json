@@ -654,6 +654,10 @@
     "sv_fork-X1": {
       "title": "Compound events on automatic block locals wake before the expression changes or miss subsequent edges",
       "standard": "IEEE 1800-2023 9.4.2, Table 9-2"
+    },
+    "sv_fork_deferred": {
+      "title": "Deferred assertion reports do not follow process ownership and flush-point rules",
+      "standard": "IEEE 1800-2023 16.4.1, 16.4.2, 16.4.4"
     }
   },
   "cases": [
@@ -4007,6 +4011,62 @@
       "classification": "xezim_bug",
       "bug": "sv_fork-X1",
       "note": "The shared case reports rises=0 instead of 3. Its assignments are separated by #1 delays, so transient coalescing cannot explain the mismatch. A reduced one-shot concatenation edge wait wakes at time 0, before any write. Clause 9.4.2 requires edge detection on the result LSB, including the X/Z transitions in Table 9-2. See verification/repros/sv_fork_compound_events.md."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_deferred::child_flush_does_not_inherit_parent_reports",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_fork_deferred",
+      "note": "The child wait must not flush the parent process reports; both parent reports are missing."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_deferred::disable_fork_flushes_live_children_only",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_fork_deferred",
+      "note": "disable fork must discard the live cancelled child report, retain naturally completed reports, and leave the parent report intact; output contains cancelled and omits parent."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_deferred::four_state_arguments_are_captured_before_child_exit",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_fork_deferred",
+      "note": "Arguments are captured at assertion execution and #0 is not a flush point; both captured reports are missing."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_deferred::sibling_event_queues_are_independent",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_fork_deferred",
+      "note": "An event-control resumption flushes only its own process queue; the sibling report is missing."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_deferred::sibling_wait_queues_are_independent",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_fork_deferred",
+      "note": "A wait resumption flushes only its own process queue; the sibling report is missing."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_deferred::zero_delay_is_not_a_flush_point",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_fork_deferred",
+      "note": "Zero-delay resumption is not among the flush points in16.4.2. Both reports are missing, also in verification/repros/fork_deferred_zero_delay.sv without the suite adapter."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_deferred::reactive_wakeup_preserves_mature_observed_only",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_fork_deferred",
+      "note": "The Observed report must mature before the Reactive program wakes the waiter; that wakeup can flush only its still-pending Final report. xezim emits neither."
     }
   ]
 }

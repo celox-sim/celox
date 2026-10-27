@@ -48,7 +48,7 @@ pub(crate) fn validate_timed_design_with_defines(design: &Design, names: &[&str]
                 }
                 // Final procedures run in an unspecified order relative to the
                 // checks after run_to_finish (IEEE 1800-2023 9.2.3).
-                if token.text == "final" {
+                if token.text == "final" && !matches!(previous, "assert" | "assume" | "cover") {
                     return Err("final procedures are not supported in timed shared cases".into());
                 }
             }
@@ -110,6 +110,20 @@ mod tests {
         let source = "module Top; initial $display(\"final\"); endmodule";
         assert!(validate_timed_design(&design(source)).is_ok());
     }
+    #[test]
+    fn final_deferred_assertions_are_not_final_procedures() {
+        for assertion in ["assert", "assume", "cover"] {
+            let source = format!(
+                "module Top; initial {assertion} /* trivia */ final (1) $display(\"ok\"); endmodule"
+            );
+            assert!(validate_timed_design(&design(&source)).is_ok(), "{source}");
+            let source = format!(
+                "module Top; initial {assertion} final (1); final $display(\"done\"); endmodule"
+            );
+            assert!(validate_timed_design(&design(&source)).is_err(), "{source}");
+        }
+    }
+
     #[test]
     fn source_order_controls_macro_hidden_scale_validation() {
         for directive in [

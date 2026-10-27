@@ -5,6 +5,7 @@
     "icarus/class.json",
     "icarus/fork.json",
     "icarus/fork_control.json",
+    "icarus/fork_deferred.json",
     "icarus/generate.json",
     "icarus/hierarchy.json",
     "icarus/indexed_select.json",

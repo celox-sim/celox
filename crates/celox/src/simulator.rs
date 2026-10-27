@@ -38,6 +38,8 @@ pub use state_file::{StateError, StateMismatch, StateSchema};
 #[cfg(feature = "host-runtime")]
 mod host {
     mod declaration;
+    #[cfg(all(test, feature = "systemverilog"))]
+    mod deferred_tests;
     mod distribution;
     mod file_io;
     mod fread;
@@ -409,6 +411,21 @@ mod host {
         },
     }
 
+    /// Host identities are deliberately outside core checkpoints. A restored
+    /// activation slot must not flush reports left by a different execution.
+    #[derive(Clone, Default)]
+    pub(super) struct DeferredOwnerContext {
+        ordinary: u64,
+        current: Option<u64>,
+        processes: crate::HashMap<usize, u64>,
+    }
+
+    impl DeferredOwnerContext {
+        fn owner(&self) -> u64 {
+            self.current.unwrap_or(self.ordinary)
+        }
+    }
+
     /// A bounded continuation of the backend ring. Records remain unformatted
     /// until the eventual consumer supplies its scope/time context.
     #[derive(Clone, Default)]
@@ -416,6 +433,22 @@ mod host {
         events: std::collections::VecDeque<RawRuntimeEvent>,
         missed: u64,
         deferred: DeferredQueues,
+        deferred_owners: DeferredOwnerContext,
+        next_deferred_owner: u64,
+    }
+
+    #[derive(Clone)]
+    struct DeferredReport {
+        queue: u32,
+        owner: u64,
+        region: celox_design::AssertionDeferral,
+        event: RawRuntimeEvent,
+    }
+
+    #[derive(Clone)]
+    struct DeferredLoss {
+        region: celox_design::AssertionDeferral,
+        count: u64,
     }
 
     /// The actions of deferred assertions that wait in the queue of their
@@ -426,13 +459,57 @@ mod host {
         /// fatal, by site id. Empty without deferred assertions.
         sites: Vec<Option<(celox_design::DeferredSite, bool)>>,
         /// Waiting actions in issue order, with their queue and region.
-        waiting: Vec<(u32, celox_design::AssertionDeferral, RawRuntimeEvent)>,
+        waiting: Vec<DeferredReport>,
         /// Events lost to the ring since the last maturity, in a design with
-        /// fatal deferred actions: they may have held one.
-        missed: u64,
+        /// fatal deferred actions: they may have held one. Cancellation must
+        /// discard only losses belonging to that execution, too.
+        missed: crate::HashMap<u64, DeferredLoss>,
     }
 
     impl PendingRuntimeEvents {
+        fn resolve_deferred_handles(&mut self, heap: &celox_heap::Heap) {
+            // The raw drain can enqueue unresolved string arguments, but it
+            // cannot mature them. Resolve before the owning thread changes
+            // heap state or publishes the actions.
+            for report in &mut self.deferred.waiting {
+                report.event.resolve_handles(heap);
+            }
+        }
+
+        fn new_deferred_owner(&mut self) -> u64 {
+            self.next_deferred_owner = self
+                .next_deferred_owner
+                .checked_add(1)
+                .expect("deferred assertion owner identity exhausted");
+            self.next_deferred_owner
+        }
+
+        fn enter_deferred_process(&mut self, process: usize) {
+            debug_assert!(self.deferred_owners.current.is_none());
+            let owner = if let Some(&owner) = self.deferred_owners.processes.get(&process) {
+                owner
+            } else {
+                let owner = self.new_deferred_owner();
+                self.deferred_owners.processes.insert(process, owner);
+                owner
+            };
+            self.deferred_owners.current = Some(owner);
+        }
+
+        fn cancel_deferred_process(&mut self, process: usize) {
+            if let Some(owner) = self.deferred_owners.processes.remove(&process) {
+                self.deferred.waiting.retain(|report| report.owner != owner);
+                self.deferred.missed.remove(&owner);
+            }
+        }
+
+        fn replace_deferred_execution(&mut self) {
+            self.deferred_owners = DeferredOwnerContext {
+                ordinary: self.new_deferred_owner(),
+                ..Default::default()
+            };
+        }
+
         fn extend(&mut self, events: impl IntoIterator<Item = RawRuntimeEvent>, capacity: usize) {
             for event in events {
                 self.push(event, capacity);
@@ -450,7 +527,12 @@ mod host {
                 match *deferred {
                     celox_design::DeferredSite::FlushPoint => self.flush(site),
                     celox_design::DeferredSite::Action { queue, region } => {
-                        self.deferred.waiting.push((queue, region, event));
+                        self.deferred.waiting.push(DeferredReport {
+                            queue,
+                            owner: self.deferred_owners.owner(),
+                            region,
+                            event,
+                        });
                     }
                 }
                 return;
@@ -463,40 +545,76 @@ mod host {
                     .flatten()
                     .any(|&(_, fatal)| fatal)
             {
-                self.deferred.missed += count;
+                // Lost records have no site identity. Fail conservatively in
+                // the earliest region that could have contained a fatal action.
+                let region = if self.deferred.sites.iter().flatten().any(|(site, fatal)| {
+                    *fatal
+                        && matches!(
+                            site,
+                            celox_design::DeferredSite::Action {
+                                region: celox_design::AssertionDeferral::Observed,
+                                ..
+                            }
+                        )
+                }) {
+                    celox_design::AssertionDeferral::Observed
+                } else {
+                    celox_design::AssertionDeferral::Final
+                };
+                self.deferred
+                    .missed
+                    .entry(self.deferred_owners.owner())
+                    .or_insert(DeferredLoss { region, count: 0 })
+                    .count += count;
             }
             self.push_ready(event, capacity);
         }
 
         /// Discard the actions waiting in queue `queue`.
         fn flush(&mut self, queue: u32) {
+            let owner = self.deferred_owners.owner();
             self.deferred
                 .waiting
-                .retain(|&(waiting, ..)| waiting != queue);
+                .retain(|report| report.queue != queue || report.owner != owner);
+            // A dynamic execution has exactly its process's queue. The
+            // ordinary context may mix unrelated comb/FF queues, so losses
+            // there must remain conservatively fatal until maturity.
+            if self.deferred_owners.current.is_some() {
+                self.deferred.missed.remove(&owner);
+            }
         }
 
-        /// The time slot ends: queue the waiting actions, those of the
-        /// Observed region (`#0`) before those of the Postponed region
-        /// (`final`), up to the first fatal one, which it returns, or
-        /// [`RawRuntimeEvent::Missed`] when events that may have been one were
-        /// lost.
-        fn mature(&mut self, capacity: usize) -> Option<RawRuntimeEvent> {
+        /// Mature one region. Matured actions leave the process queue and
+        /// cannot be flushed by activity in a later region (16.4.1).
+        fn mature(
+            &mut self,
+            region: celox_design::AssertionDeferral,
+            capacity: usize,
+        ) -> Option<RawRuntimeEvent> {
             let waiting = std::mem::take(&mut self.deferred.waiting);
-            let missed = std::mem::take(&mut self.deferred.missed);
+            let mut missed = 0;
+            self.deferred.missed.retain(|_, loss| {
+                if loss.region == region {
+                    missed += loss.count;
+                    false
+                } else {
+                    true
+                }
+            });
             let fatal = (missed > 0).then_some(RawRuntimeEvent::Missed { count: missed });
-            for region in [
-                celox_design::AssertionDeferral::Observed,
-                celox_design::AssertionDeferral::Final,
-            ] {
-                for (_, _, event) in waiting.iter().filter(|(_, r, _)| *r == region) {
-                    self.push_ready(event.clone(), capacity);
-                    // The simulation ends at a fatal action: the actions
-                    // after it do not run.
-                    if let RawRuntimeEvent::Event { site_id, .. } = event
-                        && let Some(Some((_, true))) = self.deferred.sites.get(*site_id)
-                    {
-                        return fatal.or_else(|| Some(event.clone()));
-                    }
+            for report in waiting {
+                if report.region != region {
+                    self.deferred.waiting.push(report);
+                    continue;
+                }
+                self.push_ready(report.event.clone(), capacity);
+                if let RawRuntimeEvent::Event { site_id, .. } = &report.event
+                    && let Some(Some((_, true))) = self.deferred.sites.get(*site_id)
+                {
+                    // No further actions run after a known fatal action.
+                    self.deferred.waiting.clear();
+                    self.deferred.missed.clear();
+                    return fatal.or(Some(report.event));
                 }
             }
             fatal
@@ -1462,6 +1580,7 @@ mod host {
                 self.collect_backend_runtime_events(),
                 self.backend.layout().runtime_event_capacity,
             );
+            pending.resolve_deferred_handles(self.backend.heap());
             let events = pending.drain();
             drop(pending);
             events
@@ -1486,6 +1605,7 @@ mod host {
             let mut pending = queue.lock().unwrap();
             let capacity = self.backend.layout().runtime_event_capacity;
             pending.extend(self.collect_backend_runtime_events(), capacity);
+            pending.resolve_deferred_handles(self.backend.heap());
             pending.push(
                 RawRuntimeEvent::Host {
                     site: Box::new(site),
@@ -1599,6 +1719,14 @@ mod host {
         /// process did not flush mature, `#0` before `final` (IEEE 1800-2023
         /// 16.4). A fatal one ends the simulation with an error.
         pub(crate) fn mature_deferred_assertions(&mut self) -> Result<(), RuntimeErrorCode> {
+            self.mature_deferred_assertion_region(celox_design::AssertionDeferral::Observed)?;
+            self.mature_deferred_assertion_region(celox_design::AssertionDeferral::Final)
+        }
+
+        pub(crate) fn mature_deferred_assertion_region(
+            &mut self,
+            region: celox_design::AssertionDeferral,
+        ) -> Result<(), RuntimeErrorCode> {
             // Terminal output draining must not execute actions left in the
             // Observed/Postponed queues after final procedures (9.2.3).
             if self.frozen || !self.deferred_assertions {
@@ -1606,7 +1734,11 @@ mod host {
             }
             self.stash_runtime_events();
             let capacity = self.backend.layout().runtime_event_capacity;
-            let fatal = self.pending_host_events.lock().unwrap().mature(capacity);
+            let fatal = self
+                .pending_host_events
+                .lock()
+                .unwrap()
+                .mature(region, capacity);
             if let Some(RawRuntimeEvent::Missed { count }) = fatal {
                 return Err(RuntimeErrorCode::Runtime {
                     message: format!(
@@ -1633,12 +1765,78 @@ mod host {
         /// Move the events in the backend's buffer to the queue that
         /// [`Self::drain_runtime_events`] reads.
         pub(crate) fn stash_runtime_events(&mut self) {
+            // The raw drain shares this lock: consume and attribute records
+            // atomically, before the current process owner can change.
+            let queue = Arc::clone(&self.pending_host_events);
+            let mut pending = queue.lock().unwrap();
             let events = self.collect_backend_runtime_events();
             let capacity = self.backend.layout().runtime_event_capacity;
+            pending.extend(events, capacity);
+            pending.resolve_deferred_handles(self.backend.heap());
+        }
+
+        pub(crate) fn enter_deferred_process(&mut self, process: usize) {
+            if self.deferred_assertions {
+                self.stash_runtime_events();
+                self.pending_host_events
+                    .lock()
+                    .unwrap()
+                    .enter_deferred_process(process);
+            }
+        }
+
+        pub(crate) fn leave_deferred_process(&mut self) {
+            if self.deferred_assertions {
+                self.stash_runtime_events();
+                self.pending_host_events
+                    .lock()
+                    .unwrap()
+                    .deferred_owners
+                    .current = None;
+            }
+        }
+
+        pub(crate) fn finish_deferred_process(&mut self, process: usize) {
+            if self.deferred_assertions {
+                self.pending_host_events
+                    .lock()
+                    .unwrap()
+                    .deferred_owners
+                    .processes
+                    .remove(&process);
+            }
+        }
+
+        pub(crate) fn cancel_deferred_process(&mut self, process: usize) {
+            if self.deferred_assertions {
+                self.pending_host_events
+                    .lock()
+                    .unwrap()
+                    .cancel_deferred_process(process);
+            }
+        }
+
+        pub(super) fn replace_deferred_execution(&mut self) {
+            if self.deferred_assertions {
+                self.stash_runtime_events();
+                self.pending_host_events
+                    .lock()
+                    .unwrap()
+                    .replace_deferred_execution();
+            }
+        }
+
+        pub(super) fn deferred_owner_context(&self) -> DeferredOwnerContext {
             self.pending_host_events
                 .lock()
                 .unwrap()
-                .extend(events, capacity);
+                .deferred_owners
+                .clone()
+        }
+
+        pub(super) fn restore_deferred_owner_context(&mut self, owners: DeferredOwnerContext) {
+            self.stash_runtime_events();
+            self.pending_host_events.lock().unwrap().deferred_owners = owners;
         }
 
         fn collect_backend_runtime_events(&mut self) -> Vec<RawRuntimeEvent> {
