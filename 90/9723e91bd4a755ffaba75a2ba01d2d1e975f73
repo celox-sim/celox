@@ -1,1 +1,6 @@
-Fix review 5663035668: global inside operand context and expansion budget
+Revision history for #2238:
+
+rev 2 (content) 2026-10-27 06:30 UTC — Fix review 5663035668: global inside operand context and expansion budget
+rev 1 (initial) 2026-10-27 06:30 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2238,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"4fc1740d0ed5e9dc9e47d56dceaeda0173797628","timestamp_iso":"2026-10-27T06:30:47Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"4fc1740d0ed5e9dc9e47d56dceaeda0173797628","new_sha":"909723e91bd4a755ffaba75a2ba01d2d1e975f73","timestamp_iso":"2026-10-27T06:30:47Z","reason":"Fix review 5663035668: global inside operand context and expansion budget","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/4fc1740d0ed5e9dc9e47d56dceaeda0173797628...909723e91bd4a755ffaba75a2ba01d2d1e975f73"}]} -->
