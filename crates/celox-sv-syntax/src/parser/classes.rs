@@ -22,8 +22,25 @@ impl Parser<'_> {
             .get(cursor + 1)
             .map(|index| self.tokens[*index].text.as_str())
             .unwrap_or("");
-        if token.text == "virtual" && matches!(next, "function" | "task" | "class") {
-            return false;
+        if token.text == "virtual" {
+            // Method qualifiers may follow `virtual` (Syntax 8-1). Look
+            // through them without consuming a virtual interface's type.
+            let mut method = cursor + 1;
+            while self.indices.get(method).is_some_and(|index| {
+                matches!(
+                    self.tokens[*index].text.as_str(),
+                    "protected" | "local" | "static"
+                )
+            }) {
+                method += 1;
+            }
+            if next == "class"
+                || self.indices.get(method).is_some_and(|index| {
+                    matches!(self.tokens[*index].text.as_str(), "function" | "task")
+                })
+            {
+                return false;
+            }
         }
         super::expressions::builtin(&token.text)
             || matches!(
@@ -48,7 +65,7 @@ impl Parser<'_> {
 
     pub(super) fn class_property(&mut self) -> Result<()> {
         let mut qualifiers = ClassQualifiers::default();
-        while self.class_qualifier(&mut qualifiers) {}
+        while self.class_property_qualifier(&mut qualifiers) {}
         let qualified_const =
             self.peek() == "const" && matches!(self.nth(1), "protected" | "local" | "static");
         let mut special_const = false;
@@ -56,7 +73,7 @@ impl Parser<'_> {
             self.at += 1;
             while matches!(self.peek(), "static" | "protected" | "local") {
                 special_const |= matches!(self.peek(), "protected" | "local");
-                self.class_qualifier(&mut qualifiers);
+                self.class_property_qualifier(&mut qualifiers);
             }
         }
         let declaration = self.local_declaration()?;
@@ -82,13 +99,10 @@ impl Parser<'_> {
         Ok(())
     }
 
-    /// Consume one property or method qualifier, recording it.
-    fn class_qualifier(&mut self, qualifiers: &mut ClassQualifiers) -> bool {
+    /// Consume one property qualifier; `virtual` belongs to the interface type.
+    fn class_property_qualifier(&mut self, qualifiers: &mut ClassQualifiers) -> bool {
         let flag = match self.peek() {
             "static" => &mut qualifiers.is_static,
-            "virtual" => &mut qualifiers.is_virtual,
-            "pure" => &mut qualifiers.is_pure,
-            "extern" => &mut qualifiers.is_extern,
             "local" => &mut qualifiers.local,
             "protected" => &mut qualifiers.protected,
             "rand" => &mut qualifiers.rand,
