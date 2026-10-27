@@ -22,7 +22,7 @@ test("only complete, unambiguous successful runs yield timing samples", () => {
 test("catalog keeps frontend and TB provenance distinct", () => {
   assert.deepEqual(select("all").map(w => w.id), ["sha256", "fft", "lz77"]);
   assert.throws(() => select("sha256,sha256"));
-  assert.throws(() => select("tarunes"), /HDMI RGB differs/);
+  assert.throws(() => select("tarunes"), /measurement recipe/);
   for (const w of select("all")) {
     assert.equal(w.testbenches[0].language, "veryl");
     assert.equal(w.testbenches[1].repository, "logikbench-original");

@@ -11,12 +11,13 @@ and standard-library microbenchmarks remain available in the
 | logikbench SHA-256 | 8,192 checked hashes | Cryptographic datapath |
 | logikbench FFT | 3,072 checked 64-point frames | Fixed-point signal processing |
 | logikbench LZ77 | 2,944 reconstructed bytes | Compression and history memory |
-| tarunes | Headless video/audio workload under qualification | CPU, video and audio together |
+| tarunes | Qualified headless video/audio probe; measurement pending | CPU, video and audio together |
 
 Heliodor retains its [existing comparison suite](./heliodor.md). rica retains
 `scripts/run-rica-bench.sh`; its results are currently local, not a published
-collection history. tarunes has no accepted performance samples yet: its synthetic-ROM
-qualification probe agrees with Verilator on CPU, PPU and audio, but HDMI RGB differs.
+collection history. tarunes has no accepted performance samples yet. Its synthetic-ROM
+qualification probe agrees with Verilator, including HDMI RGB, but still needs a
+fixed measurement recipe and collection runner.
 The paired Veryl/SV probes and reproduction instructions live in `benchmarks/tarunes/`.
 The collection does not combine these designs into an overall score.
 
