@@ -1418,6 +1418,7 @@ impl Module {
         // A package keeps its symbols for the scopes that use it.
         let symbols = (is_package || export_symbols).then(|| scope::ScopeSymbols {
             classes: classes::scope_classes(syntax_tree, &const_env),
+            class_member_types: classes::specializations::export_member_types(syntax_tree),
             inline_randomizations,
             declarations_only: imported.declarations_only,
             type_parameter_bindings: HashMap::default(),

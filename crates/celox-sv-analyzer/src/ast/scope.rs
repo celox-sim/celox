@@ -65,6 +65,9 @@ pub(super) struct ScopeSymbols {
     /// (IEEE 1800-2023 26.3): a scope that uses them may be analyzed from
     /// another source, without their declarations.
     pub classes: Vec<classes::Class>,
+    /// Class-declared types, frozen in each specialization's declaration
+    /// environment before another source imports them (8.23, 8.25).
+    pub class_member_types: HashMap<String, HashMap<String, Type>>,
     pub inline_randomizations: Vec<classes::constraints::InlineRequest>,
 }
 
@@ -199,6 +202,7 @@ impl ScopeSymbols {
                 self.classes.push(class.clone());
             }
         }
+        extend_missing(&mut self.class_member_types, &other.class_member_types);
         for (name, value) in &other.const_env {
             self.const_env.entry(name.clone()).or_insert(*value);
         }
@@ -447,6 +451,7 @@ impl ScopeSymbols {
         ScopeSymbols {
             // Classes have their qualified names already.
             classes: self.classes.clone(),
+            class_member_types: self.class_member_types.clone(),
             inline_randomizations: self.inline_randomizations.clone(),
             declarations_only: self.declarations_only,
             interface_instances: self.interface_instances.clone(),
