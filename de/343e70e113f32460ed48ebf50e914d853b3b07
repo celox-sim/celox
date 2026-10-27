@@ -1,0 +1,1 @@
+Address P1 r4388179384: isolate one-shot RC staging in a dedicated workflow without concurrency so unrelated events cannot replace pending staging.
