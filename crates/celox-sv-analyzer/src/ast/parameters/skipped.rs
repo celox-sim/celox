@@ -373,7 +373,7 @@ pub(in crate::ast) fn validate(
             ExprKind::Copy(_) => {
                 return Err(unsupported("shallow copy in skipped operand"));
             }
-            ExprKind::ArrayMethodWith { .. } => {
+            ExprKind::ArrayMethodWith { .. } | ExprKind::RandomizeWith { .. } => {
                 return Err(unsupported("array method with expression"));
             }
             ExprKind::Parameterized { .. } => {
@@ -587,7 +587,7 @@ pub(in crate::ast) fn literal_widths(
         visited.push(id);
         let add = |jobs: &mut Vec<_>, id| jobs.push((id, evaluated, shape));
         match &native.expression(id).kind {
-            ExprKind::ArrayMethodWith { .. } => {
+            ExprKind::ArrayMethodWith { .. } | ExprKind::RandomizeWith { .. } => {
                 return Err(unsupported("array method with expression"));
             }
             ExprKind::Literal(text) if evaluated => {
@@ -1164,6 +1164,13 @@ pub(in crate::ast) fn children(
             then_expression,
             else_expression,
         } => children.extend([*condition, *then_expression, *else_expression]),
+        ExprKind::RandomizeWith {
+            expression,
+            constraints,
+        } => {
+            children.push(*expression);
+            children.extend(constraints.iter().flatten());
+        }
         ExprKind::ArrayMethodWith {
             expression,
             predicate,

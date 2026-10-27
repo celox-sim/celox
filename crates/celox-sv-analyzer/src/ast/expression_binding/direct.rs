@@ -899,6 +899,19 @@ pub(in crate::ast) fn bind_value(
                     ExprKind::Concatenation(_) => {
                         return Err(unsupported("empty unpacked array concatenation"));
                     }
+                    ExprKind::RandomizeWith {
+                        expression,
+                        constraints,
+                    } => {
+                        values.push(objects::randomize_with(
+                            tree,
+                            *expression,
+                            constraints.as_deref(),
+                            native,
+                            dimensions,
+                        )?);
+                        continue;
+                    }
                     ExprKind::ArrayMethodWith { .. } => {
                         return Err(unsupported("array method with expression"));
                     }
