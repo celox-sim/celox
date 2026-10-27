@@ -93,6 +93,9 @@ pub struct RuntimeDesign {
     instance_ids: HashMap<InstancePath, InstanceId>,
     variables: HashMap<AbsoluteAddr, RuntimeVariable>,
     package_instances: crate::HashSet<InstanceId>,
+    /// Source-declared lexical scopes used only by reflection. Keep the
+    /// real-instance display path unchanged for lookup and VCD bookkeeping.
+    reflection_instance_paths: std::collections::BTreeMap<InstanceId, Vec<String>>,
 }
 
 impl std::ops::Deref for RuntimeDesign {
@@ -195,6 +198,7 @@ impl RuntimeDesign {
             instance_ids: frontend.instance_ids,
             variables,
             package_instances: frontend.package_instances,
+            reflection_instance_paths: Default::default(),
         };
         design
             .validate()
@@ -204,6 +208,14 @@ impl RuntimeDesign {
 
     pub fn semantic(&self) -> &celox_design::ElaboratedDesign<AbsoluteAddr> {
         &self.semantic
+    }
+
+    #[cfg(feature = "systemverilog")]
+    pub(crate) fn set_reflection_instance_paths(
+        &mut self,
+        paths: std::collections::BTreeMap<InstanceId, Vec<String>>,
+    ) {
+        self.reflection_instance_paths = paths;
     }
 
     pub fn instances(&self) -> impl Iterator<Item = &RuntimeInstance> {
@@ -900,7 +912,11 @@ impl RuntimeProgram {
             .design
             .instances()
             .map(|instance| {
-                let segments = &instance.display_path;
+                let segments = self
+                    .design
+                    .reflection_instance_paths
+                    .get(&instance.id)
+                    .unwrap_or(&instance.display_path);
                 let name = segments
                     .last()
                     .cloned()
@@ -932,9 +948,42 @@ impl RuntimeProgram {
         // instances. Retain their source path segments as navigable scopes.
         let real_scopes = scope_sources
             .iter()
-            .map(|scope| scope.full_name.clone())
-            .collect::<crate::HashSet<_>>();
+            .map(|scope| (scope.full_name.clone(), scope.instance_id))
+            .collect::<HashMap<_, _>>();
         let mut member_scopes = HashMap::default();
+        let root_instance = self
+            .design
+            .root_instance()
+            .expect("top-level instance exists")
+            .id;
+        // A generate block can contain only child instances, without a local
+        // variable to create its scope. Materialize every declared prefix and
+        // inherit its time scale from the nearest real enclosing instance.
+        for segments in self.design.reflection_instance_paths.values() {
+            let mut owner = root_instance;
+            for depth in 1..segments.len() {
+                let full_name = format!("{root_name}.{}", segments[..depth].join("."));
+                if let Some(&instance) = real_scopes.get(&full_name) {
+                    owner = instance;
+                    continue;
+                }
+                let parent_name = if depth == 1 {
+                    root_name.clone()
+                } else {
+                    format!("{root_name}.{}", segments[..depth - 1].join("."))
+                };
+                member_scopes
+                    .entry(full_name.clone())
+                    .or_insert_with(|| ScopeSource {
+                        is_instance: false,
+                        instance_id: owner,
+                        name: segments[depth - 1].clone(),
+                        full_name,
+                        parent_name: Some(parent_name),
+                        module_name: String::new(),
+                    });
+            }
+        }
         for scope in &scope_sources {
             let instance = self.design.instance(scope.instance_id).unwrap();
             for address in instance.state_addresses() {
@@ -945,7 +994,7 @@ impl RuntimeProgram {
                 for depth in 1..variable.path.len() {
                     let full_name =
                         format!("{}.{}", scope.full_name, variable.path[..depth].join("."));
-                    if real_scopes.contains(&full_name) {
+                    if real_scopes.contains_key(&full_name) {
                         continue;
                     }
                     let parent_name = if depth == 1 {

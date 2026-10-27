@@ -337,6 +337,7 @@ fn interface_signatures_collecting(
                 &[],
                 LevelLists::Processes,
                 &HashMap::default(),
+                &HashMap::default(),
             )?;
             Ok(InterfaceSignature {
                 name: prototype.name,
@@ -948,6 +949,7 @@ fn lower_package_states(
                 warnings,
                 &[],
                 LevelLists::Processes,
+                &HashMap::default(),
                 &HashMap::default(),
             )?;
             lowered.sim_module.time_precision = Some(
@@ -3171,24 +3173,44 @@ fn demote_level_lists(
     changed
 }
 
-// Use elaboration provenance rather than treating every '$' as a separator:
-// legal authored identifiers may themselves contain '$'.
+// Candidate indices only locate a declaration; source provenance decides
+// whether this is an interface path. Authored '$' names stay intact.
+fn restore_interface_path(
+    name: &str,
+    paths: &HashMap<String, sv::InterfaceMemberPath>,
+) -> Option<Vec<String>> {
+    if let Some(path) = paths.get(name) {
+        return path.restore(name);
+    }
+    for (separator, _) in name.match_indices('$') {
+        let member = &name[separator + 1..];
+        let mut handle = &name[..separator];
+        while let Some(indexed) = handle.strip_suffix(']') {
+            let Some((base, index)) = indexed.rsplit_once('[') else {
+                break;
+            };
+            if index.parse::<i128>().is_err() {
+                break;
+            }
+            let key = format!("{base}${member}");
+            if let Some(path) = paths.get(&key).filter(|path| path.arrayed)
+                && let Some(restored) = path.restore(name)
+            {
+                return Some(restored);
+            }
+            handle = base;
+        }
+    }
+    None
+}
+
 fn restore_interface_member_paths(module: &mut SimModule, source: &AnalyzedSvModule) {
     for variable in module.variables.values_mut() {
         variable.path = variable
             .path
             .iter()
             .flat_map(|segment| {
-                source
-                    .interface_member_paths
-                    .get(segment)
-                    .and_then(|path| path.restore(segment))
-                    .or_else(|| {
-                        source
-                            .interface_member_paths
-                            .values()
-                            .find_map(|path| path.restore(segment))
-                    })
+                restore_interface_path(segment, &source.interface_member_paths)
                     .unwrap_or_else(|| vec![segment.clone()])
             })
             .collect();
@@ -3367,6 +3389,7 @@ fn specialize_module(
         &local_forces,
         level_lists,
         hierarchical.foreign_writes,
+        &module.interface_member_paths,
     )?;
     propagate_force_signals(&mut lowered.instances, &key.force_signals);
     lowered.sim_module.time_precision = Some(
@@ -3480,6 +3503,7 @@ fn lower_module(
     force_signals: &[String],
     level_lists: LevelLists<'_>,
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
+    reflected_paths: &HashMap<String, sv::InterfaceMemberPath>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     lower_module_with_overrides(
         module,
@@ -3491,6 +3515,7 @@ fn lower_module(
         force_signals,
         level_lists,
         foreign_writes,
+        reflected_paths,
     )
 }
 
@@ -3573,6 +3598,7 @@ fn lower_module_with_overrides(
     force_signals: &[String],
     level_lists: LevelLists<'_>,
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
+    reflected_paths: &HashMap<String, sv::InterfaceMemberPath>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let parameter_types = module_parameter_types(module);
     let constants = module_constants_with_overrides(module, parameter_overrides);
@@ -3777,7 +3803,14 @@ fn lower_module_with_overrides(
     // Retain integral parameters for external observation, without adding them
     // to name_to_id: HDL expressions must still fold parameter references as
     // constants rather than introduce runtime loads.
-    for parameter in module.parameters() {
+    // Interface declarations are flattened into imported symbols, rather
+    // than authored module parameters. Retain their instance-local values as
+    // well; package imports remain owned by their package (IEEE 37.10).
+    let interface_parameters = module
+        .imported_parameters()
+        .iter()
+        .filter(|parameter| restore_interface_path(parameter.name(), reflected_paths).is_some());
+    for parameter in module.parameters().iter().chain(interface_parameters) {
         let Some(width) = parameter.resolved_width().filter(|width| *width > 0) else {
             continue;
         };
@@ -11287,5 +11320,54 @@ endmodule
             select_sources(&computed, computed_sources.clone(), BitAccess::new(7, 7)).unwrap(),
             computed_sources
         );
+    }
+}
+
+#[cfg(test)]
+mod interface_reflection_tests {
+    use super::*;
+
+    #[test]
+    fn indexed_interface_paths_require_declaration_provenance() {
+        let paths = [
+            (
+                "authored$bus$extra$width",
+                ["authored$bus", "extra$width"],
+                false,
+            ),
+            ("lanes$extra$width", ["lanes", "extra$width"], true),
+            ("g[3].lanes$W", ["g[3].lanes", "W"], true),
+        ]
+        .into_iter()
+        .map(|(key, segments, arrayed)| {
+            (
+                key.to_string(),
+                sv::InterfaceMemberPath {
+                    segments: segments.into_iter().map(str::to_string).collect(),
+                    arrayed,
+                },
+            )
+        })
+        .collect();
+        for (name, expected) in [
+            ("authored$bus$extra$width", ["authored$bus", "extra$width"]),
+            ("lanes[1][-2]$extra$width", ["lanes[1][-2]", "extra$width"]),
+            ("g[3].lanes[7]$W", ["g[3].lanes[7]", "W"]),
+        ] {
+            assert_eq!(
+                restore_interface_path(name, &paths),
+                Some(expected.into_iter().map(str::to_string).collect()),
+                "{name}"
+            );
+        }
+        for name in [
+            "lanes$not_declared",
+            "lanes[foo]$extra$width",
+            "authored$bus[0]$extra$width",
+            "normal$parameter",
+            "g[2].lanes[7]$W",
+        ] {
+            assert_eq!(restore_interface_path(name, &paths), None, "{name}");
+        }
     }
 }
