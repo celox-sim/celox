@@ -2495,6 +2495,27 @@ fn constructed_declarations_validate_types_dimensions_and_allocation_operands() 
 }
 
 #[test]
+fn class_properties_retain_constructed_declarations_and_initializers() {
+    let syntax = parse(
+        "module M; class Cell; endclass class Store; int data[] = new[2]; int q[$], map[string]; Cell child = new; endclass endmodule",
+    );
+    let properties = &syntax.classes[1].properties;
+    let names = properties
+        .iter()
+        .flat_map(|property| &property.declaration.variables)
+        .map(|variable| variable.name.spelling.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["data", "q", "map", "child"]);
+    let data = &properties[0].declaration.variables[0];
+    assert!(matches!(data.dimensions[0].kind, DimensionKind::Unsized));
+    assert!(matches!(
+        syntax.expression(data.value.unwrap()).kind,
+        ExprKind::Select { .. }
+    ));
+    assert!(properties[2].declaration.variables[0].value.is_some());
+}
+
+#[test]
 fn class_property_payloads_validate_while_opaque_nonproperty_items_keep_boundaries() {
     let members = "rand protected int x=1; static const int y=2; const protected static int z=3; C object=new old_object; int data[]=new[2]; constraint c { x > 0; } int after_constraint=1; extern constraint forward; nettype int N with resolver; covergroup cg; coverpoint x; endgroup int after_covergroup=2; virtual function int f(); return x; endfunction extern function int g(); function new(); super.new(); endfunction";
     parse(&format!("class C; {members} endclass module M; endmodule"));

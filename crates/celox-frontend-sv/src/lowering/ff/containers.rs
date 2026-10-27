@@ -40,6 +40,23 @@ impl Ff<'_, '_> {
         if op.reduction().is_some() {
             return self.container_reduction(op, layout, &args[0], parameter);
         }
+        // Evaluate the owning object once, before argument side effects. Read
+        // its current container after the arguments, so a nested pop is kept.
+        let property = if !matches!(op, New | Literal | Convert | Equal | CaseEqual)
+            && let sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Object(object),
+                args,
+                ..
+            } = &args[0]
+            && let sv::ir::ObjectOp::Load(field) = **object
+        {
+            let owner = args[0]
+                .as_ref()
+                .ok_or_else(|| unsupported("container property owner"))?;
+            Some((field, self.handle(owner)?))
+        } else {
+            None
+        };
         let zero = self.constant64(0);
         let (width, signed) = op.result_type(layout);
         let element_result = matches!(op, Get | PopFront | PopBack);
@@ -148,7 +165,13 @@ impl Ff<'_, '_> {
                 };
                 // Arguments can mutate the receiver (e.g. q.push_back(q.pop_front())).
                 // Read its current contents and derive positions only after evaluating them.
-                let handle = self.handle(&args[0])?;
+                let handle = if let Some((field, owner)) = property {
+                    let offset = self.constant64(u64::from(field.offset));
+                    let count = self.constant64(u64::from(field.bytes()));
+                    self.heap_call(celox_heap::ops::OBJECT_LOAD, &[owner, offset, count])
+                } else {
+                    self.handle(&args[0])?
+                };
                 let index = match op {
                     PushBack => self.heap_call(code(heap::LEN), &[handle]),
                     PopBack => {
@@ -276,6 +299,16 @@ impl Ff<'_, '_> {
                             if matches!(op, Set | Insert | PushFront | PushBack) {
                                 updated =
                                     this.heap_call(code(heap::SET_MASK), &[updated, index, mask]);
+                            }
+                            if let Some((field, owner)) = property {
+                                let place = this.constant64(
+                                    u64::from(field.offset) | u64::from(field.bytes()) << 32,
+                                );
+                                this.heap_call(
+                                    celox_heap::ops::OBJECT_STORE,
+                                    &[owner, place, updated],
+                                );
+                                return Ok(());
                             }
                             let (id, updated_name) =
                                 this.m.temp("container_update", 32, false, false);

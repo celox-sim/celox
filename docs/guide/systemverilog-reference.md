@@ -33,7 +33,7 @@ synthesis and is tested at the design level.
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Dynamic containers | one-dimensional dynamic arrays, queues (including bounded queues), and associative arrays with integral or string keys; element access, value assignment, equality, `foreach` and built-in container methods. See [dynamic containers](#dynamic-containers) |
 | Strings | `string` variables, function arguments and results: assignment of strings, string literals and casts (`string'(x)`), `==`, `!=` and ordering comparisons, concatenation and replication (with a run-time count), character reads and writes (`s[i]`), and the methods `len`, `getc`, `putc`, `toupper`, `tolower`, `compare`, `icompare`, `substr`, `atoi` / `atohex` / `atooct` / `atobin` and `itoa` / `hextoa` / `octtoa` / `bintoa`; `%s` and format-less display of string values. See [strings](#strings) |
-| Classes | classes declared in a module, a package or the compilation unit: properties of 2-state integral types up to 64 bits, `string` and class handle types, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes and method calls through interface class handles; `$cast` of class handles, as a function and as a task; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles; parameterized classes with value and type parameters, parameters read through a handle or `C#(...)::`, typedefs of classes and interface classes and `C::T`; named constructor arguments; shallow copies (`new h`). See [classes](#classes) |
+| Classes | classes declared in a module, a package or the compilation unit: properties of 2-state integral types up to 64 bits, `string` and class handle types, plus dynamic arrays, queues and associative arrays, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes and method calls through interface class handles; `$cast` of class handles, as a function and as a task; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles; parameterized classes with value and type parameters, parameters read through a handle or `C#(...)::`, typedefs of classes and interface classes and `C::T`; named constructor arguments; shallow copies (`new h`). See [classes](#classes) |
 | Parameters | integral parameters and overrides preserving widths beyond 128 bits and X/Z values, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 
 ### Processes and control flow
@@ -434,7 +434,11 @@ including X/Z for four-state elements. `foreach` visits sequence positions
 or associative keys in order. Range errors read the element type's default
 and ignore writes; unknown indices never create associative entries.
 
-Containers work in procedural code as module variables or locals. Automatic
+Containers work in procedural code as module variables, locals, and class
+instance or static properties. Class properties support unqualified access in
+methods, `this` / `super`, access through handles, inherited visibility and
+member initializers (IEEE 1800-2023 8.5, 8.9, 8.18).
+Automatic
 local initializers and module declaration initializers may allocate with
 `new[]`. Checkpoints, including serialized checkpoints, preserve contents;
 portable state files require a checkpoint instead. Strings and class objects
@@ -453,13 +457,13 @@ Rust's `SimulatorBuilder::legacy_empty_reductions(true)` or the frontend's
 affects compilation and is preserved in generated native images; it does not
 change nonempty reductions.
 Fixed arrays may have elements wider than 64 bits. These methods currently
-require a one-dimensional array variable;
+require a one-dimensional array variable or dynamic-container class property;
 `with` expressions and iterator arguments remain unsupported.
 
 Multidimensional containers, elements wider than 64 bits, real elements,
 wildcard or class keys, slices, array locator methods, keyed patterns,
 container operands within concatenations, compound or nonblocking element
-assignments, container ports / subroutine parameters / class properties and
+assignments, container ports / subroutine parameters and
 const containers remain unsupported. A `new[]` initializer currently requires
 another compatible dynamic array or queue; fixed-size arrays are unsupported.
 Static local initializers retain the existing constant-initializer restriction.
@@ -470,6 +474,16 @@ For string-indexed associative arrays, use the `size()` method. Native images
 and serialized checkpoints from earlier container versions must be regenerated.
 
 ### Classes {#classes}
+
+Class container properties use the same element and key types as
+[dynamic containers](#dynamic-containers), including four-state integral
+elements. Object aliases share those properties; assigning an array property
+or making a shallow object copy preserves independent array values, while
+class handles inside the arrays keep reference semantics (8.12). Heap
+collection and serialized checkpoints follow the nested object/container graph.
+Fixed-size unpacked class properties and const container properties remain
+unsupported. This supports the protected-container pattern used by UVM queue
+and pool wrappers; it does not establish support for the full UVM library.
 
 A class variable holds a handle of an object in the simulator's heap, `null`
 until a constructor runs. Like a string, a handle costs the same as a 32-bit

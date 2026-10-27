@@ -135,13 +135,19 @@ pub(in crate::ast) fn native_string(
 ) -> bool {
     match &native.expression(ungroup(id, native)).kind {
         ExprKind::Select { expression, .. }
-            if containers::native_type(*expression, native, dimensions).is_some() =>
+            if containers::native_type(*expression, native, tree, dimensions)
+                .ok()
+                .flatten()
+                .is_some() =>
         {
-            containers::native_type(*expression, native, dimensions).is_some_and(|ty| {
-                ty.layout.handle == Some(crate::system_functions::HandleProperty::String)
-            })
+            containers::native_type(*expression, native, tree, dimensions)
+                .ok()
+                .flatten()
+                .is_some_and(|ty| {
+                    ty.layout.handle == Some(crate::system_functions::HandleProperty::String)
+                })
         }
-        ExprKind::Call { expression, .. } if matches!(&native.expression(*expression).kind, ExprKind::Member { expression: base, name, .. } if matches!(name.spelling.as_str(), "pop_front" | "pop_back") && containers::native_type(*base, native, dimensions).is_some_and(|ty| ty.layout.handle == Some(crate::system_functions::HandleProperty::String))) => {
+        ExprKind::Call { expression, .. } if matches!(&native.expression(*expression).kind, ExprKind::Member { expression: base, name, .. } if matches!(name.spelling.as_str(), "pop_front" | "pop_back") && containers::native_type(*base, native, tree, dimensions).ok().flatten().is_some_and(|ty| ty.layout.handle == Some(crate::system_functions::HandleProperty::String))) => {
             true
         }
         ExprKind::Name(name)

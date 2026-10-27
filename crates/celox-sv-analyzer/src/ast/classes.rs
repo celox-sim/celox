@@ -733,8 +733,17 @@ pub(super) fn class(
         )?
         .ok_or_else(|| unsupported("class property type"))?;
         for variable in &property.declaration.variables {
-            if !variable.dimensions.is_empty() {
+            let ty = containers::with_dimensions(
+                ty.clone(),
+                &variable.dimensions,
+                tree,
+                &PackedDimensions::new(HashMap::default(), env, aliases),
+            )?;
+            if !ty.unpacked_ranges.is_empty() {
                 return Err(unsupported("class property with unpacked dimensions"));
+            }
+            if ty.container.is_some() && property.declaration.constant {
+                return Err(unsupported("const dynamic container class property"));
             }
             let property_name = instances::normalize_identifier(&variable.name.spelling);
             if property.qualifiers.is_static {
@@ -1114,10 +1123,8 @@ fn field(
     env: &HashMap<String, i128>,
     offset: u32,
 ) -> Converted<ObjectField> {
-    if ty.container.is_some() {
-        return Err(unsupported("dynamic container class property"));
-    }
     let (width, signed, handle) = match ty.kind() {
+        _ if ty.container.is_some() => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::String => (HANDLE_WIDTH, false, Some(HandleProperty::String)),
         TypeKind::Object => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::Bit => {
