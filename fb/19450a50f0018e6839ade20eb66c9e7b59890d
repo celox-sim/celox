@@ -1,1 +1,6 @@
-Rebase onto master after container ordering merged; preserve constraint modes and container heap operations.
+Revision history for #2271:
+
+rev 2 (content) 2026-10-27 13:18 UTC — Rebase onto master after container ordering merged; preserve constraint modes and container heap operations.
+rev 1 (initial) 2026-10-27 13:18 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2271,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"fcbf44013beedf6f5bc5c9bdf8a9b136888d15bf","timestamp_iso":"2026-10-27T13:18:02Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"fcbf44013beedf6f5bc5c9bdf8a9b136888d15bf","new_sha":"fb19450a50f0018e6839ade20eb66c9e7b59890d","timestamp_iso":"2026-10-27T13:18:02Z","reason":"Rebase onto master after container ordering merged; preserve constraint modes and container heap operations.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/fcbf44013beedf6f5bc5c9bdf8a9b136888d15bf...fb19450a50f0018e6839ade20eb66c9e7b59890d"}]} -->
