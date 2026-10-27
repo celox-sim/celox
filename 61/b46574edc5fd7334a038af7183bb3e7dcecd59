@@ -1,0 +1,1 @@
+Rebase PR #2244 onto current master and resolve conflicts with logical-equivalence frontend and shared-case additions; preserve both behaviors and rerun affected SV validation.
