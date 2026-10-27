@@ -1,0 +1,55 @@
+name: Circuit benchmarks
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: circuit-bench-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  circuits:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - name: Test collection tooling
+        run: node --test scripts/benchmark-collection.test.mjs scripts/publish-collection-bench.test.mjs
+      - name: Build runner
+        run: cargo build --release --locked -p celox-vpi --bin celox
+      - name: Prepare pinned sources
+        run: node scripts/benchmark-collection.mjs prepare all work/circuits/sources
+      - name: Measure circuits sequentially on one host
+        run: node scripts/benchmark-collection.mjs measure all work/circuits/sources work/circuits/results target/release/celox
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: circuit-results
+          path: work/circuits/results
+          retention-days: 14
+          if-no-files-found: warn
+
+  publish:
+    needs: circuits
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: circuit-results
+          path: artifacts/circuits
+      - name: Publish validated measurement history
+        run: node scripts/publish-collection-bench.mjs artifacts/circuits/results.json

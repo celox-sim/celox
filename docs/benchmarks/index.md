@@ -11,20 +11,16 @@ for every RTL design.
 The complete benchmark matrix and raw history are available on the
 [external dashboard](https://celox-sim.github.io/celox/dev/bench/).
 
-## Workload groups
+## Workloads
 
-| Group | What it exercises |
-|---|---|
-| Compile time (CodSpeed) | End-to-end frontend, optimization, layout, and native/Cranelift code generation |
-| Counter | Sequential state updates and clock-event overhead |
-| Standard library | A mix of combinational, sequential, and structured datapaths |
-| TypeScript testbench | N-API calls, typed signal access, and scheduler overhead |
-| Verilator comparison | Equivalent generated simulators for a reference baseline |
-| Heliodor Linux | Whole-design compilation, execution including the host testbench, and tiered startup/total time |
+The main view prioritizes complete hardware workloads: Heliodor and representative
+SHA-256, FFT and LZ77 circuits. rica's existing runner and tarunes qualification
+are tracked in the [circuit collection](./collection.md), including pinned sources,
+acceptance checks and the planned SystemVerilog frontend comparisons.
 
-Compilation and execution are reported separately. A faster compile does not
-imply faster generated code, and a microbenchmark result does not establish
-whole-design performance.
+[API, counter and standard-library measurements](./diagnostics.md) remain available
+as diagnostics. Compilation and execution are reported separately; a faster
+compile does not imply faster generated code.
 
 ## Reading results
 
