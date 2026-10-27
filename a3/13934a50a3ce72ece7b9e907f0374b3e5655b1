@@ -1,1 +1,7 @@
-Drop obsolete external Depends-On marker after PR 2201 merged; publish against master to avoid stale stack-base validation
+Revision history for #2207:
+
+rev 3 (rebase) 2026-10-27 05:08 UTC — Drop obsolete external Depends-On marker after PR 2201 merged; publish against master to avoid stale stack-base validation
+rev 2 (rebase) 2026-10-26 19:36 UTC — Preserve the external dependency on existing PR #2201 in the PR description
+rev 1 (initial) 2026-10-26 19:36 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2207,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"e7e2f90adeba61e58d0e5c9db0f6c8828baf59c0","timestamp_iso":"2026-10-26T19:36:01Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"e7e2f90adeba61e58d0e5c9db0f6c8828baf59c0","new_sha":"cdb6a906af76f4abb306e8f62d6e823ce577c17a","timestamp_iso":"2026-10-26T19:36:01Z","reason":"Preserve the external dependency on existing PR #2201 in the PR description","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/e7e2f90adeba61e58d0e5c9db0f6c8828baf59c0...cdb6a906af76f4abb306e8f62d6e823ce577c17a"},{"number":3,"change_type":"rebase","old_sha":"cdb6a906af76f4abb306e8f62d6e823ce577c17a","new_sha":"a313934a50a3ce72ece7b9e907f0374b3e5655b1","timestamp_iso":"2026-10-27T05:08:39Z","reason":"Drop obsolete external Depends-On marker after PR 2201 merged; publish against master to avoid stale stack-base validation","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/cdb6a906af76f4abb306e8f62d6e823ce577c17a...a313934a50a3ce72ece7b9e907f0374b3e5655b1"}]} -->
