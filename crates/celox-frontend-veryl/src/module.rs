@@ -2919,6 +2919,54 @@ mod tests {
     }
 
     #[test]
+    fn value_type_check_handles_deep_statement_chains() {
+        // Exercise only the checker: parsing and dropping deeply recursive IR
+        // have their own traversal constraints.
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                use veryl_analyzer::ir::{Expression, IfStatement, Statement};
+                use veryl_analyzer::value::Value;
+                let mut module = parse_top_module(
+                    "module Top(a: input logic, q: output logic) { assign q = a; }",
+                );
+                let Declaration::Comb(comb) = &mut module.declarations[0] else {
+                    panic!("expected combinational declaration");
+                };
+                let mut body = std::mem::take(&mut comb.statements);
+                for depth in 0..4096 {
+                    let (true_side, false_side) = if depth % 2 == 0 {
+                        (body, Vec::new())
+                    } else {
+                        (Vec::new(), body)
+                    };
+                    body = vec![Statement::If(IfStatement {
+                        cond: Expression::create_value(Value::new(1, 1, false), Default::default()),
+                        true_side,
+                        false_side,
+                        token: Default::default(),
+                    })];
+                }
+                comb.statements = body;
+                let result = crate::value_type_check::check_module(&module);
+                let Declaration::Comb(comb) = &mut module.declarations[0] else {
+                    unreachable!()
+                };
+                let mut pending = std::mem::take(&mut comb.statements);
+                while let Some(statement) = pending.pop() {
+                    if let Statement::If(branch) = statement {
+                        pending.extend(branch.true_side);
+                        pending.extend(branch.false_side);
+                    }
+                }
+                result.unwrap();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn output_address_sources_include_runtime_power_exponent() {
         let mut module = parse_top_module(
             r#"

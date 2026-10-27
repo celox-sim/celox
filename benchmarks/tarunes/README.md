@@ -1,6 +1,7 @@
 # tarunes qualification probe
 
-This candidate is **not qualified** and is not included in the performance runner.
+This probe passes correctness qualification and is not yet included in the
+performance runner. A fixed measurement recipe is still needed.
 The original MIT-licensed ROM generator exercises CPU, PPU, HDMI and APU without
 commercial ROMs. Paired headless Veryl and SV testbenches run three NES frames
 (268,029 clocks after reset), check output hashes and enforce a cycle limit.
@@ -18,12 +19,18 @@ emitted SV run with Verilator produces:
 | I2S data XOR HDMI DE | `85e85e85` |
 | Combined output | `e8ccbe50` |
 
-The final CPU PC is 32867. Celox native agrees on PC, PPU, audio and I2S/DE,
-but gives HDMI `144fb851` with this probe. The first RGB difference in an
-instrumented run is at step 61882. Both O0 and O2 reproduce the discrepancy;
-its cause is still unconfirmed. The expected assertions remain unchanged and
-Celox fails qualification. A successful timing line must never override that
-failure.
+The final CPU PC is 32867. Celox native reproduces all these hashes with the
+original DUT source and the standard compiler thread stack, including in debug
+builds. The prior HDMI mismatch came from a frontend partial-write bug: the
+PPU's single-bit inversion corrupted upper bits of its scroll address. The
+first divergent address was `fc00` instead of `3400` at step 11833. Independent
+PPU checksums had collided, so they alone were insufficient to establish
+agreement; the HDMI oracle exposed the discrepancy.
+
+The compiler also used recursive walks for deeply nested statements and
+expressions. These traversals are now iterative. No source-level masks, relaxed
+assertions or enlarged-stack environment variables are needed for this probe.
+A successful timing line must never override an assertion failure.
 
 ## Reproduce
 
@@ -40,14 +47,10 @@ cp -r work/tarunes-source/src work/tarunes-probe/
 cp benchmarks/tarunes/frames.veryl work/tarunes-probe/src/
 node benchmarks/tarunes/rom.mjs work/tarunes-probe/src
 node benchmarks/tarunes/rom.mjs work/tarunes-probe
-RUST_MIN_STACK=33554432 target/release/celox run \
+target/release/celox run \
   --project work/tarunes-probe --top benchmark_frames --backend native \
   --report --unlimited --two-state --threads 1 -O O2
 ```
-
-Celox currently needs the larger compiler thread stack for this design. With
-the default stack it overflows before simulation. This is a separate unresolved
-qualification issue, not a reason to alter the golden outputs.
 
 Then run the independent SV reference:
 
@@ -63,5 +66,4 @@ Require exit zero and `COLLECTION_REFERENCE_PASS frames-v1` from the SV run.
 The duplicate ROM files accommodate the native TB's source-relative paths and
 the SV simulator's working-directory-relative paths. This reference checks
 emitted SV; it does not constitute Celox SV frontend coverage. Reusing this SV
-TB with a pinned emitted DUT is a possible next-phase comparison after the
-qualification discrepancy is resolved.
+TB with a pinned emitted DUT is a possible next-phase comparison once a common measurement workload is defined.

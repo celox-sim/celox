@@ -48,7 +48,7 @@
       "repository": "tarunes",
       "role": "CPU, video and audio together",
       "integration": "pending",
-      "reason": "The reproducible synthetic-ROM probe in benchmarks/tarunes agrees with Verilator on CPU, PPU and audio, but HDMI RGB differs. Not eligible for performance publication until resolved.",
+      "reason": "The original synthetic-ROM probe now agrees with Verilator, including HDMI RGB, on the standard compiler stack. A fixed measurement recipe and collection runner are still needed before performance publication.",
       "testbenches": [
         {
           "id": "upstream-sv-delay-v1",
