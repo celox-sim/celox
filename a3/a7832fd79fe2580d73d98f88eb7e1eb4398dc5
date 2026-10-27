@@ -1,6 +1,1 @@
-Revision history for #2234:
-
-rev 2 (rebase) 2026-10-27 06:18 UTC
-rev 1 (initial) 2026-10-27 06:18 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2234,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"1ee9abcd9c92c40bd29032edcd4f696bd69e953a","timestamp_iso":"2026-10-27T06:18:57Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"1ee9abcd9c92c40bd29032edcd4f696bd69e953a","new_sha":"cbca758f02cd3e10fa34366fb5eaf319eb5238a6","timestamp_iso":"2026-10-27T06:18:57Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/1ee9abcd9c92c40bd29032edcd4f696bd69e953a...cbca758f02cd3e10fa34366fb5eaf319eb5238a6"}]} -->
+Replay after #2233 fixes the class-specialization stack overflow that also failed this member CI; settle implementation unchanged.
