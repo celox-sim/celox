@@ -1,0 +1,1 @@
+Address P2 review: leave ordinary constraint_mode struct fields to member binding, with nested and class-local regressions.
