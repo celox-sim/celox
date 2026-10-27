@@ -679,6 +679,8 @@ struct InterfaceDecl {
     /// Whether the declaration refers to compilation-unit items of its file.
     uses_unit_items: bool,
     parameters: Vec<InterfaceParameter>,
+    /// Value parameters and localparams whose instance paths VPI can observe.
+    reflected_parameters: Vec<String>,
     type_parameters: Vec<String>,
     parameter_order: Vec<String>,
     items: Vec<Item>,
@@ -2423,6 +2425,7 @@ impl InterfaceDecl {
             uses_unit_items: false,
             uses_macros: has_directive(file.text(span)),
             parameters: Vec::new(),
+            reflected_parameters: Vec::new(),
             type_parameters: Vec::new(),
             parameter_order: Vec::new(),
             items: Vec::new(),
@@ -2614,6 +2617,7 @@ impl InterfaceDecl {
             });
             return Ok(());
         };
+        self.reflected_parameters.push(native_name(&parameter.name));
         if local {
             self.declare(native_name(&parameter.name))?;
             self.items.push(Item::Constant {
@@ -3506,11 +3510,17 @@ pub fn plan_interfaces_with_member_paths(
         let mut member_paths = HashMap::default();
         for (handle_name, declarations) in &handles.by_name {
             for (_, handle) in declarations {
-                for member in &design.interfaces[&handle.interface].members {
+                let interface = &design.interfaces[&handle.interface];
+                for member in interface
+                    .members
+                    .iter()
+                    .map(|member| &member.name)
+                    .chain(&interface.reflected_parameters)
+                {
                     member_paths.insert(
-                        format!("{handle_name}{SEPARATOR}{}", member.name),
+                        format!("{handle_name}{SEPARATOR}{member}"),
                         InterfaceMemberPath {
-                            segments: vec![handle_name.clone(), member.name.clone()],
+                            segments: vec![handle_name.clone(), member.clone()],
                             arrayed: handle.arrayed,
                         },
                     );
