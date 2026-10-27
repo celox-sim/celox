@@ -229,7 +229,7 @@ pub(super) fn analyze_module(
             } else {
                 format!("{}${ordinal}", port.name)
             };
-            let interface =
+            let mut interface =
                 timescales::with_interface_instance(&tree.state.timescales, handle, || {
                     interface_ast::analyze(
                         &tree.child(definition_tree, &values),
@@ -241,6 +241,18 @@ pub(super) fn analyze_module(
                         imported.declarations_only,
                     )
                 })?;
+            // Header ports are members of the interface view, just like body signals.
+            for port in &interface.ports {
+                interface.symbols.as_mut().unwrap().signals.push(Signal {
+                    name: port.name.clone(),
+                    r#type: port.r#type.clone(),
+                    is_net: port.is_net,
+                    unresolved_net: port.unresolved_net,
+                    is_const: false,
+                    package_variable: None,
+                    hierarchical: None,
+                });
+            }
             let symbols = interface.symbols.as_ref().unwrap();
             let names = binding_names_with_prefix(
                 &interface,

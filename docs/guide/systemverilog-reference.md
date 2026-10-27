@@ -345,7 +345,9 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 
 Interfaces are supported within the limits below:
 
-- **Declarations:** ports on an interface, tasks, implicit nets,
+- **Declarations:** ANSI header ports can be passed through module interface
+  ports and modports, including clock inputs and parameter-dependent widths.
+  Tasks, implicit nets,
   enums and module instances inside an interface, and virtual interfaces are unsupported.
   Macros and compiler directives inside an interface are also unsupported.
 - **Modports and connections:** `inout`, `ref`, expression ports, `export` and
