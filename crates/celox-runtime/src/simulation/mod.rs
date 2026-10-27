@@ -165,6 +165,11 @@ pub struct SimulationState<B: SimBackend> {
     return_budget: u64,
     /// Rounds and process-phase passes the current time slot has run.
     slot_passes: u64,
+    /// The processes the current time slot ran, most recent last, up to
+    /// [`RESUMED_PROCESSES`]: the ones a slot that does not settle reports.
+    slot_resumed: std::collections::VecDeque<usize>,
+    /// Names of the processes for diagnostics, by index.
+    process_names: Vec<String>,
     /// The loop that runs time slots, and the slots each loop ran.
     stats: SchedulerStats,
     /// The bits of the compiled scheduler's events whose changes the host
@@ -172,6 +177,10 @@ pub struct SimulationState<B: SimBackend> {
     /// run in the reference loop.
     observed_events: u64,
 }
+
+/// The most recent processes of a time slot that a slot that does not
+/// settle reports.
+const RESUMED_PROCESSES: usize = 64;
 
 impl<B: SimBackend> SimulationState<B> {
     /// Bound the work of one time slot: `rounds` rounds and passes of the
@@ -181,6 +190,12 @@ impl<B: SimBackend> SimulationState<B> {
     pub fn set_slot_budgets(&mut self, rounds: u64, returns: u64) {
         self.round_budget = rounds;
         self.return_budget = returns;
+    }
+
+    /// Name the processes, by index, in diagnostics such as a time slot
+    /// that does not settle.
+    pub fn set_process_names(&mut self, names: Vec<String>) {
+        self.process_names = names;
     }
 
     /// Every process of `model` starts at time zero, in list order.
@@ -227,6 +242,8 @@ impl<B: SimBackend> SimulationState<B> {
             round_budget: SLOT_ROUND_BUDGET,
             return_budget: SLOT_RETURN_BUDGET,
             slot_passes: 0,
+            slot_resumed: std::collections::VecDeque::new(),
+            process_names: Vec::new(),
             stats: SchedulerStats::default(),
             observed_events: 0,
         };
@@ -525,6 +542,7 @@ impl<B: SimBackend> SimulationState<B> {
         E: SimulationExecutor<Backend = B>,
     {
         self.slot_passes = 0;
+        self.slot_resumed.clear();
         match self.step_round(executor, time, Vec::new(), Vec::new(), true, false) {
             Ok(()) => {
                 self.finish_timed_boundary(executor, time)?;

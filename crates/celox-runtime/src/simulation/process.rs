@@ -5,10 +5,10 @@ use std::collections::BTreeSet;
 
 use celox_design::{HostRequestKind, ProcessStatus};
 
-use super::SimulationState;
 use super::host::SimulationExecutor;
 use super::round::Round;
 use super::wait::wake_in_region;
+use super::{RESUMED_PROCESSES, SimulationState};
 use crate::{
     SimulatorErrorCode,
     backend::SimBackend,
@@ -127,6 +127,10 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        if self.slot_resumed.len() == RESUMED_PROCESSES {
+            self.slot_resumed.pop_front();
+        }
+        self.slot_resumed.push_back(process);
         let kernel = self.restore_activation(executor.backend_mut(), process);
         let result = self.run_activation(executor, current_time, process, kernel, returns);
         self.save_activation(executor.backend(), process);

@@ -7311,62 +7311,73 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
 }
 
 /// `expr` with the identifiers in `renames` replaced.
-fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::ir::Expr {
-    fn constant(expr: &sv::ir::ConstExpr, renames: &HashMap<String, String>) -> sv::ir::ConstExpr {
-        use sv::ir::ConstExpr;
-        let go = |expr: &ConstExpr| Box::new(constant(expr, renames));
-        match expr {
-            ConstExpr::Ident(name) => ConstExpr::Ident(renames.get(name).unwrap_or(name).clone()),
-            ConstExpr::Literal(_) => expr.clone(),
-            ConstExpr::SelectRange {
-                expr,
-                msb,
-                lsb,
-                signed,
-            } => ConstExpr::SelectRange {
-                expr: go(expr),
-                msb: go(msb),
-                lsb: go(lsb),
-                signed: *signed,
-            },
-            ConstExpr::Select { expr, bit } => ConstExpr::Select {
-                expr: go(expr),
-                bit: go(bit),
-            },
-            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
-                callee: callee.clone(),
-                site: *site,
-                args: args.iter().map(|arg| constant(arg, renames)).collect(),
-            },
-            ConstExpr::Resize {
-                expr,
-                width,
-                signed,
-            } => ConstExpr::Resize {
-                expr: go(expr),
-                width: *width,
-                signed: *signed,
-            },
-            ConstExpr::Unary { op, expr } => ConstExpr::Unary {
-                op: *op,
-                expr: go(expr),
-            },
-            ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
-                left: go(left),
-                op: *op,
-                right: go(right),
-            },
-            ConstExpr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => ConstExpr::Mux {
-                condition: go(condition),
-                then_expr: go(then_expr),
-                else_expr: go(else_expr),
-            },
-        }
+pub(super) fn rename_const_idents(
+    expr: &sv::ir::ConstExpr,
+    renames: &HashMap<String, String>,
+) -> sv::ir::ConstExpr {
+    use sv::ir::ConstExpr;
+    let go = |expr: &ConstExpr| Box::new(rename_const_idents(expr, renames));
+    match expr {
+        ConstExpr::Ident(name) => ConstExpr::Ident(renames.get(name).unwrap_or(name).clone()),
+        ConstExpr::Literal(_) => expr.clone(),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: go(expr),
+            msb: go(msb),
+            lsb: go(lsb),
+            signed: *signed,
+        },
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: go(expr),
+            bit: go(bit),
+        },
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee: callee.clone(),
+            site: *site,
+            args: args
+                .iter()
+                .map(|arg| rename_const_idents(arg, renames))
+                .collect(),
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: go(expr),
+            width: *width,
+            signed: *signed,
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op: *op,
+            expr: go(expr),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: go(left),
+            op: *op,
+            right: go(right),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: go(condition),
+            then_expr: go(then_expr),
+            else_expr: go(else_expr),
+        },
     }
+}
+
+/// `expr` with the identifiers in `renames` replaced.
+pub(super) fn rename_idents(
+    expr: &sv::ir::Expr,
+    renames: &HashMap<String, String>,
+) -> sv::ir::Expr {
     use sv::ir::Expr;
     let go = |expr: &Expr| Box::new(rename_idents(expr, renames));
     match expr {
@@ -7379,8 +7390,8 @@ fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::
             signed,
         } => Expr::Select {
             expr: go(expr),
-            msb: constant(msb, renames),
-            lsb: constant(lsb, renames),
+            msb: rename_const_idents(msb, renames),
+            lsb: rename_const_idents(lsb, renames),
             signed: *signed,
         },
         Expr::Concat(parts) => Expr::Concat(
@@ -7390,7 +7401,7 @@ fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
-            count: constant(count, renames),
+            count: rename_const_idents(count, renames),
             parts: parts
                 .iter()
                 .map(|part| rename_idents(part, renames))

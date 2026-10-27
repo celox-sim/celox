@@ -469,10 +469,20 @@ impl Simulation {
 // ── Generic methods available for any backend ───────────────────────
 
 pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> SimulationState<B> {
-    SimulationState::new(
+    let mut state = SimulationState::new(
         &simulator.backend,
         ResolvedSchedule::resolve(&simulator.backend, &simulator.schedule),
-    )
+    );
+    state.set_process_names(
+        simulator
+            .program
+            .runtime_schema
+            .process_origins
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+    );
+    state
 }
 
 impl<B: SimBackend> Simulation<B> {

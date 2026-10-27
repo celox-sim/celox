@@ -207,6 +207,20 @@ The Rust `.allow_inferred_latches(true)` and JavaScript `allowInferredLatches: t
 options provide `allow` only when this diagnostic has no explicit setting;
 an explicit `error`, `warn` or `allow` takes precedence.
 
+`shared_always_temporary` defaults to `error`, which keeps IEEE 1800-2023
+semantics for a variable that several `always @*` blocks write, such as a loop
+index they share: each block waits on the variables it reads, the shared one
+included (§9.4.2.2), so its writes wake the other blocks. Blocks that keep waking
+each other end the run with `time T does not settle`, which names the blocks.
+With `warn` or `allow`, Celox instead makes such a variable a temporary of each
+block, when only `always @*` blocks write it, each writes it before it reads it
+on every path, and nothing else reads it: no other process, continuous
+assignment, subroutine, port, instance connection or hierarchical name. Its
+writes then wake no other block, as in Icarus Verilog, and the variable itself
+keeps its initial value. This deviates from the standard, so it is not the
+default; `warn` reports each variable and its blocks. Declaring the variable
+inside each block keeps the standard semantics without it.
+
 Project simulator constructors load this table alongside `Veryl.toml`. Native
 compilation also supports standalone SystemVerilog projects:
 

@@ -85,6 +85,7 @@ impl DiagnosticPolicy {
             if matches!(
                 code,
                 "mixed_timescale"
+                    | "shared_always_temporary"
                     | "interface_array_query"
                     | "interface_array_parameter"
                     | "unpacked_port_default"
@@ -105,6 +106,8 @@ impl DiagnosticPolicy {
     ) -> celox_frontend_sv::AnalysisOptions {
         celox_frontend_sv::AnalysisOptions {
             allow_mixed_timescales: self.level("mixed_timescale") != DiagnosticLevel::Error,
+            shared_always_temporaries: self.level("shared_always_temporary")
+                != DiagnosticLevel::Error,
             default_timescale: timescale.map(|scale| (scale.unit, scale.precision)),
         }
     }

@@ -337,6 +337,7 @@ fn interface_signatures_collecting(
                 &[],
                 LevelLists::Processes,
                 &HashMap::default(),
+                SharedAlways::default(),
             )?;
             Ok(InterfaceSignature {
                 name: prototype.name,
@@ -949,6 +950,7 @@ fn lower_package_states(
                 &[],
                 LevelLists::Processes,
                 &HashMap::default(),
+                SharedAlways::default(),
             )?;
             lowered.sim_module.time_precision = Some(
                 celox_design::TimePrecision::try_from(packages.global_time_precision())
@@ -1218,6 +1220,297 @@ fn shared_edge_memories(
         memories.insert(signal.name().into());
     }
     memories
+}
+
+/// How `always @*` blocks that write a common variable run.
+#[derive(Clone, Copy)]
+struct SharedAlways<'a> {
+    /// Make a variable a temporary of each block when that is unobservable
+    /// within the module (the `shared_always_temporary` diagnostic; see
+    /// [`share_always_variables`]).
+    temporaries: bool,
+    /// The module's signals that hierarchical names in other modules denote.
+    foreign_references: &'a HashSet<String>,
+}
+
+impl Default for SharedAlways<'_> {
+    fn default() -> Self {
+        static EMPTY: std::sync::LazyLock<HashSet<String>> =
+            std::sync::LazyLock::new(HashSet::default);
+        Self {
+            temporaries: false,
+            foreign_references: &EMPTY,
+        }
+    }
+}
+
+/// `module` with its `always @*` blocks that write a common variable
+/// rearranged, and the variables they write together as processes, or
+/// `None` when no blocks write a common variable.
+///
+/// Several plain `always` processes may write one variable (IEEE 1800-2023
+/// 6.5, 9.2.2), such as a loop index, and each block waits on the variables
+/// it reads, a shared one included (9.4.2.2). So the blocks run as
+/// processes, whose writes wake the other blocks as the standard requires:
+/// a block that keeps waking another never settles, and the simulation
+/// reports the time and the processes.
+///
+/// With `shared.temporaries`, a variable becomes a temporary of each block
+/// instead when only such blocks write it, each writes it before it reads
+/// it on every path, and nothing else reads it: no other process,
+/// continuous assignment, subroutine, port, instance connection or
+/// hierarchical name. Its writes then wake no other block, unlike in the
+/// standard, and the variable itself keeps its initial value.
+fn share_always_variables(
+    module: &sv::ir::Module,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+    shared: SharedAlways<'_>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+) -> Option<(sv::ir::Module, HashSet<String>)> {
+    let comb = module.comb_processes();
+    let mut shared_names = HashSet::default();
+    let drivers = ModuleDrivers::new(module, constants, parameter_types);
+    let mut processes = HashSet::default();
+    let mut temporaries: Vec<(&sv::ir::Signal, Vec<usize>)> = Vec::new();
+    for signal in module.signals().iter().filter(|signal| !signal.is_net()) {
+        let mut writers: Vec<usize> = drivers
+            .local(signal.name())
+            .iter()
+            .map(|(driver, _)| *driver)
+            .collect();
+        writers.sort_unstable();
+        writers.dedup();
+        if writers.len() < 2
+            || !writers.iter().all(|&driver| {
+                comb.get(driver)
+                    .is_some_and(|process| process.kind() == sv::ir::CombProcessKind::AlwaysStar)
+            })
+        {
+            continue;
+        }
+        if shared.temporaries
+            && !shared.foreign_references.contains(signal.name())
+            && !read_outside(module, signal.name(), &writers)
+            && writers.iter().all(|&driver| {
+                written_before_read(comb[driver].body(), signal.name(), false) == Some(true)
+            })
+        {
+            temporaries.push((signal, writers));
+        } else {
+            processes.extend(writers);
+            shared_names.insert(signal.name().to_string());
+        }
+    }
+    if processes.is_empty() && temporaries.is_empty() {
+        return None;
+    }
+    let mut module = module.clone();
+    let mut renames: HashMap<usize, HashMap<String, String>> = HashMap::default();
+    for (signal, writers) in &temporaries {
+        let mut sites: Vec<String> = writers
+            .iter()
+            .filter_map(|&driver| driver_site(&module, driver))
+            .collect();
+        sites.sort_unstable();
+        warnings.push((
+            crate::FrontendWarningKind::SharedAlwaysTemporary {
+                module: module.name().into(),
+                signal: signal.name().into(),
+                blocks: sites.join(", "),
+            },
+            comb[writers[0]].site().cloned(),
+        ));
+        for &driver in writers {
+            let local = format!("{}$always{driver}", signal.name());
+            module = module.add_local(sv::ir::LocalVariable {
+                name: local.clone(),
+                source_name: signal.name().into(),
+                r#type: signal.r#type().clone(),
+            });
+            renames
+                .entry(driver)
+                .or_default()
+                .insert(signal.name().into(), local);
+        }
+    }
+    let module = module.map_comb_process_bodies(|index, body, sensitivity| {
+        let Some(renames) = renames.get(&index) else {
+            return body;
+        };
+        let mut renamed: Vec<sv::ir::Stmt> = Vec::new();
+        if !sensitivity {
+            // Each run starts a new temporary.
+            let mut locals: Vec<&String> = renames.values().collect();
+            locals.sort_unstable();
+            renamed.extend(locals.into_iter().map(|name| sv::ir::Stmt::Local {
+                name: name.clone(),
+                init: None,
+            }));
+        }
+        renamed.extend(body.into_iter().map(|stmt| {
+            stmt.map(
+                &mut |expr| ff::rename_idents(&expr, renames),
+                &mut |lvalue| rename_lvalue(lvalue, renames),
+            )
+        }));
+        renamed
+    });
+    Some((
+        module.run_comb_processes_as_processes(|index, _| processes.contains(&index)),
+        shared_names,
+    ))
+}
+
+/// `lvalue` with the identifiers in `renames` replaced.
+fn rename_lvalue(lvalue: sv::ir::LValue, renames: &HashMap<String, String>) -> sv::ir::LValue {
+    match lvalue {
+        sv::ir::LValue::Ident(name) => {
+            sv::ir::LValue::Ident(renames.get(&name).cloned().unwrap_or(name))
+        }
+        sv::ir::LValue::Select {
+            name,
+            msb,
+            lsb,
+            array_slice_width,
+            array_slice_reversed,
+        } => sv::ir::LValue::Select {
+            name: renames.get(&name).cloned().unwrap_or(name),
+            msb: ff::rename_const_idents(&msb, renames),
+            lsb: ff::rename_const_idents(&lsb, renames),
+            array_slice_width: array_slice_width
+                .map(|width| ff::rename_const_idents(&width, renames)),
+            array_slice_reversed,
+        },
+    }
+}
+
+/// Whether `stmts` mention `name`, read or written.
+fn stmts_mention(stmts: &[sv::ir::Stmt], name: &str) -> bool {
+    let renames: HashMap<String, String> =
+        std::iter::once((name.to_string(), format!("{name}$"))).collect();
+    stmts.iter().any(|stmt| {
+        let found = std::cell::Cell::new(false);
+        stmt.clone().map(
+            &mut |expr| {
+                found.set(found.get() || ff::rename_idents(&expr, &renames) != expr);
+                expr
+            },
+            &mut |lvalue| {
+                found.set(found.get() || rename_lvalue(lvalue.clone(), &renames) != lvalue);
+                lvalue
+            },
+        );
+        found.get()
+    })
+}
+
+/// Whether something other than the processes `writers` (indices among the
+/// combinational processes) of `module` reads or writes `name`.
+fn read_outside(module: &sv::ir::Module, name: &str, writers: &[usize]) -> bool {
+    let renames: HashMap<String, String> =
+        std::iter::once((name.to_string(), format!("{name}$"))).collect();
+    let mentions = |expr: &sv::ir::Expr| ff::rename_idents(expr, &renames) != *expr;
+    module.ports().iter().any(|port| port.name() == name)
+        || module
+            .comb_processes()
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !writers.contains(index))
+            .any(|(_, process)| {
+                stmts_mention(process.body(), name)
+                    || stmts_mention(process.sensitivity_body(), name)
+            })
+        || module
+            .ff_processes()
+            .iter()
+            .any(|process| stmts_mention(process.body(), name))
+        || module
+            .initial_processes()
+            .iter()
+            .any(|process| stmts_mention(process.body(), name))
+        || module
+            .subroutines()
+            .iter()
+            .any(|subroutine| stmts_mention(&subroutine.body, name))
+        || module
+            .assignments()
+            .iter()
+            .any(|assignment| assignment.lhs() == name || mentions(assignment.rhs()))
+        || module.instances().iter().any(|instance| {
+            instance.port_connections().iter().any(|connection| {
+                connection.actual() == name || connection.actual_expr().is_some_and(mentions)
+            })
+        })
+}
+
+/// Whether every path through `stmts` writes the whole of `name` before it
+/// reads it: `Some` with whether `name` is written when they end, or `None`
+/// when a read may come before the write. `assigned` says whether it is
+/// written when they start.
+fn written_before_read(stmts: &[sv::ir::Stmt], name: &str, mut assigned: bool) -> Option<bool> {
+    use sv::ir::Stmt;
+    let reads = |stmt: &Stmt| stmts_mention(std::slice::from_ref(stmt), name);
+    for stmt in stmts {
+        assigned = match stmt {
+            Stmt::Assign { lhs, rhs, .. } => {
+                let whole = matches!(lhs, sv::ir::LValue::Ident(target) if target == name);
+                let probe = Stmt::Eval(rhs.clone());
+                let index_reads = !whole
+                    && matches!(lhs, sv::ir::LValue::Select { .. })
+                    && lhs.name() != name
+                    && reads(stmt);
+                if !assigned && (reads(&probe) || index_reads) {
+                    return None;
+                }
+                assigned || whole
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                if !assigned && reads(&Stmt::Eval(condition.clone())) {
+                    return None;
+                }
+                let then_assigned = written_before_read(then_body, name, assigned)?;
+                let else_assigned = written_before_read(else_body, name, assigned)?;
+                then_assigned && else_assigned
+            }
+            Stmt::Loop {
+                kind,
+                init,
+                condition,
+                step,
+                body,
+            } => {
+                let initialized = written_before_read(init, name, assigned)?;
+                let header = Stmt::Loop {
+                    kind: kind.clone(),
+                    init: Vec::new(),
+                    condition: condition.clone(),
+                    step: Vec::new(),
+                    body: Vec::new(),
+                };
+                if !initialized && reads(&header) {
+                    return None;
+                }
+                // The body and the step may not run.
+                let after_body = written_before_read(body, name, initialized)?;
+                written_before_read(step, name, after_body)?;
+                initialized
+            }
+            Stmt::Break | Stmt::Continue => assigned,
+            // Other statements, case statements included, only read here.
+            _ => {
+                if !assigned && reads(stmt) {
+                    return None;
+                }
+                assigned
+            }
+        };
+    }
+    Some(assigned)
 }
 
 /// Variables, other than unpacked arrays, that several plain edge-triggered
@@ -1610,8 +1903,19 @@ fn validate_variable_driver_ranges(
             })
         });
         if overlapping_continuous || (has_overlap && !shared.contains(signal_name)) {
+            let mut sites: Vec<String> = local
+                .iter()
+                .filter_map(|(driver, _)| driver_site(module, *driver))
+                .collect();
+            sites.sort_unstable();
+            sites.dedup();
+            let at = if sites.is_empty() {
+                String::new()
+            } else {
+                format!(", written at {}", sites.join(", "))
+            };
             return Err(sv::AnalyzerError::Unsupported(format!(
-                "multiple variable drivers for `{signal_name}`"
+                "multiple variable drivers for `{signal_name}`{at}"
             )));
         }
     }
@@ -1924,6 +2228,30 @@ impl ModuleDrivers {
     fn initial(&self, signal_name: &str) -> Vec<(usize, Option<(i128, i128)>)> {
         self.drivers(signal_name, |write| Some((write.initial?, write.range)))
     }
+}
+
+/// Where process `driver` of [`ModuleDrivers::local`] is written, as
+/// `path:line` or `path:line:column`.
+fn driver_site(module: &sv::ir::Module, driver: usize) -> Option<String> {
+    let combinational = module.comb_processes().len();
+    let edge = combinational + module.ff_processes().len();
+    if let Some(process) = module.comb_processes().get(driver) {
+        return process
+            .site()
+            .map(|site| format!("{}:{}", site.logical_path.display(), site.line));
+    }
+    if driver < edge {
+        return module.ff_processes()[driver - combinational]
+            .site()
+            .map(ToString::to_string);
+    }
+    module
+        .initial_processes()
+        .iter()
+        .filter(|process| process.repeats())
+        .nth(driver - edge)
+        .and_then(|process| process.site())
+        .map(ToString::to_string)
 }
 
 /// Whether process `driver` of [`ModuleDrivers::local`] must be the only writer of
@@ -2936,6 +3264,7 @@ fn schedule_sources_collecting(
     // the order the modules are lowered in.
     let mut references = HashMap::default();
     let mut analyses = HashMap::default();
+    let mut foreign_references: HashMap<ModuleId, HashSet<String>> = HashMap::default();
     let mut foreign_writes: HashMap<ModuleId, HashMap<String, hierarchy::ForeignWrites>> =
         HashMap::default();
     for &module_id in &hierarchical_modules {
@@ -2965,6 +3294,14 @@ fn schedule_sources_collecting(
         if let Some(module) = ir.modules().iter().find(|module| module.name() == key.name) {
             hierarchy::collect_foreign_writes(module, &resolved, &mut foreign_writes);
         }
+        for reference in &resolved {
+            for (target_module, target) in &reference.targets {
+                foreign_references
+                    .entry(*target_module)
+                    .or_default()
+                    .insert(target.clone());
+            }
+        }
         references.insert(module_id, resolved);
         analyses.insert(module_id, ir);
     }
@@ -2979,6 +3316,7 @@ fn schedule_sources_collecting(
     let mut demoted: HashMap<ModuleId, HashSet<usize>> = HashMap::default();
     let mut trace = trace;
     let no_foreign_writes = HashMap::default();
+    let no_foreign_references = HashSet::default();
     loop {
         let mut specialize = |key: &LoweredSvModuleKey,
                               module_id: ModuleId|
@@ -3005,6 +3343,12 @@ fn schedule_sources_collecting(
                 HierarchicalNames {
                     signals: &signals,
                     foreign_writes: foreign_writes.get(&module_id).unwrap_or(&no_foreign_writes),
+                    shared: SharedAlways {
+                        temporaries: analysis_options.shared_always_temporaries,
+                        foreign_references: foreign_references
+                            .get(&module_id)
+                            .unwrap_or(&no_foreign_references),
+                    },
                     analyzed: analyses.get(&module_id),
                 },
             )?)
@@ -3367,6 +3711,7 @@ fn specialize_module(
         &local_forces,
         level_lists,
         hierarchical.foreign_writes,
+        hierarchical.shared,
     )?;
     propagate_force_signals(&mut lowered.instances, &key.force_signals);
     lowered.sim_module.time_precision = Some(
@@ -3385,6 +3730,8 @@ struct HierarchicalNames<'a> {
     signals: &'a [sv::ast::HierarchicalSignal],
     /// The module's signals that names in other modules write.
     foreign_writes: &'a HashMap<String, hierarchy::ForeignWrites>,
+    /// How `always @*` blocks that write a common variable run.
+    shared: SharedAlways<'a>,
     /// The analysis of the module with `signals`, if it is done already.
     analyzed: Option<&'a sv::Ir>,
 }
@@ -3396,6 +3743,7 @@ impl Default for HierarchicalNames<'_> {
         Self {
             signals: &[],
             foreign_writes: &EMPTY,
+            shared: SharedAlways::default(),
             analyzed: None,
         }
     }
@@ -3480,6 +3828,7 @@ fn lower_module(
     force_signals: &[String],
     level_lists: LevelLists<'_>,
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
+    shared: SharedAlways<'_>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     lower_module_with_overrides(
         module,
@@ -3491,6 +3840,7 @@ fn lower_module(
         force_signals,
         level_lists,
         foreign_writes,
+        shared,
     )
 }
 
@@ -3573,9 +3923,13 @@ fn lower_module_with_overrides(
     force_signals: &[String],
     level_lists: LevelLists<'_>,
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
+    shared: SharedAlways<'_>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let parameter_types = module_parameter_types(module);
     let constants = module_constants_with_overrides(module, parameter_overrides);
+    let sharing = share_always_variables(module, &constants, &parameter_types, shared, warnings);
+    let module = sharing.as_ref().map_or(module, |(module, _)| module);
+    let shared_process_variables = sharing.as_ref().map(|(_, names)| names);
     let fallbacks = module
         .ff_processes()
         .iter()
@@ -3611,7 +3965,11 @@ fn lower_module_with_overrides(
     let drivers = ModuleDrivers::new(module, &constants, &parameter_types);
     let shared_memories = shared_edge_memories(module, &drivers, foreign_writes, warnings);
     let shared_variables = shared_edge_variables(module, &drivers);
-    let shared_all = shared_memories.union(&shared_variables).cloned().collect();
+    let shared_all = shared_memories
+        .union(&shared_variables)
+        .chain(shared_process_variables.into_iter().flatten())
+        .cloned()
+        .collect();
     validate_variable_driver_ranges(module, &drivers, &shared_all)?;
     validate_foreign_drivers(module, &drivers, &shared_memories, foreign_writes)?;
     let scheduled = module

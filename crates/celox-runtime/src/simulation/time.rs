@@ -149,6 +149,7 @@ impl<B: SimBackend> SimulationState<B> {
     {
         self.host_pending = false;
         self.slot_passes = 0;
+        self.slot_resumed.clear();
         let events_to_process = if self.scheduler.next_event_time() == Some(current_time) {
             self.scheduler
                 .pop_all_at_next_time()
@@ -265,15 +266,32 @@ impl<B: SimBackend> SimulationState<B> {
         if returns <= budget {
             return Ok(());
         }
+        let name = |process: usize| {
+            self.process_names
+                .get(process)
+                .cloned()
+                .unwrap_or_else(|| format!("process {process}"))
+        };
         Err(Halt::Error(SimulatorErrorCode::Runtime {
             message: match process {
                 Some(process) => {
-                    format!("process {process} does not suspend within one time slot")
+                    format!("{} does not suspend within one time slot", name(process))
                 }
-                None => format!(
-                    "time {} does not settle: processes keep resuming",
-                    self.scheduler.time
-                ),
+                None => {
+                    let mut resumed: Vec<usize> = self.slot_resumed.iter().copied().collect();
+                    resumed.sort_unstable();
+                    resumed.dedup();
+                    let resumed: Vec<String> = resumed.into_iter().map(name).collect();
+                    format!(
+                        "time {} does not settle: processes keep resuming{}",
+                        self.scheduler.time,
+                        if resumed.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", resumed.join(", "))
+                        }
+                    )
+                }
             },
             signals: Vec::new(),
         }))
