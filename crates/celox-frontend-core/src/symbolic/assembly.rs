@@ -2604,7 +2604,14 @@ pub fn schedule_symbolic_rtl_reporting_loops(
 /// [`SettlePartitionMode::Estimated`] partitions.
 const MIN_PARTITIONED_SETTLE_COST: usize = 20_000;
 /// Expression nodes per partition of an estimated partitioned settle.
-const SETTLE_PARTITION_COST: usize = 2_000;
+const SETTLE_PARTITION_COST: usize = 16_000;
+/// Bound flag tests, publication checks, and their compiler analyses on large
+/// designs instead of growing the number of partitions with every source node.
+const TARGET_ESTIMATED_SETTLE_PARTITIONS: usize = 64;
+
+fn estimated_settle_partition_cost(cost: usize) -> usize {
+    SETTLE_PARTITION_COST.max(cost.div_ceil(TARGET_ESTIMATED_SETTLE_PARTITIONS))
+}
 
 /// The cost per partition of a partitioned settle of `comb_blocks`, or
 /// `None` to keep one pass.
@@ -2634,7 +2641,7 @@ fn settle_partitioning(
                 .iter()
                 .map(|path| scheduler::path_cost(arena, path))
                 .sum();
-            (cost >= MIN_PARTITIONED_SETTLE_COST).then_some(SETTLE_PARTITION_COST)
+            (cost >= MIN_PARTITIONED_SETTLE_COST).then(|| estimated_settle_partition_cost(cost))
         }
     }
 }
@@ -6303,5 +6310,26 @@ mod tests {
         }
         // The cases find copies, beyond the 4 initial probes each.
         assert!(copied > 50 * 4 + 50, "{copied} probes");
+    }
+}
+
+#[cfg(test)]
+mod estimated_settle_budget_tests {
+    use super::*;
+
+    #[test]
+    fn estimated_guard_count_stays_bounded_as_the_program_grows() {
+        for cost in [
+            20_000,
+            100_000,
+            1_000_000,
+            3_000_000,
+            100_000_000,
+            usize::MAX,
+        ] {
+            let target = estimated_settle_partition_cost(cost);
+            assert!(target >= SETTLE_PARTITION_COST);
+            assert!(cost.div_ceil(target) <= TARGET_ESTIMATED_SETTLE_PARTITIONS);
+        }
     }
 }
