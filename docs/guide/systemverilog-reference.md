@@ -222,7 +222,14 @@ properties and skips the post-hook (18.6.3). Resource exhaustion is a runtime er
 This initial seeded-search policy does not guarantee a uniform distribution;
 distribution improvements are tracked in [#2187](https://github.com/celox-sim/celox/issues/2187).
 
-Constrained enums and `randc`, `inside`, conditional/foreach/soft constraints,
+Set membership (`inside`) supports scalar two-state values and inclusive bounded
+ranges, including expressions of other properties. Reversed ranges are empty;
+negation excludes the set. All operands share the membership-wide width and
+signedness before arithmetic evaluation. Excessive predicate expansion is rejected
+during analysis, including repeated nested membership. Array sets, X/Z wildcard items and `$` bounds are not
+yet supported. Membership uses the same seeded solver policy described above.
+
+Constrained enums and `randc`, conditional/foreach/soft constraints,
 `dist`, `solve before`, constraint modes, external/static blocks, typed parameters
 in constraints, and inline `with` remain unsupported. Larger unconstrained `randc`
 domains, static random properties and random array/object/string properties also

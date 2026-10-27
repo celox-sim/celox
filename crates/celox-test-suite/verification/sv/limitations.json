@@ -2605,13 +2605,16 @@
     "upstream": [],
     "evidence": [
       "verification/repros/sv_scalar_constraints.json",
-      "LIMITATIONS.md#systemverilog-suite"
+      "LIMITATIONS.md#systemverilog-suite",
+      "verification/repros/sv_inside_constraints.json"
     ],
     "cases": {
       "icarus": [
         "class::constrained_randomize_scalar",
         "class::constrained_randomize_width_and_inheritance",
-        "class::constrained_randomize_hooks"
+        "class::constrained_randomize_hooks",
+        "class::constrained_randomize_inside",
+        "class::constrained_randomize_inside_widths"
       ]
     }
   },

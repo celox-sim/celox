@@ -6603,7 +6603,7 @@ fn class_randomize_rejects_unsupported_semantics() {
             "constraints",
         ),
         (
-            "rand int x; constraint c { x inside {[1:3]}; }",
+            "rand int x; constraint c { x inside {[1:$]}; }",
             "c.randomize()",
             "constraint",
         ),
@@ -7342,6 +7342,31 @@ fn final_procedures_only_follow_defaults_for_omitted_arguments() {
             assert!(error.to_string().contains("13.4.4"), "{body}: {error}");
         } else {
             result.unwrap_or_else(|error| panic!("{body}: {error}"));
+        }
+    }
+}
+
+#[test]
+fn class_randomize_bounds_nested_membership_expansion() {
+    for levels in [4, 25] {
+        let mut expr = "x".to_owned();
+        for _ in 0..levels {
+            expr = format!("({expr}) inside {{0, 1}}");
+        }
+        let source = format!(
+            "module Top; class C; rand bit x; constraint c {{ {expr}; }} endclass C c; initial begin c = new; c.randomize(); end endmodule"
+        );
+        let result = analyze_source(&source, Path::new("nested_membership.sv"));
+        if levels == 4 {
+            result.expect("small nested membership must remain supported");
+        } else {
+            let error = result
+                .expect_err("expanded membership must be bounded")
+                .to_string();
+            assert!(
+                error.contains("constraint expression expansion limit"),
+                "{error}"
+            );
         }
     }
 }
