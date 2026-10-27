@@ -3,12 +3,10 @@
 #
 # Rica (https://github.com/fabrica-eda/rica) is a 64-bit in-order RISC-V CPU
 # written in Veryl. Its `HardwareCoreTestTop` wraps the core, the instruction
-# cache and the dual-clock board memory; the CPU clock runs at twice the memory
-# clock, so the host testbench drives two clock events per cycle pair instead
-# of one wide clock domain. The workload is Rica's self-checking Rust test
-# kernels, which build from the pinned checkout with the pinned Rust toolchain.
-# Every kernel runs on one compiled model of the working profile (RV64IMAC,
-# Zba/Zbb/Zbs, M/S/U with Sv39, console) at the board's CPU/memory clocks.
+# cache and the board memory. The default harness generates a Veryl native TB
+# from each ELF, then runs it in a fresh `celox run` process per repetition.
+# The board profile supplies the CPU/memory clock ratio. Host API harnesses
+# remain available for diagnostics; their timing contract is different.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,13 +15,13 @@ CELOX_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RICA_REPO="${RICA_REPO:-https://github.com/fabrica-eda/rica.git}"
 readonly PINNED_RICA_REF="$(cat "$SCRIPT_DIR/rica-revision")"
 RICA_REF="${RICA_REF:-$PINNED_RICA_REF}"
-RICA_DIR="${RICA_DIR:-$CELOX_ROOT/target/rica/source}"
+RICA_DIR="${RICA_DIR:-$CELOX_ROOT/work/rica/source}"
 RICA_DIR="$(realpath -m "$RICA_DIR")"
-RICA_RESULTS_DIR="${RICA_RESULTS_DIR:-$CELOX_ROOT/target/rica/results}"
+RICA_RESULTS_DIR="${RICA_RESULTS_DIR:-$CELOX_ROOT/work/rica/results}"
 RICA_KERNELS="${RICA_KERNELS:-kernel-tasks kernel-syscalls kernel-atomics kernel-user kernel-supervisor}"
 RICA_REPEAT="${RICA_REPEAT:-3}"
 RICA_MODEL="${RICA_MODEL:-coincident}"
-RICA_HARNESS="${RICA_HARNESS:-resolved}"
+RICA_HARNESS="${RICA_HARNESS:-native-tb}"
 RICA_MAX_CYCLES="${RICA_MAX_CYCLES:-2000000}"
 CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O2}"
 CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
@@ -39,6 +37,8 @@ case "$RICA_CELOX_CARGO_PROFILE" in
 esac
 CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/$RICA_CELOX_PROFILE_DIR/celox-rica}"
 
+CELOX_TB_RUNNER_BIN="${CELOX_TB_RUNNER_BIN:-$CELOX_ROOT/target/$RICA_CELOX_PROFILE_DIR/celox}"
+
 usage() {
     cat <<'USAGE'
 usage: scripts/run-rica-bench.sh [prepare|run]
@@ -47,20 +47,21 @@ usage: scripts/run-rica-bench.sh [prepare|run]
   run       build the Celox runner and execute the kernels (default)
 
 Environment:
-  RICA_DIR              checkout directory (default: target/rica/source)
+  RICA_DIR              checkout directory (default: work/rica/source)
   RICA_REF              commit to check out (default: scripts/rica-revision)
-  RICA_RESULTS_DIR      results directory (default: target/rica/results)
+  RICA_RESULTS_DIR      results directory (default: work/rica/results)
   RICA_KERNELS          space-separated kernel names (default: the M, U and S kernels)
-  RICA_REPEAT           executions per kernel on one compiled model (default: 3)
+  RICA_REPEAT           fresh native TB executions per kernel (default: 3)
   RICA_MODEL            coincident (tick_events), board (serialized ticks) or timed
-  RICA_HARNESS          resolved (typed handles) or rica (name lookup per read)
+  RICA_HARNESS          native-tb (default); resolved/rica for host API diagnostics
   RICA_MAX_CYCLES       cycle budget per kernel (default: 2000000)
   CELOX_OPT_LEVEL       O0, O1 or O2 (default: O2)
   CELOX_SIR_PASS_OVERRIDES
                         space-separated +sir:<pass> / -sir:<pass> overrides
   RICA_CELOX_CARGO_PROFILE
                         cargo profile for the runner (default: release)
-  CELOX_RUNNER_BIN      prebuilt runner; set RICA_BUILD_CELOX_RUNNER=0 to skip cargo
+  CELOX_TB_RUNNER_BIN   prebuilt celox CLI for native TB execution
+  CELOX_RUNNER_BIN      prebuilt exporter/host runner; set RICA_BUILD_CELOX_RUNNER=0 to skip cargo
   RICA_ALLOW_UNPINNED   1 to run a checkout that is not a clean RICA_REF
 USAGE
 }
@@ -103,7 +104,10 @@ run() {
         fi
     fi
     if [[ "$RICA_BUILD_CELOX_RUNNER" == 1 ]]; then
-        (cd "$CELOX_ROOT" && cargo build --quiet --profile "$RICA_CELOX_CARGO_PROFILE" -p celox-bench --bin celox-rica)
+        (cd "$CELOX_ROOT" && cargo build --locked --quiet --profile "$RICA_CELOX_CARGO_PROFILE" -p celox-bench --bin celox-rica)
+    fi
+    if [[ "$RICA_HARNESS" == native-tb && "$RICA_BUILD_CELOX_RUNNER" == 1 ]]; then
+        (cd "$CELOX_ROOT" && cargo build --locked --quiet --profile "$RICA_CELOX_CARGO_PROFILE" -p celox-vpi --bin celox)
     fi
     mkdir -p "$RICA_RESULTS_DIR"
     local -a elfs=()
@@ -117,11 +121,42 @@ run() {
         fi
         elfs+=(--elf "$elf")
     done
+    if ((${#elfs[@]} == 0)); then
+        echo "error: no Rica kernels selected" >&2
+        exit 1
+    fi
     local -a passes=()
     local override
     for override in $CELOX_SIR_PASS_OVERRIDES; do
         passes+=(--sir-pass "$override")
     done
+    if [[ "$RICA_HARNESS" == native-tb ]]; then
+        [[ "$RICA_REPEAT" =~ ^[1-9][0-9]*$ ]] || { echo "error: invalid RICA_REPEAT" >&2; exit 1; }
+        if [[ -n "$CELOX_SIR_PASS_OVERRIDES" ]]; then
+            echo "error: native TB measurements do not accept SIR pass overrides" >&2
+            exit 1
+        fi
+        local results
+        results="$(mktemp -d "$RICA_RESULTS_DIR/native-tb.XXXXXXXX")"
+        "$CELOX_RUNNER_BIN" --project "$RICA_DIR/riscv" \
+            --model "$RICA_MODEL" --max-cycles "$RICA_MAX_CYCLES" \
+            --a-extension --sv39 --machine-console "${elfs[@]}" \
+            --emit-native-tb "$results/projects" | tee "$results/export.log"
+        local iteration log
+        for name in $RICA_KERNELS; do
+            for ((iteration=1; iteration<=RICA_REPEAT; iteration++)); do
+                log="$results/$name-$iteration.log"
+                "$CELOX_TB_RUNNER_BIN" run --project "$results/projects/$name" \
+                    --top test_rica --backend native --two-state --threads 1 \
+                    -O "$CELOX_OPT_LEVEL" --unlimited --report 2>&1 | tee "$log"
+                grep -Fq "RICA_COMPLETE $name " "$log"
+                grep -Eq '^CELOX_TEST_RESULT test=test_rica status=pass ' "$log"
+                grep -Eq '^CELOX_TEST_TIMING test=test_rica compile_ns=[0-9]+ execute_ns=[0-9]+ ' "$log"
+            done
+        done
+        echo "native TB results written to $results (board-kernel-native-tb-v1)"
+        return
+    fi
     local log="$RICA_RESULTS_DIR/celox-$RICA_MODEL-$RICA_HARNESS.log"
     "$CELOX_RUNNER_BIN" \
         --project "$RICA_DIR/riscv" \
