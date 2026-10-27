@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { intersectTestFilters } from "./ci-backend-tests.mjs";
 import { runtimeCasesFeature } from "./run-vtest.mjs";
 import { clearCurrentReport, saveCurrentReport } from "./ci-rust-reports.mjs";
 
 // Keep target flags local to their packages. Cargo applies --test to every -p.
-export function cargoCommands(mode, builds, filter) {
+export function cargoCommands(mode, builds, filter, backendFilter = "all()") {
   if (!["test", "lint"].includes(mode) || !Array.isArray(builds) || !builds.length)
     throw new Error("Expected a nonempty scoped Cargo build plan");
   return builds.map(({ packages, targets, features }) => {
@@ -26,7 +27,7 @@ export function cargoCommands(mode, builds, filter) {
     if (mode === "lint") {
       if (!targets.length) args.push("--all-targets");
       args.push("--no-deps");
-    } else args.push("-E", filter);
+    } else args.push("-E", intersectTestFilters(filter, backendFilter));
     return args;
   });
 }
@@ -36,6 +37,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   let reportIndex = 0;
   for (const args of cargoCommands(
     process.argv[2], JSON.parse(process.env.BUILDS), process.env.FILTER,
+    process.env.RUST_BACKEND_FILTER || "all()",
   )) {
     if (process.argv[2] === "test"
       && args.some((arg, index) => arg === "celox" && args[index - 1] === "-p")

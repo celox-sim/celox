@@ -2,6 +2,8 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { backendTestFilter } from "./ci-backend-tests.mjs";
+
 import { readWorkspace, rustTestScope } from "./ci-rust-scope.mjs";
 
 const ALL_AFFECTED = Object.freeze({
@@ -285,6 +287,7 @@ if (
     queue,
     full_validation: scheduledFull,
     fast_queue: queue && !scheduledFull,
+    rust_backend_filter: backendTestFilter(files, { full: scheduledFull }),
     ...affected,
     ...rustScopeOutputs(
       process.env.GITHUB_EVENT_NAME === "pull_request" &&
