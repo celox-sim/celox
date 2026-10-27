@@ -1,127 +1,72 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-
-const workflow = readFileSync(
-  new URL("../.github/workflows/release.yml", import.meta.url),
-  "utf8",
-);
-const publication = workflow
-  .split("      - name: Queue package publication for this release\n")[1]
-  .split("\n  queue-release:")[0];
-const script = publication
-  .split("        run: |\n")[1]
-  .split("\n")
-  .map((line) => line.replace(/^          /, ""))
-  .join("\n");
-
-function dispatch({ tag = "v0.8.2", publishedTag = tag } = {}) {
-  const directory = mkdtempSync(join(tmpdir(), "celox-release-publication-"));
-  const callsPath = join(directory, "calls.jsonl");
-  writeFileSync(
-    join(directory, "gh"),
-    `#!/usr/bin/env node
-const fs = require("node:fs");
-const args = process.argv.slice(2);
-const input = args[0] === "api" ? fs.readFileSync(0, "utf8") : "";
-fs.appendFileSync(process.env.CALLS_PATH, JSON.stringify({ args, input }) + "\\n");
-if (args[0] === "release") console.log(process.env.PUBLISHED_TAG);
-`,
-    { mode: 0o755 },
-  );
-  try {
-    const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", script], {
-      cwd: directory,
-      env: {
-        ...process.env,
-        PATH: `${directory}:${process.env.PATH}`,
-        RELEASE_TAG: tag,
-        PUBLISHED_TAG: publishedTag,
-        CALLS_PATH: callsPath,
-        GITHUB_REPOSITORY: "celox-sim/celox",
-        // A batched merge push ends at a commit after the release tag.
-        GITHUB_SHA: "259c946c7465644bb856f286295170453958ce78",
-      },
-      encoding: "utf8",
-    });
-    const calls = existsSync(callsPath)
-      ? readFileSync(callsPath, "utf8").trim().split("\n").map(JSON.parse)
-      : [];
-    return { ...result, calls };
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
+import { promoteCandidate } from "./promote-release-candidate.mjs";
+const sha = "a".repeat(40), tag = "v0.11.0";
+function fixture(overrides = {}) {
+  const calls = [];
+  return { calls, github: {
+    branchSha: async () => sha,
+    releasePull: async () => ({ number: 7 }),
+    tagSha: async () => null,
+    release: async () => null,
+    createRelease: async (...args) => calls.push(["create", ...args]),
+    dispatchPackages: async (...args) => calls.push(["dispatch", ...args]),
+    markTagged: async (...args) => calls.push(["tagged", ...args]),
+    ...overrides,
+  } };
 }
-
-test("publication runs only for a newly created root release on any event", () => {
-  assert.match(
-    workflow,
-    /id: release\n\s+uses: googleapis\/release-please-action@v5/,
-  );
-  assert.match(
-    publication,
-    /if: steps\.release\.outputs\.release_created == 'true'/,
-  );
-  assert.match(
-    publication,
-    /RELEASE_TAG: \$\{\{ steps\.release\.outputs\.tag_name \}\}/,
-  );
-  assert.doesNotMatch(publication, /github\.event_name/);
+test("promotion creates the tag/release at the qualified SHA before dispatch", async () => {
+  const f = fixture(); await promoteCandidate({ ...f, sha, tag });
+  assert.deepEqual(f.calls, [["create", tag, sha], ["dispatch", tag], ["tagged", 7]]);
 });
-
-test("dispatches both publishers for the created tag after a batched merge", () => {
-  const result = dispatch();
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.calls.length, 3);
-  assert.deepEqual(result.calls[0].args.slice(0, 3), [
-    "release",
-    "view",
-    "v0.8.2",
-  ]);
-  assert.deepEqual(result.calls[1].args, [
-    "api",
-    "--method",
-    "POST",
-    "repos/celox-sim/celox/dispatches",
-    "--input",
-    "-",
-  ]);
-  assert.deepEqual(JSON.parse(result.calls[1].input), {
-    event_type: "napi-release",
-    client_payload: { tag: "v0.8.2" },
-  });
-  assert.deepEqual(result.calls[2].args, [
-    "workflow",
-    "run",
-    "publish-crates.yml",
-    "--repo",
-    "celox-sim/celox",
-    "--ref",
-    "v0.8.2",
-  ]);
-});
-
-test("does not dispatch publishers when the stable GitHub release is missing", () => {
-  const result = dispatch({ publishedTag: "" });
-  assert.notEqual(result.status, 0);
-  assert.equal(result.calls.length, 1);
-  assert.match(result.stderr, /Published GitHub Release v0.8.2 was not found/);
-});
-
-test("rejects missing and non-stable release tags", () => {
-  for (const tag of ["", "v0.8.2-rc.1", "master"]) {
-    const result = dispatch({ tag });
-    assert.notEqual(result.status, 0);
-    assert.deepEqual(result.calls, []);
-    assert.match(result.stderr, /Expected a v-prefixed stable release tag/);
+test("superseded, unrelated and conflicting candidates cannot publish", async () => {
+  for (const overrides of [
+    { branchSha: () => "b".repeat(40) }, { releasePull: () => null },
+    { tagSha: () => "b".repeat(40) },
+    { tagSha: () => sha, release: () => ({ draft: true }) },
+    { tagSha: () => sha, release: () => ({ prerelease: true }) },
+    { branchSha: () => { throw new Error("API failure"); } },
+  ]) {
+    const f = fixture(overrides);
+    await assert.rejects(promoteCandidate({ ...f, sha, tag })); assert.deepEqual(f.calls, []);
   }
+});
+test("an exact existing release can resume package dispatch", async () => {
+  const f = fixture({ tagSha: () => sha, release: () => ({ draft: false, prerelease: false }) });
+  await promoteCandidate({ ...f, sha, tag });
+  assert.deepEqual(f.calls, [["dispatch", tag], ["tagged", 7]]);
+});
+test("release creation failure cannot dispatch packages", async () => {
+  const f = fixture({ createRelease: () => { throw new Error("creation failed"); } });
+  await assert.rejects(promoteCandidate({ ...f, sha, tag })); assert.deepEqual(f.calls, []);
+});
+test("only release branch qualification can create the public release", () => {
+  const master = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  const stage = readFileSync(new URL("../.github/workflows/stage-release-candidate.yml", import.meta.url), "utf8");
+  const rc = readFileSync(new URL("../.github/workflows/release-candidate.yml", import.meta.url), "utf8");
+  assert.match(master, /skip-github-release: true/);
+  assert.doesNotMatch(master, /release_created|release create|napi-release/);
+  assert.match(stage, /git push origin "\$CANDIDATE_SHA:refs\/heads\/release"/);
+  assert.match(stage, /ref: \$\{\{ github.event.pull_request.merge_commit_sha \}\}/);
+  assert.match(rc, /branches: \[release\]/);
+  assert.match(rc, /if: github.ref == 'refs\/heads\/release'/);
+  assert.match(rc, /validation_ref: \$\{\{ needs.candidate.outputs.sha \}\}/);
+  assert.match(rc, /needs: \[candidate, qualify\]/);
+  assert.doesNotMatch(rc, /continue-on-error/);
+});
+
+
+test("one-shot candidate staging cannot be coalesced with release management or other closures", () => {
+  const management = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  const stage = readFileSync(new URL("../.github/workflows/stage-release-candidate.yml", import.meta.url), "utf8");
+  assert.doesNotMatch(management, /^  pull_request:|^  stage-candidate:/m);
+  assert.match(management, /group: release-management/);
+  assert.match(stage, /pull_request:\n    types: \[closed\]\n    branches: \[master\]/);
+  // Neither workflow-level nor job-level concurrency may discard a pending RC.
+  assert.doesNotMatch(stage, /^\s*concurrency:/m);
+  assert.match(stage, /github.event.pull_request.merged == true/);
+  assert.match(stage, /github.event.pull_request.head.repo.full_name == github.repository/);
+  assert.match(stage, /github.event.pull_request.head.ref == 'release-please--branches--master--components--celox'/);
+  assert.doesNotMatch(stage, /git push[^\n]*(?:--force|\+)/);
 });

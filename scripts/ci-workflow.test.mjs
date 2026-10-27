@@ -31,7 +31,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   );
   assert.match(
     gate,
-    /ARM64_REQUIRED: \$\{\{ needs\.changes\.outputs\.queue != 'false' && needs\.changes\.outputs\.rust != 'false' \}\}/,
+    /ARM64_REQUIRED: \$\{\{ needs\.changes\.outputs\.full_validation != 'false' && needs\.changes\.outputs\.rust != 'false' \}\}/,
   );
   assert.match(gate, /ARM64_RESULT: \$\{\{ needs\.arm64-backend\.result \}\}/);
   const script = gate.match(/        run: \|\n([\s\S]*)/)[1];
@@ -47,6 +47,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     ARM64_RESULT: "success",
     NAPI_REQUIRED: "true",
     NATIVE_RESULT: "success",
+    WASM_REQUIRED: "true",
     WASM_RESULT: "success",
     RELEASE_REQUIRED: "false",
     EXTERNAL_RESULT: "skipped",
@@ -123,6 +124,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   const rustOnly = {
     ...success,
     NAPI_REQUIRED: "false",
+    WASM_REQUIRED: "false",
     NATIVE_RESULT: "skipped",
     WASM_RESULT: "skipped",
   };
@@ -184,15 +186,7 @@ test("scheduled and manual validation run all paths and external suites", () => 
   assert.match(external, /needs: changes\n/);
   assert.match(
     external,
-    /if: \$\{\{ !cancelled\(\) && \(github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch' \|\| needs\.changes\.outputs\.release == 'true'\)/,
-  );
-  assert.match(
-    job("changes"),
-    /release: \$\{\{ steps\.classify\.outputs\.release \}\}/,
-  );
-  assert.match(
-    job("changes"),
-    /MERGE_GROUP_BASE_REF: .*github\.event\.merge_group\.base_ref.*github\.base_ref/,
+    /if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.full_validation == 'true'/,
   );
   assert.match(job("changes"), /RELEASE_PLEASE_PR: .*github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
   assert.match(job("changes"), /QUEUE_VALIDATION: .*startsWith\(github\.head_ref, 'mergify\/merge-queue\/'\)/);
@@ -254,17 +248,17 @@ test("Rust changes validate dependency exclusions even when script jobs are omit
   );
 });
 
-test("queue CI retains the whole workspace and ordinary PRs use scoped tests", () => {
+test("full validation retains the whole workspace; the queue uses bounded integration tests", () => {
   const rust = job("rust-tests");
   assert.match(job("changes"), /QUEUE_VALIDATION: .*startsWith\(github\.head_ref, 'mergify\/merge-queue\/'\)/);
   // Anything but an explicit scope, including a failed detection, runs all.
   assert.match(
     rust,
-    /name: Run workspace tests with CI features\n        id: workspace-tests\n        if: needs\.changes\.outputs\.rust_full != 'false'\n/,
+    /name: Run workspace tests with CI features\n        id: workspace-tests\n        if: needs\.changes\.outputs\.fast_queue != 'true' && \(needs\.changes\.outputs\.rust_full != 'false'\)\n/,
   );
   assert.match(
     rust,
-    /name: Run the tests this pull request can affect\n        id: scoped-tests\n        if: needs\.changes\.outputs\.rust_full == 'false' && /,
+    /name: Run the tests this pull request can affect\n        id: scoped-tests\n        if: needs\.changes\.outputs\.fast_queue != 'true' && \(needs\.changes\.outputs\.rust_full == 'false' && /,
   );
   assert.match(
     job("changes"),
@@ -287,14 +281,14 @@ test("artifact consumers wait for their producer rather than the Rust test gate"
   assert.match(browser, /name: napi-wasm32-wasi/);
 });
 
-test("landed commits are not re-validated by a push run", () => {
+test("master pushes do not compete with the queue for full-matrix runners", () => {
   const triggers = workflow.match(/^on:\n([\s\S]*?)\n\S/m)[1];
   assert.doesNotMatch(triggers, /^\s+push:/m);
   assert.match(triggers, /^\s+merge_group:/m);
   assert.match(triggers, /^\s+schedule:/m);
 });
 
-test("platform jobs are deferred to queue validation", () => {
+test("platform jobs are deferred to full validation", () => {
   const platform = [
     "arm64-backend",
     "napi-windows",
@@ -302,7 +296,7 @@ test("platform jobs are deferred to queue validation", () => {
     "js-windows",
   ];
   for (const name of platform) {
-    assert.match(job(name), /\n    if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.queue != 'false' && \(/, name);
+    assert.match(job(name), /\n    if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.full_validation != 'false' && \(/, name);
   }
   // Linux jobs still give pull requests their feedback.
   for (const name of [
@@ -333,7 +327,7 @@ test("full runs on long-lived branches report every job's result", () => {
   assert.deepEqual([...needs].sort(), [...jobs].sort());
   assert.match(
     report,
-    /if: \$\{\{ !cancelled\(\) && \(github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'\) && \(github\.ref_name == 'master' \|\| github\.ref_name == 'develop'\)/,
+    /if: \$\{\{ !cancelled\(\) && inputs\.validation_ref == '' && \(github\.event_name == 'push' \|\| github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'\) && \(github\.ref_name == 'master' \|\| github\.ref_name == 'develop'\)/,
   );
   assert.match(report, /issues: write/);
   assert.match(report, /NEEDS: \$\{\{ toJSON\(needs\) \}\}/);
@@ -345,7 +339,7 @@ test("queue validation rejects missing coverage, producer failures and detection
   assert.match(gate, /if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.queue != 'false'/);
   const script = gate.match(/        run: \|\n([\s\S]*)/)[1];
   const needs = Object.fromEntries(["lint", "rust", "napi-windows", "napi-linux-arm64", "js-ubuntu", "js-windows", "playground-browser", "docs"].map(name => [name, { result: "success" }]));
-  needs.changes = { result: "success", outputs: { queue: "true", rust: "true", napi: "true", napi_arm64: "true", javascript: "true", scripts: "true", docs: "true" } };
+  needs.changes = { result: "success", outputs: { queue: "true", full_validation: "true", fast_queue: "false", rust: "true", napi: "true", napi_arm64: "true", javascript: "true", scripts: "true", docs: "true" } };
   const passes = (value) => spawnSync("bash", ["-e", "-c", script], { env: { ...process.env, NEEDS: JSON.stringify(value) } }).status === 0;
   assert.equal(passes(needs), true);
   for (const name of Object.keys(needs)) {
@@ -462,7 +456,7 @@ test("CI prepares one executor for full runs and scopes containing Celox", () =>
   const rust = job("rust-tests");
   const step = rust.split("      - name: Build the optimized vtest executor\n")[1]
     .split("\n      #")[0];
-  assert.match(step, /if: needs.changes.outputs.rust_full != 'false' \|\| contains\(format\(' \{0\} ', needs.changes.outputs.rust_packages\), ' celox '\)/);
+  assert.match(step, /if: needs.changes.outputs.fast_queue != 'true' && \(needs.changes.outputs.rust_full != 'false' \|\| contains\(format\(' \{0\} ', needs.changes.outputs.rust_packages\), ' celox '\)/);
   assert.match(step, /run: node scripts\/run-vtest.mjs --prepare-ci/);
   assert.ok(rust.indexOf("Build the optimized vtest executor") < rust.indexOf("Run workspace tests"));
   assert.match(rust, /cargo nextest run[^\n]*\n[^\n]*celox-test-suite\/runtime-cases/);
@@ -561,7 +555,7 @@ test("full Clippy validation excludes the disabled bridge", () => {
 
 test("upstream SV TB runs on full CI and feeds failure reporting", () => {
   const upstream = job("common-cells");
-  assert.match(upstream, /github.event_name == 'schedule' \|\| github.event_name == 'workflow_dispatch'/);
+  assert.match(upstream, /needs.changes.outputs.full_validation == 'true'/);
   assert.doesNotMatch(upstream, /continue-on-error/);
   assert.match(upstream, /conformance\/common-cells\/revision/);
   assert.match(upstream, /cargo build --locked -p celox-vpi --features systemverilog --bin celox/);
