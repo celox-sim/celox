@@ -144,9 +144,19 @@ pub(super) fn signature(
         .collect::<HashMap<_, _>>();
     let rename = scope::Renamer { names: &names };
     module.name = name;
+    let header_ports = module.ports.clone();
     module.ports = members
         .iter()
         .map(|name| {
+            if let Some(port) = header_ports.iter().find(|port| port.name == *name) {
+                return Ok(Port::new(
+                    rename.name(name),
+                    PortDirection::Input,
+                    rename.r#type(port.r#type.clone()),
+                    port.is_net,
+                )
+                .with_unresolved_net(port.unresolved_net));
+            }
             let signal = declarations
                 .iter()
                 .find(|signal| signal.name() == name)

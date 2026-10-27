@@ -722,6 +722,7 @@
       "verification/sv/limitations/interface-array-ports-icarus.json",
       "verification/sv/limitations/implicit-interface-ports-icarus.json",
       "verification/repros/sv_mixed_interface_connections_icarus.json",
+      "verification/repros/sv_header_modport_icarus.json",
       "LIMITATIONS.md#systemverilog-suite"
     ],
     "cases": {
@@ -735,6 +736,7 @@
         "interfaces::clocks_interface_processes_from_member_clocks",
         "interfaces::drives_members_through_child_outputs_and_array_generate_regions",
         "interfaces::elaborates_net_members_typedefs_and_localparams",
+        "interfaces::forwards_header_ports_through_modports",
         "interfaces::infers_directions_of_ports_without_modport",
         "interfaces::mixes_module_contracts_with_local_interface_connections",
         "interfaces::overrides_body_parameters_and_drives_members_from_imported_functions",

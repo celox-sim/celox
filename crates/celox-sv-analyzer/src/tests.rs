@@ -4820,10 +4820,6 @@ fn rejects_unsupported_interface_uses() {
     }
     for (interface, message) in [
         (
-            "interface I(input logic clk); endinterface",
-            "ports of interface `I`",
-        ),
-        (
             "interface I; enum {Idle, Busy} state; endinterface",
             "enum type in interface `I`",
         ),
@@ -7457,4 +7453,17 @@ fn constraint_mode_names_do_not_intercept_struct_members() {
     ] {
         analyze_source(source, Path::new("constraint_mode_struct.sv")).unwrap();
     }
+}
+
+#[test]
+fn interface_header_members_preserve_parameter_dependent_types() {
+    let source = "interface Bus #(parameter W=8)(input logic [W-1:0] data); modport reader(input data); endinterface";
+    let signatures = crate::interface_prototypes(&[(source, Path::new("bus.sv"))]).unwrap();
+    let port = &signatures[0].module.ports()[0];
+    assert_eq!(port.name(), "h$data");
+    let values = fxhash::FxHashMap::from_iter([("h$W".to_string(), 12)]);
+    assert_eq!(
+        typecheck::eval_const_expr(port.r#type().packed_ranges()[0].left(), &values),
+        Some(11),
+    );
 }
