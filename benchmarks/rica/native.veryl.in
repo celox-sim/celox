@@ -1,0 +1,87 @@
+// Generated with the pinned Rica DUT and ELF. Runtime stimulus and checks
+// execute entirely in the Veryl testbench, including loading board memory.
+#[test(test_rica)]
+module test_rica {
+    inst clk_cpu: $tb::clock_gen #(period: 2);
+    inst clk_mem: $tb::clock_gen #(period: @MEMORY_PERIOD@);
+    var rst_n: reset_async_low;
+    var run: logic;
+    var debug_write: logic;
+    var debug_address: logic<32>;
+    var debug_data: logic<8>;
+    var image: logic<40>[@IMAGE_LENGTH@];
+    var result: logic<64>;
+    var mailbox_low: logic<32>;
+    var complete: logic;
+    var commits: u64;
+    var cycles: u64;
+    var store_ready: logic;
+    var store_address: logic<64>;
+    var store_data: logic<64>;
+    var store_mask: logic<8>;
+    const TOHOST: logic<64> = 64'h@TOHOST@;
+    const EXPECTED_TOHOST: logic<64> = 64'd1;
+    inst dut: HardwareCoreTestTop #(
+@PARAMETERS@
+    ) (
+        clk_cpu, clk_mem, rst_n, run, debug_write, debug_address, debug_data,
+        console_host_request_sequence: 1'b0,
+        console_host_pop: 1'b0,
+        console_host_push: 1'b0,
+        console_host_data: 8'b0,
+    );
+    initial {
+        run = 0;
+        rst_n = 0;
+        debug_write = 0;
+        debug_address = 0;
+        debug_data = 0;
+        mailbox_low = 0;
+        complete = 0;
+        commits = 0;
+        cycles = 0;
+        $readmemh("image.hex", image);
+        clk_mem.next();
+        rst_n = 1;
+        for index in 0..@IMAGE_LENGTH@ {
+            debug_write = 1;
+            debug_address = image[index][39:8];
+            debug_data = image[index][7:0];
+            clk_mem.next();
+        }
+        debug_write = 0;
+        clk_mem.next();
+        run = 1;
+        for cycle in 0..@MAX_CYCLES@ {
+            // Sample the acknowledged store before the CPU edge, as in the
+            // existing coincident-edge host harness. Clock generators advance
+            // coincident CPU/memory edges together.
+            store_ready = dut.data_we && dut.data_store_retire_ready
+                && dut.data_response_sequence == dut.data_request_sequence;
+            store_address = dut.data_addr;
+            store_data = dut.data_wdata;
+            store_mask = dut.data_wmask;
+            clk_cpu.next();
+            cycles = cycle + 1;
+            if dut.commit_valid { commits += 1; }
+            result = 0;
+            if store_ready {
+                if store_address == TOHOST && store_mask == 8'hff {
+                    result = store_data;
+                } else if store_address == TOHOST && store_mask == 8'h0f {
+                    mailbox_low = store_data[31:0];
+                } else if store_address == TOHOST + 4 && store_mask == 8'h0f {
+                    result = {store_data[31:0], mailbox_low};
+                }
+            }
+            if result != 0 {
+                $assert(result == EXPECTED_TOHOST);
+                complete = 1;
+                break;
+            }
+        }
+        $assert(complete == 1);
+        $display("RICA_COMPLETE @NAME@ cycles=%0d commits=%0d", cycles, commits);
+        $finish();
+    }
+}
