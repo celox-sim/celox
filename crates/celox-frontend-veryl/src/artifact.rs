@@ -154,6 +154,8 @@ pub struct CombProcess {
     /// Exact bounded specialization proved that every output is independent
     /// of values stored by the process's preceding activation.
     pub proven_combinational: bool,
+    /// Binary selector coverage alone does not remove X/Z retention.
+    pub proven_binary_combinational: bool,
 }
 
 #[derive(Clone)]
@@ -519,8 +521,10 @@ pub(crate) fn project_module_with_ids(
                         .collect(),
                 )
             {
-                inferred_latch_diagnostics
-                    .push(crate::FrontendDiagnostic::inferred_latch(&process.token));
+                inferred_latch_diagnostics.push(crate::FrontendDiagnostic::inferred_latch(
+                    &process.token,
+                    process.proven_binary_combinational,
+                ));
             }
         }
     }

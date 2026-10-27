@@ -694,6 +694,8 @@ fn analyze(
             .iter()
             .any(|diagnostic| diagnostic.covers_uncovered_branch(error))
     });
+    frontend_diagnostics
+        .retain(|diagnostic| four_state || !diagnostic.proven_binary_combinational());
     (sir, errors, frontend_diagnostics, elaboration_warnings)
 }
 
