@@ -5,11 +5,10 @@ on:
     types: [opened, edited, synchronize, reopened]
   merge_group:
 
-# Keep only the newest request for each PR, including queue-description edits.
-# Still validate every surviving event: skipping edits could mask a failed check.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+# Every event must finish this required check. A canceled duplicate can be
+# selected by Mergify over a successful run on the same head SHA. Do not use
+# concurrency here: even cancel-in-progress: false replaces pending runs.
+# These short, read-only validations are safe to run independently.
 
 permissions:
   contents: read
