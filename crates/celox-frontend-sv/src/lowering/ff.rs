@@ -5944,11 +5944,6 @@ impl Ff<'_, '_> {
             self.urandom_state();
         }
         let mut kernel = ProcessKernelBuilder::new(slots);
-        if self.forked && self.has_deferred_assertions(body, &mut HashSet::default()) {
-            return Err(unsupported(
-                "deferred assertions in a process with fork-join",
-            ));
-        }
         if let Some(site) = self.deferred_flush_site(body) {
             kernel.flush_deferred_at(site);
         }

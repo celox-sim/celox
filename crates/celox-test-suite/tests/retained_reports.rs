@@ -232,6 +232,40 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Overriding the default variable lifetime is not yet supported",
                         ),
+                        ("verilator", "fork_deferred::disable_fork_flushes_live_children_only") => {
+                            (
+                                "compile_error",
+                                "compile",
+                                "AstNode is not of expected type",
+                            )
+                        }
+                        (
+                            "verilator",
+                            "fork_deferred::repeated_static_site_keeps_completed_reports"
+                            | "fork_deferred::reused_slot_cannot_flush_completed_reports",
+                        ) => ("compile_error", "compile", "Verilator internal fault"),
+                        (
+                            "verilator",
+                            "fork_deferred::reactive_wakeup_preserves_mature_observed_only"
+                            | "fork_deferred::sibling_event_queues_are_independent"
+                            | "fork_deferred::sibling_wait_queues_are_independent",
+                        ) => ("mismatch", "execute", "expect_output: expected"),
+                        (
+                            "icarus",
+                            "fork_deferred::child_flush_does_not_inherit_parent_reports"
+                            | "fork_deferred::disable_fork_flushes_live_children_only"
+                            | "fork_deferred::four_state_arguments_are_captured_before_child_exit"
+                            | "fork_deferred::reactive_wakeup_preserves_mature_observed_only"
+                            | "fork_deferred::repeated_static_site_keeps_completed_reports"
+                            | "fork_deferred::reused_slot_cannot_flush_completed_reports"
+                            | "fork_deferred::sibling_event_queues_are_independent"
+                            | "fork_deferred::sibling_wait_queues_are_independent"
+                            | "fork_deferred::zero_delay_is_not_a_flush_point",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Deferred assertions are not supported",
+                        ),
                         (
                             "verilator",
                             "tagged_unions::conditional_struct_payload"

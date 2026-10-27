@@ -181,10 +181,12 @@ impl<B: SimBackend> Simulator<B> {
         checkpoint: &Checkpoint,
     ) -> Result<(), CheckpointError> {
         let fingerprint = self.state_fingerprint();
+        self.stash_runtime_events();
         self.frozen = checkpoint.frozen;
         checkpoint
             .image
             .restore_into(&mut self.backend, fingerprint)?;
+        self.replace_deferred_execution();
         self.comb_observer_snapshots
             .clone_from(&checkpoint.comb_observer_snapshots);
         self.comb_observer_initial_eval = checkpoint.comb_observer_initial_eval;
