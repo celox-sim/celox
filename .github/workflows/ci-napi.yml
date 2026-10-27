@@ -133,6 +133,25 @@ jobs:
         if: env.NIGHTLY != 'true'
         run: node scripts/check-release-version.mjs
 
+  qualify:
+    name: Verify release branch qualification
+    needs: validate-release
+    if: ${{ !startsWith(inputs.channel, 'nightly-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate-release.outputs.build_sha }}
+      - name: Require the successful candidate run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.validate-release.outputs.build_sha }}
+        run: node scripts/check-release-qualification.mjs
+
   build:
     needs: validate-release
     cache-mode: write
@@ -283,7 +302,8 @@ jobs:
         run: pnpm --filter="!@celox-sim/celox-napi" --filter="!@celox-sim/playground" -r test
 
   publish:
-    needs: [validate-release, test]
+    needs: [validate-release, test, qualify]
+    if: ${{ !cancelled() && needs.validate-release.result == 'success' && needs.test.result == 'success' && (needs.qualify.result == 'success' || (startsWith(inputs.channel, 'nightly-') && needs.qualify.result == 'skipped')) }}
     runs-on: ubuntu-latest
     name: Publish
     environment: npm
@@ -320,6 +340,7 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
+          pattern: bindings-*
           path: crates/celox-napi/artifacts
 
       - name: Create npm dirs

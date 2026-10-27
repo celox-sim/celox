@@ -76,6 +76,24 @@ jobs:
       - name: Check synchronized release versions
         run: node scripts/check-release-version.mjs
 
+  qualify:
+    name: Verify release branch qualification
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Require the successful candidate run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: node scripts/check-release-qualification.mjs
+
   package:
     name: Package and test
     needs: validate
@@ -111,7 +129,7 @@ jobs:
 
   publish:
     name: Publish to crates.io
-    needs: [validate, package]
+    needs: [validate, package, qualify]
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
