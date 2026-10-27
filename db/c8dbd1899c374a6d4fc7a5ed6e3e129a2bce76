@@ -1,0 +1,1 @@
+Fix merge-queue repository-script failure: synchronize the explicit SV Verilator retained-failure expectations with the four already recorded tristate compile errors; validate all repository scripts against current master.
