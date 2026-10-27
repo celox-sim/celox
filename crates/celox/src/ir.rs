@@ -563,6 +563,10 @@ pub struct LaidOutProgram {
     pub sir: SirProgram,
     pub(crate) runtime: RuntimeProgram,
     layout: crate::backend::MemoryLayout,
+    /// Native-only generated process entries. Their SIR is expanded for one
+    /// compilation at a time; `sir.processes` reserves their stable indices.
+    #[cfg(feature = "host-runtime")]
+    pub(crate) deferred_derived_edges: HashMap<usize, crate::derived_edge::DeferredEdge>,
 }
 
 impl LaidOutProgram {
@@ -773,6 +777,8 @@ impl OptimizedSir {
             sir,
             runtime,
             layout,
+            #[cfg(feature = "host-runtime")]
+            deferred_derived_edges: HashMap::default(),
         };
         crate::settle::instrument(&mut laid_out);
         laid_out
