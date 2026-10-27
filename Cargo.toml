@@ -88,13 +88,13 @@ lydite-solver         = { path = "crates/lydite-solver" }
 lydite-syntax         = { path = "crates/lydite-syntax" }
 lydite-verify         = { path = "crates/lydite-verify" }
 
-veryl-analyzer = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "4e35a22fc1be1797cb72de99dde2da78876bc1bb" }
-veryl-emitter = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "4e35a22fc1be1797cb72de99dde2da78876bc1bb" }
-veryl-metadata = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "4e35a22fc1be1797cb72de99dde2da78876bc1bb" }
-veryl-parser = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "4e35a22fc1be1797cb72de99dde2da78876bc1bb", default-features = false }
-veryl-path = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "4e35a22fc1be1797cb72de99dde2da78876bc1bb" }
-veryl-simulator = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "4e35a22fc1be1797cb72de99dde2da78876bc1bb" }
-veryl-std = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "4e35a22fc1be1797cb72de99dde2da78876bc1bb" }
+veryl-analyzer = { git = "https://github.com/veryl-lang/veryl.git", rev = "c8aa1f266490d816b2c55a4fd3faa1f4ac72849b" }
+veryl-emitter = { git = "https://github.com/veryl-lang/veryl.git", rev = "c8aa1f266490d816b2c55a4fd3faa1f4ac72849b" }
+veryl-metadata = { git = "https://github.com/veryl-lang/veryl.git", rev = "c8aa1f266490d816b2c55a4fd3faa1f4ac72849b" }
+veryl-parser = { git = "https://github.com/veryl-lang/veryl.git", rev = "c8aa1f266490d816b2c55a4fd3faa1f4ac72849b", default-features = false }
+veryl-path = { git = "https://github.com/veryl-lang/veryl.git", rev = "c8aa1f266490d816b2c55a4fd3faa1f4ac72849b" }
+veryl-simulator = { git = "https://github.com/veryl-lang/veryl.git", rev = "c8aa1f266490d816b2c55a4fd3faa1f4ac72849b" }
+veryl-std = { git = "https://github.com/veryl-lang/veryl.git", rev = "c8aa1f266490d816b2c55a4fd3faa1f4ac72849b" }
 
 bit-set         = "0.11"
 clap            = { version = "4.5.60", features = ["derive"] }
