@@ -2572,3 +2572,69 @@ module Top(output int sum, output bit done);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq sum 49) (assert_eq done 1))
+
+(case imported_member_type_dimensions
+  (source "classes.sv" #"
+package p;
+    class Box #(int N = 5);
+        typedef bit [N-1:0] element_t;
+    endclass
+    typedef Box#() Small;
+    typedef Box#(9) Wide;
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum, output bit done);
+    import p::*;
+    localparam int N = 29;
+    Small::element_t sample;
+    Wide::element_t other;
+    initial begin
+        sample = '1;
+        other = '1;
+        sum = sample + other;
+        done = $bits(sample) == 5 && $bits(other) == 9;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 542) (assert_eq done 1))
+
+(case imported_member_type_inheritance
+  (source "classes.sv" #"
+package p;
+    class Base #(type T = byte);
+        typedef T item_t;
+    endclass
+    class Derived #(int N = 9) extends Base#(bit [2:0]); endclass
+    typedef Derived#() Tiny;
+    typedef Base#(bit [6:0]) Other;
+endpackage
+"#)
+  (source "exports.sv" #"
+package q;
+    import p::Tiny;
+    import p::Other;
+    export p::Tiny;
+    export p::Other;
+    class Sub extends Tiny;
+        typedef bit [4:0] item_t;
+        typedef item_t copied_t;
+    endclass
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum, output bit done);
+    import q::*;
+    Sub::copied_t a;
+    Other::T b;
+    Tiny::item_t c;
+    initial begin
+        a = '1;
+        b = '1;
+        c = '1;
+        sum = a + b + c;
+        done = $bits(a) == 5 && $bits(b) == 7 && $bits(c) == 3;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 165) (assert_eq done 1))

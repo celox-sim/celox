@@ -565,6 +565,12 @@ is made where the class is declared, so outside that scope only the
 specializations it names can be used. Sources of packages and compilation-unit
 items alone elaborate those scopes.
 
+Member typedefs and type parameters of a concrete package-class specialization
+remain available through imported aliases such as `Small::element_t`, including
+inheritance and package re-exports. Their dimensions are fixed in the declaring
+specialization; parameters of the importing module cannot change them. A module
+or another package can inherit those bound member types (6.18, 8.13, 8.23).
+
 Checkpoints keep objects. State files record strings but not objects, so
 saving a state file fails while any variable holds an object.
 

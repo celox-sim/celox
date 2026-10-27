@@ -459,7 +459,7 @@ pub(crate) struct Facts {
 
 impl Facts {
     fn of(tree: &SyntaxTree) -> &Self {
-        use celox_sv_syntax::ExprKind;
+        use celox_sv_syntax::{DataTypeKind, ExprKind};
         tree.spans().imports.get_or_init(|| {
             let native = tree.declarations();
             let name = |id| {
@@ -477,6 +477,10 @@ impl Facts {
                     } if separator == "::" => name(*expression),
                     _ => None,
                 })
+                .chain(native.types.iter().filter_map(|ty| {
+                    matches!(&ty.kind, DataTypeKind::Named(path) if path.len() > 1)
+                        .then_some(ty.tokens)
+                }))
                 .map(|tokens| (tokens.start, tokens.end))
                 .collect();
             // Bare pattern keys name members; they do not bind wildcard imports.
@@ -540,7 +544,7 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
     for id in spans.types.within(&ranges) {
         let ty = native.data_type(id);
         if let DataTypeKind::Named(path) = &ty.kind
-            && let [name] = path.as_slice()
+            && let Some(name) = path.first()
         {
             add(&name.name.spelling, ty.tokens.start);
         }
