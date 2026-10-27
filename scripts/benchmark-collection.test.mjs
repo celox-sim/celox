@@ -57,21 +57,23 @@ test("runner rejects broken-oracle false passes and never reuses stale output", 
 import { readFileSync } from 'node:fs';
 const tb = readFileSync(process.argv[process.argv.indexOf('--project') + 1] + '/src/tb.veryl', 'utf8');
 const negative = tb.includes('$assert(bad)');
-if (negative) { console.log('CELOX_TEST_RESULT test=tb status=fail elapsed_ns=35'); console.error('assertion failed'); process.exit(1); }
-console.log(${JSON.stringify(valid)});
+if (negative) { console.log((process.argv.includes('--aot-c-async') ? 'VERYL' : 'CELOX') + '_TEST_RESULT test=tb status=fail elapsed_ns=35'); console.error('assertion failed'); process.exit(1); }
+const veryl = process.argv.includes('--aot-c-async');
+console.log(veryl ? ${JSON.stringify(valid.replaceAll('CELOX_', 'VERYL_').replace(' jit_execute_ns=15',''))} : ${JSON.stringify(valid)});
+console.log(veryl ? 'VERYL_TEST_CONFIG test=tb backend=cc aot_c_async=true compile_only=false\\nVERYL_TIERED_STATS test=tb compiled_dispatches=0 fallback_dispatches=1' : 'CELOX_TIERED_STATS test=tb tier=interpreter promotion=pending interpreted_evaluations=1 compiled_evaluations=0');
 if(tb.includes('COLLECTION_COMPLETE')) console.log('COLLECTION_COMPLETE fixture-v1 2');
 `;
     writeFileSync(binary, script); chmodSync(binary, 0o755);
     const workload = { id: "fixture", repository: "fixture", project: "circuit", top: "tb", workload: "smoke-v1",
       testbenches: [{ id: "smoke-v1", path: "circuit/src/tb.veryl" }], negativeControl: { find: "good", replace: "bad" },
       measurement: { id: "fixture-v1", repetitions: 2, unitsPerRepetition: 1, unit: "frames" } };
-    const options = { workloads: [workload], sourceDirectory: temp, celox: binary, output: join(temp, "qualified") };
+    const options = { workloads: [workload], sourceDirectory: temp, celox: binary, veryl: binary, output: join(temp, "qualified") };
     const qualified = runCollection(options);
-    assert.equal(qualified.results[0].status, "qualified");
+    assert.deepEqual(qualified.results.map(r => r.status), ["qualified", "qualified"]);
     assert.deepEqual(qualified.results[0].samples, []);
     assert.throws(() => runCollection(options), /fresh output/);
     const measured = runCollection({ ...options, mode: "measure", output: join(temp, "measured"), samples: 2 });
-    assert.equal(measured.results[0].status, "measured");
+    assert.deepEqual(measured.results.map(r => r.status), ["measured", "measured"]);
     assert.equal(measured.results[0].samples.length, 2);
     assert.equal(measured.results[0].workUnits, 2);
     assert.match(measured.results[0].testbenchSha256, /^[0-9a-f]{64}$/);

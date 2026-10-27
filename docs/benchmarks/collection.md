@@ -29,6 +29,7 @@ is pinned to `6179df1cd15e13600a36621fc6b57de521a93d9f`.
 
 ```sh
 cargo build --release --locked -p celox-vpi --bin celox
+cargo build --release --locked -p celox-bench --bin veryl-heliodor
 node scripts/benchmark-collection.mjs list
 node scripts/benchmark-collection.mjs prepare all work/circuits/sources
 node scripts/benchmark-collection.mjs qualify all work/circuits/sources work/circuits/qualification
@@ -37,9 +38,10 @@ node scripts/benchmark-collection.mjs measure all work/circuits/sources work/cir
 
 `all` selects implemented collection runners; `list` also shows existing standalone
 runners and pending candidates. A comma-separated selection such as `sha256,fft`
-is supported. Use a fresh output directory for each invocation. The last optional
-argument to `qualify` or `measure` selects a prebuilt Celox binary; the default is
-`target/release/celox`. Debug runs are useful for validation, not release comparisons.
+is supported. Use a fresh output directory for each invocation. The last two optional
+arguments to `qualify` or `measure` select prebuilt Celox and Veryl simulator
+binaries; defaults are `target/release/celox` and `target/release/veryl-heliodor`.
+The latter runner uses the Veryl 0.22.0 simulator library and also serves Heliodor. Debug runs are useful for validation, not release comparisons.
 The tool does not build Cargo projects or create `target/` itself.
 
 Each run verifies the pinned checkout and materializes tracked project bytes in
@@ -59,15 +61,34 @@ Measurement repeats each complete upstream scenario inside one simulation:
 
 Resets, stimulus and assertions are included in execution time. Every measured
 process must complete the entire fixed workload and print its completion marker.
-Three fresh processes run sequentially; the dashboard publishes the median for
-compilation, execution and total time separately. Total starts before design
-analysis and excludes building or launching the CLI, matching the runner's
-reported timing boundary. Process wall time is retained separately. Build caches
-and waveform output are not enabled.
+Each simulator runs three fresh processes sequentially on the same host. The
+primary comparison is **Celox tiered versus Veryl simulator tiered**, with the
+same DUT and TB bytes. Celox starts in its interpreter and promotes to native
+code (O2); Veryl starts in Cranelift with asynchronous C compilation enabled.
+Completing before promotion is valid; dispatch/promotion statistics are retained.
+Both use one simulation thread; compiler parallelism follows each implementation's
+defaults within the same host CPU allocation.
+
+The dashboard's **total** is the median process wall time, from launching the
+runner through its exit, including startup and shutdown. CLI binary builds and
+source preparation happen before measurement. The internal compilation/startup
+and execution intervals are supplementary: background compilation overlaps
+execution, so those intervals do not represent isolated compiler cost or warmed
+throughput. Every process gets a new empty Veryl AOT cache; Celox's build cache
+and waveform output are disabled. This `cold-tiered-process-v1` contract starts
+new charts, separate from the old native-only internal-timing series.
+
+Remaining background C compiler processes are stopped after their runner exits,
+before the next sample starts. Ambient Celox/Veryl tuning environment variables
+are cleared so they cannot silently change the comparison settings.
+
+Both simulators must pass the positive test and reject its broken oracle.
+Publication requires a complete pair with identical source/TB hashes, three
+successful samples per simulator, valid tiered statistics and completion markers.
 
 `results.json` retains the source revision and content hash, TB hash, work count,
 frontend, backend, state model, optimization level, thread count, host CPU and
-architecture, exact runner binary hash, logs, and individual samples. A changed
+architecture, both runner binary hashes, logs, and individual samples. A changed
 source, TB or workload contract starts a new chart. The Circuit benchmarks workflow
 runs daily at 04:17 UTC and on manual dispatch. Only successful scheduled/manual
 runs on master publish history; failed logs are retained as artifacts.
