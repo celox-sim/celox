@@ -8,6 +8,22 @@ use celox::{
     SimBackend, Simulation, SlotIo,
 };
 
+// Called only for packed storage of at most128 bits. Keep the common64-bit
+// path in one machine word instead of promoting every scalar operation.
+fn packed_word(backend: &NativeBackend, signal: SignalRef) -> BigUint {
+    if signal.width <= 64 {
+        let mask = u64::MAX
+            .checked_shr((64 - signal.width) as u32)
+            .unwrap_or(0);
+        BigUint::from(u64::from_le(backend.get_as::<u64>(signal)) & mask)
+    } else {
+        let mask = u128::MAX
+            .checked_shr((128 - signal.width) as u32)
+            .unwrap_or(0);
+        BigUint::from(u128::from_le(backend.get_as::<u128>(signal)) & mask)
+    }
+}
+
 /// What the VPI entry points read and write.
 pub(crate) trait VpiState {
     /// The image the state belongs to: its reflection and layout.
@@ -59,21 +75,18 @@ impl VpiState for NativeProgramInstance {
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
         // Packed scalar reads dominate callback polling. Read their stored
         // word directly; arrays keep the backend's gather/plane layout.
-        if signal.array_layout.is_none() && signal.width <= 64 {
-            let width_mask = u64::MAX
-                .checked_shr((64 - signal.width) as u32)
-                .unwrap_or(0);
-            let value = u64::from_le(self.backend().get_as::<u64>(signal)) & width_mask;
+        if signal.array_layout.is_none() && signal.width <= 128 {
+            let value = packed_word(self.backend(), signal);
             let unknown = if signal.is_4state && self.program_image().four_state() {
                 let mask_signal = SignalRef {
                     offset: signal.offset + signal.width.div_ceil(8),
                     ..signal
                 };
-                u64::from_le(self.backend().get_as::<u64>(mask_signal)) & width_mask
+                packed_word(self.backend(), mask_signal)
             } else {
-                0
+                BigUint::default()
             };
-            (BigUint::from(value), BigUint::from(unknown))
+            (value, unknown)
         } else {
             self.backend().get_four_state(signal)
         }
@@ -279,7 +292,7 @@ mod tests {
 
     #[test]
     fn packed_reads_match_backend_across_word_boundaries_and_padding() {
-        let widths = [1usize, 3, 8, 9, 31, 32, 33, 63, 64, 65, 129];
+        let widths = [1usize, 3, 8, 9, 31, 32, 33, 63, 64, 65, 96, 127, 128, 129];
         let ports = widths
             .iter()
             .flat_map(|width| {
