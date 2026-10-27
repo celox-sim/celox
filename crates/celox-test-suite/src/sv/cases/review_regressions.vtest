@@ -595,3 +595,66 @@
   (assert_eq t2 6)
   (assert_eq t3 16)
   (assert_eq d 10))
+
+
+(case exhaustive_case_preserves_fixed_selector_bits
+  (four_state)
+  (source "fixed_case_bits.sv" #"
+    module Top(input bit b, output logic x, z, known, nested, sliced, extended);
+      logic [3:0] selector;
+      always_comb begin
+        case ({b, 1'bx})
+          2'b0x: x = 0;
+          2'b1x: x = 1;
+        endcase
+        case ({b, 1'bz})
+          2'b0z: z = 1;
+          2'b1z: z = 0;
+        endcase
+        case ({b, 1'b1})
+          2'b01: known = 0;
+          2'b11: known = 1;
+        endcase
+        case ({1'b1, {b, 2'bxz}})
+          4'b10xz: nested = 0;
+          4'b11xz: nested = 1;
+        endcase
+        selector = {b, 1'bx, 1'bz, 1'b1};
+        case (selector[3:2])
+          2'b0x: sliced = 0;
+          2'b1x: sliced = 1;
+        endcase
+        case ({b, 1'bx})
+          4'b000x: extended = 0;
+          4'b001x: extended = 1;
+        endcase
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for iteration (range 0 3) (for b_value (range 0 2)
+    (modify (set b b_value))
+    (assert_eq x b_value)
+    (assert_eq z (- 1 b_value))
+    (assert_eq known b_value)
+    (assert_eq nested b_value)
+    (assert_eq sliced b_value)
+    (assert_eq extended b_value))))
+
+(case fixed_case_bits_preserve_unknown_input_fallback
+  (four_state)
+  (source "fixed_case_fallback.sv" #"
+    module Top(input logic b, output logic [1:0] y);
+      always_comb case ({b, 1'bx})
+        2'b0x: y = 0;
+        2'b1x: y = 1;
+        default: y = 2;
+      endcase
+    endmodule
+  "#)
+  (top Top)
+  (modify (set b 0)) (assert_eq y 0)
+  (modify (set b 1)) (assert_eq y 1)
+  (modify (set b (fourstate 1 1))) (assert_eq y 2)
+  (modify (set b (fourstate 0 1))) (assert_eq y 2)
+  (modify (set b 0)) (assert_eq y 0))

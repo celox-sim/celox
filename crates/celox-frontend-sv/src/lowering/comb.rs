@@ -2564,8 +2564,77 @@ impl<'p, 'a> Comb<'p, 'a> {
         }
     }
 
+    /// Possible values of one selector bit, as a set of 0, 1, Z, X.
+    /// Follow only wiring operations: other expressions retain the original
+    /// conservative domain. Bound work even for a slice of a large/deep DAG.
+    fn case_bit_values(&self, mut node: NodeId, mut bit: usize, four_state: bool) -> u8 {
+        let fallback = if four_state { 0b1111 } else { 0b0011 };
+        let mut budget = 256usize;
+        while budget > 0 {
+            budget -= 1;
+            if bit >= self.width(node) {
+                return fallback;
+            }
+            match self.arena.get(node) {
+                SLTNode::Constant(value, mask, _, _) => {
+                    let digit =
+                        u8::from(value.bit(bit as u64)) | (u8::from(mask.bit(bit as u64)) << 1);
+                    return 1 << digit;
+                }
+                SLTNode::Input {
+                    variable, index, ..
+                } => {
+                    return if !self.m.four_state
+                        || (index.is_empty()
+                            && self
+                                .m
+                                .variables
+                                .get(variable)
+                                .is_some_and(|var| !var.is_4state))
+                    {
+                        0b0011
+                    } else {
+                        fallback
+                    };
+                }
+                SLTNode::Unary(UnaryOp::ToTwoState, _) => return 0b0011,
+                SLTNode::Unary(UnaryOp::Ident, inner) | SLTNode::Capture { expr: inner, .. } => {
+                    node = *inner
+                }
+                SLTNode::Slice { expr, access } => {
+                    let Some(offset) = bit.checked_add(access.lsb) else {
+                        return fallback;
+                    };
+                    bit = offset;
+                    node = *expr;
+                }
+                SLTNode::Concat(parts) => {
+                    let mut selected = None;
+                    // SLT concatenations store their most significant part first.
+                    for (part, width) in parts.iter().rev() {
+                        if budget == 0 {
+                            return fallback;
+                        }
+                        budget -= 1;
+                        if bit < *width {
+                            selected = Some(*part);
+                            break;
+                        }
+                        bit -= width;
+                    }
+                    let Some(part) = selected else {
+                        return fallback;
+                    };
+                    node = part;
+                }
+                _ => return fallback,
+            }
+        }
+        fallback
+    }
+
     /// For each item, whether it and the items before it cover every
-    /// two-state value of the selector with constant labels.
+    /// possible selector value with constant labels.
     fn case_coverage(
         &mut self,
         store: &mut Store,
@@ -2682,9 +2751,32 @@ impl<'p, 'a> Comb<'p, 'a> {
             }
             return Ok(coverage);
         }
+        // A concatenated fixed X/Z bit is not a free four-state input.
+        // Restrict enumeration to each bit's possible values; correlations
+        // between nonconstant bits remain conservatively unconstrained.
+        let digit_width = if four_state_selector { 2 } else { 1 };
+        let digit_mask = (1u64 << digit_width) - 1;
+        let mut fixed_bits = 0u64;
+        let mut required_bits = 0u64;
+        for bit in 0..selector_width {
+            let values = self.case_bit_values(selector_node, bit, four_state_selector);
+            let shift = digit_width * bit;
+            if values.is_power_of_two() {
+                let digit = u64::from(values.trailing_zeros());
+                if !four_state_selector && digit > 1 {
+                    return Ok(none);
+                }
+                fixed_bits |= digit_mask << shift;
+                required_bits |= digit << shift;
+            } else if four_state_selector && values == 0b0011 {
+                // A two-state variable bit has a free payload and a zero mask.
+                fixed_bits |= 2 << shift;
+            }
+        }
         let mut remaining: Vec<(BigUint, BigUint)> = if four_state_selector {
             // Each bit is 0, 1, Z (payload 0, mask 1), or X (payload 1, mask 1).
             (0u64..(1u64 << (2 * selector_width)))
+                .filter(|raw| raw & fixed_bits == required_bits)
                 .map(|raw| {
                     let mut value = BigUint::zero();
                     let mut mask = BigUint::zero();
@@ -2705,6 +2797,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 .collect()
         } else {
             (0u64..(1u64 << selector_width))
+                .filter(|raw| raw & fixed_bits == required_bits)
                 .map(|raw| (extend(&BigUint::from(raw), selector_width), BigUint::zero()))
                 .collect()
         };
