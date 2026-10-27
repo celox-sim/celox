@@ -3083,3 +3083,42 @@ fn inline_constraints_retain_ownership_and_bound_nested_calls() {
             .contains("inline constraint nesting limit")
     );
 }
+
+#[test]
+fn virtual_method_visibility_order_preserves_class_members() {
+    for qualifiers in [
+        "virtual protected",
+        "protected virtual",
+        "virtual local",
+        "local virtual",
+    ] {
+        let body = format!(
+            "class C; {qualifiers} function int f(); return 1; endfunction {qualifiers} task t(); endtask virtual interface bus vif; int after; endclass"
+        );
+        for source in [
+            format!("{body} module M; endmodule"),
+            format!("module M; {body} endmodule"),
+            format!("package P; {body} endpackage module M; endmodule"),
+        ] {
+            let syntax = parse(&source);
+            let class = &syntax.classes[0];
+            assert_eq!(class.methods.len(), 2, "{source}");
+            for method in &class.methods {
+                assert!(method.qualifiers.is_virtual);
+                assert_eq!(
+                    method.qualifiers.protected,
+                    qualifiers.contains("protected")
+                );
+                assert_eq!(method.qualifiers.local, qualifiers.contains("local"));
+            }
+            assert_eq!(class.properties.len(), 2, "{source}");
+            assert!(!class.properties[0].qualifiers.is_virtual);
+            assert!(matches!(
+                syntax
+                    .data_type(class.properties[0].declaration.data_type)
+                    .kind,
+                DataTypeKind::VirtualInterface { .. }
+            ));
+        }
+    }
+}
