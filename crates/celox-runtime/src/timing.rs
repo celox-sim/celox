@@ -108,6 +108,7 @@ impl CountedRefs {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GateRefs {
     pub signal: SignalRef,
+    pub at_write: bool,
     /// The counters of a gate judged at each write
     /// ([`celox_design::GateCounters`]).
     pub counters: Option<GateCounterRefs>,

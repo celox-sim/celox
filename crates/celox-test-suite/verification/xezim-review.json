@@ -678,6 +678,10 @@
     "sv_iff_shared_automatic": {
       "title": "fork children do not observe updates to their shared automatic iff gate",
       "standard": "IEEE 1800-2023 6.21, 9.3.2, 9.4.2.3"
+    },
+    "sv_iff_automatic_clock": {
+      "title": "A wait on an automatic clock keeps an enabled iff gate after the gate was cleared",
+      "standard": "IEEE 1800-2023 9.4.2.3"
     }
   },
   "cases": [
@@ -4167,6 +4171,14 @@
       "classification": "xezim_bug",
       "bug": "sv_iff_shared_automatic",
       "note": "The shared automatic enable becomes 0 before second rises, but rejected=1 instead of 0. Independent standalone reproductions and exact installed build provenance are in verification/repros/sv_iff_hierarchy_automatic.json. Current flake-pin build was unavailable; these observations are from the installed xezim 0.11.3 build."
+    },
+    {
+      "suite": "sv",
+      "name": "timing::iff_automatic_clock_preserves_enabled_pulses",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_iff_automatic_clock",
+      "note": "The module gate enable is cleared between the rising and falling writes to the shared automatic clock. Standalone Top/Wrapped print accepted=1 rejected=1; 9.4.2.3 requires accepted=1 rejected=0. See verification/repros/sv_iff_hierarchy_automatic.json for exact installed-build provenance and source; this is not current-pin validation."
     }
   ]
 }

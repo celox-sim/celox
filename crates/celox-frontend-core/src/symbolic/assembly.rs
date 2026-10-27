@@ -1006,7 +1006,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     .zip(&site.gates)
                     .filter_map(|(&(signal, _), gate)| {
                         gate.as_ref()
-                            .filter(|gate| gate.counters.is_some())
+                            .filter(|gate| gate.at_write)
                             .map(|gate| [signal, gate.signal])
                     })
             })
@@ -4710,16 +4710,17 @@ fn gated_terms(
             let Some(gate) = gate else {
                 continue;
             };
-            let Some(counters) = gate.counters else {
-                continue;
-            };
             if ff_written.contains(&signal)
                 || continuous.contains(&signal)
                 || continuous.contains(&gate.signal)
             {
                 gate.counters = None;
+                gate.at_write = false;
                 continue;
             }
+            let Some(counters) = gate.counters else {
+                continue;
+            };
             gated
                 .entry(signal)
                 .or_default()

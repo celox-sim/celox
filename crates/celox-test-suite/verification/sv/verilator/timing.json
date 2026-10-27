@@ -671,6 +671,29 @@
     },
     {
       "category": "Sequential",
+      "detail": "Verilator 5.052 rejects the write to a shared automatic gate or event signal in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_iff_shared_automatic",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects the write to a shared automatic gate or event signal in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
+        "upstream": []
+      },
+      "name": "timing::iff_automatic_clock_preserves_enabled_pulses",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. Standalone probes print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. A hierarchical waiter on clk also sees the later en write of a child always_comb (clk=a; en=a), giving rejected=2 instead of 0; reversing those writes correctly gives accepted=2.",
       "expectation": "Simulation",
       "known_issue": {
@@ -767,7 +790,7 @@
     },
     {
       "category": "Sequential",
-      "detail": "Verilator 5.052 rejects the write to a shared automatic gate in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
+      "detail": "Verilator 5.052 rejects the write to a shared automatic gate or event signal in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_unsupported",
@@ -778,7 +801,7 @@
         "id": "sv_verilator_iff_shared_automatic",
         "observed_version": "Verilator 5.052",
         "phase": "compile",
-        "reason": "Verilator 5.052 rejects the write to a shared automatic gate in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
+        "reason": "Verilator 5.052 rejects the write to a shared automatic gate or event signal in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
         "upstream": []
       },
       "name": "timing::iff_shared_automatic_gate_uses_edge_time_value",

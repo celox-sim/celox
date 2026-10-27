@@ -894,11 +894,13 @@ pub struct WaitSite<A> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WaitGate<A> {
     pub signal: A,
+    /// Both operands are plain variables whose values can be read at an
+    /// assignment boundary, including activation-local variables without counters.
+    pub at_write: bool,
     /// Counters that the writes of the term's signal bump at the write
-    /// itself, judging the gate there. Without them the gate is read when
-    /// the runtime detects the occurrence, after combinational logic
-    /// settled: for a gate or a signal that a continuous assignment or a
-    /// flip-flop drives.
+    /// itself, judging the gate there. Activation-local variables instead use
+    /// runtime assignment boundaries. Expressions and continuous/flip-flop
+    /// drivers clear `at_write` and require a settled observation.
     pub counters: Option<GateCounters<A>>,
 }
 
@@ -916,6 +918,7 @@ impl<A: Copy> WaitGate<A> {
     pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> WaitGate<B> {
         WaitGate {
             signal: map(self.signal),
+            at_write: self.at_write,
             counters: self.counters.map(|counters| GateCounters {
                 gated: map(counters.gated),
                 all: map(counters.all),

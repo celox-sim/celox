@@ -2764,7 +2764,8 @@
         "timing::iff_conditions_follow_combinational_process_order",
         "timing::iff_conditions_preserve_cross_module_combinational_order",
         "timing::iff_forked_automatic_gates_are_separate",
-        "timing::iff_shared_automatic_gate_uses_edge_time_value"
+        "timing::iff_shared_automatic_gate_uses_edge_time_value",
+        "timing::iff_automatic_clock_preserves_enabled_pulses"
       ]
     }
   },
@@ -2794,7 +2795,7 @@
     "category": "simulator_unsupported",
     "phase": "compile",
     "observed_version": "Verilator 5.052",
-    "reason": "Verilator 5.052 rejects the write to a shared automatic gate in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
+    "reason": "Verilator 5.052 rejects the write to a shared automatic gate or event signal in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
     "upstream": [],
     "evidence": [
       "verification/repros/sv_iff_hierarchy_automatic.json",
@@ -2802,7 +2803,8 @@
     ],
     "cases": {
       "verilator": [
-        "timing::iff_shared_automatic_gate_uses_edge_time_value"
+        "timing::iff_shared_automatic_gate_uses_edge_time_value",
+        "timing::iff_automatic_clock_preserves_enabled_pulses"
       ]
     }
   }

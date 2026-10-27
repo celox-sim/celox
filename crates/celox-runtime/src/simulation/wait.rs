@@ -267,11 +267,7 @@ impl<B: SimBackend> SimulationState<B> {
                         );
                         continue;
                     }
-                    let local_variable = processes[process]
-                        .frame
-                        .as_ref()
-                        .is_some_and(|frame| frame.locals.contains(&gate.signal));
-                    if !settled && !local_variable {
+                    if !settled && !gate.at_write {
                         continue;
                     }
                 }
@@ -528,6 +524,7 @@ impl<B: SimBackend> SimulationState<B> {
                 let Some(GateRefs {
                     signal: gate,
                     counters: Some(counters),
+                    ..
                 }) = *gate
                 else {
                     continue;

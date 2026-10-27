@@ -339,6 +339,95 @@
         "exit_code": 0,
         "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nn=0\nSimulation finished at time 2 ($finish called)\n"
       }
+    },
+    {
+      "case": "timing::iff_automatic_clock_preserves_enabled_pulses",
+      "source": "iff_automatic_clock_preserves_enabled_pulses.sv",
+      "expected_output": "accepted=1 rejected=0",
+      "observations": [
+        {
+          "top": "Top",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "-Wno-fatal",
+              "--top-module",
+              "Top",
+              "--Mdir",
+              "<checkout>/work/p2-probe-Top",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv"
+            ],
+            "exit_code": 1,
+            "output": "%Error-LIFETIME: <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:8:15: Invalid reference: Process might outlive variable 'clock'.\n                                                                                                                                                                                                 : ... note: In instance 'Top'\n                                                                                                                                                                                                 : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    8 |      begin #1 clock=1; enable=0; clock=0; end\n      |               ^~~~~\n                 ... For error description see https://verilator.org/warn/LIFETIME?v=5.052\n%Error-LIFETIME: <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:8:34: Invalid reference: Process might outlive variable 'clock'.\n                                                                                                                                                                                                 : ... note: In instance 'Top'\n                                                                                                                                                                                                 : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    8 |      begin #1 clock=1; enable=0; clock=0; end\n      |                                  ^~~~~\n%Error: Exiting due to 2 error(s)\n"
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Top",
+              "-o",
+              "<checkout>/work/p2-probe-Top.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv"
+            ],
+            "exit_code": 7,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:4: sorry: Overriding the default variable lifetime is not yet supported.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:6: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:6: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:6: error: Invalid event control.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:7: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:7: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:7: error: Invalid event control.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Top",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\naccepted=1 rejected=1\nSimulation finished at time 4 ($finish called)\n"
+          }
+        },
+        {
+          "top": "Wrapped",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "-Wno-fatal",
+              "--top-module",
+              "Wrapped",
+              "--Mdir",
+              "<checkout>/work/p2-probe-Wrapped",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv"
+            ],
+            "exit_code": 1,
+            "output": "%Warning-PINMISSING: <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:14:21: Instance has missing pin: 'accepted'\n   14 | module Wrapped; Top dut(); endmodule\n      |                     ^~~\n                     <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:1:23: ... Location of port declaration\n    1 | module Top(output int accepted, rejected);\n      |                       ^~~~~~~~\n                     ... For warning description see https://verilator.org/warn/PINMISSING?v=5.052\n                     ... Use \"/* verilator lint_off PINMISSING */\" and lint_on around source to disable this message.\n%Warning-PINMISSING: <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:14:21: Instance has missing pin: 'rejected'\n   14 | module Wrapped; Top dut(); endmodule\n      |                     ^~~\n                     <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:1:33: ... Location of port declaration\n    1 | module Top(output int accepted, rejected);\n      |                                 ^~~~~~~~\n%Error-LIFETIME: <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:8:15: Invalid reference: Process might outlive variable 'clock'.\n                                                                                                                                                                                                 : ... note: In instance 'Wrapped.dut'\n                                                                                                                                                                                                 : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    8 |      begin #1 clock=1; enable=0; clock=0; end\n      |               ^~~~~\n                 ... For error description see https://verilator.org/warn/LIFETIME?v=5.052\n%Error-LIFETIME: <checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:8:34: Invalid reference: Process might outlive variable 'clock'.\n                                                                                                                                                                                                 : ... note: In instance 'Wrapped.dut'\n                                                                                                                                                                                                 : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    8 |      begin #1 clock=1; enable=0; clock=0; end\n      |                                  ^~~~~\n%Error: Exiting due to 2 error(s)\n"
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Wrapped",
+              "-o",
+              "<checkout>/work/p2-probe-Wrapped.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv"
+            ],
+            "exit_code": 7,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:4: sorry: Overriding the default variable lifetime is not yet supported.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:6: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:6: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:6: error: Invalid event control.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:7: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:7: error: Malformed event control expression.\n<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv:7: error: Invalid event control.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Wrapped",
+              "<checkout>/crates/celox-test-suite/verification/repros/iff_automatic_clock_preserves_enabled_pulses.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\naccepted=1 rejected=1\nSimulation finished at time 4 ($finish called)\n"
+          }
+        }
+      ]
     }
   ]
 }

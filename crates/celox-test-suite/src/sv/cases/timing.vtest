@@ -2980,3 +2980,20 @@ endmodule"#)
 endmodule"#)
  (top Top) (run_until 4)
  (assert_eq accepted 1) (assert_eq rejected 0))
+
+; The clock, not only the gate, can live in a shared automatic cell.
+(case iff_automatic_clock_preserves_enabled_pulses
+ (source "iff_automatic_clock.sv" #"module Top(output int accepted, rejected);
+ bit enable=1;
+ initial begin
+   automatic bit clock=0;
+   fork
+     begin @(posedge clock iff enable); accepted++; end
+     begin @(negedge clock iff enable); rejected++; end
+     begin #1 clock=1; enable=0; clock=0; end
+   join_none
+   #3;
+ end
+endmodule"#)
+ (top Top) (run_until 4)
+ (assert_eq accepted 1) (assert_eq rejected 0))

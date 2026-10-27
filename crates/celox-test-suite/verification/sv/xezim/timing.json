@@ -629,6 +629,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "timing::iff_automatic_clock_preserves_enabled_pulses at 2999:25: assert_eq rejected: expected 0x0, got 0x1",
+      "expectation": "Simulation",
+      "name": "timing::iff_automatic_clock_preserves_enabled_pulses",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "timing::iff_conditions_are_judged_at_the_write at 2864:3: expect_output: expected [110, 61, 49, 10], got [110, 61, 48, 10]",
       "expectation": "Simulation",
       "name": "timing::iff_conditions_are_judged_at_the_write",

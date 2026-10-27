@@ -1841,3 +1841,7 @@ fn iff_fork_waits_keep_gates_across_state_files() {
         assert_eq!(loaded.get(loaded.signal(name)), expected.into(), "{name}");
     }
 }
+
+timed_cases! {
+    fn iff_automatic_clock_preserves_enabled_pulses = "timing::iff_automatic_clock_preserves_enabled_pulses";
+}

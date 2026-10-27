@@ -207,6 +207,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
         };
         let gate_refs = |gate: &celox_design::WaitGate<AbsoluteAddr>| GateRefs {
             signal: resolve(&gate.signal),
+            at_write: gate.at_write,
             counters: gate.counters.map(|counters| GateCounterRefs {
                 gated: resolve(&counters.gated),
                 all: resolve(&counters.all),

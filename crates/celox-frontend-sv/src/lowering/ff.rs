@@ -6675,7 +6675,7 @@ impl Ff<'_, '_> {
                         if !self.m.is_hidden(id)
                             || (self.forked && self.frame_locals.contains(&id)) =>
                     {
-                        variable = !self.m.is_hidden(id) && self.m.var(id).array_dims.is_empty();
+                        variable = self.m.var(id).array_dims.is_empty();
                         id
                     }
                     Some(_) => self.event_expression(&expr, samples)?,
@@ -6697,11 +6697,18 @@ impl Ff<'_, '_> {
             };
             for &kind in kinds {
                 terms.push((id, kind));
-                gates.push(gate.map(|(signal, gate_variable)| WaitGate {
-                    signal,
-                    // A variable's write is judged with a variable gate at
-                    // the write itself.
-                    counters: (variable && gate_variable).then(|| self.gate_counters()),
+                gates.push(gate.map(|(signal, gate_variable)| {
+                    WaitGate {
+                        signal,
+                        at_write: variable && gate_variable,
+                        // Shared module storage has counters; activation-local
+                        // operands are read at each process assignment boundary.
+                        counters: (variable
+                            && gate_variable
+                            && !self.m.is_hidden(id)
+                            && !self.m.is_hidden(signal))
+                        .then(|| self.gate_counters()),
+                    }
                 }));
             }
         }
@@ -6753,7 +6760,7 @@ impl Ff<'_, '_> {
             && self.m.var(id).float.is_none()
             && self.m.var(id).array_dims.is_empty()
         {
-            return Ok((id, !self.m.is_hidden(id)));
+            return Ok((id, true));
         }
         let not = |expr| sv::ir::Expr::Unary {
             op: sv::ir::UnaryOp::LogicNot,
