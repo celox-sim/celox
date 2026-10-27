@@ -7374,3 +7374,42 @@ fn class_inline_randomize_retains_call_specific_constraints() {
     endmodule"#;
     analyze_source(source, Path::new("inline_randomize.sv")).unwrap();
 }
+
+#[test]
+fn class_inline_randomize_binds_local_inputs() {
+    let source = r#"module Top;
+        class C; rand bit [7:0] x; endclass
+        C obj;
+        bit [7:0] wanted, x;
+        initial begin
+            obj = new;
+            wanted = 2; x = 3;
+            obj.randomize() with { x == wanted; };
+            obj.randomize() with { x == local::x; };
+        end
+    endmodule"#;
+    analyze_source(source, Path::new("inline_inputs.sv")).unwrap();
+}
+
+#[test]
+fn class_inline_randomize_static_names_do_not_capture_caller_locals() {
+    for (expression, supported) in [("x == limit", false), ("x == local::limit", true)] {
+        let source = format!(
+            r#"module Top;
+            class C; rand bit [7:0] x; static bit [7:0] limit = 5; endclass
+            C obj; bit [7:0] limit;
+            initial begin obj = new; limit = 3; obj.randomize() with {{ {expression}; }}; end
+        endmodule"#
+        );
+        let result = analyze_source(&source, Path::new("inline_static_scope.sv"));
+        if supported {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains("static properties in inline constraints"),
+                "{error}"
+            );
+        }
+    }
+}

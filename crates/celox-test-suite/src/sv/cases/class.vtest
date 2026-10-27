@@ -2247,3 +2247,95 @@ module Top(output bit done);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_inputs
+  (source "inline_inputs.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand bit signed [7:0] x;
+        rand bit [15:0] y;
+        constraint c { y == 7; }
+    endclass
+    Packet p;
+    bit signed [7:0] wanted;
+    bit signed [7:0] x;
+    initial begin
+        p = new;
+        wanted = -2;
+        x = -3;
+        if (!(p.randomize() with { x == wanted; })) $fatal(1, "fallback input");
+        if (p.x != -2 || p.y != 7 || wanted != -2) $fatal(1, "signed readonly input");
+        if (!(p.randomize() with { x == local::x; })) $fatal(1, "local qualifier");
+        if (p.x != -3 || x != -3) $fatal(1, "shadowed local");
+        wanted = 4;
+        if (!(p.randomize() with { x inside {[wanted:6]}; })) $fatal(1, "input range");
+        if (p.x < 4 || p.x > 6) $fatal(1, "new call input");
+        wanted = p.x;
+        if (!(p.randomize(null) with { x == wanted; })) $fatal(1, "input check");
+        wanted = 12;
+        if (p.randomize(y) with { y == wanted; }) $fatal(1, "input unsat");
+        if (p.x < 4 || p.x > 6 || p.y != 7) $fatal(1, "unsat changed object");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_input_methods
+  (source "inline_input_methods.sv" #"
+package pkg;
+    class Base;
+        rand bit [7:0] x;
+        function int pick(bit [7:0] wanted);
+            return randomize() with { x == wanted; };
+        endfunction
+    endclass
+endpackage
+module Top(output bit done);
+    class Derived extends pkg::Base;
+        rand bit [7:0] y;
+        constraint c { y == 9; }
+    endclass
+    Derived d;
+    pkg::Base b;
+    initial begin
+        d = new; b = d;
+        if (!b.pick(2) || d.x != 2 || d.y != 9) $fatal(1, "imported input");
+        if (!b.pick(5) || d.x != 5 || d.y != 9) $fatal(1, "repeated method input");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_input_hooks
+  (source "inline_input_hooks.sv" #"
+module Top(output bit done);
+    bit [7:0] wanted;
+    class Base;
+        rand bit [7:0] x;
+        int pre_calls, post_calls;
+        function void pre_randomize(); wanted = 5; pre_calls++; endfunction
+        function void post_randomize(); post_calls++; endfunction
+    endclass
+    class Derived extends Base;
+        function void pre_randomize(); wanted = 6; pre_calls++; endfunction
+    endclass
+    Base p;
+    Derived d;
+    initial begin
+        p = new; wanted = 2;
+        if (!(p.randomize(x) with { x == wanted; })) $fatal(1, "hook input solve");
+        if (p.x != 5 || wanted != 5 || p.pre_calls != 1 || p.post_calls != 1)
+            $fatal(1, "input sampled before hook");
+        wanted = 2;
+        if (p.randomize(x) with { x == wanted; x == 2; }) $fatal(1, "hook unsat");
+        if (p.x != 5 || p.pre_calls != 2 || p.post_calls != 1) $fatal(1, "hook failure state");
+        d = new; p = d; wanted = 2;
+        if (!(p.randomize() with { x == wanted; }) || p.x != 6 || p.pre_calls != 1 || p.post_calls != 1)
+            $fatal(1, "dynamic input hook");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
