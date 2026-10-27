@@ -1,0 +1,1 @@
+Fix CI retained_reports consistency: synchronize the added Icarus evidence reference in all existing rows sharing sv_icarus_interfaces; all four retained-report tests pass.
