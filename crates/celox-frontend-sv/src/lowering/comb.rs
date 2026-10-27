@@ -583,7 +583,18 @@ impl<'p, 'a> Comb<'p, 'a> {
         expr: &sv::ir::Expr,
         context: Option<(usize, bool)>,
     ) -> Result<Value, sv::AnalyzerError> {
-        let expr = expr_for_state_mode(expr, self.m.four_state);
+        self.eval_mode(store, frames, expr, context, false)
+    }
+
+    fn eval_mode(
+        &mut self,
+        store: &mut Store,
+        frames: &[Frame],
+        expr: &sv::ir::Expr,
+        context: Option<(usize, bool)>,
+        preserve_literals: bool,
+    ) -> Result<Value, sv::AnalyzerError> {
+        let expr = expr_for_state_mode(expr, self.m.four_state || preserve_literals);
         let expr = if self.m.calls(&expr) {
             self.hoist(store, frames, &expr)?
         } else {
@@ -847,11 +858,14 @@ impl<'p, 'a> Comb<'p, 'a> {
                     }
                 }
                 sources.extend(r_sources);
-                let rebuilt = if l == left && r == right {
-                    node
-                } else {
-                    self.alloc(SLTNode::Binary(l, op, r))?
-                };
+                let rebuilt =
+                    if !self.m.four_state && matches!(op, BinaryOp::EqCase | BinaryOp::NeCase) {
+                        super::case_equality::compare(self.arena, l, op, r).map_err(slt_error)?
+                    } else if l == left && r == right {
+                        node
+                    } else {
+                        self.alloc(SLTNode::Binary(l, op, r))?
+                    };
                 (rebuilt, sources)
             }
             SLTNode::Unary(op, inner) => {
@@ -2285,7 +2299,13 @@ impl<'p, 'a> Comb<'p, 'a> {
             return Ok(conditions);
         }
         let selector_signed = self.expr_signed(selector);
-        let (selector_node, selector_sources) = self.eval(store, frames, selector, None)?;
+        let (selector_node, selector_sources) = self.eval_mode(
+            store,
+            frames,
+            selector,
+            None,
+            kind == sv::ir::CaseKind::Exact,
+        )?;
         let mut labels = Vec::with_capacity(items.len());
         let mut width = self.width(selector_node);
         let mut all_signed = selector_signed;
@@ -2296,7 +2316,8 @@ impl<'p, 'a> Comb<'p, 'a> {
                     return Err(unsupported("range label outside case inside"));
                 };
                 all_signed &= self.expr_signed(value);
-                let (node, sources) = self.eval(store, frames, value, None)?;
+                let (node, sources) =
+                    self.eval_mode(store, frames, value, None, kind == sv::ir::CaseKind::Exact)?;
                 width = width.max(self.width(node));
                 item_labels.push((node, sources));
             }
@@ -2307,8 +2328,14 @@ impl<'p, 'a> Comb<'p, 'a> {
         // equality: an unsigned operand also turns the others' operands
         // unsigned (11.8.2).
         let selector_node = if self.width(selector_node) < width || selector_signed != all_signed {
-            self.eval(store, frames, selector, Some((width, all_signed)))?
-                .0
+            self.eval_mode(
+                store,
+                frames,
+                selector,
+                Some((width, all_signed)),
+                kind == sv::ir::CaseKind::Exact,
+            )?
+            .0
         } else {
             selector_node
         };
@@ -2322,7 +2349,13 @@ impl<'p, 'a> Comb<'p, 'a> {
                     && (self.width(*node) < width || self.expr_signed(value) != all_signed)
                 {
                     *node = self
-                        .eval(store, frames, value, Some((width, all_signed)))?
+                        .eval_mode(
+                            store,
+                            frames,
+                            value,
+                            Some((width, all_signed)),
+                            kind == sv::ir::CaseKind::Exact,
+                        )?
                         .0;
                 }
             }
@@ -2337,7 +2370,12 @@ impl<'p, 'a> Comb<'p, 'a> {
             for (node, mut sources) in item_labels {
                 let node = coerce_node_width(self.arena, node, Some(width), all_signed)
                     .map_err(slt_error)?;
-                let matched = self.alloc(SLTNode::Binary(selector_node, op, node))?;
+                let matched = if !self.m.four_state && kind == sv::ir::CaseKind::Exact {
+                    super::case_equality::compare(self.arena, selector_node, op, node)
+                        .map_err(slt_error)?
+                } else {
+                    self.alloc(SLTNode::Binary(selector_node, op, node))?
+                };
                 let matched = if kind == sv::ir::CaseKind::X {
                     // A wildcard comparison returns X when only selector
                     // unknowns prevent a definite match. casex ignores those
@@ -2538,11 +2576,21 @@ impl<'p, 'a> Comb<'p, 'a> {
     ) -> Result<Vec<bool>, sv::AnalyzerError> {
         let none = vec![false; items.len()];
         let mut probe = store.fork();
-        let (selector_node, _) = self.eval(&mut probe, frames, selector, None)?;
+        let (selector_node, _) = self.eval_mode(
+            &mut probe,
+            frames,
+            selector,
+            None,
+            kind == sv::ir::CaseKind::Exact,
+        )?;
         let selector_width = self.width(selector_node);
         // A four-state selector also takes X and Z bits; only exact
         // comparisons of a narrow selector are enumerated.
-        let four_state_selector = !self.two_state(selector_node);
+        let four_state_selector = if self.m.four_state {
+            !self.two_state(selector_node)
+        } else {
+            !super::case_equality::is_known(self.arena, selector_node).map_err(slt_error)?
+        };
         if four_state_selector && (kind != sv::ir::CaseKind::Exact || selector_width > 6) {
             return Ok(none);
         }
@@ -2558,7 +2606,13 @@ impl<'p, 'a> Comb<'p, 'a> {
                     sv::AnalyzerError,
                 > {
                     let signed = this.expr_signed(expr);
-                    let (node, _) = this.eval(&mut probe, frames, expr, None)?;
+                    let (node, _) = this.eval_mode(
+                        &mut probe,
+                        frames,
+                        expr,
+                        None,
+                        kind == sv::ir::CaseKind::Exact,
+                    )?;
                     Ok(slt_const4(this.arena, &mut this.consts, node)
                         .map(|(value, mask, width)| (value, mask, width, signed)))
                 };
