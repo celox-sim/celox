@@ -505,7 +505,23 @@ pub(crate) fn eval_generate_case_operand(
     width: usize,
     signed: bool,
 ) -> Option<IntegralLiteral> {
-    let expr = substitute_typed_constants(expr.clone(), constants, types);
+    eval_case_operand_in_env(
+        expr,
+        constants,
+        &|name| types.get(name).copied(),
+        width,
+        signed,
+    )
+}
+
+pub(crate) fn eval_case_operand_in_env(
+    expr: &ConstExpr,
+    constants: &dyn ConstantEnvironment,
+    types: &impl Fn(&str) -> Option<(usize, bool)>,
+    width: usize,
+    signed: bool,
+) -> Option<IntegralLiteral> {
+    let expr = substitute_typed_constants_with_lookup(expr.clone(), constants, types);
     eval_integral_in_context(&expr, width, signed)
 }
 

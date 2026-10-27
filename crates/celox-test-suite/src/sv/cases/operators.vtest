@@ -2064,3 +2064,67 @@ endmodule
   (assert_eq q 0x1fef6)
   (set b 1)
   (assert_eq q 0x1b9ed))
+
+(case constant_function_case_context
+  ; Explicit local assignments avoid an Icarus 13.0 automatic-initializer abort.
+  (source "constant_case.sv" #"
+    module Top(output logic [3:0] q, output logic [3:0] p);
+      function automatic logic mixed();
+        logic signed [7:0] x;
+        x = 8'hff;
+        case (x)
+          16'shffff: return 0;
+          16'h0000: return 0;
+          default: return 1;
+        endcase
+      endfunction
+      function automatic logic arithmetic();
+        case (8'hff + 8'h01)
+          8'h00: return 0;
+          16'h100: return 1;
+          default: return 0;
+        endcase
+      endfunction
+      function automatic logic all_signed();
+        logic signed [7:0] x;
+        x = -1;
+        case (x)
+          16'shffff: return 1;
+          16'sh0000: return 0;
+          default: return 0;
+        endcase
+      endfunction
+      function automatic logic fill();
+        case ('1)
+          8'hff: return 1;
+          default: return 0;
+        endcase
+      endfunction
+      localparam logic [3:0] P = {fill(), all_signed(), arithmetic(), mixed()};
+      assign p = P;
+      assign q = {fill(), all_signed(), arithmetic(), mixed()};
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq q 15)
+  (assert_eq p 15))
+
+(case constant_function_case_unknowns
+  (four_state)
+  (source "constant_case_unknown.sv" #"
+    module Top(output logic q, output logic p);
+      function automatic logic exact_unknown();
+        case (1'bx)
+          1'bz: return 0;
+          1'bx: return 1;
+          default: return 0;
+        endcase
+      endfunction
+      localparam logic P = exact_unknown();
+      assign p = P;
+      assign q = exact_unknown();
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq q 1)
+  (assert_eq p 1))
