@@ -955,3 +955,12 @@ sv_backends! {
 sv_backends! {
     fn constrained_randomize_inline_package_instances(sim) { @case "class::constrained_randomize_inline_package_instances"; }
 }
+
+sv_backends! {
+    fn constrained_randomize_inline_inputs(sim) { @case "class::constrained_randomize_inline_inputs"; }
+    fn constrained_randomize_inline_input_methods(sim) { @case "class::constrained_randomize_inline_input_methods"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inline_input_hooks(sim) { @case "class::constrained_randomize_inline_input_hooks"; }
+}
