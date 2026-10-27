@@ -811,7 +811,7 @@ fn pre_time_callback_writes_settle_before_due_timers() {
 }
 
 #[test]
-fn scaled_real_zero_delay_inertial_write_is_immediate() {
+fn scaled_real_zero_delay_inertial_write_waits_for_the_update_round() {
     let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
     let _session = install_runtime(trusted_instance(
@@ -822,6 +822,11 @@ fn scaled_real_zero_delay_inertial_write_is_immediate() {
     unsafe {
         let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
         let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        let initial = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 1 },
+        };
+        assert_eq!(vpi_put_value(a, &initial, ptr::null(), VPI_NO_DELAY), a);
         let input = VpiValue {
             format: VPI_INT_VAL,
             value: VpiValueData { integer: 41 },
@@ -841,11 +846,70 @@ fn scaled_real_zero_delay_inertial_write_is_immediate() {
             value: VpiValueData { integer: -1 },
         };
         vpi_get_value(y, &mut output);
+        assert_eq!(output.value.integer, 2);
+        assert!(!run_callbacks());
+        vpi_get_value(y, &mut output);
         assert_eq!(output.value.integer, 42);
         assert_eq!(vpi_free_object(a), 1);
         assert_eq!(vpi_free_object(y), 1);
     }
     clear_runtime();
+}
+
+#[test]
+fn inertial_deposits_coalesce_shared_storage_and_own_the_value() {
+    let _serial = lock_vpi();
+    // Multiple handles always share storage. The two-state lowerer also
+    // collapses a connected port; four-state port conversions can retain
+    // separate storage and are not the same deposited object.
+    for (four_state, second_name) in [(false, c"Top.a"), (true, c"Top.a"), (false, c"Top.child.i")]
+    {
+        let simulator = Simulator::builder(DESIGN, "Top")
+            .four_state(four_state)
+            .build()
+            .unwrap();
+        let _session = install_runtime(trusted_instance(
+            simulator.shared_code().program_image().clone(),
+        ))
+        .unwrap();
+        // Safety: handles and value storage remain live for each VPI call.
+        unsafe {
+            let parent = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+            let child = vpi_handle_by_name(second_name.as_ptr(), ptr::null_mut());
+            let output = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+            assert!(!parent.is_null() && !child.is_null() && !output.is_null());
+            let mut value = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: 0 },
+            };
+            assert_eq!(
+                vpi_put_value(parent, &value, ptr::null(), VPI_NO_DELAY),
+                parent
+            );
+            value.value.integer = 41;
+            assert_eq!(
+                vpi_put_value(parent, &value, ptr::null(), VPI_INERTIAL_DELAY),
+                parent
+            );
+            value.value.integer = 73;
+            assert_eq!(
+                vpi_put_value(child, &value, ptr::null(), VPI_INERTIAL_DELAY),
+                child
+            );
+            // The queued update owns its data, not the caller's union or handle.
+            value.value.integer = 99;
+            assert_eq!(vpi_free_object(parent), 1);
+            vpi_get_value(child, &mut value);
+            assert_eq!(value.value.integer, 0);
+            assert!(!run_callbacks());
+            vpi_get_value(child, &mut value);
+            assert_eq!(value.value.integer, 73, "four_state={four_state}");
+            vpi_get_value(output, &mut value);
+            assert_eq!(value.value.integer, 74);
+            assert_eq!(vpi_free_object(child), 1);
+            assert_eq!(vpi_free_object(output), 1);
+        }
+    }
 }
 
 #[test]
@@ -1075,6 +1139,9 @@ fn string_separators_delay_flags_and_force_release_follow_vpi_semantics() {
             vpi_put_value(a, &rejected, ptr::null(), VPI_INERTIAL_DELAY),
             a
         );
+        vpi_get_value(y, &mut read);
+        assert_eq!(read.value.integer, 42);
+        assert!(!run_callbacks());
         vpi_get_value(y, &mut read);
         assert_eq!(read.value.integer, 11);
 
@@ -4152,4 +4219,85 @@ fn timed_vpi_capture_reads_the_active_slot_without_advancing_it() {
             .value,
         [9, 0, 0, 0]
     );
+}
+
+/// Host deposits after quiescence reopen update regions without advancing time.
+#[cfg(feature = "systemverilog")]
+#[test]
+fn inertial_deposits_resume_a_quiescent_timed_session() {
+    let _serial = lock_vpi();
+    let source = "`timescale 1ns/1ns
+        module Top(input logic [7:0] x, output logic [7:0] y, output logic started);
+            initial started = 1;
+            assign y = x + 1;
+        endmodule";
+    for four_state in [false, true] {
+        let image = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("resume_inertial.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .opt_level(celox::OptLevel::O1)
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+        let simulation = celox::Simulation::from_sv_sources(Vec::new(), "")
+            .build_native_from_image(image.clone())
+            .unwrap();
+        let _session = install_timed_runtime(image, simulation).unwrap();
+        // Safety: all handles and callback storage remain live on this thread.
+        unsafe {
+            let x = vpi_handle_by_name(c"Top.x".as_ptr(), ptr::null_mut());
+            assert!(!x.is_null());
+            put_int(x, 0);
+            assert!(!run_callbacks_result().unwrap());
+            assert_eq!(read_int(c"Top.started"), 1);
+            assert_eq!(read_int(c"Top.y"), 1);
+            let mut previous = 0;
+            for next in [7, 19] {
+                let value = VpiValue {
+                    format: VPI_INT_VAL,
+                    value: VpiValueData { integer: next },
+                };
+                vpi_put_value(x, &value, ptr::null(), VPI_INERTIAL_DELAY);
+                assert_eq!(read_int(c"Top.x"), previous);
+                let mut observations = Vec::<(i32, i32)>::new();
+                for reason in [CB_READ_WRITE_SYNCH, CB_READ_ONLY_SYNCH] {
+                    let data = VpiCbData {
+                        reason,
+                        cb_rtn: Some(record_resumed_inertial_value),
+                        obj: ptr::null_mut(),
+                        time: ptr::null_mut(),
+                        value: ptr::null_mut(),
+                        index: 0,
+                        user_data: ptr::from_mut(&mut observations).cast(),
+                    };
+                    assert!(!vpi_register_cb(&data).is_null());
+                }
+                assert!(!run_callbacks_result().unwrap());
+                assert_eq!(celox_vpi_current_time(), 0);
+                assert_eq!(read_int(c"Top.x"), next);
+                assert_eq!(read_int(c"Top.y"), next + 1);
+                assert_eq!(
+                    observations,
+                    vec![
+                        (CB_READ_WRITE_SYNCH, next + 1),
+                        (CB_READ_ONLY_SYNCH, next + 1)
+                    ]
+                );
+                previous = next;
+            }
+            vpi_free_object(x);
+        }
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+unsafe extern "C" fn record_resumed_inertial_value(data: *mut VpiCbData) -> i32 {
+    // Safety: the test keeps the observation vector live until both callbacks fire.
+    unsafe {
+        let observations = &mut *(*data).user_data.cast::<Vec<(i32, i32)>>();
+        observations.push(((*data).reason, read_int(c"Top.y")));
+    }
+    0
 }
