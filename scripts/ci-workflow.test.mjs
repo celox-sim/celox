@@ -23,7 +23,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   assert.match(gate, /if: \$\{\{ !cancelled\(\)/);
   assert.match(
     gate,
-    /needs: \[changes, rust-tests, rust-default-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites\]/,
+    /needs: \[changes, rust-tests, rust-default-tests, sv-tests, arm64-backend, napi-linux, napi-wasm\]/,
   );
   assert.match(
     gate,
@@ -49,8 +49,6 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     NATIVE_RESULT: "success",
     WASM_REQUIRED: "true",
     WASM_RESULT: "success",
-    RELEASE_REQUIRED: "false",
-    EXTERNAL_RESULT: "skipped",
   };
   const cases = [
     { env: { ...success, DEFAULT_REQUIRED: "false", DEFAULT_RESULT: "skipped" }, passes: true },
@@ -146,21 +144,6 @@ test("the required gate rejects failures and only accepts explicitly optional sk
       passes: false,
     });
   }
-  // A merge group that cuts a release must pass every external comparison.
-  const release = {
-    ...success,
-    RELEASE_REQUIRED: "true",
-    EXTERNAL_RESULT: "success",
-  };
-  cases.push({ env: release, passes: true });
-  for (const status of ["failure", "cancelled", "skipped", ""]) {
-    cases.push({ env: { ...release, EXTERNAL_RESULT: status }, passes: false });
-  }
-  // Full runs report comparison failures through an issue, not this gate.
-  for (const status of ["success", "failure", "cancelled", ""]) {
-    cases.push({ env: { ...success, EXTERNAL_RESULT: status }, passes: true });
-  }
-  cases.push({ env: { ...success, RELEASE_REQUIRED: "" }, passes: false });
   for (const { env, passes } of cases) {
     const result = spawnSync("bash", ["-e", "-c", script], {
       env: { ...process.env, ...env },
@@ -171,7 +154,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   }
 });
 
-test("scheduled and manual validation run all paths and external suites", () => {
+test("external comparisons run independently of product validation", () => {
   assert.match(
     workflow,
     /schedule:\n    - cron: "17 1 \* \* \*"\n  workflow_dispatch:/,
@@ -182,12 +165,12 @@ test("scheduled and manual validation run all paths and external suites", () => 
   );
   assert.match(job("changes"), /STABLE_LANE: .*github\.ref_name == 'master'/);
   assert.match(job("lint"), /VERYL_LANE: .*github\.ref_name == 'develop'/);
-  const external = job("external-suites");
-  assert.match(external, /needs: changes\n/);
-  assert.match(
-    external,
-    /if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.full_validation == 'true'/,
-  );
+  const external = readFileSync(new URL("../.github/workflows/external-comparisons.yml", import.meta.url), "utf8");
+  assert.doesNotMatch(workflow, /external-suites|EXTERNAL_RESULT|RELEASE_REQUIRED/);
+  assert.match(external, /schedule:/);
+  assert.match(external, /workflow_dispatch:/);
+  assert.doesNotMatch(external, /workflow_call:|pull_request:|push:/);
+  assert.match(external, /REPORT_NAME: External simulator comparisons/);
   assert.match(job("changes"), /RELEASE_PLEASE_PR: .*github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
   assert.match(job("changes"), /QUEUE_VALIDATION: .*startsWith\(github\.head_ref, 'mergify\/merge-queue\/'\)/);
   assert.match(external, /fail-fast: false/);

@@ -18,7 +18,7 @@ function runGate(name, needs) {
 test("qualification fails on every missing, skipped, failed or cancelled required job", () => {
   const names = job(workflow, "full-validation").match(/needs:\s*\[([^\]]+)\]/)[1]
     .split(",").map(name => name.trim()).filter(Boolean);
-  for (const required of ["rust-tests", "rust-default-tests", "sv-tests", "external-suites", "common-cells", "arm64-backend", "js-windows", "napi-wasm", "playground-browser"]) {
+  for (const required of ["rust-tests", "rust-default-tests", "sv-tests", "common-cells", "arm64-backend", "js-windows", "napi-wasm", "playground-browser"]) {
     assert.ok(names.includes(required), required);
   }
   const needs = Object.fromEntries(names.map(name => [name, { result: "success" }]));
