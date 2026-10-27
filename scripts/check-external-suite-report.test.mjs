@@ -285,6 +285,8 @@ test("every retained baseline accepts only its existing failures", () => {
           result.accepted_failures,
           tool === "icarus"
             ? [
+                "class::type_parameter_imports",
+                "class::type_parameter_shadowing",
                 "fork::compound_event_activations_outlive_parent",
                 "fork::compound_event_four_state_lsb_edges",
                 "fork::compound_event_function_scratch_isolated",

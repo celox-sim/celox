@@ -1481,6 +1481,28 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:7: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::type_parameter_imports",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 13; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Invalid module instantiation\n<case>/testbench.sv:11: error: Invalid module item.\n<case>/testbench.sv:12: error: Repeat timeunit found and the initial timeunit for this scope is missing.\n<case>/testbench.sv:13: error: Repeat timeprecision found and the initial timeprecision for this scope is missing.\n",
+      "expectation": "Simulation",
+      "name": "class::type_parameter_shadowing",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects pure virtual method declarations and interface classes with syntax errors (\"Invalid class item\", \"Invalid module item\") and fails code generation without a diagnostic (\"Code generation had 2 error(s)\") for a method called on an element of an array of class handles. IEEE 1800-2023 8.21 and 8.26 define pure virtual methods and interface classes, and 7.4 and 8.4 permit arrays of class handles. Verilator passes all but two cases; see sv_verilator_interface_class_casts and sv_verilator_extended_interface_class_methods.",
       "expectation": "Simulation",
       "known_issue": {
