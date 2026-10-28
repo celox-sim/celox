@@ -1,7 +1,11 @@
 //! Versioned container for attaching a native program image to a precompiled
 //! runtime executable.
 
-use std::{fmt, path::Path};
+use std::{
+    fmt,
+    io::{Read, Seek, SeekFrom},
+    path::Path,
+};
 
 use super::backend::NativeProgramImage;
 
@@ -215,9 +219,58 @@ impl NativeProgramImage {
     pub fn discover_in_current_executable()
     -> Result<Option<AppendedNativeImage>, NativeImageContainerError> {
         let executable = std::env::current_exe()?;
-        let bytes = std::fs::read(executable)?;
-        Self::discover_appended(&bytes)
+        let mut file = std::fs::File::open(executable)?;
+        discover_reader(&mut file)
     }
+}
+
+// Read the trailer first so ordinary CLI commands do not copy the runtime
+// executable and attached runs allocate only their serialized image.
+fn discover_reader(
+    reader: &mut (impl Read + Seek),
+) -> Result<Option<AppendedNativeImage>, NativeImageContainerError> {
+    let file_len = reader.seek(SeekFrom::End(0))?;
+    if file_len < TRAILER_SIZE as u64 {
+        return Ok(None);
+    }
+    reader.seek(SeekFrom::End(-(TRAILER_SIZE as i64)))?;
+    let mut trailer = [0u8; TRAILER_SIZE];
+    reader.read_exact(&mut trailer)?;
+    if &trailer[..8] != TRAILER_MAGIC {
+        return Ok(None);
+    }
+    let trailer_size = u32::from_le_bytes(trailer[12..16].try_into().unwrap());
+    if trailer_size as usize != TRAILER_SIZE {
+        return Err(NativeImageContainerError::UnsupportedTrailerSize(
+            trailer_size,
+        ));
+    }
+    let payload_len = u64::from_le_bytes(trailer[16..24].try_into().unwrap());
+    let runtime_len = (file_len - TRAILER_SIZE as u64)
+        .checked_sub(payload_len)
+        .ok_or(NativeImageContainerError::TruncatedPayload)?;
+    let runtime_len =
+        usize::try_from(runtime_len).map_err(|_| NativeImageContainerError::SizeOverflow)?;
+    let payload_size =
+        usize::try_from(payload_len).map_err(|_| NativeImageContainerError::SizeOverflow)?;
+    let buffer_size = payload_size
+        .checked_add(TRAILER_SIZE)
+        .ok_or(NativeImageContainerError::SizeOverflow)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(buffer_size)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::OutOfMemory, error))?;
+    reader.seek(SeekFrom::Start(runtime_len as u64))?;
+    reader.take(payload_len).read_to_end(&mut bytes)?;
+    if bytes.len() != payload_size {
+        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+    }
+    bytes.extend_from_slice(&trailer);
+    let mut appended = NativeProgramImage::discover_appended(&bytes)?;
+    if let Some(appended) = &mut appended {
+        appended.runtime_len = runtime_len;
+    }
+    Ok(appended)
 }
 
 fn discover_appended_payload(
@@ -261,4 +314,121 @@ fn checksum(bytes: &[u8]) -> u64 {
     bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
     })
+}
+
+#[cfg(all(
+    test,
+    target_pointer_width = "64",
+    any(
+        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+        target_arch = "aarch64"
+    )
+))]
+mod tests {
+    use super::*;
+
+    // A virtual runtime prefix may be arbitrarily large but is never readable.
+    // This checks I/O bounds without putting a large fixture or benchmark in CI.
+    struct SuffixReader {
+        prefix: u64,
+        suffix: Vec<u8>,
+        position: u64,
+        bytes_read: usize,
+    }
+    impl Read for SuffixReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if buffer.is_empty() {
+                return Ok(0);
+            }
+            let offset = self
+                .position
+                .checked_sub(self.prefix)
+                .ok_or_else(|| std::io::Error::other("runtime prefix must not be read"))?;
+            let offset = usize::try_from(offset).map_err(std::io::Error::other)?;
+            let count = buffer.len().min(self.suffix.len().saturating_sub(offset));
+            if count != 0 {
+                buffer[..count].copy_from_slice(&self.suffix[offset..offset + count]);
+            }
+            self.position += count as u64;
+            self.bytes_read += count;
+            Ok(count)
+        }
+    }
+    impl Seek for SuffixReader {
+        fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+            let position = match from {
+                SeekFrom::Start(n) => i128::from(n),
+                SeekFrom::Current(n) => i128::from(self.position) + i128::from(n),
+                SeekFrom::End(n) => {
+                    i128::from(self.prefix) + self.suffix.len() as i128 + i128::from(n)
+                }
+            };
+            self.position = u64::try_from(position).map_err(std::io::Error::other)?;
+            Ok(self.position)
+        }
+    }
+    fn image() -> NativeProgramImage {
+        let source = "module Top(a: input logic<8>, b: input logic<8>, y: output logic<8>) { assign y = a + b; }";
+        crate::Simulator::builder(source, "Top")
+            .opt_level(crate::OptLevel::O1)
+            .build()
+            .unwrap()
+            .shared_code()
+            .program_image()
+            .clone()
+    }
+    #[test]
+    fn reader_ignores_runtime_prefix_and_preserves_image_and_offset() {
+        let image = image();
+        let suffix = image.to_container_bytes().unwrap();
+        let size = suffix.len();
+        let mut reader = SuffixReader {
+            prefix: 1u64 << 32,
+            suffix,
+            position: 0,
+            bytes_read: 0,
+        };
+        let found = discover_reader(&mut reader).unwrap().unwrap();
+        assert_eq!(found.runtime_len, 1usize << 32);
+        assert_eq!(found.image.code_image(), image.code_image());
+        assert_eq!(found.image.reflection(), image.reflection());
+        assert_eq!(reader.bytes_read, size);
+    }
+    #[test]
+    fn ordinary_executable_reads_only_its_trailer() {
+        let mut reader = SuffixReader {
+            prefix: 1u64 << 32,
+            suffix: vec![0; TRAILER_SIZE],
+            position: 0,
+            bytes_read: 0,
+        };
+        assert!(discover_reader(&mut reader).unwrap().is_none());
+        assert_eq!(reader.bytes_read, TRAILER_SIZE);
+        let mut short = std::io::Cursor::new(vec![0u8; TRAILER_SIZE - 1]);
+        assert!(discover_reader(&mut short).unwrap().is_none());
+    }
+    #[test]
+    fn reader_preserves_container_corruption_checks() {
+        let encoded = image().to_container_bytes().unwrap();
+        let trailer = encoded.len() - TRAILER_SIZE;
+        let mut bad_size = encoded.clone();
+        bad_size[trailer + 12..trailer + 16].copy_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            discover_reader(&mut std::io::Cursor::new(bad_size)),
+            Err(NativeImageContainerError::UnsupportedTrailerSize(0))
+        ));
+        let mut truncated = encoded.clone();
+        truncated[trailer + 16..trailer + 24]
+            .copy_from_slice(&(encoded.len() as u64).to_le_bytes());
+        assert!(matches!(
+            discover_reader(&mut std::io::Cursor::new(truncated)),
+            Err(NativeImageContainerError::TruncatedPayload)
+        ));
+        let mut corrupt = encoded;
+        corrupt[0] ^= 1;
+        assert!(matches!(
+            discover_reader(&mut std::io::Cursor::new(corrupt)),
+            Err(NativeImageContainerError::ChecksumMismatch)
+        ));
+    }
 }
