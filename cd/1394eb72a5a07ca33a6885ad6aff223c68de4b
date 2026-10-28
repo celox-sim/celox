@@ -1,0 +1,1 @@
+Address Codex review: first/last/num evaluate the receiver once; package-qualified enum constants resolve their enumeration; name() results take string methods; runtime next/prev counts convert to int unsigned with sign extension, as constant counts do.
