@@ -1879,6 +1879,18 @@ pub(in crate::ast) fn format_arguments(
 /// String literals in integral contexts are unsigned packed arrays of bytes
 /// (IEEE 1800-2023 5.9). Keep the semantic IR integral, including escapes.
 fn packed_string_literal(text: &str) -> Option<String> {
+    let bytes = string_literal_bytes(text)?;
+    let width = (bytes.len() * 8).max(8);
+    Some(format!(
+        "{}'h{}",
+        width,
+        num_bigint::BigUint::from_bytes_be(&bytes).to_str_radix(16)
+    ))
+}
+
+/// The bytes of string literal `text`, written with its quotes, after its
+/// escapes (IEEE 1800-2023 5.9.1).
+pub(in crate::ast) fn string_literal_bytes(text: &str) -> Option<Vec<u8>> {
     let text = if let Some(text) = text.strip_prefix("\"\"\"") {
         text.strip_suffix("\"\"\"")?
     } else {
@@ -1939,12 +1951,7 @@ fn packed_string_literal(text: &str) -> Option<String> {
         };
         bytes.push(value);
     }
-    let width = (bytes.len() * 8).max(8);
-    Some(format!(
-        "{}'h{}",
-        width,
-        num_bigint::BigUint::from_bytes_be(&bytes).to_str_radix(16)
-    ))
+    Some(bytes)
 }
 
 pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> bool {

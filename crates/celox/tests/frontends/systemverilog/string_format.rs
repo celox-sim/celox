@@ -15,6 +15,8 @@ sv_backends! {
     fn sformatf_in_container_operands(sim) { @case "string_format::sformatf_in_container_operands"; }
     fn sformatf_with_associative_index(sim) { @case "string_format::sformatf_with_associative_index"; }
     fn sformatf_with_reference_argument(sim) { @case "string_format::sformatf_with_reference_argument"; }
+    fn swrite_matches_write(sim) { @case "string_format::swrite_matches_write"; }
+    fn display_later_formats(sim) { @case "string_format::display_later_formats"; }
     // External testbenches wrap the design, so the hierarchical name `%m`
     // prints differs between simulators; Celox prints the same for both.
     fn sformatf_scope_matches_display(sim) {
@@ -82,4 +84,42 @@ fn container_owner_is_captured_before_formatting_operands() {
     let other = sim.signal("other_size");
     assert_eq!(sim.get(first), BigUint::from(1u8));
     assert_eq!(sim.get(other), BigUint::from(0u8));
+}
+
+/// A value without a conversion of its own keeps its default conversion when a
+/// later format literal is folded into the format: block-local strings and
+/// reals print as they do without one (IEEE 1800-2023 21.2.1.1).
+#[test]
+fn later_formats_keep_default_conversions_of_locals() {
+    let source = r#"
+        module Top;
+            initial begin
+                string s;
+                real r;
+                s = "text";
+                r = 1.5;
+                $write(s, r, "\n");
+                $write("", s, r, "", "\n");
+            end
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("locals.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    let messages: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Write { message } => message,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0], messages[1]);
+    assert!(
+        messages[0].starts_with(b"text"),
+        "{:?}",
+        String::from_utf8_lossy(&messages[0])
+    );
 }

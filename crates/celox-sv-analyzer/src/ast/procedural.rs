@@ -665,6 +665,76 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         .map(Some)
     }
 
+    /// Fold the arguments of a display or write task after its first format
+    /// into that format when a later string literal is a further format: a
+    /// string literal that no conversion consumes continues the format, and
+    /// a value without a conversion of its own is written in the radix of the
+    /// task (IEEE 1800-2023 21.2.1.1).
+    fn merge_display_formats(
+        &self,
+        task: SystemTask,
+        args: &mut Vec<SystemTaskArg<Expr>>,
+        ids: &mut Vec<Option<celox_sv_syntax::ExprId>>,
+    ) {
+        let (SystemTask::Display(radix)
+        | SystemTask::Write(radix)
+        | SystemTask::Fdisplay(radix)
+        | SystemTask::Fwrite(radix)) = task
+        else {
+            return;
+        };
+        let Some(start) = template_index(task, args) else {
+            return;
+        };
+        let Some(SystemTaskArg::Str(first)) = args.get(start) else {
+            return;
+        };
+        let mut text = first.clone();
+        let mut pending = format_conversions(&text).len();
+        let mut later_format = false;
+        for arg in &args[start + 1..] {
+            match arg {
+                SystemTaskArg::Str(literal) if pending == 0 => {
+                    later_format = true;
+                    pending = format_conversions(literal).len();
+                    text.push_str(literal);
+                }
+                _ if pending > 0 => pending -= 1,
+                SystemTaskArg::Expr(value) => text.push_str(&default_conversion(
+                    expression_binding::string_value(value, &self.dims),
+                    expression_binding::real_value(value, &self.dims),
+                    radix,
+                )),
+                SystemTaskArg::Str(_) => unreachable!("an unconsumed literal is a format"),
+                SystemTaskArg::Empty => text.push_str(&default_conversion(false, false, radix)),
+            }
+        }
+        if !later_format {
+            return;
+        }
+        // The values keep their places; the further formats are folded into
+        // the first one.
+        let mut pending = format_conversions(first).len();
+        let mut kept = vec![SystemTaskArg::Str(text)];
+        let mut kept_ids = vec![ids.get(start).copied().flatten()];
+        for (position, arg) in args.iter().enumerate().skip(start + 1) {
+            match arg {
+                SystemTaskArg::Str(literal) if pending == 0 => {
+                    pending = format_conversions(literal).len();
+                }
+                arg => {
+                    pending = pending.saturating_sub(1);
+                    kept.push(arg.clone());
+                    kept_ids.push(ids.get(position).copied().flatten());
+                }
+            }
+        }
+        args.truncate(start);
+        args.extend(kept);
+        ids.truncate(start);
+        ids.extend(kept_ids);
+    }
+
     /// `output = value` for the string `value` of `$sformat`, which assigns
     /// its output as a string literal is assigned (IEEE 1800-2023 21.3.3,
     /// 5.9).
@@ -1453,6 +1523,74 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             );
             return Ok(vec![self.format_assignment(output, value)?]);
         }
+        // `$swrite(output, args...)` assigns what `$write(args...)` would
+        // print, in the radix of its name (IEEE 1800-2023 21.3.3).
+        if let Some(radix) = swrite_radix(name) {
+            if arguments.iter().any(|arg| arg.name.is_some()) {
+                return Err(unsupported(format!("named arguments of `{name}`")));
+            }
+            let output = arguments.first().and_then(|arg| arg.value).ok_or_else(|| {
+                AnalyzerError::InvalidSystemTfCall {
+                    name: name.into(),
+                    detail: "expected an output argument".into(),
+                }
+            })?;
+            // As for `$write`, a string literal that no conversion consumes
+            // continues the format, and a value without a conversion of its
+            // own is written in the radix of the task (21.2.1.1).
+            let mut text = Vec::new();
+            let mut values = Vec::new();
+            let mut pending = 0;
+            for (position, arg) in arguments.iter().enumerate().skip(1) {
+                let id = arg
+                    .value
+                    .ok_or_else(|| AnalyzerError::InvalidSystemTfCall {
+                        name: name.into(),
+                        detail: format!("argument {} is omitted", position + 1),
+                    })?;
+                let literal = match &declarations.expression(id).kind {
+                    celox_sv_syntax::ExprKind::Literal(text) => {
+                        expression_binding::string_literal_bytes(text)
+                    }
+                    _ => None,
+                };
+                if pending == 0
+                    && let Some(literal) = literal
+                {
+                    pending = format_conversions(&String::from_utf8_lossy(&literal)).len();
+                    text.extend_from_slice(&literal);
+                    continue;
+                }
+                let value =
+                    expression_binding::bind_value(id, declarations, self.tree, &self.dims, None)?;
+                if pending > 0 {
+                    pending -= 1;
+                } else {
+                    text.extend_from_slice(
+                        default_conversion(
+                            literal.is_some()
+                                || expression_binding::string_value(&value, &self.dims),
+                            expression_binding::real_value(&value, &self.dims),
+                            radix,
+                        )
+                        .as_bytes(),
+                    );
+                }
+                values.push(value);
+            }
+            let format = Expr::Literal(format!(
+                "{}'h{}",
+                (text.len() * 8).max(8),
+                num_bigint::BigUint::from_bytes_be(&text).to_str_radix(16)
+            ));
+            let value = expression_binding::string_call(
+                StringOp::Format {
+                    ticks_per_unit: timescales::time_divisor(root, self.tree)?,
+                },
+                std::iter::once(format).chain(values).collect(),
+            );
+            return Ok(vec![self.format_assignment(output, value)?]);
+        }
         if name == "$sformatf" {
             let mut value =
                 expression_binding::bind_value(root, declarations, self.tree, &self.dims, None)?;
@@ -1526,17 +1664,26 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 {
                     return Ok(SystemTaskArg::Str(text.to_string()));
                 }
-                let mut value =
+                // Renamed below, once the types of the source names have
+                // chosen the conversions of the format.
+                let value =
                     expression_binding::bind_value(id, declarations, self.tree, &self.dims, None)?;
-                self.rename_expr(&mut value);
                 Ok(SystemTaskArg::Expr(value))
             })
             .collect::<Result<Vec<_>, AnalyzerError>>()?;
         let mut args = args;
+        // The native expression of each argument, kept in step with `args`.
+        let mut ids = arguments.iter().map(|arg| arg.value).collect::<Vec<_>>();
+        self.merge_display_formats(task, &mut args, &mut ids);
+        for arg in &mut args {
+            if let SystemTaskArg::Expr(value) = arg {
+                self.rename_expr(value);
+            }
+        }
         // A string literal that %t converts is bound as a value: the binder
         // handles every literal form, triple quotes and escapes included.
         let mut bind = |index: usize| -> Result<Option<Expr>, AnalyzerError> {
-            let Some(id) = arguments.get(index).and_then(|arg| arg.value) else {
+            let Some(id) = ids.get(index).copied().flatten() else {
                 return Ok(None);
             };
             let mut value =
@@ -3386,34 +3533,49 @@ pub(super) fn process_site(
     })
 }
 
-/// `%t` reports a time value in the units of `$timeformat`, by default the
-/// smallest time precision of the design (IEEE 1800-2023 20.4.3, Table 20-3),
-/// in which the simulation counts its time. The value is in the time unit of
-/// the calling scope, of which `ticks_per_unit` simulation time units make
-/// one, so each value a `%t` of the template converts is scaled by it.
-fn scale_time_conversions(
-    task: SystemTask,
-    args: &mut [SystemTaskArg<Expr>],
-    ticks_per_unit: u64,
-    bind: &mut impl FnMut(usize) -> Result<Option<Expr>, AnalyzerError>,
-) -> Result<(), AnalyzerError> {
-    if ticks_per_unit == 1 {
-        return Ok(());
-    }
-    let template = match task {
+/// The position of the format among the arguments of a display, write or
+/// severity task, which a leading string literal there is.
+fn template_index(task: SystemTask, args: &[SystemTaskArg<Expr>]) -> Option<usize> {
+    Some(match task {
         SystemTask::Display(_) | SystemTask::Write(_) | SystemTask::Severity(_) => 0,
         SystemTask::Fatal => usize::from(matches!(args.first(), Some(SystemTaskArg::Expr(_)))),
         SystemTask::Fdisplay(_)
         | SystemTask::Fwrite(_)
         | SystemTask::Assert
         | SystemTask::AssertContinue => 1,
-        _ => return Ok(()),
-    };
-    let Some(SystemTaskArg::Str(text)) = args.get(template) else {
-        return Ok(());
-    };
-    // The conversions of the template, in the order they take arguments
-    // (21.2.1.2): flags, a width and a precision may precede each.
+        _ => return None,
+    })
+}
+
+/// The conversion that writes a value without one of its own in a task of
+/// `radix` (IEEE 1800-2023 21.2.1.1): a string as text, a real as `$write`
+/// writes reals.
+fn default_conversion(string: bool, real: bool, radix: system_functions::Radix) -> String {
+    if real {
+        "%#g".into()
+    } else if string {
+        "%s".into()
+    } else {
+        format!("%{}", radix.letter())
+    }
+}
+
+/// The radix of a `$swrite` task named `name`.
+fn swrite_radix(name: &str) -> Option<system_functions::Radix> {
+    use system_functions::Radix;
+    Some(match name {
+        "$swrite" => Radix::Decimal,
+        "$swriteb" => Radix::Binary,
+        "$swriteo" => Radix::Octal,
+        "$swriteh" => Radix::Hexadecimal,
+        _ => return None,
+    })
+}
+
+/// The conversions of a format, in the order they take arguments
+/// (IEEE 1800-2023 21.2.1.2): flags, a width and a precision may precede
+/// each.
+fn format_conversions(text: &str) -> Vec<char> {
     let mut conversions = Vec::new();
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -3434,7 +3596,30 @@ fn scale_time_conversions(
             conversions.push(spec);
         }
     }
-    for (offset, spec) in conversions.into_iter().enumerate() {
+    conversions
+}
+
+/// `%t` reports a time value in the units of `$timeformat`, by default the
+/// smallest time precision of the design (IEEE 1800-2023 20.4.3, Table 20-3),
+/// in which the simulation counts its time. The value is in the time unit of
+/// the calling scope, of which `ticks_per_unit` simulation time units make
+/// one, so each value a `%t` of the template converts is scaled by it.
+fn scale_time_conversions(
+    task: SystemTask,
+    args: &mut [SystemTaskArg<Expr>],
+    ticks_per_unit: u64,
+    bind: &mut impl FnMut(usize) -> Result<Option<Expr>, AnalyzerError>,
+) -> Result<(), AnalyzerError> {
+    if ticks_per_unit == 1 {
+        return Ok(());
+    }
+    let Some(template) = template_index(task, args) else {
+        return Ok(());
+    };
+    let Some(SystemTaskArg::Str(text)) = args.get(template) else {
+        return Ok(());
+    };
+    for (offset, spec) in format_conversions(text).into_iter().enumerate() {
         if !matches!(spec, 't' | 'T') {
             continue;
         }
