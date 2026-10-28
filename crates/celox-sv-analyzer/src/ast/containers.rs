@@ -194,7 +194,7 @@ pub(super) fn native_type(
     {
         return Ok(outer.element.container.clone());
     }
-    Ok(None)
+    locators::result_type(expression_binding::ungroup(id, native), native, tree, dims)
 }
 
 pub(super) fn call(op: ContainerOp, layout: ContainerLayout, args: Vec<Expr>) -> Expr {
@@ -320,8 +320,20 @@ fn check_compatible(
             "container assignment requires a compatible container",
         ));
     };
-    if source.key != target.key
-        || source.element != target.element
+    // `logic` and `reg` denote the same type (IEEE 1800-2023 6.11.1).
+    let same = |a: &Option<Type>, b: &Option<Type>| {
+        let normal = |ty: &Option<Type>| {
+            ty.clone().map(|mut ty| {
+                if ty.kind == TypeKind::Reg {
+                    ty.kind = TypeKind::Logic;
+                }
+                ty
+            })
+        };
+        normal(a) == normal(b)
+    };
+    if !same(&source.key, &target.key)
+        || !same(&Some(source.element.clone()), &Some(target.element.clone()))
         || match (source.layout.kind, target.layout.kind) {
             (ContainerKind::Associative { .. }, _) | (_, ContainerKind::Associative { .. }) => {
                 source.layout.kind != target.layout.kind
@@ -1088,6 +1100,9 @@ fn struct_element(
     dims: &PackedDimensions,
 ) -> Converted<Option<(Arc<ContainerType>, Expr)>> {
     let id = expression_binding::ungroup(id, native);
+    if let Some(found) = locators::record_iterator(id, native, dims) {
+        return Ok(Some(found));
+    }
     let base = match &native.expression(id).kind {
         ExprKind::Select { expression, .. } => *expression,
         ExprKind::Call { .. } | ExprKind::Member { .. } => {
@@ -1136,6 +1151,9 @@ pub(super) fn native_struct_element(
     dims: &PackedDimensions,
 ) -> Converted<Option<Arc<unpacked_structs::UnpackedStruct>>> {
     let id = expression_binding::ungroup(id, native);
+    if let Some((target, _)) = locators::record_iterator(id, native, dims) {
+        return Ok(target.element.unpacked_struct().cloned());
+    }
     let base = match &native.expression(id).kind {
         ExprKind::Select { expression, .. } => *expression,
         ExprKind::Call { expression, .. } => match &native.expression(*expression).kind {

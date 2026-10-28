@@ -3139,5 +3139,82 @@
         "string_format::pattern_format_keys_and_handles"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_array_locators",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/array-locators-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "array_locators::array_locator_associative",
+        "array_locators::array_locator_class_predicates",
+        "array_locators::array_locator_find",
+        "array_locators::array_locator_fixed",
+        "array_locators::array_locator_fixed_struct_enum",
+        "array_locators::array_locator_four_state",
+        "array_locators::array_locator_index_argument",
+        "array_locators::array_locator_iterator_names",
+        "array_locators::array_locator_min_max_unique",
+        "array_locators::array_locator_struct_elements"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_array_locator_index_argument",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 rejects the index argument of an array method call ('with' function expects only up to one argument) and an omitted iterator argument before it ('with' function expects simple variable name). IEEE 1800-2023 7.12 (Syntax 7-5) permits both and 7.12.4 renames the index querying method; xezim 0.11.3 compiles the case but finds no element.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_array_locator_index_argument.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "array_locators::array_locator_index_argument"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_array_locator_associative_order",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 orders the indices of an associative array with an int index as unsigned: foreach visits 3, 10, -5, find_index returns 3 before -5 and max with (item.index) selects the element at -5. IEEE 1800-2023 7.8.4 orders an integral index signed or unsigned by the signedness of the index type, so -5 comes first and the largest index is 10; xezim 0.11.3 returns empty queues for associative arrays.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_array_locator_associative_order.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "array_locators::array_locator_associative"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_array_locator_fixed_indices",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 gives locator methods of a fixed-size array the positions of its elements from the right bound instead of their indices: find_first_index of int down[3:0] finds the element at index 1 before the one at 2, find_index of byte bytes[2:5] returns 1 and 3 for indices 3 and 5, and item.index never equals 4, and arrays at the bounds of int report index 0 or 1; min of {1, -2, 3, -4} also returns 1. IEEE 1800-2023 7.12.1 returns indices and takes the first element closest to the leftmost index, 7.12.4 makes item.index the index value, and 6.11 makes byte signed; xezim 0.11.3 shares the index errors.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_array_locator_fixed_indices.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "array_locators::array_locator_fixed"
+      ]
+    }
   }
 ]

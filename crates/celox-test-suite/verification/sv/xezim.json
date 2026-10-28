@@ -2,6 +2,7 @@
   "case_files": [
     "xezim/aggregate_regressions.json",
     "xezim/always_comb.json",
+    "xezim/array_locators.json",
     "xezim/binary_file_io.json",
     "xezim/class.json",
     "xezim/concurrent_assertions.json",

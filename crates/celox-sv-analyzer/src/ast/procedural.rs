@@ -176,6 +176,110 @@ fn before_returns(body: &mut Vec<Stmt>, epilogue: &[Stmt], result: Option<&str>)
     }
 }
 
+/// Apply `rename` to each identifier of `expr`; one for which it returns a
+/// literal is replaced by that literal.
+pub(super) fn rename_const_idents(
+    expr: &mut ConstExpr,
+    rename: &mut impl FnMut(&mut String) -> Option<String>,
+) {
+    match expr {
+        ConstExpr::Ident(name) => {
+            if let Some(value) = rename(name) {
+                *expr = ConstExpr::Literal(value);
+            }
+        }
+        ConstExpr::Literal(_) => {}
+        ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            rename_const_idents(expr, rename);
+            rename_const_idents(msb, rename);
+            rename_const_idents(lsb, rename);
+        }
+        ConstExpr::Select { expr, bit } => {
+            rename_const_idents(expr, rename);
+            rename_const_idents(bit, rename);
+        }
+        ConstExpr::Function { args, .. } => {
+            args.iter_mut()
+                .for_each(|arg| rename_const_idents(arg, rename));
+        }
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            rename_const_idents(expr, rename)
+        }
+        ConstExpr::Binary { left, right, .. } => {
+            rename_const_idents(left, rename);
+            rename_const_idents(right, rename);
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            rename_const_idents(condition, rename);
+            rename_const_idents(then_expr, rename);
+            rename_const_idents(else_expr, rename);
+        }
+    }
+}
+
+/// [`rename_const_idents`] for an expression and the positions it selects.
+pub(super) fn rename_expr_idents(
+    expr: &mut Expr,
+    rename: &mut impl FnMut(&mut String) -> Option<String>,
+) {
+    match expr {
+        Expr::Ident(name) => {
+            if let Some(value) = rename(name) {
+                *expr = Expr::Literal(value);
+            }
+        }
+        Expr::Literal(_) => {}
+        Expr::Select { expr, msb, lsb, .. } => {
+            rename_expr_idents(expr, rename);
+            rename_const_idents(msb, rename);
+            rename_const_idents(lsb, rename);
+        }
+        Expr::Concat(parts) => parts
+            .iter_mut()
+            .for_each(|part| rename_expr_idents(part, rename)),
+        Expr::RepeatConcat { count, parts } => {
+            rename_const_idents(count, rename);
+            parts
+                .iter_mut()
+                .for_each(|part| rename_expr_idents(part, rename));
+        }
+        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => rename_expr_idents(expr, rename),
+        Expr::Binary { left, right, .. } => {
+            rename_expr_idents(left, rename);
+            rename_expr_idents(right, rename);
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            rename_expr_idents(condition, rename);
+            rename_expr_idents(then_expr, rename);
+            rename_expr_idents(else_expr, rename);
+        }
+        Expr::Call { args, .. } => args
+            .iter_mut()
+            .flatten()
+            .for_each(|arg| rename_expr_idents(arg, rename)),
+        Expr::Inside { expr, items } => {
+            rename_expr_idents(expr, rename);
+            for item in items {
+                match item {
+                    InsideItem::Value(value) => rename_expr_idents(value, rename),
+                    InsideItem::Range { low, high } => {
+                        rename_expr_idents(low, rename);
+                        rename_expr_idents(high, rename);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The `int` type of a loop variable declared by `foreach`.
 pub(super) fn int_type() -> Type {
     Type {
@@ -198,6 +302,12 @@ pub(super) fn int_type() -> Type {
     }
 }
 
+impl Drop for BodyBuilder<'_, '_, '_> {
+    fn drop(&mut self) {
+        self.flush_locator_locals();
+    }
+}
+
 impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     pub(super) fn new(
         tree: &'t AnalysisContext<'t>,
@@ -207,13 +317,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     ) -> Self {
         let type_aliases = (*dims.type_aliases).clone();
         let automatic = state.automatic;
+        let mut dims = dims.clone();
+        dims.locator_locals = Some(locators::LocalSink::new(*state.counter));
         Self {
             automatic,
             task_timing: false,
             return_shape: None,
             sensitivity_body: Vec::new(),
             tree,
-            dims: dims.clone(),
+            dims,
             scopes: vec![Scope {
                 entries: Vec::new(),
             }],
@@ -221,6 +333,24 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             type_aliases,
             local_constants: HashMap::default(),
             body,
+        }
+    }
+
+    /// Declare the locals that the array locator methods of the bound
+    /// expressions use (see [`locators`]).
+    pub(super) fn flush_locator_locals(&mut self) {
+        if let Some(sink) = &self.dims.locator_locals {
+            for local in sink.take() {
+                // A call bound again declares the same locals.
+                if !self
+                    .state
+                    .locals
+                    .iter()
+                    .any(|known| known.name == local.name)
+                {
+                    self.state.locals.push(local);
+                }
+            }
         }
     }
 
@@ -417,89 +547,20 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     }
 
     fn rename_const(&self, expr: &mut ConstExpr) {
-        match expr {
-            ConstExpr::Ident(name) => match self.local_constant(name) {
-                Some(value) => *expr = ConstExpr::Literal(value.clone()),
-                None => self.rename_name(name),
-            },
-            ConstExpr::Literal(_) => {}
-            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
-                self.rename_const(expr);
-                self.rename_const(msb);
-                self.rename_const(lsb);
-            }
-            ConstExpr::Select { expr, bit } => {
-                self.rename_const(expr);
-                self.rename_const(bit);
-            }
-            ConstExpr::Function { args, .. } => {
-                args.iter_mut().for_each(|arg| self.rename_const(arg));
-            }
-            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
-                self.rename_const(expr)
-            }
-            ConstExpr::Binary { left, right, .. } => {
-                self.rename_const(left);
-                self.rename_const(right);
-            }
-            ConstExpr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                self.rename_const(condition);
-                self.rename_const(then_expr);
-                self.rename_const(else_expr);
-            }
-        }
+        rename_const_idents(expr, &mut |name| self.rename_ident(name));
     }
 
     fn rename_expr(&self, expr: &mut Expr) {
-        match expr {
-            Expr::Ident(name) => match self.local_constant(name) {
-                Some(value) => *expr = Expr::Literal(value.clone()),
-                None => self.rename_name(name),
-            },
-            Expr::Literal(_) => {}
-            Expr::Select { expr, msb, lsb, .. } => {
-                self.rename_expr(expr);
-                self.rename_const(msb);
-                self.rename_const(lsb);
-            }
-            Expr::Concat(parts) => parts.iter_mut().for_each(|part| self.rename_expr(part)),
-            Expr::RepeatConcat { count, parts } => {
-                self.rename_const(count);
-                parts.iter_mut().for_each(|part| self.rename_expr(part));
-            }
-            Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => self.rename_expr(expr),
-            Expr::Binary { left, right, .. } => {
-                self.rename_expr(left);
-                self.rename_expr(right);
-            }
-            Expr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                self.rename_expr(condition);
-                self.rename_expr(then_expr);
-                self.rename_expr(else_expr);
-            }
-            Expr::Call { args, .. } => args
-                .iter_mut()
-                .flatten()
-                .for_each(|arg| self.rename_expr(arg)),
-            Expr::Inside { expr, items } => {
-                self.rename_expr(expr);
-                for item in items {
-                    match item {
-                        InsideItem::Value(value) => self.rename_expr(value),
-                        InsideItem::Range { low, high } => {
-                            self.rename_expr(low);
-                            self.rename_expr(high);
-                        }
-                    }
-                }
+        rename_expr_idents(expr, &mut |name| self.rename_ident(name));
+    }
+
+    /// Rename a referenced local, or return the value of a local parameter.
+    fn rename_ident(&self, name: &mut String) -> Option<String> {
+        match self.local_constant(name) {
+            Some(value) => Some(value.clone()),
+            None => {
+                self.rename_name(name);
+                None
             }
         }
     }

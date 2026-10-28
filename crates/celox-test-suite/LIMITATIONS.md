@@ -635,6 +635,10 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_verilator_pattern_format` | execute | verilator | 2 | Verilator 5.052 prints `%p` of integral container elements and integral associative keys in hexadecimal (`'h1`, and `'hfffffffe` for the `int` key -2) and a string literal as its packed value. IEEE 1800-2023 21.2.1.6 prints singular values as unformatted `$display` prints them, in decimal, and a string literal in quotes; xezim 0.11.3 prints the queue and dynamic array case as expected. |
 | `sv_icarus_pattern_format` | execute | icarus | 1 | Icarus 13.0 compiles `%p` of queues and dynamic arrays, then `vvp` stops: "$display does not support argument type (116)." IEEE 1800-2023 21.2.1.6 prints them as assignment patterns. |
 | `sv_icarus_associative_arrays_and_class_queues` | compile | icarus | 1 | Icarus 13.0 rejects associative arrays with `int` and `string` indices ("Type names are not valid expressions here") and queues of class handles, which IEEE 1800-2023 7.8 and 7.10 define. |
+| `sv_icarus_array_locators` | compile | icarus | 10 | Icarus 13.0 does not parse an array method call with a `with` clause ("syntax error", "Malformed statement"), so every locator method of IEEE 1800-2023 7.12.1 is rejected, and it does not support the unpacked structure elements of one case; Verilator 5.052 and xezim 0.11.3 compile the cases. The [pre-exclusion diagnostics](verification/sv/limitations/array-locators-icarus.json) retain a reduced source. |
+| `sv_verilator_array_locator_index_argument` | compile | verilator | 1 | Verilator 5.052 rejects the index argument of `q.find(e, pos) with (...)` and an omitted iterator argument before it; IEEE 1800-2023 7.12 (Syntax 7-5) permits both and 7.12.4 renames the index method. xezim 0.11.3 compiles the case but finds no element. [Standalone probe](verification/repros/sv_array_locator_index_argument.json). |
+| `sv_verilator_array_locator_associative_order` | execute | verilator | 1 | Verilator 5.052 orders `int` associative indices as unsigned (its `foreach` visits 3, 10, -5), so `find_index` returns 3 before -5 and `max with (item.index)` selects the element at -5. IEEE 1800-2023 7.8.4 orders a signed index type numerically as signed. xezim 0.11.3 returns empty queues for associative arrays. [Standalone probe](verification/repros/sv_array_locator_associative_order.json). |
+| `sv_verilator_array_locator_fixed_indices` | execute | verilator | 1 | Verilator 5.052 gives locator methods of `int down[3:0]` and `byte bytes[2:5]` element positions from the right bound instead of indices, so `find_first_index` searches from the right and `item.index` never equals 4, and `min` of `byte` elements `{1, -2, 3, -4}` returns 1. IEEE 1800-2023 7.12.1 and 7.12.4 use the declared indices from the leftmost one, and 6.11 makes `byte` signed. xezim 0.11.3 shares the index errors. [Standalone probe](verification/repros/sv_array_locator_fixed_indices.json). |
 
 The `string_format` cases compare `$sformatf`, `$sformat` and `$swrite` with
 `$display` / `$write` of the same format and arguments. The [Icarus observations](verification/sv/limitations/string-format-icarus.json)
@@ -644,6 +648,16 @@ four-state case. `%m` is checked only in Celox, as each adapter wraps the
 design in its own testbench hierarchy. The `pattern_format` cases print `%p`
 of containers, strings and class handles; the [observations](verification/sv/limitations/pattern-format.json)
 retain the standalone Verilator, Icarus and xezim outputs.
+
+The `array_locators` cases check the locator methods of IEEE 1800-2023 7.12.1
+on queues, dynamic, associative and fixed-size arrays. Icarus 13.0 does not
+parse them; Verilator 5.052 passes the remaining cases, except that it does
+not run the four-state case. xezim 0.11.3 fails on locator results used as
+operands, string `min`, associative arrays, enum methods of the iterator,
+whole-structure comparisons of the iterator, `unique` of X and Z values and
+the index argument (`sv_array_locator_*` in the xezim review), as the
+[standalone probe](verification/repros/sv_array_locator_operands_xezim.json)
+shows.
 
 The [system-function edge-case evidence](verification/repros/system_function_edge_cases.json)
 retains the failed Icarus runs and minimal sources. Cover comparisons enable

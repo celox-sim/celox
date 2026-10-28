@@ -103,6 +103,8 @@ macro_rules! sv_backends {
 
 #[path = "frontends/systemverilog/always_comb.rs"]
 mod always_comb;
+#[path = "frontends/systemverilog/array_locators.rs"]
+mod array_locators;
 #[path = "frontends/systemverilog/binary_file_io.rs"]
 mod binary_file_io;
 #[path = "frontends/systemverilog/class.rs"]

@@ -213,6 +213,14 @@ change events. Native-image/checkpoint tests cover the new runtime operations.
 Associative ordering is prohibited by 7.12.2; fixed-array ordering, `shuffle`,
 `with` expressions and iterator arguments remain unsupported.
 
+Array locator methods (7.12.1) update 22 more rows: both state modes of the
+ten `chapter-7/arrays/associative/locator-methods` cases and of
+`chapter-7/arrays/unpacked/index.sv` (`item.index`, 7.12.4) change from fail
+to pass. Each was simulated in both modes and its displayed values checked
+against 7.12.1, including the first occurrence that `unique_index` keeps.
+Full official runs at the pinned revision report 1277 passing cases in 2state
+and 1288 in 4state, and change only these 22 verdicts.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.

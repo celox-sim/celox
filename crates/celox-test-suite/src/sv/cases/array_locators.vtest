@@ -1,0 +1,329 @@
+(group array_locators (category types))
+
+(case array_locator_find
+  (source "array_locators.sv" #"
+module Top(output bit [7:0] flags);
+    int q[$] = '{5, 1, 4, 1, 9, 2, 6};
+    int d[] = '{3, 8, 3, 7};
+    int r[$], r2[$], lowest[$], highest[$];
+    initial begin
+        lowest = '{4}; highest = '{9};
+        r = q.find with (item > 3);
+        flags[0] = r.size() == 4 && r.sum() == 24 && r.min() == lowest && r.max() == highest;
+        r = q.find_index(x) with (x == 1);
+        flags[1] = r.size() == 2 && r.sum() == 4 && r[0] == 1;
+        r = q.find_first with (item > 4);
+        flags[2] = r.size() == 1 && r[0] == 5;
+        r = q.find_first_index with (item > 4);
+        flags[3] = r.size() == 1 && r[0] == 0 && q.find_first_index with (item > 100).size() == 0;
+        r = q.find_last with (item < 3);
+        r2 = q.find_last_index(v) with (v < 3);
+        flags[4] = r.size() == 1 && r[0] == 2 && r2.size() == 1 && r2[0] == 5;
+        r = q.find with (item == item.index);
+        flags[5] = r.size() == 2 && r.sum() == 7;
+        r = q.find(e) with (e.index > 3 && e.index < 6);
+        flags[6] = r.size() == 2 && r.sum() == 11;
+        r = d.find_last_index with (item == 3);
+        flags[7] = r.size() == 1 && r[0] == 2 && d.find with (item == 3).size() == 2;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 255))
+
+(case array_locator_min_max_unique
+  (source "array_locators.sv" #"
+module Top(output bit [6:0] flags);
+    int q[$] = '{5, 1, 4, 1, 9, 2, 6};
+    string names[$] = '{"bob", "alice", "carol", "alice"};
+    int r[$], lowest[$], highest[$];
+    string s[$], s2[$], first_name[$];
+    initial begin
+        lowest = '{1}; highest = '{9}; first_name = '{"alice"};
+        flags[0] = q.min() == lowest && q.max == highest;
+        r = q.min with (-item);
+        flags[1] = r == highest && q.max(v) with (v % 7) == q.find with (item == 6);
+        r = q.unique;
+        flags[2] = r.size() == 6 && r.sum() == 27;
+        r = q.unique_index;
+        flags[3] = r.size() == 6 && q[r[0]] + q[r[1]] + q[r[2]] + q[r[3]] + q[r[4]] + q[r[5]] == 27;
+        r = q.unique(v) with (v % 3);
+        flags[4] = r.size() == 3;
+        s = names.unique;
+        s2 = names.max();
+        flags[5] = s.size() == 3 && s2.size() == 1 && s2[0] == "carol" && names.min == first_name;
+        s = names.find with (item.len() == 5);
+        r = names.find_first_index with (item == "carol");
+        flags[6] = s.size() == 3 && r.size() == 1 && r[0] == 2;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 127))
+
+(case array_locator_associative
+  (source "array_locators.sv" #"
+module Top(output bit [5:0] flags);
+    int by_name[string];
+    int by_key[int];
+    string keys[$], keys2[$];
+    int r[$], r2[$];
+    initial begin
+        by_name["x"] = 3; by_name["b"] = 9; by_name["m"] = 3;
+        keys = by_name.find_index with (item == 3);
+        flags[0] = keys.size() == 2 && keys[0] == "m" && keys[1] == "x";
+        keys = by_name.find_first_index with (item == 3);
+        keys2 = by_name.find_last_index with (item == 3);
+        flags[1] = keys.size() == 1 && keys[0] == "m" && keys2.size() == 1 && keys2[0] == "x";
+        r = by_name.find with (item.index != "b");
+        flags[2] = r.size() == 2 && r[0] == 3 && r[1] == 3;
+        by_key[10] = 1; by_key[-5] = 2; by_key[3] = 2;
+        r = by_key.find_index with (item == 2);
+        flags[3] = r.size() == 2 && r[0] == -5 && r[1] == 3;
+        r = by_key.min(v) with (v.index);
+        r2 = by_key.max with (item.index);
+        flags[4] = r.size() == 1 && r[0] == 2 && r2.size() == 1 && r2[0] == 1;
+        r = by_key.unique_index;
+        r2 = by_key.find_first with (item.index > 0);
+        flags[5] = r.size() == 2 && r2.size() == 1 && r2[0] == 2;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 63))
+
+(case array_locator_fixed
+  (source "array_locators.sv" #"
+module Top(output bit [6:0] flags);
+    int up[4] = '{10, 20, 30, 40};
+    int top_end[2147483647:2147483647];
+    int bottom_end[-2147483648:-2147483647];
+    int down[3:0];
+    byte bytes[2:5] = '{1, -2, 3, -4};
+    int r[$], r2[$];
+    byte b[$];
+    initial begin
+        down[3] = 1; down[2] = 5; down[1] = 5; down[0] = 2;
+        r = up.find with (item > 15);
+        r2 = up.find_index with (item > 15);
+        flags[0] = r.size() == 3 && r[0] == 20 && r[2] == 40 && r2.size() == 3 && r2[0] == 1 && r2[2] == 3;
+        r = down.find_first_index with (item == 5);
+        r2 = down.find_last_index with (item == 5);
+        flags[1] = r.size() == 1 && r[0] == 2 && r2.size() == 1 && r2[0] == 1;
+        r = down.find_index with (item == item.index + 3);
+        r2 = up.max();
+        flags[2] = r.size() == 1 && r[0] == 2 && r2.size() == 1 && r2[0] == 40;
+        b = bytes.min;
+        r = bytes.find_index with (item < 0);
+        flags[3] = b.size() == 1 && b[0] == -4 && r.size() == 2 && r[0] == 3 && r[1] == 5;
+        b = bytes.find_first with (item.index == 4);
+        flags[4] = b.size() == 1 && b[0] == 3;
+        // Traversals that end at a bound of the int index.
+        top_end[2147483647] = 9;
+        r = top_end.find_last_index with (item == 9);
+        flags[5] = r.size() == 1 && r[0] == 2147483647;
+        bottom_end[-2147483648] = 3;
+        r = bottom_end.find_last_index with (item == 3);
+        r2 = bottom_end.find_index with (item == 0);
+        flags[6] = r.size() == 1 && r[0] == -2147483648 && r2.size() == 1 && r2[0] == -2147483647;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 127))
+
+(case array_locator_class_predicates
+  (source "array_locators.sv" #"
+module Top(output bit [6:0] flags);
+    class Alias;
+        string type_name, path;
+        int id;
+        function new(string type_name, string path, int id);
+            this.type_name = type_name; this.path = path; this.id = id;
+        endfunction
+        function int twice(); return id * 2; endfunction
+    endclass
+    class Factory;
+        Alias aliases[$];
+        function void add(string type_name, string path, int id);
+            Alias entry = new(type_name, path, id);
+            aliases.push_back(entry);
+        endfunction
+        function int count_above(int limit);
+            Alias above[$];
+            above = aliases.find(e) with (e.id > limit);
+            return above.size();
+        endfunction
+        function int resolve(string requested, string full_path);
+            Alias found[$];
+            found = aliases.find(i) with ((i.type_name == requested) && path_ok(i.path, full_path));
+            return found.size() == 0 ? -1 : found[0].id;
+        endfunction
+    endclass
+    int calls;
+    function automatic bit path_ok(string pattern, string path);
+        calls++;
+        return pattern == "*" || pattern == path;
+    endfunction
+    Factory f;
+    Alias hits[$];
+    int r[$];
+    int i;
+    initial begin
+        f = new;
+        f.add("drv", "top.env.a", 1); f.add("mon", "*", 2); f.add("drv", "*", 3);
+        flags[0] = f.resolve("drv", "top.env.a") == 1 && f.resolve("drv", "top.env.b") == 3;
+        calls = 0;
+        flags[1] = f.resolve("mon", "x") == 2 && calls == 1 && f.resolve("seq", "x") == -1;
+        hits = f.aliases.find(h) with (h.id >= 2);
+        flags[2] = hits.size() == 2 && hits[0].type_name == "mon" && hits[1].id == 3;
+        r = f.aliases.find_index(h) with (h.twice() == 4);
+        flags[3] = r.size() == 1 && r[0] == 1 && f.count_above(1) == 2;
+        calls = 0;
+        if (f.aliases.size() > 9 && f.aliases.find(h) with (path_ok(h.path, "*")).size() > 0)
+            calls = 99;
+        flags[4] = calls == 0;
+        i = 0;
+        while (f.aliases.find with (item.id > i).size() > 1) i++;
+        flags[5] = i == 2;
+        r = f.aliases.find_index with (f.aliases.find(x) with (x.type_name == item.type_name).size() > 1);
+        flags[6] = r.size() == 2 && r[0] == 0 && r[1] == 2;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 127))
+
+(case array_locator_index_argument
+  (source "array_locators.sv" #"
+module Top(output bit [2:0] flags);
+    typedef struct packed { bit [7:0] index; bit [7:0] value; } entry_t;
+    int q[$] = '{5, 1, 4, 1, 9, 2, 6};
+    entry_t entries[$];
+    int r[$];
+    initial begin
+        r = q.find(e, pos) with (e.pos > 3 && e.pos() < 6);
+        flags[0] = r.size() == 2 && r.sum() == 11;
+        r = q.find_index(, at) with (item.at == item);
+        flags[1] = r.size() == 2 && r[0] == 1 && r[1] == 6;
+        entries = '{'{index: 8'd0, value: 8'd7}, '{index: 8'd5, value: 8'd8}};
+        r = entries.find_index(item, position) with (item.index != item.position);
+        flags[2] = r.size() == 1 && r[0] == 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 7))
+
+(case array_locator_four_state
+  (source "array_locators.sv" #"
+module Top(output bit [4:0] flags);
+    logic [3:0] q[$];
+    logic [3:0] r[$];
+    int i[$];
+    initial begin
+        q = '{4'b1x00, 4'd3, 4'd5, 4'bzzzz};
+        r = q.find with (item > 4);
+        flags[0] = r.size() == 1 && r[0] === 4'd5;
+        i = q.find_index with (item === 4'b1x00);
+        flags[1] = i.size() == 1 && i[0] == 0;
+        r = q.find_first with ($isunknown(item));
+        flags[2] = r.size() == 1 && r[0] === 4'b1x00;
+        r = q.find_last with ($isunknown(item));
+        flags[3] = r.size() == 1 && r[0] === 4'bzzzz;
+        // unique keeps one entry for each value, X and Z bits included.
+        q = '{4'b1x00, 4'd3, 4'b1x00, 4'bzzzz, 4'd3, 4'bzzzz, 4'b1z00};
+        r = q.unique;
+        i = q.unique_index;
+        flags[4] = r.size() == 4 && i.size() == 4
+            && r.find with (item === 4'b1x00).size() == 1
+            && r.find with (item === 4'b1z00).size() == 1;
+    end
+endmodule
+"#)
+  (four_state)
+  (top Top) (run_until 0) (assert_eq flags 31))
+
+(case array_locator_fixed_struct_enum
+  (source "array_locators.sv" #"
+module Top(output bit [3:0] flags);
+    typedef struct packed { bit [3:0] tag; bit [3:0] value; } pair_t;
+    typedef enum logic [1:0] { RED, GREEN, BLUE } color_t;
+    pair_t pairs[3];
+    pair_t found[$];
+    pair_t first, second;
+    color_t colors[4] = '{RED, BLUE, GREEN, BLUE};
+    color_t c[$];
+    int i[$];
+    initial begin
+        pairs[0] = {4'd1, 4'd5}; pairs[1] = {4'd2, 4'd6}; pairs[2] = {4'd1, 4'd7};
+        found = pairs.find with (item.tag == 1);
+        first = found[0]; second = found[1];
+        flags[0] = found.size() == 2 && first.value == 5 && second.value == 7;
+        i = colors.find_index with (item == BLUE);
+        flags[1] = i.size() == 2 && i[0] == 1 && i[1] == 3;
+        c = colors.max;
+        flags[2] = c.size() == 1 && c[0] == BLUE;
+        c = colors.find_first with (item.next() == BLUE);
+        flags[3] = c.size() == 1 && c[0] == GREEN;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 15))
+
+(case array_locator_struct_elements
+  (source "array_locators.sv" #"
+module Top(output bit [4:0] flags);
+    typedef struct { string alias_type_name; string full_inst_path; int id; } alias_t;
+    class Factory;
+        protected alias_t aliases[$];
+        function void add(string type_name, string path, int id);
+            alias_t entry;
+            entry.alias_type_name = type_name; entry.full_inst_path = path; entry.id = id;
+            aliases.push_back(entry);
+        endfunction
+        function int resolve(string requested_type_name, string full_inst_path);
+            alias_t type_alias_inst[$];
+            type_alias_inst = aliases.find(i) with ((i.alias_type_name == requested_type_name)
+                && path_ok(i.full_inst_path, full_inst_path));
+            return type_alias_inst.size() == 0 ? -1 : type_alias_inst[0].id;
+        endfunction
+        function bit whole_values();
+            alias_t second, found[$];
+            int r[$];
+            second = aliases[1];
+            r = aliases.find_index with (item == second);
+            found = aliases.max with (item.id);
+            return r.size() == 1 && r[0] == 1 && found.size() == 1 && found[0].id == 3;
+        endfunction
+    endclass
+    function automatic bit path_ok(string pattern, string path);
+        return pattern == "*" || pattern == path;
+    endfunction
+    Factory f;
+    initial begin
+        f = new;
+        f.add("drv", "top.env.a", 1); f.add("mon", "*", 2); f.add("drv", "*", 3);
+        flags[0] = f.resolve("drv", "top.env.a") == 1;
+        flags[1] = f.resolve("drv", "top.env.b") == 3;
+        flags[2] = f.resolve("mon", "x") == 2;
+        flags[3] = f.resolve("seq", "x") == -1;
+        flags[4] = f.whole_values();
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 31))
+
+(case array_locator_iterator_names
+  (source "array_locators.sv" #"
+module Top(output bit [2:0] flags);
+    int q[$] = '{0, 5, 1, 7};
+    reg [7:0] regs[2] = '{0, 3};
+    reg [7:0] found[$];
+    int r[$];
+    initial begin
+        // An iterator may take the name of the default index method.
+        r = q.find(index) with (index > 0);
+        flags[0] = r.size() == 3 && r[0] == 5 && r[2] == 7;
+        r = q.find_index(index) with (index > index.index);
+        flags[1] = r.size() == 2 && r[0] == 1 && r[1] == 3;
+        found = regs.find with (item != 0);
+        flags[2] = found.size() == 1 && found[0] == 3;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 7))

@@ -98,6 +98,7 @@ impl Ff<'_, '_> {
                 )
             }
             ObjectOp::Container { .. } => unreachable!("handled by container_call"),
+            ObjectOp::Locator(_) => unreachable!("handled by locator"),
             ObjectOp::New {
                 class,
                 size,
@@ -279,6 +280,7 @@ impl Ff<'_, '_> {
         let (temp, name) = self.m.temp("object", width, signed, false);
         let kind = match op {
             ObjectOp::Container { .. } => unreachable!("handled by container_call"),
+            ObjectOp::Locator(_) => unreachable!("handled by locator"),
             ObjectOp::New { .. } | ObjectOp::Copy | ObjectOp::Box(_) => {
                 Some(celox_design::ValueKind::ObjRef)
             }

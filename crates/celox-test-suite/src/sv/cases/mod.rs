@@ -16,6 +16,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("containers.vtest"),
     },
     Group {
+        file: "src/sv/cases/array_locators.vtest",
+        text: include_str!("array_locators.vtest"),
+    },
+    Group {
         file: "src/sv/cases/fork_deferred.vtest",
         text: include_str!("fork_deferred.vtest"),
     },

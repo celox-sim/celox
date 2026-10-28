@@ -238,6 +238,9 @@ pub(in crate::ast) fn native_struct(
     dims: &PackedDimensions,
 ) -> Converted<Option<Arc<UnpackedStruct>>> {
     let id = expression_binding::ungroup(id, native);
+    if let Some((container, _)) = locators::record_iterator(id, native, dims) {
+        return Ok(container.element.unpacked_struct().cloned());
+    }
     Ok(match &native.expression(id).kind {
         ExprKind::Name(_) | ExprKind::Member { .. } => match member_path(id, native)
             .map(|mut parts| {
