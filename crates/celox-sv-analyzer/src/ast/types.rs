@@ -196,7 +196,14 @@ fn declaration_name(
             "{}::{name}",
             instances::normalize_identifier(&unit.name.spelling)
         ),
-        None => format!("{}::{name}", packages::UNIT),
+        // Each source file's compilation unit is a scope of its own, as for
+        // its classes (IEEE 1800-2023 3.12.1).
+        None => {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = fxhash::FxHasher::default();
+            tree.compilation_path().hash(&mut hasher);
+            format!("{}::{name}@{:016x}", packages::UNIT, hasher.finish())
+        }
     }
 }
 

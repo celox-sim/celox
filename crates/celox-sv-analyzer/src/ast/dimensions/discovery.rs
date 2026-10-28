@@ -993,14 +993,19 @@ pub(in crate::ast) fn query_operand_dimensions_id(
     // A class's signatures are bound in the scope that declares it, from
     // that scope's declarations alone, once for all of its queries.
     let base = context.clone();
-    let classes = scope_class_signatures(tree, &frames[0], &key, &base)?;
-    settle(
-        &frames,
-        tree,
-        &key,
-        &mut context,
-        Classes::Published(&classes),
-    )?;
+    // Without classes of its own, the scope has no signatures to bind once.
+    if classes::scope_declarations(tree).next().is_none() {
+        settle(&frames, tree, &key, &mut context, Classes::Bind)?;
+    } else {
+        let classes = scope_class_signatures(tree, &frames[0], &key, &base)?;
+        settle(
+            &frames,
+            tree,
+            &key,
+            &mut context,
+            Classes::Published(&classes),
+        )?;
+    }
     overlay(&mut context, input);
     if let Some(id) = owners.subroutine {
         let subroutine = native.subroutine(id);

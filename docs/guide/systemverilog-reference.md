@@ -331,7 +331,7 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, enumeration constants declared in a class, enumeration, struct and union types and named four-state or string constants as class parameter values, specializations of a parameterized class outside the package or compilation unit that declares it, properties that are `real`, arrays or wider than 64 bits, and randomization or constraints over 4-state properties. Timed tasks with static local declarations and recursive calls remain unsupported.
+- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, enumeration constants declared in a class, enumeration, struct and union types and named four-state or string constants as class parameter values, module-local classes as type arguments to package-class specializations, properties that are `real`, arrays or wider than 64 bits, and randomization or constraints over 4-state properties. Timed tasks with static local declarations and recursive calls remain unsupported.
 - Behavioral and verification constructs: intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events and `->`, `wait fork` / `disable fork`, temporal concurrent assertions beyond the Boolean subset below, `force` / `release`.
@@ -595,23 +595,30 @@ anonymous enumeration, struct or union type is rejected as a type argument.
 Package typedefs of specializations, such as `typedef C#(word_t) word_c` with
 `word_t` bounded by a package parameter, use the package's constants.
 
-A class declared in a package or the compilation unit is laid out and its
-methods are lowered where it is declared, once (IEEE 1800-2023 3.12.1, 26.3):
+A class declared in a package or the compilation unit has its layout and
+method bodies bound in its declaration scope (IEEE 1800-2023 3.12.1, 26.3):
 a module uses it through an import, as `p::C`, or by its name when the
 compilation unit declares it, also from another source file. Its static
 properties are variables of the package, shared by every module that uses
 the class. A module class may extend it and override its virtual
 methods; calls of those methods through handles in the module then also reach
-the overrides of the module's classes. A specialization of a parameterized class
-is made where the class is declared, so outside that scope only the
-specializations it names can be used. Sources of packages and compilation-unit
-items alone elaborate those scopes.
+the overrides of the module's classes. A package's parameterized class can also
+be specialized by an importing module, package, or compilation-unit class,
+including with a compilation-unit class as a type argument. Explicit arguments
+are bound in the caller's scope; defaults and class bodies retain the package's
+declaration scope. Matching specializations share their type and static storage
+throughout the design (8.25). Module-local classes cannot yet be used as these
+type arguments: their identity must distinguish module instances. Sources of
+packages and compilation-unit items alone elaborate those scopes.
 
 Member typedefs and type parameters of a concrete package-class specialization
 remain available through imported aliases such as `Small::element_t`, including
 inheritance and package re-exports. Their dimensions are fixed in the declaring
 specialization; parameters of the importing module cannot change them. A module
 or another package can inherit those bound member types (6.18, 8.13, 8.23).
+Inherited value parameters and localparams, including strings, also retain their
+base specialization's bindings when the derived package declares names that
+shadow them (8.13, 8.25).
 
 Checkpoints keep objects. State files record strings but not objects, so
 saving a state file fails while any variable holds an object.
