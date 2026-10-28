@@ -14,7 +14,7 @@
 compile_error!("celox-vpi currently supports only x86-64 and AArch64");
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ffi::{CStr, CString, c_char, c_void},
     io::Write,
     ptr,
@@ -367,6 +367,11 @@ pub type VpiHandle = *mut VpiHandleObject;
 #[derive(Default)]
 struct VpiHost {
     runtime: RefCell<Option<Runtime>>,
+    /// Untimed state can only change through the host's mutation helpers.
+    /// Timed slot observers keep polling because kernels can update their state
+    /// between observer callbacks without returning through those helpers.
+    poll_only_when_dirty: bool,
+    values_dirty: Cell<bool>,
     forced_values: RefCell<HashMap<VpiSignalIdentity, ForcedValue>>,
     pending_writes: RefCell<PendingWrites>,
     // Zero-delay inertial deposits become visible in the next update round.
@@ -653,6 +658,8 @@ pub fn install_timed_runtime(
 
 fn install(runtime: Runtime) -> Result<VpiSession, String> {
     let mut host = VpiHost::default();
+    host.poll_only_when_dirty = matches!(runtime, Runtime::Untimed(_));
+    host.values_dirty.set(true);
     *host.runtime.get_mut() = Some(runtime);
     let host = std::rc::Rc::new(host);
     let mut active = ACTIVE_HOST
@@ -806,9 +813,13 @@ fn with_runtime<R>(operation: impl FnOnce(&dyn VpiState) -> R) -> Option<R> {
 fn with_runtime_mut<R>(operation: impl FnOnce(&mut dyn VpiState) -> R) -> Option<R> {
     with_host(|host| {
         borrow_cell_mut(&host.runtime, |runtime| {
-            runtime
+            let result = runtime
                 .as_mut()
-                .map(|runtime| operation(runtime.state_mut()))
+                .map(|runtime| operation(runtime.state_mut()));
+            if result.is_some() {
+                host.values_dirty.set(true);
+            }
+            result
         })
     })
 }
@@ -818,7 +829,11 @@ fn with_runtime_mut<R>(operation: impl FnOnce(&mut dyn VpiState) -> R) -> Option
 fn with_instance_mut<R>(operation: impl FnOnce(&mut NativeProgramInstance) -> R) -> Option<R> {
     with_host(|host| {
         borrow_cell_mut(&host.runtime, |runtime| match runtime {
-            Some(Runtime::Untimed(instance)) => Some(operation(instance)),
+            Some(Runtime::Untimed(instance)) => {
+                let result = operation(instance);
+                host.values_dirty.set(true);
+                Some(result)
+            }
             _ => None,
         })
     })
