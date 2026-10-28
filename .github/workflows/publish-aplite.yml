@@ -23,7 +23,7 @@ jobs:
           ref: ${{ github.sha }}
       - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
       - name: Check release identity
         env:
           GH_TOKEN: ${{ github.token }}
@@ -48,7 +48,7 @@ jobs:
           ref: ${{ github.sha }}
       - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
       - uses: ./.github/actions/setup-rust
       - name: Authenticate to crates.io
         id: crates_io_auth
