@@ -1,0 +1,1 @@
+Build documentation tests with the vtest profile too: with tests no longer at opt-level 0 they otherwise recompiled the workspace (seen in this PR's own run).
