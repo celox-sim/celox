@@ -13,6 +13,14 @@ const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
 // Concurrent assertion kernels suspend into Observed and Reactive regions.
 const CONTAINER_VERSION: u16 = 52;
 const TRAILER_SIZE: usize = 32;
+// This optional prefix descriptor does not change the Postcard payload. Older
+// readers ignore framing flags and continue to locate the payload at EOF.
+const RUNTIME_PADDING_FLAG: u8 = 1;
+const RUNTIME_PADDING_MAGIC: &[u8; 8] = b"CELOXPAD";
+const RUNTIME_PADDING_SIZE: usize = 32;
+const SMALL_CODE_ALIGNMENT: usize = 4096;
+const HUGE_CODE_ALIGNMENT: usize = 2 * 1024 * 1024;
+
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -62,7 +70,7 @@ impl fmt::Display for NativeImageArchitecture {
 
 /// Result of finding and decoding an image appended to another byte sequence.
 pub struct AppendedNativeImage {
-    /// Length of the original runtime prefix before the serialized image.
+    /// Length of the runtime prefix, including alignment padding, before the serialized image.
     pub runtime_len: usize,
     /// Decoded pointer-free program image.
     pub image: NativeProgramImage,
@@ -72,6 +80,7 @@ struct AppendedNativePayload<'a> {
     runtime_len: usize,
     version: u16,
     architecture: u8,
+    flags: u8,
     payload: &'a [u8],
 }
 
@@ -128,11 +137,37 @@ impl NativeProgramImage {
     /// the runtime discover the payload without parsing its own executable
     /// format.
     pub fn append_to_runtime(&self, runtime: &[u8]) -> Result<Vec<u8>, NativeImageContainerError> {
+        self.append_to_runtime_aligned(runtime, 1)
+    }
+
+    fn append_to_runtime_aligned(
+        &self,
+        runtime: &[u8],
+        alignment: usize,
+    ) -> Result<Vec<u8>, NativeImageContainerError> {
+        debug_assert!(alignment.is_power_of_two());
         self.validate()
             .map_err(NativeImageContainerError::InvalidImage)?;
         let payload = postcard::to_allocvec(self)?;
-        let total_len = runtime
+        let (code, remaining) = postcard::take_from_bytes::<&[u8]>(&payload)?;
+        let code_prefix = payload.len() - remaining.len() - code.len();
+        let descriptor_size = if alignment > 1 {
+            RUNTIME_PADDING_SIZE
+        } else {
+            0
+        };
+        let code_start = runtime
             .len()
+            .checked_add(descriptor_size)
+            .and_then(|size| size.checked_add(code_prefix))
+            .ok_or(NativeImageContainerError::SizeOverflow)?;
+        let padding = (alignment - code_start % alignment) % alignment;
+        let runtime_len = runtime
+            .len()
+            .checked_add(padding)
+            .and_then(|size| size.checked_add(descriptor_size))
+            .ok_or(NativeImageContainerError::SizeOverflow)?;
+        let total_len = runtime_len
             .checked_add(payload.len())
             .and_then(|size| size.checked_add(TRAILER_SIZE))
             .ok_or(NativeImageContainerError::SizeOverflow)?;
@@ -141,11 +176,25 @@ impl NativeProgramImage {
 
         let mut output = Vec::with_capacity(total_len);
         output.extend_from_slice(runtime);
+        output.resize(runtime_len - descriptor_size, 0);
+        if descriptor_size != 0 {
+            let mut descriptor = [0u8; RUNTIME_PADDING_SIZE];
+            descriptor[..8].copy_from_slice(RUNTIME_PADDING_MAGIC);
+            descriptor[8..16].copy_from_slice(&(runtime.len() as u64).to_le_bytes());
+            descriptor[16..24].copy_from_slice(&(padding as u64).to_le_bytes());
+            let hash = checksum(&descriptor[..24]);
+            descriptor[24..32].copy_from_slice(&hash.to_le_bytes());
+            output.extend_from_slice(&descriptor);
+        }
         output.extend_from_slice(&payload);
         output.extend_from_slice(TRAILER_MAGIC);
         output.extend_from_slice(&CONTAINER_VERSION.to_le_bytes());
         output.push(NativeImageArchitecture::current() as u8);
-        output.push(0); // flags, reserved for future container revisions
+        output.push(if descriptor_size != 0 {
+            RUNTIME_PADDING_FLAG
+        } else {
+            0
+        });
         output.extend_from_slice(&(TRAILER_SIZE as u32).to_le_bytes());
         output.extend_from_slice(&payload_len.to_le_bytes());
         output.extend_from_slice(&checksum(&payload).to_le_bytes());
@@ -167,10 +216,18 @@ impl NativeProgramImage {
         let output_path = output_path.as_ref();
         let metadata = std::fs::metadata(runtime_path)?;
         let runtime = std::fs::read(runtime_path)?;
-        let runtime_len = discover_appended_payload(&runtime)?
-            .map(|appended| appended.runtime_len)
-            .unwrap_or(runtime.len());
-        let output = self.append_to_runtime(&runtime[..runtime_len])?;
+        let runtime_len = match discover_appended_payload(&runtime)? {
+            Some(appended) => unpadded_runtime_len(&runtime, &appended)?,
+            None => runtime.len(),
+        };
+        // The Postcard payload stays unchanged; padding belongs to the runtime
+        // prefix so older format-compatible readers can still load the image.
+        let alignment = if self.code_image().len() >= HUGE_CODE_ALIGNMENT {
+            HUGE_CODE_ALIGNMENT
+        } else {
+            SMALL_CODE_ALIGNMENT
+        };
+        let output = self.append_to_runtime_aligned(&runtime[..runtime_len], alignment)?;
         std::fs::write(output_path, output)?;
         std::fs::set_permissions(output_path, metadata.permissions())?;
         Ok(())
@@ -195,24 +252,10 @@ impl NativeProgramImage {
         let Some(appended) = discover_appended_payload(bytes)? else {
             return Ok(None);
         };
-        if appended.version != CONTAINER_VERSION {
-            return Err(NativeImageContainerError::UnsupportedVersion(
-                appended.version,
-            ));
-        }
-        let found = NativeImageArchitecture::decode(appended.architecture)?;
-        let expected = NativeImageArchitecture::current();
-        if found != expected {
-            return Err(NativeImageContainerError::ArchitectureMismatch { expected, found });
-        }
-        let image = NativeProgramImage::from_postcard_bytes(appended.payload)?;
-        image
-            .validate()
-            .map_err(NativeImageContainerError::InvalidImage)?;
-        Ok(Some(AppendedNativeImage {
-            runtime_len: appended.runtime_len,
-            image,
-        }))
+        Ok(Some(decode_appended_image(
+            appended,
+            Self::from_postcard_bytes,
+        )?))
     }
 
     /// Read the running executable and discover an image attached at EOF.
@@ -220,14 +263,42 @@ impl NativeProgramImage {
     -> Result<Option<AppendedNativeImage>, NativeImageContainerError> {
         #[cfg(target_os = "linux")]
         if let Ok(mapping) = super::executable_mapping::ExecutableMapping::current() {
-            // The decoder returns owned metadata/code, so the temporary input
-            // mapping can be released immediately after decoding.
-            return Self::discover_appended(mapping.as_bytes());
+            let owner = std::sync::Arc::new(mapping);
+            let Some(appended) = discover_appended_payload(owner.as_bytes())? else {
+                return Ok(None);
+            };
+            return Ok(Some(decode_appended_image(appended, |payload| {
+                Self::from_mapped_postcard_bytes(payload, owner.clone())
+            })?));
         }
         let executable = std::env::current_exe()?;
         let mut file = std::fs::File::open(executable)?;
         discover_reader(&mut file)
     }
+}
+
+fn decode_appended_image(
+    appended: AppendedNativePayload<'_>,
+    decode: impl FnOnce(&[u8]) -> Result<NativeProgramImage, postcard::Error>,
+) -> Result<AppendedNativeImage, NativeImageContainerError> {
+    if appended.version != CONTAINER_VERSION {
+        return Err(NativeImageContainerError::UnsupportedVersion(
+            appended.version,
+        ));
+    }
+    let found = NativeImageArchitecture::decode(appended.architecture)?;
+    let expected = NativeImageArchitecture::current();
+    if found != expected {
+        return Err(NativeImageContainerError::ArchitectureMismatch { expected, found });
+    }
+    let image = decode(appended.payload)?;
+    image
+        .validate()
+        .map_err(NativeImageContainerError::InvalidImage)?;
+    Ok(AppendedNativeImage {
+        runtime_len: appended.runtime_len,
+        image,
+    })
 }
 
 // Read the trailer first so ordinary CLI commands do not copy the runtime
@@ -312,8 +383,48 @@ fn discover_appended_payload(
         runtime_len,
         version: u16::from_le_bytes(trailer[8..10].try_into().unwrap()),
         architecture: trailer[10],
+        flags: trailer[11],
         payload,
     }))
+}
+
+fn unpadded_runtime_len(
+    bytes: &[u8],
+    appended: &AppendedNativePayload<'_>,
+) -> Result<usize, NativeImageContainerError> {
+    if appended.flags & RUNTIME_PADDING_FLAG == 0 {
+        return Ok(appended.runtime_len);
+    }
+    let invalid = || {
+        NativeImageContainerError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid attached-runtime padding descriptor",
+        ))
+    };
+    let start = appended
+        .runtime_len
+        .checked_sub(RUNTIME_PADDING_SIZE)
+        .ok_or_else(invalid)?;
+    let descriptor = bytes.get(start..appended.runtime_len).ok_or_else(invalid)?;
+    if &descriptor[..8] != RUNTIME_PADDING_MAGIC {
+        return Err(invalid());
+    }
+    let expected = u64::from_le_bytes(descriptor[24..32].try_into().unwrap());
+    if checksum(&descriptor[..24]) != expected {
+        return Err(NativeImageContainerError::ChecksumMismatch);
+    }
+    let raw_len = usize::try_from(u64::from_le_bytes(descriptor[8..16].try_into().unwrap()))
+        .map_err(|_| NativeImageContainerError::SizeOverflow)?;
+    let padding = usize::try_from(u64::from_le_bytes(descriptor[16..24].try_into().unwrap()))
+        .map_err(|_| NativeImageContainerError::SizeOverflow)?;
+    if raw_len.checked_add(padding) != Some(start)
+        || bytes
+            .get(raw_len..start)
+            .is_none_or(|padding| padding.iter().any(|&byte| byte != 0))
+    {
+        return Err(invalid());
+    }
+    Ok(raw_len)
 }
 
 fn checksum(bytes: &[u8]) -> u64 {
@@ -408,6 +519,46 @@ mod tests {
             );
             assert_eq!(postcard::to_allocvec(&kind).unwrap(), bytes);
         }
+    }
+
+    #[test]
+    fn aligned_prefix_preserves_the_legacy_payload_and_original_runtime() {
+        let image = image();
+        let runtime = b"precompiled runtime";
+        let legacy = image.append_to_runtime(runtime).unwrap();
+        let aligned = image
+            .append_to_runtime_aligned(runtime, HUGE_CODE_ALIGNMENT)
+            .unwrap();
+        let old = discover_appended_payload(&legacy).unwrap().unwrap();
+        let new = discover_appended_payload(&aligned).unwrap().unwrap();
+        assert_eq!(old.flags, 0);
+        assert_eq!(new.flags, RUNTIME_PADDING_FLAG);
+        assert_eq!(new.payload, old.payload);
+        assert_eq!(unpadded_runtime_len(&aligned, &new).unwrap(), runtime.len());
+        let (code, remaining) = postcard::take_from_bytes::<&[u8]>(new.payload).unwrap();
+        let offset = aligned.len() - TRAILER_SIZE - remaining.len() - code.len();
+        assert!(offset.is_multiple_of(HUGE_CODE_ALIGNMENT));
+        let decoded: NativeProgramImage = postcard::from_bytes(new.payload).unwrap();
+        assert_eq!(decoded.code_image(), image.code_image());
+    }
+
+    #[test]
+    fn corrupt_padding_descriptor_does_not_overwrite_the_runtime() {
+        let image = image();
+        let mut bytes = image
+            .append_to_runtime_aligned(b"runtime", HUGE_CODE_ALIGNMENT)
+            .unwrap();
+        let frame = discover_appended_payload(&bytes).unwrap().unwrap();
+        let descriptor = frame.runtime_len - RUNTIME_PADDING_SIZE;
+        bytes[descriptor + 8] ^= 1;
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = directory.path().join("runtime");
+        std::fs::write(&runtime, &bytes).unwrap();
+        assert!(matches!(
+            image.write_attached_runtime(&runtime, &runtime),
+            Err(NativeImageContainerError::ChecksumMismatch)
+        ));
+        assert_eq!(std::fs::read(runtime).unwrap(), bytes);
     }
 
     #[test]

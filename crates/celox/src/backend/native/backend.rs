@@ -28,6 +28,7 @@ use super::super::RuntimeEventBuffer;
 use super::super::compile_cancel::{CompileCancel, cancelled, cancelled_error};
 use super::super::traits::SimulatorErrorCode;
 use super::super::{MemoryLayout, get_byte_size, memory_image::MemoryImage};
+use super::code_bytes::NativeCodeBytes;
 #[cfg(any(
     feature = "x86_64-codegen",
     all(target_arch = "x86_64", not(feature = "arm64-codegen"))
@@ -243,13 +244,57 @@ impl SharedNativeCode {
                 name: symbol.name.clone(),
             })
             .collect::<Vec<_>>();
-        let jit_image = jit_mem::JitCode::new_named_with_symbols_profiled(
-            program_image.code_image(),
-            "celox_native_image",
-            &symbols,
-            program_image.options.perf_map,
-        )
-        .map_err(|source| codegen_err(CodegenError::NativeMemory { source }))?;
+        #[cfg(all(
+            target_os = "linux",
+            target_arch = "x86_64",
+            not(feature = "arm64-codegen")
+        ))]
+        let mapped = match &program_image.code {
+            NativeCodeBytes::Mapped { owner, range }
+                if program_image
+                    .code_image()
+                    .as_ptr()
+                    .addr()
+                    .is_multiple_of(64) =>
+            {
+                // Retain the previous executable allocation as a fallback if
+                // file execution is unavailable (for example a no-exec mount).
+                if owner.make_executable(range.clone()).is_ok() {
+                    // Safety: image validation and the caller establish trusted
+                    // target code; the Arc retains its immutable executable
+                    // file mapping for every entry pointer's lifetime.
+                    Some(unsafe {
+                        jit_mem::JitCode::from_executable_owner(
+                            owner.clone(),
+                            program_image.code_image().as_ptr(),
+                            program_image.code_image().len(),
+                            "celox_native_image",
+                            &symbols,
+                            program_image.options.perf_map,
+                        )
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        #[cfg(not(all(
+            target_os = "linux",
+            target_arch = "x86_64",
+            not(feature = "arm64-codegen")
+        )))]
+        let mapped: Option<Result<jit_mem::JitCode, std::io::Error>> = None;
+        let jit_image = mapped
+            .unwrap_or_else(|| {
+                jit_mem::JitCode::new_named_with_symbols_profiled(
+                    program_image.code_image(),
+                    "celox_native_image",
+                    &symbols,
+                    program_image.options.perf_map,
+                )
+            })
+            .map_err(|source| codegen_err(CodegenError::NativeMemory { source }))?;
         let kernel_addresses = program_image
             .runtime_schema
             .native_kernel_offsets
@@ -460,7 +505,7 @@ pub(crate) struct NativeRuntimeSchema {
 /// precompiled Celox runtime.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NativeProgramImage {
-    code: Vec<u8>,
+    code: NativeCodeBytes,
     code_entries: Vec<NativeCodeEntry>,
     symbols: Vec<NativeCodeSymbol>,
     comb_offset: usize,
@@ -487,14 +532,14 @@ pub struct NativeProgramImage {
 
 // Keep this private Postcard decoder in field order with NativeProgramImage.
 // Postcard encodes both Vec<u8> and byte slices as a length followed by raw
-// bytes. Borrowing that slice and copying once avoids per-byte sequence visits
-// for large code images. The public Serde representation and container writer
+// bytes. Borrowing that slice avoids per-byte sequence visits and allows file
+// storage to back the code directly. The public Serde representation and payload
 // remain unchanged, including for formats that distinguish arrays and bytes.
 #[derive(Deserialize)]
 #[serde(remote = "NativeProgramImage")]
 struct PostcardNativeProgramImage {
     #[serde(deserialize_with = "deserialize_postcard_code")]
-    code: Vec<u8>,
+    code: NativeCodeBytes,
     code_entries: Vec<NativeCodeEntry>,
     symbols: Vec<NativeCodeSymbol>,
     comb_offset: usize,
@@ -519,16 +564,50 @@ struct PostcardNativeProgramImage {
     lanes: Option<super::lanes::NativeLaneImage>,
 }
 
-fn deserialize_postcard_code<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+fn deserialize_postcard_code<'de, D>(deserializer: D) -> Result<NativeCodeBytes, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    <&[u8]>::deserialize(deserializer).map(<[u8]>::to_vec)
+    // The caller installs owned or mapped storage after decoding metadata.
+    <&[u8]>::deserialize(deserializer).map(|_| NativeCodeBytes::Owned(Vec::new()))
 }
 
 impl NativeProgramImage {
     pub(super) fn from_postcard_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
-        PostcardNativeProgramImage::deserialize(&mut postcard::Deserializer::from_bytes(bytes))
+        let (code, _) = postcard::take_from_bytes::<&[u8]>(bytes)?;
+        let mut image = PostcardNativeProgramImage::deserialize(
+            &mut postcard::Deserializer::from_bytes(bytes),
+        )?;
+        image.code = code.to_vec().into();
+        Ok(image)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn from_mapped_postcard_bytes(
+        bytes: &[u8],
+        owner: Arc<super::executable_mapping::ExecutableMapping>,
+    ) -> Result<Self, postcard::Error> {
+        let (code, _) = postcard::take_from_bytes::<&[u8]>(bytes)?;
+        let mut image = PostcardNativeProgramImage::deserialize(
+            &mut postcard::Deserializer::from_bytes(bytes),
+        )?;
+        if !code.is_empty() {
+            // The container reader passes a payload slice from this same owner.
+            let start = code
+                .as_ptr()
+                .addr()
+                .checked_sub(owner.as_bytes().as_ptr().addr())
+                .ok_or(postcard::Error::DeserializeBadEncoding)?;
+            let end = start
+                .checked_add(code.len())
+                .filter(|&end| end <= owner.as_bytes().len())
+                .ok_or(postcard::Error::DeserializeBadEncoding)?;
+            image.code = NativeCodeBytes::Mapped {
+                owner,
+                range: start..end,
+            };
+        }
+        Ok(image)
     }
 
     /// Physical duration of one tick, retained in serialized native images.
@@ -3006,7 +3085,7 @@ fn compile_program_with_outlining_threshold(
 
     Ok((
         NativeProgramImage {
-            code: packed_image,
+            code: packed_image.into(),
             code_entries,
             symbols: image_symbols,
             comb_offset,
@@ -4200,6 +4279,40 @@ mod tests {
     };
 
     #[test]
+    fn replacing_images_does_not_accumulate_alignment_padding() {
+        let source =
+            "module Top(a: input bit<8>, b: input bit<8>, y: output bit<8>) { assign y = a + b; }";
+        let mut image = crate::Simulator::builder(source, "Top")
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        let original_code = image.code.to_vec();
+        assert!(original_code.len() < 16_383);
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = directory.path().join("runtime");
+        std::fs::write(&runtime, b"precompiled runtime").unwrap();
+        let mut sizes = Vec::new();
+        // Crossing a Postcard length-prefix boundary changes the required
+        // padding. Trailing zeros test framing only and are never executed.
+        for length in [16_383, 16_384, 16_383, 16_384] {
+            let mut code = original_code.clone();
+            code.resize(length, 0);
+            image.code = code.into();
+            image.write_attached_runtime(&runtime, &runtime).unwrap();
+            let bytes = std::fs::read(&runtime).unwrap();
+            let found = NativeProgramImage::discover_appended(&bytes)
+                .unwrap()
+                .unwrap();
+            assert_eq!(found.image.code_image().len(), length);
+            assert!(bytes.starts_with(b"precompiled runtime"));
+            sizes.push(bytes.len());
+        }
+        assert_eq!(sizes[0], sizes[2]);
+        assert_eq!(sizes[1], sizes[3]);
+        assert_eq!(sizes[1], sizes[0] + 1);
+    }
+
+    #[test]
     fn postcard_code_decoder_preserves_legacy_payloads() {
         let source = "module Top(clk: input clock, d: input bit<8>, q: output bit<8>) { always_ff (clk) { q = d; } }";
         let mut image = crate::Simulator::builder(source, "Top")
@@ -4209,11 +4322,14 @@ mod tests {
         // These byte patterns exercise the wire decoder only; no synthetic
         // machine code is validated, mapped executable, or invoked.
         for length in [0, 1, 127, 128, 255, 256, 1024] {
-            image.code = (0..length).map(|index| index as u8).collect();
+            image.code = (0..length)
+                .map(|index| index as u8)
+                .collect::<Vec<_>>()
+                .into();
             let payload = postcard::to_allocvec(&image).unwrap();
             let legacy: NativeProgramImage = postcard::from_bytes(&payload).unwrap();
             let decoded = NativeProgramImage::from_postcard_bytes(&payload).unwrap();
-            assert_eq!(decoded.code, image.code);
+            assert_eq!(&*decoded.code, &*image.code);
             assert_eq!(
                 postcard::to_allocvec(&decoded).unwrap(),
                 postcard::to_allocvec(&legacy).unwrap(),

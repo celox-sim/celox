@@ -861,8 +861,19 @@ fn native_program_image_writes_an_executable_runtime_file() {
     let appended = celox::NativeProgramImage::discover_appended(&output)
         .unwrap()
         .unwrap();
-    assert_eq!(appended.runtime_len, b"precompiled runtime".len());
-    assert_eq!(&output[..appended.runtime_len], b"precompiled runtime");
+    let prefix = b"precompiled runtime";
+    assert_eq!(&output[..prefix.len()], prefix);
+    assert!(appended.runtime_len >= prefix.len());
+    let payload = &output[appended.runtime_len..output.len() - NATIVE_IMAGE_TRAILER_SIZE];
+    let (code, remaining) = postcard::take_from_bytes::<&[u8]>(payload).unwrap();
+    let code_start = output.len() - NATIVE_IMAGE_TRAILER_SIZE - remaining.len() - code.len();
+    let alignment = if code.len() >= 2 * 1024 * 1024 {
+        2 * 1024 * 1024
+    } else {
+        4096
+    };
+    assert!(code_start.is_multiple_of(alignment));
+    assert_eq!(code, image.code_image());
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
