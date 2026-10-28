@@ -156,6 +156,11 @@ fn same_value(previous: &celox::BigUint, current: &celox::BigUint) -> bool {
 }
 
 fn changed_values(host: &super::VpiHost) -> Vec<(u64, celox::BigUint, celox::BigUint)> {
+    // Clear before collecting/firing: a callback's write must invalidate this
+    // scan, including writes made by earlier callbacks in the same batch.
+    if host.poll_only_when_dirty && !host.values_dirty.replace(false) {
+        return Vec::new();
+    }
     borrow_cell(&host.callbacks, |state| {
         state
             .callbacks
