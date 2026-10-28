@@ -356,7 +356,7 @@ pub struct VpiHandleObject {
     kind: HandleKind,
     name: CString,
     full_name: CString,
-    value_string: Option<CString>,
+    value_string: Vec<u8>,
     value_vector: Vec<VpiVecVal>,
 }
 
@@ -869,7 +869,7 @@ fn new_object_handle(object: ObjectRef) -> VpiHandle {
         kind: HandleKind::Object(object),
         name: c_string(&name),
         full_name: c_string(&full_name),
-        value_string: None,
+        value_string: Vec::new(),
         value_vector: Vec::new(),
     }))
 }
@@ -882,7 +882,7 @@ fn new_iterator_handle(objects: Vec<ObjectRef>) -> VpiHandle {
         kind: HandleKind::Iterator { objects, next: 0 },
         name: c_string(""),
         full_name: c_string(""),
-        value_string: None,
+        value_string: Vec::new(),
         value_vector: Vec::new(),
     }))
 }
@@ -892,7 +892,7 @@ fn new_constant_handle(value: i32) -> VpiHandle {
         kind: HandleKind::Constant(value),
         name: c_string(""),
         full_name: c_string(""),
-        value_string: None,
+        value_string: Vec::new(),
         value_vector: Vec::new(),
     }))
 }
@@ -902,7 +902,7 @@ fn new_callback_handle(id: u64) -> VpiHandle {
         kind: HandleKind::Callback(id),
         name: c_string(""),
         full_name: c_string(""),
-        value_string: None,
+        value_string: Vec::new(),
         value_vector: Vec::new(),
     }))
 }
@@ -1286,8 +1286,12 @@ pub unsafe extern "C" fn vpi_get_str(property: i32, reference: VpiHandle) -> *mu
             .flatten() else {
                 return ptr::null_mut();
             };
-            handle.value_string = Some(c_string(&name));
-            handle.value_string.as_ref().unwrap().as_ptr().cast_mut()
+            handle.value_string.clear();
+            handle
+                .value_string
+                .extend(name.bytes().filter(|byte| *byte != 0));
+            handle.value_string.push(0);
+            handle.value_string.as_mut_ptr().cast()
         }
         VPI_TYPE => match handle.kind {
             HandleKind::Object(object) => match object_type(object) {
@@ -1325,40 +1329,43 @@ fn value_bits_at(host: &VpiHost, id: SignalSelection) -> Option<(BigUint, BigUin
     })
 }
 
-fn format_binary(value: &BigUint, mask: &BigUint, width: usize) -> String {
-    (0..width)
-        .rev()
-        .map(|bit| {
-            if mask.bit(bit as u64) {
-                if value.bit(bit as u64) { 'x' } else { 'z' }
-            } else if value.bit(bit as u64) {
-                '1'
-            } else {
-                '0'
-            }
-        })
-        .collect()
+fn format_binary(buffer: &mut Vec<u8>, value: &BigUint, mask: &BigUint, width: usize) {
+    buffer.resize(width, 0);
+    let mut values = value.iter_u64_digits();
+    let mut masks = mask.iter_u64_digits();
+    for chunk in buffer.rchunks_mut(64) {
+        let value = values.next().unwrap_or(0);
+        let mask = masks.next().unwrap_or(0);
+        for (bit, digit) in chunk.iter_mut().rev().enumerate() {
+            let index = (((mask >> bit) & 1) << 1) | ((value >> bit) & 1);
+            *digit = b"01zx"[index as usize];
+        }
+    }
+    buffer.push(0);
 }
 
-fn format_hex(value: &BigUint, mask: &BigUint, width: usize) -> String {
-    (0..width.div_ceil(4))
-        .rev()
-        .map(|nibble| {
-            let bit = nibble * 4;
-            if (0..4).any(|offset| bit + offset < width && mask.bit((bit + offset) as u64)) {
-                let all_z = (0..4).all(|offset| {
-                    bit + offset >= width
-                        || mask.bit((bit + offset) as u64) && !value.bit((bit + offset) as u64)
-                });
-                if all_z { 'z' } else { 'x' }
+fn format_hex(buffer: &mut Vec<u8>, value: &BigUint, mask: &BigUint, width: usize) {
+    buffer.resize(width.div_ceil(4), 0);
+    let mut values = value.iter_u64_digits();
+    let mut masks = mask.iter_u64_digits();
+    for (word, chunk) in buffer.rchunks_mut(16).enumerate() {
+        let value = values.next().unwrap_or(0);
+        let mask = masks.next().unwrap_or(0);
+        for (nibble, digit) in chunk.iter_mut().rev().enumerate() {
+            let shift = nibble * 4;
+            let valid = (1u8 << (width - word * 64 - shift).min(4)) - 1;
+            let bits = (value >> shift) as u8 & 15;
+            let unknown = (mask >> shift) as u8 & valid;
+            *digit = if unknown == 0 {
+                b"0123456789abcdef"[usize::from(bits)]
+            } else if unknown == valid && bits & valid == 0 {
+                b'z'
             } else {
-                let digit = (0..4).fold(0u8, |digit, offset| {
-                    digit | (u8::from(value.bit((bit + offset) as u64)) << offset)
-                });
-                char::from_digit(u32::from(digit), 16).unwrap()
-            }
-        })
-        .collect()
+                b'x'
+            };
+        }
+    }
+    buffer.push(0);
 }
 
 fn encode_signal_value(
@@ -1371,7 +1378,7 @@ fn encode_signal_value(
 ) {
     match value.format {
         VPI_INT_VAL => {
-            let mut integer = bits.to_u32_digits().first().copied().unwrap_or(0);
+            let mut integer = bits.iter_u32_digits().next().unwrap_or(0);
             if signed && width > 0 && width < 32 && bits.bit((width - 1) as u64) {
                 integer |= u32::MAX << width;
             }
@@ -1387,25 +1394,22 @@ fn encode_signal_value(
             };
         }
         VPI_BIN_STR_VAL => {
-            handle.value_string = Some(c_string(&format_binary(bits, mask, width)));
-            value.value.str_ = handle.value_string.as_ref().unwrap().as_ptr().cast_mut();
+            format_binary(&mut handle.value_string, bits, mask, width);
+            value.value.str_ = handle.value_string.as_mut_ptr().cast();
         }
         VPI_HEX_STR_VAL => {
-            let string = format_hex(bits, mask, width);
-            handle.value_string = Some(c_string(&string));
-            value.value.str_ = handle.value_string.as_ref().unwrap().as_ptr().cast_mut();
+            format_hex(&mut handle.value_string, bits, mask, width);
+            value.value.str_ = handle.value_string.as_mut_ptr().cast();
         }
         VPI_VECTOR_VAL => {
             let words = width.div_ceil(32);
-            let value_words = bits.to_u32_digits();
-            let mask_words = mask.to_u32_digits();
+            let mut value_words = bits.iter_u32_digits();
+            let mut mask_words = mask.iter_u32_digits();
             handle.value_vector.clear();
-            handle
-                .value_vector
-                .extend((0..words).map(|index| VpiVecVal {
-                    aval: value_words.get(index).copied().unwrap_or(0) as i32,
-                    bval: mask_words.get(index).copied().unwrap_or(0) as i32,
-                }));
+            handle.value_vector.extend((0..words).map(|_| VpiVecVal {
+                aval: value_words.next().unwrap_or(0) as i32,
+                bval: mask_words.next().unwrap_or(0) as i32,
+            }));
             value.value.vector = handle.value_vector.as_mut_ptr();
         }
         VPI_SUPPRESS_VAL => {}
