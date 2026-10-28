@@ -1,0 +1,1 @@
+Update the NAPI inactive-edge regression for wiring-only clock projection: copied aliases now remain settled, while non-wiring consumers and pre-existing dirty state still require settling.
