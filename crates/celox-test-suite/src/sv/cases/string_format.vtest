@@ -341,3 +341,63 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "a1<2>3-\n"))
+
+; 21.3.3: `$swrite` and its radix forms assign what `$write` and its radix
+; forms print for the same arguments; a string literal that no conversion
+; consumes is a further format (21.2.1.1).
+(case swrite_matches_write
+  (source "swrite_write.sv" #"
+module Top(output bit done);
+    string s, name;
+    int i;
+    bit [7:0] b;
+    initial begin
+        i = 12;
+        b = 8'h5a;
+        name = "n";
+        $write("a=", i, " b=", b, " ", name, "\n");
+        $swrite(s, "a=", i, " b=", b, " ", name, "\n");
+        $write("%s", s);
+        $writeh(i, " ", b, "\n");
+        $swriteh(s, i, " ", b, "\n");
+        $write("%s", s);
+        $writeb(b, "\n");
+        $swriteb(s, b, "\n");
+        $write("%s", s);
+        $writeo(b, "\n");
+        $swriteo(s, b, "\n");
+        $write("%s", s);
+        $write("%0d-%s|", i, name, i, "\n");
+        $swrite(s, "%0d-%s|", i, name, i, "\n");
+        $write("%s", s);
+        $write(name, i, "\n");
+        $swrite(s, name, i, "\n");
+        $write("%s", s);
+        $write("a=%0d ", 1, "b=%0d", i, "|%s", "c", 2, "\n");
+        $swrite(s, "a=%0d ", 1, "b=%0d", i, "|%s", "c", 2, "\n");
+        $write("%s", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "a=         12 b= 90 n\na=         12 b= 90 n\n0000000c 5a\n0000000c 5a\n01011010\n01011010\n132\n132\n12-n|         12\n12-n|         12\nn         12\nn         12\na=1 b=12|c          2\na=1 b=12|c          2\n"))
+
+; 21.2.1.1: a later format literal of `$display` keeps the conversions of the
+; values without one, here a block-local string, and a `%t` in it converts the
+; value that follows it. Timed cases run at 1 ns / 1 ps.
+(case display_later_formats
+  (source "display_later_formats.sv" #"
+module Top(output bit done);
+    initial begin
+        string s;
+        s = "hello";
+        $display("", s, "!");
+        $display("[", "%t", "A", "]");
+        $display("[%t]", "A");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "hello!\n[               65000]\n[               65000]\n"))

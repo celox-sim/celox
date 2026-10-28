@@ -628,8 +628,8 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_string_associative_arrays_and_property_queue_methods` | compile | icarus | 2 | Icarus 13.0 rejects associative arrays with `string` and `bit [63:0]` indices and queue methods called on a class property ("Can't find task push_back in class Log"), which IEEE 1800-2023 7.8 and 7.10 define; Verilator 5.052 and xezim 0.11.3 compile the cases. |
 | `sv_verilator_associative_index_cast` | execute | verilator | 1 | Verilator 5.052 evaluates an associative index `x + 32'd1` at 32 bits and stores key 0; IEEE 1800-2023 7.8.4 evaluates it as a cast to the `bit [63:0]` index type (6.24.1), giving `64'h100000000`. xezim 0.11.3 also stores key 0 (`sv_associative_index_cast` in its review). [Evidence](verification/repros/sv_associative_index_cast.json). |
 
-The `string_format` cases compare `$sformatf` and `$sformat` with `$display`
-of the same format and arguments. The [Icarus observations](verification/sv/limitations/string-format-icarus.json)
+The `string_format` cases compare `$sformatf`, `$sformat` and `$swrite` with
+`$display` / `$write` of the same format and arguments. The [Icarus observations](verification/sv/limitations/string-format-icarus.json)
 retain the three failing runs with reduced adapter-free sources; the remaining
 cases pass in all three tools, except that Verilator 5.052 does not run the
 four-state case. `%m` is checked only in Celox, as each adapter wraps the

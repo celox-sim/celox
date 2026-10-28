@@ -13,7 +13,8 @@ mod strings;
 pub(super) use calls::{statement as call_statement, statement_root as call_statement_root};
 pub(super) use direct::{
     arguments, bind_value, call_name as native_name, callable_name, cast_target_native,
-    format_arguments, member_context, real_value, remove_real_division_guards, ungroup,
+    format_arguments, member_context, real_value, remove_real_division_guards,
+    string_literal_bytes, ungroup,
 };
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
 pub(super) use objects::{
@@ -25,7 +26,8 @@ pub(super) use objects::{
     receiver as object_receiver, static_property as object_static_property, this as object_this,
 };
 pub(super) use strings::{
-    call as string_call, method as string_method, native_string, to_string as string_operand,
+    call as string_call, method as string_method, native_string, string_value,
+    to_string as string_operand,
 };
 fn disagreement() -> AnalyzerError {
     AnalyzerError::Parse("invalid native expression ownership".into())
