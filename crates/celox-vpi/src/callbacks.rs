@@ -184,7 +184,7 @@ pub(super) fn dispatch_value_changes() -> bool {
     with_host(dispatch_value_changes_for_host)
 }
 
-fn dispatch_value_changes_for_host(host: &super::VpiHost) -> bool {
+pub(super) fn dispatch_value_changes_for_host(host: &super::VpiHost) -> bool {
     if borrow_cell(&host.callbacks, |state| state.finish) {
         return false;
     }
@@ -331,7 +331,7 @@ fn run_with_host(host: &super::VpiHost) -> bool {
     borrow_cell_mut(&host.callbacks, |state| state.running = true);
     fire_all_for_host(host, CB_START_OF_SIMULATION);
     if !borrow_cell(&host.callbacks, |state| state.finish) {
-        super::flush_pending_writes();
+        super::flush_pending_writes_for_host(host);
     }
     let mut iterations = 0usize;
     'scheduler: loop {
@@ -340,7 +340,8 @@ fn run_with_host(host: &super::VpiHost) -> bool {
         }
         iterations += 1;
         if iterations > 1_000_000 {
-            fail(
+            fail_for_host(
+                host,
                 "VPI callback scheduler exceeded 1000000 iterations without advancing time"
                     .to_string(),
             );
@@ -354,7 +355,7 @@ fn run_with_host(host: &super::VpiHost) -> bool {
                 break 'scheduler;
             }
         }
-        if !super::flush_pending_writes() {
+        if !super::flush_pending_writes_for_host(host) {
             break;
         }
         if borrow_cell(&host.callbacks, |state| state.finish) {
@@ -366,7 +367,7 @@ fn run_with_host(host: &super::VpiHost) -> bool {
                 if borrow_cell(&host.callbacks, |state| state.finish) {
                     break 'scheduler;
                 }
-                if !super::flush_pending_writes() {
+                if !super::flush_pending_writes_for_host(host) {
                     break 'scheduler;
                 }
                 if borrow_cell(&host.callbacks, |state| state.finish) {
@@ -374,10 +375,11 @@ fn run_with_host(host: &super::VpiHost) -> bool {
                 }
                 continue;
             }
-            if super::flush_inertial_writes() {
+            if super::flush_inertial_writes_for_host(host) {
                 iterations += 1;
                 if iterations > 1_000_000 {
-                    fail(
+                    fail_for_host(
+                        host,
                         "VPI inertial updates exceeded 1000000 rounds without advancing time"
                             .into(),
                     );
@@ -397,7 +399,7 @@ fn run_with_host(host: &super::VpiHost) -> bool {
                         break 'scheduler;
                     }
                 }
-                if !super::flush_pending_writes() {
+                if !super::flush_pending_writes_for_host(host) {
                     break 'scheduler;
                 }
                 if borrow_cell(&host.callbacks, |state| state.finish) {
@@ -434,7 +436,7 @@ fn run_with_host(host: &super::VpiHost) -> bool {
         });
         fire_all_for_host(host, CB_NEXT_SIM_TIME);
         if !borrow_cell(&host.callbacks, |state| state.finish) {
-            super::flush_pending_writes();
+            super::flush_pending_writes_for_host(host);
         }
     }
     let finished = borrow_cell(&host.callbacks, |state| state.finish);
@@ -744,28 +746,42 @@ pub(super) fn run_timed() -> bool {
 }
 
 pub(super) fn is_running() -> bool {
-    with_host(|host| borrow_cell(&host.callbacks, |state| state.running))
+    with_host(is_running_for_host)
+}
+
+pub(super) fn is_running_for_host(host: &super::VpiHost) -> bool {
+    borrow_cell(&host.callbacks, |state| state.running)
 }
 
 pub(super) fn finish_requested() -> bool {
-    with_host(|host| borrow_cell(&host.callbacks, |state| state.finish))
+    with_host(finish_requested_for_host)
+}
+
+pub(super) fn finish_requested_for_host(host: &super::VpiHost) -> bool {
+    borrow_cell(&host.callbacks, |state| state.finish)
 }
 
 pub(super) fn request_finish() {
-    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.finish = true));
+    with_host(request_finish_for_host);
+}
+
+pub(super) fn request_finish_for_host(host: &super::VpiHost) {
+    borrow_cell_mut(&host.callbacks, |state| state.finish = true)
 }
 
 pub(super) fn fail(message: String) {
-    with_host(|host| {
-        borrow_cell_mut(&host.callbacks, |state| {
-            state.error.get_or_insert(message);
-            state.finish = true;
-        })
+    with_host(|host| fail_for_host(host, message));
+}
+
+pub(super) fn fail_for_host(host: &super::VpiHost, message: String) {
+    borrow_cell_mut(&host.callbacks, |state| {
+        state.error.get_or_insert(message);
+        state.finish = true;
     });
 }
 
-pub(super) fn has_error() -> bool {
-    with_host(|host| borrow_cell(&host.callbacks, |state| state.error.is_some()))
+pub(super) fn has_error_for_host(host: &super::VpiHost) -> bool {
+    borrow_cell(&host.callbacks, |state| state.error.is_some())
 }
 
 pub(super) fn take_error() -> Option<String> {
@@ -995,7 +1011,11 @@ pub unsafe extern "C" fn vpi_handle_by_index(reference: VpiHandle, index: i32) -
 
 #[unsafe(no_mangle)]
 pub extern "C" fn celox_vpi_current_time() -> u64 {
-    with_host(|host| borrow_cell(&host.callbacks, |state| state.time))
+    with_host(current_time_for_host)
+}
+
+pub(super) fn current_time_for_host(host: &super::VpiHost) -> u64 {
+    borrow_cell(&host.callbacks, |state| state.time)
 }
 
 #[unsafe(no_mangle)]
