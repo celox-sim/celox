@@ -4,3 +4,5 @@ rev 2 (content) 2026-10-28 18:52 UTC — Review fixes: the traced builder seeds 
 rev 1 (initial) 2026-10-28 18:52 UTC
 
 <!-- mergify-revision-data: {"schema_version":1,"pull_number":2471,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"2b9bd110da20c95f04fb95dfccc0daa081a92501","timestamp_iso":"2026-10-28T18:52:39Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"2b9bd110da20c95f04fb95dfccc0daa081a92501","new_sha":"ae2b6edecedc7943341891f30a14060e7ebc63d8","timestamp_iso":"2026-10-28T18:52:39Z","reason":"Review fixes: the traced builder seeds the UVM arguments (set_plusargs); freed regex handles release their registry entries (maps keyed by never-reused handles); `.` matches newlines as without REG_NEWLINE.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/2b9bd110da20c95f04fb95dfccc0daa081a92501...ae2b6edecedc7943341891f30a14060e7ebc63d8"}]} -->
+
+Review fixes (round 3): regexes compile with Unicode off (C-locale bytes; non-UTF-8 pattern bytes escaped); builtin output actuals are FF targets; builtin calls count as process effects.
