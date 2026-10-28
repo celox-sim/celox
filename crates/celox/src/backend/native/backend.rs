@@ -485,7 +485,52 @@ pub struct NativeProgramImage {
     lanes: Option<super::lanes::NativeLaneImage>,
 }
 
+// Keep this private Postcard decoder in field order with NativeProgramImage.
+// Postcard encodes both Vec<u8> and byte slices as a length followed by raw
+// bytes. Borrowing that slice and copying once avoids per-byte sequence visits
+// for large code images. The public Serde representation and container writer
+// remain unchanged, including for formats that distinguish arrays and bytes.
+#[derive(Deserialize)]
+#[serde(remote = "NativeProgramImage")]
+struct PostcardNativeProgramImage {
+    #[serde(deserialize_with = "deserialize_postcard_code")]
+    code: Vec<u8>,
+    code_entries: Vec<NativeCodeEntry>,
+    symbols: Vec<NativeCodeSymbol>,
+    comb_offset: usize,
+    comb_unit_offsets: Vec<usize>,
+    /// Entry offset of each process kernel.
+    process_offsets: Vec<usize>,
+    required_native_features: u8,
+    event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
+    eval_only_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
+    apply_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
+    id_to_addr: Vec<AbsoluteAddr>,
+    id_to_event: Vec<NativeEventImageRef>,
+    reflection: DesignReflection,
+    design: crate::ir::RuntimeDesign,
+    testbench: Option<TestbenchProgram<AbsoluteAddr>>,
+    runtime_schema: NativeRuntimeSchema,
+    layout: MemoryLayout,
+    native_memory_size: usize,
+    options: NativeRuntimeOptions,
+    four_state_inits: Vec<(usize, usize)>,
+    /// Lane-partitioned kernels, one function per task.
+    lanes: Option<super::lanes::NativeLaneImage>,
+}
+
+fn deserialize_postcard_code<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <&[u8]>::deserialize(deserializer).map(<[u8]>::to_vec)
+}
+
 impl NativeProgramImage {
+    pub(super) fn from_postcard_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        PostcardNativeProgramImage::deserialize(&mut postcard::Deserializer::from_bytes(bytes))
+    }
+
     /// Physical duration of one tick, retained in serialized native images.
     pub fn time_precision(&self) -> celox_design::TimePrecision {
         self.design.time_precision
@@ -4150,6 +4195,32 @@ mod tests {
     use crate::ir::{
         BasicBlock, BlockId, RegisterId, RegisterType, SIRInstruction, SIRTerminator, SIRValue,
     };
+
+    #[test]
+    fn postcard_code_decoder_preserves_legacy_payloads() {
+        let source = "module Top(clk: input clock, d: input bit<8>, q: output bit<8>) { always_ff (clk) { q = d; } }";
+        let mut image = crate::Simulator::builder(source, "Top")
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        // These byte patterns exercise the wire decoder only; no synthetic
+        // machine code is validated, mapped executable, or invoked.
+        for length in [0, 1, 127, 128, 255, 256, 1024] {
+            image.code = (0..length).map(|index| index as u8).collect();
+            let payload = postcard::to_allocvec(&image).unwrap();
+            let legacy: NativeProgramImage = postcard::from_bytes(&payload).unwrap();
+            let decoded = NativeProgramImage::from_postcard_bytes(&payload).unwrap();
+            assert_eq!(decoded.code, image.code);
+            assert_eq!(
+                postcard::to_allocvec(&decoded).unwrap(),
+                postcard::to_allocvec(&legacy).unwrap(),
+            );
+            for end in [0, 1, payload.len() - 1] {
+                assert!(postcard::from_bytes::<NativeProgramImage>(&payload[..end]).is_err());
+                assert!(NativeProgramImage::from_postcard_bytes(&payload[..end]).is_err());
+            }
+        }
+    }
 
     #[test]
     fn image_without_clock_alias_exports_uses_full_settle() {
