@@ -186,6 +186,7 @@ mod host {
         derived_ticks: celox_runtime::DerivedTickPlans<B::Event>,
         /// Boxed, so that taking it out for a tick moves one pointer.
         derived_scratch: Option<Box<celox_runtime::DerivedTickScratch>>,
+        coincident_edges: celox_runtime::CoincidentEdgeCache<B::Event>,
         /// Per event ID, the generated units that run an edge of the event
         /// with its derived domains. Empty without them.
         derived_units: Arc<[Option<DerivedEdgeUnit>]>,
@@ -1266,6 +1267,7 @@ mod host {
                 tick_timing_eval_comb_ns: 0,
                 derived_ticks,
                 derived_scratch: Some(Box::new(derived_scratch)),
+                coincident_edges: Default::default(),
                 derived_units,
                 derived_settle,
                 frozen: false,
@@ -2690,8 +2692,14 @@ mod host {
             let mut watch = std::mem::take(&mut self.host_watch);
             let dirty = self.dirty;
             let write = watched_write(&mut watch);
-            let result =
-                celox_runtime::run_edges(self, &plans, &edges, &mut scratch, moves, dirty, write);
+            let result = if moves.len() < 2 {
+                celox_runtime::run_edges(self, &plans, &edges, &mut scratch, moves, dirty, write)
+            } else {
+                let mut cache = std::mem::take(&mut self.coincident_edges);
+                let result = cache.run(self, &plans, &edges, &mut scratch, moves, dirty, write);
+                self.coincident_edges = cache;
+                result
+            };
             self.host_watch = watch;
             self.derived_scratch = Some(scratch);
             self.note_edge(result)
@@ -3779,6 +3787,85 @@ mod host {
             }
             let seen = sim.signal("seen");
             assert_eq!(sim.get(seen), BigUint::from(2u8));
+        }
+
+        #[cfg(feature = "systemverilog")]
+        #[test_case::test_case(false; "two_state")]
+        #[test_case::test_case(true; "four_state")]
+        fn cached_coincident_edges_match_fresh_plans_after_level_and_gate_changes(
+            four_state: bool,
+        ) {
+            let source = "module Top(input logic aclk, bclk, cclk, en,
+                output logic [15:0] a, b, c, g);
+                wire gated = aclk & en;
+                always @(posedge aclk) a <= a + 1;
+                always @(posedge bclk) b <= a;
+                always @(posedge cclk) c <= b;
+                always @(posedge gated) g <= g + 1;
+            endmodule";
+            let build = || {
+                Simulator::from_sv_sources(vec![(source, std::path::Path::new("cache.sv"))], "Top")
+                    .four_state(four_state)
+                    .build()
+                    .unwrap()
+            };
+            let mut cached = build();
+            let mut fresh = build();
+            for sim in [&mut cached, &mut fresh] {
+                for name in ["a", "b", "c", "g", "aclk", "bclk", "cclk", "en"] {
+                    let signal = sim.signal(name);
+                    sim.set_four_state(signal, BigUint::from(0u8), BigUint::from(0u8));
+                }
+            }
+            let mut random = 13u32;
+            for step in 0..256 {
+                random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+                for (sim, reuse) in [(&mut cached, true), (&mut fresh, false)] {
+                    let enable = sim.signal("en");
+                    sim.modify(|io| io.set(enable, (step % 3 == 0) as u8))
+                        .unwrap();
+                    if four_state && step % 7 == 0 {
+                        let clock = sim.signal("aclk");
+                        sim.set_four_state(clock, BigUint::from(0u8), BigUint::from(1u8));
+                    }
+                    if !reuse {
+                        sim.coincident_edges = Default::default();
+                    }
+                    let mut moves: Vec<_> = ["aclk", "bclk", "cclk"]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(bit, name)| {
+                            (
+                                sim.event(name),
+                                if random & (1 << bit) == 0 {
+                                    celox_runtime::Edge::Falling
+                                } else {
+                                    celox_runtime::Edge::Rising
+                                },
+                            )
+                        })
+                        .collect();
+                    if step % 2 == 0 {
+                        moves.reverse();
+                    }
+                    // Duplicate signals and transitions to the existing level
+                    // must not change which domains belong to the cached plan.
+                    if step % 5 == 0 {
+                        moves.push((moves[0].0, moves[0].1.opposite()));
+                    }
+                    sim.edges(&moves).unwrap();
+                }
+                for name in ["a", "b", "c", "g", "aclk", "bclk", "cclk"] {
+                    let left = cached.signal(name);
+                    let right = fresh.signal(name);
+                    assert_eq!(
+                        cached.get_four_state(left),
+                        fresh.get_four_state(right),
+                        "step {step}: {name}"
+                    );
+                }
+                assert_eq!(cached.dirty, fresh.dirty);
+            }
         }
 
         #[test]
