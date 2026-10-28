@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793181599158,
+  "lastUpdate": 1793184714243,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -417124,6 +417124,155 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-cc-aarch64/heliodor_suite_smp_linux_boot_8hart_execution",
             "unit": "ms",
             "value": 14128733.988743
+          }
+        ]
+      }
+    ],
+    "Circuit Benchmarks": [
+      {
+        "commit": {
+          "id": "e7ec496251252061bd3574befc881f882d77bc95",
+          "message": "feat(sv)!: execute clocked Boolean concurrent assertions (#2408)",
+          "timestamp": "2026-10-28T09:49:29Z",
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "url": "https://github.com/celox-sim/celox/commit/e7ec496251252061bd3574befc881f882d77bc95"
+        },
+        "date": 1793184714243,
+        "cpu": "AMD EPYC 9V45 96-Core Processor",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "collection-celox-tiered/collection_sha256_32e20b483104_x64_compilation",
+            "unit": "ns",
+            "value": 61933125,
+            "range": "60201715–62332520",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"042fdbd77b877b1d680d14a8bafc2b59dcaf9f1895ebfd7a9844f8a0deb3193f\",\"workload\":\"nist-pairs-v1\",\"testbench\":\"collection-nist-pairs-v1\",\"testbenchSha256\":\"ca41757671d4fba6fc3550dab980806d3226b43c3578f466d7e9335145cf878c\",\"workUnits\":8192,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"compilation\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_sha256_32e20b483104_x64_execution",
+            "unit": "ns",
+            "value": 270200459,
+            "range": "266687449–294642403",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"042fdbd77b877b1d680d14a8bafc2b59dcaf9f1895ebfd7a9844f8a0deb3193f\",\"workload\":\"nist-pairs-v1\",\"testbench\":\"collection-nist-pairs-v1\",\"testbenchSha256\":\"ca41757671d4fba6fc3550dab980806d3226b43c3578f466d7e9335145cf878c\",\"workUnits\":8192,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"execution\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_sha256_32e20b483104_x64_total",
+            "unit": "ns",
+            "value": 340013414,
+            "range": "337716686–366366932",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"042fdbd77b877b1d680d14a8bafc2b59dcaf9f1895ebfd7a9844f8a0deb3193f\",\"workload\":\"nist-pairs-v1\",\"testbench\":\"collection-nist-pairs-v1\",\"testbenchSha256\":\"ca41757671d4fba6fc3550dab980806d3226b43c3578f466d7e9335145cf878c\",\"workUnits\":8192,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_sha256_32e20b483104_x64_compilation",
+            "unit": "ns",
+            "value": 181533668,
+            "range": "161398855–186144976",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"042fdbd77b877b1d680d14a8bafc2b59dcaf9f1895ebfd7a9844f8a0deb3193f\",\"workload\":\"nist-pairs-v1\",\"testbench\":\"collection-nist-pairs-v1\",\"testbenchSha256\":\"ca41757671d4fba6fc3550dab980806d3226b43c3578f466d7e9335145cf878c\",\"workUnits\":8192,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"compilation\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_sha256_32e20b483104_x64_execution",
+            "unit": "ns",
+            "value": 160778170,
+            "range": "158383535–180989519",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"042fdbd77b877b1d680d14a8bafc2b59dcaf9f1895ebfd7a9844f8a0deb3193f\",\"workload\":\"nist-pairs-v1\",\"testbench\":\"collection-nist-pairs-v1\",\"testbenchSha256\":\"ca41757671d4fba6fc3550dab980806d3226b43c3578f466d7e9335145cf878c\",\"workUnits\":8192,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"execution\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_sha256_32e20b483104_x64_total",
+            "unit": "ns",
+            "value": 367743733,
+            "range": "343071765–389936559",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"042fdbd77b877b1d680d14a8bafc2b59dcaf9f1895ebfd7a9844f8a0deb3193f\",\"workload\":\"nist-pairs-v1\",\"testbench\":\"collection-nist-pairs-v1\",\"testbenchSha256\":\"ca41757671d4fba6fc3550dab980806d3226b43c3578f466d7e9335145cf878c\",\"workUnits\":8192,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_fft_6334240922e2_x64_compilation",
+            "unit": "ns",
+            "value": 63968685,
+            "range": "61810792–70302654",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"a60ff7a502095599849773376fb2452336a0b8532ee29dd51bd4945a7efd5079\",\"workload\":\"three-tones-v1\",\"testbench\":\"collection-three-tones-v1\",\"testbenchSha256\":\"f385417fc911372b12f6f8a343b672dac418d6a7eda1c794b707387ee4aa7445\",\"workUnits\":3072,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"compilation\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_fft_6334240922e2_x64_execution",
+            "unit": "ns",
+            "value": 1562656563,
+            "range": "1561856879–1578781380",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"a60ff7a502095599849773376fb2452336a0b8532ee29dd51bd4945a7efd5079\",\"workload\":\"three-tones-v1\",\"testbench\":\"collection-three-tones-v1\",\"testbenchSha256\":\"f385417fc911372b12f6f8a343b672dac418d6a7eda1c794b707387ee4aa7445\",\"workUnits\":3072,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"execution\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_fft_6334240922e2_x64_total",
+            "unit": "ns",
+            "value": 1638314973,
+            "range": "1634345877–1660675803",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"a60ff7a502095599849773376fb2452336a0b8532ee29dd51bd4945a7efd5079\",\"workload\":\"three-tones-v1\",\"testbench\":\"collection-three-tones-v1\",\"testbenchSha256\":\"f385417fc911372b12f6f8a343b672dac418d6a7eda1c794b707387ee4aa7445\",\"workUnits\":3072,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_fft_6334240922e2_x64_compilation",
+            "unit": "ns",
+            "value": 210738803,
+            "range": "199785251–290444507",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"a60ff7a502095599849773376fb2452336a0b8532ee29dd51bd4945a7efd5079\",\"workload\":\"three-tones-v1\",\"testbench\":\"collection-three-tones-v1\",\"testbenchSha256\":\"f385417fc911372b12f6f8a343b672dac418d6a7eda1c794b707387ee4aa7445\",\"workUnits\":3072,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"compilation\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_fft_6334240922e2_x64_execution",
+            "unit": "ns",
+            "value": 2315805261,
+            "range": "2258483309–2628597880",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"a60ff7a502095599849773376fb2452336a0b8532ee29dd51bd4945a7efd5079\",\"workload\":\"three-tones-v1\",\"testbench\":\"collection-three-tones-v1\",\"testbenchSha256\":\"f385417fc911372b12f6f8a343b672dac418d6a7eda1c794b707387ee4aa7445\",\"workUnits\":3072,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"execution\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_fft_6334240922e2_x64_total",
+            "unit": "ns",
+            "value": 2539675904,
+            "range": "2494953654–2947426943",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"a60ff7a502095599849773376fb2452336a0b8532ee29dd51bd4945a7efd5079\",\"workload\":\"three-tones-v1\",\"testbench\":\"collection-three-tones-v1\",\"testbenchSha256\":\"f385417fc911372b12f6f8a343b672dac418d6a7eda1c794b707387ee4aa7445\",\"workUnits\":3072,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_lz77_173e86f7a6ea_x64_compilation",
+            "unit": "ns",
+            "value": 206711014,
+            "range": "205837242–207310880",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"bda69213cec0a967b56060e819a9e6c9bf943ce6b7d6da84c57acd0946a2a1a1\",\"workload\":\"roundtrip-streams-v1\",\"testbench\":\"collection-roundtrip-streams-v1\",\"testbenchSha256\":\"c107718bd22b2b3d2013739babd039c967166f9ddc61ba4433bbd90a0b52196c\",\"workUnits\":2944,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"compilation\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_lz77_173e86f7a6ea_x64_execution",
+            "unit": "ns",
+            "value": 177874564,
+            "range": "175969710–177895335",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"bda69213cec0a967b56060e819a9e6c9bf943ce6b7d6da84c57acd0946a2a1a1\",\"workload\":\"roundtrip-streams-v1\",\"testbench\":\"collection-roundtrip-streams-v1\",\"testbenchSha256\":\"c107718bd22b2b3d2013739babd039c967166f9ddc61ba4433bbd90a0b52196c\",\"workUnits\":2944,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"execution\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_lz77_173e86f7a6ea_x64_total",
+            "unit": "ns",
+            "value": 424714372,
+            "range": "424129594–425740560",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"bda69213cec0a967b56060e819a9e6c9bf943ce6b7d6da84c57acd0946a2a1a1\",\"workload\":\"roundtrip-streams-v1\",\"testbench\":\"collection-roundtrip-streams-v1\",\"testbenchSha256\":\"c107718bd22b2b3d2013739babd039c967166f9ddc61ba4433bbd90a0b52196c\",\"workUnits\":2944,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_lz77_173e86f7a6ea_x64_compilation",
+            "unit": "ns",
+            "value": 401206424,
+            "range": "390089778–402598693",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"bda69213cec0a967b56060e819a9e6c9bf943ce6b7d6da84c57acd0946a2a1a1\",\"workload\":\"roundtrip-streams-v1\",\"testbench\":\"collection-roundtrip-streams-v1\",\"testbenchSha256\":\"c107718bd22b2b3d2013739babd039c967166f9ddc61ba4433bbd90a0b52196c\",\"workUnits\":2944,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"compilation\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_lz77_173e86f7a6ea_x64_execution",
+            "unit": "ns",
+            "value": 17444425,
+            "range": "17342310–18118912",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"bda69213cec0a967b56060e819a9e6c9bf943ce6b7d6da84c57acd0946a2a1a1\",\"workload\":\"roundtrip-streams-v1\",\"testbench\":\"collection-roundtrip-streams-v1\",\"testbenchSha256\":\"c107718bd22b2b3d2013739babd039c967166f9ddc61ba4433bbd90a0b52196c\",\"workUnits\":2944,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"execution\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_lz77_173e86f7a6ea_x64_total",
+            "unit": "ns",
+            "value": 466652614,
+            "range": "461884720–481180206",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"bda69213cec0a967b56060e819a9e6c9bf943ce6b7d6da84c57acd0946a2a1a1\",\"workload\":\"roundtrip-streams-v1\",\"testbench\":\"collection-roundtrip-streams-v1\",\"testbenchSha256\":\"c107718bd22b2b3d2013739babd039c967166f9ddc61ba4433bbd90a0b52196c\",\"workUnits\":2944,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
           }
         ]
       }
