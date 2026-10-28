@@ -307,6 +307,44 @@ pub(in crate::ast) fn specialize(
     arguments: &[Argument],
     context: &PackedDimensions,
 ) -> Converted<String> {
+    match bind_specialization(tree, generic, arguments, context)? {
+        Binding::Ready(name) => Ok(name),
+        Binding::Deferred(parameter) => Err(unresolved_parameter(&parameter)),
+    }
+}
+
+/// Initial typedef discovery runs before enclosing constants are collected.
+/// A missing value may be retried after that collection; actual type uses and
+/// subsequent typedef passes still require every parameter to be constant.
+pub(in crate::ast) fn specialize_if_ready(
+    tree: &AnalysisContext<'_>,
+    generic: &str,
+    arguments: &[Argument],
+    context: &PackedDimensions,
+) -> Converted<Option<String>> {
+    Ok(
+        match bind_specialization(tree, generic, arguments, context)? {
+            Binding::Ready(name) => Some(name),
+            Binding::Deferred(_) => None,
+        },
+    )
+}
+
+enum Binding {
+    Ready(String),
+    Deferred(String),
+}
+
+fn unresolved_parameter(name: &str) -> AnalyzerError {
+    unsupported(format!("class parameter `{name}` without a constant value"))
+}
+
+fn bind_specialization(
+    tree: &AnalysisContext<'_>,
+    generic: &str,
+    arguments: &[Argument],
+    context: &PackedDimensions,
+) -> Converted<Binding> {
     let depth = &tree.state.class_specialization_depth;
     if depth.get() >= MAX_NESTING {
         return Err(unsupported(format!(
@@ -318,7 +356,8 @@ pub(in crate::ast) fn specialize(
     // Parameter binding and body construction have large temporary values.
     // Keep those phases off the stack while resolving an inherited class.
     let pending = match prepare(tree, generic, arguments, context)? {
-        Preparation::Existing(name) => return Ok(name),
+        Preparation::Existing(name) => return Ok(Binding::Ready(name)),
+        Preparation::Deferred(name) => return Ok(Binding::Deferred(name)),
         Preparation::Pending(pending) => pending,
     };
     tree.state
@@ -327,7 +366,7 @@ pub(in crate::ast) fn specialize(
         .push(pending.name.clone());
     let _building = Building(&tree.state.class_specializations_building);
     let bases = bind_bases(tree, generic, &pending.env, &pending.aliases)?;
-    finish_specialization(tree, generic, pending, bases)
+    finish_specialization(tree, generic, pending, bases).map(Binding::Ready)
 }
 
 struct PendingSpecialization {
@@ -339,6 +378,7 @@ struct PendingSpecialization {
 
 enum Preparation {
     Existing(String),
+    Deferred(String),
     Pending(Box<PendingSpecialization>),
 }
 
@@ -433,8 +473,10 @@ fn prepare(
         own_env: HashMap::default(),
         own_aliases: HashMap::default(),
     };
-    if let Some(id) = declaration.parameter_ports {
-        parameters.bind(tree, declaration, id, true, &mut env, &mut aliases)?;
+    if let Some(id) = declaration.parameter_ports
+        && let Some(name) = parameters.bind(tree, declaration, id, true, &mut env, &mut aliases)?
+    {
+        return Ok(Preparation::Deferred(name));
     }
     if let Some(name) = parameters
         .values
@@ -557,7 +599,13 @@ fn finish_specialization(
     body.sort_by_key(|(start, _)| *start);
     for (_, item) in body {
         match item {
-            Ok(id) => parameters.bind(tree, declaration, id, false, &mut env, &mut aliases)?,
+            Ok(id) => {
+                if let Some(name) =
+                    parameters.bind(tree, declaration, id, false, &mut env, &mut aliases)?
+                {
+                    return Err(unresolved_parameter(&name));
+                }
+            }
             Err(id) => {
                 let alias = native.type_alias(id);
                 let celox_sv_syntax::TypeAliasTarget::DataType(target) = alias.target else {
@@ -630,7 +678,9 @@ struct Parameters {
 
 impl Parameters {
     /// Bind parameter declaration `id` of class `declaration`, one of its
-    /// parameter port list when `port`, in `env` and `aliases`.
+    /// parameter port list when `port`, in `env` and `aliases`. Return the
+    /// first value parameter that cannot yet be evaluated, without publishing
+    /// a partially bound specialization.
     fn bind(
         &mut self,
         tree: &AnalysisContext<'_>,
@@ -639,7 +689,7 @@ impl Parameters {
         port: bool,
         env: &mut HashMap<String, i128>,
         aliases: &mut HashMap<String, Type>,
-    ) -> Converted<()> {
+    ) -> Converted<Option<String>> {
         let native = tree.declarations();
         for parameter in &native.parameter_declaration(id).parameters {
             let name = instances::normalize_identifier(&parameter.name.spelling);
@@ -714,9 +764,7 @@ impl Parameters {
                         (_, Some(Expr::Literal(literal))) => literal.clone(),
                         (Some(value), _) => value.to_string(),
                         _ => {
-                            return Err(unsupported(format!(
-                                "class parameter `{name}` without a constant value"
-                            )));
+                            return Ok(Some(name));
                         }
                     };
                     if port {
@@ -729,7 +777,7 @@ impl Parameters {
                 }
             }
         }
-        Ok(())
+        Ok(None)
     }
 }
 

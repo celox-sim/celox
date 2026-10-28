@@ -240,13 +240,14 @@ pub(super) fn alias_base_type(
     tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
+    defer_class_defaults: bool,
 ) -> Converted<Option<Type>> {
     // Typedef type-reference inference is outside the supported alias path.
     if matches!(native.data_type(id).kind, DataTypeKind::TypeOf(_)) {
         return Ok(None);
     }
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
-    binding::bind_alias_in(id, native, tree, &context)
+    binding::bind_alias_in(id, native, tree, &context, defer_class_defaults)
 }
 
 /// Builtin integral identity/width without syntax or aggregate layout.
