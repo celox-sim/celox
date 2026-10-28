@@ -1,1 +1,6 @@
-Address review: register enumerators only for enum declarations, inherit their type markers through own_env; extend regression case
+Revision history for #2491:
+
+rev 2 (content) 2026-10-28 23:13 UTC — Address review: register enumerators only for enum declarations, inherit their type markers through own_env; extend regression case
+rev 1 (initial) 2026-10-28 23:13 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2491,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"4538ed86672f6492d0d143eab479f3185acf709a","timestamp_iso":"2026-10-28T23:13:58Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"4538ed86672f6492d0d143eab479f3185acf709a","new_sha":"4d3474c6711597e49733a1aca6daff4be28f9505","timestamp_iso":"2026-10-28T23:13:58Z","reason":"Address review: register enumerators only for enum declarations, inherit their type markers through own_env; extend regression case","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/4538ed86672f6492d0d143eab479f3185acf709a...4d3474c6711597e49733a1aca6daff4be28f9505"}]} -->
