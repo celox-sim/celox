@@ -93,7 +93,24 @@ impl VpiState for NativeProgramInstance {
     }
 
     fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint) {
-        self.backend_mut().set_four_state(signal, value, mask);
+        // The typed setter writes packed words and clears a four-state mask
+        // without allocating an intermediate byte vector. Unknown four-state
+        // values and arrays retain the backend's general plane writer.
+        if signal.array_layout.is_none()
+            && signal.width <= 128
+            && (mask.bits() == 0 || !signal.is_4state || !self.program_image().four_state())
+        {
+            let mut words = value.iter_u64_digits();
+            let low = words.next().unwrap_or(0);
+            if signal.width <= 64 {
+                self.backend_mut().set(signal, low.to_le());
+            } else {
+                let word = u128::from(low) | (u128::from(words.next().unwrap_or(0)) << 64);
+                self.backend_mut().set(signal, word.to_le());
+            }
+        } else {
+            self.backend_mut().set_four_state(signal, value, mask);
+        }
     }
 
     fn force(&mut self, id: ReflectionSignalId, value: BigUint, mask: BigUint) -> bool {
@@ -349,6 +366,109 @@ mod tests {
                     VpiState::get_four_state(&instance, empty),
                     instance.backend().get_four_state(empty)
                 );
+            }
+        }
+    }
+    #[test]
+    fn packed_writes_match_backend_and_preserve_neighboring_planes() {
+        let widths = [1usize, 3, 8, 9, 31, 32, 33, 63, 64, 65, 96, 127, 128, 129];
+        let ports = widths
+            .iter()
+            .flat_map(|width| {
+                [
+                    format!("input logic [{}:0] p{width}", width - 1),
+                    format!("output logic [{}:0] q{width}", width - 1),
+                ]
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let assignments = widths
+            .iter()
+            .map(|width| format!("assign q{width}=p{width};"))
+            .collect::<String>();
+        let source = format!(
+            "module Top({ports},input bit [127:0] b,output bit [127:0] bo); {assignments} assign bo=b; endmodule"
+        );
+        let names = widths
+            .iter()
+            .flat_map(|width| [format!("Top.p{width}"), format!("Top.q{width}")])
+            .chain(["Top.b".into(), "Top.bo".into()])
+            .collect::<Vec<_>>();
+        let writable = widths
+            .iter()
+            .map(|width| format!("Top.p{width}"))
+            .chain(["Top.b".into()])
+            .collect::<Vec<_>>();
+        for four_state in [false, true] {
+            let simulator = celox::Simulator::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("packed_writes.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .opt_level(celox::OptLevel::O1)
+            .build()
+            .unwrap();
+            let image = simulator.shared_code().program_image().clone();
+            // Safety: both instances use an image compiled in this test.
+            let (mut fast, mut reference) = unsafe {
+                (
+                    NativeProgramInstance::from_image(image.clone()).unwrap(),
+                    NativeProgramInstance::from_image(image).unwrap(),
+                )
+            };
+            for name in &writable {
+                let signal = fast.signal_ref(name).unwrap();
+                let reference_signal = reference.signal_ref(name).unwrap();
+                let ones = (BigUint::from(1u8) << signal.width) - BigUint::from(1u8);
+                let high = BigUint::from(1u8) << (signal.width - 1);
+                let patterns = [
+                    (
+                        (BigUint::from(1u8) << (signal.width + 5)) | &ones,
+                        BigUint::default(),
+                    ),
+                    (ones.clone(), ones.clone()),
+                    (BigUint::default(), ones.clone()),
+                    (high.clone(), high),
+                    (BigUint::from(1u8), BigUint::default()),
+                    (BigUint::default(), BigUint::default()),
+                ];
+                for (value, mask) in patterns {
+                    VpiState::set_four_state(&mut fast, signal, value.clone(), mask.clone());
+                    reference
+                        .backend_mut()
+                        .set_four_state(reference_signal, value, mask);
+                    // Inspect the actual stored bytes too, including padding
+                    // and transitions from unknown masks back to known values.
+                    let bytes = signal.width.div_ceil(8)
+                        * if signal.is_4state && four_state { 2 } else { 1 };
+                    let (fast_ptr, fast_size) = fast.backend().memory_as_ptr();
+                    let (reference_ptr, reference_size) = reference.backend().memory_as_ptr();
+                    assert!(
+                        signal.offset + bytes <= fast_size
+                            && reference_signal.offset + bytes <= reference_size
+                    );
+                    // Safety: these views cover only the selected stored planes.
+                    unsafe {
+                        assert_eq!(
+                            std::slice::from_raw_parts(fast_ptr.add(signal.offset), bytes),
+                            std::slice::from_raw_parts(
+                                reference_ptr.add(reference_signal.offset),
+                                bytes
+                            ),
+                            "{name}, four_state={four_state}"
+                        );
+                    }
+                    for neighbor in &names {
+                        assert_eq!(
+                            fast.backend()
+                                .get_four_state(fast.signal_ref(neighbor).unwrap()),
+                            reference
+                                .backend()
+                                .get_four_state(reference.signal_ref(neighbor).unwrap()),
+                            "neighbor={neighbor}, written={name}, four_state={four_state}"
+                        );
+                    }
+                }
             }
         }
     }
