@@ -75,7 +75,7 @@ pub(super) struct Registration {
     _value_storage: Option<Box<VpiValue>>,
     pub(super) handle: VpiHandle,
     due: Option<u64>,
-    snapshot: Option<(celox::BigUint, celox::BigUint)>,
+    snapshot: Option<ValueSnapshot>,
 }
 
 #[derive(Default)]
@@ -142,20 +142,42 @@ fn registration_ids_for_host(host: &super::VpiHost, reason: i32) -> Vec<u64> {
     })
 }
 
-fn same_value(previous: &celox::BigUint, current: &celox::BigUint) -> bool {
-    // Clock/reset watches usually fit one word. Avoid byte-slice comparison
-    // there, checking both lengths on every read so growing values and X/Z
-    // masks still compare every digit.
-    let mut previous_words = previous.iter_u64_digits();
-    let mut current_words = current.iter_u64_digits();
-    if previous_words.len() <= 1 && current_words.len() <= 1 {
-        previous_words.next().unwrap_or(0) == current_words.next().unwrap_or(0)
-    } else {
-        previous == current
+/// Keep narrow callback samples in machine words. The representation is
+/// canonical in registrations, including samples from forces and timed/array runtimes.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ValueSnapshot {
+    Word(u64, u64),
+    Wide(celox::BigUint, celox::BigUint),
+}
+
+impl ValueSnapshot {
+    pub(super) fn new(value: celox::BigUint, mask: celox::BigUint) -> Self {
+        if value.bits() <= 64 && mask.bits() <= 64 {
+            Self::Word(
+                value.iter_u64_digits().next().unwrap_or(0),
+                mask.iter_u64_digits().next().unwrap_or(0),
+            )
+        } else {
+            Self::Wide(value, mask)
+        }
+    }
+
+    pub(super) fn canonical(self) -> Self {
+        match self {
+            Self::Word(..) => self,
+            Self::Wide(value, mask) => Self::new(value, mask),
+        }
+    }
+
+    pub(super) fn into_big(self) -> (celox::BigUint, celox::BigUint) {
+        match self {
+            Self::Word(value, mask) => (value.into(), mask.into()),
+            Self::Wide(value, mask) => (value, mask),
+        }
     }
 }
 
-fn changed_values(host: &super::VpiHost) -> Vec<(u64, celox::BigUint, celox::BigUint)> {
+fn changed_values(host: &super::VpiHost) -> Vec<(u64, ValueSnapshot)> {
     // Clear before collecting/firing: a callback's write must invalidate this
     // scan, including writes made by earlier callbacks in the same batch.
     if host.poll_only_when_dirty && !host.values_dirty.replace(false) {
@@ -167,14 +189,13 @@ fn changed_values(host: &super::VpiHost) -> Vec<(u64, celox::BigUint, celox::Big
             .iter()
             .filter_map(|(&id, registration)| {
                 let signal = registration.signal?;
-                let (value, mask, _) = super::value_bits_at(host, signal)?;
+                let (snapshot, _) = super::value_snapshot_at(host, signal)?;
+                let snapshot = snapshot.canonical();
                 registration
                     .snapshot
                     .as_ref()
-                    .is_none_or(|(previous_value, previous_mask)| {
-                        !same_value(previous_value, &value) || !same_value(previous_mask, &mask)
-                    })
-                    .then_some((id, value, mask))
+                    .is_none_or(|previous| previous != &snapshot)
+                    .then_some((id, snapshot))
             })
             .collect()
     })
@@ -190,8 +211,8 @@ pub(super) fn dispatch_value_changes_for_host(host: &super::VpiHost) -> bool {
     }
     let changed = changed_values(host);
     let progressed = !changed.is_empty();
-    for (id, value, mask) in changed {
-        fire_with_snapshot_for_host(host, id, Some((value, mask)));
+    for (id, snapshot) in changed {
+        fire_with_snapshot_for_host(host, id, Some(snapshot));
         if borrow_cell(&host.callbacks, |state| state.finish) {
             break;
         }
@@ -221,17 +242,14 @@ fn fire(id: u64) -> bool {
     fire_with_snapshot(id, None)
 }
 
-fn fire_with_snapshot(
-    id: u64,
-    delivered_snapshot: Option<(celox::BigUint, celox::BigUint)>,
-) -> bool {
+fn fire_with_snapshot(id: u64, delivered_snapshot: Option<ValueSnapshot>) -> bool {
     with_host(|host| fire_with_snapshot_for_host(host, id, delivered_snapshot))
 }
 
 fn fire_with_snapshot_for_host(
     host: &super::VpiHost,
     id: u64,
-    delivered_snapshot: Option<(celox::BigUint, celox::BigUint)>,
+    delivered_snapshot: Option<ValueSnapshot>,
 ) -> bool {
     let Some(mut registration) = borrow_cell_mut(&host.callbacks, |state| {
         let registration = state.callbacks.remove(&id)?;
@@ -244,7 +262,7 @@ fn fire_with_snapshot_for_host(
     let now = borrow_cell(&host.callbacks, |state| state.time);
     let delivered_snapshot = delivered_snapshot.or_else(|| {
         registration.signal.and_then(|signal| {
-            super::value_bits_at(host, signal).map(|(value, mask, _)| (value, mask))
+            super::value_snapshot_at(host, signal).map(|(snapshot, _)| snapshot.canonical())
         })
     });
     if !registration.data.time.is_null() {
@@ -270,14 +288,13 @@ fn fire_with_snapshot_for_host(
         // Safety: callback registration keeps both pointers live until the
         // callback is removed. A dispatch snapshot preserves the value which
         // selected the whole callback batch even if an earlier callback wrote.
-        if let Some((value, mask)) = &delivered_snapshot {
+        if let Some(snapshot) = &delivered_snapshot {
             unsafe {
                 write_snapshot_value(
                     host,
                     registration.data.obj,
                     registration.data.value,
-                    value,
-                    mask,
+                    snapshot,
                 )
             };
         } else {
@@ -877,7 +894,7 @@ pub unsafe extern "C" fn vpi_register_cb(data: *const VpiCbData) -> VpiHandle {
         let due = (data.reason == CB_AFTER_DELAY)
             .then(|| state.time.saturating_add(callback_delay(&data)));
         let snapshot = signal.and_then(|signal| {
-            super::value_bits_at(&host, signal).map(|(value, mask, _)| (value, mask))
+            super::value_snapshot_at(&host, signal).map(|(snapshot, _)| snapshot.canonical())
         });
         state.callbacks.insert(
             id,
@@ -1021,4 +1038,37 @@ pub(super) fn current_time_for_host(host: &super::VpiHost) -> u64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn celox_vpi_runtime_cookie() -> *mut c_void {
     ptr::null_mut()
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::ValueSnapshot;
+    use celox::BigUint;
+
+    #[test]
+    fn canonical_snapshots_compare_growing_values_and_mask_only_changes() {
+        for bit in [0usize, 31, 32, 63, 64, 65, 127, 128] {
+            let value = BigUint::from(1u8) << bit;
+            let known = ValueSnapshot::new(value.clone(), BigUint::default());
+            let unknown = ValueSnapshot::new(value.clone(), value.clone());
+            assert_ne!(known, unknown);
+            assert_ne!(
+                known,
+                ValueSnapshot::new(BigUint::default(), BigUint::default())
+            );
+            assert_eq!(
+                known,
+                ValueSnapshot::Wide(value.clone(), BigUint::default()).canonical()
+            );
+            assert_eq!(
+                unknown,
+                ValueSnapshot::Wide(value.clone(), value.clone()).canonical()
+            );
+            if bit < 64 {
+                assert_eq!(known, ValueSnapshot::Word(1u64 << bit, 0));
+            } else {
+                assert!(matches!(known, ValueSnapshot::Wide(..)));
+            }
+        }
+    }
 }
