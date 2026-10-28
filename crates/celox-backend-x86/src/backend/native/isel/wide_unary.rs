@@ -237,24 +237,35 @@ pub(super) fn lower_wide_unary(
                 });
                 acc = next;
             }
-            // Now acc has XOR of all chunks. Need popcount parity (odd # of 1-bits → 1)
-            // Fold 64-bit value to 1 bit by cascading XOR
-            let mut val = acc;
-            for shift in [32u8, 16, 8, 4, 2, 1] {
-                let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::ShrImm {
-                    dst: shifted,
-                    src: val,
-                    imm: shift,
+            // XORing the chunks preserves total parity. Use the same scalar
+            // POPCNT operation as narrow reductions when the target supports it.
+            let val = if ctx.use_popcnt {
+                let count = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Popcnt {
+                    dst: count,
+                    src: acc,
                 });
-                let folded = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::Xor {
-                    dst: folded,
-                    lhs: val,
-                    rhs: shifted,
-                });
-                val = folded;
-            }
+                count
+            } else {
+                // Keep the software fold for targets without POPCNT.
+                let mut val = acc;
+                for shift in [32u8, 16, 8, 4, 2, 1] {
+                    let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::ShrImm {
+                        dst: shifted,
+                        src: val,
+                        imm: shift,
+                    });
+                    let folded = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Xor {
+                        dst: folded,
+                        lhs: val,
+                        rhs: shifted,
+                    });
+                    val = folded;
+                }
+                val
+            };
             let result = ctx.alloc_vreg(SpillDesc::transient());
             ctx.emit_and_imm(block, result, val, 1);
             let mut dst_chunks = Vec::with_capacity(n_chunks);
