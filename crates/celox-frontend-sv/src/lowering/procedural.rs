@@ -288,6 +288,8 @@ impl<'a> ProcModule<'a> {
                     }
                     continue;
                 }
+                // A lookup is a value of its operands.
+                sv::ir::Callee::Lookup { .. } => continue,
                 // String operations use the simulator's heap.
                 sv::ir::Callee::String(_)
                 | sv::ir::Callee::Object(_)
@@ -1147,6 +1149,7 @@ impl<'a> ProcModule<'a> {
     pub fn is_callee(&self, callee: &sv::ir::Callee) -> bool {
         match callee {
             sv::ir::Callee::System(function) => function.reads_simulation_state(),
+            sv::ir::Callee::Lookup { .. } => false,
             sv::ir::Callee::String(_)
             | sv::ir::Callee::Object(_)
             | sv::ir::Callee::Checked { .. } => true,

@@ -3,6 +3,7 @@ use super::*;
 use celox_sv_syntax::{Declarations, DimensionKind, ExprId, ExprKind};
 mod calls;
 mod direct;
+mod enums;
 mod lvalues;
 mod objects;
 mod references;

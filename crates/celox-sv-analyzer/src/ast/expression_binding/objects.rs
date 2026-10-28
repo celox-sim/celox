@@ -927,7 +927,7 @@ pub(super) fn random_selection(
                     return Err(unsupported("randomization of a 4-state class property"));
                 }
                 if property.field.handle.is_some()
-                    || (property.r#type.is_enum && property.r#type.enum_values.is_none())
+                    || (property.r#type.is_enum && property.r#type.enum_domain.is_none())
                     || (property.randc && property.cyclic_domain_size().is_none())
                 {
                     return Err(unsupported(
