@@ -8778,6 +8778,7 @@ mod aggregate_regressions {
         fn parameter_element_forwarding(sim) { @case "aggregate_regressions::parameter_element_forwarding"; }
         fn parameter_runtime_element_bit(sim) { @case "aggregate_regressions::parameter_runtime_element_bit"; }
         fn independent_clock_memory_writers(sim) { @case "aggregate_regressions::independent_clock_memory_writers"; }
+        fn wide_concatenated_procedural_targets(sim) { @case "aggregate_regressions::wide_concatenated_procedural_targets"; }
     }
 }
 
