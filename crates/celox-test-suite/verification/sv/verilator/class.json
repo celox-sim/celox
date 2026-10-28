@@ -306,6 +306,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::generate_scope_enum_type_arguments at 2759:27: assert_eq sum: expected 0x4bc, got 0x8ae",
+      "expectation": "Simulation",
+      "name": "class::generate_scope_enum_type_arguments",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::implicit_constructors_and_this",
