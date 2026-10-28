@@ -1537,6 +1537,11 @@ unsafe fn write_snapshot_value(
     if value.is_null() || reference.is_null() {
         return;
     }
+    // Safety: checked non-null above; the callback owns its value record.
+    let value = unsafe { &mut *value };
+    if value.format == VPI_SUPPRESS_VAL {
+        return;
+    }
     // Safety: the caller has selected this host and keeps the callback's
     // object handle live through dispatch.
     let handle = unsafe { &mut *reference };
@@ -1545,16 +1550,16 @@ unsafe fn write_snapshot_value(
     };
     let metadata = borrow_cell(&host.runtime, |runtime| {
         let runtime = runtime.as_ref()?.state();
-        runtime
-            .reflection()
-            .signal(id.root)
-            .and_then(|signal| Some((id.width(runtime)?, signal.signed)))
+        let width = id.width(runtime)?;
+        let signed = value.format == VPI_INT_VAL
+            && width > 0
+            && width < 32
+            && runtime.reflection().signal(id.root)?.signed;
+        Some((width, signed))
     });
     let Some((width, signed)) = metadata else {
         return;
     };
-    // Safety: checked non-null above; the caller owns writable value storage.
-    let value = unsafe { &mut *value };
     encode_snapshot_value(handle, value, snapshot, width, signed);
 }
 
@@ -1574,12 +1579,16 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
     let Some(host) = selected_host() else {
         return;
     };
+    // Safety: selection above rejects foreign-thread calls before accessing
+    // caller storage, which is non-null and writable on the owning thread.
+    let value = unsafe { &mut *value };
+    if value.format == VPI_SUPPRESS_VAL {
+        return;
+    }
     // Safety: the caller supplies a live handle; selection above rejects
     // foreign-thread/unbound calls before dereferencing it.
     let handle = unsafe { &mut *reference };
     if let HandleKind::Constant(integer) = handle.kind {
-        // Safety: checked non-null above; caller owns the `VpiValue` allocation.
-        let value = unsafe { &mut *value };
         if value.format == VPI_INT_VAL {
             value.value.integer = integer;
         }
@@ -1591,14 +1600,16 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
     let Some((snapshot, width)) = value_snapshot_at(&host, id) else {
         return;
     };
-    let signed = borrow_cell(&host.runtime, |runtime| {
-        runtime
-            .as_ref()
-            .and_then(|runtime| runtime.state().reflection().signal(id.root))
-            .is_some_and(|signal| signal.signed)
-    });
-    // Safety: checked non-null above; caller owns the `VpiValue` allocation.
-    encode_snapshot_value(handle, unsafe { &mut *value }, &snapshot, width, signed);
+    let signed = value.format == VPI_INT_VAL
+        && width > 0
+        && width < 32
+        && borrow_cell(&host.runtime, |runtime| {
+            runtime
+                .as_ref()
+                .and_then(|runtime| runtime.state().reflection().signal(id.root))
+                .is_some_and(|signal| signal.signed)
+        });
+    encode_snapshot_value(handle, value, &snapshot, width, signed);
 }
 
 fn decode_digit(digit: u8, radix_bits: u32) -> Option<(u8, u8)> {
