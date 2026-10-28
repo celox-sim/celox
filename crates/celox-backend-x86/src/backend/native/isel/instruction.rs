@@ -1359,79 +1359,78 @@ pub(super) fn lower_instruction(
                             ..
                         } => {
                             if *width_bits > 64 {
-                                // Wide mask store: chunk-by-chunk
-                                if let Some(mchunks) = ctx.wide_masks.get(src_reg).cloned() {
-                                    let mut bit_pos = 0usize;
-                                    let mut store_remaining = *width_bits;
-                                    for (chunk_vreg, chunk_width) in &mchunks {
-                                        if store_remaining == 0 {
-                                            break;
-                                        }
-                                        let logical_chunk_width =
-                                            (*chunk_width).min(store_remaining);
-                                        let mut consumed = 0usize;
-                                        while consumed < logical_chunk_width {
-                                            let part_bit_off = *bit_off + bit_pos + consumed;
-                                            let intra =
-                                                ctx.static_byte_and_intra(addr, part_bit_off).1;
-                                            let remaining = logical_chunk_width - consumed;
-                                            let part_width = remaining.min(64 - intra);
-                                            let part_byte_off =
-                                                ctx.mask_byte_offset(addr, part_bit_off);
-                                            let part_src = if consumed == 0 {
-                                                *chunk_vreg
-                                            } else {
-                                                let shifted =
-                                                    ctx.alloc_vreg(SpillDesc::transient());
-                                                block.push(MInst::ShrImm {
-                                                    dst: shifted,
-                                                    src: *chunk_vreg,
-                                                    imm: consumed as u8,
-                                                });
-                                                shifted
-                                            };
-
-                                            if intra == 0 && OpSize::from_bits(part_width).is_some()
-                                            {
-                                                block.push(MInst::Store {
-                                                    base: BaseReg::SimState,
-                                                    offset: part_byte_off,
-                                                    src: part_src,
-                                                    size: OpSize::from_bits(part_width).unwrap(),
-                                                });
-                                            } else {
-                                                let containing_off = part_byte_off;
-                                                let load_size = ISelContext::op_size_for_width(
-                                                    part_width + intra,
-                                                );
-                                                let old = ctx.alloc_vreg(SpillDesc::transient());
-                                                block.push(MInst::Load {
-                                                    dst: old,
-                                                    base: BaseReg::SimState,
-                                                    offset: containing_off,
-                                                    size: load_size,
-                                                });
-                                                let new = ctx.alloc_vreg(SpillDesc::transient());
-                                                ctx.emit_bfi(
-                                                    block,
-                                                    new,
-                                                    old,
-                                                    part_src,
-                                                    intra as u8,
-                                                    mask_for_width(part_width),
-                                                );
-                                                block.push(MInst::Store {
-                                                    base: BaseReg::SimState,
-                                                    offset: containing_off,
-                                                    src: new,
-                                                    size: load_size,
-                                                });
-                                            }
-                                            consumed += part_width;
-                                        }
-                                        bit_pos += logical_chunk_width;
-                                        store_remaining -= logical_chunk_width;
+                                // Wide mask store: chunk-by-chunk. A source
+                                // without wide mask chunks (e.g. a load of a
+                                // two-state variable) still defines every
+                                // destination mask bit: its scalar mask, if
+                                // any, covers the low chunk and the rest is 0.
+                                let mchunks =
+                                    wide_mask_store_chunks(ctx, block, src_reg, *width_bits);
+                                let mut bit_pos = 0usize;
+                                let mut store_remaining = *width_bits;
+                                for (chunk_vreg, chunk_width) in &mchunks {
+                                    if store_remaining == 0 {
+                                        break;
                                     }
+                                    let logical_chunk_width = (*chunk_width).min(store_remaining);
+                                    let mut consumed = 0usize;
+                                    while consumed < logical_chunk_width {
+                                        let part_bit_off = *bit_off + bit_pos + consumed;
+                                        let intra = ctx.static_byte_and_intra(addr, part_bit_off).1;
+                                        let remaining = logical_chunk_width - consumed;
+                                        let part_width = remaining.min(64 - intra);
+                                        let part_byte_off =
+                                            ctx.mask_byte_offset(addr, part_bit_off);
+                                        let part_src = if consumed == 0 {
+                                            *chunk_vreg
+                                        } else {
+                                            let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                                            block.push(MInst::ShrImm {
+                                                dst: shifted,
+                                                src: *chunk_vreg,
+                                                imm: consumed as u8,
+                                            });
+                                            shifted
+                                        };
+
+                                        if intra == 0 && OpSize::from_bits(part_width).is_some() {
+                                            block.push(MInst::Store {
+                                                base: BaseReg::SimState,
+                                                offset: part_byte_off,
+                                                src: part_src,
+                                                size: OpSize::from_bits(part_width).unwrap(),
+                                            });
+                                        } else {
+                                            let containing_off = part_byte_off;
+                                            let load_size =
+                                                ISelContext::op_size_for_width(part_width + intra);
+                                            let old = ctx.alloc_vreg(SpillDesc::transient());
+                                            block.push(MInst::Load {
+                                                dst: old,
+                                                base: BaseReg::SimState,
+                                                offset: containing_off,
+                                                size: load_size,
+                                            });
+                                            let new = ctx.alloc_vreg(SpillDesc::transient());
+                                            ctx.emit_bfi(
+                                                block,
+                                                new,
+                                                old,
+                                                part_src,
+                                                intra as u8,
+                                                mask_for_width(part_width),
+                                            );
+                                            block.push(MInst::Store {
+                                                base: BaseReg::SimState,
+                                                offset: containing_off,
+                                                src: new,
+                                                size: load_size,
+                                            });
+                                        }
+                                        consumed += part_width;
+                                    }
+                                    bit_pos += logical_chunk_width;
+                                    store_remaining -= logical_chunk_width;
                                 }
                             } else {
                                 let mask_off = ctx.mask_byte_offset(addr, *bit_off);
@@ -3276,4 +3275,26 @@ pub(super) fn lower_instruction(
             }
         }
     }
+}
+
+/// The mask chunks a wide store writes for `src`, with their widths.
+///
+/// Registers produced without wide mask chunks (a load of a two-state
+/// variable, a two-state operation) are known by at most a scalar mask for
+/// their low chunk; every higher chunk is known (zero mask).
+fn wide_mask_store_chunks(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    src: &RegisterId,
+    width_bits: usize,
+) -> Vec<(VReg, usize)> {
+    if let Some(chunks) = ctx.wide_masks.get(src).cloned() {
+        return chunks;
+    }
+    let n_chunks = ISelContext::num_chunks(width_bits);
+    get_wide_mask_chunks(ctx, block, src, n_chunks)
+        .into_iter()
+        .enumerate()
+        .map(|(index, vreg)| (vreg, (width_bits - index * 64).min(64)))
+        .collect()
 }
