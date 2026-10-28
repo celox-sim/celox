@@ -30,6 +30,7 @@
     "xezim/review_regressions.json",
     "xezim/scan.json",
     "xezim/string.json",
+    "xezim/string_format.json",
     "xezim/synthesizable.json",
     "xezim/system_functions.json",
     "xezim/tagged_unions.json",

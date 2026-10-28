@@ -24,6 +24,10 @@ impl Ff<'_, '_> {
                     .ok_or_else(|| unsupported(format!("omitted argument of `{op}`")))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // A format captures each operand at its own type, in order.
+        if let StringOp::Format { ticks_per_unit } = op {
+            return self.format_string(ticks_per_unit, &args);
+        }
         if args.iter().any(|arg| self.m.calls(arg)) {
             for (index, arg) in args.iter_mut().enumerate() {
                 let context = match op {
@@ -39,6 +43,7 @@ impl Ff<'_, '_> {
             }
         }
         let result = match op {
+            StringOp::Format { .. } => unreachable!("formatted above"),
             StringOp::FromBits => {
                 let buffer = self.heap_call(ops::NEW, &[]);
                 let buffer = self.append_bits(buffer, &args[0])?;

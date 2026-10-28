@@ -1,0 +1,38 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "string_format::sformatf_four_state_values",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 evaluates the index x + 32'd1 of an associative array with a bit [63:0] index at the expression's own 32 bits, so the element is stored under key 0. IEEE 1800-2023 7.8.4 evaluates an integral index as a cast to the index type, and 6.24.1 gives a size cast the value after an assignment to that width, so the key is 64'h100000000; xezim 0.11.3 also stores key 0.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_associative_index_cast.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_associative_index_cast",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 evaluates the index x + 32'd1 of an associative array with a bit [63:0] index at the expression's own 32 bits, so the element is stored under key 0. IEEE 1800-2023 7.8.4 evaluates an integral index as a cast to the index type, and 6.24.1 gives a size cast the value after an assignment to that width, so the key is 64'h100000000; xezim 0.11.3 also stores key 0.",
+        "upstream": []
+      },
+      "name": "string_format::sformatf_with_associative_index",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

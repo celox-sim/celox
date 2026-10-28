@@ -11,6 +11,7 @@
 
 mod containers;
 mod file_io;
+mod format;
 mod fread;
 mod objects;
 mod process;
@@ -1994,8 +1995,17 @@ impl<'p, 'a> Ff<'p, 'a> {
         } else {
             arg_order.to_vec()
         };
+        // A register would not survive a host request in a later actual:
+        // each actual before the last one that can make a request is kept, as
+        // its C type, in a temporary until the call.
+        let last_request = positions.iter().rposition(|&position| {
+            args.get(position)
+                .and_then(Option::as_ref)
+                .is_some_and(|arg| self.m.makes_host_request(arg))
+        });
+        let mut kept = Vec::new();
         // Evaluate actuals in source order, then pass registers in C formal order.
-        for position in positions {
+        for (index, position) in positions.into_iter().enumerate() {
             let argument = import.arguments().get(position).ok_or_else(|| {
                 unsupported(format!("argument position of DPI-C function `{name}`"))
             })?;
@@ -2008,6 +2018,24 @@ impl<'p, 'a> Ff<'p, 'a> {
             let r#type = argument.r#type();
             let arg = self.hoist(arg)?;
             let value = self.eval(&arg, Some((r#type.width(), r#type.is_signed())))?;
+            let register = self.dpi_register(value, r#type);
+            if last_request.is_some_and(|last| index < last) {
+                let four_state = matches!(self.b.register(&register), RegisterType::Logic { .. });
+                let (temp, name) =
+                    self.m
+                        .temp("dpi_input", r#type.width(), r#type.is_signed(), four_state);
+                self.store(temp, SIROffset::Static(0), r#type.width(), register);
+                kept.push((position, name));
+            } else {
+                registers[position] = Some(register);
+            }
+        }
+        for (position, name) in kept {
+            let r#type = import.arguments()[position].r#type();
+            let value = self.eval(
+                &sv::ir::Expr::Ident(name),
+                Some((r#type.width(), r#type.is_signed())),
+            )?;
             registers[position] = Some(self.dpi_register(value, r#type));
         }
         let registers = registers
@@ -2890,11 +2918,35 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok(sv::ir::Expr::Ident(name))
     }
 
+    /// The input `value` of formal `id`, or with `keep` the name of a
+    /// temporary of the formal's type that holds it across a later host
+    /// request.
+    fn kept_input(
+        &mut self,
+        id: SourceVarId,
+        value: RegisterId,
+        keep: bool,
+    ) -> Result<RegisterId, String> {
+        if !keep {
+            return Ok(value);
+        }
+        let formal = self.m.var(id);
+        let (width, signed, value_kind, float) =
+            (formal.width, formal.signed, formal.value_kind, formal.float);
+        let four_state = matches!(self.b.register(&value), RegisterType::Logic { .. });
+        let (temp, name) = self.m.temp("input", width, signed, four_state);
+        let variable = self.m.variables.get_mut(&temp).unwrap();
+        variable.value_kind = value_kind;
+        variable.float = float;
+        self.store(temp, SIROffset::Static(0), width, value);
+        Err(name)
+    }
+
     /// The value of `expr` now, in a temporary of its type.
     fn keep_argument(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         let signed = self.expr_signed(expr);
         let float = floating::precision(expr, self.m.variables, self.m.name_to_id);
-        let handle = reads_string_variable(expr, self.m.variables, self.m.name_to_id);
+        let handle = self.m.expr_is_string(expr);
         let value = self.eval(expr, None)?;
         let register = self.b.register(&value).clone();
         let width = register.width();
@@ -4010,11 +4062,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 sv::ir::SystemTaskArg::Expr(expr) => {
                     let expr = expr.clone();
                     let signed = self.expr_signed(&expr);
-                    arg_is_handle.push(reads_string_variable(
-                        &expr,
-                        self.m.variables,
-                        self.m.name_to_id,
-                    ));
+                    arg_is_handle.push(self.m.expr_is_string(&expr));
                     arg_float_precision.push(floating::precision(
                         &expr,
                         self.m.variables,
@@ -4645,7 +4693,24 @@ impl<'p, 'a> Ff<'p, 'a> {
                 Reference::Alias(alias) => aliases.push(*alias),
             }
         }
-        for position in positions {
+        // An input evaluates into a register, which a host request in a later
+        // input, a default included, would lose: each input before the last
+        // one that can make a request is kept, converted to its formal, in a
+        // temporary until the formals are written.
+        let last_request = positions.iter().rposition(|&position| {
+            subroutine.params.get(position).is_some_and(|param| {
+                param.direction.is_read()
+                    && !param.direction.is_reference()
+                    && args
+                        .get(position)
+                        .cloned()
+                        .flatten()
+                        .or_else(|| param.default.clone())
+                        .is_some_and(|actual| self.m.makes_host_request(&actual))
+            })
+        });
+        for (index, position) in positions.into_iter().enumerate() {
+            let keep = last_request.is_some_and(|last| index < last);
             let param = subroutine
                 .params
                 .get(position)
@@ -4730,17 +4795,22 @@ impl<'p, 'a> Ff<'p, 'a> {
                         .alloc(SLTNode::Unary(UnaryOp::ToTwoState, node))
                         .map_err(slt_error)?;
                 }
-                inputs.push((id, self.lower_slt(&arena, node)?));
+                let value = self.lower_slt(&arena, node)?;
+                inputs.push((id, self.kept_input(id, value, keep)));
             } else if !subroutine.persistent_locals.contains(&param.name)
                 && (self.kernel.is_none()
                     || !subroutine.is_task
                     || subroutine.automatic_locals.contains(&param.name))
             {
                 let value = self.default_reg(id);
-                inputs.push((id, value));
+                inputs.push((id, self.kept_input(id, value, keep)));
             }
         }
         for (id, value) in inputs {
+            let value = match value {
+                Ok(value) => value,
+                Err(name) => self.eval(&sv::ir::Expr::Ident(name), None)?,
+            };
             let width = self.m.var(id).width;
             let offset = sv_memory_offset(self.m.var(id), 0, width);
             self.store(id, offset, width, value);

@@ -545,6 +545,8 @@ pub enum HostRequestKind {
     // Append new variants: native images persist Serde variant indices.
     /// Services owned by an explicitly invoked testbench kernel.
     Testbench,
+    /// Formatting to a string (`$sformatf`).
+    Format,
 }
 
 impl HostRequestKind {
@@ -558,6 +560,7 @@ impl HostRequestKind {
             Self::Distribution => 5,
             Self::Process => 6,
             Self::Testbench => 7,
+            Self::Format => 8,
         };
         (family << 32) | site as u64
     }
@@ -572,6 +575,7 @@ impl HostRequestKind {
             5 => Self::Distribution,
             6 => Self::Process,
             7 => Self::Testbench,
+            8 => Self::Format,
             _ => return None,
         };
         Some((family, request as u32))
@@ -2271,6 +2275,7 @@ mod tests {
             HostRequestKind::Distribution,
             HostRequestKind::Process,
             HostRequestKind::Testbench,
+            HostRequestKind::Format,
         ] {
             for site in [0, 1, u32::MAX] {
                 assert_eq!(
@@ -2279,7 +2284,7 @@ mod tests {
                 );
             }
         }
-        for invalid in [0, u32::MAX as u64, 8u64 << 32, 1u64 << 63] {
+        for invalid in [0, u32::MAX as u64, 9u64 << 32, 1u64 << 63] {
             assert_eq!(HostRequestKind::decode(invalid), None);
         }
         assert_eq!(

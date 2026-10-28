@@ -13,7 +13,7 @@ mod strings;
 pub(super) use calls::{statement as call_statement, statement_root as call_statement_root};
 pub(super) use direct::{
     arguments, bind_value, call_name as native_name, callable_name, cast_target_native,
-    member_context, real_value, remove_real_division_guards, ungroup,
+    format_arguments, member_context, real_value, remove_real_division_guards, ungroup,
 };
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
 pub(super) use objects::{

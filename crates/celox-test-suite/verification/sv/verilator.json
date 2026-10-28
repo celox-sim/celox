@@ -22,6 +22,7 @@
     "verilator/review_regressions.json",
     "verilator/scan.json",
     "verilator/string.json",
+    "verilator/string_format.json",
     "verilator/synthesizable.json",
     "verilator/system_functions.json",
     "verilator/tagged_unions.json",
