@@ -8,8 +8,27 @@ use crate::{
 };
 use celox_design::ForkJoin;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProcessControl {
+    pub exposed: bool,
+    pub random: Option<u64>,
+    pub killed: bool,
+    pub suspended: Option<SuspendedProcess>,
+    pub awaiting: Option<usize>,
+    pub observes: Vec<usize>,
+    pub level_wait: bool,
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SuspendedProcess {
+    pub runnable: bool,
+    pub wake_time: Option<u64>,
+    pub wait_word: Option<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Activation {
+    #[serde(default)]
+    pub control: ProcessControl,
     pub kernel: usize,
     pub parent: Option<usize>,
     pub private: Vec<Value>,
@@ -21,6 +40,7 @@ pub struct Activation {
 impl Activation {
     fn root(kernel: usize) -> Self {
         Self {
+            control: ProcessControl::default(),
             kernel,
             parent: None,
             private: Vec::new(),
@@ -140,6 +160,8 @@ impl<B: SimBackend> SimulationState<B> {
             let mut child = self.process_state.activations[process].clone();
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             child.private[random] = ((u64::from(seed) | (1 << 32)).into(), 0u8.into());
+            child.control = ProcessControl::default();
+            child.live = true;
             child.parent = Some(process);
             child.pending.clear();
             child.join = None;
@@ -147,6 +169,7 @@ impl<B: SimBackend> SimulationState<B> {
             child.private[status] = (0u8.into(), 0u8.into());
             let reusable = (self.kernel_count..self.process_state.activations.len()).find(|&id| {
                 !self.process_state.activations[id].live
+                    && !self.process_state.activations[id].control.exposed
                     && !self
                         .process_state
                         .activations
@@ -242,6 +265,9 @@ impl<B: SimBackend> SimulationState<B> {
         for (id, activation) in state.activations.iter_mut().enumerate() {
             activation.pending.retain(|&child| !cancelled[child]);
             if cancelled[id] {
+                activation.control.killed |= activation.live;
+                activation.control.suspended = None;
+                activation.control.awaiting = None;
                 activation.live = false;
                 activation.join = None;
                 state.waiters.remove(id);
@@ -259,6 +285,9 @@ impl<B: SimBackend> SimulationState<B> {
             if cancelled {
                 self.retire_activation(id);
             }
+        }
+        for &id in &live_cancelled {
+            self.process_changed(id);
         }
         live_cancelled
     }
@@ -279,12 +308,16 @@ impl<B: SimBackend> SimulationState<B> {
                     parent.join = None;
                     let id = self.process_state.activations[process].parent.unwrap();
                     let state = &mut self.process_state;
-                    wake_in_region(
-                        &self.model.processes,
-                        &mut state.ready,
-                        &mut state.reactive,
-                        id,
-                    );
+                    if state.activations[id].live
+                        && state.activations[id].control.suspended.is_none()
+                    {
+                        wake_in_region(
+                            &self.model.processes,
+                            &mut state.ready,
+                            &mut state.reactive,
+                            id,
+                        );
+                    }
                 }
             }
         }
@@ -303,6 +336,20 @@ impl<B: SimBackend> SimulationState<B> {
             };
             if activation.live {
                 break;
+            }
+            if activation.control.exposed
+                && !activation.private.is_empty()
+                && let Some(frame) = &self.model.processes[id].frame
+                && let Some(index) = frame.private.iter().position(|s| *s == frame.random)
+            {
+                activation.control.random = Some(
+                    activation.private[index]
+                        .0
+                        .to_u64_digits()
+                        .first()
+                        .copied()
+                        .unwrap_or(0),
+                );
             }
             activation.private.clear();
             activation.locals.clear();

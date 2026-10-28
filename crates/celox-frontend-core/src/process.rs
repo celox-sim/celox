@@ -61,7 +61,7 @@ pub struct ProcessKernelBuilder {
     /// The block each resume point continues in; point 0 is the start.
     resume_blocks: Vec<BlockId>,
     /// The wait site and predicate entry resume point being lowered.
-    wait_site: Option<(u32, usize)>,
+    wait_site: Option<(u64, usize)>,
     /// The runtime event site the process reports at its flush points
     /// (see [`Self::flush_deferred_at`]).
     flush_site: Option<u32>,
@@ -293,7 +293,15 @@ impl ProcessKernelBuilder {
     /// afterwards is the site's resume point: the caller lowers the wait's
     /// condition there and ends it with [`Self::wake_if`].
     pub fn suspend_wait(&mut self, site: u32) -> Result<(), ProcessKernelError> {
-        self.store_delay_constant(u64::from(site));
+        self.suspend_wait_word(u64::from(site))
+    }
+
+    pub fn suspend_level_wait(&mut self, site: u32) -> Result<(), ProcessKernelError> {
+        self.suspend_wait_word(u64::from(site) | celox_design::PROCESS_LEVEL_WAIT)
+    }
+
+    fn suspend_wait_word(&mut self, site: u64) -> Result<(), ProcessKernelError> {
+        self.store_delay_constant(site);
         self.suspend(ProcessStatus::Wait)?;
         self.wait_site = Some((site, self.resume_blocks.len() - 1));
         Ok(())
@@ -316,7 +324,7 @@ impl ProcessKernelBuilder {
         // Predicate evaluation may itself yield to the runtime (for example,
         // disable fork). A later wakeup must evaluate the whole predicate.
         self.store_constant(self.slots.resume, PROCESS_RESUME_WIDTH, resume as u64);
-        self.store_delay_constant(u64::from(site));
+        self.store_delay_constant(site);
         self.end(ProcessStatus::Pending);
         self.builder.switch_to_block(woken);
         if let Some(site_id) = self.flush_site {

@@ -174,6 +174,33 @@ in the function itself remain forbidden. Scheduling calls in declaration
 initializers, `final`, `always_comb`, and `always_ff` are diagnosed; the latter
 two contexts do not currently provide a process kernel for such calls.
 
+### Process handles
+
+The built-in `process` class (also named `std::process`, 26.7) provides `self()`, `status()`, `kill()`, `await()`,
+`suspend()` and `resume()`, and the `process::state` enum (IEEE 1800-2023 9.7).
+Handles can be stored in variables, class properties and containers. Repeated
+`self()` calls in one thread return the same handle, which remains valid after
+termination. `kill()` also terminates descendants of a finished parent.
+`wait (p.status() == process::FINISHED)` wakes when that state changes.
+
+Suspending a waiting process stops its event sensitivity. Resuming it rearms
+an event wait, checks a level wait immediately, or resumes an elapsed delay.
+A thread may suspend itself from a task or procedure; a function cannot suspend
+its own thread or call `await()`. Constructing or extending `process` is rejected.
+
+All `final` procedures share one process identity and RNG (9.2.3). Its status
+stays RUNNING until the entire final phase ends, including across `$stop` and
+resumption. A user package named `process` retains its qualified typedefs;
+`std::process::state` unambiguously selects the built-in state type.
+
+`srandom()`, `get_randstate()` and `set_randstate()` use the selected process's
+random stream (18.13.3–18.13.5). State strings are opaque and specific to Celox.
+Checkpoints preserve process handles and their control state. Portable state
+files currently reject exposed process handles; use `checkpoint()` / `restore()`.
+Exposed identities are retained until the simulation is released. An external
+`kill()` releases the target's execution frame and automatic-local bindings
+while preserving its identity and RNG state.
+
 ### Class randomization
 
 `object.randomize()` randomizes enabled `rand` properties and returns signed

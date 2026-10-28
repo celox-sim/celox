@@ -90,6 +90,13 @@ impl<'a> ProcModule<'a> {
     /// or function that returns one.
     pub fn expr_is_string(&self, expr: &sv::ir::Expr) -> bool {
         match expr {
+            sv::ir::Expr::Call {
+                callee:
+                    sv::ir::Callee::System(sv::ir::SystemFunction::Process(
+                        celox_design::ProcessOp::GetRandstate,
+                    )),
+                ..
+            } => true,
             sv::ir::Expr::Ident(name) => self
                 .name_to_id
                 .get(name)

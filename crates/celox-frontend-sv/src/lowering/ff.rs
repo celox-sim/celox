@@ -13,6 +13,7 @@ mod containers;
 mod file_io;
 mod fread;
 mod objects;
+mod process;
 mod scan;
 mod strings;
 
@@ -89,6 +90,8 @@ pub(super) struct Ff<'p, 'a> {
     /// directly.
     kernel: Option<ProcessKernelBuilder>,
     forked: bool,
+    process_control: bool,
+    process_predicate: bool,
     frame_locals: Vec<SourceVarId>,
     event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
     unobserved_function_writes: HashSet<SourceVarId>,
@@ -188,6 +191,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             dist_seed: None,
             kernel: None,
             forked: false,
+            process_control: false,
+            process_predicate: false,
             frame_locals: Vec::new(),
             event_probes: Vec::new(),
             unobserved_function_writes: HashSet::default(),
@@ -902,6 +907,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                         | SystemFunction::UrandomRange => {
                             self.urandom_state();
                         }
+                        SystemFunction::Process(_) => {
+                            self.urandom_state();
+                        }
                         SystemFunction::Random if args.is_empty() => {
                             self.dist_seed();
                         }
@@ -1559,6 +1567,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(expr.clone());
         }
         Ok(match expr {
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Process(op)),
+                args,
+                ..
+            } => self.process_call(*op, args)?,
             Expr::Call {
                 callee: sv::ir::Callee::Checked { width, signed },
                 args,
@@ -2808,6 +2821,44 @@ impl<'p, 'a> Ff<'p, 'a> {
             parts => self.assign_concat(parts, &seed_result)?,
         }
         Ok(Expr::Ident(ret_name))
+    }
+
+    /// Heap helpers emit several registers before their call. Materialize
+    /// operands first so an operand's synchronous host request cannot leave
+    /// those registers live across a kernel return. Preserve formal sizing and
+    /// handle roots, including an object receiver captured before side effects.
+    fn heap_operand(
+        &mut self,
+        expr: &sv::ir::Expr,
+        context: Option<(usize, bool)>,
+        kind: Option<celox_design::ValueKind>,
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let expr = self.hoist(expr)?;
+        let value_kind = kind.unwrap_or_else(|| {
+            if let sv::ir::Expr::Ident(name) = &expr {
+                self.m
+                    .id(name)
+                    .and_then(|id| self.m.variables.get(&id))
+                    .map(|v| v.value_kind)
+                    .unwrap_or(celox_design::ValueKind::Bits)
+            } else if self.m.expr_is_string(&expr) {
+                celox_design::ValueKind::StrRef
+            } else {
+                celox_design::ValueKind::Bits
+            }
+        });
+        let float = self.m.expr_float_precision(&expr);
+        let signed = context.map_or_else(|| self.expr_signed(&expr), |(_, signed)| signed);
+        let value = self.eval(&expr, context)?;
+        let register = self.b.register(&value);
+        let width = register.width();
+        let four_state = matches!(register, celox_sir::RegisterType::Logic { .. });
+        let (id, name) = self.m.temp("heap_operand", width, signed, four_state);
+        let variable = self.m.variables.get_mut(&id).unwrap();
+        variable.value_kind = value_kind;
+        variable.float = float;
+        self.store(id, SIROffset::Static(0), width, value);
+        Ok(sv::ir::Expr::Ident(name))
     }
 
     /// The value of `expr` now, in a temporary of its type.
@@ -5860,6 +5911,7 @@ impl Ff<'_, '_> {
         body: &[sv::ir::Stmt],
         slots: ProcessSlots<SourceVarId>,
         process: usize,
+        final_process: bool,
     ) -> Result<KernelUnit, sv::AnalyzerError> {
         self.process = process;
         let starts_with_event_wait = slots.requires_timed_simulation;
@@ -5960,12 +6012,67 @@ impl Ff<'_, '_> {
         }
         self.observe_blocking_assignments =
             has_activation_event(self.m, body, &mut HashSet::default());
+        fn has_process(
+            m: &ProcModule<'_>,
+            body: &[sv::ir::Stmt],
+            visited: &mut HashSet<String>,
+            defaults: &mut HashSet<(String, usize)>,
+        ) -> bool {
+            let mut calls = Vec::new();
+            for stmt in body {
+                stmt.walk(&mut |stmt| {
+                    stmt_calls(stmt, &mut calls);
+                    match stmt {
+                        sv::ir::Stmt::Wait(condition) => collect_calls(condition, &mut calls),
+                        sv::ir::Stmt::WaitEvent(items) => {
+                            for item in items {
+                                collect_calls(&item.expr, &mut calls);
+                            }
+                        }
+                        sv::ir::Stmt::Delay { amount, .. } => collect_calls(amount, &mut calls),
+                        _ => {}
+                    }
+                });
+            }
+            while let Some((callee, args)) = calls.pop() {
+                match callee {
+                    sv::ir::Callee::System(sv::ir::SystemFunction::Process(_)) => return true,
+                    sv::ir::Callee::Subroutine(name) => {
+                        let Some(sub) = m.subroutine(&name) else {
+                            continue;
+                        };
+                        for (position, param) in sub.params.iter().enumerate() {
+                            if matches!(args.get(position), None | Some(None))
+                                && let Some(default) = &param.default
+                                && defaults.insert((name.clone(), position))
+                            {
+                                collect_calls(default, &mut calls);
+                            }
+                        }
+                        if visited.insert(name) && has_process(m, &sub.body, visited, defaults) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            false
+        }
+        self.process_control = has_process(
+            self.m,
+            body,
+            &mut HashSet::default(),
+            &mut HashSet::default(),
+        );
         self.forked = has_fork(
             self.m,
             body,
             &mut HashSet::default(),
             &mut HashSet::default(),
         );
+        // Finals share one process RNG even when a particular body only
+        // draws random values and never exposes process::self().
+        self.forked |= self.process_control || final_process;
         // Forks reached through inlined tasks also need per-activation random state.
         if self.forked {
             self.urandom_state();
@@ -7153,7 +7260,11 @@ impl Ff<'_, '_> {
         // Keep the kernel available while evaluating the predicate: functions
         // may perform synchronous process control such as disable fork.
         let direct = std::mem::replace(&mut self.direct, true);
+        let predicate = std::mem::replace(&mut self.process_predicate, true);
         let result = (|| {
+            if self.process_control {
+                self.process_call(celox_design::ProcessOp::Observe, &[])?;
+            }
             let (holds, _) = self.eval_truth(condition)?;
             let join = self.b.new_block();
             let wait = self.b.new_block();
@@ -7163,8 +7274,18 @@ impl Ff<'_, '_> {
                 false_block: (wait, Vec::new()),
             });
             self.b.switch_to_block(wait);
-            self.with_kernel(|kernel| kernel.suspend_wait(site))
-                .map_err(kernel_error)?;
+            let process_control = self.process_control;
+            self.with_kernel(|kernel| {
+                if process_control {
+                    kernel.suspend_level_wait(site)
+                } else {
+                    kernel.suspend_wait(site)
+                }
+            })
+            .map_err(kernel_error)?;
+            if self.process_control {
+                self.process_call(celox_design::ProcessOp::Observe, &[])?;
+            }
             let (holds, _) = self.eval_truth(condition)?;
             self.with_kernel(|kernel| kernel.wake_if(holds));
             self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
@@ -7172,6 +7293,7 @@ impl Ff<'_, '_> {
             Ok(())
         })();
         self.direct = direct;
+        self.process_predicate = predicate;
         result
     }
 

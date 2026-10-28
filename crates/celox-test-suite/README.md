@@ -255,9 +255,15 @@ checks the design's output with `expect_output`. Design delays count time
 units with the injected 1 ns / 1 ps scale. Explicit `timescale`, `timeunit`
 and `timeprecision` declarations, and `resetall`, are rejected consistently by
 the Celox and external adapters, with each simulator's predefined macros
-applied. A timed design has no `final` procedures: they would run in an
-arbitrary order relative to the checks after `run_to_finish`. `tick` cannot be
-mixed with timed operations.
+applied. Timed designs may contain `final` procedures. External adapters reject
+signal reads after `run_to_finish` unless every design final only prints
+literals or simulation time with `$display`/`$write` (empty blocks are also safe).
+This conservative restriction covers indirect writes through functions and
+hierarchy: final procedures execute in an unspecified order (IEEE 1800-2023
+9.2.3). Values captured by the script before finish remain safe to check.
+An `expect_output` after `run_to_finish` includes the output of all final
+procedures; external adapters check it after the simulator exits. `tick`
+cannot be mixed with timed operations.
 
 A timed script begins with `run_until` or `run_to_finish`; the parser rejects
 any other first statement. Time zero starts the design's `initial` and

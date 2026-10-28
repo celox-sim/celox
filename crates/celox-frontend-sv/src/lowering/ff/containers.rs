@@ -11,13 +11,80 @@ impl Ff<'_, '_> {
         args: &[Option<sv::ir::Expr>],
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use ContainerOp::*;
-        let args = args
+        let mut args = args
             .iter()
             .map(|arg| {
                 arg.clone()
                     .ok_or_else(|| unsupported("omitted container operand"))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let original_key_width = args
+            .get(1)
+            .and_then(|key| self.m.comparison_width(key, key));
+        if op.reduction().is_none() && args.iter().any(|arg| self.m.calls(arg)) {
+            let value_receiver = matches!(op, New | Literal | Convert | Equal | CaseEqual);
+            if !value_receiver {
+                // Preserve the receiver's location, not an old immutable copy
+                // of its contents: arguments may mutate this same container.
+                if let sv::ir::Expr::Call {
+                    callee: sv::ir::Callee::Object(object),
+                    args: operands,
+                    ..
+                } = &mut args[0]
+                    && matches!(**object, sv::ir::ObjectOp::Load(_))
+                    && let Some(owner) = operands.first_mut().and_then(Option::as_mut)
+                {
+                    *owner = self.heap_operand(
+                        owner,
+                        Some((32, false)),
+                        Some(celox_design::ValueKind::ObjRef),
+                    )?;
+                }
+            }
+            if !value_receiver
+                && self.m.calls(&args[0])
+                && !matches!(&args[0], sv::ir::Expr::Call { callee: sv::ir::Callee::Object(op), .. } if matches!(**op, sv::ir::ObjectOp::Load(_)))
+            {
+                args[0] = self.heap_operand(
+                    &args[0],
+                    Some((32, false)),
+                    Some(celox_design::ValueKind::ObjRef),
+                )?;
+            }
+            let count = args.len();
+            for (index, arg) in args.iter_mut().enumerate() {
+                if !value_receiver && (index == 0 || matches!(op, First | Last | Next | Prev)) {
+                    continue;
+                }
+                let element = op == Literal
+                    || (matches!(op, Set | Insert | PushFront | PushBack) && index + 1 == count);
+                let (context, kind) = if element {
+                    (
+                        Some((layout.width as usize, layout.signed)),
+                        layout.handle.map(|h| match h {
+                            HandleProperty::String => celox_design::ValueKind::StrRef,
+                            HandleProperty::Object => celox_design::ValueKind::ObjRef,
+                        }),
+                    )
+                } else if op == New && index == 0 {
+                    (Some((64, true)), None)
+                } else if value_receiver {
+                    (Some((32, false)), Some(celox_design::ValueKind::ObjRef))
+                } else {
+                    match layout.kind {
+                        ContainerKind::Associative { string: true, .. } => {
+                            (Some((32, false)), Some(celox_design::ValueKind::StrRef))
+                        }
+                        ContainerKind::Associative {
+                            key_width, signed, ..
+                        } => (Some((key_width as usize, signed)), None),
+                        _ if matches!(op, Get | Set) => (Some((64, true)), None),
+                        _ => (Some((32, true)), None),
+                    }
+                };
+                *arg = self.heap_operand(arg, context, kind)?;
+            }
+        }
         let (kind, capacity, signed_key, string_key) = match layout.kind {
             ContainerKind::Dynamic => (0, 0, false, false),
             ContainerKind::Queue { capacity } => (1, capacity, false, false),
@@ -238,10 +305,7 @@ impl Ff<'_, '_> {
                             key_width,
                             string: false,
                             ..
-                        } => self
-                            .m
-                            .comparison_width(&args[1], &args[1])
-                            .is_some_and(|width| width < key_width as usize),
+                        } => original_key_width.is_some_and(|width| width < key_width as usize),
                         _ => false,
                     };
                     if narrow {

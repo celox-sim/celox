@@ -1947,3 +1947,47 @@ fn iff_host_pulses_use_the_waiting_automatic_gate() {
     check!(build().build_cranelift());
     check!(build().build_wasm());
 }
+
+timed_cases! {
+ fn process_identity_and_status = "fork_control::process_identity_and_status";
+ fn process_finished_parent_kills_descendants = "fork_control::process_finished_parent_kills_descendants";
+}
+
+timed_cases! {
+ fn process_suspend_and_resume_waits = "fork_control::process_suspend_and_resume_waits";
+ fn process_self_suspend_and_await = "fork_control::process_self_suspend_and_await";
+ fn process_status_wait_and_disable = "fork_control::process_status_wait_and_disable";
+ fn process_random_state_and_handles = "fork_control::process_random_state_and_handles";
+}
+
+timed_cases! {
+ fn process_package_constants_keep_their_scope = "fork_control::process_package_constants_keep_their_scope";
+ fn process_self_kill_finishes_program = "fork_control::process_self_kill_finishes_program";
+ fn process_external_kill_finishes_program = "fork_control::process_external_kill_finishes_program";
+}
+
+timed_cases! {
+ fn final_procedure_output_survives_finish = "timing::final_procedure_output_survives_finish";
+ fn final_procedure_output_survives_program_completion = "timing::final_procedure_output_survives_program_completion";
+}
+
+timed_cases! {
+ fn process_program_exit_wakes_sibling_observers = "fork_control::process_program_exit_wakes_sibling_observers";
+}
+
+timed_cases! {
+ fn process_mutual_status_waits_advance_to_cancellation = "fork_control::process_mutual_status_waits_advance_to_cancellation";
+ fn process_final_kill_preserves_cleanup = "fork_control::process_final_kill_preserves_cleanup";
+}
+
+timed_cases! {
+ fn process_package_qualified_types_keep_their_scope = "fork_control::process_package_qualified_types_keep_their_scope";
+ fn process_final_procedures_share_identity_and_rng = "fork_control::process_final_procedures_share_identity_and_rng";
+ fn process_ancestor_kill_preserves_caller_rng = "fork_control::process_ancestor_kill_preserves_caller_rng";
+}
+
+timed_cases! {
+ fn process_nested_calls_preserve_level_wait_resume = "fork_control::process_nested_calls_preserve_level_wait_resume";
+ fn process_resume_resamples_automatic_event_expression = "fork_control::process_resume_resamples_automatic_event_expression";
+ fn process_resume_after_program_exit_is_noop = "fork_control::process_resume_after_program_exit_is_noop";
+}

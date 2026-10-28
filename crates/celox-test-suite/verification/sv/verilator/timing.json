@@ -1748,6 +1748,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "the design did not finish after run_to_finish",
+      "expectation": "Simulation",
+      "name": "timing::final_procedure_output_survives_program_completion",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

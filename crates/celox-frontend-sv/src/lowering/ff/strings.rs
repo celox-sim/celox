@@ -17,13 +17,27 @@ impl Ff<'_, '_> {
         op: StringOp,
         args: &[Option<sv::ir::Expr>],
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
-        let args = args
+        let mut args = args
             .iter()
             .map(|arg| {
                 arg.clone()
                     .ok_or_else(|| unsupported(format!("omitted argument of `{op}`")))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if args.iter().any(|arg| self.m.calls(arg)) {
+            for (index, arg) in args.iter_mut().enumerate() {
+                let context = match op {
+                    StringOp::FromBits | StringOp::Concat => None,
+                    StringOp::Itoa(_) => Some((32, true)),
+                    _ if index == 0 || matches!(op, StringOp::Compare | StringOp::ICompare) => {
+                        Some((32, false))
+                    }
+                    StringOp::Putc if index == 2 => Some((64, false)),
+                    _ => Some((64, true)),
+                };
+                *arg = self.heap_operand(arg, context, None)?;
+            }
+        }
         let result = match op {
             StringOp::FromBits => {
                 let buffer = self.heap_call(ops::NEW, &[]);
