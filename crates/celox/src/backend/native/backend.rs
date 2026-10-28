@@ -1799,6 +1799,7 @@ fn format_native_codegen_trace(
     comb: &CompiledNativeFunction,
     ff_codes: &HashMap<usize, CompiledNativeFunction>,
     tasks: &[NativeCompileTask<'_>],
+    processes: &[CompiledNativeFunction],
 ) -> NativeCodegenTrace {
     let mut optimized_sir = String::from("=== Optimized SIR used by native emission ===\n");
     let mut mir = String::from("=== MIR used by native emission ===\n");
@@ -1843,6 +1844,20 @@ fn format_native_codegen_trace(
                 .trace
                 .as_ref()
                 .expect("explicit native trace must capture every FF function"),
+        );
+    }
+    for (index, process) in processes.iter().enumerate() {
+        append_native_function_trace(
+            &mut optimized_sir,
+            &mut mir,
+            &mut reactive_graph,
+            &mut state_layout,
+            &format!("process[{index}]"),
+            &[],
+            process
+                .trace
+                .as_ref()
+                .expect("explicit native trace must capture every process"),
         );
     }
     NativeCodegenTrace {
@@ -2712,7 +2727,7 @@ fn compile_program_with_outlining_threshold(
             NativeMergeKind::Complete,
             None,
             &process_options,
-            false,
+            capture_trace,
             &options.optimize_options.diagnostics,
             cancel,
         )
@@ -2743,8 +2758,9 @@ fn compile_program_with_outlining_threshold(
             }
         }
     }
-    let codegen_trace = capture_trace
-        .then(|| format_native_codegen_trace(&comb_jit, &compiled_ff_codes, &compile_tasks));
+    let codegen_trace = capture_trace.then(|| {
+        format_native_codegen_trace(&comb_jit, &compiled_ff_codes, &compile_tasks, &process_jits)
+    });
     let semantic_memory_size = layout
         .merged_total_size
         .checked_add(layout.triggered_bits_total_size)

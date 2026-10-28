@@ -275,3 +275,35 @@ fn many_clocks_compile_the_comb_program_once() {
     assert_eq!(functions(2), (1, 2));
     assert_eq!(functions(12), (1, 0));
 }
+
+#[test]
+fn trace_contains_native_testbench_processes() {
+    let code = r#"
+        #[test(test_top)]
+        module Top {
+            var q: logic<8>;
+            initial {
+                q = 1;
+                $assert(q == 1);
+            }
+        }
+    "#;
+    let result = SimulatorBuilder::new(code, "Top")
+        .trace_mir()
+        .build_with_trace();
+    result.res.expect("native testbench build should succeed");
+    assert!(
+        result
+            .trace
+            .native_optimized_sir
+            .unwrap()
+            .contains("=== Native function process[0] ===")
+    );
+    assert!(
+        result
+            .trace
+            .mir
+            .unwrap()
+            .contains("=== Native function process[0] ===")
+    );
+}
