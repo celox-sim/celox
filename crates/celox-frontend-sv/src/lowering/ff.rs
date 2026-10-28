@@ -19,7 +19,8 @@ mod strings;
 use super::procedural::*;
 use super::*;
 use celox_design::{
-    CounterKind, DeferredSite, NbaPosition, NbaSite, SPARSE_WORKING_REGION, WaitSite,
+    CounterKind, DeferredSite, EVENT_COUNTER_WIDTH, GateCounters, NbaPosition, NbaSite,
+    SPARSE_WORKING_REGION, WaitGate, WaitSite,
 };
 use celox_frontend_core::process::{NBA_POSITION_WIDTH, ProcessKernelBuilder, ProcessKernelError};
 use celox_sir::{RegisterId, RegisterType};
@@ -969,6 +970,27 @@ impl<'p, 'a> Ff<'p, 'a> {
                 stable(*id)
             }
         };
+        if !self.m.four_state {
+            // Node IDs are topological. Cache exact comparisons before mapping
+            // their parents, reusing the existing graph/loop remapper.
+            for (index, expression) in arena.iter().enumerate() {
+                if let SLTNode::Binary(left, op @ (BinaryOp::EqCase | BinaryOp::NeCase), right) =
+                    expression
+                {
+                    let left = arena
+                        .get(*left)
+                        .map_addr(*left, arena, &mut mapped_arena, &mut cache, &map)
+                        .map_err(slt_error)?;
+                    let right = arena
+                        .get(*right)
+                        .map_addr(*right, arena, &mut mapped_arena, &mut cache, &map)
+                        .map_err(slt_error)?;
+                    let equal = super::case_equality::compare(&mut mapped_arena, left, *op, right)
+                        .map_err(slt_error)?;
+                    cache.insert(NodeId(index), equal);
+                }
+            }
+        }
         let mapped = arena
             .get(node)
             .map_addr(node, arena, &mut mapped_arena, &mut cache, &map)
@@ -5898,9 +5920,9 @@ impl Ff<'_, '_> {
             for stmt in body {
                 stmt.walk(&mut |stmt| match stmt {
                     sv::ir::Stmt::WaitEvent(items) => {
-                        found |= items
-                            .iter()
-                            .any(|item| !matches!(&item.expr, sv::ir::Expr::Ident(_)));
+                        found |= items.iter().any(|item| {
+                            item.iff.is_some() || !matches!(&item.expr, sv::ir::Expr::Ident(_))
+                        });
                     }
                     sv::ir::Stmt::Call { name, .. } => calls.push(name.clone()),
                     _ => {}
@@ -5944,11 +5966,6 @@ impl Ff<'_, '_> {
             self.urandom_state();
         }
         let mut kernel = ProcessKernelBuilder::new(slots);
-        if self.forked && self.has_deferred_assertions(body, &mut HashSet::default()) {
-            return Err(unsupported(
-                "deferred assertions in a process with fork-join",
-            ));
-        }
         if let Some(site) = self.deferred_flush_site(body) {
             kernel.flush_deferred_at(site);
         }
@@ -5960,12 +5977,26 @@ impl Ff<'_, '_> {
                 "activation-local event expression without assignment observation boundaries",
             ));
         }
-        if self.event_probes.iter().any(|probe| {
+        let implicit_probe_write = self.event_probes.iter().any(|probe| {
             probe
                 .inputs
                 .iter()
                 .any(|input| self.unobserved_function_writes.contains(input))
-        }) {
+        });
+        let implicit_gate_write = self.wait_sites.iter().any(|site| {
+            site.terms
+                .iter()
+                .zip(&site.gates)
+                .any(|(&(signal, _), gate)| {
+                    gate.is_some_and(|gate| {
+                        gate.at_write
+                            && gate.counters.is_none()
+                            && (self.unobserved_function_writes.contains(&signal)
+                                || self.unobserved_function_writes.contains(&gate.signal))
+                    })
+                })
+        });
+        if implicit_probe_write || implicit_gate_write {
             return Err(unsupported(
                 "implicit write to an activation-local event operand without an observation boundary",
             ));
@@ -6574,9 +6605,10 @@ impl Ff<'_, '_> {
     /// control samples as it begins.
     fn wait_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
         let mut terms = Vec::new();
+        let mut gates = Vec::new();
         let mut samples = Vec::new();
-        self.event_terms(items, &mut terms, &mut samples)?;
-        self.suspend_on(terms, samples)
+        self.event_terms(items, &mut terms, &mut gates, &mut samples)?;
+        self.suspend_on(terms, gates, samples)
     }
 
     /// `@*` (IEEE 1800-2023 9.4.2.2): wait for a change of a variable that
@@ -6619,19 +6651,22 @@ impl Ff<'_, '_> {
             .map(|name| sv::ir::EventItem {
                 edge: sv::ir::EventEdge::Any,
                 expr: sv::ir::Expr::Ident(name),
+                iff: None,
             })
             .collect();
+        let mut gates = vec![None; terms.len()];
         let mut samples = Vec::new();
-        self.event_terms(&locals, &mut terms, &mut samples)?;
-        self.suspend_on(terms, samples)
+        self.event_terms(&locals, &mut terms, &mut gates, &mut samples)?;
+        self.suspend_on(terms, gates, samples)
     }
 
-    /// The counter terms of `items` and the samples the process takes of
-    /// their expressions before it suspends.
+    /// The counter terms of `items`, their `iff` gates, and the samples the
+    /// process takes of their expressions before it suspends.
     fn event_terms(
         &mut self,
         items: &[sv::ir::EventItem],
         terms: &mut Vec<(SourceVarId, CounterKind)>,
+        gates: &mut Vec<Option<WaitGate<SourceVarId>>>,
         samples: &mut Vec<(String, sv::ir::Expr)>,
     ) -> Result<(), sv::AnalyzerError> {
         for item in items {
@@ -6647,12 +6682,14 @@ impl Ff<'_, '_> {
             {
                 return Err(sv::AnalyzerError::RealEdgeEvent { edge });
             }
+            let mut variable = false;
             let id = match &expr {
                 sv::ir::Expr::Ident(name) => match self.m.id(name) {
                     Some(id)
                         if !self.m.is_hidden(id)
                             || (self.forked && self.frame_locals.contains(&id)) =>
                     {
+                        variable = self.m.var(id).array_dims.is_empty();
                         id
                     }
                     Some(_) => self.event_expression(&expr, samples)?,
@@ -6662,29 +6699,51 @@ impl Ff<'_, '_> {
                 },
                 _ => self.event_expression(&expr, samples)?,
             };
-            match item.edge {
-                sv::ir::EventEdge::Any => terms.push((id, CounterKind::Changes)),
-                sv::ir::EventEdge::Pos => terms.push((id, CounterKind::Rises)),
-                sv::ir::EventEdge::Neg => terms.push((id, CounterKind::Falls)),
-                sv::ir::EventEdge::Both => {
-                    terms.push((id, CounterKind::Rises));
-                    terms.push((id, CounterKind::Falls));
-                }
+            let gate = match &item.iff {
+                Some(iff) => Some(self.event_gate(iff, samples)?),
+                None => None,
+            };
+            let kinds: &[CounterKind] = match item.edge {
+                sv::ir::EventEdge::Any => &[CounterKind::Changes],
+                sv::ir::EventEdge::Pos => &[CounterKind::Rises],
+                sv::ir::EventEdge::Neg => &[CounterKind::Falls],
+                sv::ir::EventEdge::Both => &[CounterKind::Rises, CounterKind::Falls],
+            };
+            for &kind in kinds {
+                terms.push((id, kind));
+                gates.push(gate.map(|(signal, gate_variable)| {
+                    WaitGate {
+                        signal,
+                        at_write: variable && gate_variable,
+                        // Shared module storage has counters; activation-local
+                        // operands are read at each process assignment boundary.
+                        counters: (variable
+                            && gate_variable
+                            && !self.m.is_hidden(id)
+                            && !self.m.is_hidden(signal))
+                        .then(|| self.gate_counters()),
+                    }
+                }));
             }
         }
         Ok(())
     }
 
-    /// Suspend until one of `terms` counts, after taking `samples`.
+    /// Suspend until one of `terms` counts while its gate in `gates` holds,
+    /// after taking `samples`.
     fn suspend_on(
         &mut self,
         terms: Vec<(SourceVarId, CounterKind)>,
+        mut gates: Vec<Option<WaitGate<SourceVarId>>>,
         samples: Vec<(String, sv::ir::Expr)>,
     ) -> Result<(), sv::AnalyzerError> {
         for (target, value) in samples {
             self.assign(&sv::ir::LValue::Ident(target), &value)?;
         }
-        let site = self.wait_site(terms);
+        if gates.iter().all(Option::is_none) {
+            gates.clear();
+        }
+        let site = self.wait_site(terms, gates);
         self.with_kernel(|kernel| -> Result<(), ProcessKernelError> {
             kernel.suspend_wait(site)?;
             let woken = kernel.builder().alloc_bit(1, false);
@@ -6695,6 +6754,64 @@ impl Ff<'_, '_> {
             Ok(())
         })
         .map_err(kernel_error)
+    }
+
+    /// The signal whose least significant bit is the `iff` condition `iff`
+    /// of an event item (IEEE 1800-2023 9.4.2.3): a one-bit variable itself,
+    /// or the variable `$event[k]` of the condition's truth value. Its
+    /// operands are not terms of the wait; the runtime reads it when it
+    /// detects an occurrence.
+    fn event_gate(
+        &mut self,
+        iff: &sv::ir::Expr,
+        samples: &mut Vec<(String, sv::ir::Expr)>,
+    ) -> Result<(SourceVarId, bool), sv::AnalyzerError> {
+        let iff = self.propagate(iff);
+        if let sv::ir::Expr::Ident(name) = &iff
+            && let Some(id) = self.m.id(name)
+            && (!self.m.is_hidden(id) || self.forked && self.frame_locals.contains(&id))
+            && self.m.var(id).width == 1
+            && self.m.var(id).float.is_none()
+            && self.m.var(id).array_dims.is_empty()
+        {
+            return Ok((id, true));
+        }
+        let not = |expr| sv::ir::Expr::Unary {
+            op: sv::ir::UnaryOp::LogicNot,
+            expr: Box::new(expr),
+        };
+        Ok((self.event_expression(&not(not(iff)), samples)?, false))
+    }
+
+    /// The counters of a new gated term ([`GateCounters`]): `$event[k]`
+    /// counts the occurrences while the gate holds, `$event[k].all` all
+    /// of them.
+    fn gate_counters(&mut self) -> GateCounters<SourceVarId> {
+        let index = self.m.next_event_index();
+        let counter = SvVariable {
+            float: None,
+            path: Vec::new(),
+            width: EVENT_COUNTER_WIDTH,
+            signed: false,
+            is_4state: false,
+            packed_ranges: vec![(EVENT_COUNTER_WIDTH as i128 - 1, 0)],
+            array_dims: Vec::new(),
+            unpacked_ranges: Vec::new(),
+            domain_kind: DomainKind::Other,
+            kind: VariableKind::Variable,
+            type_kind: PortTypeKind::Bit,
+            source: None,
+            hidden: true,
+            force_control: None,
+            value_kind: Default::default(),
+            sampled_from: None,
+            history_of: None,
+        };
+        let (gated, _) = self.m.event_variable(index, None, counter.clone());
+        let (all, _) = self
+            .m
+            .event_variable(index, Some("all".to_string()), counter);
+        GateCounters { gated, all }
     }
 
     /// The variable `$event[k]` of a new event expression `expr`, with its
@@ -7026,6 +7143,7 @@ impl Ff<'_, '_> {
             ids.into_iter()
                 .map(|id| (id, CounterKind::Changes))
                 .collect(),
+            Vec::new(),
         );
         // Keep the kernel available while evaluating the predicate: functions
         // may perform synchronous process control such as disable fork.
@@ -7054,11 +7172,16 @@ impl Ff<'_, '_> {
 
     /// Declare a wait site of the process with the given terms and return
     /// its local index.
-    fn wait_site(&mut self, terms: Vec<(SourceVarId, CounterKind)>) -> u32 {
+    fn wait_site(
+        &mut self,
+        terms: Vec<(SourceVarId, CounterKind)>,
+        gates: Vec<Option<WaitGate<SourceVarId>>>,
+    ) -> u32 {
         let index = self.wait_sites.len() as u32;
         self.wait_sites.push(WaitSite {
             process: self.process,
             terms,
+            gates,
         });
         index
     }
@@ -7243,6 +7366,20 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                 }
                 // A string operation is a value of its operands.
                 sv::ir::Callee::String(_) => continue,
+                // Container contents are immutable: reading an element is a
+                // value of the container handle and index, unlike a class
+                // property that can change without its handle changing.
+                sv::ir::Callee::Object(op)
+                    if matches!(
+                        *op,
+                        sv::ir::ObjectOp::Container {
+                            op: sv::ir::ContainerOp::Get,
+                            ..
+                        }
+                    ) =>
+                {
+                    continue;
+                }
                 // A property can change without the handle changing.
                 sv::ir::Callee::Object(op) => return Some(op.to_string()),
                 sv::ir::Callee::Checked { .. } => return Some("tagged union access".into()),

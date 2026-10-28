@@ -12,7 +12,7 @@ use std::rc::Rc;
 use super::*;
 use crate::system_functions::{HandleProperty, ObjectField, ObjectOp};
 
-mod constraints;
+pub(super) mod constraints;
 pub(super) mod specializations;
 
 /// Bit width of a handle, see `celox_design::HANDLE_WIDTH`.
@@ -733,8 +733,17 @@ pub(super) fn class(
         )?
         .ok_or_else(|| unsupported("class property type"))?;
         for variable in &property.declaration.variables {
-            if !variable.dimensions.is_empty() {
+            let ty = containers::with_dimensions(
+                ty.clone(),
+                &variable.dimensions,
+                tree,
+                &PackedDimensions::new(HashMap::default(), env, aliases),
+            )?;
+            if !ty.unpacked_ranges.is_empty() {
                 return Err(unsupported("class property with unpacked dimensions"));
+            }
+            if ty.container.is_some() && property.declaration.constant {
+                return Err(unsupported("const dynamic container class property"));
             }
             let property_name = instances::normalize_identifier(&variable.name.spelling);
             if property.qualifiers.is_static {
@@ -778,7 +787,10 @@ pub(super) fn class(
     for method in &declaration.methods {
         let subroutine = native.subroutine(method.subroutine);
         let method_name = instances::normalize_identifier(&subroutine.name.spelling);
-        if matches!(method_name.as_str(), "randomize" | "srandom" | "rand_mode") {
+        if matches!(
+            method_name.as_str(),
+            "randomize" | "srandom" | "rand_mode" | "constraint_mode"
+        ) {
             return Err(unsupported(
                 "overriding built-in class randomization methods",
             ));
@@ -868,7 +880,7 @@ pub(super) fn class(
         .unwrap_or_default();
     for block in &declaration.constraints {
         let block_name = block.name.spelling.clone();
-        constraints.retain(|(name, _)| *name != block_name);
+
         let expressions = block
             .expressions
             .as_ref()
@@ -879,7 +891,12 @@ pub(super) fn class(
                     .map(|&id| constraints::bind(id, tree, &properties, env))
                     .collect()
             });
-        constraints.push((block_name, expressions));
+        // Constraint indices survive overrides, including calls via base handles.
+        if let Some((_, inherited)) = constraints.iter_mut().find(|(name, _)| *name == block_name) {
+            *inherited = expressions;
+        } else {
+            constraints.push((block_name, expressions));
+        }
     }
     let class = Rc::new(Class {
         name: name.to_owned(),
@@ -1114,10 +1131,8 @@ fn field(
     env: &HashMap<String, i128>,
     offset: u32,
 ) -> Converted<ObjectField> {
-    if ty.container.is_some() {
-        return Err(unsupported("dynamic container class property"));
-    }
     let (width, signed, handle) = match ty.kind() {
+        _ if ty.container.is_some() => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::String => (HANDLE_WIDTH, false, Some(HandleProperty::String)),
         TypeKind::Object => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::Bit => {

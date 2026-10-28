@@ -97,89 +97,107 @@ fn float_operation(feature: &'static str, detail: String, token: &TokenRange) ->
 
 impl Checker<'_> {
     fn expression(&mut self, expression: &Expression) -> Result<(), ParserError> {
-        let comptime = expression.comptime();
-        // The analyzer folds constant expressions, so no operation remains.
-        if comptime.is_const {
-            return Ok(());
+        enum Pending<'a> {
+            Expression(&'a Expression),
+            Integral(&'a Expression, &'static str),
         }
-        match expression {
-            Expression::Term(factor) => self.factor(factor),
-            Expression::Unary(op, inner, comptime) => {
-                if float_kind(crate::float::type_of(inner)).is_some()
-                    && !matches!(op, Op::Add | Op::Sub)
-                {
-                    return Err(float_operation(
-                        "floating-point operation",
-                        format!("operator `{op}` is not supported on floating-point values"),
-                        &comptime.token,
-                    ));
+        let mut pending = vec![Pending::Expression(expression)];
+        while let Some(item) = pending.pop() {
+            let expression = match item {
+                Pending::Expression(expression) => expression,
+                Pending::Integral(expression, role) => {
+                    self.integral(expression, role)?;
+                    continue;
                 }
-                self.expression(inner)
+            };
+            let comptime = expression.comptime();
+            // The analyzer folds constant expressions, so no operation remains.
+            if comptime.is_const {
+                continue;
             }
-            Expression::Binary(left, op, right, comptime) => {
-                if *op == Op::As {
-                    self.conversion(&comptime.r#type, left)?;
-                    return self.expression(left);
+            match expression {
+                Expression::Term(factor) => self.factor(factor)?,
+                Expression::Unary(op, inner, comptime) => {
+                    if float_kind(crate::float::type_of(inner)).is_some()
+                        && !matches!(op, Op::Add | Op::Sub)
+                    {
+                        return Err(float_operation(
+                            "floating-point operation",
+                            format!("operator `{op}` is not supported on floating-point values"),
+                            &comptime.token,
+                        ));
+                    }
+                    pending.push(Pending::Expression(inner));
                 }
-                if (float_kind(crate::float::type_of(left)).is_some()
-                    || float_kind(crate::float::type_of(right)).is_some())
-                    && crate::float::binary(*op).is_none()
-                {
-                    return Err(float_operation(
-                        "floating-point operation",
-                        format!("operator `{op}` is not supported on floating-point values"),
-                        &comptime.token,
-                    ));
+                Expression::Binary(left, op, right, comptime) => {
+                    if *op == Op::As {
+                        self.conversion(&comptime.r#type, left)?;
+                        pending.push(Pending::Expression(left));
+                        continue;
+                    }
+                    if (float_kind(crate::float::type_of(left)).is_some()
+                        || float_kind(crate::float::type_of(right)).is_some())
+                        && crate::float::binary(*op).is_none()
+                    {
+                        return Err(float_operation(
+                            "floating-point operation",
+                            format!("operator `{op}` is not supported on floating-point values"),
+                            &comptime.token,
+                        ));
+                    }
+                    if float_kind(crate::float::type_of(left)).is_some() {
+                        self.conversion(crate::float::type_of(left), right)?;
+                    } else if float_kind(crate::float::type_of(right)).is_some() {
+                        self.conversion(crate::float::type_of(right), left)?;
+                    }
+                    pending.push(Pending::Expression(right));
+                    pending.push(Pending::Expression(left));
                 }
-                if float_kind(crate::float::type_of(left)).is_some() {
-                    self.conversion(crate::float::type_of(left), right)?;
-                } else if float_kind(crate::float::type_of(right)).is_some() {
-                    self.conversion(crate::float::type_of(right), left)?;
+                Expression::Ternary(cond, left, right, _) => {
+                    self.condition(cond)?;
+                    self.conversion(crate::float::type_of(expression), left)?;
+                    self.conversion(crate::float::type_of(expression), right)?;
+                    pending.push(Pending::Expression(right));
+                    pending.push(Pending::Expression(left));
+                    pending.push(Pending::Expression(cond));
                 }
-                self.expression(left)?;
-                self.expression(right)
-            }
-            Expression::Ternary(cond, left, right, _) => {
-                self.condition(cond)?;
-                self.conversion(crate::float::type_of(expression), left)?;
-                self.conversion(crate::float::type_of(expression), right)?;
-                self.expression(cond)?;
-                self.expression(left)?;
-                self.expression(right)
-            }
-            Expression::Concatenation(items, _) => {
-                for (value, repeat) in items {
-                    self.integral(value, "concatenation")?;
-                    self.expression(value)?;
-                    if let Some(repeat) = repeat {
-                        self.integral(repeat, "replication count")?;
-                        self.expression(repeat)?;
+                Expression::Concatenation(items, _) => {
+                    for (value, repeat) in items.iter().rev() {
+                        if let Some(repeat) = repeat {
+                            pending.push(Pending::Expression(repeat));
+                            pending.push(Pending::Integral(repeat, "replication count"));
+                        }
+                        pending.push(Pending::Expression(value));
+                        pending.push(Pending::Integral(value, "concatenation"));
                     }
                 }
-                Ok(())
-            }
-            Expression::ArrayLiteral(items, _) => {
-                for item in items {
-                    match item {
-                        ArrayLiteralItem::Value(value, repeat) => {
-                            self.expression(value)?;
-                            if let Some(repeat) = repeat {
-                                self.integral(repeat, "replication count")?;
-                                self.expression(repeat)?;
+                Expression::ArrayLiteral(items, _) => {
+                    for item in items.iter().rev() {
+                        match item {
+                            ArrayLiteralItem::Value(value, repeat) => {
+                                if let Some(repeat) = repeat {
+                                    pending.push(Pending::Expression(repeat));
+                                    pending.push(Pending::Integral(repeat, "replication count"));
+                                }
+                                pending.push(Pending::Expression(value));
+                            }
+                            ArrayLiteralItem::Defaul(value) => {
+                                pending.push(Pending::Expression(value))
                             }
                         }
-                        ArrayLiteralItem::Defaul(value) => self.expression(value)?,
                     }
                 }
-                Ok(())
-            }
-            Expression::StructConstructor(_, fields, _) => {
-                for (_, value) in fields {
-                    self.expression(value)?;
+                Expression::StructConstructor(_, fields, _) => {
+                    pending.extend(
+                        fields
+                            .iter()
+                            .rev()
+                            .map(|(_, value)| Pending::Expression(value)),
+                    );
                 }
-                Ok(())
             }
         }
+        Ok(())
     }
 
     fn factor(&mut self, factor: &Factor) -> Result<(), ParserError> {
@@ -393,7 +411,41 @@ impl Checker<'_> {
     }
 
     fn statements(&mut self, statements: &[Statement]) -> Result<(), ParserError> {
-        for statement in statements {
+        // Else-if chains and generated decoders can be thousands of nodes
+        // deep. Keep traversal state on the heap, preserving source-order
+        // diagnostics (including each case arm's patterns before its body).
+        enum Pending<'a> {
+            Statements(&'a [Statement]),
+            Patterns(&'a [CasePattern]),
+        }
+        let mut pending = vec![Pending::Statements(statements)];
+        while let Some(item) = pending.pop() {
+            let statements = match item {
+                Pending::Statements(statements) => statements,
+                Pending::Patterns(patterns) => {
+                    for pattern in patterns {
+                        match pattern {
+                            CasePattern::Eq(value) => {
+                                self.integral(value, "case item")?;
+                                self.expression(value)?;
+                            }
+                            CasePattern::Range { lo, hi, .. } => {
+                                self.integral(lo, "case item")?;
+                                self.integral(hi, "case item")?;
+                                self.expression(lo)?;
+                                self.expression(hi)?;
+                            }
+                        }
+                    }
+                    continue;
+                }
+            };
+            let Some((statement, rest)) = statements.split_first() else {
+                continue;
+            };
+            if !rest.is_empty() {
+                pending.push(Pending::Statements(rest));
+            }
             match statement {
                 Statement::Assign(x) => {
                     for destination in &x.dst {
@@ -426,34 +478,21 @@ impl Checker<'_> {
                 Statement::If(x) => {
                     self.condition(&x.cond)?;
                     self.expression(&x.cond)?;
-                    self.statements(&x.true_side)?;
-                    self.statements(&x.false_side)?;
+                    pending.push(Pending::Statements(&x.false_side));
+                    pending.push(Pending::Statements(&x.true_side));
                 }
                 Statement::IfReset(x) => {
-                    self.statements(&x.true_side)?;
-                    self.statements(&x.false_side)?;
+                    pending.push(Pending::Statements(&x.false_side));
+                    pending.push(Pending::Statements(&x.true_side));
                 }
                 Statement::Case(x) => {
                     self.integral(&x.case_target, "case expression")?;
                     self.expression(&x.case_target)?;
-                    for arm in &x.arms {
-                        for pattern in &arm.patterns {
-                            match pattern {
-                                CasePattern::Eq(value) => {
-                                    self.integral(value, "case item")?;
-                                    self.expression(value)?;
-                                }
-                                CasePattern::Range { lo, hi, .. } => {
-                                    self.integral(lo, "case item")?;
-                                    self.integral(hi, "case item")?;
-                                    self.expression(lo)?;
-                                    self.expression(hi)?;
-                                }
-                            }
-                        }
-                        self.statements(&arm.body)?;
+                    pending.push(Pending::Statements(&x.default));
+                    for arm in x.arms.iter().rev() {
+                        pending.push(Pending::Statements(&arm.body));
+                        pending.push(Pending::Patterns(&arm.patterns));
                     }
-                    self.statements(&x.default)?;
                 }
                 Statement::For(x) => {
                     let (ForRange::Forward { start, end, .. }
@@ -465,7 +504,7 @@ impl Checker<'_> {
                             self.expression(value)?;
                         }
                     }
-                    self.statements(&x.body)?;
+                    pending.push(Pending::Statements(&x.body));
                 }
                 Statement::TbMethodCall(x) => {
                     if let Some(destination) = &x.ret {

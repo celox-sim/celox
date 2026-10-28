@@ -27,6 +27,7 @@ pub mod syntax;
 pub mod system_functions;
 pub mod typecheck;
 
+pub use ast::const_functions::RuntimeConstantFunctions;
 pub use ast::interfaces::{
     InterfaceMemberPath, InterfaceMemberPaths, NativeInterfacePlan, plan_interfaces,
     plan_interfaces_with_member_paths,
@@ -48,6 +49,9 @@ pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AnalysisOptions {
     pub allow_mixed_timescales: bool,
+    /// Compatibility mode: return zero for every empty array reduction,
+    /// rather than the product/bitwise-AND identity. Disabled by default.
+    pub legacy_empty_reductions: bool,
     /// Default unit/precision exponents; precision also bounds global resolution.
     pub default_timescale: Option<(i32, i32)>,
 }
@@ -227,7 +231,6 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("streaming concatenation", 447),
     ("loop-generate unroll limit exceeded", 448),
     ("iff-qualified always_ff event", 452),
-    ("iff-qualified event", 1444),
     ("nonblocking assignment inside always_comb", 453),
     ("genvar update operator", 455),
     ("reduction operator in parameter expression", 456),

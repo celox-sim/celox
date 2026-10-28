@@ -18,6 +18,7 @@ impl BodyBuilder<'_, '_, '_> {
         header: &ForeachHeader,
     ) -> Result<Vec<ForeachLoop>, AnalyzerError> {
         let native = self.tree.declarations();
+        let container = containers::native_type(header.array, native, self.tree, &self.dims)?;
         let mut array = header.array;
         let mut unit_member = None;
         let array = loop {
@@ -36,16 +37,11 @@ impl BodyBuilder<'_, '_, '_> {
                 _ => return Err(unsupported("foreach array")),
             }
         };
-        if let Some(container) = self
-            .dims
-            .get(&array)
-            .and_then(|shape| shape.container.clone())
-        {
+        if let Some(container) = container {
             let [Some(variable)] = header.variables.as_slice() else {
                 return Err(unsupported("one-dimensional container foreach index"));
             };
-            let mut array = Expr::Ident(array);
-            self.rename_expr(&mut array);
+            let array = self.native_value(header.array)?;
             let mut index_type = int_type();
             let status = if let ContainerKind::Associative {
                 key_width,

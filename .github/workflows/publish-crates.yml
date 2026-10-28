@@ -3,18 +3,22 @@ name: Publish Rust Crates
 on:
   workflow_dispatch:
     inputs:
+      source_tag:
+        description: Existing source tag to publish using a repaired workflow tag
+        required: false
+        type: string
       release_tag:
         description: Stable release tag to resume from a numbered recovery tag
         required: false
         type: string
 
 concurrency:
-  group: crates-publish-${{ github.ref }}
+  group: crates-publish-${{ inputs.source_tag && format('refs/tags/{0}', inputs.source_tag) || github.ref }}
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
-  SOURCE_TAG: ${{ github.ref_name }}
+  RELEASE_TAG: ${{ inputs.release_tag || inputs.source_tag || github.ref_name }}
+  SOURCE_TAG: ${{ inputs.source_tag || github.ref_name }}
 
 permissions:
   contents: read
@@ -22,14 +26,17 @@ permissions:
 jobs:
   validate:
     name: Validate release
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.source_tag && format('refs/tags/{0}', inputs.source_tag) || github.sha }}
           fetch-depth: 0
 
       - name: Check release tag and version
+        id: source
         shell: bash
         run: |
           if [[ "$GITHUB_REF_TYPE" != "tag" || ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -48,6 +55,9 @@ jobs:
               exit 1
             fi
           fi
+          # Bind all consumers to the exact tag checkout, never the repair workflow.
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$SOURCE_TAG^{commit}")"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           expected_tag="v$(tr -d '\r\n' < VERSION)"
           if [[ "$RELEASE_TAG" != "$expected_tag" ]]; then
             echo "Release tag $RELEASE_TAG does not match VERSION ($expected_tag)." >&2
@@ -76,6 +86,24 @@ jobs:
       - name: Check synchronized release versions
         run: node scripts/check-release-version.mjs
 
+  qualify:
+    name: Verify release branch qualification
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+      - name: Require the successful candidate run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: node scripts/check-release-qualification.mjs
+
   package:
     name: Package and test
     needs: validate
@@ -83,19 +111,29 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+
+      # Publisher fixes come from this workflow revision; product files stay
+      # at the immutable, qualified source SHA checked out above.
+      - name: Check out publisher tooling
+        uses: actions/checkout@v7
+        with:
           ref: ${{ github.sha }}
+          path: work/publisher-tooling
+          sparse-checkout: scripts
+          persist-credentials: false
 
       - uses: ./.github/actions/setup-rust
 
       - name: Validate every public crate package
         run: |
           node scripts/check-package-includes.mjs
-          ./scripts/publish-crates.sh package
+          bash work/publisher-tooling/scripts/publish-crates.sh package
 
       - name: Test the public frontend path
         run: |
           cargo test --locked -p celox-frontend-sdk
-          cargo test --locked -p celox --test frontend_sdk
+          cargo test --locked -p celox --features cranelift --test frontend_sdk
           cargo run --locked -p celox --example frontend_binary
 
       - name: Build and load a frontend-owned N-API adapter
@@ -111,7 +149,7 @@ jobs:
 
   publish:
     name: Publish to crates.io
-    needs: [validate, package]
+    needs: [validate, package, qualify]
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
@@ -120,7 +158,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+
+      # Publisher fixes come from this workflow revision; product files stay
+      # at the immutable, qualified source SHA checked out above.
+      - name: Check out publisher tooling
+        uses: actions/checkout@v7
+        with:
           ref: ${{ github.sha }}
+          path: work/publisher-tooling
+          sparse-checkout: scripts
+          persist-credentials: false
 
       - uses: ./.github/actions/setup-rust
 
@@ -131,4 +179,4 @@ jobs:
       - name: Publish crates in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates_io_auth.outputs.token }}
-        run: ./scripts/publish-crates.sh publish
+        run: bash work/publisher-tooling/scripts/publish-crates.sh publish

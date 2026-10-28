@@ -398,7 +398,7 @@ dependencies = [
 
 [[package]]
 name = "celox"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "bit-set",
  "celox-analysis",
@@ -458,14 +458,14 @@ dependencies = [
 
 [[package]]
 name = "celox-analysis"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "fxhash",
 ]
 
 [[package]]
 name = "celox-backend-arm64"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox-analysis",
  "celox-backend-common",
@@ -482,14 +482,14 @@ dependencies = [
 
 [[package]]
 name = "celox-backend-common"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "fxhash",
 ]
 
 [[package]]
 name = "celox-backend-cranelift"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox-backend-common",
  "celox-design",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "celox-backend-wasm"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox-backend-cranelift",
  "celox-design",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "celox-backend-x86"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox-analysis",
  "celox-backend-common",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "celox-bench"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox",
  "celox-design",
@@ -564,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "celox-bench-sv"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "veryl-analyzer",
  "veryl-emitter",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "celox-design"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "fxhash",
  "num-bigint",
@@ -584,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "celox-example-my-frontend-napi"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox-frontend-sdk",
  "celox-napi",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-core"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox-design",
  "celox-frontend-sdk",
@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-sdk"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "fxhash",
  "num-bigint",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-sv"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox-design",
  "celox-frontend-core",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-veryl"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "bit-set",
  "celox-design",
@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "celox-heap"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "aplite",
  "fxhash",
@@ -672,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "celox-macros"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "fxhash",
  "insta",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "celox-napi"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox",
  "celox-design",
@@ -711,7 +711,7 @@ dependencies = [
 
 [[package]]
 name = "celox-runtime"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "bit-set",
  "celox-design",
@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "celox-sir"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox-analysis",
  "celox-design",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "celox-sir-opt"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "bit-set",
  "celox-analysis",
@@ -759,7 +759,7 @@ dependencies = [
 
 [[package]]
 name = "celox-slt"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox-analysis",
  "celox-design",
@@ -775,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "celox-state-layout"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox-design",
  "fxhash",
@@ -784,7 +784,7 @@ dependencies = [
 
 [[package]]
 name = "celox-sv-analyzer"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox-design",
  "celox-heap",
@@ -797,14 +797,14 @@ dependencies = [
 
 [[package]]
 name = "celox-sv-syntax"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "fxhash",
 ]
 
 [[package]]
 name = "celox-test-suite"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox-sv-analyzer",
  "celox-sv-syntax",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "celox-testbench"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox-design",
  "celox-heap",
@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "celox-ts-gen"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "fxhash",
  "insta",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "celox-vpi"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "blake3",
  "celox",
@@ -871,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "celox-wasm"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox",
  "console_error_panic_hook",
@@ -2580,7 +2580,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "lydite"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "lydite-ir",
  "lydite-solver",
@@ -2591,7 +2591,7 @@ dependencies = [
 
 [[package]]
 name = "lydite-celox"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "celox",
  "celox-design",
@@ -2612,7 +2612,7 @@ dependencies = [
 
 [[package]]
 name = "lydite-ir"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "aplite",
  "serde_json",
@@ -2620,7 +2620,7 @@ dependencies = [
 
 [[package]]
 name = "lydite-solver"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "aplite",
  "lydite-ir",
@@ -2629,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "lydite-syntax"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "lydite-ir",
  "parol",
@@ -2641,7 +2641,7 @@ dependencies = [
 
 [[package]]
 name = "lydite-verify"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "lydite-ir",
  "lydite-solver",

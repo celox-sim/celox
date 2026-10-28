@@ -1,4 +1,38 @@
+use super::*;
+
 sv_backends! {
+    fn constant_function_conditional_types(sim) { @case "operators::constant_function_conditional_types"; }
+    fn constant_function_conditional_unknown_types(sim) { @case "operators::constant_function_conditional_unknown_types"; }
+
+    // Compare cached runtime calls with elaboration-time constants through
+    // Celox's four-state API, including the payload and mask of unknown bits.
+    fn constant_function_inside_unknowns(sim) {
+        @setup { let source = r#"
+    module Top(output logic [4:0] q, output logic [4:0] p);
+      function automatic logic unknown_match();
+        logic x;
+        return x inside {1'b1};
+      endfunction
+      function automatic logic definite_match(); return 1'bx inside {1'b0, 1'b?}; endfunction
+      function automatic logic definite_mismatch(); return 2'bx0 inside {2'b11}; endfunction
+      function automatic logic unknown_range(); return 1'bx inside {[1'b0:1'b1]}; endfunction
+      function automatic logic empty_range(); return 2'b11 inside {[2'bxx:2'b01]}; endfunction
+      localparam logic [4:0] P = {empty_range(), unknown_range(), definite_mismatch(), definite_match(), unknown_match()};
+      assign p = P;
+      assign q = {empty_range(), unknown_range(), definite_mismatch(), definite_match(), unknown_match()};
+    endmodule
+  "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("constant_inside.sv"))], "Top").four_state(true);
+        for name in ["q", "p"] {
+            assert_eq!(sim.get_four_state(sim.signal(name)), (BigUint::from(0x0bu8), BigUint::from(0x09u8)), "{name}");
+        }
+    }
+
+    fn constant_function_case_context(sim) { @case "operators::constant_function_case_context"; }
+    fn constant_function_case_unknowns(sim) { @case "operators::constant_function_case_unknowns"; }
+    fn logical_equivalence(sim) { @case "operators::logical_equivalence"; }
+    fn logical_equivalence_unknown(sim) { @case "operators::logical_equivalence_unknown"; }
+    fn logical_equivalence_evaluates_operands_once(sim) { @case "operators::logical_equivalence_evaluates_operands_once"; }
     fn logical_implication_short_circuit(sim) { @case "operators::logical_implication_short_circuit"; }
     fn logical_implication_unknown(sim) { @case "operators::logical_implication_unknown"; }
     fn logical_implication(sim) { @case "operators::logical_implication"; }
@@ -201,5 +235,20 @@ sv_backends! {
 sv_backends! {
     fn wide_reduction_and_respects_partial_storage_words(sim) {
         @case "operators::wide_reduction_and_respects_partial_storage_words";
+    }
+    fn two_state_case_equality_preserves_unknown_literals(sim) {
+        @case "operators::two_state_case_equality_preserves_unknown_literals";
+    }
+    fn two_state_case_equality_compares_literal_structure(sim) {
+        @case "operators::two_state_case_equality_compares_literal_structure";
+    }
+    fn two_state_case_equality_preserves_conditional_unknowns(sim) {
+        @case "operators::two_state_case_equality_preserves_conditional_unknowns";
+    }
+    fn two_state_case_equality_keeps_call_effects_and_loaded_bytes(sim) {
+        @case "operators::two_state_case_equality_keeps_call_effects_and_loaded_bytes";
+    }
+    fn two_state_case_equality_keeps_unknown_expression_bits(sim) {
+        @case "operators::two_state_case_equality_keeps_unknown_expression_bits";
     }
 }

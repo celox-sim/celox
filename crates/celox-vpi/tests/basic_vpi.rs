@@ -76,6 +76,138 @@ fn systemverilog_parameters_are_typed_read_only_objects_at_o2() {
     clear_runtime();
 }
 
+#[cfg(feature = "systemverilog")]
+#[test]
+fn interface_parameters_keep_instance_paths_and_specialized_values() {
+    let _serial = lock_vpi();
+    let source = r#"
+        package P; parameter PKG = 123; parameter axil_ctrl_bar$not_member = 99; endpackage
+        interface Bus #(parameter ADDR_W = 8, parameter extra$width = 3);
+            localparam HALF = ADDR_W / 2;
+            logic [ADDR_W-1:0] data;
+        endinterface
+        module Top #(parameter authored$width = 7)(output logic q);
+            import P::*;
+            Bus #(.ADDR_W(24)) axil_ctrl_bar();
+            Bus #(.ADDR_W(12)) lanes[1:0]();
+            assign q = 1'b0;
+        endmodule
+    "#;
+    let simulator = Simulator::from_sv_sources(
+        vec![(source, std::path::Path::new("interface_params.sv"))],
+        "Top",
+    )
+    .opt_level(celox::OptLevel::O1)
+    .build()
+    .unwrap();
+    let image = simulator.shared_code().program_image().clone();
+    let image =
+        celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+            .unwrap();
+    let _session = install_runtime(trusted_instance(image)).unwrap();
+    unsafe {
+        for (name, expected) in [
+            (c"Top.axil_ctrl_bar.ADDR_W", 24),
+            (c"Top.axil_ctrl_bar.HALF", 12),
+            (c"Top.lanes[1].ADDR_W", 12),
+            (c"Top.lanes[0].HALF", 6),
+            (c"Top.lanes[0].extra$width", 3),
+            (c"Top.authored$width", 7),
+        ] {
+            let handle = vpi_handle_by_name(name.as_ptr(), ptr::null_mut());
+            assert!(!handle.is_null(), "{name:?}");
+            assert_eq!(vpi_get(VPI_TYPE, handle), VPI_PARAMETER);
+            let mut value = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: 0 },
+            };
+            vpi_get_value(handle, &mut value);
+            assert_eq!(value.value.integer, expected, "{name:?}");
+            value.value.integer = 0;
+            vpi_put_value(handle, &value, ptr::null(), VPI_NO_DELAY);
+            vpi_get_value(handle, &mut value);
+            assert_eq!(value.value.integer, expected, "{name:?} is read-only");
+            vpi_free_object(handle);
+        }
+        // Imported package constants do not acquire module-instance names.
+        assert!(vpi_handle_by_name(c"Top.PKG".as_ptr(), ptr::null_mut()).is_null());
+        assert!(
+            vpi_handle_by_name(c"Top.axil_ctrl_bar$not_member".as_ptr(), ptr::null_mut()).is_null()
+        );
+    }
+    clear_runtime();
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn generate_scopes_with_only_child_instances_are_iterable() {
+    let _serial = lock_vpi();
+    let source = r#"
+        module Leaf #(parameter P = 0)(output logic q);
+            timeunit 1us; timeprecision 1ns;
+            assign q = P;
+        endmodule
+        module Top(output logic [1:0] q);
+            timeunit 1ns; timeprecision 1ps;
+            for (genvar n = 0; n < 2; n++) begin : bank
+                if (1) begin : shell
+                    Leaf #(.P(n)) u(q[n]);
+                end
+            end
+        endmodule
+    "#;
+    let simulator = Simulator::from_sv_sources(
+        vec![(source, std::path::Path::new("generate_scopes.sv"))],
+        "Top",
+    )
+    .opt_level(celox::OptLevel::O1)
+    .build()
+    .unwrap();
+    let image = simulator.shared_code().program_image().clone();
+    let image =
+        celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+            .unwrap();
+    let _session = install_runtime(trusted_instance(image)).unwrap();
+    unsafe {
+        let top = vpi_handle_by_name(c"Top".as_ptr(), ptr::null_mut());
+        let iterator = vpi_iterate(VPI_INTERNAL_SCOPE, top);
+        assert!(!iterator.is_null());
+        let mut names = Vec::new();
+        loop {
+            let bank = vpi_scan(iterator);
+            if bank.is_null() {
+                break;
+            }
+            names.push(
+                CStr::from_ptr(vpi_get_str(VPI_NAME, bank))
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+            );
+            assert_eq!(vpi_get(VPI_TIME_UNIT, bank), -9);
+            let nested = vpi_iterate(VPI_INTERNAL_SCOPE, bank);
+            assert!(!nested.is_null());
+            let shell = vpi_scan(nested);
+            assert!(!shell.is_null());
+            assert_eq!(CStr::from_ptr(vpi_get_str(VPI_NAME, shell)), c"shell");
+            assert_eq!(vpi_get(VPI_TIME_UNIT, shell), -9);
+            assert!(vpi_scan(nested).is_null());
+            let children = vpi_iterate(VPI_MODULE, shell);
+            let leaf = vpi_scan(children);
+            assert!(!leaf.is_null());
+            assert_eq!(CStr::from_ptr(vpi_get_str(VPI_NAME, leaf)), c"u");
+            assert_eq!(vpi_get(VPI_TIME_UNIT, leaf), -6);
+            assert!(vpi_scan(children).is_null());
+            vpi_free_object(leaf);
+            vpi_free_object(shell);
+            vpi_free_object(bank);
+        }
+        assert_eq!(names, ["bank[0]", "bank[1]"]);
+        vpi_free_object(top);
+    }
+    clear_runtime();
+}
+
 unsafe extern "C" fn reschedule_long_callback(data: *mut VpiCbData) -> i32 {
     let count = LONG_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
     let delay = LONG_CALLBACK_DELAY.load(Ordering::SeqCst);
@@ -679,7 +811,7 @@ fn pre_time_callback_writes_settle_before_due_timers() {
 }
 
 #[test]
-fn scaled_real_zero_delay_inertial_write_is_immediate() {
+fn scaled_real_zero_delay_inertial_write_waits_for_the_update_round() {
     let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
     let _session = install_runtime(trusted_instance(
@@ -690,6 +822,11 @@ fn scaled_real_zero_delay_inertial_write_is_immediate() {
     unsafe {
         let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
         let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        let initial = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 1 },
+        };
+        assert_eq!(vpi_put_value(a, &initial, ptr::null(), VPI_NO_DELAY), a);
         let input = VpiValue {
             format: VPI_INT_VAL,
             value: VpiValueData { integer: 41 },
@@ -709,11 +846,70 @@ fn scaled_real_zero_delay_inertial_write_is_immediate() {
             value: VpiValueData { integer: -1 },
         };
         vpi_get_value(y, &mut output);
+        assert_eq!(output.value.integer, 2);
+        assert!(!run_callbacks());
+        vpi_get_value(y, &mut output);
         assert_eq!(output.value.integer, 42);
         assert_eq!(vpi_free_object(a), 1);
         assert_eq!(vpi_free_object(y), 1);
     }
     clear_runtime();
+}
+
+#[test]
+fn inertial_deposits_coalesce_shared_storage_and_own_the_value() {
+    let _serial = lock_vpi();
+    // Multiple handles always share storage. The two-state lowerer also
+    // collapses a connected port; four-state port conversions can retain
+    // separate storage and are not the same deposited object.
+    for (four_state, second_name) in [(false, c"Top.a"), (true, c"Top.a"), (false, c"Top.child.i")]
+    {
+        let simulator = Simulator::builder(DESIGN, "Top")
+            .four_state(four_state)
+            .build()
+            .unwrap();
+        let _session = install_runtime(trusted_instance(
+            simulator.shared_code().program_image().clone(),
+        ))
+        .unwrap();
+        // Safety: handles and value storage remain live for each VPI call.
+        unsafe {
+            let parent = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+            let child = vpi_handle_by_name(second_name.as_ptr(), ptr::null_mut());
+            let output = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+            assert!(!parent.is_null() && !child.is_null() && !output.is_null());
+            let mut value = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: 0 },
+            };
+            assert_eq!(
+                vpi_put_value(parent, &value, ptr::null(), VPI_NO_DELAY),
+                parent
+            );
+            value.value.integer = 41;
+            assert_eq!(
+                vpi_put_value(parent, &value, ptr::null(), VPI_INERTIAL_DELAY),
+                parent
+            );
+            value.value.integer = 73;
+            assert_eq!(
+                vpi_put_value(child, &value, ptr::null(), VPI_INERTIAL_DELAY),
+                child
+            );
+            // The queued update owns its data, not the caller's union or handle.
+            value.value.integer = 99;
+            assert_eq!(vpi_free_object(parent), 1);
+            vpi_get_value(child, &mut value);
+            assert_eq!(value.value.integer, 0);
+            assert!(!run_callbacks());
+            vpi_get_value(child, &mut value);
+            assert_eq!(value.value.integer, 73, "four_state={four_state}");
+            vpi_get_value(output, &mut value);
+            assert_eq!(value.value.integer, 74);
+            assert_eq!(vpi_free_object(child), 1);
+            assert_eq!(vpi_free_object(output), 1);
+        }
+    }
 }
 
 #[test]
@@ -943,6 +1139,9 @@ fn string_separators_delay_flags_and_force_release_follow_vpi_semantics() {
             vpi_put_value(a, &rejected, ptr::null(), VPI_INERTIAL_DELAY),
             a
         );
+        vpi_get_value(y, &mut read);
+        assert_eq!(read.value.integer, 42);
+        assert!(!run_callbacks());
         vpi_get_value(y, &mut read);
         assert_eq!(read.value.integer, 11);
 
@@ -2917,16 +3116,28 @@ fn sessions_release_on_unwind_and_reject_nested_or_foreign_hosts() {
     let image = simulator.shared_code().program_image().clone();
     let session = install_runtime(trusted_instance(image.clone())).unwrap();
     assert!(install_runtime(trusted_instance(image.clone())).is_err());
-    std::thread::spawn(|| {
+    // Keep the owner's handle live while a foreign C caller attempts a read.
+    let address = unsafe { vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut()) } as usize;
+    assert_ne!(address, 0);
+    let foreign_image = image.clone();
+    std::thread::spawn(move || {
+        assert!(install_runtime(trusted_instance(foreign_image)).is_err());
         // A foreign thread must not see or clear the owner's runtime.
         clear_runtime();
         unsafe {
+            let mut value = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: -1 },
+            };
+            vpi_get_value(address as VpiHandle, &mut value);
+            assert_eq!(value.value.integer, -1);
             assert!(vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut()).is_null());
         }
     })
     .join()
     .unwrap();
     unsafe {
+        assert_eq!(vpi_free_object(address as VpiHandle), 1);
         let signal = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
         assert!(!signal.is_null());
         vpi_free_object(signal);
@@ -4020,4 +4231,85 @@ fn timed_vpi_capture_reads_the_active_slot_without_advancing_it() {
             .value,
         [9, 0, 0, 0]
     );
+}
+
+/// Host deposits after quiescence reopen update regions without advancing time.
+#[cfg(feature = "systemverilog")]
+#[test]
+fn inertial_deposits_resume_a_quiescent_timed_session() {
+    let _serial = lock_vpi();
+    let source = "`timescale 1ns/1ns
+        module Top(input logic [7:0] x, output logic [7:0] y, output logic started);
+            initial started = 1;
+            assign y = x + 1;
+        endmodule";
+    for four_state in [false, true] {
+        let image = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("resume_inertial.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .opt_level(celox::OptLevel::O1)
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+        let simulation = celox::Simulation::from_sv_sources(Vec::new(), "")
+            .build_native_from_image(image.clone())
+            .unwrap();
+        let _session = install_timed_runtime(image, simulation).unwrap();
+        // Safety: all handles and callback storage remain live on this thread.
+        unsafe {
+            let x = vpi_handle_by_name(c"Top.x".as_ptr(), ptr::null_mut());
+            assert!(!x.is_null());
+            put_int(x, 0);
+            assert!(!run_callbacks_result().unwrap());
+            assert_eq!(read_int(c"Top.started"), 1);
+            assert_eq!(read_int(c"Top.y"), 1);
+            let mut previous = 0;
+            for next in [7, 19] {
+                let value = VpiValue {
+                    format: VPI_INT_VAL,
+                    value: VpiValueData { integer: next },
+                };
+                vpi_put_value(x, &value, ptr::null(), VPI_INERTIAL_DELAY);
+                assert_eq!(read_int(c"Top.x"), previous);
+                let mut observations = Vec::<(i32, i32)>::new();
+                for reason in [CB_READ_WRITE_SYNCH, CB_READ_ONLY_SYNCH] {
+                    let data = VpiCbData {
+                        reason,
+                        cb_rtn: Some(record_resumed_inertial_value),
+                        obj: ptr::null_mut(),
+                        time: ptr::null_mut(),
+                        value: ptr::null_mut(),
+                        index: 0,
+                        user_data: ptr::from_mut(&mut observations).cast(),
+                    };
+                    assert!(!vpi_register_cb(&data).is_null());
+                }
+                assert!(!run_callbacks_result().unwrap());
+                assert_eq!(celox_vpi_current_time(), 0);
+                assert_eq!(read_int(c"Top.x"), next);
+                assert_eq!(read_int(c"Top.y"), next + 1);
+                assert_eq!(
+                    observations,
+                    vec![
+                        (CB_READ_WRITE_SYNCH, next + 1),
+                        (CB_READ_ONLY_SYNCH, next + 1)
+                    ]
+                );
+                previous = next;
+            }
+            vpi_free_object(x);
+        }
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+unsafe extern "C" fn record_resumed_inertial_value(data: *mut VpiCbData) -> i32 {
+    // Safety: the test keeps the observation vector live until both callbacks fire.
+    unsafe {
+        let observations = &mut *(*data).user_data.cast::<Vec<(i32, i32)>>();
+        observations.push(((*data).reason, read_int(c"Top.y")));
+    }
+    0
 }

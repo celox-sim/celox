@@ -505,7 +505,23 @@ pub(crate) fn eval_generate_case_operand(
     width: usize,
     signed: bool,
 ) -> Option<IntegralLiteral> {
-    let expr = substitute_typed_constants(expr.clone(), constants, types);
+    eval_case_operand_in_env(
+        expr,
+        constants,
+        &|name| types.get(name).copied(),
+        width,
+        signed,
+    )
+}
+
+pub(crate) fn eval_case_operand_in_env(
+    expr: &ConstExpr,
+    constants: &dyn ConstantEnvironment,
+    types: &impl Fn(&str) -> Option<(usize, bool)>,
+    width: usize,
+    signed: bool,
+) -> Option<IntegralLiteral> {
+    let expr = substitute_typed_constants_with_lookup(expr.clone(), constants, types);
     eval_integral_in_context(&expr, width, signed)
 }
 
@@ -536,7 +552,6 @@ fn eval_integral_in_context(
                     | BinaryOp::Mul
                     | BinaryOp::Div
                     | BinaryOp::Mod
-                    | BinaryOp::Pow
                     | BinaryOp::BitAnd
                     | BinaryOp::BitOr
                     | BinaryOp::BitXor
@@ -549,6 +564,16 @@ fn eval_integral_in_context(
                 signed,
             )?
         }
+        ConstExpr::Binary {
+            left,
+            op: BinaryOp::Pow,
+            right,
+        } => eval_four_state_binary_literal(
+            &eval_integral_in_context(left, width, signed)?,
+            BinaryOp::Pow,
+            &self_determined_integral_literal(right)?,
+            signed,
+        )?,
         ConstExpr::Binary { left, op, right }
             if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) =>
         {
@@ -1341,8 +1366,11 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
                     literal.signed = signed;
                     return Some(literal);
                 }
-                let extension = signed_extension(&literal, signed);
-                Some(resize_integral_literal(literal, width, signed, extension))
+                if literal.width == width && literal.signed == signed {
+                    Some(literal)
+                } else {
+                    eval_integral_in_context(expr, width, signed)
+                }
             };
             let then_literal = resize_arm(then_expr, then_literal)?;
             let else_literal = resize_arm(else_expr, else_literal)?;

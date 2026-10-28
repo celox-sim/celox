@@ -844,6 +844,16 @@ pub enum ContainerKind {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContainerOp {
+    Reverse,
+    Sort,
+    Rsort,
+    ReduceSum,
+    ReduceProduct,
+    ReduceAnd,
+    LegacyReduceProduct,
+    LegacyReduceAnd,
+    ReduceOr,
+    ReduceXor,
     Equal,
     CaseEqual,
     New,
@@ -866,10 +876,24 @@ pub enum ContainerOp {
     Prev,
 }
 impl ContainerOp {
+    pub fn reduction(self) -> Option<crate::ir::BinaryOp> {
+        use crate::ir::BinaryOp;
+        match self {
+            Self::ReduceSum => Some(BinaryOp::Add),
+            Self::ReduceProduct | Self::LegacyReduceProduct => Some(BinaryOp::Mul),
+            Self::ReduceAnd | Self::LegacyReduceAnd => Some(BinaryOp::BitAnd),
+            Self::ReduceOr => Some(BinaryOp::BitOr),
+            Self::ReduceXor => Some(BinaryOp::BitXor),
+            _ => None,
+        }
+    }
     pub fn mutates(self) -> bool {
         matches!(
             self,
-            Self::Set
+            Self::Reverse
+                | Self::Sort
+                | Self::Rsort
+                | Self::Set
                 | Self::Clear
                 | Self::Delete
                 | Self::Insert
@@ -882,7 +906,16 @@ impl ContainerOp {
     pub fn result_type(self, layout: ContainerLayout) -> (usize, bool) {
         match self {
             Self::Equal | Self::CaseEqual => (1, false),
-            Self::Get | Self::PopFront | Self::PopBack => (layout.width as usize, layout.signed),
+            Self::Get
+            | Self::PopFront
+            | Self::PopBack
+            | Self::ReduceSum
+            | Self::ReduceProduct
+            | Self::ReduceAnd
+            | Self::LegacyReduceProduct
+            | Self::LegacyReduceAnd
+            | Self::ReduceOr
+            | Self::ReduceXor => (layout.width as usize, layout.signed),
             Self::Size | Self::Exists | Self::First | Self::Last | Self::Next | Self::Prev => {
                 (32, true)
             }
@@ -928,6 +961,8 @@ pub enum ObjectOp {
     Check(u32),
     /// Query or set the random mode of a property at its byte offset.
     ModeGet(u32, bool),
+    ConstraintModeGet(u32),
+    ConstraintModeSet(Option<u32>),
     ModeSet(u32),
     ModePush,
     ModePop,
@@ -959,12 +994,13 @@ impl ObjectOp {
             Self::Randomize(_)
             | Self::Seed
             | Self::Check(_)
+            | Self::ConstraintModeSet(_)
             | Self::ModeSet(_)
             | Self::ModePush
             | Self::ModePop
             | Self::ModeSelect(..)
             | Self::ModeSelected(_) => (32, false),
-            Self::ModeGet(..) => (32, true),
+            Self::ModeGet(..) | Self::ConstraintModeGet(_) => (32, true),
             Self::Load(field) => (field.width as usize, field.signed),
             Self::New { .. } | Self::ClassOf | Self::Store(_) | Self::Copy => (32, false),
         }
@@ -985,6 +1021,8 @@ impl fmt::Display for ObjectOp {
             Self::Seed => "object random seed",
             Self::Check(_) => "object receiver check",
             Self::ModeGet(..) => "random mode query",
+            Self::ConstraintModeGet(_) => "constraint mode query",
+            Self::ConstraintModeSet(_) => "constraint mode update",
             Self::ModeSet(_) => "random mode update",
             Self::ModePush => "save random modes",
             Self::ModePop => "restore random modes",

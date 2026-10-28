@@ -9,6 +9,8 @@
 
 mod value;
 use value::Value;
+mod runtime;
+pub use runtime::RuntimeConstantFunctions;
 
 use num_bigint::BigUint;
 use std::cell::{Cell, RefCell};
@@ -49,6 +51,8 @@ pub(crate) struct State {
     functions: RefCell<ConstantFunctions>,
     revision: generate::Revision,
     depth: Cell<usize>,
+    runtime_fuel: Cell<Option<usize>>,
+    runtime_two_state: Cell<Option<bool>>,
     argument_names: RefCell<(
         Arc<ConstantFunctionTable>,
         Arc<HashMap<String, Vec<String>>>,
@@ -891,6 +895,7 @@ pub(super) fn eval_call_literal(
 
 fn call_value(name: &str, args: &[Value], constants: &dyn ConstantEnvironment) -> Option<Value> {
     let state = constants.function_state()?;
+    runtime::charge(state)?;
     let functions = state.functions.borrow().functions.clone();
     let function = functions.get(name)?;
     let depth = state.depth.get();
@@ -944,7 +949,8 @@ fn call_in_frame(
     let (return_name, return_type) = function.return_var.as_ref()?;
     frame.declare(return_name, return_type)?;
     frame.return_width = Some(frame.type_of(return_name)?.0);
-    frame.set(return_name, Value::integer(0))?;
+    let initial = frame.initial_value(return_name)?;
+    frame.set(return_name, initial)?;
     match frame.block(&function.body)? {
         Flow::Return(Some(value)) => {
             frame.set(return_name, value)?;
@@ -1034,15 +1040,49 @@ impl<'a> Frame<'a> {
     }
 
     fn declare(&mut self, name: &str, r#type: &crate::ir::Type) -> Option<()> {
-        if !r#type.unpacked_ranges().is_empty() {
+        if self
+            .constants
+            .function_state()
+            .is_some_and(|state| state.runtime_two_state.get().is_some())
+            && matches!(
+                r#type.kind(),
+                crate::ir::TypeKind::Real
+                    | crate::ir::TypeKind::Shortreal
+                    | crate::ir::TypeKind::String
+                    | crate::ir::TypeKind::Object
+            )
+        {
             return None;
         }
-        let width = r#type
-            .resolved_width()
-            .or_else(|| {
-                crate::typecheck::resolve_packed_width_in_env(r#type.packed_ranges(), self)
-            })?
-            .max(1);
+        if !r#type.unpacked_ranges().is_empty()
+            && self
+                .constants
+                .function_state()?
+                .runtime_two_state
+                .get()
+                .is_none()
+        {
+            return None;
+        }
+        // Resolved runtime types already include unpacked dimensions.
+        // Elaboration types still need their dimensions evaluated here.
+        let width = if let Some(width) = r#type.resolved_width() {
+            width.max(1)
+        } else {
+            let mut width =
+                crate::typecheck::resolve_packed_width_in_env(r#type.packed_ranges(), self)?.max(1);
+            for range in r#type.unpacked_ranges() {
+                let (left, right) = range.resolved_bounds().or_else(|| {
+                    Some((
+                        self.eval_lowered(range.left())?,
+                        self.eval_lowered(range.right())?,
+                    ))
+                })?;
+                let count = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
+                width = width.checked_mul(count)?;
+            }
+            width
+        };
         if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
             return None;
         }
@@ -1054,12 +1094,29 @@ impl<'a> Frame<'a> {
         Some(())
     }
 
+    fn initial_value(&self, name: &str) -> Option<Value> {
+        let runtime = self
+            .constants
+            .function_state()
+            .and_then(|state| state.runtime_two_state.get());
+        if runtime == Some(true) || self.two_state.contains(name) {
+            return Some(Value::integer(0));
+        }
+        let (width, _) = self.type_of(name)?;
+        typecheck::parse_integral_literal(&format!("{width}'bx")).map(Value::from_literal)
+    }
+
     fn set(&mut self, name: &str, value: Value) -> Option<()> {
         let value = match self.type_of(name) {
             Some((width, signed)) => value.resize(width, signed)?,
             None => value,
         };
-        let value = if self.two_state.contains(name) {
+        let value = if self.two_state.contains(name)
+            || self
+                .constants
+                .function_state()
+                .is_some_and(|state| state.runtime_two_state.get() == Some(true))
+        {
             value.into_two_state()
         } else {
             value
@@ -1069,6 +1126,9 @@ impl<'a> Frame<'a> {
     }
 
     fn tick(&mut self) -> Option<()> {
+        if let Some(state) = self.constants.function_state() {
+            runtime::charge(state)?;
+        }
         self.iterations += 1;
         (self.iterations <= MAX_ITERATIONS).then_some(())
     }
@@ -1107,6 +1167,119 @@ impl<'a> Frame<'a> {
         self.eval_lowered(&lowered).map(Value::integer)
     }
 
+    fn case_operand(&mut self, expr: &Expr, context: ExprType) -> Option<Value> {
+        if context.width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+            return None;
+        }
+        let lowered = self.lower(expr)?.into();
+        typecheck::eval_case_operand_in_env(
+            &lowered,
+            self,
+            &|name| self.type_of(name),
+            context.width,
+            context.signed,
+        )
+        .map(Value::from_literal)
+    }
+
+    /// Type queries must not execute a case label or select a conditional arm.
+    fn expression_type(&self, expr: &Expr) -> Option<ExprType> {
+        let ty = |(width, signed)| ExprType { width, signed };
+        let placeholder = |ty: ExprType| ConstExpr::Resize {
+            expr: Box::new(ConstExpr::Literal("0".into())),
+            width: ty.width,
+            signed: ty.signed,
+        };
+        let expression = match expr {
+            Expr::Ident(name) => {
+                return self.type_of(name).map(ty).or_else(|| {
+                    self.constants
+                        .literal(name)
+                        .map(|value| ty((value.width, value.signed)))
+                });
+            }
+            Expr::Literal(text) => {
+                // An unbased unsized fill is one bit in a self-determined
+                // type query; its value fills the eventual case context.
+                if matches!(
+                    text.trim().to_ascii_lowercase().as_str(),
+                    "'0" | "'1" | "'x" | "'z" | "'?"
+                ) {
+                    return Some(ty((1, false)));
+                }
+                return typecheck::integral_literal_type_metadata(text).map(ty);
+            }
+            Expr::Resize { width, signed, .. } => return Some(ty((*width, *signed))),
+            Expr::Inside { .. } => return Some(ty((1, false))),
+            Expr::Select {
+                msb, lsb, signed, ..
+            } => {
+                // Indexed selects have a constant width even when their base
+                // calls a function. Cancel the common base without executing it.
+                let width = typecheck::select_range_width(
+                    &msb.clone().into(),
+                    &lsb.clone().into(),
+                    &HashMap::default(),
+                )
+                .or_else(|| {
+                    let msb = self.eval_lowered(&msb.clone().into())?;
+                    let lsb = self.eval_lowered(&lsb.clone().into())?;
+                    usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)
+                })?;
+                return Some(ty((width, *signed)));
+            }
+            Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => {
+                let width = parts.iter().try_fold(0usize, |width, part| {
+                    width.checked_add(self.expression_type(part)?.width)
+                })?;
+                let count = if let Expr::RepeatConcat { count, .. } = expr {
+                    usize::try_from(self.eval_lowered(&count.clone().into())?).ok()?
+                } else {
+                    1
+                };
+                return Some(ty((width.checked_mul(count)?, false)));
+            }
+            Expr::Call {
+                callee: Callee::Subroutine(name),
+                ..
+            } => {
+                let functions = self.constants.function_state()?.functions.borrow();
+                let (_, result) = functions.functions.get(name)?.return_var.as_ref()?;
+                let width = result.resolved_width().or_else(|| {
+                    typecheck::resolve_packed_width_in_env(result.packed_ranges(), self)
+                })?;
+                return Some(ty((width, result.is_signed())));
+            }
+            Expr::Call { callee, args, .. } => ConstExpr::Function {
+                callee: callee.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| Some(placeholder(self.expression_type(arg.as_ref()?)?)))
+                    .collect::<Option<_>>()?,
+                site: None,
+            },
+            Expr::Unary { op, expr } => ConstExpr::Unary {
+                op: *op,
+                expr: Box::new(placeholder(self.expression_type(expr)?)),
+            },
+            Expr::Binary { left, op, right } => ConstExpr::Binary {
+                left: Box::new(placeholder(self.expression_type(left)?)),
+                op: *op,
+                right: Box::new(placeholder(self.expression_type(right)?)),
+            },
+            Expr::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => ConstExpr::Mux {
+                condition: Box::new(ConstExpr::Literal("0".into())),
+                then_expr: Box::new(placeholder(self.expression_type(then_expr)?)),
+                else_expr: Box::new(placeholder(self.expression_type(else_expr)?)),
+            },
+        };
+        infer_const_expr_type(&expression, &HashMap::default())
+    }
+
     fn truth(&mut self, expr: &Expr) -> Option<bool> {
         // An unknown procedural condition does not select the then branch.
         Some(self.eval(expr)?.truth() == Some(true))
@@ -1124,7 +1297,7 @@ impl<'a> Frame<'a> {
     /// `expr` as a constant expression, with the parts the constant
     /// evaluator does not model replaced by typed temporaries.
     fn lower(&mut self, expr: &Expr) -> Option<ConstExpr> {
-        Some(match expr {
+        let lowered = match expr {
             Expr::Ident(name) => ConstExpr::Ident(name.clone()),
             Expr::Literal(value) => ConstExpr::Literal(value.clone()),
             Expr::Unary { op, expr } => ConstExpr::Unary {
@@ -1140,18 +1313,8 @@ impl<'a> Frame<'a> {
                 condition,
                 then_expr,
                 else_expr,
-            } => {
-                // Only the selected arm is evaluated.
-                match self.eval(condition)?.truth() {
-                    Some(true) => self.lower(then_expr)?,
-                    Some(false) => self.lower(else_expr)?,
-                    None => ConstExpr::Mux {
-                        condition: Box::new(self.lower(condition)?),
-                        then_expr: Box::new(self.lower(then_expr)?),
-                        else_expr: Box::new(self.lower(else_expr)?),
-                    },
-                }
-            }
+            } => self.lower_mux(condition, then_expr, else_expr)?,
+
             Expr::Call {
                 callee: Callee::Subroutine(name),
                 args,
@@ -1215,30 +1378,8 @@ impl<'a> Frame<'a> {
                 width: *width,
                 signed: *signed,
             },
-            Expr::Inside { expr, items } => {
-                let mut found = false;
-                for item in items {
-                    found |= match item {
-                        InsideItem::Value(item) => self.truth(&Expr::Binary {
-                            left: expr.clone(),
-                            op: BinaryOp::EqWildcard,
-                            right: Box::new(item.clone()),
-                        })?,
-                        InsideItem::Range { low, high } => {
-                            self.truth(&Expr::Binary {
-                                left: Box::new(low.clone()),
-                                op: BinaryOp::Le,
-                                right: expr.clone(),
-                            })? && self.truth(&Expr::Binary {
-                                left: expr.clone(),
-                                op: BinaryOp::Le,
-                                right: Box::new(high.clone()),
-                            })?
-                        }
-                    };
-                }
-                ConstExpr::Literal(format!("1'b{}", u8::from(found)))
-            }
+            Expr::Inside { expr, items } => self.lower_inside(expr, items)?,
+
             Expr::Concat(_) | Expr::RepeatConcat { .. } => {
                 let literal = self.concat_literal(expr)?;
                 if literal.width == 0 {
@@ -1246,7 +1387,116 @@ impl<'a> Frame<'a> {
                 }
                 self.temporary(Value::from_literal(literal))?
             }
+        };
+        // Runtime two-state evaluation discards X/Z at operation boundaries.
+        // This interpreter uses four-state expression rules. Only reuse a
+        // result when every intermediate is known; otherwise runtime lowering
+        // supplies the state-mode semantics (including out-of-range selects).
+        if self
+            .constants
+            .function_state()
+            .is_some_and(|state| state.runtime_two_state.get() == Some(true))
+        {
+            let literal = typecheck::eval_const_integral_literal_in_env(
+                &lowered.clone().into(),
+                self,
+                &|name| self.type_of(name),
+            )?;
+            if literal.mask != BigUint::default() {
+                return None;
+            }
+        }
+        Some(lowered)
+    }
+
+    fn type_placeholder(&self, expr: &Expr) -> Option<ConstExpr> {
+        let ty = self.expression_type(expr)?;
+        if ty.width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+            return None;
+        }
+        Some(ConstExpr::Resize {
+            expr: Box::new(ConstExpr::Literal("0".into())),
+            width: ty.width,
+            signed: ty.signed,
         })
+    }
+
+    #[inline(never)]
+    fn lower_mux(
+        &mut self,
+        condition: &Expr,
+        then_expr: &Expr,
+        else_expr: &Expr,
+    ) -> Option<ConstExpr> {
+        let condition = self.eval(condition)?;
+        let truth = condition.truth();
+        let condition = self.temporary(condition)?;
+        // The skipped arm still contributes its type (11.8.1), but its value
+        // and calls must not be evaluated (11.4.11). Keep the mux so an outer
+        // size context can reach arithmetic inside the selected arm (11.8.2).
+        let (then_expr, else_expr) = match truth {
+            Some(true) => {
+                let skipped = self.type_placeholder(else_expr)?;
+                (self.lower(then_expr)?, skipped)
+            }
+            Some(false) => {
+                let skipped = self.type_placeholder(then_expr)?;
+                (skipped, self.lower(else_expr)?)
+            }
+            None => (self.lower(then_expr)?, self.lower(else_expr)?),
+        };
+        Some(ConstExpr::Mux {
+            condition: Box::new(condition),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        })
+    }
+
+    #[inline(never)]
+    fn lower_inside(&mut self, expr: &Expr, items: &[InsideItem]) -> Option<ConstExpr> {
+        // Keep comparisons as four-state expressions. Procedural truth
+        // would turn an unknown membership result into a known zero.
+        let selector = self.lower(expr)?;
+        let mut result = Some(false);
+        for item in items {
+            let comparison = match item {
+                InsideItem::Value(item) => ConstExpr::Binary {
+                    left: Box::new(selector.clone()),
+                    op: BinaryOp::EqWildcard,
+                    right: Box::new(self.lower(item)?),
+                },
+                InsideItem::Range { low, high } => ConstExpr::Binary {
+                    left: Box::new(ConstExpr::Binary {
+                        left: Box::new(self.lower(low)?),
+                        op: BinaryOp::Le,
+                        right: Box::new(selector.clone()),
+                    }),
+                    op: BinaryOp::LogicAnd,
+                    right: Box::new(ConstExpr::Binary {
+                        left: Box::new(selector.clone()),
+                        op: BinaryOp::Le,
+                        right: Box::new(self.lower(high)?),
+                    }),
+                },
+            };
+            let comparison =
+                typecheck::eval_const_integral_literal_in_env(&comparison.into(), self, &|name| {
+                    self.type_of(name)
+                })?;
+            result = match (result, typecheck::integral_literal_truth(&comparison)) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            };
+        }
+        Some(ConstExpr::Literal(
+            match result {
+                Some(true) => "1'b1",
+                Some(false) => "1'b0",
+                None => "1'bx",
+            }
+            .into(),
+        ))
     }
 
     /// Fold concatenations with each operand's own width before the surrounding
@@ -1325,7 +1575,19 @@ impl<'a> Frame<'a> {
                 }
                 self.set(name, value)?;
             }
-            LValue::Select { name, msb, lsb, .. } => {
+            LValue::Select {
+                name,
+                msb,
+                lsb,
+                array_slice_width,
+                array_slice_reversed,
+                ..
+            } => {
+                // Aggregate slice ordering needs element-aware assignment;
+                // leave that call to the ordinary runtime lowering.
+                if array_slice_width.is_some() || *array_slice_reversed {
+                    return None;
+                }
                 let msb = self.eval_lowered(&msb.clone().into())?;
                 let lsb = self.eval_lowered(&lsb.clone().into())?;
                 let old = self.values.get(name)?.clone();
@@ -1336,7 +1598,82 @@ impl<'a> Frame<'a> {
         Some(())
     }
 
+    #[inline(never)]
+    fn case_statement(
+        &mut self,
+        kind: CaseKind,
+        selector: &Expr,
+        items: &[crate::procedural::CaseItemBase<Expr, LValue>],
+        default: Option<&[Stmt]>,
+    ) -> Option<Flow> {
+        if matches!(kind, CaseKind::Z | CaseKind::X) {
+            return None;
+        }
+        // All labels contribute to the common type, including labels
+        // after the first match (12.5). Query their types without
+        // executing them; labels are evaluated only in source order.
+        let mut context = self.expression_type(selector)?;
+        if kind == CaseKind::Exact {
+            for item in items {
+                for label in &item.labels {
+                    let CaseLabel::Value(value) = label else {
+                        return None;
+                    };
+                    let ty = self.expression_type(value)?;
+                    context.width = context.width.max(ty.width);
+                    context.signed &= ty.signed;
+                }
+            }
+        }
+        let selector = if kind == CaseKind::Exact {
+            self.case_operand(selector, context)?
+        } else {
+            self.eval(selector)?
+        };
+        let ConstExpr::Ident(selector) = self.temporary(selector)? else {
+            return None;
+        };
+        for item in items {
+            for label in &item.labels {
+                let comparison = match (&kind, label) {
+                    (CaseKind::Inside, label) => Expr::Inside {
+                        expr: Box::new(Expr::Ident(selector.clone())),
+                        items: vec![match label {
+                            CaseLabel::Value(value) => InsideItem::Value(value.clone()),
+                            CaseLabel::Range { low, high } => InsideItem::Range {
+                                low: low.clone(),
+                                high: high.clone(),
+                            },
+                        }],
+                    },
+                    (_, CaseLabel::Value(value)) => {
+                        let value = self.case_operand(value, context)?;
+                        let ConstExpr::Ident(value) = self.temporary(value)? else {
+                            return None;
+                        };
+                        Expr::Binary {
+                            left: Box::new(Expr::Ident(selector.clone())),
+                            op: BinaryOp::EqCase,
+                            right: Box::new(Expr::Ident(value)),
+                        }
+                    }
+                    (_, CaseLabel::Range { .. }) => return None,
+                };
+                if self.truth(&comparison)? {
+                    return self.block(&item.body);
+                }
+            }
+        }
+        if let Some(default) = default {
+            return self.block(default);
+        }
+        Some(Flow::Next)
+    }
+
     fn stmt(&mut self, stmt: &Stmt) -> Option<Flow> {
+        if let Some(state) = self.constants.function_state() {
+            runtime::charge(state)?;
+        }
         match stmt {
             Stmt::Assign { lhs, rhs, .. } => {
                 let width = match lhs {
@@ -1363,7 +1700,7 @@ impl<'a> Frame<'a> {
                 self.declare(name, &r#type)?;
                 let value = match init {
                     Some(init) => self.assignment_value(init, self.type_of(name)?.0)?,
-                    None => Value::integer(0),
+                    None => self.initial_value(name)?,
                 };
                 self.set(name, value)?;
             }
@@ -1384,41 +1721,9 @@ impl<'a> Frame<'a> {
                 items,
                 default,
             } => {
-                if matches!(kind, CaseKind::Z | CaseKind::X) {
-                    return None;
-                }
-                // Each label compares as an equality with the selector, at
-                // their common width (IEEE 1800-2023 12.5).
-                for item in items {
-                    for label in &item.labels {
-                        let comparison = match (kind, label) {
-                            (CaseKind::Inside, label) => Expr::Inside {
-                                expr: Box::new(selector.clone()),
-                                items: vec![match label {
-                                    CaseLabel::Value(value) => InsideItem::Value(value.clone()),
-                                    CaseLabel::Range { low, high } => InsideItem::Range {
-                                        low: low.clone(),
-                                        high: high.clone(),
-                                    },
-                                }],
-                            },
-                            (_, CaseLabel::Value(value)) => Expr::Binary {
-                                left: Box::new(selector.clone()),
-                                op: BinaryOp::Eq,
-                                right: Box::new(value.clone()),
-                            },
-                            (_, CaseLabel::Range { .. }) => return None,
-                        };
-                        let matched = self.truth(&comparison)?;
-                        if matched {
-                            return self.block(&item.body);
-                        }
-                    }
-                }
-                if let Some(default) = default {
-                    return self.block(default);
-                }
+                return self.case_statement(*kind, selector, items, default.as_deref());
             }
+
             Stmt::Loop {
                 kind,
                 init,

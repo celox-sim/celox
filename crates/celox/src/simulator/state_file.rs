@@ -411,9 +411,12 @@ impl<B: SimBackend> Simulator<B> {
         // Evaluating the loaded state can still fail (an oscillating
         // combinational loop), so keep the current state to return to.
         let previous = self.checkpoint()?;
+        let previous_deferred_owners = self.deferred_owner_context();
+        self.stash_runtime_events();
         self.state_schema()
             .load(&mut self.backend, file)
             .map_err(StateError::Mismatch)?;
+        self.replace_deferred_execution();
         for address in &self.program.runtime_schema.time_slots {
             self.backend.set(
                 SignalRef {
@@ -429,7 +432,9 @@ impl<B: SimBackend> Simulator<B> {
         // observers take it as their baseline instead of reporting changes.
         if let Err(error) = self.backend.eval_comb() {
             let error = self.decorate_runtime_error(error);
-            self.restore(&previous)?;
+            let restored = self.restore(&previous);
+            self.restore_deferred_owner_context(previous_deferred_owners);
+            restored?;
             return Err(StateError::Runtime(error));
         }
         self.comb_observer_snapshots = self.snapshot_all_comb_observers();
@@ -609,6 +614,15 @@ impl<B: SimBackend> Simulator<B> {
                                     let (value, mask) = split(term, image);
                                     BaselineRecord::Value { value, mask }
                                 }
+                                Baseline::Gated { gated, all, raw } => {
+                                    let (value, mask) = split(term, raw);
+                                    BaselineRecord::Gated {
+                                        gated: *gated,
+                                        all: *all,
+                                        value,
+                                        mask,
+                                    }
+                                }
                                 Baseline::RawCounter { seen, raw } => {
                                     // The bytes a `Counter` baseline's value saves as.
                                     let (value, mask) = split(term, raw);
@@ -777,7 +791,7 @@ impl<B: SimBackend> Simulator<B> {
                 .collect::<Vec<_>>();
             let site = usize::try_from(waiter.site).ok();
             // Each baseline has the kind of its term: a counter for a
-            // counted signal, a value otherwise.
+            // counted signal or a gate with counters, a value otherwise.
             let counted = |signal: &crate::AbsoluteAddr| {
                 if self
                     .program
@@ -799,13 +813,17 @@ impl<B: SimBackend> Simulator<B> {
             };
             if !site.and_then(|site| sites.get(site)).is_some_and(|site| {
                 site.terms.len() == waiter.baselines.len()
-                    && site
-                        .terms
-                        .iter()
-                        .zip(&waiter.baselines)
-                        .all(|((signal, _), baseline)| {
-                            counted(signal) == matches!(baseline, BaselineRecord::Counter { .. })
-                        })
+                    && site.terms.iter().zip(&waiter.baselines).enumerate().all(
+                        |(index, ((signal, _), baseline))| {
+                            let gated =
+                                site.gate(index).is_some_and(|gate| gate.counters.is_some());
+                            match baseline {
+                                BaselineRecord::Gated { .. } => gated,
+                                BaselineRecord::Counter { .. } => counted(signal) || gated,
+                                BaselineRecord::Value { .. } => !counted(signal) && !gated,
+                            }
+                        },
+                    )
             }) {
                 unknown.push(format!("{} wait site {}", waiter.process, waiter.site));
                 continue;
@@ -818,13 +836,19 @@ impl<B: SimBackend> Simulator<B> {
                 .filter(|site| site.process == kernel(index))
                 .nth(site.unwrap_or_default())
                 .is_some_and(|site| {
-                    site.terms.iter().any(|(signal, _)| {
-                        self.program
-                            .runtime_schema
-                            .rtl_writes
-                            .iter()
-                            .any(|atom| atom.id == *signal)
-                    })
+                    // A gate without counters counts as driven
+                    // (`TermModel::driven`).
+                    site.gates
+                        .iter()
+                        .flatten()
+                        .any(|gate| gate.counters.is_none())
+                        || site.terms.iter().any(|(signal, _)| {
+                            self.program
+                                .runtime_schema
+                                .rtl_writes
+                                .iter()
+                                .any(|atom| atom.id == *signal)
+                        })
                 });
             waiters.insert(
                 index,
@@ -834,7 +858,31 @@ impl<B: SimBackend> Simulator<B> {
                     baselines: waiter
                         .baselines
                         .iter()
-                        .map(|baseline| match baseline {
+                        .enumerate()
+                        .map(|(term, baseline)| match baseline {
+                            BaselineRecord::Gated {
+                                gated,
+                                all,
+                                value,
+                                mask,
+                            } => {
+                                let signal = sites[site.unwrap_or_default()].terms[term].0;
+                                let signal = self.backend.resolve_signal(&signal);
+                                let len = celox_runtime::timing::planes(&self.backend, signal)
+                                    .map_or(0, <[u8]>::len);
+                                Baseline::Gated {
+                                    gated: *gated,
+                                    all: *all,
+                                    raw: celox_runtime::timing::encode_planes(
+                                        &(
+                                            BigUint::from_bytes_le(value),
+                                            BigUint::from_bytes_le(mask),
+                                        ),
+                                        signal.width,
+                                        len,
+                                    ),
+                                }
+                            }
                             BaselineRecord::Counter { seen, value, mask } => Baseline::Counter {
                                 seen: *seen,
                                 value: (

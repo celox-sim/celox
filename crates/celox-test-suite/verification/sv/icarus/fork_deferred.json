@@ -1,0 +1,103 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:5: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:6: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n",
+      "expectation": "Simulation",
+      "name": "fork_deferred::child_flush_does_not_inherit_parent_reports",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:3: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:5: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:6: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n",
+      "expectation": "Simulation",
+      "name": "fork_deferred::disable_fork_flushes_live_children_only",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:4: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:5: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:6: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n",
+      "expectation": "Simulation",
+      "name": "fork_deferred::four_state_arguments_are_captured_before_child_exit",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:5: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:6: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n",
+      "expectation": "Simulation",
+      "name": "fork_deferred::reactive_wakeup_preserves_mature_observed_only",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:6: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:7: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n",
+      "expectation": "Simulation",
+      "name": "fork_deferred::repeated_static_site_keeps_completed_reports",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:5: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n",
+      "expectation": "Simulation",
+      "name": "fork_deferred::reused_slot_cannot_flush_completed_reports",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:4: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:5: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n",
+      "expectation": "Simulation",
+      "name": "fork_deferred::sibling_event_queues_are_independent",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:4: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:5: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n",
+      "expectation": "Simulation",
+      "name": "fork_deferred::sibling_wait_queues_are_independent",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:4: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:5: sorry: Deferred assertions are not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n",
+      "expectation": "Simulation",
+      "name": "fork_deferred::zero_delay_is_not_a_flush_point",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

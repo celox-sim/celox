@@ -35,8 +35,16 @@ pub(in crate::ast) fn native_class(
         dimension,
     } = &expression.kind
         && matches!(dimension.kind, celox_sv_syntax::DimensionKind::Index(_))
-        && let ExprKind::Name(name) = &native.expression(ungroup(*expression, native)).kind
     {
+        if let Some(ty) = containers::native_type(*expression, native, tree, dimensions)
+            .ok()
+            .flatten()
+        {
+            return ty.element.class().map(str::to_owned);
+        }
+        let ExprKind::Name(name) = &native.expression(ungroup(*expression, native)).kind else {
+            return None;
+        };
         let ty = dimensions.get(&instances::normalize_identifier(&name.spelling))?;
         return ty
             .container
@@ -829,6 +837,123 @@ pub(super) fn random_selection(
     )))
 }
 
+/// Constraint block modes are independent of member rand_mode and inline constraints (18.9).
+pub(in crate::ast) fn constraint_mode_call(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+    allow_set: bool,
+) -> Converted<Option<Expr>> {
+    let (callee, args) = match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Call {
+            expression,
+            arguments,
+        } => (*expression, arguments.as_slice()),
+        _ => (id, &[][..]),
+    };
+    let (owner, block, handle) = match &native.expression(ungroup(callee, native)).kind {
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "." && name.spelling == "constraint_mode" => {
+            if let Some(owner) = native_class(tree, *expression, native, dimensions) {
+                (
+                    owner,
+                    None,
+                    receiver(tree, Some(*expression), native, dimensions)?,
+                )
+            } else {
+                match &native.expression(ungroup(*expression, native)).kind {
+                    ExprKind::Member {
+                        expression: object,
+                        separator,
+                        name,
+                    } if separator == "." => {
+                        let Some(owner) = native_class(tree, *object, native, dimensions) else {
+                            return Ok(None);
+                        };
+                        (
+                            owner,
+                            Some(name.spelling.clone()),
+                            receiver(tree, Some(*object), native, dimensions)?,
+                        )
+                    }
+                    ExprKind::Name(name)
+                        if scope_class(dimensions).is_some()
+                            && dimensions.get(THIS).is_some()
+                            && dimensions.get(&name.spelling).is_none() =>
+                    {
+                        (
+                            scope_class(dimensions).unwrap(),
+                            Some(name.spelling.clone()),
+                            this(),
+                        )
+                    }
+                    _ => return Ok(None),
+                }
+            }
+        }
+        ExprKind::Name(name)
+            if name.spelling == "constraint_mode"
+                && dimensions.get("constraint_mode").is_none() =>
+        {
+            let Some(owner) = scope_class(dimensions) else {
+                return Ok(None);
+            };
+            if dimensions.get(THIS).is_none() {
+                return Err(unsupported("constraint_mode requires an object receiver"));
+            }
+            (owner, None, this())
+        }
+        _ => return Ok(None),
+    };
+    let class = class(tree, dimensions, &owner)?;
+    if class.constraints.iter().any(|(_, block)| {
+        block
+            .as_ref()
+            .is_err_and(|reason| reason == "unsupported constraint block form")
+    }) {
+        return Err(unsupported(
+            "constraint_mode for external or static constraint blocks",
+        ));
+    }
+    let index = block
+        .map(|name| {
+            class
+                .constraints
+                .iter()
+                .position(|(block, _)| *block == name)
+                .map(|index| index as u32)
+                .ok_or_else(|| unsupported(format!("unknown constraint block {name}")))
+        })
+        .transpose()?;
+    if args.is_empty() {
+        let index = index
+            .ok_or_else(|| unsupported("constraint_mode getter requires one named constraint"))?;
+        return Ok(Some(classes::object_call(
+            ObjectOp::ConstraintModeGet(index),
+            vec![handle],
+        )));
+    }
+    if !allow_set {
+        return Err(unsupported(
+            "constraint_mode setter is void and cannot be used as a value",
+        ));
+    }
+    if args.len() != 1 || args[0].name.is_some() || args[0].value.is_none() {
+        return Err(unsupported(
+            "constraint_mode setter requires one on_off argument",
+        ));
+    }
+    let enabled = bind_value(args[0].value.unwrap(), native, tree, dimensions, None)?;
+    Ok(Some(classes::object_call(
+        ObjectOp::ConstraintModeSet(index),
+        vec![handle, enabled],
+    )))
+}
+
 /// Bind rand_mode's void setter and integer getter separately (18.8).
 /// A getter requires one random property; only the setter accepts an object.
 pub(in crate::ast) fn rand_mode_call(
@@ -932,4 +1057,152 @@ fn check_random_access(
         property.local,
         property.protected,
     )
+}
+
+pub(super) fn randomize_with(
+    tree: &AnalysisContext<'_>,
+    expression: ExprId,
+    constraints: Option<&[ExprId]>,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Expr> {
+    let (callee, arguments) = match &native.expression(ungroup(expression, native)).kind {
+        ExprKind::Call {
+            expression,
+            arguments,
+        } => (*expression, arguments.as_slice()),
+        _ => (expression, &[][..]),
+    };
+    let (method_name, _, receiver) = method(tree, callee, native, dimensions)?
+        .filter(|(name, _, _)| name.ends_with("::randomize"))
+        .ok_or_else(|| unsupported("inline constraints require class randomize"))?;
+    let owner = method_name.strip_suffix("::randomize").unwrap();
+    let class = class(tree, dimensions, owner)?;
+    // Inline constraints need the solver even on otherwise unconstrained classes.
+    class.constraint_program()?;
+    let constraint_ids = constraints.ok_or_else(|| unsupported("inline constraint form"))?;
+    let mut inputs = HashMap::default();
+    let mut input_types = Vec::new();
+    let mut input_values = Vec::new();
+    let mut pending = constraint_ids.to_vec();
+    while let Some(id) = pending.pop() {
+        let candidate = match &native.expression(id).kind {
+            ExprKind::Name(name) => {
+                let name = instances::normalize_identifier(&name.spelling);
+                if class.properties.iter().any(|p| p.name == name) {
+                    None
+                } else if class.statics.iter().any(|p| p.name == name) {
+                    return Err(unsupported("static properties in inline constraints"));
+                } else {
+                    Some((name.clone(), name))
+                }
+            }
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "::"
+                && matches!(&native.expression(*expression).kind, ExprKind::Name(root) if root.spelling == "local") =>
+            {
+                let name = instances::normalize_identifier(&name.spelling);
+                Some((format!("local::{name}"), name))
+            }
+            ExprKind::Group(id) | ExprKind::Unary { expression: id, .. } => {
+                pending.push(*id);
+                None
+            }
+            ExprKind::Binary { left, right, .. } => {
+                pending.extend([*right, *left]);
+                None
+            }
+            ExprKind::Set(items) => {
+                for item in items {
+                    match item.kind {
+                        celox_sv_syntax::DimensionKind::Index(id) => pending.push(id),
+                        celox_sv_syntax::DimensionKind::Range { left, right } => {
+                            pending.extend([right, left])
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            _ => None,
+        };
+        let Some((key, name)) = candidate else {
+            continue;
+        };
+        if inputs.contains_key(&key) {
+            continue;
+        }
+        let variable = dimensions
+            .get(&name)
+            .ok_or_else(|| unsupported(format!("inline local variable `{name}`")))?;
+        if variable.real
+            || variable.string
+            || variable.class.is_some()
+            || variable.container.is_some()
+            || !variable.unpacked.is_empty()
+            || !variable.is_2state
+        {
+            return Err(unsupported(
+                "inline inputs require two-state scalar variables",
+            ));
+        }
+        let value = Expr::Ident(name);
+        let width = expr_static_width(&tree.state, &value, dimensions)
+            .filter(|width| (1..=64).contains(width))
+            .ok_or_else(|| unsupported("inline input width"))?;
+        let mut ty = classes::unsigned_type(width);
+        ty.is_signed = variable.signed;
+        inputs.insert(key, (input_types.len(), width as u32, variable.signed));
+        input_types.push(ty);
+        input_values.push(Some(value));
+    }
+    let constraints = constraint_ids
+        .iter()
+        .map(|&id| {
+            classes::constraints::bind_inputs(
+                id,
+                tree,
+                &class.properties,
+                &dimensions.const_env,
+                &inputs,
+            )
+            .map_err(|reason| unsupported(format!("inline constraints: {reason}")))
+        })
+        .collect::<Converted<Vec<_>>>()?;
+    let selection = random_selection(tree, dimensions, &method_name, arguments, native)?;
+    let handle = match receiver {
+        Receiver::Handle(id) => bind_value(id, native, tree, dimensions, None)?,
+        Receiver::This => this(),
+        Receiver::Static => return Err(unsupported("inline randomize object receiver")),
+    };
+    let key = tree.state.next_call_site.get();
+    tree.state.next_call_site.set(key + 1);
+    let inline = classes::constraints::Inline {
+        key,
+        class,
+        constraints,
+        inputs: input_types,
+        dimensions: dimensions.clone(),
+    };
+    let name = inline.name(owner);
+    // Argument evaluation is left-to-right. Prepare the receiver and run its
+    // pre-hook before sampling any caller-scope input. Evaluate the receiver once.
+    let handle = if input_values.is_empty() {
+        handle
+    } else {
+        Expr::Call {
+            callee: Callee::Subroutine(inline.prepare_name(owner)),
+            args: vec![Some(handle), Some(selection.clone())],
+            arg_order: Vec::new(),
+        }
+    };
+    tree.state.inline_randomizations.borrow_mut().push(inline);
+    Ok(Expr::Call {
+        callee: Callee::Subroutine(name),
+        args: [vec![Some(handle), Some(selection)], input_values].concat(),
+        arg_order: Vec::new(),
+    })
 }

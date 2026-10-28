@@ -2,6 +2,8 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { backendTestFilter } from "./ci-backend-tests.mjs";
+
 import { readWorkspace, rustTestScope } from "./ci-rust-scope.mjs";
 
 const ALL_AFFECTED = Object.freeze({
@@ -109,18 +111,6 @@ export function isVersionOnlyRelease(files) {
   return (
     cutsRelease(normalized) &&
     normalized.every((path) => RELEASE_PLEASE_FILES.has(path))
-  );
-}
-
-// On master, only the release pull request changes the release manifest, so a
-// PR or legacy merge group carrying it gets full validation before merging
-// instead of the change-based subset. Syncing master into develop carries the
-// same change without releasing anything. An undeterminable diff fails open.
-export function isReleaseMergeGroup({ event, baseRef, files }) {
-  return (
-    ["merge_group", "pull_request"].includes(event) &&
-    baseRef === "refs/heads/master" &&
-    (files === null || cutsRelease(files))
   );
 }
 
@@ -286,13 +276,8 @@ if (
     : changedFiles(process.argv[2] ?? "", process.argv[3] ?? "");
   const queue = process.env.QUEUE_VALIDATION === "true" ||
     (process.env.QUEUE_VALIDATION !== "false" && process.env.GITHUB_EVENT_NAME !== "pull_request");
-  const release = queue && isReleaseMergeGroup({
-    event: process.env.GITHUB_EVENT_NAME,
-    baseRef: process.env.MERGE_GROUP_BASE_REF,
-    files,
-  });
   const affected =
-    files === null || release
+    files === null
       ? { ...ALL_AFFECTED, heliodor_arm64: true }
       : {
           ...classifyFiles(files, { releasePlease: !queue && process.env.RELEASE_PLEASE_PR === "true" }),
@@ -300,12 +285,13 @@ if (
         };
   writeOutputs({
     queue,
+    full_validation: scheduledFull,
+    fast_queue: queue && !scheduledFull,
+    rust_backend_filter: backendTestFilter(files, { full: scheduledFull }),
     ...affected,
-    release,
     ...rustScopeOutputs(
       process.env.GITHUB_EVENT_NAME === "pull_request" &&
-        !queue &&
-        !release &&
+        !scheduledFull &&
         affected.rust
         ? files
         : null,
@@ -321,8 +307,8 @@ export function celoxRustTestScope(files, packages) {
   );
 }
 
-// Queue drafts, merge groups, releases and daily runs keep the Celox
-// workspace. Lydite tests run independently in lydite-checks.yml.
+// Full validation keeps the Celox workspace; PR and queue lint use change scopes.
+// Lydite tests run independently in lydite-checks.yml.
 export function rustScopeOutputs(files) {
   let scope = { full: true };
   let checks;

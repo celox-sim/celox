@@ -32,6 +32,7 @@ pub fn schedule_symbolic_rtl(
         source_id_maps,
         inferred_latch_diagnostics,
     } = source;
+    let reset_wires = reset_wires(&symbolic);
     let root_id = symbolic.root_id;
     let root = module_ir.get(&root_id).copied();
     let initial_block_lengths = root
@@ -124,6 +125,96 @@ pub fn schedule_symbolic_rtl(
             }
         }
     }
+    // Preserve declared polarity before the source sidecar is discarded.
+    // PortTypeKind has already resolved abstract `reset` using project defaults,
+    // so it cannot distinguish a declaration from that fallback by itself.
+    let mut declared_reset_active_low = crate::HashMap::default();
+    for (&instance, module_id) in &lookup.instance_module {
+        let (Some(module), Some(ids)) = (module_ir.get(module_id), source_id_maps.get(module_id))
+        else {
+            continue;
+        };
+        for (id, variable) in &module.variables {
+            use veryl_analyzer::ir::TypeKind;
+            let active_low = match variable.r#type.kind {
+                TypeKind::ResetAsyncHigh | TypeKind::ResetSyncHigh => false,
+                TypeKind::ResetAsyncLow | TypeKind::ResetSyncLow => true,
+                _ => continue,
+            };
+            if let Some(id) = ids.get(id)
+                && let Some((address, _)) = lookup.instance_variable(instance, *id)
+            {
+                declared_reset_active_low
+                    .entry(address)
+                    .and_modify(|previous| {
+                        if *previous != Some(active_low) {
+                            *previous = None;
+                        }
+                    })
+                    .or_insert(Some(active_low));
+            }
+        }
+    }
+    // Input ports have separate state objects in Celox. Follow only exact
+    // one-bit copies, not event aliases (opposite async edges have separate
+    // event domains even when they share a physical reset level).
+    let mut neighbors: crate::HashMap<celox_design::StateAddr, Vec<celox_design::StateAddr>> =
+        crate::HashMap::default();
+    for (path, &instance) in &lookup.instance_ids {
+        let module = lookup.instance_module[&instance];
+        for wire in reset_wires.get(&module).into_iter().flatten() {
+            let child = if let Some((name, index)) = &wire.child {
+                let mut child_path = path.0.clone();
+                child_path.push((name.clone(), *index));
+                let Some(child) = lookup.instance_ids.get(&crate::InstancePath(child_path)) else {
+                    continue;
+                };
+                *child
+            } else {
+                instance
+            };
+            let endpoint = |addr: celox_slt::GlueAddrBase<crate::SourceVarId>| match addr {
+                celox_slt::GlueAddrBase::Parent(id) => lookup.instance_variable(instance, id),
+                celox_slt::GlueAddrBase::Child(id) => lookup.instance_variable(child, id),
+            };
+            if let (Some((a, _)), Some((b, _))) = (endpoint(wire.a), endpoint(wire.b)) {
+                neighbors.entry(a).or_default().push(b);
+                neighbors.entry(b).or_default().push(a);
+            }
+        }
+    }
+    let mut visited = HashSet::default();
+    for &start in neighbors.keys() {
+        if visited.contains(&start) {
+            continue;
+        }
+        let mut pending = vec![start];
+        let mut component = Vec::new();
+        let mut declared = None;
+        let mut conflict = false;
+        while let Some(address) = pending.pop() {
+            if !visited.insert(address) {
+                continue;
+            }
+            component.push(address);
+            if let Some(polarity) = declared_reset_active_low.get(&address) {
+                if polarity.is_none()
+                    || declared.is_some_and(|previous| Some(previous) != *polarity)
+                {
+                    conflict = true;
+                } else {
+                    declared = *polarity;
+                }
+            }
+            pending.extend(neighbors.get(&address).into_iter().flatten().copied());
+        }
+        if declared.is_some() || conflict {
+            for address in component {
+                declared_reset_active_low.insert(address, if conflict { None } else { declared });
+            }
+        }
+    }
+    let declared_reset_active_low = std::sync::Arc::new(declared_reset_active_low);
     let mut child_sources = Vec::new();
     let mut components = Vec::new();
     let mut component_bindings = Vec::new();
@@ -151,6 +242,7 @@ pub fn schedule_symbolic_rtl(
                     reset_type: config.reset_type,
                     file_dependencies: config.file_dependencies.clone(),
                     constant_strings: constant_strings.clone(),
+                    declared_reset_active_low: declared_reset_active_low.clone(),
                     id_map: VerylIdMap {
                         module_variables: source_id_maps
                             .get(module_id)
@@ -189,6 +281,7 @@ pub fn schedule_symbolic_rtl(
         reset_type: config.reset_type,
         file_dependencies: config.file_dependencies.clone(),
         constant_strings,
+        declared_reset_active_low,
         id_map: VerylIdMap {
             module_variables: source_id_maps,
         },
@@ -314,4 +407,89 @@ fn configured_clock_periods(
         periods.insert(symbol.found.token.text, value.payload_u64().max(2));
     }
     Ok(periods)
+}
+
+struct ResetWire {
+    child: Option<(String, usize)>,
+    a: celox_slt::GlueAddrBase<crate::SourceVarId>,
+    b: celox_slt::GlueAddrBase<crate::SourceVarId>,
+}
+
+fn reset_wires(
+    source: &crate::symbolic::artifact::SymbolicRtl,
+) -> crate::HashMap<celox_design::ModuleId, Vec<ResetWire>> {
+    use celox_slt::{GlueAddrBase as Addr, SLTNode};
+    let mut result = crate::HashMap::default();
+    for (&id, module) in &source.modules {
+        let wires = result.entry(id).or_insert_with(Vec::new);
+        let one_bit = |id| {
+            module
+                .variables
+                .get(&id)
+                .is_some_and(|v| v.metadata.width == 1)
+        };
+        for path in &module.comb_blocks {
+            let Some(target) = path.target.var() else {
+                continue;
+            };
+            if let SLTNode::Input {
+                variable,
+                index,
+                access,
+                ..
+            } = module.arena.get(path.expr)
+                && one_bit(target.id)
+                && one_bit(*variable)
+                && target.access.lsb == 0
+                && target.access.msb == 0
+                && access.lsb == 0
+                && access.msb == 0
+                && index.is_empty()
+            {
+                wires.push(ResetWire {
+                    child: None,
+                    a: Addr::Parent(target.id),
+                    b: Addr::Parent(*variable),
+                });
+            }
+        }
+        for (name, blocks) in &module.glue_blocks {
+            for (index, block) in blocks.iter().enumerate() {
+                let width = |addr| match addr {
+                    Addr::Parent(id) => module.variables[&id].metadata.width,
+                    Addr::Child(id) => {
+                        source.modules[&block.module_id].variables[&id]
+                            .metadata
+                            .width
+                    }
+                };
+                for (_, path) in block.input_ports.iter().chain(&block.output_ports) {
+                    let Some(target) = path.target.var() else {
+                        continue;
+                    };
+                    if let SLTNode::Input {
+                        variable,
+                        index: indices,
+                        access,
+                        ..
+                    } = block.arena.get(path.expr)
+                        && width(target.id) == 1
+                        && width(*variable) == 1
+                        && target.access.lsb == 0
+                        && target.access.msb == 0
+                        && access.lsb == 0
+                        && access.msb == 0
+                        && indices.is_empty()
+                    {
+                        wires.push(ResetWire {
+                            child: Some((name.clone(), module.instance_index(name, index))),
+                            a: target.id,
+                            b: *variable,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    result
 }

@@ -2129,6 +2129,21 @@ fn form_coupled_store_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
         apply_coupled_store_plan(eu, plan, next_block, &mut reg_counter);
         next_block += consumed;
     }
+    // Plans belong to distinct original blocks and were collected before any
+    // mutation. Check the completed batch once rather than rescanning every
+    // unrelated definition after each local rewrite.
+    verify_coupled_store_batch(eu);
+}
+
+fn verify_coupled_store_batch(eu: &ExecutionUnit<RegionedAbsoluteAddr>) {
+    debug_assert_eq!(
+        {
+            #[cfg(test)]
+            tests::COUPLED_BATCH_VERIFICATIONS.with(|count| count.set(count.get() + 1));
+            eu.verify_result()
+        },
+        Ok(())
+    );
 }
 
 fn best_coupled_store_plan(
@@ -2714,7 +2729,6 @@ fn apply_coupled_store_plan(
     for value in dead_mux_values {
         eu.register_map.remove(&value);
     }
-    debug_assert_eq!(eu.verify_result(), Ok(()));
 }
 
 fn form_same_predicate_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
@@ -4097,6 +4111,10 @@ fn instruction_has_effect(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    thread_local! {
+        pub(super) static COUPLED_BATCH_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     use super::*;
     use crate::ir::{DomainKind, InstanceId, SIRValue, TriggerIdWithKind};
     use celox_design::StateObjectId as VarId;
@@ -4563,6 +4581,99 @@ mod tests {
         assert_eq!(after.entry_block_id, before.entry_block_id);
         assert_eq!(after.register_map, before.register_map);
         assert_eq!(after.blocks, before.blocks);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn coupled_store_batches_verify_once_and_preserve_all_stores() {
+        const COUNT: usize = 16;
+        let mut registers = HashMap::from_iter([
+            (RegisterId(0), bit(1)),
+            (RegisterId(1), bit(8)),
+            (RegisterId(2), bit(8)),
+        ]);
+        let mut blocks = HashMap::default();
+        for lane in 0..COUNT {
+            let base = 3 + lane * 11;
+            let reg = |offset| RegisterId(base + offset);
+            for offset in 0..11 {
+                registers.insert(reg(offset), bit(8));
+            }
+            let mut instructions = vec![SIRInstruction::Binary(
+                reg(0),
+                RegisterId(1),
+                BinaryOp::Mul,
+                RegisterId(1),
+            )];
+            for offset in 1..7 {
+                instructions.push(SIRInstruction::Binary(
+                    reg(offset),
+                    reg(offset - 1),
+                    BinaryOp::Mul,
+                    RegisterId(1),
+                ));
+            }
+            instructions.extend([
+                SIRInstruction::Imm(reg(7), SIRValue::new(85u8)),
+                SIRInstruction::Binary(reg(8), reg(6), BinaryOp::Add, RegisterId(2)),
+                SIRInstruction::Mux(reg(9), RegisterId(0), reg(6), reg(7)),
+                SIRInstruction::Mux(reg(10), RegisterId(0), reg(8), reg(7)),
+                SIRInstruction::Store(
+                    address(100 + lane * 2),
+                    SIROffset::Static(0),
+                    8,
+                    reg(9),
+                    vec![],
+                    vec![],
+                ),
+                SIRInstruction::Store(
+                    address(101 + lane * 2),
+                    SIROffset::Static(0),
+                    8,
+                    reg(10),
+                    vec![],
+                    vec![],
+                ),
+            ]);
+            insert_block(
+                &mut blocks,
+                lane,
+                if lane == 0 {
+                    vec![RegisterId(0), RegisterId(1), RegisterId(2)]
+                } else {
+                    vec![]
+                },
+                instructions,
+                if lane + 1 == COUNT {
+                    SIRTerminator::Return
+                } else {
+                    SIRTerminator::Jump(BlockId(lane + 1), vec![])
+                },
+            );
+        }
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map: registers,
+        };
+        eu.verify_result().unwrap();
+        let before = eu.clone();
+        COUPLED_BATCH_VERIFICATIONS.with(|count| count.set(0));
+        form_coupled_store_regions(&mut eu);
+        assert_eq!(COUPLED_BATCH_VERIFICATIONS.with(|count| count.get()), 1);
+        assert_eq!(
+            eu.blocks.len(),
+            COUNT * 4,
+            "every independent store group should be transformed"
+        );
+        eu.verify_result().unwrap();
+        for condition in [0, 1] {
+            for input in [0, 1] {
+                let expected = execute_with_inputs(&before, condition, input, 7);
+                let actual = execute_with_inputs(&eu, condition, input, 7);
+                assert_eq!(actual, expected);
+            }
+        }
     }
 
     #[test]

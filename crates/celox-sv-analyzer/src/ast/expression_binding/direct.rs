@@ -296,8 +296,18 @@ pub(in crate::ast) fn bind_value(
                         ));
                     }
                 }
+                if let Some((value, _)) = array_reductions::bind(id, native, tree, dimensions)? {
+                    values.push(value);
+                    continue;
+                }
                 if let Some(value) = containers::value(id, native, tree, dimensions, false)? {
                     values.push(value);
+                    continue;
+                }
+                if let Some(call) =
+                    objects::constraint_mode_call(tree, id, native, dimensions, false)?
+                {
+                    values.push(call);
                     continue;
                 }
                 if let Some(call) = objects::rand_mode_call(tree, id, native, dimensions, false)? {
@@ -899,6 +909,19 @@ pub(in crate::ast) fn bind_value(
                     ExprKind::Concatenation(_) => {
                         return Err(unsupported("empty unpacked array concatenation"));
                     }
+                    ExprKind::RandomizeWith {
+                        expression,
+                        constraints,
+                    } => {
+                        values.push(objects::randomize_with(
+                            tree,
+                            *expression,
+                            constraints.as_deref(),
+                            native,
+                            dimensions,
+                        )?);
+                        continue;
+                    }
                     ExprKind::ArrayMethodWith { .. } => {
                         return Err(unsupported("array method with expression"));
                     }
@@ -961,12 +984,14 @@ pub(in crate::ast) fn bind_value(
                                     | "&&"
                                     | "||"
                                     | "->"
+                                    | "<->"
                             )
                         {
                             return Err(unsupported("operator on a real operand"));
                         }
                         let implication = op == "->";
-                        let left = if implication {
+                        let equivalence = op == "<->";
+                        let left = if implication || equivalence {
                             Expr::Unary {
                                 op: UnaryOp::LogicNot,
                                 expr: Box::new(left),
@@ -974,10 +999,21 @@ pub(in crate::ast) fn bind_value(
                         } else {
                             left
                         };
+                        // Each truth-value conversion evaluates its operand once (11.4.7).
+                        let right = if equivalence {
+                            Expr::Unary {
+                                op: UnaryOp::LogicNot,
+                                expr: Box::new(right),
+                            }
+                        } else {
+                            right
+                        };
                         let xnor = matches!(op.as_str(), "~^" | "^~");
                         let value = Expr::Binary {
                             left: Box::new(left),
-                            op: if implication {
+                            op: if equivalence {
+                                BinaryOp::Eq
+                            } else if implication {
                                 BinaryOp::LogicOr
                             } else if xnor {
                                 BinaryOp::BitXor

@@ -109,7 +109,8 @@
         "category": "simulator_disagreement",
         "evidence": [
           "verification/repros/sv_scalar_constraints.json",
-          "LIMITATIONS.md#systemverilog-suite"
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inline_constraints.json"
         ],
         "id": "sv_verilator_post_randomize_unsat",
         "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
@@ -118,6 +119,141 @@
         "upstream": []
       },
       "name": "class::constrained_randomize_hooks",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator invokes post_randomize unconditionally after an UNSAT ordinary randomize call. Generated C++ calls the post hook after constraint.next without testing its return. IEEE 1800-2023 18.6.3 requires skipping the post hook on failure. The case keeps its assertion and tests that pre_randomize updates state before solving.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inline_constraints.json"
+        ],
+        "id": "sv_verilator_post_randomize_unsat",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator invokes post_randomize unconditionally after an UNSAT ordinary randomize call. Generated C++ calls the post hook after constraint.next without testing its return. IEEE 1800-2023 18.6.3 requires skipping the post hook on failure. The case keeps its assertion and tests that pre_randomize updates state before solving.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inline",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Through a Base handle containing a Derived object that hides Base.x, Verilator binds inline x == 2 to Derived.x, conflicting with its x == 9 block. IEEE 1800-2023 18.7 starts inline name lookup in the class of the object handle used at the call. Base.x must be 2 and Derived.x must be 9. The standalone source reproduces UNSAT without the suite adapter. Assertions are retained.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_inline_constraint_scope.sv",
+          "verification/repros/sv_inline_constraints.json"
+        ],
+        "id": "sv_verilator_inline_constraint_static_scope",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Through a Base handle containing a Derived object that hides Base.x, Verilator binds inline x == 2 to Derived.x, conflicting with its x == 9 block. IEEE 1800-2023 18.7 starts inline name lookup in the class of the object handle used at the call. Base.x must be 2 and Derived.x must be 9. The standalone source reproduces UNSAT without the suite adapter. Assertions are retained.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inline_inheritance",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator copies caller-scope inline inputs into its generated helper before pre_randomize. When the hook changes wanted from 2 to 5, the solve still assigns x = 2. IEEE 1800-2023 18.6.2 invokes the pre-hook before randomization, and 18.7 permits references to caller-scope state variables. The regression retains the post-hook value and single-invocation assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_inline_input_hooks.json"
+        ],
+        "id": "sv_verilator_inline_inputs_before_pre_hook",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator copies caller-scope inline inputs into its generated helper before pre_randomize. When the hook changes wanted from 2 to 5, the solve still assigns x = 2. IEEE 1800-2023 18.6.2 invokes the pre-hook before randomization, and 18.7 permits references to caller-scope state variables. The regression retains the post-hook value and single-invocation assertions.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inline_input_hooks",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_verilator_constraint_mode_override",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_base_dispatch",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "IEEE 1800-2023 18.9 declares constraint_mode(bit on_off). Passing integer 2 converts to bit zero and disables the block. Verilator keeps it enabled; the regression preserves the mode query assertion.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_verilator_constraint_mode_bit_argument",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "IEEE 1800-2023 18.9 declares constraint_mode(bit on_off). Passing integer 2 converts to bit zero and disables the block. Verilator keeps it enabled; the regression preserves the mode query assertion.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_basic",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_verilator_constraint_mode_override",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_inheritance",
       "phase": "skip",
       "status": "ignored",
       "stronger_than_sv": false,

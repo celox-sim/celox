@@ -140,8 +140,14 @@ fn slice_preserves_loaded_value_across_store() {
                     );
                 }
                 if overlapping {
-                    // Dynamic stores and commits also invalidate a static load.
+                    // Dynamic stores, commits and opaque kernels invalidate
+                    // a static load before any direct slice reload.
                     for write in [
+                        SIRInstruction::ExternCall {
+                            dst: None,
+                            func: celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG,
+                            args: vec![],
+                        },
                         SIRInstruction::Store(
                             input,
                             SIROffset::Dynamic(replacement),

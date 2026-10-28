@@ -578,6 +578,29 @@ impl StateSsa {
             for (instruction_index, instruction) in block.instructions.iter().enumerate() {
                 let mut instruction_effects = InstructionEffects::default();
                 match instruction {
+                    SIRInstruction::ExternCall { func, .. }
+                        if celox_sir::extern_abi::native_kernel_index(*func).is_some() =>
+                    {
+                        // An outlined native callee observes the old state and
+                        // may replace every slot, including pending FF state.
+                        for (slot, fact) in facts.iter_mut().enumerate() {
+                            fact.escapes = true;
+                            fact.has_kill = true;
+                            fact.def_blocks.insert(block_id);
+                            if !defined.contains(&slot) {
+                                fact.upward_use_blocks.insert(block_id);
+                            }
+                            defined.insert(slot);
+                            instruction_effects.uses.push(UseEffect {
+                                slot,
+                                destination: None,
+                            });
+                            instruction_effects.defs.push(DefEffect {
+                                slot,
+                                kind: DefEffectKind::Kill,
+                            });
+                        }
+                    }
                     SIRInstruction::Load(destination, addr, offset, width)
                         if addr.region == region =>
                     {
@@ -1317,6 +1340,72 @@ mod tests {
                 )
             })
             .expect("destination has a StateSSA use")
+    }
+
+    #[test]
+    fn native_kernel_call_observes_and_kills_every_state_region() {
+        for region in [STABLE_REGION, WORKING_REGION, SPARSE_WORKING_REGION] {
+            let addr = address(region, 0);
+            let eu = unit(
+                vec![block(
+                    0,
+                    vec![
+                        SIRInstruction::Imm(RegisterId(0), SIRValue::new(3u8)),
+                        SIRInstruction::Store(
+                            addr,
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(0),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                        SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(0), 8),
+                        SIRInstruction::ExternCall {
+                            dst: None,
+                            func: celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG,
+                            args: Vec::new(),
+                        },
+                        SIRInstruction::Load(RegisterId(2), addr, SIROffset::Static(0), 8),
+                    ],
+                    SIRTerminator::Return,
+                )],
+                (0..3).map(|i| (RegisterId(i), bit(8))),
+            );
+            eu.verify_result().unwrap();
+            let cfg = SirCfg::analyze(&eu).unwrap();
+            let state = StateSsa::analyze_all_loads(&eu, &cfg, region).unwrap();
+            let MemoryAccessKind::Use {
+                reaching: before, ..
+            } = use_access(&state, RegisterId(1)).kind
+            else {
+                panic!("load")
+            };
+            let MemoryAccessKind::Use {
+                reaching: after, ..
+            } = use_access(&state, RegisterId(2)).kind
+            else {
+                panic!("load")
+            };
+            assert_ne!(before, after);
+            assert!(matches!(
+                state.accesses[after.0].kind,
+                MemoryAccessKind::Kill { .. }
+            ));
+            assert!(state.slots[0].escapes && state.slots[0].has_kill);
+            assert!(
+                state
+                    .accesses
+                    .iter()
+                    .any(|access| access.instruction == Some(3)
+                        && matches!(
+                            access.kind,
+                            MemoryAccessKind::Use {
+                                destination: None,
+                                ..
+                            }
+                        ))
+            );
+        }
     }
 
     #[test]

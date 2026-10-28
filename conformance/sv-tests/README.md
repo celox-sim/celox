@@ -164,6 +164,12 @@ the initial 28 upstream checks passed. Arity and void-result rejection remain ch
 Queue slices, queue operands in concatenations, element-reference persistence,
 warning diagnostics, and queries on nonintegral pop results remain outside
 this change's support contract.
+Logical equivalence (`<->`) now passes six generated cases in both state modes.
+The binary-operator case passes elaboration; the five logical-operator cases
+execute simulations and pass their assertions. A full run before the container
+method changes above changed only these twelve verdicts, with no passing case
+regressing: 1,208 cases pass in 2state and 1,219 in 4state. Shared tests cover unknown operands and
+evaluate both operands exactly once (IEEE 1800-2023 11.4.7).
 
 Logical implication (`->`) now passes six generated cases in both state modes.
 The binary-operator case passes elaboration; the five logical-operator cases
@@ -171,6 +177,35 @@ execute simulations and pass their assertions. A full run before the container
 method changes above changed only these twelve verdicts, with no passing case
 regressing: 1,208 cases pass in 2state and 1,219 in 4state. Shared tests also cover short-circuiting and
 unknown operands (IEEE 1800-2023 11.4.7).
+
+Integral array reductions (7.12.3) support `sum`, `product`, `and`, `or` and
+`xor`, with or without empty parentheses. The five unmodified
+`chapter-7/arrays/unpacked/reduction-methods` simulation cases pass the
+official runner in both state modes at the pinned revision. Only those ten
+reviewed expectations change from `fail` to `pass`; this is a focused run,
+not a new full-corpus measurement. Shared regressions also exercise fixed
+arrays, queues, integral- and string-indexed associative arrays, element-width
+overflow, signed results, packed type queries and four-state propagation.
+Empty reductions use the operation identity (`product`: one, `and`: all ones,
+`sum` / `or` / `xor`: zero). An explicit `legacy_empty_reductions` build option
+selects zero for all empty reductions. These empty-input cases are covered by
+shared and simulator API regressions; the five upstream cases use nonempty
+arrays and do not distinguish these modes.
+`with` expressions, iterator arguments and
+multidimensional unpacked receivers remain unsupported.
+
+Dynamic arrays and queues support `reverse`, `sort` and `rsort` (7.12.2),
+including the bare method form. The three unmodified upstream
+`chapter-7/arrays/unpacked/ordering-methods` cases pass the official simulation
+runner in both state modes. Exactly these six expectations change from `fail`
+to `pass`; the neighboring `shuffle` case remains a failure in both modes.
+This is a focused eight-verdict run, not a full-corpus measurement.
+Shared cases additionally check negative and unsigned integral values through
+64 bits, string ordering, bounded queues, empty/singleton arrays, local
+shadowing, value copies, class identity, X/Z preservation and scalar element
+change events. Native-image/checkpoint tests cover the new runtime operations.
+Associative ordering is prohibited by 7.12.2; fixed-array ordering, `shuffle`,
+`with` expressions and iterator arguments remain unsupported.
 
 ## Running locally
 

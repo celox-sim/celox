@@ -2495,6 +2495,27 @@ fn constructed_declarations_validate_types_dimensions_and_allocation_operands() 
 }
 
 #[test]
+fn class_properties_retain_constructed_declarations_and_initializers() {
+    let syntax = parse(
+        "module M; class Cell; endclass class Store; int data[] = new[2]; int q[$], map[string]; Cell child = new; endclass endmodule",
+    );
+    let properties = &syntax.classes[1].properties;
+    let names = properties
+        .iter()
+        .flat_map(|property| &property.declaration.variables)
+        .map(|variable| variable.name.spelling.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["data", "q", "map", "child"]);
+    let data = &properties[0].declaration.variables[0];
+    assert!(matches!(data.dimensions[0].kind, DimensionKind::Unsized));
+    assert!(matches!(
+        syntax.expression(data.value.unwrap()).kind,
+        ExprKind::Select { .. }
+    ));
+    assert!(properties[2].declaration.variables[0].value.is_some());
+}
+
+#[test]
 fn class_property_payloads_validate_while_opaque_nonproperty_items_keep_boundaries() {
     let members = "rand protected int x=1; static const int y=2; const protected static int z=3; C object=new old_object; int data[]=new[2]; constraint c { x > 0; } int after_constraint=1; extern constraint forward; nettype int N with resolver; covergroup cg; coverpoint x; endgroup int after_covergroup=2; virtual function int f(); return x; endfunction extern function int g(); function new(); super.new(); endfunction";
     parse(&format!("class C; {members} endclass module M; endmodule"));
@@ -3047,10 +3068,78 @@ fn malformed_array_method_with_is_rejected() {
 #[test]
 fn constraints_retain_simple_expressions_and_mark_other_forms() {
     let tree = parse(
-        "class C; rand int x; constraint a { x > 0; x < 3; } constraint b { if (x) x == 1; } endclass",
+        "class C; rand int x; constraint a { x > 0; x < 3; } constraint b { if (x) x == 1; } constraint c { soft x == 1; } constraint d { if (1) {} } endclass",
     );
     let blocks = &tree.classes[0].constraints;
     assert_eq!(blocks[0].name.spelling, "a");
     assert_eq!(blocks[0].expressions.as_ref().unwrap().len(), 2);
-    assert!(blocks[1].expressions.is_none());
+    let guarded = blocks[1].expressions.as_ref().unwrap();
+    assert_eq!(guarded.len(), 1);
+    assert!(
+        matches!(&tree.expression(guarded[0]).kind, ExprKind::Binary { operator, .. } if operator == "||")
+    );
+    assert!(blocks[2].expressions.is_none());
+    assert!(blocks[3].expressions.as_ref().unwrap().is_empty());
+}
+
+#[test]
+fn inline_constraints_retain_ownership_and_bound_nested_calls() {
+    let syntax =
+        parse("module M; initial obj.randomize() with { if (x) y == 1; else y == 2; }; endmodule");
+    assert!(
+        syntax
+            .expression_nodes()
+            .any(|(_, node)| matches!(&node.kind,
+        ExprKind::RandomizeWith { constraints: Some(values), .. } if values.len() == 2))
+    );
+    let source = format!(
+        "module M; initial {}1;{} endmodule",
+        "obj.randomize() with { ".repeat(100),
+        " };".repeat(100)
+    );
+    assert!(
+        Declarations::parse(&source, Path::new("nested_inline.sv"))
+            .unwrap_err()
+            .to_string()
+            .contains("inline constraint nesting limit")
+    );
+}
+
+#[test]
+fn virtual_method_visibility_order_preserves_class_members() {
+    for qualifiers in [
+        "virtual protected",
+        "protected virtual",
+        "virtual local",
+        "local virtual",
+    ] {
+        let body = format!(
+            "class C; {qualifiers} function int f(); return 1; endfunction {qualifiers} task t(); endtask virtual interface bus vif; int after; endclass"
+        );
+        for source in [
+            format!("{body} module M; endmodule"),
+            format!("module M; {body} endmodule"),
+            format!("package P; {body} endpackage module M; endmodule"),
+        ] {
+            let syntax = parse(&source);
+            let class = &syntax.classes[0];
+            assert_eq!(class.methods.len(), 2, "{source}");
+            for method in &class.methods {
+                assert!(method.qualifiers.is_virtual);
+                assert_eq!(
+                    method.qualifiers.protected,
+                    qualifiers.contains("protected")
+                );
+                assert_eq!(method.qualifiers.local, qualifiers.contains("local"));
+            }
+            assert_eq!(class.properties.len(), 2, "{source}");
+            assert!(!class.properties[0].qualifiers.is_virtual);
+            assert!(matches!(
+                syntax
+                    .data_type(class.properties[0].declaration.data_type)
+                    .kind,
+                DataTypeKind::VirtualInterface { .. }
+            ));
+        }
+    }
 }

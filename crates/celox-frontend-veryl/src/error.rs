@@ -57,7 +57,12 @@ impl From<celox_frontend_core::LoweringPhase> for LoweringPhase {
 #[derive(Error, Debug, Clone)]
 pub enum FrontendDiagnostic {
     #[error("latch inference inside always_comb: assignments retain their previous values")]
-    InferredLatch { source_location: SourceLocation },
+    InferredLatch {
+        source_location: SourceLocation,
+        /// Candidate retention is unreachable for binary selectors. Keep this
+        /// evidence until duplicate upstream coverage warnings are removed.
+        proven_binary_combinational: bool,
+    },
 
     #[error("Array literal side-effect evaluation count is undefined: {detail}")]
     UndefinedArrayLiteralEvaluationCount {
@@ -91,23 +96,38 @@ pub enum FrontendDiagnostic {
 }
 
 impl FrontendDiagnostic {
-    pub(crate) fn inferred_latch(token: &TokenRange) -> Self {
+    pub(crate) fn inferred_latch(token: &TokenRange, proven_binary_combinational: bool) -> Self {
         Self::InferredLatch {
             source_location: SourceLocation::from_token(token),
+            proven_binary_combinational,
         }
+    }
+
+    pub fn proven_binary_combinational(&self) -> bool {
+        matches!(
+            self,
+            Self::InferredLatch {
+                proven_binary_combinational: true,
+                ..
+            }
+        )
     }
 
     pub(crate) fn same_site(&self, other: &Self) -> bool {
         let a = self.source_location();
         let b = other.source_location();
         std::mem::discriminant(self) == std::mem::discriminant(other)
+            && self.proven_binary_combinational() == other.proven_binary_combinational()
             && a.path() == b.path()
             && a.span == b.span
     }
 
     /// Coverage warnings for this same process are represented by inferred_latch.
     pub fn covers_uncovered_branch(&self, error: &veryl_analyzer::AnalyzerError) -> bool {
-        let Self::InferredLatch { source_location } = self else {
+        let Self::InferredLatch {
+            source_location, ..
+        } = self
+        else {
             return false;
         };
         let veryl_analyzer::AnalyzerError::UncoveredBranch {
@@ -170,7 +190,9 @@ impl FrontendDiagnostic {
 
     fn source_location(&self) -> &SourceLocation {
         match self {
-            Self::InferredLatch { source_location }
+            Self::InferredLatch {
+                source_location, ..
+            }
             | Self::UndefinedArrayLiteralEvaluationCount {
                 source_location, ..
             }

@@ -149,7 +149,10 @@ impl<B: SimBackend> SimulationState<B> {
         E: SimulationExecutor<Backend = B>,
     {
         {
-            executor.run_process(kernel)?;
+            executor.enter_deferred_assertion_process(process);
+            let result = executor.run_process(kernel);
+            executor.leave_deferred_assertion_process();
+            result?;
             let status: u8 = executor
                 .backend()
                 .get_as(self.model.processes[process].status);
@@ -177,12 +180,19 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 Some(ProcessStatus::Done) => {
                     self.end_activation(process);
+                    executor.finish_deferred_assertion_process(process);
                     if self.model.processes[process].program.is_some() {
                         self.program_kernel_ended(executor.backend())?;
                     }
                 }
                 Some(ProcessStatus::Exit) => {
                     self.exit_program(executor.backend_mut(), process)?;
+                    let program = self.model.processes[process].program;
+                    for (index, candidate) in self.model.processes.iter().enumerate() {
+                        if candidate.program == program {
+                            executor.finish_deferred_assertion_process(index);
+                        }
+                    }
                     self.program_kernel_ended(executor.backend())?;
                 }
                 Some(ProcessStatus::Finish) => return Err(Halt::Finish),
@@ -198,7 +208,9 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 Some(ProcessStatus::WaitFork) => return Ok(self.wait_for_children(process)),
                 Some(ProcessStatus::DisableFork) => {
-                    self.disable_children(process);
+                    for child in self.disable_children(process) {
+                        executor.cancel_deferred_assertion_process(child);
+                    }
                     return Ok(true);
                 }
                 Some(ProcessStatus::Local) => {
@@ -222,7 +234,10 @@ impl<B: SimBackend> SimulationState<B> {
                         .filter(|site| site.kind == kind)
                         .nth(index as usize)
                         .ok_or(SimulatorErrorCode::InternalError)?;
-                    executor.host_request(request, current_time)?;
+                    executor.enter_deferred_assertion_process(process);
+                    let result = executor.host_request(request, current_time);
+                    executor.leave_deferred_assertion_process();
+                    result?;
                     *returns += 1;
                     self.charge(*returns, Some(process))?;
                     return Ok(true);
@@ -291,7 +306,7 @@ impl<B: SimBackend> SimulationState<B> {
                 // one, the check following the settle sees them: a settle
                 // does not write what processes write.
                 if again || !self.region_ready(reactive).is_empty() {
-                    self.observe_driven(executor.backend_mut())?;
+                    self.observe_driven_unsettled(executor.backend_mut())?;
                 }
                 if !again {
                     break;
@@ -412,7 +427,7 @@ impl<B: SimBackend> SimulationState<B> {
                 // host's view of the state, and what the settle derived.
                 entry = false;
                 if !self.process_state.waiters.is_empty() {
-                    self.observe(executor.backend_mut(), None)?;
+                    self.observe_settled(executor.backend_mut())?;
                 }
             } else {
                 self.observe_driven(executor.backend_mut())?;

@@ -12,7 +12,7 @@ mod control;
 mod final_procedures;
 mod foreach;
 use foreach::ForeachLoop;
-mod randomization;
+pub(super) mod randomization;
 pub(super) mod timed_tasks;
 mod timing;
 use crate::procedural::{
@@ -682,6 +682,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let bind = |right| {
             expression_binding::bind_value(right, native, self.tree, &self.dims, Some(&target))
         };
+        if let Some(container) = property.r#type.container.as_deref() {
+            if op != "=" {
+                return Err(unsupported("compound assignment to a container property"));
+            }
+            let value = containers::assignment(right, self.tree, &self.dims, container)?;
+            return self.property_store(&property, handle, op, value).map(Some);
+        }
         let mut value = match property.r#type.class() {
             Some(class) if op == "=" => {
                 match expression_binding::object_constructor(
@@ -762,9 +769,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         root: celox_sv_syntax::ExprId,
     ) -> Result<Option<Stmt>, AnalyzerError> {
         let native = self.tree.declarations();
-        if let Some(mut call) =
-            expression_binding::object_rand_mode_call(self.tree, root, native, &self.dims, true)?
-        {
+        if let Some(mut call) = expression_binding::object_constraint_mode_call(
+            self.tree, root, native, &self.dims, true,
+        )?
+        .or(expression_binding::object_rand_mode_call(
+            self.tree, root, native, &self.dims, true,
+        )?) {
             self.rename_expr(&mut call);
             return Ok(Some(match call {
                 Expr::Call {
@@ -1199,6 +1209,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         root: celox_sv_syntax::ExprId,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
         let native = self.tree.declarations();
+        if let Some((mut value, _)) = array_reductions::bind(root, native, self.tree, &self.dims)? {
+            self.rename_expr(&mut value);
+            return Ok(vec![Stmt::Eval(value)]);
+        }
         if let Some(mut value) = containers::value(root, native, self.tree, &self.dims, true)? {
             self.rename_expr(&mut value);
             return Ok(vec![Stmt::Eval(value)]);
@@ -1237,11 +1251,26 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             let query_root =
                 expression_binding::call_statement_root(root, discarded, self.tree.declarations())?;
             if discarded
+                && let Some((mut value, _)) =
+                    array_reductions::bind(query_root, native, self.tree, &self.dims)?
+            {
+                self.rename_expr(&mut value);
+                return Ok(vec![Stmt::Eval(value)]);
+            }
+            if discarded
                 && let Some(mut value) =
                     containers::value(query_root, native, self.tree, &self.dims, true)?
             {
                 self.rename_expr(&mut value);
                 return Ok(vec![Stmt::Eval(value)]);
+            }
+            if matches!(
+                native.expression(query_root).kind,
+                celox_sv_syntax::ExprKind::RandomizeWith { .. }
+            ) {
+                let mut call = self.native_value(query_root)?;
+                self.rename_expr(&mut call);
+                return Ok(vec![Stmt::Eval(call)]);
             }
             if let Some(call) = self.method_call_statement(query_root)? {
                 return Ok(vec![call]);
@@ -2275,6 +2304,9 @@ pub(super) fn lower_subroutine(
     builder.push_scope();
     if let Some(class) = class {
         builder.enter_class_scope(class);
+        // Method formals and locals may shadow properties, but not another
+        // declaration in the method's own lexical scope (8.5, 6.21).
+        builder.push_scope();
     }
     // Defaults bind in the enclosing declaration scope, before
     // any formal can shadow those names (IEEE 1800-2023 13.5.3).
@@ -2379,6 +2411,9 @@ pub(super) fn lower_subroutine(
         None => body.extend(builder.native_body(&items, &native.authored_statements)?),
     }
     builder.pop_scope();
+    if class.is_some() {
+        builder.pop_scope();
+    }
     let static_types: HashMap<String, Type> = builder
         .state
         .statics
@@ -2693,6 +2728,16 @@ impl BodyBuilder<'_, '_, '_> {
             let Some(initializer) = property.initializer else {
                 continue;
             };
+            if let Some(container) = property.r#type.container.as_deref() {
+                let mut value =
+                    containers::assignment(initializer, self.tree, &self.dims, container)?;
+                self.rename_expr(&mut value);
+                body.push(Stmt::Eval(classes::object_call(
+                    system_functions::ObjectOp::Store(property.field),
+                    vec![Expr::Ident(this.to_owned()), value],
+                )));
+                continue;
+            }
             let mut value = match property.r#type.class() {
                 Some(class) => expression_binding::object_constructor(
                     self.tree,

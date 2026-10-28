@@ -149,9 +149,16 @@ for crate in "${crates[@]}"; do
   # every test and benchmark binary; linking all of Celox exceeds the disk on a
   # GitHub-hosted runner. A shared target directory also reuses dependencies
   # between archives instead of keeping one full build tree per crate.
+  archive_features=()
+  if [[ "$crate" == celox ]]; then
+    # Cross-backend test targets call these APIs without individual cfg guards.
+    # Match the ordinary Celox integration harness, including its SV targets.
+    archive_features=(--features cranelift,wasm-runtime,systemverilog)
+  fi
   cargo check \
     --locked \
     --all-targets \
+    "${archive_features[@]}" \
     --manifest-path "$package_dir/Cargo.toml" \
     --target-dir "$PWD/target/package-checks"
 

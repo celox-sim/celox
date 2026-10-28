@@ -3498,10 +3498,6 @@ fn rejects_unimplemented_timing_constructs() {
         ("event e; initial @e;", "named event"),
         ("event e; initial ->e;", "named event"),
         (
-            "logic clk, en; initial @(posedge clk iff en);",
-            "iff-qualified event",
-        ),
-        (
             "logic a, b; initial a = #1 b;",
             "intra-assignment timing control",
         ),
@@ -3524,8 +3520,8 @@ fn rejects_unimplemented_timing_constructs() {
         );
     }
     assert_eq!(
-        AnalyzerError::Unsupported("iff-qualified event".to_string()).tracking_issue(),
-        1444
+        AnalyzerError::Unsupported("iff-qualified always_ff event".to_string()).tracking_issue(),
+        452
     );
 }
 
@@ -4819,10 +4815,6 @@ fn rejects_unsupported_interface_uses() {
         );
     }
     for (interface, message) in [
-        (
-            "interface I(input logic clk); endinterface",
-            "ports of interface `I`",
-        ),
         (
             "interface I; enum {Idle, Busy} state; endinterface",
             "enum type in interface `I`",
@@ -6588,11 +6580,6 @@ fn explicit_output_data_types_default_to_variables() {
 fn class_randomize_rejects_unsupported_semantics() {
     for (members, call, expected) in [
         (
-            "rand int x; constraint c { if (x) x == 1; }",
-            "c.randomize()",
-            "constraints",
-        ),
-        (
             "rand int x; constraint c { soft x == 1; }",
             "c.randomize()",
             "constraints",
@@ -6603,14 +6590,9 @@ fn class_randomize_rejects_unsupported_semantics() {
             "constraints",
         ),
         (
-            "rand int x; constraint c { x inside {[1:3]}; }",
+            "rand int x; constraint c { x inside {[1:$]}; }",
             "c.randomize()",
             "constraint",
-        ),
-        (
-            "rand int x; constraint c { (x == 1) -> (x < 3); }",
-            "c.randomize()",
-            "constraints",
         ),
         (
             "rand int x; constraint c { (x == 1) <-> (x < 3); }",
@@ -6646,7 +6628,7 @@ fn class_randomize_rejects_unsupported_semantics() {
         ),
         (
             "rand int x;",
-            "c.randomize() with { x == 1; }",
+            "c.randomize() with { outside == 1; }",
             "unsupported",
         ),
         ("rand int x;", "c.randomize(x + 1)", "arguments"),
@@ -6923,6 +6905,164 @@ fn class_visibility_rejects_inaccessible_members() {
         let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
         assert!(
             matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn imported_class_member_types_keep_declaration_dimensions() {
+    let package = r#"
+        package p;
+            class Box #(int N = 5);
+                typedef bit [N-1:0] element_t;
+            endclass
+            typedef Box#() Small;
+            typedef Box#(9) Wide;
+        endpackage
+    "#;
+    let packages = analyze_packages(&[(package, Path::new("member-types-package.sv"))]).unwrap();
+    let ir = analyze_source_module_with_packages(
+        r#"
+        module Top import p::*; #(parameter int N = 29) (
+            input Small::element_t sample, input Wide::element_t other,
+            output bit done
+        );
+            assign done = $bits(sample) == 5 && $bits(other) == 9;
+        endmodule
+        "#,
+        Path::new("member-types-top.sv"),
+        "Top",
+        &HashMap::default(),
+        &packages,
+    )
+    .expect("imported class typedefs must retain their declaration's dimensions");
+    let top = ir
+        .modules()
+        .iter()
+        .find(|module| module.name() == "Top")
+        .unwrap();
+    for (name, expected) in [("sample", 5), ("other", 9)] {
+        let width = top
+            .ports()
+            .iter()
+            .find(|port| port.name() == name)
+            .and_then(|port| port.r#type().resolved_width());
+        assert_eq!(width, Some(expected), "{name}");
+    }
+}
+
+#[test]
+fn imported_class_member_types_preserve_package_qualifier_precedence() {
+    analyze_source(
+        r#"
+        package p; typedef bit [4:0] word_t; endpackage
+        package q; typedef byte p; endpackage
+        package r; typedef int p; endpackage
+        module Top import q::*; import r::*; (input p::word_t value, output bit done);
+            assign done = $bits(value) == 5;
+        endmodule
+        "#,
+        Path::new("package-qualifier-before-wildcards.sv"),
+    )
+    .expect("a package qualifier must not bind ambiguous wildcard type names");
+}
+
+#[test]
+fn imported_class_member_types_do_not_export_package_locals() {
+    let error = analyze_source(
+        r#"
+        package p;
+            typedef bit [3:0] Hidden;
+            class Item; typedef bit [7:0] Public; endclass
+        endpackage
+        module Top(output int sum);
+            import p::Item;
+            Item::Hidden sample;
+            initial sum = sample;
+        endmodule
+        "#,
+        Path::new("imported-class-private-scope.sv"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("Hidden"), "{error}");
+}
+
+#[test]
+fn class_type_parameter_qualifiers_are_not_package_dependencies() {
+    for body in [
+        "static function int get(); return TYPE::value; endfunction",
+        "typedef TYPE::word_t element_t;",
+        "localparam type element_t = TYPE::word_t;",
+        "extern static function int get();",
+    ] {
+        let out_of_block = if body.starts_with("extern") {
+            "function int Q::get(); return TYPE::value; endfunction"
+        } else {
+            ""
+        };
+        let source = format!(
+            "package p; class Item; static int value=42; typedef bit[7:0] word_t; endclass class Q#(type TYPE=Item); {body} endclass {out_of_block} endpackage module Top; endmodule"
+        );
+        analyze_source(&source, Path::new("class-type-qualifier.sv"))
+            .unwrap_or_else(|error| panic!("{body}: {error}"));
+    }
+}
+
+#[test]
+fn class_type_parameter_scopes_do_not_hide_unknown_packages() {
+    for (body, outside, name) in [
+        (
+            "static function int get(); return missing::value; endfunction",
+            "",
+            "missing",
+        ),
+        ("", "localparam int value=TYPE::value;", "TYPE"),
+        (
+            "typedef TYPE Alias;",
+            "localparam int value=Alias::value;",
+            "Alias",
+        ),
+    ] {
+        let source = format!(
+            "package p; class Item; endclass class Q#(type TYPE=Item); {body} endclass endpackage module Top; {outside} endmodule"
+        );
+        let error = analyze_source(&source, Path::new("class-type-real-package.sv")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("unknown package `{name}`")),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn class_type_alias_qualifiers_are_not_package_dependencies() {
+    for source in [
+        "package p; class Item; static int value=42; endclass typedef Item Alias; class Q; static function int get(); return Alias::value; endfunction endclass endpackage module Top; endmodule",
+        "package p; class Item#(int N=42); static int value=N; endclass typedef Item#(23) Alias; class Q; static function int get(); return Alias::value; endfunction endclass endpackage module Top; endmodule",
+        "module Top; class Item; typedef bit[7:0] word_t; endclass typedef Item Alias; Alias::word_t value; endmodule",
+        "package Alias; class Item; static int value=42; endclass endpackage module Top; typedef Alias::Item Alias; initial $display(Alias::value); endmodule",
+        "module Top; class Item; static int value=42; endclass if (1) begin : g typedef Item Alias; initial $display(Alias::value); end endmodule",
+        "module Top; class Item; static int value=42; endclass class Q; typedef Item Alias; static function int get(); return Alias::value; endfunction endclass endmodule",
+        "package a; typedef int Alias; endpackage package b; typedef byte Alias; endpackage module Top; import a::*; import b::*; class Item; static int value=42; endclass class Q; typedef Item Alias; static function int get(); return Alias::value; endfunction endclass endmodule",
+    ] {
+        analyze_source(source, Path::new("class-alias-qualifier.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+}
+
+#[test]
+fn class_type_alias_scopes_preserve_package_dependencies() {
+    for source in [
+        "module Top; class Item; static int value=42; endclass class Q; typedef Item Alias; endclass localparam int value=Alias::value; endmodule",
+        "module Top; class Item; static int value=42; endclass if (1) begin : g typedef Item Alias; end localparam int value=Alias::value; endmodule",
+        "module Top; class Item; endclass typedef Alias::Item Alias; endmodule",
+    ] {
+        let error = analyze_source(source, Path::new("class-alias-real-package.sv")).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown package `Alias`"),
             "{source}: {error}"
         );
     }
@@ -7344,4 +7484,140 @@ fn final_procedures_only_follow_defaults_for_omitted_arguments() {
             result.unwrap_or_else(|error| panic!("{body}: {error}"));
         }
     }
+}
+
+#[test]
+fn class_randomize_bounds_nested_membership_expansion() {
+    for levels in [4, 25] {
+        let mut expr = "x".to_owned();
+        for _ in 0..levels {
+            expr = format!("({expr}) inside {{0, 1}}");
+        }
+        let source = format!(
+            "module Top; class C; rand bit x; constraint c {{ {expr}; }} endclass C c; initial begin c = new; c.randomize(); end endmodule"
+        );
+        let result = analyze_source(&source, Path::new("nested_membership.sv"));
+        if levels == 4 {
+            result.expect("small nested membership must remain supported");
+        } else {
+            let error = result
+                .expect_err("expanded membership must be bounded")
+                .to_string();
+            assert!(
+                error.contains("constraint expression expansion limit"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn class_inline_randomize_retains_call_specific_constraints() {
+    let source = r#"module Top;
+        class C; rand int x; constraint c { x < 10; } endclass
+        C obj;
+        initial begin
+            obj = new;
+            if (!(obj.randomize() with { x == 2; })) $fatal;
+            obj.randomize() with { x == 3; };
+        end
+    endmodule"#;
+    analyze_source(source, Path::new("inline_randomize.sv")).unwrap();
+}
+
+#[test]
+fn class_inline_randomize_binds_local_inputs() {
+    let source = r#"module Top;
+        class C; rand bit [7:0] x; endclass
+        C obj;
+        bit [7:0] wanted, x;
+        initial begin
+            obj = new;
+            wanted = 2; x = 3;
+            obj.randomize() with { x == wanted; };
+            obj.randomize() with { x == local::x; };
+        end
+    endmodule"#;
+    analyze_source(source, Path::new("inline_inputs.sv")).unwrap();
+}
+
+#[test]
+fn class_inline_randomize_static_names_do_not_capture_caller_locals() {
+    for (expression, supported) in [("x == limit", false), ("x == local::limit", true)] {
+        let source = format!(
+            r#"module Top;
+            class C; rand bit [7:0] x; static bit [7:0] limit = 5; endclass
+            C obj; bit [7:0] limit;
+            initial begin obj = new; limit = 3; obj.randomize() with {{ {expression}; }}; end
+        endmodule"#
+        );
+        let result = analyze_source(&source, Path::new("inline_static_scope.sv"));
+        if supported {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains("static properties in inline constraints"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn constraint_mode_rejects_invalid_calls() {
+    for (statement, expected) in [
+        ("c.constraint_mode();", "getter requires"),
+        ("c.missing.constraint_mode(0);", "unknown constraint"),
+        ("c.x.constraint_mode();", "unknown constraint"),
+        ("result = c.rule.constraint_mode(1);", "setter is void"),
+        ("c.rule.constraint_mode(1, 0);", "one on_off"),
+    ] {
+        let source = format!(
+            "module Top; class C; rand bit [3:0] x; constraint rule {{ x == 1; }} endclass C c; int result; initial begin c = new; {statement} end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("constraint_mode.sv"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{statement}: {error}");
+    }
+}
+
+#[test]
+fn constraint_mode_cannot_be_overridden() {
+    let source = "module Top; class C; function void constraint_mode(bit flag); endfunction endclass C c; initial c = new; endmodule";
+    let error = analyze_source(source, Path::new("constraint_mode_override.sv"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("overriding"), "{error}");
+}
+
+#[test]
+fn constraint_mode_outside_classes_remains_an_ordinary_function() {
+    let source = "module Top(output int value); function int constraint_mode(); return 42; endfunction initial value = constraint_mode(); endmodule";
+    analyze_source(source, Path::new("constraint_mode_function.sv")).unwrap();
+}
+
+#[test]
+fn constraint_mode_names_do_not_intercept_struct_members() {
+    for source in [
+        "module Top(output int value); struct packed { int constraint_mode; } s; initial value = s.constraint_mode; endmodule",
+        "module Top(output int value); struct packed { struct packed { int constraint_mode; } child; } s; initial value = s.child.constraint_mode; endmodule",
+        "module Top(output int value); class C; function int f(); struct packed { int constraint_mode; } s; s.constraint_mode=37; return s.constraint_mode; endfunction endclass C c; initial begin c=new; value=c.f(); end endmodule",
+    ] {
+        analyze_source(source, Path::new("constraint_mode_struct.sv")).unwrap();
+    }
+}
+
+#[test]
+fn interface_header_members_preserve_parameter_dependent_types() {
+    let source = "interface Bus #(parameter W=8)(input logic [W-1:0] data); modport reader(input data); endinterface";
+    let signatures = crate::interface_prototypes(&[(source, Path::new("bus.sv"))]).unwrap();
+    let port = &signatures[0].module.ports()[0];
+    assert_eq!(port.name(), "h$data");
+    let values = fxhash::FxHashMap::from_iter([("h$W".to_string(), 12)]);
+    assert_eq!(
+        typecheck::eval_const_expr(port.r#type().packed_ranges()[0].left(), &values),
+        Some(11),
+    );
 }

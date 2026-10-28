@@ -3,6 +3,15 @@
 use super::*;
 
 sv_backends! {
+    fn class_imported_member_type_dimensions(sim) { @case "class::imported_member_type_dimensions"; }
+    fn class_imported_member_type_inheritance(sim) { @case "class::imported_member_type_inheritance"; }
+    fn class_type_alias_members(sim) { @case "class::type_alias_members"; }
+    fn class_type_alias_lexical_scopes(sim) { @case "class::type_alias_lexical_scopes"; }
+    fn constraint_mode_ordinary_struct_members(sim) {
+        @case "class::constraint_mode_ordinary_struct_members";
+    }
+    fn class_type_parameter_imports(sim) { @case "class::type_parameter_imports"; }
+    fn class_type_parameter_shadowing(sim) { @case "class::type_parameter_shadowing"; }
     fn class_objects_properties_and_methods(sim) { @case "class::objects_properties_and_methods"; }
 }
 
@@ -931,4 +940,86 @@ sv_backends! {
 
 sv_backends! {
     fn constrained_randomize_hooks(sim) { @case "class::constrained_randomize_hooks"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inside(sim) { @case "class::constrained_randomize_inside"; }
+    fn constrained_randomize_inside_widths(sim) { @case "class::constrained_randomize_inside_widths"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_conditionals(sim) { @case "class::constrained_randomize_conditionals"; }
+    fn constrained_randomize_nested_guards(sim) { @case "class::constrained_randomize_nested_guards"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inline(sim) { @case "class::constrained_randomize_inline"; }
+    fn constrained_randomize_inline_inheritance(sim) { @case "class::constrained_randomize_inline_inheritance"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inline_basic(sim) { @case "class::constrained_randomize_inline_basic"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inline_package_instances(sim) { @case "class::constrained_randomize_inline_package_instances"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inline_inputs(sim) { @case "class::constrained_randomize_inline_inputs"; }
+    fn constrained_randomize_inline_input_methods(sim) { @case "class::constrained_randomize_inline_input_methods"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inline_input_hooks(sim) { @case "class::constrained_randomize_inline_input_hooks"; }
+}
+
+sv_backends! {
+    fn constraint_mode_basic(sim) { @case "class::constraint_mode_basic"; }
+    fn constraint_mode_inheritance(sim) { @case "class::constraint_mode_inheritance"; }
+    fn constraint_mode_hooks(sim) { @case "class::constraint_mode_hooks"; }
+}
+
+sv_backends! {
+    fn constraint_mode_checkpoint(sim) {
+        @setup { let source = r#"
+            module Top(input bit enable, output int mode, output bit [3:0] value);
+                timeunit 1ps / 1ps;
+                class C;
+                    rand bit [3:0] x;
+                    constraint c { x == 2; }
+                endclass
+                C p;
+                initial begin
+                    p = new;
+                    p.constraint_mode(0);
+                    #10 if (enable) p.c.constraint_mode(1);
+                    #10;
+                    mode = p.c.constraint_mode();
+                    if (mode) begin
+                        if (!p.randomize()) $fatal(1, "enabled solve");
+                    end else begin
+                        if (!(p.randomize() with { x == 7; })) $fatal(1, "restored solve");
+                    end
+                    value = p.x;
+                end
+            endmodule
+        "#; }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("constraint_mode_checkpoint.sv"))], "Top").four_state(true);
+        sim.run_until(5).unwrap();
+        let saved = sim.checkpoint().unwrap();
+        let enable = sim.signal("enable");
+        sim.modify(|io| io.set(enable, 1u8)).unwrap();
+        sim.run_until(25).unwrap();
+        assert_eq!(sim.get(sim.signal("mode")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("value")), 2u8.into());
+        sim.restore(&saved).unwrap();
+        sim.run_until(25).unwrap();
+        assert_eq!(sim.get(sim.signal("mode")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("value")), 7u8.into());
+    }
+}
+
+sv_backends! {
+    fn constraint_mode_base_dispatch(sim) { @case "class::constraint_mode_base_dispatch"; }
 }

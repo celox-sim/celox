@@ -1,0 +1,13 @@
+{
+  "tool": "xezim",
+  "version": "xezim version 0.11.3",
+  "source": "fork_deferred_zero_delay.sv",
+  "command": "xezim -s Top fork_deferred_zero_delay.sv",
+  "expected_display_lines": [
+    "after zero",
+    "observed",
+    "final"
+  ],
+  "review": "IEEE 1800-2023 16.4.2 does not make a zero-delay resumption a deferred-assertion flush point. Both reports should mature after the Inactive resumption, in Observed and Postponed respectively (16.4.1). The standalone source reproduces missing reports without the shared-suite emitter.",
+  "observed_output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nafter zero\nSimulation finished at time 1 ($finish called)\n"
+}

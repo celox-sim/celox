@@ -18,7 +18,13 @@ async function run(t, mode, env = {}) {
     curl: `#!/usr/bin/env bash
 url="\${@: -1}"
 case "$url" in
-  */0.8.0) printf '%s' "\${VERSION_STATUS:-200}" ;;
+  */0.8.0)
+    if [[ -n "\${ONLY_UNPUBLISHED:-}" && "$url" != */"\${ONLY_UNPUBLISHED}"/0.8.0 ]]; then
+      printf '200'
+    else
+      printf '%s' "\${VERSION_STATUS:-200}"
+    fi
+    ;;
   */celox-test-suite) printf '%s' "\${CRATE_STATUS:-200}" ;;
   *) printf '200' ;;
 esac
@@ -133,4 +139,13 @@ test("publication order includes every public crate after its workspace dependen
       );
     }
   }
+});
+
+test("Celox archive checks enable cross-backend and SV integration features", async (t) => {
+  const result = await run(t, "publish", { VERSION_STATUS: "404", ONLY_UNPUBLISHED: "celox" });
+  assert.equal(result.code, 1); // The mock registry rejects the eventual publish.
+  const calls = await readFile(join(result.root, "cargo.log"), "utf8");
+  assert.match(calls, /package --locked -p celox\n/);
+  assert.match(calls, /check --locked --all-targets --features cranelift,wasm-runtime,systemverilog --manifest-path .*celox-0.8.0\/Cargo.toml/);
+  assert.equal(calls.split("\n").filter(line => line.startsWith("package ")).length, 1);
 });

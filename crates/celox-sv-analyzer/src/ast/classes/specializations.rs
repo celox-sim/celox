@@ -180,6 +180,11 @@ fn inherit(
     env: &mut HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) {
+    if lookup(tree, name).is_none()
+        && let Some(members) = scope::imported(&tree.state).class_member_types.get(name)
+    {
+        aliases.extend(members.clone());
+    }
     for specialization in lineage(tree, name) {
         for (key, value) in &specialization.declared_env {
             match value {
@@ -243,12 +248,55 @@ pub(in crate::ast) fn member_type(
     member: &str,
 ) -> Option<Type> {
     let generic = generic(tree, name);
-    lineage(tree, name).iter().rev().find_map(|specialization| {
-        // The class name itself is not a member.
-        (member != scope_key(&specialization.generic) && member != scope_key(&generic))
-            .then(|| specialization.aliases.get(member).cloned())
-            .flatten()
-    })
+    lineage(tree, name)
+        .iter()
+        .rev()
+        .find_map(|specialization| {
+            // The class name itself is not a member.
+            (member != scope_key(&specialization.generic) && member != scope_key(&generic))
+                .then(|| specialization.aliases.get(member).cloned())
+                .flatten()
+        })
+        .or_else(|| {
+            scope::imported(&tree.state)
+                .class_member_types
+                .get(name)?
+                .get(member)
+                .cloned()
+        })
+}
+
+/// Only types declared by a class and its bases cross the scope boundary.
+/// Resolve bounds in their owning specialization, before caller names can
+/// reinterpret them (6.18, 8.13, 8.23, 8.25).
+pub(in crate::ast) fn export_member_types(
+    tree: &AnalysisContext<'_>,
+) -> HashMap<String, HashMap<String, Type>> {
+    let imported = scope::imported(&tree.state);
+    let mut result = imported.class_member_types.clone();
+    for declaration in super::scope_declarations(tree) {
+        for name in super::specializations_of(tree, declaration) {
+            let mut members = HashMap::default();
+            for specialization in lineage(tree, &name) {
+                for base in &specialization.bases {
+                    if lookup(tree, base).is_none()
+                        && let Some(inherited) = imported.class_member_types.get(base)
+                    {
+                        members.extend(inherited.clone());
+                    }
+                }
+                for (member, ty) in &specialization.declared_aliases {
+                    if let Some(ty) =
+                        type_parameters::resolve(&tree.state, ty.clone(), &specialization.env)
+                    {
+                        members.insert(member.clone(), ty);
+                    }
+                }
+            }
+            result.insert(name, members);
+        }
+    }
+    result
 }
 
 /// The specialization of class `generic` that `arguments`, bound in
@@ -267,6 +315,43 @@ pub(in crate::ast) fn specialize(
     }
     depth.set(depth.get() + 1);
     let _nesting = Nesting(depth);
+    // Parameter binding and body construction have large temporary values.
+    // Keep those phases off the stack while resolving an inherited class.
+    let pending = match prepare(tree, generic, arguments, context)? {
+        Preparation::Existing(name) => return Ok(name),
+        Preparation::Pending(pending) => pending,
+    };
+    tree.state
+        .class_specializations_building
+        .borrow_mut()
+        .push(pending.name.clone());
+    let _building = Building(&tree.state.class_specializations_building);
+    let bases = bind_bases(tree, generic, &pending.env, &pending.aliases)?;
+    finish_specialization(tree, generic, pending, bases)
+}
+
+struct PendingSpecialization {
+    name: String,
+    parameters: Parameters,
+    env: HashMap<String, i128>,
+    aliases: HashMap<String, Type>,
+}
+
+enum Preparation {
+    Existing(String),
+    Pending(Box<PendingSpecialization>),
+}
+
+// These boundaries keep the recursive inheritance frame small in debug and
+// optimized builds alike; the specialization limit must produce a diagnostic
+// before the host thread runs out of stack.
+#[inline(never)]
+fn prepare(
+    tree: &AnalysisContext<'_>,
+    generic: &str,
+    arguments: &[Argument],
+    context: &PackedDimensions,
+) -> Converted<Preparation> {
     let native = tree.declarations();
     let declaration = super::declaration(tree, generic)
         .ok_or_else(|| unsupported(format!("class `{generic}`")))?;
@@ -375,7 +460,7 @@ pub(in crate::ast) fn specialize(
             .borrow()
             .contains(&name)
     {
-        return Ok(name);
+        return Ok(Preparation::Existing(name));
     }
     if tree.state.class_specializations_frozen.get() {
         return Err(unsupported(format!(
@@ -387,11 +472,24 @@ pub(in crate::ast) fn specialize(
             "more than {MAX_SPECIALIZATIONS} class specializations"
         )));
     }
-    tree.state
-        .class_specializations_building
-        .borrow_mut()
-        .push(name.clone());
-    let _building = Building(&tree.state.class_specializations_building);
+    Ok(Preparation::Pending(Box::new(PendingSpecialization {
+        name,
+        parameters,
+        env,
+        aliases,
+    })))
+}
+
+#[inline(never)]
+fn bind_bases(
+    tree: &AnalysisContext<'_>,
+    generic: &str,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Converted<Vec<String>> {
+    let native = tree.declarations();
+    let declaration = super::declaration(tree, generic)
+        .ok_or_else(|| unsupported(format!("class `{generic}`")))?;
     // The bases are named in the scope of the parameters; a class does not
     // inherit the declarations of the interface classes it implements.
     let inherited = match &declaration.base {
@@ -401,12 +499,31 @@ pub(in crate::ast) fn specialize(
     };
     let mut bases = Vec::new();
     for id in inherited {
-        if let Some(base) = type_binding::procedural_type(id, native, tree, &env, &aliases)?
+        if let Some(base) = type_binding::procedural_type(id, native, tree, env, aliases)?
             .and_then(|ty| ty.class().map(str::to_owned))
         {
             bases.push(base);
         }
     }
+    Ok(bases)
+}
+
+#[inline(never)]
+fn finish_specialization(
+    tree: &AnalysisContext<'_>,
+    generic: &str,
+    pending: Box<PendingSpecialization>,
+    bases: Vec<String>,
+) -> Converted<String> {
+    let PendingSpecialization {
+        name,
+        mut parameters,
+        mut env,
+        mut aliases,
+    } = *pending;
+    let native = tree.declarations();
+    let declaration = super::declaration(tree, generic)
+        .ok_or_else(|| unsupported(format!("class `{generic}`")))?;
     // The body sees the parameters and types of the bases, hidden by the
     // class's own, and the scope of the specialization (8.25.1).
     for base in &bases {
@@ -1086,5 +1203,44 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
         if after == before || after >= MAX_SPECIALIZATIONS {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn inheritance_specialization_uses_the_default_thread_stack() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let mut source = String::from("module Top;");
+                for index in 0..16 {
+                    source.push_str(&format!(
+                        "class Layer{index} #(int N = 0) extends Layer{}#(N + 1); endclass ",
+                        index + 1,
+                    ));
+                }
+                source.push_str(
+                    "class Layer16 #(int N = 0); localparam int VALUE = N; endclass
+                     Layer0#() object; initial $display(Layer0#()::VALUE); endmodule",
+                );
+                crate::analyze_source(&source, Path::new("deep-class-inheritance.sv")).unwrap();
+
+                let error = crate::analyze_source(
+                    "module Top;
+                     class Recursive #(int N = 0) extends Recursive#(N + 1); endclass
+                     Recursive object; endmodule",
+                    Path::new("unbounded-class-inheritance.sv"),
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(error.contains("nested more than 64 deep"), "{error}");
+                assert!(error.contains("class `Recursive`"), "{error}");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

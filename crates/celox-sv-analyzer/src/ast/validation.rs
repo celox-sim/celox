@@ -44,6 +44,11 @@ pub(super) fn always_kind(
             }
             match event {
                 EventControl::Wildcard => AlwaysKind::Comb,
+                // An `iff` event is judged when it occurs, which only the
+                // process path does (IEEE 1800-2023 9.4.2.3).
+                EventControl::Items(items) if items.iter().any(|item| item.iff.is_some()) => {
+                    AlwaysKind::Process
+                }
                 EventControl::Items(items)
                     if items.iter().any(|item| item.edge != TimingEdge::Any) =>
                 {

@@ -369,6 +369,108 @@ macro_rules! deferred {
                 );
             }
 
+            #[test]
+            fn fork_cancelled_fatal_does_not_mature_in_either_region() {
+                for region in ["#0", "final"] {
+                    let body = format!("initial begin fork begin assert {region} (0) else $fatal(1, \"cancelled\"); #5; end join_none #0; disable fork; #1; a=1; end");
+                    let mut sim = simulation(&body);
+                    sim.run_until(2).unwrap();
+                    assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+                }
+            }
+
+            #[test]
+            fn fork_completed_fatal_survives_disable_fork_in_either_region() {
+                for region in ["#0", "final"] {
+                    let body = format!("initial begin fork begin assert {region} (0) else $fatal(1, \"completed\"); end join_none #0; disable fork; #1; a=1; end");
+                    let mut sim = simulation(&body);
+                    let error = sim.run_until(2).unwrap_err();
+                    assert!(error.to_string().contains("completed"), "{error}");
+                    assert_eq!(sim.get(sim.signal("a")), 0u8.into());
+                }
+            }
+
+            #[test]
+            fn fork_stop_retains_owner_until_wait_flushes_only_that_child() {
+                let mut sim = simulation(r#"
+                    initial begin
+                        fork
+                            begin assert #0 (1) $display("stopped"); $stop; wait(a); end
+                            begin assert #0 (1) $display("sibling"); end
+                        join_none
+                        #0; a=1; #1;
+                    end
+                "#);
+                sim.run_until(1).unwrap();
+                assert!(sim.is_stopped());
+                assert!(summary(sim.drain_runtime_events()).is_empty());
+                sim.run_until(1).unwrap();
+                assert!(!sim.is_stopped());
+                assert_eq!(summary(sim.drain_runtime_events()), vec![("sibling".to_owned(), None)]);
+            }
+
+            #[test]
+            fn fork_reactive_wakeup_cannot_cancel_an_observed_fatal() {
+                for region in ["#0", "final"] {
+                    let source = format!(r#"`timescale 1ns/1ns
+                        module Top(output bit done);
+                            bit go;
+                            Driver driver(go);
+                            initial fork begin
+                                assert {region} (0) else $fatal(1, "deferred fatal");
+                                wait(go); done=1;
+                            end join
+                        endmodule
+                        program Driver(output bit go);
+                            initial begin go=1; #10; end
+                        endprogram"#);
+                    let mut sim = celox::Simulation::from_sv_sources(
+                        vec![(source.as_str(), Path::new("reactive_deferred.sv"))], "Top"
+                    ).$backend().unwrap();
+                    let result = sim.run_until(1);
+                    if region == "#0" {
+                        let error = result.unwrap_err();
+                        assert!(error.to_string().contains("deferred fatal"), "{error}");
+                    } else {
+                        result.unwrap();
+                        assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+                    }
+                }
+            }
+
+            #[test]
+            fn fork_wait_flush_discards_its_lost_fatal_reports() {
+                let mut sim = simulation(r#"
+                    initial begin
+                        fork begin
+                            assert final (0) else $fatal(1, "flushed");
+                            repeat (2000) $display("discarded");
+                            wait(a);
+                        end join_none
+                        #0; a=1; #1; b=1;
+                    end
+                "#);
+                sim.run_until(2).unwrap();
+                assert_eq!(sim.get(sim.signal("b")), 1u8.into());
+                assert!(sim.drain_runtime_events().iter().any(|event| matches!(event, RuntimeEvent::Missed { .. })));
+            }
+
+            #[test]
+            fn fork_cancelled_overflow_cannot_leave_a_fatal_in_another_owner() {
+                let mut sim = simulation(r#"
+                    initial begin
+                        fork begin
+                            assert final (0) else $fatal(1, "cancelled");
+                            repeat (2000) $display("discarded");
+                            #5;
+                        end join_none
+                        #0; disable fork; #1; a=1;
+                    end
+                "#);
+                sim.run_until(2).unwrap();
+                assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+            }
+
             /// Events lost to a full event buffer may have held a deferred
             /// `$fatal`, which then still ends the simulation.
             #[test]
@@ -543,6 +645,37 @@ fn deferred_actions_are_one_display_or_severity_task_call() {
         assert!(
             error.to_string().contains("deferred assertion action"),
             "{action}: {error}"
+        );
+    }
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn fork_deferred_queues_follow_differential_scheduler_mirrors() {
+    let source = r#"`timescale 1ns/1ns
+    module Top;
+        bit go;
+        initial begin
+            fork
+                begin assert #0 (1) $display("kept"); #1; end
+                begin assert #0 (1) $display("flushed"); wait(go); end
+            join_none
+            #0; go=1; #2;
+        end
+    endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("deferred_differential.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .scheduler_mode(celox::SchedulerMode::Differential)
+        .build_native()
+        .unwrap();
+        sim.run_until(2).unwrap();
+        assert_eq!(
+            summary(sim.drain_runtime_events()),
+            vec![("kept".to_owned(), None)]
         );
     }
 }

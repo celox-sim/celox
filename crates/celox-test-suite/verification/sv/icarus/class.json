@@ -186,18 +186,51 @@
     },
     {
       "category": "Types",
-      "detail": "Icarus rejects constraint declarations before elaboration. IEEE 1800-2023 18.5 defines these blocks. Celox retains all assertions; Verilator passes the scalar and width/inheritance cases.",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_compile_limitation",
         "evidence": [
           "verification/repros/sv_scalar_constraints.json",
-          "LIMITATIONS.md#systemverilog-suite"
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json",
+          "verification/repros/sv_inline_constraints.json",
+          "verification/repros/sv_inline_input_icarus.json",
+          "verification/repros/sv_inline_input_hooks.json"
         ],
         "id": "sv_icarus_scalar_constraints",
         "observed_version": "Icarus Verilog version 13.0 (devel)",
         "phase": "compile",
-        "reason": "Icarus rejects constraint declarations before elaboration. IEEE 1800-2023 18.5 defines these blocks. Celox retains all assertions; Verilator passes the scalar and width/inheritance cases.",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_conditionals",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json",
+          "verification/repros/sv_inline_constraints.json",
+          "verification/repros/sv_inline_input_icarus.json",
+          "verification/repros/sv_inline_input_hooks.json"
+        ],
+        "id": "sv_icarus_scalar_constraints",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "phase": "compile",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
         "upstream": []
       },
       "name": "class::constrained_randomize_hooks",
@@ -209,18 +242,303 @@
     },
     {
       "category": "Types",
-      "detail": "Icarus rejects constraint declarations before elaboration. IEEE 1800-2023 18.5 defines these blocks. Celox retains all assertions; Verilator passes the scalar and width/inheritance cases.",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_compile_limitation",
         "evidence": [
           "verification/repros/sv_scalar_constraints.json",
-          "LIMITATIONS.md#systemverilog-suite"
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json",
+          "verification/repros/sv_inline_constraints.json",
+          "verification/repros/sv_inline_input_icarus.json",
+          "verification/repros/sv_inline_input_hooks.json"
         ],
         "id": "sv_icarus_scalar_constraints",
         "observed_version": "Icarus Verilog version 13.0 (devel)",
         "phase": "compile",
-        "reason": "Icarus rejects constraint declarations before elaboration. IEEE 1800-2023 18.5 defines these blocks. Celox retains all assertions; Verilator passes the scalar and width/inheritance cases.",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inline",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json",
+          "verification/repros/sv_inline_constraints.json",
+          "verification/repros/sv_inline_input_icarus.json",
+          "verification/repros/sv_inline_input_hooks.json"
+        ],
+        "id": "sv_icarus_scalar_constraints",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "phase": "compile",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inline_basic",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json",
+          "verification/repros/sv_inline_constraints.json",
+          "verification/repros/sv_inline_input_icarus.json",
+          "verification/repros/sv_inline_input_hooks.json"
+        ],
+        "id": "sv_icarus_scalar_constraints",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "phase": "compile",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inline_inheritance",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json",
+          "verification/repros/sv_inline_constraints.json",
+          "verification/repros/sv_inline_input_icarus.json",
+          "verification/repros/sv_inline_input_hooks.json"
+        ],
+        "id": "sv_icarus_scalar_constraints",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "phase": "compile",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inline_input_hooks",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json",
+          "verification/repros/sv_inline_constraints.json",
+          "verification/repros/sv_inline_input_icarus.json",
+          "verification/repros/sv_inline_input_hooks.json"
+        ],
+        "id": "sv_icarus_scalar_constraints",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "phase": "compile",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inline_input_methods",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json",
+          "verification/repros/sv_inline_constraints.json",
+          "verification/repros/sv_inline_input_icarus.json",
+          "verification/repros/sv_inline_input_hooks.json"
+        ],
+        "id": "sv_icarus_scalar_constraints",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "phase": "compile",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inline_inputs",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json",
+          "verification/repros/sv_inline_constraints.json",
+          "verification/repros/sv_inline_input_icarus.json",
+          "verification/repros/sv_inline_input_hooks.json"
+        ],
+        "id": "sv_icarus_scalar_constraints",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "phase": "compile",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inline_package_instances",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json",
+          "verification/repros/sv_inline_constraints.json",
+          "verification/repros/sv_inline_input_icarus.json",
+          "verification/repros/sv_inline_input_hooks.json"
+        ],
+        "id": "sv_icarus_scalar_constraints",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "phase": "compile",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inside",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json",
+          "verification/repros/sv_inline_constraints.json",
+          "verification/repros/sv_inline_input_icarus.json",
+          "verification/repros/sv_inline_input_hooks.json"
+        ],
+        "id": "sv_icarus_scalar_constraints",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "phase": "compile",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inside_widths",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json",
+          "verification/repros/sv_inline_constraints.json",
+          "verification/repros/sv_inline_input_icarus.json",
+          "verification/repros/sv_inline_input_hooks.json"
+        ],
+        "id": "sv_icarus_scalar_constraints",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "phase": "compile",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_nested_guards",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json",
+          "verification/repros/sv_inline_constraints.json",
+          "verification/repros/sv_inline_input_icarus.json",
+          "verification/repros/sv_inline_input_hooks.json"
+        ],
+        "id": "sv_icarus_scalar_constraints",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "phase": "compile",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
         "upstream": []
       },
       "name": "class::constrained_randomize_scalar",
@@ -232,21 +550,114 @@
     },
     {
       "category": "Types",
-      "detail": "Icarus rejects constraint declarations before elaboration. IEEE 1800-2023 18.5 defines these blocks. Celox retains all assertions; Verilator passes the scalar and width/inheritance cases.",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_compile_limitation",
         "evidence": [
           "verification/repros/sv_scalar_constraints.json",
-          "LIMITATIONS.md#systemverilog-suite"
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inside_constraints.json",
+          "verification/repros/sv_conditional_constraints.json",
+          "verification/repros/sv_inline_constraints.json",
+          "verification/repros/sv_inline_input_icarus.json",
+          "verification/repros/sv_inline_input_hooks.json"
         ],
         "id": "sv_icarus_scalar_constraints",
         "observed_version": "Icarus Verilog version 13.0 (devel)",
         "phase": "compile",
-        "reason": "Icarus rejects constraint declarations before elaboration. IEEE 1800-2023 18.5 defines these blocks. Celox retains all assertions; Verilator passes the scalar and width/inheritance cases.",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
         "upstream": []
       },
       "name": "class::constrained_randomize_width_and_inheritance",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_constraint_modes",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_base_dispatch",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_constraint_modes",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_basic",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_constraint_modes",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_hooks",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_constraint_modes",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (devel)",
+        "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_inheritance",
       "phase": "skip",
       "status": "ignored",
       "stronger_than_sv": false,
@@ -340,6 +751,28 @@
       "name": "class::implicit_constructors_and_this",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::imported_member_type_dimensions",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::imported_member_type_inheritance",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -1064,6 +1497,50 @@
       "name": "class::string_methods_on_properties",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Syntax error in typedef clause.\n<case>/source_0.sv:11: sorry: External methods are not yet supported.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: I give up on this function definition.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::type_alias_lexical_scopes",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::type_alias_members",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:7: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::type_parameter_imports",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 13; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Invalid module instantiation\n<case>/testbench.sv:11: error: Invalid module item.\n<case>/testbench.sv:12: error: Repeat timeunit found and the initial timeunit for this scope is missing.\n<case>/testbench.sv:13: error: Repeat timeprecision found and the initial timeprecision for this scope is missing.\n",
+      "expectation": "Simulation",
+      "name": "class::type_parameter_shadowing",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
