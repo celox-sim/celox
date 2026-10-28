@@ -48,7 +48,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         id: cache
         with:
-          key: vtest-v1
+          # The vtest executor's build plan (profile, scope, features) lives in
+          # run-vtest.mjs; a change of it is a different cache.
+          key: vtest-${{ hashFiles('scripts/run-vtest.mjs') }}
       - name: Install cargo-nextest
         if: steps.cache.outputs.cache-hit != 'true'
         uses: taiki-e/install-action@v2
