@@ -37,6 +37,7 @@ use celox_sv_analyzer as sv;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use num_bigint::BigUint;
 
+mod case_equality;
 mod comb;
 mod comb_retention;
 mod ff;
@@ -336,6 +337,7 @@ fn interface_signatures_collecting(
                 warnings,
                 &[],
                 LevelLists::Processes,
+                &HashMap::default(),
                 &HashMap::default(),
             )?;
             Ok(InterfaceSignature {
@@ -948,6 +950,7 @@ fn lower_package_states(
                 warnings,
                 &[],
                 LevelLists::Processes,
+                &HashMap::default(),
                 &HashMap::default(),
             )?;
             lowered.sim_module.time_precision = Some(
@@ -3171,24 +3174,44 @@ fn demote_level_lists(
     changed
 }
 
-// Use elaboration provenance rather than treating every '$' as a separator:
-// legal authored identifiers may themselves contain '$'.
+// Candidate indices only locate a declaration; source provenance decides
+// whether this is an interface path. Authored '$' names stay intact.
+fn restore_interface_path(
+    name: &str,
+    paths: &HashMap<String, sv::InterfaceMemberPath>,
+) -> Option<Vec<String>> {
+    if let Some(path) = paths.get(name) {
+        return path.restore(name);
+    }
+    for (separator, _) in name.match_indices('$') {
+        let member = &name[separator + 1..];
+        let mut handle = &name[..separator];
+        while let Some(indexed) = handle.strip_suffix(']') {
+            let Some((base, index)) = indexed.rsplit_once('[') else {
+                break;
+            };
+            if index.parse::<i128>().is_err() {
+                break;
+            }
+            let key = format!("{base}${member}");
+            if let Some(path) = paths.get(&key).filter(|path| path.arrayed)
+                && let Some(restored) = path.restore(name)
+            {
+                return Some(restored);
+            }
+            handle = base;
+        }
+    }
+    None
+}
+
 fn restore_interface_member_paths(module: &mut SimModule, source: &AnalyzedSvModule) {
     for variable in module.variables.values_mut() {
         variable.path = variable
             .path
             .iter()
             .flat_map(|segment| {
-                source
-                    .interface_member_paths
-                    .get(segment)
-                    .and_then(|path| path.restore(segment))
-                    .or_else(|| {
-                        source
-                            .interface_member_paths
-                            .values()
-                            .find_map(|path| path.restore(segment))
-                    })
+                restore_interface_path(segment, &source.interface_member_paths)
                     .unwrap_or_else(|| vec![segment.clone()])
             })
             .collect();
@@ -3367,6 +3390,7 @@ fn specialize_module(
         &local_forces,
         level_lists,
         hierarchical.foreign_writes,
+        &module.interface_member_paths,
     )?;
     propagate_force_signals(&mut lowered.instances, &key.force_signals);
     lowered.sim_module.time_precision = Some(
@@ -3480,6 +3504,7 @@ fn lower_module(
     force_signals: &[String],
     level_lists: LevelLists<'_>,
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
+    reflected_paths: &HashMap<String, sv::InterfaceMemberPath>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     lower_module_with_overrides(
         module,
@@ -3491,6 +3516,7 @@ fn lower_module(
         force_signals,
         level_lists,
         foreign_writes,
+        reflected_paths,
     )
 }
 
@@ -3573,6 +3599,7 @@ fn lower_module_with_overrides(
     force_signals: &[String],
     level_lists: LevelLists<'_>,
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
+    reflected_paths: &HashMap<String, sv::InterfaceMemberPath>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let parameter_types = module_parameter_types(module);
     let constants = module_constants_with_overrides(module, parameter_overrides);
@@ -3777,7 +3804,14 @@ fn lower_module_with_overrides(
     // Retain integral parameters for external observation, without adding them
     // to name_to_id: HDL expressions must still fold parameter references as
     // constants rather than introduce runtime loads.
-    for parameter in module.parameters() {
+    // Interface declarations are flattened into imported symbols, rather
+    // than authored module parameters. Retain their instance-local values as
+    // well; package imports remain owned by their package (IEEE 37.10).
+    let interface_parameters = module
+        .imported_parameters()
+        .iter()
+        .filter(|parameter| restore_interface_path(parameter.name(), reflected_paths).is_some());
+    for parameter in module.parameters().iter().chain(interface_parameters) {
         let Some(width) = parameter.resolved_width().filter(|width| *width > 0) else {
             continue;
         };
@@ -4663,10 +4697,16 @@ pub(crate) fn attach_instance_glue(
             .values()
             .any(|module| !module.sim_module.nba_switches.is_empty()))
     .then(|| {
+        // A gate is read at each write of its term's signal too.
         let mut seeds: HashSet<SourceVarId> = module
             .wait_sites
             .iter()
-            .flat_map(|site| site.terms.iter().map(|&(signal, _)| signal))
+            .flat_map(|site| {
+                site.terms
+                    .iter()
+                    .map(|&(signal, _)| signal)
+                    .chain(site.gates.iter().flatten().map(|gate| gate.signal))
+            })
             .collect();
         let triggers = module
             .eval_only_ff_blocks
@@ -4717,6 +4757,13 @@ pub(crate) fn attach_instance_glue(
         );
         seeds
     });
+    let gated_waits = lowered_modules.values().any(|module| {
+        module
+            .sim_module
+            .wait_sites
+            .iter()
+            .any(|site| site.gates.iter().any(Option::is_some))
+    });
     let (comb_blocks, arena, created, comb_observers, comb_sites, comb_alternatives) =
         lower_comb_processes(
             &lowered.source,
@@ -4732,6 +4779,7 @@ pub(crate) fn attach_instance_glue(
             warnings,
             waits,
             watch_seeds.as_ref(),
+            gated_waits,
         )
         .map_err(|error| match error {
             sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
@@ -5015,6 +5063,17 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
             op: *op,
             expr: Box::new(expr_for_state_mode(expr, four_state)),
         },
+        sv::ir::Expr::Binary { left, op, right }
+            if !four_state && matches!(op, sv::ir::BinaryOp::EqCase | sv::ir::BinaryOp::NeCase) =>
+        {
+            // Storage remains two-state; exact comparison operands retain
+            // literal X/Z until value and mask are compared (11.4.5).
+            sv::ir::Expr::Binary {
+                left: Box::new(expr_for_state_mode(left, true)),
+                op: *op,
+                right: Box::new(expr_for_state_mode(right, true)),
+            }
+        }
         sv::ir::Expr::Binary { left, op, right } => sv::ir::Expr::Binary {
             left: Box::new(expr_for_state_mode(left, four_state)),
             op: *op,
@@ -5382,6 +5441,7 @@ fn lower_comb_processes(
     warnings: &mut Vec<crate::warning::PendingWarning>,
     waits: bool,
     watch_seeds: Option<&HashSet<SourceVarId>>,
+    gated_waits: bool,
 ) -> Result<
     (
         Vec<LogicPath<SourceVarId>>,
@@ -5490,6 +5550,7 @@ fn lower_comb_processes(
                     process,
                     random_seeds[&(2, index)],
                     targets,
+                    gated_waits,
                     &mut arena,
                 ) {
                     comb_blocks.extend(paths);
@@ -5677,14 +5738,16 @@ fn watchable_variables(
 }
 
 /// The imperative unit of an `always_comb` process lowered symbolically to
-/// `targets`, and its [`CombAlternative`], if the unit may store a variable
-/// of the design twice in one execution. Otherwise nothing of the attempt
-/// remains in `pm`.
+/// `targets`, and its [`CombAlternative`]. Keep even single-store alternatives:
+/// assembly resolves cross-module gated wait dependencies only after lowering.
+/// It chooses imperative execution only when those global dependencies or
+/// occurrence counters require preserving procedural order.
 fn lower_comb_alternative(
     pm: &mut procedural::ProcModule<'_>,
     process: &sv::ir::CombProcess,
     random_seed: u32,
     targets: Vec<VarAtomBase<SourceVarId>>,
+    gated_waits: bool,
     arena: &mut SLTNodeArena<SourceVarId>,
 ) -> Option<(Vec<LogicPath<SourceVarId>>, CombAlternative)> {
     let checkpoint = pm.checkpoint();
@@ -5715,7 +5778,7 @@ fn lower_comb_alternative(
                     });
                 (id, candidates)
             })
-            .filter(|(_, candidates)| !candidates.is_empty())
+            .filter(|(_, candidates)| gated_waits || !candidates.is_empty())
             .map(|(process, candidates)| (paths, process, candidates)),
         _ => None,
     };
@@ -10642,6 +10705,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stateless_function_scratch_loops_do_not_become_runtime_loops() {
+        let source = r#"module Top(input wire [255:0] d, output wire [255:0] q);
+            function [15:0][15:0] pattern();
+                logic [15:0] words [15:0];
+                for (int i=0; i<16; i++) words[i] = 16'b1 << i;
+                for (int i=0; i<16; i++) for (int j=0; j<16; j++) pattern[i][j] = words[i][j];
+            endfunction
+            assign q = d ^ pattern();
+        endmodule"#;
+        for four_state in [false, true] {
+            let output = schedule_sources(
+                &[(source, Path::new("top.sv"))],
+                "Top",
+                &[],
+                &[],
+                &[],
+                four_state,
+                &celox_frontend_core::ParallelScheduleOptions::default(),
+                &FrontendTraceOptions::default(),
+                None,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            let instructions: usize = output
+                .scheduled
+                .sir
+                .eval_comb
+                .iter()
+                .flat_map(|unit| unit.blocks.values())
+                .map(|block| block.instructions.len())
+                .sum();
+            assert!(
+                instructions < 32,
+                "constant scratch loops produced {instructions} runtime instructions"
+            );
+        }
+    }
+
+    #[test]
     fn bit_select_width_does_not_evaluate_a_runtime_zero_sample() {
         let index = sv::ir::ConstExpr::Ident("index".into());
         let bound = sv::ir::ConstExpr::Binary {
@@ -11287,5 +11389,54 @@ endmodule
             select_sources(&computed, computed_sources.clone(), BitAccess::new(7, 7)).unwrap(),
             computed_sources
         );
+    }
+}
+
+#[cfg(test)]
+mod interface_reflection_tests {
+    use super::*;
+
+    #[test]
+    fn indexed_interface_paths_require_declaration_provenance() {
+        let paths = [
+            (
+                "authored$bus$extra$width",
+                ["authored$bus", "extra$width"],
+                false,
+            ),
+            ("lanes$extra$width", ["lanes", "extra$width"], true),
+            ("g[3].lanes$W", ["g[3].lanes", "W"], true),
+        ]
+        .into_iter()
+        .map(|(key, segments, arrayed)| {
+            (
+                key.to_string(),
+                sv::InterfaceMemberPath {
+                    segments: segments.into_iter().map(str::to_string).collect(),
+                    arrayed,
+                },
+            )
+        })
+        .collect();
+        for (name, expected) in [
+            ("authored$bus$extra$width", ["authored$bus", "extra$width"]),
+            ("lanes[1][-2]$extra$width", ["lanes[1][-2]", "extra$width"]),
+            ("g[3].lanes[7]$W", ["g[3].lanes[7]", "W"]),
+        ] {
+            assert_eq!(
+                restore_interface_path(name, &paths),
+                Some(expected.into_iter().map(str::to_string).collect()),
+                "{name}"
+            );
+        }
+        for name in [
+            "lanes$not_declared",
+            "lanes[foo]$extra$width",
+            "authored$bus[0]$extra$width",
+            "normal$parameter",
+            "g[2].lanes[7]$W",
+        ] {
+            assert_eq!(restore_interface_path(name, &paths), None, "{name}");
+        }
     }
 }

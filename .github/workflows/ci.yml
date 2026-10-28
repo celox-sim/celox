@@ -1,7 +1,7 @@
 name: CI
 
 # Ordinary PRs run focused checks; queue draft PRs run pre-merge validation.
-# Keep merge_group during migration and rollback; landed pushes need no rerun.
+# Heavy validation runs on release candidates and at the scheduled cadence.
 on:
   pull_request:
   merge_group:
@@ -9,11 +9,17 @@ on:
   schedule:
     - cron: "17 1 * * *"
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      validation_ref:
+        description: Immutable publication source SHA
+        required: true
+        type: string
 
 concurrency:
   # A new push must not cancel the daily full run halfway through its corpus.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'full' || 'changes' }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
+  group: ${{ github.workflow }}-${{ inputs.validation_ref || github.ref }}-${{ (inputs.validation_ref != '' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'full' || 'changes' }}
+  cancel-in-progress: ${{ inputs.validation_ref == '' && github.event_name != 'push' && github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
 
 env:
   CARGO_INCREMENTAL: "0"
@@ -29,8 +35,9 @@ jobs:
       STABLE_LANE: ${{ github.ref_name == 'master' || github.base_ref == 'master' || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/master') }}
     outputs:
       queue: ${{ steps.classify.outputs.queue }}
+      full_validation: ${{ steps.classify.outputs.full_validation }}
+      fast_queue: ${{ steps.classify.outputs.fast_queue }}
       docs: ${{ steps.classify.outputs.docs }}
-      release: ${{ steps.classify.outputs.release }}
       javascript: ${{ steps.classify.outputs.javascript }}
       napi: ${{ steps.classify.outputs.napi }}
       napi_arm64: ${{ steps.classify.outputs.napi_arm64 }}
@@ -48,12 +55,20 @@ jobs:
       rust_vpi_e2e: ${{ steps.classify.outputs.rust_vpi_e2e }}
       rust_features: ${{ steps.classify.outputs.rust_features }}
       rust_filter: ${{ steps.classify.outputs.rust_filter }}
+      rust_backend_filter: ${{ steps.classify.outputs.rust_backend_filter }}
       rust_libraries: ${{ steps.classify.outputs.rust_libraries }}
       rust_library_features: ${{ steps.classify.outputs.rust_library_features }}
       scripts: ${{ steps.classify.outputs.scripts }}
     steps:
+      - name: Validate qualification revision
+        if: inputs.validation_ref != ''
+        env:
+          VALIDATION_REF: ${{ inputs.validation_ref }}
+        run: '[[ "$VALIDATION_REF" =~ ^[0-9a-f]{40}$ ]]'
+
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.validation_ref || github.sha }}
           fetch-depth: 0
 
       - name: Classify changed files
@@ -61,8 +76,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          FULL_VALIDATION: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-          MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref || format('refs/heads/{0}', github.base_ref) }}
+          FULL_VALIDATION: ${{ contains(github.event.pull_request.labels.*.name, 'ci:full') || inputs.validation_ref != '' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
           RELEASE_PLEASE_PR: ${{ github.event_name == 'pull_request' && github.head_ref == 'release-please--branches--master--components--celox' && github.event.pull_request.head.repo.full_name == github.repository }}
           QUEUE_VALIDATION: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergify/merge-queue/') || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
           # Keep the classifier usable before the pinned toolchain is installed.
@@ -80,6 +94,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.validation_ref || github.sha }}
 
       - uses: pnpm/action-setup@v6
 
@@ -104,6 +120,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
       - name: Install Nix
@@ -148,24 +165,24 @@ jobs:
           fi
 
       - name: cargo clippy
-        if: (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') && needs.changes.outputs.rust_full != 'false'
+        if: needs.changes.outputs.fast_queue != 'true' && ((needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') && needs.changes.outputs.rust_full != 'false')
         run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim --no-deps
 
       - name: Lint the crates this pull request can affect
-        if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_lint_packages != ''
+        if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_lint_packages != '')
         env:
           BUILDS: ${{ needs.changes.outputs.rust_lint_builds }}
         run: |
           node scripts/run-ci-rust-scope.mjs lint
 
       - name: Build Rust API documentation
-        if: (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') && needs.changes.outputs.rust_full != 'false'
+        if: needs.changes.outputs.fast_queue != 'true' && ((needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') && needs.changes.outputs.rust_full != 'false')
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --workspace --exclude lydite-celox --no-deps
 
       - name: Build the API documentation this pull request can affect
-        if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_doc_libraries != ''
+        if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_doc_libraries != '')
         env:
           RUSTDOCFLAGS: -D warnings
           LIBRARIES: ${{ needs.changes.outputs.rust_doc_libraries }}
@@ -206,17 +223,24 @@ jobs:
         if: needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' && needs.changes.outputs.scripts != 'true'
         run: node --test scripts/ci-changes.test.mjs scripts/ci-rust-scope.test.mjs scripts/ci-lydite-changes.test.mjs
 
+      - name: Check default workspace integration
+        if: needs.changes.outputs.fast_queue == 'true' && needs.changes.outputs.rust == 'true'
+        timeout-minutes: 20
+        run: cargo check --locked --workspace --exclude 'lydite*'
+
   rust-tests:
     name: Rust Tests
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     env:
+      RUST_BACKEND_FILTER: ${{ needs.changes.outputs.rust_backend_filter || 'all()' }}
       CELOX_CI_REPORT_DIR: work/ci-reports/rust
       HAS_MERGIFY_TOKEN: ${{ secrets.MERGIFY_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
       - uses: ./.github/actions/setup-rust
@@ -230,12 +254,12 @@ jobs:
         run: node scripts/ci-rust-reports.mjs reset
 
       - uses: actions/setup-python@v7
-        if: needs.changes.outputs.rust_vpi_e2e != 'false'
+        if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_vpi_e2e != 'false')
         with:
           python-version: "3.14"
 
       - name: Install cocotb
-        if: needs.changes.outputs.rust_vpi_e2e != 'false'
+        if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_vpi_e2e != 'false')
         run: python -m pip install cocotb==2.1.0
 
       - name: Install cargo-nextest
@@ -244,7 +268,7 @@ jobs:
           tool: cargo-nextest@0.9.144
 
       - name: Build the optimized vtest executor
-        if: needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_packages), ' celox ')
+        if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_packages), ' celox '))
         run: node scripts/run-vtest.mjs --prepare-ci
 
       # Enable the frontend and suite features together so common integration
@@ -252,23 +276,33 @@ jobs:
       # nextest schedules tests from all binaries on one pool; `cargo test`
       # runs the binaries one after another.
       # A pull request builds and runs only the tests its changes can affect
-      # (scripts/ci-rust-scope.mjs); merge groups and the daily run keep the
+      # (scripts/ci-rust-scope.mjs); post-merge and release validation keep the
       # Celox workspace. lydite-checks.yml owns Lydite tests at its own cadence.
       - name: Run workspace tests with CI features
         id: workspace-tests
-        if: needs.changes.outputs.rust_full != 'false'
+        if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false')
         run: >-
-          cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci
+          cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci -E "$RUST_BACKEND_FILTER"
           --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the tests this pull request can affect
         id: scoped-tests
-        if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_packages != ''
+        if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_packages != '')
         env:
           BUILDS: ${{ needs.changes.outputs.rust_builds }}
           FILTER: ${{ needs.changes.outputs.rust_filter }}
         run: |
           node scripts/run-ci-rust-scope.mjs test
+
+      - name: Run merge queue integration tests
+        id: queue-tests
+        if: needs.changes.outputs.fast_queue == 'true'
+        timeout-minutes: 20
+        run: >-
+          cargo nextest run --locked -p celox --features systemverilog --profile ci
+          --test counter --test hierarchy --test native_exec
+          --test simulation_limits --test sv_unit_scope --test sv_packages
+          -E "$RUST_BACKEND_FILTER"
 
       - name: Collect Rust test reports
         if: success() || failure()
@@ -276,7 +310,7 @@ jobs:
 
       - name: Run cocotb VPI end-to-end test
         id: cocotb-tests
-        if: needs.changes.outputs.rust_vpi_e2e != 'false'
+        if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_vpi_e2e != 'false')
         env:
           RUST_FULL: ${{ needs.changes.outputs.rust_full }}
           BUILDS: ${{ needs.changes.outputs.rust_builds }}
@@ -298,17 +332,17 @@ jobs:
           token: ${{ secrets.MERGIFY_TOKEN }}
           report_path: work/ci-reports/rust/*.xml
           job_name: rust-tests
-          test_step_outcome: ${{ steps.cocotb-tests.outcome == 'failure' && 'failure' || steps.workspace-tests.outcome != 'skipped' && steps.workspace-tests.outcome || steps.scoped-tests.outcome }}
+          test_step_outcome: ${{ steps.queue-tests.outcome != 'skipped' && steps.queue-tests.outcome || steps.cocotb-tests.outcome == 'failure' && 'failure' || steps.workspace-tests.outcome != 'skipped' && steps.workspace-tests.outcome || steps.scoped-tests.outcome }}
 
       # nextest does not run documentation tests.
       - name: Run workspace documentation tests with CI features
-        if: needs.changes.outputs.rust_full != 'false'
+        if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false')
         run: >-
           cargo test --locked --workspace --exclude 'lydite*' --doc
           --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the documentation tests of the changed libraries
-        if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_libraries != ''
+        if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_libraries != '')
         env:
           LIBRARIES: ${{ needs.changes.outputs.rust_libraries }}
           FEATURES: ${{ needs.changes.outputs.rust_library_features }}
@@ -317,15 +351,15 @@ jobs:
           for package in $LIBRARIES; do args+=(-p "$package"); done
           if [ -n "$FEATURES" ]; then args+=(--features "$FEATURES"); fi
           cargo test --locked --doc "${args[@]}"
-
   rust-default-tests:
     name: Rust default-feature tests
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.rust == 'true' && (needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_libraries), ' celox ')))) }}
+    if: ${{ !cancelled() && needs.changes.outputs.fast_queue != 'true' && (needs.changes.result != 'success' || (needs.changes.outputs.rust == 'true' && (needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_libraries), ' celox ')))) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
@@ -336,113 +370,16 @@ jobs:
           cargo test --locked -p celox --lib
           cargo test --locked -p celox --doc
 
-  external-suites:
-    name: External suite (${{ matrix.suite }}, ${{ matrix.tool }})
-    needs: changes
-    # Scheduled and manual runs compare even when change detection fails. A
-    # merge group that cuts a release also compares before it can merge.
-    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.release == 'true') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [veryl, sv]
-        tool: [verilator, icarus, xezim]
-    env:
-      VERIFY_TOOL: ${{ matrix.tool }}
-      # xezim builds from source, so only its jobs enter the shell with it.
-      VERIFY_SHELL: ${{ matrix.tool == 'xezim' && '.#xezim' || '.' }}
-      VERIFY_SUITE: ${{ matrix.suite }}
-      VERIFY_BIN: ${{ matrix.suite == 'sv' && format('verify-sv-{0}', matrix.tool) || format('verify-{0}', matrix.tool) }}
-      VERIFY_BASELINE: ${{ matrix.suite == 'sv' && format('crates/celox-test-suite/verification/sv/{0}.json', matrix.tool) || format('crates/celox-test-suite/verification/{0}.json', matrix.tool) }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-
-      # Use the same locked tool versions as the retained exclusion evidence.
-      - name: Install Nix
-        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31
-
-      - name: Test live simulator adapters
-        if: matrix.suite == 'veryl'
-        run: >-
-          nix develop "$VERIFY_SHELL" --no-update-lock-file --command
-          cargo test --locked -p celox-test-suite --features "$VERIFY_TOOL"
-          --test oracles -- --ignored
-
-      # The VPI host's time-step regions against Icarus, through the same
-      # cocotb test module, with the locked cocotb and Icarus versions.
-      - name: Cross-check cocotb time-step regions against Icarus
-        if: matrix.suite == 'sv' && matrix.tool == 'icarus'
-        run: >-
-          nix develop "$VERIFY_SHELL" --no-update-lock-file --command
-          cargo test --locked -p celox-vpi --features systemverilog
-          --test cocotb_e2e icarus_and_celox_agree_on_dut_processes -- --ignored --exact
-
-      - name: Catalogue every shared case
-        if: ${{ !cancelled() }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/external-suite"
-          nix develop "$VERIFY_SHELL" --no-update-lock-file --command \
-            cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
-            --bin "$VERIFY_BIN" -- --list > "$RUNNER_TEMP/external-suite/catalogue.json"
-
-      - name: Verify every shared case against the external simulator
-        id: verify
-        if: ${{ !cancelled() }}
-        run: |
-          # The runner returns 1 for retained failures as well as regressions.
-          # The next step checks the complete fresh report and the exit status.
-          rm -f "$RUNNER_TEMP/external-suite/logs/results.json"
-          if nix develop "$VERIFY_SHELL" --no-update-lock-file --command \
-            cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
-            --bin "$VERIFY_BIN" -- --fresh --jobs 2 \
-            --output "$RUNNER_TEMP/external-suite/logs"; then
-            task_verify_status=0
-          else
-            task_verify_status=$?
-          fi
-          echo "exit_status=$task_verify_status" >> "$GITHUB_OUTPUT"
-
-      - name: Reject new or changed external verification failures
-        if: ${{ !cancelled() }}
-        env:
-          VERIFY_EXIT_STATUS: ${{ steps.verify.outputs.exit_status }}
-        run: >-
-          nix develop "$VERIFY_SHELL" --no-update-lock-file --command
-          node scripts/check-external-suite-report.mjs
-          "$RUNNER_TEMP/external-suite/logs/results.json" "$VERIFY_BASELINE"
-          "$RUNNER_TEMP/external-suite/catalogue.json" "$VERIFY_EXIT_STATUS" "$VERIFY_SUITE"
-
-      - name: Retain results and failure diagnostics
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: external-suite-${{ matrix.suite }}-${{ matrix.tool }}
-          # Keep evidence rather than hundreds of generated simulator binaries.
-          path: |
-            ${{ runner.temp }}/external-suite/catalogue.json
-            ${{ runner.temp }}/external-suite/logs/**/*.json
-            ${{ runner.temp }}/external-suite/logs/**/*.log
-            ${{ runner.temp }}/external-suite/logs/**/*.veryl
-            ${{ runner.temp }}/external-suite/logs/**/*.sv
-            ${{ runner.temp }}/external-suite/logs/**/*.v
-            ${{ runner.temp }}/external-suite/logs/**/*.svh
-            ${{ runner.temp }}/external-suite/logs/**/*.vh
-            ${{ runner.temp }}/external-suite/logs/**/harness.cpp
-            ${{ runner.temp }}/external-suite/logs/**/vpi_bits.hpp
-          if-no-files-found: error
-          retention-days: 14
-
   common-cells:
     name: Upstream SystemVerilog testbench
-    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.full_validation == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.validation_ref || github.sha }}
 
       - uses: ./.github/actions/setup-rust
 
@@ -482,11 +419,13 @@ jobs:
   sv-tests:
     name: sv-tests conformance
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.rust == 'true' && needs.changes.outputs.rust_sv_tests != 'false')) }}
+    if: ${{ !cancelled() && needs.changes.outputs.fast_queue != 'true' && (needs.changes.result != 'success' || (needs.changes.outputs.rust == 'true' && needs.changes.outputs.rust_sv_tests != 'false')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.validation_ref || github.sha }}
 
       - uses: ./.github/actions/setup-rust
 
@@ -569,6 +508,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
       - uses: ./.github/actions/setup-rust
@@ -607,11 +547,12 @@ jobs:
   napi-wasm:
     name: NAPI WASM Build & Test
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.fast_queue != 'true' && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
       - uses: ./.github/actions/setup-rust
@@ -663,27 +604,24 @@ jobs:
   # into a successful check merely because a downstream job was skipped.
   rust:
     name: Rust Test & NAPI Build
-    needs: [changes, rust-tests, rust-default-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites]
+    needs: [changes, rust-tests, rust-default-tests, sv-tests, arm64-backend, napi-linux, napi-wasm]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     env:
       CHANGES_RESULT: ${{ needs.changes.result }}
       RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
       RUST_RESULT: ${{ needs.rust-tests.result }}
-      DEFAULT_REQUIRED: ${{ needs.changes.result != 'success' || (needs.changes.outputs.rust == 'true' && (needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_libraries), ' celox '))) }}
+      DEFAULT_REQUIRED: ${{ needs.changes.outputs.fast_queue != 'true' && (needs.changes.result != 'success' || (needs.changes.outputs.rust == 'true' && (needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_libraries), ' celox ')))) }}
       DEFAULT_RESULT: ${{ needs.rust-default-tests.result }}
-      SV_TESTS_REQUIRED: ${{ needs.changes.outputs.rust != 'false' && needs.changes.outputs.rust_sv_tests != 'false' }}
+      SV_TESTS_REQUIRED: ${{ needs.changes.outputs.fast_queue != 'true' && needs.changes.outputs.rust != 'false' && needs.changes.outputs.rust_sv_tests != 'false' }}
       SV_TESTS_RESULT: ${{ needs.sv-tests.result }}
-      # Platform coverage is mandatory in queue and full validation runs.
-      ARM64_REQUIRED: ${{ needs.changes.outputs.queue != 'false' && needs.changes.outputs.rust != 'false' }}
+      # Platform coverage is mandatory in full validation, outside the queue.
+      ARM64_REQUIRED: ${{ needs.changes.outputs.full_validation != 'false' && needs.changes.outputs.rust != 'false' }}
       ARM64_RESULT: ${{ needs.arm64-backend.result }}
       NAPI_REQUIRED: ${{ needs.changes.outputs.napi }}
       NATIVE_RESULT: ${{ needs.napi-linux.result }}
+      WASM_REQUIRED: ${{ needs.changes.outputs.fast_queue != 'true' && needs.changes.outputs.napi != 'false' }}
       WASM_RESULT: ${{ needs.napi-wasm.result }}
-      # Only a release merge group gates on the comparisons. Full runs report
-      # them through report-full-validation instead.
-      RELEASE_REQUIRED: ${{ needs.changes.outputs.release }}
-      EXTERNAL_RESULT: ${{ needs.external-suites.result }}
     steps:
       - name: Check tests and builds
         run: |
@@ -703,22 +641,20 @@ jobs:
           if [ "$NAPI_REQUIRED" != false ] || [ "$NATIVE_RESULT" != skipped ]; then
             test "$NATIVE_RESULT" = success
           fi
-          if [ "$NAPI_REQUIRED" != false ] || [ "$WASM_RESULT" != skipped ]; then
+          if [ "$WASM_REQUIRED" != false ] || [ "$WASM_RESULT" != skipped ]; then
             test "$WASM_RESULT" = success
-          fi
-          if [ "$RELEASE_REQUIRED" != false ]; then
-            test "$EXTERNAL_RESULT" = success
           fi
 
   arm64-backend:
     name: ARM64 Backend Test
     needs: changes
-    # Full platform checks run once in the queue, not on every PR push.
-    if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
+    # Full platform checks run after landing and before publication.
+    if: ${{ !cancelled() && needs.changes.outputs.full_validation != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-26.04-arm
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
       - uses: ./.github/actions/setup-rust
@@ -758,11 +694,12 @@ jobs:
   napi-windows:
     name: NAPI Build (Windows)
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.full_validation != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
       - uses: ./.github/actions/setup-rust
@@ -796,11 +733,12 @@ jobs:
   napi-linux-arm64:
     name: NAPI Build (Linux ARM64 GNU)
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.full_validation != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
       - uses: ./.github/actions/setup-rust
@@ -844,6 +782,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
       - uses: pnpm/action-setup@v6
@@ -885,11 +824,12 @@ jobs:
   js-windows:
     name: JS Test (Windows)
     needs: [changes, napi-windows]
-    if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.full_validation != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
       - uses: pnpm/action-setup@v6
@@ -917,12 +857,13 @@ jobs:
   playground-browser:
     name: Playground Browser Test
     needs: [changes, napi-wasm]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.napi == 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.fast_queue != 'true' && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
       - uses: pnpm/action-setup@v6
@@ -974,11 +915,11 @@ jobs:
               docs: changed.docs === "true",
               lint: [changed.rust, changed.javascript, changed.scripts].includes("true"),
               rust: [changed.rust, changed.napi].includes("true"),
-              "napi-windows": changed.napi === "true",
-              "napi-linux-arm64": changed.napi_arm64 === "true",
+              "napi-windows": changed.full_validation === "true" && changed.napi === "true",
+              "napi-linux-arm64": changed.full_validation === "true" && changed.napi_arm64 === "true",
               "js-ubuntu": changed.javascript === "true",
-              "js-windows": changed.javascript === "true",
-              "playground-browser": [changed.napi, changed.javascript].includes("true"),
+              "js-windows": changed.full_validation === "true" && changed.javascript === "true",
+              "playground-browser": changed.fast_queue !== "true" && [changed.napi, changed.javascript].includes("true"),
             };
             if (Object.entries(required).some(([name, required]) => required && jobs[name].result !== "success") ||
                 jobs.changes.result !== "success" || jobs.changes.outputs.queue !== "true" ||
@@ -987,9 +928,9 @@ jobs:
             }
           '
 
-  # Report daily/manual runs independently of merge queue validation.
-  report-full-validation:
-    name: Report full validation
+  # Fail closed: skipped full coverage cannot qualify a release.
+  full-validation:
+    name: Release qualification
     needs:
       [
         changes,
@@ -999,7 +940,6 @@ jobs:
         rust-tests,
         rust-default-tests,
         sv-tests,
-        external-suites,
         common-cells,
         napi-linux,
         napi-wasm,
@@ -1011,7 +951,42 @@ jobs:
         js-windows,
         playground-browser,
       ]
-    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'master' || github.ref_name == 'develop') }}
+    if: ${{ always() && needs.changes.outputs.full_validation == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - name: Require every full-validation job
+        run: |
+          node --input-type=module -e '
+            const jobs = JSON.parse(process.env.NEEDS);
+            if (Object.values(jobs).some(job => job.result !== "success")) process.exit(1);
+          '
+
+  report-full-validation:
+    name: Report full validation
+    needs:
+      [
+        changes,
+        full-validation,
+        queue-validation,
+        docs,
+        lint,
+        rust-tests,
+        rust-default-tests,
+        sv-tests,
+        common-cells,
+        napi-linux,
+        napi-wasm,
+        rust,
+        arm64-backend,
+        napi-windows,
+        napi-linux-arm64,
+        js-ubuntu,
+        js-windows,
+        playground-browser,
+      ]
+    if: ${{ !cancelled() && inputs.validation_ref == '' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'master' || github.ref_name == 'develop') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1019,6 +994,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.validation_ref || github.sha }}
           sparse-checkout: scripts
 
       - name: Open, update, or close the full CI issue

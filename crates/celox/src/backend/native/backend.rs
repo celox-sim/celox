@@ -232,7 +232,7 @@ impl SharedNativeCode {
         }
         // Loading DPI-C libraries runs their initializers and keeps them
         // loaded, so it waits until the image is known to be usable.
-        let extern_functions = dpi.resolve(&program_image.runtime_schema.extern_functions)?;
+        let mut extern_functions = dpi.resolve(&program_image.runtime_schema.extern_functions)?;
         let symbols = program_image
             .symbols
             .iter()
@@ -249,6 +249,13 @@ impl SharedNativeCode {
             program_image.options.perf_map,
         )
         .map_err(|source| codegen_err(CodegenError::NativeMemory { source }))?;
+        let kernel_addresses = program_image
+            .runtime_schema
+            .native_kernel_offsets
+            .iter()
+            .map(|&offset| native_function_at(&jit_image, offset).map(|func| func as usize))
+            .collect::<Result<Vec<_>, _>>()?;
+        extern_functions.append_native_kernels(kernel_addresses);
         let materialize = |event: NativeEventImageRef| -> Result<NativeEventRef, SimulatorError> {
             Ok(NativeEventRef {
                 func: native_function_at(&jit_image, event.func_offset)?,
@@ -399,6 +406,8 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) runtime_event_sites: Vec<RuntimeEventSite>,
     /// Extern functions the code calls, resolved when the image is attached.
     pub(crate) extern_functions: Vec<celox_design::ExternFunction>,
+    /// Image-local compiled callees appended to the DPI address table.
+    pub(crate) native_kernel_offsets: Vec<usize>,
     pub(crate) comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
     pub(crate) testbench_read_roots: HashSet<AbsoluteAddr>,
     pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
@@ -672,6 +681,11 @@ impl NativeProgramImage {
         }
         if !entry_offsets.contains(&self.comb_offset) {
             return Err("eval_comb offset does not name an image entry".into());
+        }
+        for &offset in &self.runtime_schema.native_kernel_offsets {
+            if !entry_offsets.contains(&offset) {
+                return Err("native kernel offset does not name an image entry".into());
+            }
         }
         if self
             .comb_unit_offsets
@@ -2167,6 +2181,16 @@ fn compile_program(
     capture_trace: bool,
     cancel: Option<&CompileCancel>,
 ) -> Result<(NativeProgramImage, Option<NativeCodegenTrace>), SimulatorError> {
+    compile_program_with_outlining_threshold(laid_out, options, capture_trace, cancel, 32_768)
+}
+
+fn compile_program_with_outlining_threshold(
+    laid_out: &LaidOutProgram,
+    options: &SimulatorOptions,
+    capture_trace: bool,
+    cancel: Option<&CompileCancel>,
+    outline_threshold: usize,
+) -> Result<(NativeProgramImage, Option<NativeCodegenTrace>), SimulatorError> {
     let sir = laid_out;
     let layout = laid_out.layout();
     let force_bindings =
@@ -2178,42 +2202,40 @@ fn compile_program(
         .iter()
         .map(|unit| unit.blocks.len())
         .sum::<usize>();
-    let max_task_blocks = compile_tasks
-        .iter()
-        .map(|task| {
-            task.units
-                .iter()
-                .map(|unit| unit.blocks.len())
-                .sum::<usize>()
-        })
-        .max()
-        .unwrap_or(0);
-    let max_instructions = std::iter::once(sir.sir.eval_comb.iter().collect::<Vec<_>>())
-        .chain(compile_tasks.iter().map(|task| task.units.clone()))
-        .map(|units| {
+    let size = |units: &[&ExecutionUnit<RegionedAbsoluteAddr>]| {
+        (
+            units.iter().map(|unit| unit.blocks.len()).sum::<usize>(),
             units
                 .iter()
                 .flat_map(|unit| unit.blocks.values())
                 .map(|block| block.instructions.len())
-                .sum::<usize>()
-        })
-        .max()
-        .unwrap_or(0);
+                .sum::<usize>(),
+        )
+    };
+    let comb_size = size(&sir.sir.eval_comb.iter().collect::<Vec<_>>());
+    let task_sizes = compile_tasks
+        .iter()
+        .map(|task| size(&task.units))
+        .collect::<Vec<_>>();
+    let max_task_blocks = task_sizes.iter().map(|size| size.0).max().unwrap_or(0);
+    let max_task_instructions = task_sizes.iter().map(|size| size.1).max().unwrap_or(0);
+    let max_instructions = comb_size.1.max(max_task_instructions);
+    let large = |size: (usize, usize)| size.0 >= 65_536 || size.1 >= 131_072;
     let release_pages = || {
         // Measure usable capacity after returning unused large-compiler pages.
         // Small single-worker builds must not trim unrelated process heaps.
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        if comb_blocks.max(max_task_blocks) >= 65_536 {
+        if large(comb_size) || large((max_task_blocks, max_task_instructions)) {
             unsafe {
                 libc::malloc_trim(0);
             }
         }
     };
     release_pages();
-    let workers = super::compile_resources::workers(
-        comb_blocks.max(max_task_blocks),
-        max_instructions,
-        compile_tasks.len() + 1,
+    let workers = super::compile_resources::workers_with_primary(
+        comb_size,
+        (max_task_blocks, max_task_instructions),
+        compile_tasks.len(),
     );
     let serial = workers == 1;
     // Start expensive functions early so the final fused function does not
@@ -2230,12 +2252,128 @@ fn compile_program(
     });
     if options.x86_options.diagnostics.phase_timing {
         tracing::debug!(
-            "[native-timing] compile_program serial={serial} workers={workers} comb_blocks={comb_blocks} max_task_blocks={max_task_blocks} max_instructions={max_instructions} ff_tasks={}",
-            compile_tasks.len()
+            "[native-timing] compile_program serial={serial} workers={workers} comb_blocks={comb_blocks} max_task_blocks={max_task_blocks} max_instructions={max_instructions} ff_tasks={} settle_partitions={} settle_check={}",
+            compile_tasks.len(),
+            sir.runtime()
+                .runtime_schema
+                .settle_partitions
+                .as_ref()
+                .map_or(0, |s| s.partitions),
+            layout.settle_check(),
         );
     }
+    // Execution units already communicate through state. Keep large units
+    // separate instead of rebuilding a single allocator problem, and dispatch
+    // them through the same bounded pool as the FF functions.
+    let split_comb = cfg!(any(
+        feature = "x86_64-codegen",
+        all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+    )) && !capture_trace
+        && sir.sir.eval_comb.len() > 1
+        && comb_size.1 >= outline_threshold;
+    let mut comb_chunk_jits = Vec::new();
     let next_task = AtomicUsize::new(0);
-    let (comb_jit, compiled_ff_codes) = if serial {
+    let (comb_jit, compiled_ff_codes) = if split_comb {
+        let ff_count = compile_tasks.len();
+        let sizes = task_sizes
+            .iter()
+            .copied()
+            .chain(sir.sir.eval_comb.iter().map(|unit| size(&[unit])))
+            .collect::<Vec<_>>();
+        let mut order = (0..sizes.len()).collect::<Vec<_>>();
+        order.sort_by_key(|&index| std::cmp::Reverse(sizes[index]));
+        let workers = super::compile_resources::workers(
+            sizes.iter().map(|s| s.0).max().unwrap_or(0),
+            sizes.iter().map(|s| s.1).max().unwrap_or(0),
+            sizes.len(),
+        );
+        if options.x86_options.diagnostics.phase_timing {
+            tracing::debug!(
+                "[native-timing] comb_chunks={} workers={workers}",
+                sir.sir.eval_comb.len()
+            );
+        }
+        let codes = super::compile_resources::compile_tasks(&order, workers, |index| {
+            if cancelled(cancel) {
+                return Err(cancelled_error());
+            }
+            if index < ff_count {
+                let task = &compile_tasks[index];
+                compile_unit_refs(
+                    &task.units,
+                    layout,
+                    options.four_state,
+                    task.label,
+                    task.merge_kind,
+                    task.first_ff_unit,
+                    &options.x86_options,
+                    false,
+                    &options.optimize_options.diagnostics,
+                    cancel,
+                )
+            } else {
+                compile_unit_refs(
+                    &[&sir.sir.eval_comb[index - ff_count]],
+                    layout,
+                    options.four_state,
+                    "eval_comb_chunk",
+                    NativeMergeKind::Partial,
+                    None,
+                    &options.x86_options,
+                    false,
+                    &options.optimize_options.diagnostics,
+                    cancel,
+                )
+            }
+        })
+        .map_err(|_| codegen_message("native compile worker panicked"))?;
+        let mut compiled = HashMap::default();
+        for (index, code) in codes.into_iter().enumerate() {
+            let code = code?;
+            if index < ff_count {
+                compiled.insert(index, code);
+            } else {
+                comb_chunk_jits.push(code);
+            }
+        }
+        let first_slot = sir.runtime().runtime_schema.extern_functions.len() + 1;
+        let mut builder = celox_sir::SIRBuilder::new();
+        for index in 0..comb_chunk_jits.len() {
+            let slot = u32::try_from(first_slot + index)
+                .ok()
+                .filter(|&slot| slot < 0x1000_0000)
+                .ok_or_else(|| codegen_message("too many native extern functions"))?;
+            builder.emit(SIRInstruction::ExternCall {
+                dst: None,
+                func: celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG | slot,
+                args: Vec::new(),
+            });
+        }
+        builder.seal_block(SIRTerminator::Return);
+        let caller_options = options
+            .x86_options
+            .clone()
+            .with_native_callees(comb_chunk_jits.iter().map(|code| code.required_state_size));
+        let (blocks, register_map, _) = builder.drain();
+        let comb = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+        let root = compile_unit_refs(
+            &[&comb],
+            layout,
+            options.four_state,
+            "eval_comb",
+            NativeMergeKind::Complete,
+            None,
+            &caller_options,
+            false,
+            &options.optimize_options.diagnostics,
+            cancel,
+        )?;
+        (root, compiled)
+    } else if serial {
         let comb_jit = compile_units(
             &sir.sir.eval_comb,
             layout,
@@ -2247,8 +2385,12 @@ fn compile_program(
             cancel,
         )?;
         let mut compiled = HashMap::default();
+        let mut previous_large = large(comb_size);
         for (task_id, task) in compile_tasks.iter().enumerate() {
-            release_pages();
+            if previous_large {
+                release_pages();
+            }
+            previous_large = large(task_sizes[task_id]);
             let code = compile_unit_refs(
                 &task.units,
                 layout,
@@ -2374,29 +2516,142 @@ fn compile_program(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let process_jits = sir
+    // Return completed codegen's allocator pages before budgeting the process
+    // workers. Small designs leave unrelated process heaps alone.
+    release_pages();
+    // Outlining amortizes the dominant circuit across all derived edges.
+    // Keep small circuits inline, where cross-boundary optimization is cheap.
+    let comb_instructions = sir
+        .sir
+        .eval_comb
+        .iter()
+        .flat_map(|unit| unit.blocks.values())
+        .map(|block| block.instructions.len())
+        .sum::<usize>();
+    let outline_comb = cfg!(any(
+        feature = "x86_64-codegen",
+        all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+    )) && !sir.deferred_derived_edges.is_empty()
+        && comb_instructions >= outline_threshold;
+    let outlined_comb = if outline_comb {
+        let slot = u32::try_from(sir.runtime().runtime_schema.extern_functions.len())
+            .ok()
+            .filter(|&slot| slot < 0x1000_0000)
+            .ok_or_else(|| codegen_message("too many native extern functions"))?;
+        let mut builder = celox_sir::SIRBuilder::new();
+        builder.emit(SIRInstruction::ExternCall {
+            dst: None,
+            func: celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG | slot,
+            args: Vec::new(),
+        });
+        builder.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = builder.drain();
+        Some([ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        }])
+    } else {
+        None
+    };
+    let mut process_options = options.x86_options.clone();
+    if outline_comb {
+        // Nested functions must not overwrite the caller's spills, saved
+        // registers, scratch values, or extern call area.
+        process_options = process_options.with_native_callees([comb_jit.required_state_size]);
+    }
+    let derived_model = (!sir.deferred_derived_edges.is_empty()).then(|| {
+        celox_design::schedule::ScheduleModel::derive(&sir.design, &sir.runtime().runtime_schema)
+    });
+    let process_sizes = sir
         .sir
         .processes
         .iter()
         .enumerate()
         .map(|(index, unit)| {
-            if cancelled(cancel) {
-                return Err(cancelled_error());
-            }
-            compile_unit_refs(
-                &[unit],
-                layout,
-                options.four_state,
-                &format!("process[{index}]"),
-                NativeMergeKind::Complete,
-                None,
-                &options.x86_options,
-                false,
-                &options.optimize_options.diagnostics,
-                cancel,
+            sir.deferred_derived_edges.get(&index).map_or_else(
+                || {
+                    (
+                        unit.blocks.len(),
+                        unit.blocks
+                            .values()
+                            .map(|block| block.instructions.len())
+                            .sum(),
+                    )
+                },
+                |edge| {
+                    if outline_comb {
+                        // The recipe estimate includes two complete comb
+                        // copies. Both now use a single call; its fixed CFG
+                        // allowance already covers those call instructions.
+                        (
+                            edge.blocks.saturating_sub(comb_blocks.saturating_mul(2)),
+                            edge.instructions
+                                .saturating_sub(comb_instructions.saturating_mul(2)),
+                        )
+                    } else {
+                        (edge.blocks, edge.instructions)
+                    }
+                },
             )
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
+    let max_process_blocks = process_sizes.iter().map(|size| size.0).max().unwrap_or(0);
+    let max_process_instructions = process_sizes.iter().map(|size| size.1).max().unwrap_or(0);
+    // The resource budget already includes overlapping SIR/MIR copies.
+    // Use the expanded size, rather than the tiny reserved process entry.
+    let process_workers = super::compile_resources::workers(
+        max_process_blocks,
+        max_process_instructions,
+        process_sizes.len(),
+    );
+    let mut process_order = (0..process_sizes.len()).collect::<Vec<_>>();
+    process_order.sort_by_key(|&index| std::cmp::Reverse(process_sizes[index]));
+    if options.x86_options.diagnostics.phase_timing {
+        tracing::debug!(
+            "[native-timing] process_compile workers={process_workers} units={} max_blocks={max_process_blocks} max_instructions={max_process_instructions}",
+            process_sizes.len()
+        );
+    }
+    let compile_process = |index| {
+        let unit = &sir.sir.processes[index];
+        if cancelled(cancel) {
+            return Err(cancelled_error());
+        }
+        // Expand, compile, then drop just this edge's SIR. Retaining every
+        // expansion makes memory scale with circuit size times edge count.
+        let generated = sir
+            .deferred_derived_edges
+            .get(&index)
+            .map(|edge| {
+                let model = derived_model.as_ref().expect("deferred edge model");
+                if let Some(comb) = &outlined_comb {
+                    edge.generate_with_comb(sir, model, comb)
+                } else {
+                    edge.generate(sir, model)
+                }
+                .map_err(codegen_message)
+            })
+            .transpose()?;
+        let unit = generated.as_ref().unwrap_or(unit);
+        compile_unit_refs(
+            &[unit],
+            layout,
+            options.four_state,
+            &format!("process[{index}]"),
+            NativeMergeKind::Complete,
+            None,
+            &process_options,
+            false,
+            &options.optimize_options.diagnostics,
+            cancel,
+        )
+    };
+    let process_jits =
+        super::compile_resources::compile_tasks(&process_order, process_workers, compile_process)
+            .map_err(|_| codegen_message("native process compile thread panicked"))?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
     let lane_kernels = super::lanes::compile_lane_kernels(sir, options, cancel)?;
     let codegen_trace = capture_trace
         .then(|| format_native_codegen_trace(&comb_jit, &compiled_ff_codes, &compile_tasks));
@@ -2405,6 +2660,7 @@ fn compile_program(
         .checked_add(layout.triggered_bits_total_size)
         .expect("native semantic-memory size overflow");
     let native_memory_size = std::iter::once(comb_jit.required_state_size)
+        .chain(comb_chunk_jits.iter().map(|code| code.required_state_size))
         .chain(
             compiled_ff_codes
                 .values()
@@ -2424,6 +2680,11 @@ fn compile_program(
         )
         .fold(semantic_memory_size, usize::max);
     let required_native_features = std::iter::once(comb_jit.required_native_features)
+        .chain(
+            comb_chunk_jits
+                .iter()
+                .map(|code| code.required_native_features),
+        )
         .chain(
             compiled_ff_codes
                 .values()
@@ -2452,6 +2713,20 @@ fn compile_program(
         "eval_comb".into(),
         &comb_jit,
     )?;
+    let mut native_kernel_offsets = if outline_comb || split_comb {
+        vec![comb_offset]
+    } else {
+        Vec::new()
+    };
+    for (index, code) in comb_chunk_jits.iter().enumerate() {
+        native_kernel_offsets.push(append_native_code(
+            &mut packed_image,
+            &mut code_entries,
+            &mut image_symbols,
+            format!("eval_comb_chunk[{index}]"),
+            code,
+        )?);
+    }
     let mut comb_unit_offsets = Vec::with_capacity(comb_unit_jits.len());
     for (index, compiled) in comb_unit_jits.iter().enumerate() {
         comb_unit_offsets.push(append_native_code(
@@ -2642,6 +2917,7 @@ fn compile_program(
                 runtime_errors: sir.runtime().runtime_schema.runtime_errors.clone(),
                 runtime_event_sites: sir.runtime().runtime_schema.runtime_event_sites.clone(),
                 extern_functions: sir.runtime().runtime_schema.extern_functions.clone(),
+                native_kernel_offsets,
                 comb_observers: sir.runtime().runtime_schema.comb_observers.clone(),
                 testbench_read_roots: sir.runtime().runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: sir.runtime().runtime_schema.rtl_writes.clone(),
@@ -2785,6 +3061,35 @@ fn write_initial_run_to_plane(
 }
 
 impl NativeBackend {
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn compile_outlined_image_for_test(
+        program: &LaidOutProgram,
+        options: &SimulatorOptions,
+    ) -> Result<NativeProgramImage, SimulatorError> {
+        compile_program_with_outlining_threshold(program, options, false, None, 0)
+            .map(|(image, _)| image)
+    }
+
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn split_comb_units_for_test(program: &mut LaidOutProgram) {
+        program.sir.eval_comb = program
+            .sir
+            .eval_comb
+            .iter()
+            .flat_map(split_comb_execution_unit)
+            .collect();
+    }
+
     pub(crate) fn eval_comb_units_with(
         &mut self,
         mut after_unit: impl FnMut(&mut Self),

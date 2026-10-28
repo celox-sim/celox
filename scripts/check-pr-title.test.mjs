@@ -58,11 +58,12 @@ test("guards the repository setting that exposes the title to release automation
   );
 });
 
-test("title requests coalesce per PR without skipping edit validation", () => {
+test("title events finish independently without skipping edit validation", () => {
   const workflow = readFileSync(new URL("../.github/workflows/pr-title.yml", import.meta.url), "utf8");
   assert.match(workflow, /types: \[opened, edited, synchronize, reopened\]/);
-  assert.match(workflow, /group: \$\{\{ github.workflow \}\}-\$\{\{ github.event_name \}\}-\$\{\{ github.event.pull_request.number \|\| github.event.merge_group.head_sha \|\| github.run_id \}\}/);
-  assert.match(workflow, /cancel-in-progress: \$\{\{ github.event_name == 'pull_request_target' \}\}/);
+  // Same-head synchronize/edited events must both reach a validation result.
+  // A non-canceling group also replaces pending runs; disallow job-level groups too.
+  assert.doesNotMatch(workflow, /^\s*concurrency:/m);
   assert.doesNotMatch(workflow, /github.event.action != 'edited'|queue: max/);
   assert.match(workflow, /github.event.pull_request.state == 'open'/);
 });

@@ -145,6 +145,28 @@
     },
     {
       "category": "Types",
+      "detail": "class::imported_member_type_dimensions at 2600:27: assert_eq sum: expected 0x21e, got 0x2",
+      "expectation": "Simulation",
+      "name": "class::imported_member_type_dimensions",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::imported_member_type_inheritance at 2640:27: assert_eq sum: expected 0xa5, got 0x1d",
+      "expectation": "Simulation",
+      "name": "class::imported_member_type_inheritance",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::inherited_methods_of_extended_interface_classes",
@@ -491,6 +513,39 @@
       "name": "class::string_methods_on_properties",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::type_alias_lexical_scopes at 2574:27: assert_eq sum: expected 0x31, got 0x7",
+      "expectation": "Simulation",
+      "name": "class::type_alias_lexical_scopes",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::type_parameter_imports at 2503:27: assert_eq done: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "class::type_parameter_imports",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::type_parameter_shadowing at 2521:27: assert_eq flags: expected 0x3, got 0x1",
+      "expectation": "Simulation",
+      "name": "class::type_parameter_shadowing",
+      "phase": "execute",
+      "status": "mismatch",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

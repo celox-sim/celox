@@ -104,6 +104,26 @@ fn cocotb_observes_edges_before_nonblocking_updates() {
 
 #[test]
 #[ignore = "requires a cocotb installation; CI runs this test explicitly"]
+fn cocotb_inertial_writes_and_native_clocks_preserve_edge_sampling() {
+    for initial in ["WITH_INITIAL=0", "WITH_INITIAL=1"] {
+        check_cocotb_native_design_with_options(
+            &["inertial.sv"],
+            "test_inertial",
+            ".",
+            &["-G", initial],
+        );
+        check_cocotb_native_design_with_environment(
+            &["inertial.sv"],
+            "test_inertial",
+            ".",
+            &["-G", initial],
+            &[("COCOTB_TRUST_INERTIAL_WRITES", "0")],
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a cocotb installation; CI runs this test explicitly"]
 fn cocotb_runs_dut_processes_in_step() {
     let output = check_cocotb_native_design(&["processes.sv"], "test_processes", ".");
     // `%0t` formats in the time precision, 1 ps.
@@ -227,6 +247,16 @@ fn check_cocotb_native_design_with_options(
     filter: &str,
     options: &[&str],
 ) -> String {
+    check_cocotb_native_design_with_environment(source, module, filter, options, &[])
+}
+
+fn check_cocotb_native_design_with_environment(
+    source: &[&str],
+    module: &str,
+    filter: &str,
+    options: &[&str],
+    environment: &[(&str, &str)],
+) -> String {
     let python = env::var_os("CELOX_COCOTB_PYTHON")
         .expect("CELOX_COCOTB_PYTHON must name the cocotb Python interpreter");
     let python = python.to_string_lossy().into_owned();
@@ -267,13 +297,15 @@ fn check_cocotb_native_design_with_options(
         .arg("--results-file")
         .arg(&results)
         .current_dir(&fixture)
+        .env_remove("COCOTB_TRUST_INERTIAL_WRITES")
+        .envs(environment.iter().copied())
         .env("COCOTB_TESTCASE", "inherited_selector_must_be_cleared")
         .env("PYTHONPATH", &python_path)
         .output()
         .unwrap();
     assert!(
         runtime.status.success(),
-        "cocotb runtime failed for {source:?}:\n{}\n{}",
+        "cocotb runtime failed for {source:?} {options:?} {environment:?}:\n{}\n{}",
         String::from_utf8_lossy(&runtime.stdout),
         String::from_utf8_lossy(&runtime.stderr)
     );

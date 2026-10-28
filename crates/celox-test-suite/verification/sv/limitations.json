@@ -1,5 +1,22 @@
 [
   {
+    "id": "sv_verilator_logical_equivalence_side_effects",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "IEEE 1800-2023 11.4.7 requires each logical equivalence operand to be evaluated exactly once. Verilator 5.052 evaluates the left function twice in the standalone reproduction and emits SIDEEFFECT warnings; Icarus 13.0 evaluates both functions once.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_logical_equivalence_once.sv",
+      "src/sv/cases/operators.vtest"
+    ],
+    "cases": {
+      "verilator": [
+        "operators::logical_equivalence_evaluates_operands_once"
+      ]
+    }
+  },
+  {
     "id": "sv_static_function_result_lifetime",
     "category": "simulator_disagreement",
     "phase": "execute",
@@ -705,6 +722,7 @@
       "verification/sv/limitations/interface-array-ports-icarus.json",
       "verification/sv/limitations/implicit-interface-ports-icarus.json",
       "verification/repros/sv_mixed_interface_connections_icarus.json",
+      "verification/repros/sv_header_modport_icarus.json",
       "LIMITATIONS.md#systemverilog-suite"
     ],
     "cases": {
@@ -718,6 +736,7 @@
         "interfaces::clocks_interface_processes_from_member_clocks",
         "interfaces::drives_members_through_child_outputs_and_array_generate_regions",
         "interfaces::elaborates_net_members_typedefs_and_localparams",
+        "interfaces::forwards_header_ports_through_modports",
         "interfaces::infers_directions_of_ports_without_modport",
         "interfaces::mixes_module_contracts_with_local_interface_connections",
         "interfaces::overrides_body_parameters_and_drives_members_from_imported_functions",
@@ -2584,17 +2603,33 @@
     "category": "simulator_compile_limitation",
     "phase": "compile",
     "observed_version": "Icarus Verilog version 13.0 (devel)",
-    "reason": "Icarus rejects constraint declarations before elaboration. IEEE 1800-2023 18.5 defines these blocks. Celox retains all assertions; Verilator passes the scalar and width/inheritance cases.",
+    "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
     "upstream": [],
     "evidence": [
       "verification/repros/sv_scalar_constraints.json",
-      "LIMITATIONS.md#systemverilog-suite"
+      "LIMITATIONS.md#systemverilog-suite",
+      "verification/repros/sv_inside_constraints.json",
+      "verification/repros/sv_conditional_constraints.json",
+      "verification/repros/sv_inline_constraints.json",
+      "verification/repros/sv_inline_input_icarus.json",
+      "verification/repros/sv_inline_input_hooks.json"
     ],
     "cases": {
       "icarus": [
         "class::constrained_randomize_scalar",
         "class::constrained_randomize_width_and_inheritance",
-        "class::constrained_randomize_hooks"
+        "class::constrained_randomize_hooks",
+        "class::constrained_randomize_inside",
+        "class::constrained_randomize_inside_widths",
+        "class::constrained_randomize_conditionals",
+        "class::constrained_randomize_nested_guards",
+        "class::constrained_randomize_inline",
+        "class::constrained_randomize_inline_inheritance",
+        "class::constrained_randomize_inline_basic",
+        "class::constrained_randomize_inline_package_instances",
+        "class::constrained_randomize_inline_inputs",
+        "class::constrained_randomize_inline_input_methods",
+        "class::constrained_randomize_inline_input_hooks"
       ]
     }
   },
@@ -2607,11 +2642,169 @@
     "upstream": [],
     "evidence": [
       "verification/repros/sv_scalar_constraints.json",
+      "LIMITATIONS.md#systemverilog-suite",
+      "verification/repros/sv_inline_constraints.json"
+    ],
+    "cases": {
+      "verilator": [
+        "class::constrained_randomize_hooks",
+        "class::constrained_randomize_inline"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_inline_constraint_static_scope",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Through a Base handle containing a Derived object that hides Base.x, Verilator binds inline x == 2 to Derived.x, conflicting with its x == 9 block. IEEE 1800-2023 18.7 starts inline name lookup in the class of the object handle used at the call. Base.x must be 2 and Derived.x must be 9. The standalone source reproduces UNSAT without the suite adapter. Assertions are retained.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_inline_constraint_scope.sv",
+      "verification/repros/sv_inline_constraints.json"
+    ],
+    "cases": {
+      "verilator": [
+        "class::constrained_randomize_inline_inheritance"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_inline_inputs_before_pre_hook",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator copies caller-scope inline inputs into its generated helper before pre_randomize. When the hook changes wanted from 2 to 5, the solve still assigns x = 2. IEEE 1800-2023 18.6.2 invokes the pre-hook before randomization, and 18.7 permits references to caller-scope state variables. The regression retains the post-hook value and single-invocation assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_inline_input_hooks.json"
+    ],
+    "cases": {
+      "verilator": [
+        "class::constrained_randomize_inline_input_hooks"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_constraint_mode_bit_argument",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "IEEE 1800-2023 18.9 declares constraint_mode(bit on_off). Passing integer 2 converts to bit zero and disables the block. Verilator keeps it enabled; the regression preserves the mode query assertion.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_constraint_modes.json"
+    ],
+    "cases": {
+      "verilator": [
+        "class::constraint_mode_basic"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_constraint_mode_override",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_constraint_modes.json"
+    ],
+    "cases": {
+      "verilator": [
+        "class::constraint_mode_inheritance",
+        "class::constraint_mode_base_dispatch"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_constraint_modes",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (devel)",
+    "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_constraint_modes.json"
+    ],
+    "cases": {
+      "icarus": [
+        "class::constraint_mode_base_dispatch",
+        "class::constraint_mode_basic",
+        "class::constraint_mode_hooks",
+        "class::constraint_mode_inheritance"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_iff_event_controls",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_iff_event_controls_icarus.json",
+      "verification/repros/sv_iff_hierarchy_automatic.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::iff_events_occur_only_while_the_condition_holds",
+        "timing::iff_conditions_see_writes_before_the_event",
+        "timing::iff_conditions_apply_to_their_own_items",
+        "timing::iff_conditions_read_automatic_task_arguments",
+        "timing::unknown_iff_conditions_are_false",
+        "timing::plain_always_iff_events_run_as_processes",
+        "timing::iff_conditions_are_judged_before_edge_processes_run",
+        "timing::iff_conditions_are_judged_at_the_write",
+        "timing::iff_conditions_follow_nonblocking_update_order",
+        "timing::iff_conditions_consume_occurrences_while_false",
+        "timing::iff_conditions_follow_combinational_process_order",
+        "timing::iff_conditions_preserve_cross_module_combinational_order",
+        "timing::iff_forked_automatic_gates_are_separate",
+        "timing::iff_shared_automatic_gate_uses_edge_time_value",
+        "timing::iff_automatic_clock_preserves_enabled_pulses"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_iff_late_conditions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. Standalone probes print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. A hierarchical waiter on clk also sees the later en write of a child always_comb (clk=a; en=a), giving rejected=2 instead of 0; reversing those writes correctly gives accepted=2.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_iff_late_conditions_verilator.json",
+      "verification/repros/sv_iff_hierarchy_automatic.json",
       "LIMITATIONS.md#systemverilog-suite"
     ],
     "cases": {
       "verilator": [
-        "class::constrained_randomize_hooks"
+        "timing::iff_conditions_are_judged_at_the_write",
+        "timing::iff_conditions_follow_nonblocking_update_order",
+        "timing::iff_conditions_follow_combinational_process_order",
+        "timing::iff_conditions_preserve_cross_module_combinational_order"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_iff_shared_automatic",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects the write to a shared automatic gate or event signal in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_iff_hierarchy_automatic.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::iff_shared_automatic_gate_uses_edge_time_value",
+        "timing::iff_automatic_clock_preserves_enabled_pulses"
       ]
     }
   }

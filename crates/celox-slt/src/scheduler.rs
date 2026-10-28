@@ -3513,12 +3513,6 @@ struct PlannedPartition<Addr> {
     pinned: bool,
 }
 
-/// Run every partition of a settle that starts with at least
-/// `1 / FULL_SETTLE_DIVISOR` of its flags set (or the untracked byte), and
-/// skip comparing what the partitions write: running the whole settle then
-/// costs about a single pass.
-const FULL_SETTLE_DIVISOR: usize = 3;
-
 /// A chunk of an object a partition writes, compared before and after the
 /// partition runs.
 struct WatchedChunk<Addr> {
@@ -3929,9 +3923,10 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         }
     }
 
-    /// Start a settle of `count` partitions: run all of them when the
-    /// untracked byte or at least `1 / FULL_SETTLE_DIVISOR` of their flags
-    /// are set, recorded in the full byte.
+    /// Start a settle of `count` partitions. Skip publication comparisons
+    /// when every partition will run anyway, or an untracked raw view requires
+    /// a full settle. A fraction of dirty flags is not a cost estimate: a
+    /// clean partition can contain most of the program's work.
     fn begin_settle(&mut self, flags: Addr, count: usize) {
         let all = self.builder.alloc_bit(count * 8, false);
         self.builder.emit(SIRInstruction::Load(
@@ -3945,10 +3940,8 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         self.builder
             .emit(SIRInstruction::Unary(dirty, UnaryOp::PopCount, all));
         let threshold = self.builder.alloc_bit(count_width, false);
-        self.builder.emit(SIRInstruction::Imm(
-            threshold,
-            SIRValue::new(count.div_ceil(FULL_SETTLE_DIVISOR) as u64),
-        ));
+        self.builder
+            .emit(SIRInstruction::Imm(threshold, SIRValue::new(count as u64)));
         let busy = self.builder.alloc_bit(1, false);
         self.builder.emit(SIRInstruction::Binary(
             busy,

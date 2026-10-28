@@ -91,7 +91,7 @@ X/Z を扱う場合は builder に `.four_state(true)` を指定します。
 
 - [単純なクラス](./systemverilog-reference#classes)を超えるクラスを使う検証、並行アサーション。
 - `fork` / `join`、named event、`a = #1 b` のような代入内のタイミング制御、
-  イベント制御の `iff`（[#1444](https://github.com/celox-sim/celox/issues/1444)）。
+  `always_ff` のイベント制御の `iff`（[#452](https://github.com/celox-sim/celox/issues/452)）。
 - ラッチ内のノンブロッキング代入、複数ドライバ、トライステートバス。`always_comb` の暗黙のラッチ推論は 共通の `[diagnostics]` 設定で `inferred_latch = "warn"` または `"allow"` を指定して許可します。
 - 非 ANSI モジュールポート、ワイルドカード `.*` 接続、ゲートプリミティブ、`bind`。
 - `real`、unpacked 構造体、interface の一部の機能。

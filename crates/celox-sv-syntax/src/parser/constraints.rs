@@ -6,7 +6,13 @@ enum Job {
     Block(bool),
     Expression,
     Set,
-    Else,
+    Guard {
+        condition: ExprId,
+        first: usize,
+        start: usize,
+        negate: bool,
+        has_else: bool,
+    },
 }
 
 impl Parser<'_> {
@@ -43,8 +49,6 @@ impl Parser<'_> {
         }) {
             return Err(self.error("duplicate constraint block"));
         }
-        let mut expressions = Vec::new();
-        let mut supported = !is_static;
         if self.eat(";") {
             if let Some(class) = self.class_stack.last_mut() {
                 class.constraints.push(ClassConstraint {
@@ -57,6 +61,19 @@ impl Parser<'_> {
         if prototype {
             return Err(self.error("extern or pure constraint requires a prototype"));
         }
+        let expressions = self.constraint_block()?;
+        if let Some(class) = self.class_stack.last_mut() {
+            class.constraints.push(ClassConstraint {
+                name,
+                expressions: if is_static { None } else { expressions },
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn constraint_block(&mut self) -> Result<Option<Vec<ExprId>>> {
+        let mut expressions = Vec::new();
+        let mut supported = true;
         self.expect("{")?;
         let mut jobs = vec![Job::Block(true)];
         while let Some(job) = jobs.pop() {
@@ -84,18 +101,60 @@ impl Parser<'_> {
                         jobs.push(Job::Expression);
                     }
                 }
-                Job::Else => {
-                    if self.eat("else") {
+                Job::Guard {
+                    condition,
+                    first,
+                    start,
+                    negate,
+                    has_else,
+                } => {
+                    let guard = if negate {
+                        self.node(
+                            start,
+                            ExprKind::Unary {
+                                operator: "!".into(),
+                                expression: condition,
+                                postfix: false,
+                            },
+                        )?
+                    } else {
+                        condition
+                    };
+                    let body: Vec<_> = expressions.drain(first..).collect();
+                    for expression in body {
+                        expressions.push(self.node(
+                            start,
+                            ExprKind::Binary {
+                                left: guard,
+                                operator: "||".into(),
+                                right: expression,
+                            },
+                        )?);
+                    }
+                    if has_else && self.eat("else") {
+                        jobs.push(Job::Guard {
+                            condition,
+                            first: expressions.len(),
+                            start,
+                            negate: false,
+                            has_else: false,
+                        });
                         jobs.push(Job::Set);
                     }
                 }
                 Job::Expression => {
+                    let start = self.at;
                     if self.eat("if") {
-                        supported = false;
                         self.expect("(")?;
-                        self.expression(0)?;
+                        let condition = self.expression(0)?;
                         self.expect(")")?;
-                        jobs.push(Job::Else);
+                        jobs.push(Job::Guard {
+                            condition,
+                            first: expressions.len(),
+                            start,
+                            negate: true,
+                            has_else: true,
+                        });
                         jobs.push(Job::Set);
                     } else if self.eat("foreach") {
                         supported = false;
@@ -121,7 +180,14 @@ impl Parser<'_> {
                             supported &= simple;
                         }
                         if !soft && self.eat("->") {
-                            supported = false;
+                            let condition = expressions.pop().expect("condition retained");
+                            jobs.push(Job::Guard {
+                                condition,
+                                first: expressions.len(),
+                                start,
+                                negate: true,
+                                has_else: false,
+                            });
                             jobs.push(Job::Set);
                         } else {
                             if self.eat("dist") {
@@ -134,13 +200,7 @@ impl Parser<'_> {
                 }
             }
         }
-        if let Some(class) = self.class_stack.last_mut() {
-            class.constraints.push(ClassConstraint {
-                name,
-                expressions: supported.then_some(expressions),
-            });
-        }
-        Ok(())
+        Ok(supported.then_some(expressions))
     }
 
     fn constraint_condition(&mut self) -> Result<(ExprId, bool)> {

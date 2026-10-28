@@ -21,6 +21,15 @@ jobs:
       - name: Dispatch full CI on develop
         run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref develop
 
+  queue-external-develop:
+    name: Queue develop external comparisons
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Dispatch external comparisons on develop
+        run: gh workflow run external-comparisons.yml --repo "$GITHUB_REPOSITORY" --ref develop
+
   # Lydite core validation also runs on develop; bridge gates are disabled.
   queue-lydite-develop:
     name: Queue develop Lydite validation

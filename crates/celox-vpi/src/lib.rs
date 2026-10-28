@@ -1,7 +1,8 @@
 //! Minimal IEEE VPI compatibility layer backed by an attached Celox image.
 //!
 //! This first layer intentionally implements object discovery, hierarchy
-//! iteration, properties, and immediate signal values. Callback scheduling is
+//! iteration, properties, immediate values, and zero-delay inertial deposits.
+//! Callback scheduling is
 //! kept separate because it must share the runtime's simulation-region loop.
 
 #![cfg_attr(
@@ -368,6 +369,8 @@ struct VpiHost {
     runtime: RefCell<Option<Runtime>>,
     forced_values: RefCell<HashMap<VpiSignalIdentity, ForcedValue>>,
     pending_writes: RefCell<PendingWrites>,
+    // Zero-delay inertial deposits become visible in the next update round.
+    inertial_writes: RefCell<HashMap<VpiSignalIdentity, PendingDeposit>>,
     callbacks: RefCell<callbacks::CallbackState>,
     vlog: RefCell<Option<callbacks::VlogStorage>>,
 }
@@ -465,28 +468,29 @@ fn host_is_active() -> bool {
         .is_some_and(|host| host.owner == std::thread::current().id())
 }
 
+fn selected_host() -> Option<std::rc::Rc<VpiHost>> {
+    let active = ACTIVE_HOST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    active
+        .as_ref()
+        .filter(|host| host.owner == std::thread::current().id())
+        .map(|host| {
+            let pointer = host.address as *const VpiHost;
+            // Safety: the owning registration stays live under the lock and
+            // only its owner thread touches this non-Send Rc. The cloned Rc
+            // keeps the host alive across callbacks and reentrant teardown.
+            unsafe {
+                std::rc::Rc::increment_strong_count(pointer);
+                std::rc::Rc::from_raw(pointer)
+            }
+        })
+}
+
 fn with_host<R>(operation: impl FnOnce(&VpiHost) -> R) -> R {
-    let host = {
-        let active = ACTIVE_HOST
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        active
-            .as_ref()
-            .filter(|host| host.owner == std::thread::current().id())
-            .map(|host| {
-                let pointer = host.address as *const VpiHost;
-                // Safety: the owning registration stays live under the lock and
-                // only its owner thread touches this non-Send Rc. The cloned Rc
-                // keeps the host alive across callbacks and reentrant teardown.
-                unsafe {
-                    std::rc::Rc::increment_strong_count(pointer);
-                    std::rc::Rc::from_raw(pointer)
-                }
-            })
-    };
     // An unbound/foreign-thread C call sees an empty host, never another
     // thread's non-Send simulation state.
-    let host = host.unwrap_or_default();
+    let host = selected_host().unwrap_or_default();
     operation(&host)
 }
 
@@ -1286,21 +1290,23 @@ pub unsafe extern "C" fn vpi_get_str(property: i32, reference: VpiHandle) -> *mu
 }
 
 fn value_bits(id: SignalSelection) -> Option<(BigUint, BigUint, usize)> {
-    with_host(|host| {
-        borrow_cell(&host.runtime, |runtime| {
-            let runtime = runtime.as_ref()?.state();
-            let signal = runtime.reflection().signal(id.root)?;
-            if id.depth != signal.unpacked_dims.len() {
-                return None;
-            }
-            let width = id.width(runtime)?;
-            let identity = id.identity(runtime)?;
-            if let Some(forced) = host.forced_values.borrow().get(&identity) {
-                return Some((forced.value.clone(), forced.mask.clone(), width));
-            }
-            let (value, mask) = id.read(runtime)?;
-            Some((value, mask, width))
-        })
+    with_host(|host| value_bits_at(host, id))
+}
+
+fn value_bits_at(host: &VpiHost, id: SignalSelection) -> Option<(BigUint, BigUint, usize)> {
+    borrow_cell(&host.runtime, |runtime| {
+        let runtime = runtime.as_ref()?.state();
+        let signal = runtime.reflection().signal(id.root)?;
+        if id.depth != signal.unpacked_dims.len() {
+            return None;
+        }
+        let width = id.width(runtime)?;
+        let identity = id.identity(runtime)?;
+        if let Some(forced) = host.forced_values.borrow().get(&identity) {
+            return Some((forced.value.clone(), forced.mask.clone(), width));
+        }
+        let (value, mask) = id.read(runtime)?;
+        Some((value, mask, width))
     })
 }
 
@@ -1393,28 +1399,28 @@ fn encode_signal_value(
 }
 
 unsafe fn write_snapshot_value(
+    host: &VpiHost,
     reference: VpiHandle,
     value: *mut VpiValue,
     bits: &BigUint,
     mask: &BigUint,
 ) {
-    if value.is_null() {
+    if value.is_null() || reference.is_null() {
         return;
     }
-    // Safety: the caller upholds the VPI handle contract.
-    let Some(handle) = (unsafe { handle_mut(reference) }) else {
-        return;
-    };
+    // Safety: the caller has selected this host and keeps the callback's
+    // object handle live through dispatch.
+    let handle = unsafe { &mut *reference };
     let HandleKind::Object(ObjectRef::Signal(id)) = handle.kind else {
         return;
     };
-    let metadata = with_runtime(|runtime| {
+    let metadata = borrow_cell(&host.runtime, |runtime| {
+        let runtime = runtime.as_ref()?.state();
         runtime
             .reflection()
             .signal(id.root)
             .and_then(|signal| Some((id.width(runtime)?, signal.signed)))
-    })
-    .flatten();
+    });
     let Some((width, signed)) = metadata else {
         return;
     };
@@ -1430,13 +1436,17 @@ unsafe fn write_snapshot_value(
 /// `reference` must be a live signal handle and `value` must point to writable
 /// `VpiValue` storage. Returned string/vector pointers are owned by the handle.
 pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValue) {
-    if value.is_null() {
+    if value.is_null() || reference.is_null() {
         return;
     }
-    // Safety: both pointers follow the VPI ABI contract.
-    let Some(handle) = (unsafe { handle_mut(reference) }) else {
+    // The selected host belongs to this thread. Resolve it once for both
+    // handle access and signal metadata instead of reentering the registry.
+    let Some(host) = selected_host() else {
         return;
     };
+    // Safety: the caller supplies a live handle; selection above rejects
+    // foreign-thread/unbound calls before dereferencing it.
+    let handle = unsafe { &mut *reference };
     if let HandleKind::Constant(integer) = handle.kind {
         // Safety: checked non-null above; caller owns the `VpiValue` allocation.
         let value = unsafe { &mut *value };
@@ -1448,17 +1458,15 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
     let HandleKind::Object(ObjectRef::Signal(id)) = handle.kind else {
         return;
     };
-    let Some((bits, mask, width)) = value_bits(id) else {
+    let Some((bits, mask, width)) = value_bits_at(&host, id) else {
         return;
     };
-    let signed = with_runtime(|runtime| {
+    let signed = borrow_cell(&host.runtime, |runtime| {
         runtime
-            .reflection()
-            .signal(id.root)
-            .map(|signal| signal.signed)
-    })
-    .flatten()
-    .unwrap_or(false);
+            .as_ref()
+            .and_then(|runtime| runtime.state().reflection().signal(id.root))
+            .is_some_and(|signal| signal.signed)
+    });
     // Safety: checked non-null above; caller owns the `VpiValue` allocation.
     encode_signal_value(handle, unsafe { &mut *value }, &bits, &mask, width, signed);
 }
@@ -1600,29 +1608,22 @@ pub unsafe extern "C" fn vpi_put_value(
     let Some(ObjectRef::Signal(id)) = (unsafe { object_ref(reference) }) else {
         return ptr::null_mut();
     };
-    if with_runtime(|runtime| {
-        runtime
-            .reflection()
-            .signal(id.root)
-            .is_some_and(|signal| signal.is_parameter)
-    })
-    .unwrap_or(false)
-    {
+    if id.depth != 0 && matches!(flags, VPI_FORCE_FLAG | VPI_RELEASE_FLAG) {
         return ptr::null_mut();
     }
-    if !with_runtime(|runtime| {
-        runtime
-            .reflection()
-            .signal(id.root)
-            .is_some_and(|signal| id.depth == signal.unpacked_dims.len())
+    let signal_info = with_runtime(|runtime| {
+        let root = runtime.reflection().signal(id.root)?;
+        if root.is_parameter || id.depth != root.unpacked_dims.len() {
+            return None;
+        }
+        Some((
+            id.identity(runtime)?,
+            id.width(runtime)?,
+            id.signal(runtime)?.is_4state && runtime.four_state(),
+        ))
     })
-    .unwrap_or(false)
-        || (id.depth != 0 && matches!(flags, VPI_FORCE_FLAG | VPI_RELEASE_FLAG))
-    {
-        return ptr::null_mut();
-    }
-    let identity = with_runtime(|runtime| id.identity(runtime)).flatten();
-    let Some(identity) = identity else {
+    .flatten();
+    let Some((identity, width, is_4state)) = signal_info else {
         return ptr::null_mut();
     };
     if flags == VPI_RELEASE_FLAG {
@@ -1677,16 +1678,6 @@ pub unsafe extern "C" fn vpi_put_value(
         };
     }
 
-    let signal_info = with_runtime(|runtime| {
-        Some((
-            id.width(runtime)?,
-            id.signal(runtime)?.is_4state && runtime.four_state(),
-        ))
-    })
-    .flatten();
-    let Some((width, is_4state)) = signal_info else {
-        return ptr::null_mut();
-    };
     // Safety: value follows the VPI value contract.
     let Some((mut bits, mut mask)) = (unsafe { decode_value(value, width) }) else {
         return ptr::null_mut();
@@ -1704,6 +1695,33 @@ pub unsafe extern "C" fn vpi_put_value(
             mask = 0u8.into();
         }
     }
+    if flags == VPI_INERTIAL_DELAY {
+        with_host(|host| {
+            host.inertial_writes.borrow_mut().insert(
+                identity,
+                PendingDeposit {
+                    id,
+                    value: bits,
+                    mask,
+                },
+            );
+        });
+        return reference;
+    }
+    if apply_signal_value(id, identity, bits, mask, flags) {
+        reference
+    } else {
+        ptr::null_mut()
+    }
+}
+
+fn apply_signal_value(
+    id: SignalSelection,
+    identity: VpiSignalIdentity,
+    bits: BigUint,
+    mask: BigUint,
+    flags: i32,
+) -> bool {
     let force_deposited = if flags == VPI_FORCE_FLAG {
         let deposited = with_host(|host| {
             borrow_cell(&host.forced_values, |forced| {
@@ -1719,7 +1737,7 @@ pub unsafe extern "C" fn vpi_put_value(
             with_runtime(|runtime| Some(runtime.get_four_state(id.signal(runtime)?))).flatten()
         });
         let Some((deposited_value, deposited_mask)) = deposited else {
-            return ptr::null_mut();
+            return false;
         };
         Some((deposited_value, deposited_mask))
     } else if with_host(|host| {
@@ -1731,7 +1749,7 @@ pub unsafe extern "C" fn vpi_put_value(
             })
         })
     }) {
-        return reference;
+        return true;
     } else {
         None
     };
@@ -1788,12 +1806,35 @@ pub unsafe extern "C" fn vpi_put_value(
             });
         }
     }
-    let succeeded = succeeded && (callbacks::is_running() || flush_pending_writes());
-    if succeeded {
-        reference
-    } else {
-        ptr::null_mut()
+    succeeded && (callbacks::is_running() || flush_pending_writes())
+}
+
+fn has_inertial_writes() -> bool {
+    with_host(|host| !host.inertial_writes.borrow().is_empty())
+}
+
+/// Apply one inertial update round after the current callbacks and domains.
+/// A callback on an edge generated here can enqueue the next round, but its
+/// deposits must not change the values sampled by that edge's FF kernel.
+fn flush_inertial_writes() -> bool {
+    let writes = with_host(|host| std::mem::take(&mut *host.inertial_writes.borrow_mut()));
+    if writes.is_empty() {
+        return false;
     }
+    for (identity, deposit) in writes {
+        if !apply_signal_value(
+            deposit.id,
+            identity,
+            deposit.value,
+            deposit.mask,
+            VPI_NO_DELAY,
+        ) {
+            callbacks::fail("failed to apply an inertial VPI write".into());
+            return true;
+        }
+    }
+    flush_pending_writes();
+    true
 }
 
 fn flush_pending_writes() -> bool {

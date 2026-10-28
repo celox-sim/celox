@@ -26,7 +26,8 @@
 //!     waiter count u32, then per waiter:
 //!       process str | site u64 | baseline count u32, then per baseline:
 //!         0 u8 | counter u32 | value bytes | mask bytes, or
-//!         1 u8 | value bytes | mask bytes
+//!         1 u8 | value bytes | mask bytes, or
+//!         2 u8 | gated counter u32 | all counter u32 | value bytes | mask bytes
 //!     ready count u32, then per process: process str
 //!     inactive count u32, then per process: process str
 //!     update count u32, then per update:
@@ -178,6 +179,15 @@ pub enum BaselineRecord {
     },
     /// The signal's value at the last check, as little-endian bytes.
     Value { value: Vec<u8>, mask: Vec<u8> },
+    /// A term whose `iff` gate a write judges at the write: its gated
+    /// counter when the wait began, its counter of all occurrences and the
+    /// signal's value at the last check, as little-endian bytes.
+    Gated {
+        gated: u32,
+        all: u32,
+        value: Vec<u8>,
+        mask: Vec<u8>,
+    },
 }
 
 /// A queued nonblocking assignment.
@@ -541,6 +551,18 @@ fn put_processes(w: &mut impl Write, processes: &ProcessRecord, version: u16) ->
                     put_bytes(w, value)?;
                     put_bytes(w, mask)?;
                 }
+                BaselineRecord::Gated {
+                    gated,
+                    all,
+                    value,
+                    mask,
+                } => {
+                    w.write_all(&[2])?;
+                    w.write_all(&gated.to_le_bytes())?;
+                    w.write_all(&all.to_le_bytes())?;
+                    put_bytes(w, value)?;
+                    put_bytes(w, mask)?;
+                }
             }
         }
     }
@@ -608,6 +630,12 @@ fn get_processes(r: &mut impl Read, version: u16) -> Result<ProcessRecord, State
                             mask: get_len_bytes(r)?,
                         }),
                         1 => Ok(BaselineRecord::Value {
+                            value: get_len_bytes(r)?,
+                            mask: get_len_bytes(r)?,
+                        }),
+                        2 => Ok(BaselineRecord::Gated {
+                            gated: get_u32(r)?,
+                            all: get_u32(r)?,
                             value: get_len_bytes(r)?,
                             mask: get_len_bytes(r)?,
                         }),
@@ -765,6 +793,12 @@ mod tests {
                             BaselineRecord::Value {
                                 value: vec![1],
                                 mask: vec![0],
+                            },
+                            BaselineRecord::Gated {
+                                gated: 3,
+                                all: 5,
+                                value: vec![1],
+                                mask: vec![],
                             },
                         ],
                     }],

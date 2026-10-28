@@ -38,7 +38,37 @@ impl Ff<'_, '_> {
                     buffer = self.heap_call(ops::APPEND_BYTES, &[buffer, value, count]);
                 }
                 let program = self.heap_call(ops::FREEZE, &[buffer]);
-                self.heap_call(ops::OBJECT_RANDOMIZE, &[object, program, check])
+                if args.len() == 2 {
+                    self.heap_call(ops::OBJECT_RANDOMIZE, &[object, program, check])
+                } else {
+                    let mut inputs = self.heap_call(ops::NEW, &[]);
+                    let one = self.constant64(1);
+                    inputs = self.heap_call(ops::APPEND_BYTES, &[inputs, check, one]);
+                    for value in &args[2..] {
+                        let value = self.integer_of_width(value, 64, false)?;
+                        let eight = self.constant64(8);
+                        inputs = self.heap_call(ops::APPEND_BYTES, &[inputs, value, eight]);
+                    }
+                    self.heap_call(ops::OBJECT_RANDOMIZE_INPUTS, &[object, program, inputs])
+                }
+            }
+            ObjectOp::ConstraintModeGet(index) => {
+                let object = self.handle(&args[0])?;
+                self.heap_call(
+                    ops::encode(ops::OBJECT_CONSTRAINT_MODE_GET, u64::from(*index)),
+                    &[object],
+                )
+            }
+            ObjectOp::ConstraintModeSet(index) => {
+                let object = self.handle(&args[0])?;
+                let enabled = self.integer_of_width(&args[1], 1, false)?;
+                self.heap_call(
+                    ops::encode(
+                        ops::OBJECT_CONSTRAINT_MODE_SET,
+                        u64::from(index.unwrap_or(u32::MAX)),
+                    ),
+                    &[object, enabled],
+                )
             }
             ObjectOp::Container { .. } => unreachable!("handled by container_call"),
             ObjectOp::New {
@@ -149,6 +179,8 @@ impl Ff<'_, '_> {
                 HandleProperty::Object => celox_design::ValueKind::ObjRef,
             }),
             ObjectOp::Randomize(_)
+            | ObjectOp::ConstraintModeGet(_)
+            | ObjectOp::ConstraintModeSet(_)
             | ObjectOp::Store(_)
             | ObjectOp::ClassOf
             | ObjectOp::Random

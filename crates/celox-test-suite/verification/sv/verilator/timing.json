@@ -2,6 +2,98 @@
   "cases": [
     {
       "category": "Sequential",
+      "detail": "Verilator 5.052 schedules an always @* that calls a timed task differently from its event control: the task called for a = 5 at 3 ns writes y at 6 ns instead of 5 ns, a nonblocking update after the task's 1 ns delay lands at 2 ns instead of 3 ns, and a standalone probe shows it rerunning the call for a change made while the task was suspended and for variables only the task body reads. IEEE 1800-2023 9.4.2.2 makes the implicit event list the variables the statement reads, the task's arguments but not its body, and 9.4.2 waits only for changes after the event control is reached. Icarus passes the unchanged shared assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_always_star_timed_task",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 schedules an always @* that calls a timed task differently from its event control: the task called for a = 5 at 3 ns writes y at 6 ns instead of 5 ns, a nonblocking update after the task's 1 ns delay lands at 2 ns instead of 3 ns, and a standalone probe shows it rerunning the call for a change made while the task was suspended and for variables only the task body reads. IEEE 1800-2023 9.4.2.2 makes the implicit event list the variables the statement reads, the task's arguments but not its body, and 9.4.2 waits only for changes after the event control is reached. Icarus passes the unchanged shared assertions.",
+        "upstream": []
+      },
+      "name": "timing::always_star_timed_task_calls_assign_nonblocking",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 schedules an always @* that calls a timed task differently from its event control: the task called for a = 5 at 3 ns writes y at 6 ns instead of 5 ns, a nonblocking update after the task's 1 ns delay lands at 2 ns instead of 3 ns, and a standalone probe shows it rerunning the call for a change made while the task was suspended and for variables only the task body reads. IEEE 1800-2023 9.4.2.2 makes the implicit event list the variables the statement reads, the task's arguments but not its body, and 9.4.2 waits only for changes after the event control is reached. Icarus passes the unchanged shared assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_always_star_timed_task",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 schedules an always @* that calls a timed task differently from its event control: the task called for a = 5 at 3 ns writes y at 6 ns instead of 5 ns, a nonblocking update after the task's 1 ns delay lands at 2 ns instead of 3 ns, and a standalone probe shows it rerunning the call for a change made while the task was suspended and for variables only the task body reads. IEEE 1800-2023 9.4.2.2 makes the implicit event list the variables the statement reads, the task's arguments but not its body, and 9.4.2 waits only for changes after the event control is reached. Icarus passes the unchanged shared assertions.",
+        "upstream": []
+      },
+      "name": "timing::always_star_timed_task_calls_run_as_processes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 builds the event list of an always @* that calls a timed task without the reads of the defaults of omitted arguments of nested calls, so a change of a does not wake `always @* delayed(pick())` with `pick(input v = a)`, and without the reads of a branch that constant folding removes; it also runs the process at time zero. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, a constant-false branch included, and 9.4.2 waits for a change. Icarus passes the nested-default case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_always_star_implicit_reads",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 builds the event list of an always @* that calls a timed task without the reads of the defaults of omitted arguments of nested calls, so a change of a does not wake `always @* delayed(pick())` with `pick(input v = a)`, and without the reads of a branch that constant folding removes; it also runs the process at time zero. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, a constant-false branch included, and 9.4.2 waits for a change. Icarus passes the nested-default case.",
+        "upstream": []
+      },
+      "name": "timing::always_star_timed_task_calls_wait_on_folded_branch_reads",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 builds the event list of an always @* that calls a timed task without the reads of the defaults of omitted arguments of nested calls, so a change of a does not wake `always @* delayed(pick())` with `pick(input v = a)`, and without the reads of a branch that constant folding removes; it also runs the process at time zero. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, a constant-false branch included, and 9.4.2 waits for a change. Icarus passes the nested-default case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_always_star_implicit_reads",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 builds the event list of an always @* that calls a timed task without the reads of the defaults of omitted arguments of nested calls, so a change of a does not wake `always @* delayed(pick())` with `pick(input v = a)`, and without the reads of a branch that constant folding removes; it also runs the process at time zero. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, a constant-false branch included, and 9.4.2 waits for a change. Icarus passes the nested-default case.",
+        "upstream": []
+      },
+      "name": "timing::always_star_timed_task_calls_wait_on_nested_call_defaults",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::always_timed_task_without_inline_timing_executes",
@@ -95,6 +187,63 @@
       "name": "timing::blocking_ff_woken_waiters_sample_before_continuations",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::blocking_write_edges_read_values_before_nonblocking_updates",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_active_region_waiters_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_active_region_waiters",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
+        "upstream": []
+      },
+      "name": "timing::blocking_write_waiters_rearm_before_nonblocking_updates",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_active_region_waiters_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_active_region_waiters",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
+        "upstream": []
+      },
+      "name": "timing::blocking_write_waiters_run_before_nonblocking_updates",
+      "phase": "skip",
+      "status": "ignored",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -249,6 +398,29 @@
       "name": "timing::delays_resume_initial_blocks_at_later_times",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 wakes a process waiting on a variable only for the value an evaluation leaves: an always_comb or edge-triggered body that rewrites a variable 1 -> 0 -> 1, and nonblocking updates `y <= 0; y <= 1;` from 1, wake no waiter, nor does a pulse that one always_ff writes to some bits of a variable while other processes write its other bits, or a nonblocking update that rises from the final blocking value. IEEE 1800-2023 4.3 and 9.4.2 make every store an update event that triggers the waiter, and 10.4.2 applies nonblocking updates in issue order, each its own update. Standalone probes print the spec counts in Icarus 13.0 and 1 or 0 in Verilator.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_intermediate_writes_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_intermediate_writes",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 wakes a process waiting on a variable only for the value an evaluation leaves: an always_comb or edge-triggered body that rewrites a variable 1 -> 0 -> 1, and nonblocking updates `y <= 0; y <= 1;` from 1, wake no waiter, nor does a pulse that one always_ff writes to some bits of a variable while other processes write its other bits, or a nonblocking update that rises from the final blocking value. IEEE 1800-2023 4.3 and 9.4.2 make every store an update event that triggers the waiter, and 10.4.2 applies nonblocking updates in issue order, each its own update. Standalone probes print the spec counts in Icarus 13.0 and 1 or 0 in Verilator.",
+        "upstream": []
+      },
+      "name": "timing::derived_clocks_follow_superseded_publications",
+      "phase": "skip",
+      "status": "ignored",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -499,6 +671,148 @@
     },
     {
       "category": "Sequential",
+      "detail": "Verilator 5.052 rejects the write to a shared automatic gate or event signal in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_iff_shared_automatic",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects the write to a shared automatic gate or event signal in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
+        "upstream": []
+      },
+      "name": "timing::iff_automatic_clock_preserves_enabled_pulses",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. Standalone probes print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. A hierarchical waiter on clk also sees the later en write of a child always_comb (clk=a; en=a), giving rejected=2 instead of 0; reversing those writes correctly gives accepted=2.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_iff_late_conditions_verilator.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_iff_late_conditions",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. Standalone probes print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. A hierarchical waiter on clk also sees the later en write of a child always_comb (clk=a; en=a), giving rejected=2 instead of 0; reversing those writes correctly gives accepted=2.",
+        "upstream": []
+      },
+      "name": "timing::iff_conditions_are_judged_at_the_write",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. Standalone probes print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. A hierarchical waiter on clk also sees the later en write of a child always_comb (clk=a; en=a), giving rejected=2 instead of 0; reversing those writes correctly gives accepted=2.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_iff_late_conditions_verilator.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_iff_late_conditions",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. Standalone probes print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. A hierarchical waiter on clk also sees the later en write of a child always_comb (clk=a; en=a), giving rejected=2 instead of 0; reversing those writes correctly gives accepted=2.",
+        "upstream": []
+      },
+      "name": "timing::iff_conditions_follow_combinational_process_order",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. Standalone probes print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. A hierarchical waiter on clk also sees the later en write of a child always_comb (clk=a; en=a), giving rejected=2 instead of 0; reversing those writes correctly gives accepted=2.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_iff_late_conditions_verilator.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_iff_late_conditions",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. Standalone probes print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. A hierarchical waiter on clk also sees the later en write of a child always_comb (clk=a; en=a), giving rejected=2 instead of 0; reversing those writes correctly gives accepted=2.",
+        "upstream": []
+      },
+      "name": "timing::iff_conditions_follow_nonblocking_update_order",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. Standalone probes print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. A hierarchical waiter on clk also sees the later en write of a child always_comb (clk=a; en=a), giving rejected=2 instead of 0; reversing those writes correctly gives accepted=2.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_iff_late_conditions_verilator.json",
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_iff_late_conditions",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. Standalone probes print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. A hierarchical waiter on clk also sees the later en write of a child always_comb (clk=a; en=a), giving rejected=2 instead of 0; reversing those writes correctly gives accepted=2.",
+        "upstream": []
+      },
+      "name": "timing::iff_conditions_preserve_cross_module_combinational_order",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 rejects the write to a shared automatic gate or event signal in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_iff_hierarchy_automatic.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_iff_shared_automatic",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects the write to a shared automatic gate or event signal in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
+        "upstream": []
+      },
+      "name": "timing::iff_shared_automatic_gate_uses_edge_time_value",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Verilator 5.052 rejects @* in an initial forever (\"Unsupported: Event control with implicit sensitivity (@*) in this context\"), which IEEE 1800-2023 9.4.2.2 permits in any procedural timing control statement. Icarus 13.0 passes the case.",
       "expectation": "Simulation",
       "known_issue": {
@@ -570,63 +884,6 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::intermediate_combinational_writes_reach_concatenated_ports",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_disagreement",
-        "evidence": [
-          "verification/repros/sv_active_region_waiters_verilator.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_verilator_active_region_waiters",
-        "observed_version": "Verilator 5.052",
-        "phase": "execute",
-        "reason": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
-        "upstream": []
-      },
-      "name": "timing::blocking_write_waiters_run_before_nonblocking_updates",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_disagreement",
-        "evidence": [
-          "verification/repros/sv_active_region_waiters_verilator.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_verilator_active_region_waiters",
-        "observed_version": "Verilator 5.052",
-        "phase": "execute",
-        "reason": "Verilator 5.052 resumes a process woken by a blocking write of an edge-triggered process only after the same edge's nonblocking updates: with `y = ~y; q <= q + 1;` a waiter on `@(y)` reads the updated q, and with `y = 1; y <= 0; y <= 1;` from 0 it does not wait again before the nonblocking updates and counts 1 instead of 3. IEEE 1800-2023 4.5 makes the blocking write an update event of the active region and enters the NBA region only when the active and inactive regions are empty, so the waiter runs first (9.4.2). Standalone probes print the spec values in Icarus 13.0.",
-        "upstream": []
-      },
-      "name": "timing::blocking_write_waiters_rearm_before_nonblocking_updates",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "timing::blocking_write_edges_read_values_before_nonblocking_updates",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -873,6 +1130,17 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::output_reads_settle_waiting_processes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::package_scoped_delay_values_wait_their_value",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -1172,6 +1440,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "timing::staged_nonblocking_updates_keep_their_order",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Verilator 5.052 wakes a process waiting on a variable only for the value an evaluation leaves: an always_comb or edge-triggered body that rewrites a variable 1 -> 0 -> 1, and nonblocking updates `y <= 0; y <= 1;` from 1, wake no waiter, nor does a pulse that one always_ff writes to some bits of a variable while other processes write its other bits, or a nonblocking update that rises from the final blocking value. IEEE 1800-2023 4.3 and 9.4.2 make every store an update event that triggers the waiter, and 10.4.2 applies nonblocking updates in issue order, each its own update. Standalone probes print the spec counts in Icarus 13.0 and 1 or 0 in Verilator.",
       "expectation": "Simulation",
       "known_issue": {
@@ -1212,17 +1491,6 @@
       "name": "timing::staged_nonblocking_writes_wake_waiters",
       "phase": "skip",
       "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "timing::staged_nonblocking_updates_keep_their_order",
-      "phase": "execute",
-      "status": "passed",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -1384,6 +1652,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "timing::unknown_iff_conditions_are_false",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::untimed_task_copyback_preserves_distinct_activation_times",
@@ -1466,132 +1745,6 @@
       "name": "timing::zero_trip_child_dependencies_ignore_body_and_step",
       "phase": "execute",
       "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Verilator 5.052 schedules an always @* that calls a timed task differently from its event control: the task called for a = 5 at 3 ns writes y at 6 ns instead of 5 ns, a nonblocking update after the task's 1 ns delay lands at 2 ns instead of 3 ns, and a standalone probe shows it rerunning the call for a change made while the task was suspended and for variables only the task body reads. IEEE 1800-2023 9.4.2.2 makes the implicit event list the variables the statement reads, the task's arguments but not its body, and 9.4.2 waits only for changes after the event control is reached. Icarus passes the unchanged shared assertions.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_disagreement",
-        "evidence": [
-          "verification/sv/limitations/verilator.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_verilator_always_star_timed_task",
-        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
-        "phase": "execute",
-        "reason": "Verilator 5.052 schedules an always @* that calls a timed task differently from its event control: the task called for a = 5 at 3 ns writes y at 6 ns instead of 5 ns, a nonblocking update after the task's 1 ns delay lands at 2 ns instead of 3 ns, and a standalone probe shows it rerunning the call for a change made while the task was suspended and for variables only the task body reads. IEEE 1800-2023 9.4.2.2 makes the implicit event list the variables the statement reads, the task's arguments but not its body, and 9.4.2 waits only for changes after the event control is reached. Icarus passes the unchanged shared assertions.",
-        "upstream": []
-      },
-      "name": "timing::always_star_timed_task_calls_run_as_processes",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Verilator 5.052 schedules an always @* that calls a timed task differently from its event control: the task called for a = 5 at 3 ns writes y at 6 ns instead of 5 ns, a nonblocking update after the task's 1 ns delay lands at 2 ns instead of 3 ns, and a standalone probe shows it rerunning the call for a change made while the task was suspended and for variables only the task body reads. IEEE 1800-2023 9.4.2.2 makes the implicit event list the variables the statement reads, the task's arguments but not its body, and 9.4.2 waits only for changes after the event control is reached. Icarus passes the unchanged shared assertions.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_disagreement",
-        "evidence": [
-          "verification/sv/limitations/verilator.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_verilator_always_star_timed_task",
-        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052; Icarus 13.0",
-        "phase": "execute",
-        "reason": "Verilator 5.052 schedules an always @* that calls a timed task differently from its event control: the task called for a = 5 at 3 ns writes y at 6 ns instead of 5 ns, a nonblocking update after the task's 1 ns delay lands at 2 ns instead of 3 ns, and a standalone probe shows it rerunning the call for a change made while the task was suspended and for variables only the task body reads. IEEE 1800-2023 9.4.2.2 makes the implicit event list the variables the statement reads, the task's arguments but not its body, and 9.4.2 waits only for changes after the event control is reached. Icarus passes the unchanged shared assertions.",
-        "upstream": []
-      },
-      "name": "timing::always_star_timed_task_calls_assign_nonblocking",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Verilator 5.052 builds the event list of an always @* that calls a timed task without the reads of the defaults of omitted arguments of nested calls, so a change of a does not wake `always @* delayed(pick())` with `pick(input v = a)`, and without the reads of a branch that constant folding removes; it also runs the process at time zero. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, a constant-false branch included, and 9.4.2 waits for a change. Icarus passes the nested-default case.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_disagreement",
-        "evidence": [
-          "verification/sv/limitations/verilator.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_verilator_always_star_implicit_reads",
-        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
-        "phase": "execute",
-        "reason": "Verilator 5.052 builds the event list of an always @* that calls a timed task without the reads of the defaults of omitted arguments of nested calls, so a change of a does not wake `always @* delayed(pick())` with `pick(input v = a)`, and without the reads of a branch that constant folding removes; it also runs the process at time zero. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, a constant-false branch included, and 9.4.2 waits for a change. Icarus passes the nested-default case.",
-        "upstream": []
-      },
-      "name": "timing::always_star_timed_task_calls_wait_on_nested_call_defaults",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Verilator 5.052 builds the event list of an always @* that calls a timed task without the reads of the defaults of omitted arguments of nested calls, so a change of a does not wake `always @* delayed(pick())` with `pick(input v = a)`, and without the reads of a branch that constant folding removes; it also runs the process at time zero. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, a constant-false branch included, and 9.4.2 waits for a change. Icarus passes the nested-default case.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_disagreement",
-        "evidence": [
-          "verification/sv/limitations/verilator.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_verilator_always_star_implicit_reads",
-        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
-        "phase": "execute",
-        "reason": "Verilator 5.052 builds the event list of an always @* that calls a timed task without the reads of the defaults of omitted arguments of nested calls, so a change of a does not wake `always @* delayed(pick())` with `pick(input v = a)`, and without the reads of a branch that constant folding removes; it also runs the process at time zero. IEEE 1800-2023 9.4.2.2 defines the implicit event list by the identifiers that appear in the statement, a constant-false branch included, and 9.4.2 waits for a change. Icarus passes the nested-default case.",
-        "upstream": []
-      },
-      "name": "timing::always_star_timed_task_calls_wait_on_folded_branch_reads",
-      "phase": "skip",
-      "status": "ignored",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "timing::package_scoped_delay_values_wait_their_value",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Sequential",
-      "detail": "Verilator 5.052 wakes a process waiting on a variable only for the value an evaluation leaves: an always_comb or edge-triggered body that rewrites a variable 1 -> 0 -> 1, and nonblocking updates `y <= 0; y <= 1;` from 1, wake no waiter, nor does a pulse that one always_ff writes to some bits of a variable while other processes write its other bits, or a nonblocking update that rises from the final blocking value. IEEE 1800-2023 4.3 and 9.4.2 make every store an update event that triggers the waiter, and 10.4.2 applies nonblocking updates in issue order, each its own update. Standalone probes print the spec counts in Icarus 13.0 and 1 or 0 in Verilator.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "simulator_disagreement",
-        "evidence": [
-          "verification/repros/sv_intermediate_writes_verilator.json",
-          "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_verilator_intermediate_writes",
-        "observed_version": "Verilator 5.052",
-        "phase": "execute",
-        "reason": "Verilator 5.052 wakes a process waiting on a variable only for the value an evaluation leaves: an always_comb or edge-triggered body that rewrites a variable 1 -> 0 -> 1, and nonblocking updates `y <= 0; y <= 1;` from 1, wake no waiter, nor does a pulse that one always_ff writes to some bits of a variable while other processes write its other bits, or a nonblocking update that rises from the final blocking value. IEEE 1800-2023 4.3 and 9.4.2 make every store an update event that triggers the waiter, and 10.4.2 applies nonblocking updates in issue order, each its own update. Standalone probes print the spec counts in Icarus 13.0 and 1 or 0 in Verilator.",
-        "upstream": []
-      },
-      "name": "timing::derived_clocks_follow_superseded_publications",
-      "phase": "skip",
-      "status": "ignored",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

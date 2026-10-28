@@ -148,6 +148,22 @@ fn shape(context: &mut PackedDimensions, name: String, ty: &Type, local: bool) {
         context.insert(name, value);
     }
 }
+// Binding the declaration's type/ranges may reenter discovery and needs the
+// completed prefix. The following table edit itself performs no queries. Drop
+// only our own old snapshot during that edit, so ScopedMap need not copy its
+// growing overlay on every declaration, then publish before the next query.
+fn publish_shape(
+    tree: &AnalysisContext<'_>,
+    key: &Key,
+    context: &mut PackedDimensions,
+    name: String,
+    ty: &Type,
+    local: bool,
+) {
+    tree.state.dimensions.partial.borrow_mut().remove(key);
+    shape(context, name, ty, local);
+    publish(&tree.state.dimensions, key, context);
+}
 fn variables(
     declaration: &celox_sv_syntax::VariableDeclaration,
     tree: &AnalysisContext<'_>,
@@ -162,8 +178,7 @@ fn variables(
         type_binding::ordinary_variable(variable, declaration.data_type, tree.declarations())
     }) {
         let ty = type_with_dimensions(base.clone(), &variable.dimensions, tree, context)?;
-        shape(context, name(&variable.name), &ty, local);
-        publish(&tree.state.dimensions, key, context);
+        publish_shape(tree, key, context, name(&variable.name), &ty, local);
     }
     Ok(())
 }
@@ -206,7 +221,7 @@ fn parameter(
             if !scalar_binding && let Some(base) = type_binding::bind(*data_type, tree, context)? {
                 let ty = type_with_dimensions(base, dimensions, tree, context)?;
                 if !dimensions.is_empty() || !ty.packed_ranges().is_empty() {
-                    shape(context, n, &ty, local);
+                    publish_shape(tree, key, context, n, &ty, local);
                 }
             }
         }
@@ -236,8 +251,7 @@ fn declaration(
                 for variable in &data.variables {
                     let ty =
                         type_with_dimensions(base.clone(), &variable.dimensions, tree, context)?;
-                    shape(context, name(&variable.name), &ty, false);
-                    publish(&tree.state.dimensions, key, context);
+                    publish_shape(tree, key, context, name(&variable.name), &ty, false);
                 }
             }
         }
@@ -689,8 +703,7 @@ fn statement_scope(
                 for declaration in declarations {
                     if let Some(ty) = type_binding::bind(declaration.data_type, tree, context)? {
                         for variable in declaration.variables {
-                            shape(context, name(&variable.name), &ty, true);
-                            publish(&tree.state.dimensions, key, context);
+                            publish_shape(tree, key, context, name(&variable.name), &ty, true);
                         }
                     }
                 }
@@ -699,8 +712,7 @@ fn statement_scope(
                 let ty = type_binding::builtin_type("int", None)
                     .ok_or_else(|| unsupported("foreach index type"))?;
                 for n in names {
-                    shape(context, name(&n), &ty, true);
-                    publish(&tree.state.dimensions, key, context);
+                    publish_shape(tree, key, context, name(&n), &ty, true);
                 }
             }
         }
@@ -824,8 +836,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
                     && let Ok(ty) = type_with_dimensions(base, &port.dimensions, tree, &context)
                     && let celox_sv_syntax::PortKind::Named(n) = &port.kind
                 {
-                    shape(&mut context, name(n), &ty, false);
-                    publish(&tree.state.dimensions, &key, &context);
+                    publish_shape(tree, &key, &mut context, name(n), &ty, false);
                 }
             }
         }
@@ -842,8 +853,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
     if let Some(id) = owners.subroutine {
         let subroutine = native.subroutine(id);
         for (argument, ty) in formal_types(subroutine, tree, &context)? {
-            shape(&mut context, argument.name, &ty, true);
-            publish(&tree.state.dimensions, &key, &context);
+            publish_shape(tree, &key, &mut context, argument.name, &ty, true);
         }
         if contains(subroutine.body_tokens, target)
             && subroutine.kind == SubroutineKind::Function
@@ -853,8 +863,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
             if matches!(native.data_type(id).kind, DataTypeKind::Implicit) {
                 ty.kind = TypeKind::Logic;
             }
-            shape(&mut context, name(&subroutine.name), &ty, true);
-            publish(&tree.state.dimensions, &key, &context);
+            publish_shape(tree, &key, &mut context, name(&subroutine.name), &ty, true);
         }
     }
     statement_scope(&owners.statements, target, tree, &mut context, &key)?;

@@ -70,6 +70,7 @@ pub struct VpiErrorInfo {
 
 pub(super) struct Registration {
     data: VpiCbData,
+    signal: Option<super::SignalSelection>,
     _time_storage: Option<Box<VpiTime>>,
     _value_storage: Option<Box<VpiValue>>,
     pub(super) handle: VpiHandle,
@@ -148,8 +149,8 @@ fn changed_values() -> Vec<(u64, celox::BigUint, celox::BigUint)> {
                 .callbacks
                 .iter()
                 .filter_map(|(&id, registration)| {
-                    let signal = callback_signal(&registration.data)?;
-                    let (value, mask, _) = value_bits(signal)?;
+                    let signal = registration.signal?;
+                    let (value, mask, _) = super::value_bits_at(host, signal)?;
                     registration
                         .snapshot
                         .as_ref()
@@ -202,20 +203,27 @@ fn fire_with_snapshot(
     id: u64,
     delivered_snapshot: Option<(celox::BigUint, celox::BigUint)>,
 ) -> bool {
-    let Some(mut registration) = with_host(|host| {
-        borrow_cell_mut(&host.callbacks, |state| {
-            let registration = state.callbacks.remove(&id)?;
-            state.firing.insert(id, false);
-            Some(registration)
-        })
+    with_host(|host| fire_with_snapshot_for_host(host, id, delivered_snapshot))
+}
+
+fn fire_with_snapshot_for_host(
+    host: &super::VpiHost,
+    id: u64,
+    delivered_snapshot: Option<(celox::BigUint, celox::BigUint)>,
+) -> bool {
+    let Some(mut registration) = borrow_cell_mut(&host.callbacks, |state| {
+        let registration = state.callbacks.remove(&id)?;
+        state.firing.insert(id, false);
+        Some(registration)
     }) else {
         return false;
     };
 
-    let now = with_host(|host| borrow_cell(&host.callbacks, |state| state.time));
+    let now = borrow_cell(&host.callbacks, |state| state.time);
     let delivered_snapshot = delivered_snapshot.or_else(|| {
-        callback_signal(&registration.data)
-            .and_then(|signal| value_bits(signal).map(|(value, mask, _)| (value, mask)))
+        registration.signal.and_then(|signal| {
+            super::value_bits_at(host, signal).map(|(value, mask, _)| (value, mask))
+        })
     });
     if !registration.data.time.is_null() {
         // Safety: cocotb stores callback time in its live callback object.
@@ -242,7 +250,13 @@ fn fire_with_snapshot(
         // selected the whole callback batch even if an earlier callback wrote.
         if let Some((value, mask)) = &delivered_snapshot {
             unsafe {
-                write_snapshot_value(registration.data.obj, registration.data.value, value, mask)
+                write_snapshot_value(
+                    host,
+                    registration.data.obj,
+                    registration.data.value,
+                    value,
+                    mask,
+                )
             };
         } else {
             unsafe { vpi_get_value(registration.data.obj, registration.data.value) };
@@ -255,17 +269,13 @@ fn fire_with_snapshot(
         unsafe { callback(&mut registration.data) };
     }
 
-    let cancelled = with_host(|host| {
-        borrow_cell_mut(&host.callbacks, |state| {
-            state.firing.remove(&id).unwrap_or(true)
-        })
+    let cancelled = borrow_cell_mut(&host.callbacks, |state| {
+        state.firing.remove(&id).unwrap_or(true)
     });
     if registration.data.reason == CB_VALUE_CHANGE && !cancelled {
         registration.snapshot = delivered_snapshot;
-        with_host(|host| {
-            borrow_cell_mut(&host.callbacks, |state| {
-                state.callbacks.insert(id, registration);
-            })
+        borrow_cell_mut(&host.callbacks, |state| {
+            state.callbacks.insert(id, registration);
         });
     } else {
         // Safety: callback handles are private allocations and one-shot
@@ -288,14 +298,18 @@ fn fire_all(reason: i32) -> bool {
 }
 
 pub(super) fn run() -> bool {
-    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.running = true));
+    with_host(run_with_host)
+}
+
+fn run_with_host(host: &super::VpiHost) -> bool {
+    borrow_cell_mut(&host.callbacks, |state| state.running = true);
     fire_all(CB_START_OF_SIMULATION);
-    if !finish_requested() {
+    if !borrow_cell(&host.callbacks, |state| state.finish) {
         super::flush_pending_writes();
     }
     let mut iterations = 0usize;
     'scheduler: loop {
-        if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
+        if borrow_cell(&host.callbacks, |state| state.finish) {
             break;
         }
         iterations += 1;
@@ -310,26 +324,41 @@ pub(super) fn run() -> bool {
         let mut progressed = false;
         for id in due_ids() {
             progressed |= fire(id);
-            if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
+            if borrow_cell(&host.callbacks, |state| state.finish) {
                 break 'scheduler;
             }
         }
         if !super::flush_pending_writes() {
             break;
         }
-        if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
+        if borrow_cell(&host.callbacks, |state| state.finish) {
             break;
         }
         loop {
             if dispatch_value_changes() {
                 progressed = true;
-                if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
+                if borrow_cell(&host.callbacks, |state| state.finish) {
                     break 'scheduler;
                 }
                 if !super::flush_pending_writes() {
                     break 'scheduler;
                 }
-                if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
+                if borrow_cell(&host.callbacks, |state| state.finish) {
+                    break 'scheduler;
+                }
+                continue;
+            }
+            if super::flush_inertial_writes() {
+                iterations += 1;
+                if iterations > 1_000_000 {
+                    fail(
+                        "VPI inertial updates exceeded 1000000 rounds without advancing time"
+                            .into(),
+                    );
+                    break 'scheduler;
+                }
+                progressed = true;
+                if borrow_cell(&host.callbacks, |state| state.finish) {
                     break 'scheduler;
                 }
                 continue;
@@ -338,14 +367,14 @@ pub(super) fn run() -> bool {
             if !read_write.is_empty() {
                 for id in read_write {
                     progressed |= fire(id);
-                    if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
+                    if borrow_cell(&host.callbacks, |state| state.finish) {
                         break 'scheduler;
                     }
                 }
                 if !super::flush_pending_writes() {
                     break 'scheduler;
                 }
-                if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
+                if borrow_cell(&host.callbacks, |state| state.finish) {
                     break 'scheduler;
                 }
                 continue;
@@ -354,7 +383,7 @@ pub(super) fn run() -> bool {
         }
         progressed |= fire_read_only();
 
-        if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
+        if borrow_cell(&host.callbacks, |state| state.finish) {
             break;
         }
         if progressed {
@@ -382,17 +411,17 @@ pub(super) fn run() -> bool {
             })
         });
         fire_all(CB_NEXT_SIM_TIME);
-        if !finish_requested() {
+        if !borrow_cell(&host.callbacks, |state| state.finish) {
             super::flush_pending_writes();
         }
     }
-    let finished = with_host(|host| borrow_cell(&host.callbacks, |state| state.finish));
+    let finished = borrow_cell(&host.callbacks, |state| state.finish);
     // End-of-simulation callbacks are the one region intentionally dispatched
     // after finish has already been requested.
     for id in registration_ids(CB_END_OF_SIMULATION) {
         fire(id);
     }
-    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.running = false));
+    borrow_cell_mut(&host.callbacks, |state| state.running = false);
     finished
 }
 
@@ -404,7 +433,7 @@ fn watched_signals() -> Vec<celox::SignalRef> {
             state
                 .callbacks
                 .values()
-                .filter_map(|registration| callback_signal(&registration.data))
+                .filter_map(|registration| registration.signal)
                 .collect::<Vec<_>>()
         })
     });
@@ -525,6 +554,9 @@ fn settled_regions() -> Regions {
             }
             continue;
         }
+        if super::flush_inertial_writes() {
+            return Regions::Wrote;
+        }
         let read_write = registration_ids(CB_READ_WRITE_SYNCH);
         if read_write.is_empty() {
             break;
@@ -633,7 +665,8 @@ pub(super) fn run_timed() -> bool {
             })
         });
         let event = with_simulation(|simulation| simulation.next_event_time()).flatten();
-        let Some(time) = due.into_iter().chain(event).min() else {
+        let inertial = super::has_inertial_writes().then(current_time);
+        let Some(time) = due.into_iter().chain(event).chain(inertial).min() else {
             break;
         };
         if time > current_time() {
@@ -646,6 +679,7 @@ pub(super) fn run_timed() -> bool {
         } else if with_host(|host| borrow_cell(&host.callbacks, |state| state.read_only_at))
             == Some(time)
             && event != Some(time)
+            && inertial != Some(time)
         {
             // A zero-delay timer that a ReadOnly callback registered runs,
             // still read-only: the time step's regions do not open again.
@@ -812,6 +846,7 @@ pub unsafe extern "C" fn vpi_register_cb(data: *const VpiCbData) -> VpiHandle {
                 id,
                 Registration {
                     data,
+                    signal,
                     _time_storage: time_storage,
                     _value_storage: value_storage,
                     handle,

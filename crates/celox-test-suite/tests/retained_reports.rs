@@ -232,6 +232,40 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Overriding the default variable lifetime is not yet supported",
                         ),
+                        ("verilator", "fork_deferred::disable_fork_flushes_live_children_only") => {
+                            (
+                                "compile_error",
+                                "compile",
+                                "AstNode is not of expected type",
+                            )
+                        }
+                        (
+                            "verilator",
+                            "fork_deferred::repeated_static_site_keeps_completed_reports"
+                            | "fork_deferred::reused_slot_cannot_flush_completed_reports",
+                        ) => ("compile_error", "compile", "Verilator internal fault"),
+                        (
+                            "verilator",
+                            "fork_deferred::reactive_wakeup_preserves_mature_observed_only"
+                            | "fork_deferred::sibling_event_queues_are_independent"
+                            | "fork_deferred::sibling_wait_queues_are_independent",
+                        ) => ("mismatch", "execute", "expect_output: expected"),
+                        (
+                            "icarus",
+                            "fork_deferred::child_flush_does_not_inherit_parent_reports"
+                            | "fork_deferred::disable_fork_flushes_live_children_only"
+                            | "fork_deferred::four_state_arguments_are_captured_before_child_exit"
+                            | "fork_deferred::reactive_wakeup_preserves_mature_observed_only"
+                            | "fork_deferred::repeated_static_site_keeps_completed_reports"
+                            | "fork_deferred::reused_slot_cannot_flush_completed_reports"
+                            | "fork_deferred::sibling_event_queues_are_independent"
+                            | "fork_deferred::sibling_wait_queues_are_independent"
+                            | "fork_deferred::zero_delay_is_not_a_flush_point",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Deferred assertions are not supported",
+                        ),
                         (
                             "verilator",
                             "tagged_unions::conditional_struct_payload"
@@ -267,6 +301,25 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "functions cannot have delay statements.",
                         ),
+                        (
+                            "icarus",
+                            "class::imported_member_type_dimensions"
+                            | "class::imported_member_type_inheritance",
+                        ) => ("compile_error", "compile", "source_0.sv:3: syntax error"),
+                        ("icarus", "class::type_alias_members") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::type_alias_lexical_scopes") => (
+                            "compile_error",
+                            "compile",
+                            "External methods are not yet supported",
+                        ),
+                        ("icarus", "class::type_parameter_imports") => {
+                            ("compile_error", "compile", "source_0.sv:7: syntax error")
+                        }
+                        ("icarus", "class::type_parameter_shadowing") => {
+                            ("compile_error", "compile", "Invalid module item")
+                        }
                         ("icarus", "unions::packed_mixed_state") => (
                             "mismatch",
                             "execute",
@@ -287,6 +340,20 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile_error",
                             "compile",
                             "packed array parameters are not supported yet",
+                        ),
+                        (
+                            "verilator",
+                            "operators::two_state_case_equality_compares_literal_structure"
+                            | "operators::two_state_case_equality_preserves_conditional_unknowns"
+                            | "operators::two_state_case_equality_keeps_unknown_expression_bits",
+                        ) => ("compile_error", "compile", "Unsupported tristate construct"),
+                        (
+                            "verilator",
+                            "operators::two_state_case_equality_preserves_unknown_literals",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: tristate in top-level IO",
                         ),
                         _ => panic!("unreviewed failure: {tool} {name}: {status}"),
                     };

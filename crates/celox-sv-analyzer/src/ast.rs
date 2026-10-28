@@ -25,6 +25,7 @@ pub(super) struct AnalysisState {
     interfaces: interface_ast::State,
     dimensions: dimensions::State,
     root_subroutines: std::cell::Cell<bool>,
+    inline_randomizations: RefCell<Vec<classes::constraints::Inline>>,
     next_call_site: std::rc::Rc<std::cell::Cell<usize>>,
     timescales: timescales::State,
     diagnostics: RefCell<Vec<warnings::AnalyzerWarning>>,
@@ -163,6 +164,7 @@ mod port_owners;
 mod timing;
 mod type_binding;
 pub(crate) use parameters::unbounded_parameter_marker;
+mod array_reductions;
 mod containers;
 mod patterns;
 mod procedural;
@@ -1307,6 +1309,13 @@ impl Module {
                 )?);
                 (subroutines, comb_processes, ff_processes, initial_processes)
             };
+        let (inline_subroutines, inline_randomizations) =
+            procedural::randomization::inline_subroutines(
+                syntax_tree,
+                &mut body_state,
+                &packed_dimensions,
+            )?;
+        subroutines.extend(inline_subroutines);
         // Static locals of the processes that keep their value are variables
         // of the module, initialized once with the declaration initializers.
         let statics: HashMap<String, Type> = body_state.statics.drain(..).collect();
@@ -1409,6 +1418,8 @@ impl Module {
         // A package keeps its symbols for the scopes that use it.
         let symbols = (is_package || export_symbols).then(|| scope::ScopeSymbols {
             classes: classes::scope_classes(syntax_tree, &const_env),
+            class_member_types: classes::specializations::export_member_types(syntax_tree),
+            inline_randomizations,
             declarations_only: imported.declarations_only,
             type_parameter_bindings: HashMap::default(),
             pattern_parameter_bindings: HashMap::default(),

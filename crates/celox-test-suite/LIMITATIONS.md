@@ -546,7 +546,7 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_runtime_packed_subselect` | compile | icarus | 3 | Icarus 13.0 rejects a further select after a runtime index into a multidimensional packed array, or after runtime indices into an unpacked array of them (t[k][j], t[k][2:1], u[j][k][i]: "Array index expressions must be constant here"). Verilator passes the two-state case; the four-state one is outside what it checks. |
 | `sv_verilator_multidimensional_interface_connections` | compile | verilator | 1 | Verilator 5.052 validates a 2x2 scalar interface array against a two-bit connection instead of four bits. See the focused interface-array evidence above. |
 | `sv_icarus_interface_array_connections` | compile | icarus | 3 | Icarus 13.0 rejects distributed unpacked actuals and multidimensional instances, and aborts on interface array ports. See the focused interface-array evidence above. |
-| `sv_icarus_interfaces` | compile | icarus | 15 | Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports ("sorry: modport task/function ports are not yet supported") and multidimensional interface instance arrays ("sorry: Multi-dimensional arrays of instances are not yet supported"). Verilator passes these cases. The implicit named interface cases have [focused pre-exclusion evidence](verification/sv/limitations/implicit-interface-ports-icarus.json). The mixed module-contract/local-interface case retains its [port-declaration diagnostics](verification/repros/sv_mixed_interface_connections_icarus.json). |
+| `sv_icarus_interfaces` | compile | icarus | 16 | Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports ("sorry: modport task/function ports are not yet supported") and multidimensional interface instance arrays ("sorry: Multi-dimensional arrays of instances are not yet supported"). Verilator passes these cases. The implicit named interface cases have [focused pre-exclusion evidence](verification/sv/limitations/implicit-interface-ports-icarus.json). The mixed module-contract/local-interface case retains its [port-declaration diagnostics](verification/repros/sv_mixed_interface_connections_icarus.json). |
 | `sv_icarus_packed_inner_index_range` | execute | icarus | 1 | Icarus 13.0 flattens an out-of-range inner index of a multidimensional packed array into the neighbouring element: a read gives a known value instead of X, and a write lands in that element; IEEE 1800-2023 7.4.6 and 11.5.1 make the select out of range. Verilator cannot check four-state values, and it truncates out-of-range packed indices. |
 | `sv_icarus_string_methods` | compile | icarus | 3 | Icarus 13.0 does not implement the string methods getc, putc, compare, icompare, toupper, tolower, substr, atoi/atohex/atooct/atobin and itoa/hextoa/octtoa/bintoa ("Method getc is not a string method"), and requires a constant replication count for a string ("A reference to a net or variable is not allowed in a constant expression"). IEEE 1800-2023 6.16 defines the methods and 11.4.12.2 permits a non-constant count for a string replication. Verilator passes the cases. |
 | `sv_icarus_unpacked_subroutine_ports` | compile | icarus | 2 | Icarus 13.0 reports that subroutine ports with unpacked dimensions are not yet supported. Verilator passes the valid case. |
@@ -618,6 +618,8 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_program_exit` | execute | icarus | 1 | Icarus 13.0 does not define `$exit`; IEEE 1800-2023 24.7 ends the calling program's `initial` procedures. |
 | `sv_verilator_program_exit` | execute | verilator | 1 | Verilator 5.052 continues after `$exit` and keeps the program's other `initial` procedures (24.7). Icarus does not run the case; xezim 0.11.3 agrees with the expected output. |
 | `sv_verilator_program_items` | compile | verilator | 2 | Verilator 5.052 rejects an `always` procedure and a module instance in a program with syntax errors, which the run cannot count as language rejections. Both are illegal (IEEE 1800-2023 24.3); Icarus 13.0 rejects them with diagnostics that name the rule. |
+| `sv_icarus_iff_event_controls` | compile | icarus | 15 | Icarus 13.0 rejects `iff` in an event control with "syntax error" and "Malformed event control expression." IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; [Standalone probe](verification/repros/sv_iff_event_controls_icarus.json); Verilator 5.052 runs the cases and gives the asserted counts. |
+| `sv_verilator_iff_late_conditions` | execute | verilator | 4 | Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. [Standalone probes](verification/repros/sv_iff_late_conditions_verilator.json) print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. |
 
 The [system-function edge-case evidence](verification/repros/system_function_edge_cases.json)
 retains the failed Icarus runs and minimal sources. Cover comparisons enable
@@ -839,6 +841,137 @@ not exclusions or passing assertions. Pinned xezim 0.11.3 passes all six;
 Verilator 5.052 passes the five two-state cases and its adapter does not support
 the four-state case. Reproduce with `verify-sv-icarus --filter
 fork_control::function_join_none_`.
+
+### Deferred assertions in fork processes
+
+`fork_deferred::` checks the process-local report queues of IEEE 1800-2023
+16.4.1, their event/wait flush points (16.4.2), and cancellation (16.4.4).
+Natural completion retains queued reports; a zero-delay resumption does not
+flush them. Observed reports mature before Reactive program activity and
+cannot subsequently be flushed, while Final reports remain flushable until
+Postponed. These cases remain executable with their original assertions.
+
+The reviewed [xezim observations](verification/sv/xezim/fork_deferred.json)
+include missing sibling/parent reports, a cancelled child report surviving,
+and missing reports after `#0`. The [standalone zero-delay source](verification/repros/fork_deferred_zero_delay.sv)
+and [observed output](verification/repros/fork_deferred_zero_delay.json)
+reproduce the latter without the suite emitter. The
+[Verilator observations](verification/sv/verilator/fork_deferred.json) retain
+incorrect sibling reports and internal compiler faults as mismatches and
+compile errors respectively. The [Icarus observations](verification/sv/icarus/fork_deferred.json)
+retain its explicit unsupported-deferred-assertion diagnostics as compile
+errors; disabling assertions would not validate these cases.
+
+The daily gate matches these exact reviewed classifications and diagnostics;
+none becomes an exclusion or a pass. Reproduce with `verify-sv-xezim`,
+`verify-sv-verilator`, or `verify-sv-icarus` and `--filter fork_deferred::`.
+
+For these nine cases, xezim 0.11.3 records 2 passes and 7 mismatches;
+Verilator 5.052 records 2 passes, 3 mismatches, 3 compiler faults, and
+1 unsupported four-state case; Icarus 13.0 records 9 compile errors.
+In the Reactive-wakeup case, xezim loses the matured Observed report,
+while Verilator also emits the Final report that the wait resumption must flush.
+
+### Z expressions inside exact comparisons in Verilator
+
+The `operators::two_state_case_equality_*` regressions keep runtime storage
+two-state while testing literal X/Z in expressions (IEEE 1800-2023 11.4.5
+and 12.5; issue #2136). Icarus 13.0 passes all five cases. Verilator 5.052
+passes `keeps_call_effects_and_loaded_bytes`, but rejects the other four
+with `Unsupported tristate construct` or `Unsupported: tristate in top-level IO`.
+Their actual compile diagnostics are retained in
+[the Verilator operators report](verification/sv/verilator/operators.json);
+they remain executed cases rather than exclusions. Reproduce with
+`verify-sv-verilator --filter two_state_case_equality --jobs 1`.
+
+### Constraint modes
+
+The `class::constraint_mode_*` cases keep the assertions required by IEEE
+1800-2023 18.9 and 18.5.2. Icarus 13.0 rejects constraint declarations.
+Verilator 5.052 passes the pre-hook mode case, but treats integer `2` as enabled
+instead of converting the setter argument to `bit` zero, and does not apply
+base-handle mode changes to an overridden constraint. See
+[the retained observations](verification/repros/sv_constraint_modes.json).
+Celox runs these assertions on all registered backends.
+
+### Class type-parameter qualifiers
+
+The two `class::type_parameter_*` cases keep `TYPE::value` bound to the
+class selected by the type parameter, including an out-of-block method; a
+real package named `TYPE` remains visible outside that class (IEEE 1800-2023
+6.20.3, 8.23, 8.24 and 8.25.1). Icarus 13.0 rejects both during compilation.
+Their exact diagnostics remain executed failures in
+[the Icarus class report](verification/sv/icarus/class.json), with individual
+case checks in `retained_reports.rs`. No assertion or exclusion changes.
+
+The xezim 0.11.3 source pinned at `5eab5f2` still loses the class static
+member lookup. Its exact mismatch remains an executed failure in
+[the xezim class report](verification/sv/xezim/class.json), reviewed against
+IEEE 1800-2023 6.20.3, 8.23, 8.24, 8.25.1 in
+[the xezim review](verification/xezim-review.json). The
+[adapter-free source](verification/repros/sv_class_type_parameter_xezim.sv) and
+[observations](verification/repros/sv_class_type_parameter_xezim.json)
+retain the separate top and wrapped runs. The validation build regenerated
+the dependency lock in an isolated Nix package because the repository lock
+names a different xezim-core revision. No simulator source changes were used.
+
+### Class typedef qualifiers
+
+The two `class::type_alias_*` cases keep class aliases usable before `::`,
+including alias chains, static state identity and a class-local alias visible
+in an out-of-block method (IEEE 1800-2023 6.18, 8.23 and 8.24). Icarus 13.0
+rejects the generic-class case with a syntax error and the lexical-scope case
+with typedef/external-method diagnostics. Both remain executed failures in
+[the Icarus class report](verification/sv/icarus/class.json), with individual
+case checks in `retained_reports.rs`. No assertion or exclusion changes.
+
+The xezim 0.11.3 source pinned at `5eab5f2` passes `type_alias_members`,
+but still loses the class static member lookup in `type_alias_lexical_scopes`. Its exact mismatch remains an executed failure in
+[the xezim class report](verification/sv/xezim/class.json), reviewed against
+IEEE 1800-2023 6.18, 8.23, 8.24 in
+[the xezim review](verification/xezim-review.json). The
+[adapter-free source](verification/repros/sv_class_type_alias_xezim.sv) and
+[observations](verification/repros/sv_class_type_alias_xezim.json)
+retain the separate top and wrapped runs. The validation build regenerated
+the dependency lock in an isolated Nix package because the repository lock
+names a different xezim-core revision. No simulator source changes were used.
+
+### Imported class member types
+
+The `class::imported_member_type_*` cases check typedefs and type parameters
+of concrete package-class specializations, inherited types, re-exports and
+local typedef overrides (IEEE 1800-2023 6.18, 8.13, 8.23, 8.25).
+The declaring specialization fixes each type; a caller's same-named
+parameter does not resize it. Verilator 5.052 passes both cases.
+
+Icarus 13.0 rejects both generic class declarations during parsing. The
+xezim 0.11.3 sources pinned at `5eab5f2` lose the default Box specialization's
+member width and, in a non-top module, both value-dependent member widths.
+They also resolve the inherited/type-parameter members to 32-bit types instead
+of 3 and 7 bits. The exact failures remain executed evidence in the
+[Icarus class report](verification/sv/icarus/class.json) and
+[xezim class report](verification/sv/xezim/class.json), with specification
+review in [the xezim review](verification/xezim-review.json).
+
+Adapter-free [dimension source](verification/repros/sv_imported_member_types_dimensions_xezim.sv)
+and [observations](verification/repros/sv_imported_member_types_dimensions_xezim.json),
+and [inheritance source](verification/repros/sv_imported_member_types_inheritance_xezim.sv)
+and [observations](verification/repros/sv_imported_member_types_inheritance_xezim.json)
+retain Top and Wrapped runs. The xezim validation build used the existing Nix
+recipe with a regenerated dependency lock, with no simulator source changes.
+Assertions and exclusions are unchanged.
+
+### Conditional events across hierarchy and automatic fork scopes
+
+The four additional `timing::iff_*` regressions preserve strict event-time
+conditions (IEEE 1800-2023 9.4.2.3) and shared automatic lifetimes (6.21).
+[Standalone Top and Wrapped probes](verification/repros/sv_iff_hierarchy_automatic.json)
+reproduce Verilator 5.052's late hierarchical gate and shared-local LIFETIME rejection,
+and Icarus 13.0's unsupported event syntax. The installed xezim 0.11.3 build
+misorders gates and does not reflect the shared automatic gate update. Its six
+failures remain executed evidence, not exclusions. The current flake pin could
+not be built because the dependency lock references a different xezim-core revision;
+the evidence identifies the installed binary and does not claim current-pin coverage.
 
 ## veryl-native-queue-components
 

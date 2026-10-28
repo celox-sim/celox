@@ -49,6 +49,8 @@ impl ScopeImports {
         let mut imports = Self::default();
         let blocks = generate_scopes(tree)?;
         let nested = nested_declarations(tree);
+        let class_types = class_type_parameter_scopes(tree);
+        let aliases = type_alias_scopes(tree, &blocks);
         for view in package_owners::scope(tree)? {
             let binding = tree.declarations().package_binding(view.id);
             for native in &binding.items {
@@ -123,13 +125,27 @@ impl ScopeImports {
                 if package == "std" && normalize_identifier(&name.spelling) == "randomize" {
                     continue;
                 }
-                // `C::name` names a member of class `C` (IEEE 1800-2023 8.23).
-                if visible_class(tree, &package) {
+                // Inline constraint local:: lookup bypasses the receiver class,
+                // not through a package dependency (18.7.1).
+                if package == "local" {
                     continue;
                 }
-                if !nested.iter().any(|(start, end, names)| {
-                    (*start..*end).contains(&expression.tokens.start) && names.contains(&package)
-                }) {
+                // `C::name` names a member of class `C` (IEEE 1800-2023 8.23).
+                if visible_class(tree, &package)
+                    || aliases.iter().any(|(start, end, name)| {
+                        (*start..*end).contains(&expression.tokens.start) && name == &package
+                    })
+                {
+                    continue;
+                }
+                if !nested
+                    .iter()
+                    .chain(&class_types)
+                    .any(|(start, end, names)| {
+                        (*start..*end).contains(&expression.tokens.start)
+                            && names.contains(&package)
+                    })
+                {
                     imports
                         .qualified
                         .push((package, normalize_identifier(&name.spelling)));
@@ -143,6 +159,14 @@ impl ScopeImports {
                 && let [package, name] = path.as_slice()
                 // `C::T` names a type of class `C` (IEEE 1800-2023 8.23).
                 && !visible_class(tree, &normalize_identifier(&package.name.spelling))
+                && !aliases.iter().any(|(start, end, name)| {
+                    (*start..*end).contains(&ty.tokens.start)
+                        && name == &normalize_identifier(&package.name.spelling)
+                })
+                && !class_types.iter().any(|(start, end, names)| {
+                    (*start..*end).contains(&ty.tokens.start)
+                        && names.contains(&normalize_identifier(&package.name.spelling))
+                })
             {
                 imports.qualified.push((
                     normalize_identifier(&package.name.spelling),
@@ -174,6 +198,53 @@ fn visible_class(tree: &SyntaxTree, name: &str) -> bool {
             unit.is_none() || unit == scope
         }
     })
+}
+
+/// A typedef's name becomes visible after its declaration, within its
+/// lexical scope (6.18). A class alias can qualify members too (8.23).
+fn type_alias_scopes(tree: &SyntaxTree, blocks: &[GenerateScope]) -> Vec<(usize, usize, String)> {
+    use celox_sv_syntax::BodyItemKind;
+    let native = tree.declarations();
+    let Ok(items) = body_items(tree) else {
+        return Vec::new();
+    };
+    let scope_end = tree.root_unit().map_or(usize::MAX, |unit| unit.tokens.end);
+    let mut result = Vec::new();
+    for id in items {
+        let BodyItemKind::TypeAlias(id) = native.body_item(id).kind else {
+            continue;
+        };
+        let alias = native.type_alias(id);
+        let name = normalize_identifier(&alias.name.spelling);
+        let class = native
+            .classes
+            .iter()
+            .filter(|class| {
+                class.tokens.start <= alias.tokens.start && alias.tokens.end <= class.tokens.end
+            })
+            .min_by_key(|class| class.tokens.end - class.tokens.start);
+        let end = blocks
+            .iter()
+            .filter(|block| block.contains(alias.tokens.start))
+            .map(|block| block.end)
+            .chain(class.map(|class| class.tokens.end))
+            .fold(scope_end, usize::min);
+        result.push((alias.tokens.end, end, name.clone()));
+        if let Some(class) = class {
+            let owner =
+                super::classes::enclosing_unit(native, class.tokens).map(|unit| unit.tokens);
+            for id in native.subroutine_ids() {
+                let sub = native.subroutine(id);
+                if matches!(&sub.scope[..], [scope] if normalize_identifier(&scope.name.spelling) == normalize_identifier(&class.name.spelling))
+                    && super::classes::enclosing_unit(native, sub.tokens).map(|unit| unit.tokens)
+                        == owner
+                {
+                    result.push((sub.tokens.start, sub.tokens.end, name.clone()));
+                }
+            }
+        }
+    }
+    result
 }
 
 /// The names declared directly in a module or package scope: its ports and
@@ -388,7 +459,7 @@ pub(crate) struct Facts {
 
 impl Facts {
     fn of(tree: &SyntaxTree) -> &Self {
-        use celox_sv_syntax::ExprKind;
+        use celox_sv_syntax::{DataTypeKind, ExprKind};
         tree.spans().imports.get_or_init(|| {
             let native = tree.declarations();
             let name = |id| {
@@ -406,6 +477,10 @@ impl Facts {
                     } if separator == "::" => name(*expression),
                     _ => None,
                 })
+                .chain(native.types.iter().filter_map(|ty| {
+                    matches!(&ty.kind, DataTypeKind::Named(path) if path.len() > 1)
+                        .then_some(ty.tokens)
+                }))
                 .map(|tokens| (tokens.start, tokens.end))
                 .collect();
             // Bare pattern keys name members; they do not bind wildcard imports.
@@ -436,7 +511,9 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
     let Ok(ranges) = active_ranges(tree) else {
         return HashMap::default();
     };
-    let nested = nested_declarations(tree);
+    let mut nested = nested_declarations(tree);
+    nested.extend(class_type_parameter_scopes(tree));
+    let aliases = type_alias_scopes(tree, &generate_scopes(tree).unwrap_or_default());
     let Facts { pattern_keys, .. } = Facts::of(tree);
     let mut names: HashMap<String, Vec<usize>> = HashMap::default();
     let mut add = |name: &str, offset| {
@@ -445,6 +522,9 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
             && !nested.iter().any(|(start, end, declared)| {
                 (*start..*end).contains(&offset) && declared.contains(&name)
             })
+            && !aliases
+                .iter()
+                .any(|(start, end, declared)| (*start..*end).contains(&offset) && declared == &name)
         {
             names.entry(name).or_default().push(offset);
         }
@@ -464,7 +544,7 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
     for id in spans.types.within(&ranges) {
         let ty = native.data_type(id);
         if let DataTypeKind::Named(path) = &ty.kind
-            && let [name] = path.as_slice()
+            && let Some(name) = path.first()
         {
             add(&name.name.spelling, ty.tokens.start);
         }
@@ -706,6 +786,56 @@ fn scope_lookup(
         }
     }
     Ok(ScopeLookup::Outside)
+}
+
+/// Lexical class type-parameter scopes, including out-of-block methods.
+/// These prefixes name types rather than package dependencies (6.20.3, 8.25).
+fn class_type_parameter_scopes(tree: &SyntaxTree) -> Vec<(usize, usize, HashSet<String>)> {
+    use celox_sv_syntax::{BodyItemKind, ParameterKind};
+    let native = tree.declarations();
+    let mut result = Vec::new();
+    let Ok(items) = body_items(tree) else {
+        return result;
+    };
+    for id in items {
+        if !matches!(&native.body_item(id).kind, BodyItemKind::Unconverted { category, .. } if category == "class")
+        {
+            continue;
+        }
+        let owner = native.body_item(id).tokens;
+        for class in native
+            .classes
+            .iter()
+            .filter(|class| owner.start <= class.tokens.start && class.tokens.end <= owner.end)
+        {
+            let names: HashSet<String> = class
+                .parameter_ports
+                .iter()
+                .chain(&class.parameters)
+                .flat_map(|id| &native.parameter_declaration(*id).parameters)
+                .filter(|parameter| matches!(parameter.kind, ParameterKind::Type { .. }))
+                .map(|parameter| normalize_identifier(&parameter.name.spelling))
+                .collect();
+            if names.is_empty() {
+                continue;
+            }
+            result.push((class.tokens.start, class.tokens.end, names.clone()));
+            // Out-of-block definitions have their class's lexical type scope
+            // only within that class's declaring scope (8.24, 8.25.1).
+            let class_scope =
+                super::classes::enclosing_unit(native, class.tokens).map(|unit| unit.tokens);
+            for id in native.subroutine_ids() {
+                let sub = native.subroutine(id);
+                if matches!(&sub.scope[..], [scope] if normalize_identifier(&scope.name.spelling) == normalize_identifier(&class.name.spelling))
+                    && super::classes::enclosing_unit(native, sub.tokens).map(|unit| unit.tokens)
+                        == class_scope
+                {
+                    result.push((sub.tokens.start, sub.tokens.end, names.clone()));
+                }
+            }
+        }
+    }
+    result
 }
 
 fn nested_declarations(tree: &SyntaxTree) -> Vec<(usize, usize, HashSet<String>)> {

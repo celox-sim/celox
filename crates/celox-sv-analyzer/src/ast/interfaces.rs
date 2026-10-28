@@ -679,10 +679,13 @@ struct InterfaceDecl {
     /// Whether the declaration refers to compilation-unit items of its file.
     uses_unit_items: bool,
     parameters: Vec<InterfaceParameter>,
+    /// Value parameters and localparams whose instance paths VPI can observe.
+    reflected_parameters: Vec<String>,
     type_parameters: Vec<String>,
     parameter_order: Vec<String>,
     items: Vec<Item>,
     members: Vec<Member>,
+    has_ports: bool,
     functions: Vec<Function>,
     modports: HashMap<String, Vec<ModportItem>>,
     /// The names declared in the interface scope.
@@ -2399,11 +2402,6 @@ impl InterfaceDecl {
         let unit = tree.root_unit()?;
         let native = tree.declarations();
         let interface_name = native_name(&unit.name);
-        if !unit.ports.is_empty() {
-            return Err(unsupported(format!(
-                "ports of interface `{interface_name}`"
-            )));
-        }
         if native.types.iter().any(|ty| {
             unit.tokens.start <= ty.tokens.start
                 && ty.tokens.end <= unit.tokens.end
@@ -2423,16 +2421,38 @@ impl InterfaceDecl {
             uses_unit_items: false,
             uses_macros: has_directive(file.text(span)),
             parameters: Vec::new(),
+            reflected_parameters: Vec::new(),
             type_parameters: Vec::new(),
             parameter_order: Vec::new(),
             items: Vec::new(),
             members: Vec::new(),
+            has_ports: !unit.ports.is_empty(),
             functions: Vec::new(),
             modports: HashMap::default(),
             names: HashSet::default(),
             references: Vec::new(),
             lvalues: HashSet::default(),
         };
+        for port in &unit.ports {
+            let native::PortKind::Named(name) = &port.kind else {
+                return Err(unsupported(format!(
+                    "non-ANSI ports of interface `{interface_name}`"
+                )));
+            };
+            interface.add_member(Member {
+                name: native_name(name),
+                data_type: port
+                    .data_type
+                    .and_then(|id| file.range_span(native.data_type(id).tokens)),
+                dimensions: port
+                    .dimensions
+                    .iter()
+                    .map(|dimension| file.span(dimension.tokens))
+                    .collect::<Converted<_>>()?,
+                // A port default is not a variable initializer.
+                initializer: None,
+            })?;
+        }
         for id in &unit.package_bindings {
             let binding = native.package_binding(*id);
             if unit.header.start <= binding.tokens.start && binding.tokens.end <= unit.header.end {
@@ -2614,6 +2634,7 @@ impl InterfaceDecl {
             });
             return Ok(());
         };
+        self.reflected_parameters.push(native_name(&parameter.name));
         if local {
             self.declare(native_name(&parameter.name))?;
             self.items.push(Item::Constant {
@@ -3362,7 +3383,9 @@ pub fn plan_interfaces_with_member_paths(
                 .copied()
                 .unwrap_or(module.span);
             for instance in &instantiation.instances {
-                check_no_connections(instance, &interface)?;
+                if !design.interfaces[&interface].has_ports {
+                    check_no_connections(instance, &interface)?;
+                }
                 let handle = native_name(&instance.name);
                 handles.insert(
                     handle,
@@ -3506,11 +3529,17 @@ pub fn plan_interfaces_with_member_paths(
         let mut member_paths = HashMap::default();
         for (handle_name, declarations) in &handles.by_name {
             for (_, handle) in declarations {
-                for member in &design.interfaces[&handle.interface].members {
+                let interface = &design.interfaces[&handle.interface];
+                for member in interface
+                    .members
+                    .iter()
+                    .map(|member| &member.name)
+                    .chain(&interface.reflected_parameters)
+                {
                     member_paths.insert(
-                        format!("{handle_name}{SEPARATOR}{}", member.name),
+                        format!("{handle_name}{SEPARATOR}{member}"),
                         InterfaceMemberPath {
-                            segments: vec![handle_name.clone(), member.name.clone()],
+                            segments: vec![handle_name.clone(), member.clone()],
                             arrayed: handle.arrayed,
                         },
                     );

@@ -11,7 +11,6 @@ import {
   affectsHeliodorArm64,
   classifyFiles,
   cutsRelease,
-  isReleaseMergeGroup,
   rustScopeOutputs,
 } from "./ci-changes.mjs";
 
@@ -159,8 +158,10 @@ test("full validation overrides even an empty valid diff", () => {
     {
       ...all,
       queue: true,
+      full_validation: true,
+      fast_queue: false,
+      rust_backend_filter: false,
       heliodor_arm64: true,
-      release: false,
       // The whole Rust workspace, with no package scope or filter.
       rust_full: true,
       rust_packages: false,
@@ -216,7 +217,7 @@ function runClassifier(
         const [name, value] = line.split("=");
         return [name, value === "true"];
       })
-      .filter(([name]) => !name.startsWith("rust_") && name !== "queue"),
+      .filter(([name]) => !name.startsWith("rust_") && !["queue", "full_validation", "fast_queue", "rust_backend_filter"].includes(name)),
   );
 }
 
@@ -233,50 +234,20 @@ test("only the release manifest marks a release", () => {
   );
 });
 
-test("only master merge groups that change the release manifest are releases", () => {
-  const manifest = [".release-please-manifest.json"];
-  const master = { event: "merge_group", baseRef: "refs/heads/master" };
-  assert.equal(isReleaseMergeGroup({ ...master, files: manifest }), true);
-  assert.equal(isReleaseMergeGroup({ ...master, files: null }), true);
-  assert.equal(isReleaseMergeGroup({ ...master, files: ["README.md"] }), false);
-  // Syncing a release into develop carries the manifest but tags nothing.
-  for (const files of [manifest, null]) {
-    assert.equal(
-      isReleaseMergeGroup({
-        event: "merge_group",
-        baseRef: "refs/heads/develop",
-        files,
-      }),
-      false,
-    );
-  }
-  for (const event of ["push", "schedule"]) {
-    assert.equal(
-      isReleaseMergeGroup({
-        event,
-        baseRef: "refs/heads/master",
-        files: manifest,
-      }),
-      false,
-    );
-  }
-});
-
-test("merge groups with an unknown diff are treated as releases", () => {
+test("unknown queue diffs select all paths without running release qualification", () => {
   assert.deepEqual(runClassifier("", "", MASTER_GROUP), {
     ...all,
     heliodor_arm64: true,
-    release: true,
   });
   // Other events still run every path, but without the release gate.
   assert.deepEqual(
     runClassifier("", "", { GITHUB_EVENT_NAME: "pull_request" }),
-    { ...all, heliodor_arm64: true, release: false },
+    { ...all, heliodor_arm64: true },
   );
 });
 
 // CI checks out a single commit, so build the history this test needs.
-test("a merge group that changes the release manifest is a release", (t) => {
+test("release manifest changes no longer trigger full queue validation", (t) => {
   const repository = mkdtempSync(join(tmpdir(), "celox-ci-changes-"));
   t.after(() => rmSync(repository, { recursive: true, force: true }));
   const git = (...args) =>
@@ -297,9 +268,9 @@ test("a merge group that changes the release manifest is a release", (t) => {
   const base = commitManifest("0.1.0");
   const release = commitManifest("0.2.0");
   const classify = (env) =>
-    runClassifier(base, release, env, repository).release;
+    runClassifier(base, release, env, repository).rust;
 
-  assert.equal(classify(MASTER_GROUP), true);
+  assert.equal(classify(MASTER_GROUP), false);
   assert.equal(classify({ GITHUB_EVENT_NAME: "pull_request" }), false);
   assert.equal(
     classify({
@@ -319,7 +290,6 @@ test("other merge groups are not releases", () => {
   assert.deepEqual(runClassifier(head, head, MASTER_GROUP), {
     ...none,
     heliodor_arm64: false,
-    release: false,
   });
 });
 
@@ -494,32 +464,14 @@ test("generic Rust changes do not schedule ARM64 Heliodor on pull requests", () 
   );
 });
 
-test("queue drafts on master run release gates even with an unknown diff", () => {
-  for (const files of [[".release-please-manifest.json"], null]) {
-    assert.equal(
-      isReleaseMergeGroup({
-        event: "pull_request",
-        baseRef: "refs/heads/master",
-        files,
-      }),
-      true,
-    );
-    assert.equal(
-      isReleaseMergeGroup({
-        event: "pull_request",
-        baseRef: "refs/heads/develop",
-        files,
-      }),
-      false,
-    );
-  }
+test("queue drafts do not run release gates even with an unknown diff", () => {
   assert.deepEqual(
     runClassifier("", "", {
       GITHUB_EVENT_NAME: "pull_request",
       MERGE_GROUP_BASE_REF: "refs/heads/master",
       QUEUE_VALIDATION: "true",
     }),
-    { ...all, heliodor_arm64: true, release: true },
+    { ...all, heliodor_arm64: true },
   );
 });
 
@@ -565,7 +517,7 @@ test("PR branches behind their base ignore unmerged base changes", (t) => {
   assert.deepEqual(changedFilesBetween(base, head, repository), ["CONTRIBUTING.md"]);
   assert.deepEqual(
     runClassifier(base, head, { GITHUB_EVENT_NAME: "pull_request" }, repository),
-    { ...none, docs: true, heliodor_arm64: false, release: false },
+    { ...none, docs: true, heliodor_arm64: false },
   );
 });
 

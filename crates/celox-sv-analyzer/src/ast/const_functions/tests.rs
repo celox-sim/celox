@@ -528,6 +528,11 @@ fn partial_return_assignments_reach_the_127_and_128_bit_boundaries() {
             vec![],
             vec![
                 Stmt::Assign {
+                    lhs: LValue::Ident("wide".into()),
+                    rhs: literal("'0"),
+                    nonblocking: false,
+                },
+                Stmt::Assign {
                     lhs: select(7, 0),
                     rhs: literal("8'ha5"),
                     nonblocking: false,
@@ -546,6 +551,34 @@ fn partial_return_assignments_reach_the_127_and_128_bit_boundaries() {
             "width={width}, signed={signed}"
         );
     }
+}
+
+#[test]
+fn partial_returns_preserve_unwritten_unknown_bits() {
+    let constants = HashMap::default();
+    let mut function = function(
+        "partial",
+        vec![],
+        vec![Stmt::Assign {
+            lhs: LValue::Select {
+                name: "partial".into(),
+                msb: ConstExpr::Literal("1".into()),
+                lsb: ConstExpr::Literal("0".into()),
+                signed: false,
+                array_slice_width: None,
+                array_slice_reversed: false,
+                is_2state: false,
+            },
+            rhs: literal("2'b01"),
+            nonblocking: false,
+        }],
+    );
+    function.return_var = Some(("partial".into(), fixed_ty(8, false)));
+    let value = call_in_frame(&function, &[], Frame::new(&constants))
+        .unwrap()
+        .into_literal();
+    assert_eq!(value.value, BigUint::from(0xfdu8));
+    assert_eq!(value.mask, BigUint::from(0xfcu8));
 }
 
 #[test]

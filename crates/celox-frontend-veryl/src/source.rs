@@ -60,6 +60,9 @@ pub struct VerylTestbenchSource {
     pub id_map: VerylIdMap,
     /// Constant scalar string lets are continuous assignments, outside initial blocks.
     pub constant_strings: HashMap<celox_design::StateAddr, Expression>,
+    /// Explicit reset declarations sharing each projected state object. None
+    /// means conflicting polarities, so a generator uses the project default.
+    pub declared_reset_active_low: std::sync::Arc<HashMap<celox_design::StateAddr, Option<bool>>>,
     pub initial_statements: Option<Vec<Statement>>,
     /// Length of each initial block in `initial_statements`; empty means one block.
     pub initial_block_lengths: Vec<usize>,

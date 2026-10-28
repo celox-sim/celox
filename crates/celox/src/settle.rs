@@ -150,6 +150,18 @@ pub(crate) fn instrument_processes_from(program: &mut LaidOutProgram, first: usi
     }
 }
 
+/// Apply the same process instrumentation after a deferred native kernel is
+/// expanded. Its reserved process entry contained no stores to instrument.
+#[cfg(feature = "host-runtime")]
+pub(crate) fn instrument_unit(
+    program: &LaidOutProgram,
+    unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+) {
+    if let Some(marker) = Marker::new(program.layout(), program.runtime()) {
+        marker.instrument(unit);
+    }
+}
+
 struct Marker<'a> {
     settle: &'a SettleLayout,
     layout: &'a crate::backend::MemoryLayout,

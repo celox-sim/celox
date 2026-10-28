@@ -184,6 +184,7 @@ pub(in crate::ast) fn classify<'a>(
                         FfEdge::Neg => EventEdge::Neg,
                     },
                     expr: Expr::Ident(event.signal.clone()),
+                    iff: None,
                 })
                 .collect(),
         )];

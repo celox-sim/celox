@@ -1,0 +1,25 @@
+{
+  "standard": "IEEE 1800-2023 9.4.2.3 and A.6.5",
+  "expected": "An event control item may be qualified by `iff expression`; the item triggers only if the expression is true when the event occurs.",
+  "probes": [
+    {
+      "name": "iff_items",
+      "note": "The suite case iff_events_occur_only_while_the_condition_holds.",
+      "source": "module Top;\n  bit clk, en;\n  int n, m;\n  initial forever begin @(posedge clk iff en); n++; end\n  initial forever begin @(clk iff en); m++; end\n  initial begin\n    #1 clk = 1;\n    #1 clk = 0;\n    #1 en = 1;\n    #1 clk = 1;\n    #1 en = 0;\n    #1 en = 1;\n    #1 clk = 0;\n    #1 clk = 1;\n    #1 $display(\"n=%0d m=%0d\", n, m);\n    $finish;\n  end\nendmodule\n",
+      "icarus_compile": {
+        "command": "iverilog -g2012 -s Top -o <repro>/probe.vvp <repro>/probe.sv",
+        "exit_code": 6,
+        "output": "<repro>/probe.sv:4: syntax error\n<repro>/probe.sv:4: error: Malformed event control expression.\n<repro>/probe.sv:4: error: Invalid event control.\n<repro>/probe.sv:5: syntax error\n<repro>/probe.sv:5: error: Malformed event control expression.\n<repro>/probe.sv:5: error: Invalid event control.\n"
+      },
+      "verilator_compile": {
+        "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "verilator_run": {
+        "command": "<repro>/obj/VTop",
+        "exit_code": 0,
+        "output": "n=2 m=3\n- <repro>/probe.sv:16: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 9ps; walltime 0.000 s; speed 200.423 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+      }
+    }
+  ]
+}
