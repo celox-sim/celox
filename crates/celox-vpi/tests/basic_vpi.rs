@@ -4313,3 +4313,139 @@ unsafe extern "C" fn record_resumed_inertial_value(data: *mut VpiCbData) -> i32 
     }
     0
 }
+#[cfg(feature = "systemverilog")]
+struct CallbackVectorValues {
+    words: usize,
+    values: Vec<Vec<VpiVecVal>>,
+}
+
+#[cfg(feature = "systemverilog")]
+unsafe extern "C" fn record_callback_vector_values(data: *mut VpiCbData) -> i32 {
+    // Safety: the test retains its context, and VPI supplies the requested vector.
+    unsafe {
+        let context = &mut *(*data).user_data.cast::<CallbackVectorValues>();
+        let vector = (*(*data).value).value.vector;
+        context
+            .values
+            .push(std::slice::from_raw_parts(vector, context.words).to_vec());
+    }
+    0
+}
+
+/// Change detection must observe high bits and changes in only the X/Z mask,
+/// including transitions between values that do and do not fit one machine word.
+#[cfg(feature = "systemverilog")]
+#[test]
+fn value_change_callbacks_compare_full_values_and_unknown_masks() {
+    let _serial = lock_vpi();
+    for four_state in [false, true] {
+        for width in [63usize, 64, 65] {
+            let source = format!(
+                "module Top(input logic [{0}:0] x, output logic [{0}:0] y); assign y=x; endmodule",
+                width - 1
+            );
+            let simulator = Simulator::from_sv_sources(
+                vec![(&source, std::path::Path::new("callback_values.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .opt_level(celox::OptLevel::O1)
+            .build()
+            .unwrap();
+            let _session = install_runtime(trusted_instance(
+                simulator.shared_code().program_image().clone(),
+            ))
+            .unwrap();
+            let zero = "0".repeat(width);
+            let one = format!("{}1", "0".repeat(width - 1));
+            let high_and_low = format!("1{}1", "0".repeat(width - 2));
+            let unknown = format!("{}x", "0".repeat(width - 1));
+            let high_z = format!("{}z", "0".repeat(width - 1));
+            let mut observed = CallbackVectorValues {
+                words: width.div_ceil(32),
+                values: Vec::new(),
+            };
+            // Safety: handles, callback context and write buffers remain live.
+            unsafe {
+                let x = vpi_handle_by_name(c"Top.x".as_ptr(), ptr::null_mut());
+                let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+                assert!(!x.is_null() && !y.is_null());
+                let initial = std::ffi::CString::new(zero.clone()).unwrap();
+                let value = VpiValue {
+                    format: VPI_BIN_STR_VAL,
+                    value: VpiValueData {
+                        str_: initial.as_ptr().cast_mut(),
+                    },
+                };
+                assert_eq!(vpi_put_value(x, &value, ptr::null(), VPI_NO_DELAY), x);
+                let mut value = VpiValue {
+                    format: VPI_VECTOR_VAL,
+                    value: VpiValueData {
+                        vector: ptr::null_mut(),
+                    },
+                };
+                let data = VpiCbData {
+                    reason: CB_VALUE_CHANGE,
+                    cb_rtn: Some(record_callback_vector_values),
+                    obj: y,
+                    time: ptr::null_mut(),
+                    value: &mut value,
+                    index: 0,
+                    user_data: ptr::from_mut(&mut observed).cast(),
+                };
+                let callback = vpi_register_cb(&data);
+                assert!(!callback.is_null());
+                let mut previous = vec![VpiVecVal::default(); observed.words];
+                let mut expected = Vec::new();
+                for pattern in [
+                    zero.clone(),
+                    one.clone(),
+                    one.clone(),
+                    high_and_low,
+                    one.clone(),
+                    unknown,
+                    one,
+                    zero.clone(),
+                    high_z,
+                    zero.clone(),
+                    "1".repeat(width),
+                    "x".repeat(width),
+                    "z".repeat(width),
+                    zero,
+                ] {
+                    let mut vector = vec![VpiVecVal::default(); observed.words];
+                    for (bit, digit) in pattern.bytes().rev().enumerate() {
+                        let word = &mut vector[bit / 32];
+                        let selected = 1u32 << (bit % 32);
+                        if digit == b'1' || four_state && digit == b'x' {
+                            word.aval |= selected as i32;
+                        }
+                        if four_state && matches!(digit, b'x' | b'z') {
+                            word.bval |= selected as i32;
+                        }
+                    }
+                    if vector != previous {
+                        expected.push(vector.clone());
+                        previous = vector;
+                    }
+                    let buffer = std::ffi::CString::new(pattern).unwrap();
+                    let value = VpiValue {
+                        format: VPI_BIN_STR_VAL,
+                        value: VpiValueData {
+                            str_: buffer.as_ptr().cast_mut(),
+                        },
+                    };
+                    assert_eq!(vpi_put_value(x, &value, ptr::null(), VPI_NO_DELAY), x);
+                    assert!(!run_callbacks_result().unwrap());
+                    assert_eq!(
+                        observed.values, expected,
+                        "width={width}, four_state={four_state}"
+                    );
+                }
+                assert_eq!(vpi_remove_cb(callback), 1);
+                vpi_free_object(x);
+                vpi_free_object(y);
+            }
+        }
+    }
+}
