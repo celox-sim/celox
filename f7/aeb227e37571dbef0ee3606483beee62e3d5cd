@@ -1,0 +1,1 @@
+Sync with master after #2322: Format host requests use family 7 (Process took 6), and $sformatf bypasses the new operand materialization in string_call, which truncated its format literal to 32 bits.
