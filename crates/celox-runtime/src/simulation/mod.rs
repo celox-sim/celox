@@ -211,7 +211,12 @@ impl<B: SimBackend> SimulationState<B> {
             last_clock_unknown: BitSet::new(),
             four_state: backend.layout().four_state,
             process_wakeups: (0..model.processes.len())
-                .filter(|&index| model.processes[index].kind != celox_design::ProcessKind::Final)
+                .filter(|&index| {
+                    matches!(
+                        model.processes[index].kind,
+                        celox_design::ProcessKind::Regular | celox_design::ProcessKind::Initializer
+                    )
+                })
                 .map(|process| Reverse((0, process)))
                 .collect(),
             kernel_count: model.processes.len(),
