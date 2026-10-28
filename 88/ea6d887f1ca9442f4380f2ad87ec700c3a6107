@@ -1,8 +1,1 @@
-Revision history for #2462:
-
-rev 4 (rebase) 2026-10-28 16:35 UTC
-rev 3 (content) 2026-10-28 16:19 UTC
-rev 2 (rebase) 2026-10-28 16:13 UTC
-rev 1 (initial) 2026-10-28 16:13 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2462,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"f591ca907a6e732cbbedc492b17d72536be990c3","timestamp_iso":"2026-10-28T16:13:57Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"f591ca907a6e732cbbedc492b17d72536be990c3","new_sha":"0a5fcabeb4487c703128b47f4ce96d4084ebe2e3","timestamp_iso":"2026-10-28T16:13:57Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/f591ca907a6e732cbbedc492b17d72536be990c3...0a5fcabeb4487c703128b47f4ce96d4084ebe2e3"},{"number":3,"change_type":"content","old_sha":"0a5fcabeb4487c703128b47f4ce96d4084ebe2e3","new_sha":"d47f8890c42eb65404242b383817337b83050cf5","timestamp_iso":"2026-10-28T16:19:40Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/0a5fcabeb4487c703128b47f4ce96d4084ebe2e3...d47f8890c42eb65404242b383817337b83050cf5"},{"number":4,"change_type":"rebase","old_sha":"d47f8890c42eb65404242b383817337b83050cf5","new_sha":"88ea6d887f1ca9442f4380f2ad87ec700c3a6107","timestamp_iso":"2026-10-28T16:35:56Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/d47f8890c42eb65404242b383817337b83050cf5...88ea6d887f1ca9442f4380f2ad87ec700c3a6107"}]} -->
+Synchronize merged #2444 before adding the compiled Veryl TB scheduler and release benchmarks.
