@@ -25,6 +25,50 @@
     },
     {
       "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::class_properties",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::class_properties_inheritance_and_collections",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::class_property_assignment_order",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::class_property_four_state_members",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "four-state expectations",
       "expectation": "Simulation",
       "name": "unpacked_structs::four_state_members",

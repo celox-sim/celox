@@ -33,7 +33,7 @@ synthesis and is tested at the design level.
 | Patterns | assignment patterns for packed and unpacked structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Dynamic containers | one-dimensional dynamic arrays, queues (including bounded queues), and associative arrays with integral or string keys; element access, value assignment, equality, `foreach` and built-in container methods. See [dynamic containers](#dynamic-containers) |
 | Strings | `string` variables, function arguments and results: assignment of strings, string literals and casts (`string'(x)`), `==`, `!=` and ordering comparisons, concatenation and replication (with a run-time count), character reads and writes (`s[i]`), and the methods `len`, `getc`, `putc`, `toupper`, `tolower`, `compare`, `icompare`, `substr`, `atoi` / `atohex` / `atooct` / `atobin` and `itoa` / `hextoa` / `octtoa` / `bintoa`; `%s` and format-less display of string values; text formatted by `$sformatf` / `$sformat` / `$swrite`. See [strings](#strings) |
-| Classes | classes declared in a module, a package or the compilation unit: properties of 2-state and 4-state integral types up to 64 bits (4-state properties start as X and keep X/Z bits), `string` and class handle types, plus dynamic arrays, queues and associative arrays, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes and method calls through interface class handles; `$cast` of class handles, as a function and as a task; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles; parameterized classes with value and type parameters, parameters read through a handle or `C#(...)::`, typedefs of classes and interface classes and `C::T`; named constructor arguments; shallow copies (`new h`). See [classes](#classes) |
+| Classes | classes declared in a module, a package or the compilation unit: properties of 2-state and 4-state integral types up to 64 bits (4-state properties start as X and keep X/Z bits), `string` and class handle types, unpacked structures of those types (see [unpacked structures](#unpacked-structures)), plus dynamic arrays, queues and associative arrays, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes and method calls through interface class handles; `$cast` of class handles, as a function and as a task; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles; parameterized classes with value and type parameters, parameters read through a handle or `C#(...)::`, typedefs of classes and interface classes and `C::T`; named constructor arguments; shallow copies (`new h`). See [classes](#classes) |
 | Parameters | integral parameters and overrides preserving widths beyond 128 bits and X/Z values, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 
 ### Processes and control flow
@@ -330,8 +330,8 @@ SystemVerilog emitted by Veryl.
 Unpacked structures (IEEE 1800-2023 7.2) may have integral, enumeration,
 `string`, class handle, packed structure and nested unpacked structure
 members, each keeping its own 2-state or 4-state type. Variables of such a
-type may be module variables, procedural locals, and subroutine arguments of
-any direction and results. Members are read and written like variables of
+type may be module variables, procedural locals, class properties, and
+subroutine arguments of any direction and results. Members are read and written like variables of
 their type; a whole structure is assigned and compared with `==`, `!=`,
 `===` and `!==` against a value of the same type, chosen with `?:`, or built
 from an assignment pattern (`'{a, b}`, `'{m: v, default: d}`, `T'{...}`, with
@@ -344,7 +344,7 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, enumeration constants declared in a class, enumeration, struct and union types and named four-state or string constants as class parameter values, module-local classes as type arguments to package-class specializations, properties that are `real`, arrays or wider than 64 bits, and randomization or constraints over 4-state properties. Timed tasks with static local declarations and recursive calls remain unsupported.
+- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, enumeration constants declared in a class, enumeration, struct and union types and named four-state or string constants as class parameter values, module-local classes as type arguments to package-class specializations, properties that are `real`, arrays or wider than 64 bits, bit and part selects and packed structure members of a property (also of a member of a property of unpacked structure type), properties as `output` or `inout` arguments, and randomization or constraints over 4-state properties. Timed tasks with static local declarations and recursive calls remain unsupported.
 - Behavioral and verification constructs: intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events and `->`, `wait fork` / `disable fork`, temporal concurrent assertions beyond the Boolean subset below, `force` / `release`.
@@ -361,9 +361,9 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   `bind`.
 - Declarations: variable declaration initializers of members of an interface
   array, ANSI port default values, tagged unions, unpacked unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
-  `real`, and unpacked structs as ports, nets, parameters, class properties,
-  array or container elements, or with members that are arrays, `real`, or
-  have default values.
+  `real`, and unpacked structs as ports, nets, parameters, static, `rand` or
+  `const` class properties, array or container elements, or with members that
+  are arrays, `real`, or have default values.
 - Sequential processes: `iff` qualifiers in `always_ff` event lists ([#452](https://github.com/celox-sim/celox/issues/452)), and in
   `always_ff` edge operands other than a plain signal ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit
   edge signals, and several edges without an asynchronous reset.

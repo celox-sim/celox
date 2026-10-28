@@ -29,7 +29,7 @@ outline: [2, 3]
 | 式 | `**` を含む算術、論理、シフト、比較、リダクション、連結・複製、`?:`、`inside`、`==?` / `!=?`、キャスト（`N'(x)`、`signed'(x)`、`T'(x)`）、`$signed` / `$unsigned` |
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed・unpacked 構造体、packed 配列、unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
-| クラス | モジュール・package・コンパイル単位で宣言したクラス。64 ビット以下の 2 値・4 値整数型（4 値のプロパティは X で始まり、X/Z ビットを保持します）・`string`・クラスハンドル型のプロパティ（初期値つきも可）、引数あり・なしの `new`、暗黙と明示のコンストラクタ、ハンドル経由またはクラス内から修飾なしで呼ぶメソッド（`function` と `task`、本体をクラス外に書く `extern` も可）、`this`、`null`、ハンドルの代入と比較、プロパティとメソッドの継承（基底クラスのコンストラクタは `super.new(...)` か `extends Base(...)` で呼ぶ）、`super.` によるメンバ参照、virtual メソッド、抽象クラス（`virtual class`）と pure virtual メソッド、interface クラスを実装するクラスと interface クラスのハンドルを通したメソッド呼び出し、関数とタスクとしてのクラスハンドルの `$cast`、static プロパティとメソッド、static メンバと `C::new` の `C::` によるスコープ解決、ハンドルの配列、値パラメータと型パラメータを持つパラメータ付きクラス、ハンドルや `C#(...)::` を通したパラメータの参照、クラスと interface クラスの typedef と `C::T`、名前付きのコンストラクタ引数、浅いコピー（`new h`）。[クラス](#classes)を参照 |
+| クラス | モジュール・package・コンパイル単位で宣言したクラス。64 ビット以下の 2 値・4 値整数型（4 値のプロパティは X で始まり、X/Z ビットを保持します）・`string`・クラスハンドル型と、それらをメンバとする unpacked 構造体（[unpacked 構造体](#unpacked-structures)を参照）のプロパティ（初期値つきも可）、引数あり・なしの `new`、暗黙と明示のコンストラクタ、ハンドル経由またはクラス内から修飾なしで呼ぶメソッド（`function` と `task`、本体をクラス外に書く `extern` も可）、`this`、`null`、ハンドルの代入と比較、プロパティとメソッドの継承（基底クラスのコンストラクタは `super.new(...)` か `extends Base(...)` で呼ぶ）、`super.` によるメンバ参照、virtual メソッド、抽象クラス（`virtual class`）と pure virtual メソッド、interface クラスを実装するクラスと interface クラスのハンドルを通したメソッド呼び出し、関数とタスクとしてのクラスハンドルの `$cast`、static プロパティとメソッド、static メンバと `C::new` の `C::` によるスコープ解決、ハンドルの配列、値パラメータと型パラメータを持つパラメータ付きクラス、ハンドルや `C#(...)::` を通したパラメータの参照、クラスと interface クラスの typedef と `C::T`、名前付きのコンストラクタ引数、浅いコピー（`new h`）。[クラス](#classes)を参照 |
 | 文字列 | `string` 型の変数、関数の引数と戻り値。文字列・文字列リテラル・キャスト（`string'(x)`）の代入、`==` / `!=` と大小比較、連結と複製（実行時の回数も可）、文字の読み書き（`s[i]`）、メソッド `len`、`getc`、`putc`、`toupper`、`tolower`、`compare`、`icompare`、`substr`、`atoi` / `atohex` / `atooct` / `atobin`、`itoa` / `hextoa` / `octtoa` / `bintoa`。`%s` と書式なしの表示。[文字列](#strings)を参照 |
 | パラメータ | 整数のパラメータ、128ビットを超える幅と X/Z を保持するパラメータ上書き、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル）と unpacked 配列のパターンによる上書き |
 
@@ -208,7 +208,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 
 unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列挙型、`string`、
 クラスハンドル、packed 構造体、入れ子の unpacked 構造体を使え、各メンバは自身の
-2 値・4 値の型を保ちます。この型の変数は、モジュール変数、手続き内のローカル変数、
+2 値・4 値の型を保ちます。この型の変数は、モジュール変数、手続き内のローカル変数、クラスプロパティ、
 任意の方向のサブルーチン引数と戻り値にできます。メンバはその型の変数と同じように
 読み書きできます。構造体全体は、同じ型の値との代入と `==`・`!=`・`===`・`!==` による
 比較、`?:` による選択、assignment pattern（`'{a, b}`、`'{m: v, default: d}`、
@@ -221,7 +221,7 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
 その構文を追跡する issue の番号が含まれます。専用の issue がない構文は、フロントエンドの
 ロードマップ [#88](https://github.com/celox-sim/celox/issues/88) を指します。
 
-- [対応範囲](#classes)外のクラスの機能：クラスハンドル以外の変数への `$cast`、クラス内で宣言した列挙定数、クラスパラメータの値としての列挙型・構造体型・共用体型と名前付きの 4 値・文字列定数、package のクラスをモジュール内クラス型で特殊化する機能、`real`・配列・64 ビットを超えるプロパティ、4 値プロパティの乱数化と制約。時間待ちを含む task の static ローカル宣言、再帰呼び出し。
+- [対応範囲](#classes)外のクラスの機能：クラスハンドル以外の変数への `$cast`、クラス内で宣言した列挙定数、クラスパラメータの値としての列挙型・構造体型・共用体型と名前付きの 4 値・文字列定数、package のクラスをモジュール内クラス型で特殊化する機能、`real`・配列・64 ビットを超えるプロパティ、プロパティ（unpacked 構造体型のプロパティのメンバを含む）のビット選択・部分選択と packed 構造体メンバ、`output` / `inout` 引数としてのプロパティ、4 値プロパティの乱数化と制約。時間待ちを含む task の static ローカル宣言、再帰呼び出し。
 - `inout` / `ref` / 式を使う modport、virtual interface など。
   ANSI ヘッダーのポートは、クロック入力やパラメータ依存の幅も含めて modport 経由で渡せます。
   interface 自体と入れ子の interface は対応しています。型パラメータはインスタンスごとに解決し、modport ポート経由でも伝搬します。
@@ -236,7 +236,7 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート式（`module m({a, b}, c[3:0], .p(d))` など、[#1953](https://github.com/celox-sim/celox/issues/1953)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
-- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、`real`、ポート・ネット・パラメータ・クラスプロパティ・配列やコンテナの要素としての unpacked 構造体、配列・`real`・既定値を持つメンバ。
+- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、`real`、ポート・ネット・パラメータ・static / `rand` / `const` のクラスプロパティ・配列やコンテナの要素としての unpacked 構造体、配列・`real`・既定値を持つメンバ。
 - 順序回路のプロセス：`always_ff` のイベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）、および `always_ff` での
   単純な信号以外のエッジオペランド（[#464](https://github.com/celox-sim/celox/issues/464)）、複数ビットのエッジ信号、
   非同期リセットを持たない複数のエッジ。
