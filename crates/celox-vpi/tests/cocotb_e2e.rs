@@ -719,3 +719,83 @@ fn cocotb_uses_declared_force_targets_in_an_optimized_native_image() {
 fn cocotb_indexes_unpacked_arrays_and_observes_element_changes() {
     check_cocotb_native_design(&["arrays.sv"], "test_arrays", "indexes_unpacked_arrays");
 }
+/// Configuration discovery must support both cocotb layouts, use the CLI
+/// fallback when loaded-library lookup is unavailable, and honor request flags.
+#[test]
+#[ignore = "requires a Python interpreter; CI runs cocotb tests explicitly"]
+fn cocotb_configuration_discovery_preserves_fallbacks_and_overrides() {
+    let python = env::var_os("CELOX_COCOTB_PYTHON")
+        .expect("CELOX_COCOTB_PYTHON must name the cocotb Python interpreter");
+    let temporary = tempfile::tempdir().unwrap();
+    let package = temporary.path().join("cocotb_tools");
+    fs::create_dir(&package).unwrap();
+    fs::write(package.join("__init__.py"), "").unwrap();
+    // Simulate a platform without dladdr so the public cocotb CLI fallback
+    // is exercised even on hosts that support direct loaded-library lookup.
+    fs::write(temporary.path().join("ctypes.py"), "").unwrap();
+    let script = format!(
+        "import sys; sys.path.insert(0, {}); exec({})",
+        serde_json::to_string(&temporary.path().to_string_lossy()).unwrap(),
+        serde_json::to_string(include_str!("../src/cocotb_config.py")).unwrap()
+    );
+    let run = |flags: [&str; 3]| {
+        let output = Command::new(&python)
+            .args(["-c", &script])
+            .args(flags)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let fallback = r#"
+import sys
+from pathlib import Path
+
+def lib_name_path(interface, simulator):
+    assert (interface, simulator) == ("vpi", "icarus")
+    return Path("adapter.vpl")
+
+def main():
+    assert sys.argv[1:] == ["--libpython"]
+    print("libpython.so")
+"#;
+    fs::write(package.join("config.py"), fallback).unwrap();
+    let old = run(["1", "1", "1"]);
+    assert_eq!(old["vpi"], "adapter.vpl");
+    assert_eq!(old["libpython"], "libpython.so");
+    assert!(old["pygpi_entry_point"].is_null());
+    fs::write(
+        package.join("config.py"),
+        format!("{fallback}\ndef pygpi_entry_point():\n    return 'simulator.so,initialize'\n"),
+    )
+    .unwrap();
+    let new = run(["1", "1", "1"]);
+    assert_eq!(new["pygpi_entry_point"], "simulator.so,initialize");
+    let partial = run(["0", "1", "0"]);
+    assert!(partial["vpi"].is_null());
+    assert_eq!(partial["libpython"], "libpython.so");
+    assert!(partial["pygpi_entry_point"].is_null());
+    let partial = run(["1", "0", "1"]);
+    assert_eq!(partial["vpi"], "adapter.vpl");
+    assert!(partial["libpython"].is_null());
+    assert_eq!(partial["pygpi_entry_point"], "simulator.so,initialize");
+    // An entirely explicit configuration must not import cocotb at all.
+    fs::write(
+        package.join("config.py"),
+        "raise RuntimeError('unexpected configuration import')\n",
+    )
+    .unwrap();
+    let explicit = run(["0", "0", "0"]);
+    assert!(
+        explicit["python"]
+            .as_str()
+            .is_some_and(|path| !path.is_empty())
+    );
+    assert!(explicit["vpi"].is_null());
+    assert!(explicit["libpython"].is_null());
+    assert!(explicit["pygpi_entry_point"].is_null());
+}
