@@ -1,0 +1,1 @@
+Review fix: a default record is the null handle, so equal updates of new[] elements keep the container.
