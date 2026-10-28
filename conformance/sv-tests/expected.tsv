@@ -2637,8 +2637,8 @@ generated/sampled_functions/20.13--rose.sv	2state	fail
 generated/sampled_functions/20.13--rose.sv	4state	fail
 generated/sampled_functions/20.13--rose_gclk.sv	2state	fail
 generated/sampled_functions/20.13--rose_gclk.sv	4state	fail
-generated/sampled_functions/20.13--sampled.sv	2state	fail
-generated/sampled_functions/20.13--sampled.sv	4state	fail
+generated/sampled_functions/20.13--sampled.sv	2state	pass
+generated/sampled_functions/20.13--sampled.sv	4state	pass
 generated/sampled_functions/20.13--stable.sv	2state	fail
 generated/sampled_functions/20.13--stable.sv	4state	fail
 generated/sampled_functions/20.13--stable_gclk.sv	2state	fail
