@@ -26,6 +26,7 @@
     "xezim/real_extensions.json",
     "xezim/real_math.json",
     "xezim/realtime.json",
+    "xezim/references.json",
     "xezim/review_regressions.json",
     "xezim/scan.json",
     "xezim/string.json",

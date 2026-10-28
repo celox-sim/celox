@@ -13,6 +13,7 @@ mod final_procedures;
 mod foreach;
 use foreach::ForeachLoop;
 pub(super) mod randomization;
+pub(super) mod references;
 pub(super) mod timed_tasks;
 mod timing;
 use crate::procedural::{
@@ -2305,6 +2306,19 @@ pub(super) fn lower_subroutine(
         // Methods are automatic (IEEE 1800-2023 8.6).
         None => builder.automatic || class.is_some(),
     };
+    if !builder.automatic
+        && let Some((argument, ..)) = params
+            .iter()
+            .find(|(_, direction, ..)| direction.is_reference())
+    {
+        return Err(AnalyzerError::InvalidRefArgument {
+            subroutine: name.clone(),
+            argument: argument.clone(),
+            detail: "a subroutine with a static lifetime cannot pass arguments by reference \
+                     (IEEE 1800-2023 13.5.2)"
+                .into(),
+        });
+    }
     let first_static = builder.state.statics.len();
     builder.push_scope();
     if let Some(class) = class {

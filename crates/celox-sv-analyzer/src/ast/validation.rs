@@ -829,24 +829,6 @@ fn validate_scope(
             return Err(unsupported("wildcard port connection"));
         }
     }
-    for index in spans.subroutines.within(&ranges) {
-        let function = &native.subroutines[index];
-        if selected(function.tokens)
-            && function
-                .ports
-                .iter()
-                .flatten()
-                .chain(
-                    function
-                        .port_declarations
-                        .iter()
-                        .flat_map(|declaration| &declaration.ports),
-                )
-                .any(|port| port.direction == Some(celox_sv_syntax::Direction::Ref))
-        {
-            return Err(unsupported("ref function argument"));
-        }
-    }
     for id in spans.types.within(&ranges) {
         let data = native.data_type(id);
         if !selected(data.tokens) {
