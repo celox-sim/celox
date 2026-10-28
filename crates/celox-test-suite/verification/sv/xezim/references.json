@@ -1,0 +1,202 @@
+{
+  "cases": [
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::const_ref_in_a_continuous_assignment",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "references::const_ref_reads_the_current_value at 135:2: assert_eq q: expected 0x9, got 0x1",
+      "expectation": "Simulation",
+      "name": "references::const_ref_reads_the_current_value",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_actual_of_an_equivalent_type",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "references::ref_array_element_index_is_fixed_at_the_call at 296:2: assert_eq e1: expected 0xd, got 0x2",
+      "expectation": "Simulation",
+      "name": "references::ref_array_element_index_is_fixed_at_the_call",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_class_property_names_the_object_of_the_call",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "references::ref_default_and_named_arguments at 179:2: assert_eq h_out: expected 0xc, got 0xb",
+      "expectation": "Simulation",
+      "name": "references::ref_default_and_named_arguments",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "references::ref_element_after_an_input_in_forked_activations at 407:2: assert_eq q: expected 0x3502, got 0x47a4",
+      "expectation": "Simulation",
+      "name": "references::ref_element_after_an_input_in_forked_activations",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "references::ref_element_select_past_the_element at 386:2: assert_eq kept: expected 0x5, got 0x0",
+      "expectation": "Simulation",
+      "name": "references::ref_element_select_past_the_element",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "references::ref_elements_of_concurrent_task_activations at 318:2: assert_eq q: expected 0x3502, got 0x47a4",
+      "expectation": "Simulation",
+      "name": "references::ref_elements_of_concurrent_task_activations",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_fills_caller_queues",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "references::ref_formals_of_one_actual_alias_each_other at 38:2: assert_eq b_seen: expected 0x5, got 0x0",
+      "expectation": "Simulation",
+      "name": "references::ref_formals_of_one_actual_alias_each_other",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_property_forwarded_to_output_and_inout",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_property_of_this",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_replaces_a_class_handle",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_static_class_properties",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "references::ref_task_keeps_a_property_while_suspended at 262:2: assert_eq q: expected 0x6e, got 0xb",
+      "expectation": "Simulation",
+      "name": "references::ref_task_keeps_a_property_while_suspended",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "references::ref_task_keeps_the_reference_while_suspended at 60:2: assert_eq late: expected 0x7, got 0x3",
+      "expectation": "Simulation",
+      "name": "references::ref_task_keeps_the_reference_while_suspended",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "references::ref_writes_are_seen_before_the_return at 23:2: assert_eq seen: expected 0xb, got 0xa",
+      "expectation": "Simulation",
+      "name": "references::ref_writes_are_seen_before_the_return",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

@@ -1,0 +1,407 @@
+(group references (category functions))
+
+; IEEE 1800-2023 13.5.2: a ref or const ref formal is the actual itself, not a
+; copy. Writes through it are seen at once, other names of the actual alias it,
+; and a task keeps the reference while it is suspended.
+
+(case ref_writes_are_seen_before_the_return
+ (source "ref_writes_are_seen_before_the_return.sv" #"module Top(output int q, output int seen);
+ int g;
+ function automatic void bump(ref int x);
+  x = x + 1;
+  seen = g;
+ endfunction
+ initial begin
+  g = 10;
+  bump(g);
+  q = g;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq q 11)
+ (assert_eq seen 11))
+
+(case ref_formals_of_one_actual_alias_each_other
+ (source "ref_formals_of_one_actual_alias_each_other.sv" #"module Top(output int q, output int b_seen);
+ int g;
+ function automatic void f(ref int a, ref int b);
+  a = 5;
+  b_seen = b;
+  b = a + 1;
+ endfunction
+ initial begin f(g, g); q = g; end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq q 6)
+ (assert_eq b_seen 5))
+
+(case ref_task_keeps_the_reference_while_suspended
+ (source "ref_task_keeps_the_reference_while_suspended.sv" #"
+module Top(output int early, output int late, output int q);
+ task automatic watch(ref int x);
+  #1 early = x;
+  #4 late = x;
+  x = x + 100;
+ endtask
+ initial begin
+  automatic int local_value = 3;
+  fork
+   watch(local_value);
+   begin #2 local_value = 7; end
+  join
+  q = local_value;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq early 3)
+ (assert_eq late 7)
+ (assert_eq q 107))
+
+(case ref_fills_caller_queues
+ (source "ref_fills_caller_queues.sv" #"module Top(output int count, output int total, output int names);
+ function automatic void fill(ref int values[$], ref string paths[$], input int n);
+  for (int i = 1; i <= n; i++) begin
+   values.push_back(i);
+   paths.push_back("p");
+  end
+ endfunction
+ function automatic void forward(ref int values[$], ref string paths[$]);
+  fill(values, paths, 2);
+ endfunction
+ initial begin
+  automatic int q[$];
+  automatic string s[$];
+  fill(q, s, 3);
+  forward(q, s);
+  count = q.size();
+  total = 0;
+  foreach (q[i]) total += q[i];
+  names = s.size();
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq count 5)
+ (assert_eq total 9)
+ (assert_eq names 5))
+
+(case ref_replaces_a_class_handle
+ (source "ref_replaces_a_class_handle.sv" #"module Top(output int q, output int same);
+ class Item;
+  int value;
+  function new(int v); value = v; endfunction
+ endclass
+ function automatic void make(ref Item item, input int v);
+  item = new(v);
+ endfunction
+ initial begin
+  automatic Item h = new(1);
+  automatic Item old = h;
+  make(h, 42);
+  q = h.value;
+  same = h == old;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq q 42)
+ (assert_eq same 0))
+
+(case const_ref_reads_the_current_value
+ (source "const_ref_reads_the_current_value.sv" #"module Top(output int q, output int sum);
+ int g;
+ int a[4];
+ function automatic int observe(const ref int x);
+  g = 9;
+  return x;
+ endfunction
+ function automatic int total(const ref int values[4]);
+  int s = 0;
+  foreach (values[i]) s += values[i];
+  return s;
+ endfunction
+ initial begin
+  g = 1;
+  a = '{1, 2, 3, 4};
+  q = observe(g);
+  sum = total(a);
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq q 9)
+ (assert_eq sum 10))
+
+(case const_ref_in_a_continuous_assignment
+ (source "const_ref_in_a_continuous_assignment.sv" #"
+module Top(output int early, output int late);
+ int g = 3;
+ int r;
+ function automatic int next(const ref int x);
+  return x + 1;
+ endfunction
+ assign r = next(g);
+ initial begin
+  #1 early = r;
+  g = 7;
+  #1 late = r;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 5)
+ (assert_eq early 4)
+ (assert_eq late 8))
+
+(case ref_default_and_named_arguments
+ (source "ref_default_and_named_arguments.sv" #"module Top(output int q, output int h_out);
+ int g = 1;
+ int h = 10;
+ function automatic void inc(ref int x = g);
+  x++;
+ endfunction
+ function automatic void move(ref int a, ref int b);
+  a += b;
+  b = 0;
+ endfunction
+ initial begin
+  inc();
+  move(.b(g), .a(h));
+  q = g;
+  h_out = h;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq q 0)
+ (assert_eq h_out 12))
+
+(case ref_actual_of_an_equivalent_type
+ (source "ref_actual_of_an_equivalent_type.sv" #"module Top(output int q);
+ bit signed [31:0] word;
+ function automatic void set(ref int x);
+  x = -5;
+ endfunction
+ initial begin set(word); q = word == -5 && word < 0; end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq q 1))
+
+(case ref_class_property_names_the_object_of_the_call
+ (source "ref_class_property_names_the_object_of_the_call.sv" #"module Top(output int first, output int second, output int names);
+ class Node;
+  int count;
+  string labels[$];
+  function new(int c); count = c; endfunction
+ endclass
+ function automatic void retarget(ref int x, ref Node node);
+  node = new(77);
+  x = 9;
+ endfunction
+ function automatic void label(ref string out[$]);
+  out.push_back("a");
+  out.push_back("b");
+ endfunction
+ initial begin
+  automatic Node node = new(1);
+  automatic Node old = node;
+  retarget(node.count, node);
+  label(old.labels);
+  first = old.count;
+  second = node.count;
+  names = old.labels.size();
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq first 9)
+ (assert_eq second 77)
+ (assert_eq names 2))
+
+(case ref_property_of_this
+ (source "ref_property_of_this.sv" #"module Top(output int q);
+ function automatic void bump(ref int x);
+  x = x + 1;
+ endfunction
+ class Counter;
+  int value;
+  function void twice();
+   bump(value);
+   bump(this.value);
+  endfunction
+ endclass
+ initial begin
+  automatic Counter c = new;
+  c.twice();
+  q = c.value;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq q 2))
+
+(case ref_task_keeps_a_property_while_suspended
+ (source "ref_task_keeps_a_property_while_suspended.sv" #"module Top(output int q);
+ class Node; int count; endclass
+ task automatic later(ref int x);
+  #2 x = x + 10;
+ endtask
+ initial begin
+  automatic Node k = new;
+  k.count = 1;
+  fork later(k.count); join_none
+  #1 k.count = 100;
+  #3 q = k.count;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 110))
+
+(case ref_array_element_index_is_fixed_at_the_call
+ (source "ref_array_element_index_is_fixed_at_the_call.sv" #"module Top(output int e1, output int e3, output int row_sum, output int swapped);
+ int arr[4];
+ int m[2][3];
+ int i;
+ function automatic void bump(ref int x);
+  x = x + 10;
+  i = 3;
+  x = x + 1;
+ endfunction
+ function automatic void row(ref int r[3]);
+  foreach (r[k]) r[k] = k + 7;
+ endfunction
+ function automatic void swap(ref int a, ref int b);
+  int t = a;
+  a = b;
+  b = t;
+ endfunction
+ initial begin
+  arr = '{1, 2, 3, 4};
+  i = 1;
+  bump(arr[i]);
+  e1 = arr[1];
+  e3 = arr[3];
+  row(m[1]);
+  row_sum = m[1][0] + m[1][1] + m[1][2] + m[0][0];
+  swap(arr[0], arr[3]);
+  swapped = arr[0] * 10 + arr[3];
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq e1 13)
+ (assert_eq e3 4)
+ (assert_eq row_sum 24)
+ (assert_eq swapped 41))
+
+(case ref_elements_of_concurrent_task_activations
+ (source "ref_elements_of_concurrent_task_activations.sv" #"module Top(output int q);
+ int arr[4];
+ task automatic add_later(ref int x, input int d);
+  #(d) x = x + d;
+ endtask
+ initial begin
+  arr = '{10, 20, 30, 40};
+  for (int k = 0; k < 3; k++) begin
+   automatic int j = k;
+   fork add_later(arr[j], j + 1); join_none
+  end
+  #5 q = arr[0] * 1000 + arr[1] * 100 + arr[2] * 10 + arr[3];
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 13570))
+
+(case ref_static_class_properties
+ (source "ref_static_class_properties.sv" #"module Top(output int count, output int inst);
+ function automatic void bump(ref int x);
+  x++;
+ endfunction
+ class Counter;
+  static int total;
+  int own;
+  function void go();
+   bump(total);
+   bump(Counter::total);
+   bump(own);
+  endfunction
+ endclass
+ initial begin
+  automatic Counter c = new;
+  c.go();
+  bump(Counter::total);
+  count = Counter::total;
+  inst = c.own;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq count 3)
+ (assert_eq inst 1))
+
+(case ref_property_forwarded_to_output_and_inout
+ (source "ref_property_forwarded_to_output_and_inout.sv" #"module Top(output int q);
+ class Item; int value; endclass
+ function automatic void set(output int y);
+  y = 21;
+ endfunction
+ function automatic void twice(inout int y);
+  y = y * 2;
+ endfunction
+ function automatic void forward(ref int x);
+  set(x);
+  twice(x);
+ endfunction
+ initial begin
+  automatic Item item = new;
+  forward(item.value);
+  q = item.value;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq q 42))
+
+(case ref_element_select_past_the_element
+ (source "ref_element_select_past_the_element.sv" #"module Top(output int kept, output int past, output int next_row);
+ int m[2][3];
+ function automatic int touch(ref int r[3]);
+  r[3] = 99;
+  r[1] = 5;
+  return r[3];
+ endfunction
+ initial begin
+  past = touch(m[0]);
+  kept = m[0][1];
+  next_row = m[1][0];
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq kept 5)
+ (assert_eq past 0)
+ (assert_eq next_row 0))
+
+(case ref_element_after_an_input_in_forked_activations
+ (source "ref_element_after_an_input_in_forked_activations.sv" #"module Top(output int q);
+ int arr[4];
+ task automatic add_later(input int d, ref int x);
+  #(d) x = x + d;
+ endtask
+ initial begin
+  arr = '{10, 20, 30, 40};
+  for (int k = 0; k < 3; k++) begin
+   automatic int j = k;
+   fork add_later(j + 1, arr[j]); join_none
+  end
+  #5 q = arr[0] * 1000 + arr[1] * 100 + arr[2] * 10 + arr[3];
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 13570))

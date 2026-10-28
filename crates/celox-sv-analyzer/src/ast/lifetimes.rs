@@ -747,7 +747,7 @@ impl Flow<'_> {
                 Stmt::AssignConcat { parts, .. } => {
                     writes |= parts.iter().any(|part| part.name() == self.name)
                 }
-                // A task may write an output or inout argument; one of a
+                // A task may write an output, inout, or ref argument; one of a
                 // subroutine whose directions are unknown may be either.
                 Stmt::Call { name, args, .. } => {
                     let directions = self.directions.get(name);
@@ -755,15 +755,13 @@ impl Flow<'_> {
                         arg.as_ref().is_some_and(|arg| expr_reads(arg, self.name))
                             && directions
                                 .and_then(|directions| directions.get(index))
-                                .is_none_or(|direction| {
-                                    *direction != crate::procedural::ParamDirection::Input
-                                })
+                                .is_none_or(|direction| direction.is_written())
                     })
                 }
                 _ => {}
             });
-            // A function called in an expression may write an output or
-            // inout argument too.
+            // A function called in an expression may write an output,
+            // inout, or ref argument too.
             stmt.walk(&mut |stmt| {
                 for expr in stmt_exprs(stmt) {
                     writes |= self.call_writes(expr);
@@ -774,7 +772,7 @@ impl Flow<'_> {
     }
 
     /// Whether a function called in `expr` writes the local through an
-    /// output or inout argument.
+    /// output, inout, or ref argument.
     fn call_writes(&self, expr: &Expr) -> bool {
         let mut writes = false;
         visit_calls(expr, &mut |callee, args| {
@@ -786,9 +784,7 @@ impl Flow<'_> {
                 arg.as_ref().is_some_and(|arg| expr_reads(arg, self.name))
                     && directions
                         .and_then(|directions| directions.get(index))
-                        .is_some_and(|direction| {
-                            *direction != crate::procedural::ParamDirection::Input
-                        })
+                        .is_some_and(|direction| direction.is_written())
             });
         });
         writes
@@ -916,7 +912,7 @@ pub(super) fn visit_calls<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Callee, &'e
     }
 }
 
-fn expr_reads(expr: &Expr, name: &str) -> bool {
+pub(super) fn expr_reads(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Ident(ident) => ident == name,
         Expr::Literal(_) => false,
