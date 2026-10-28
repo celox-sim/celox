@@ -1767,7 +1767,11 @@ mod host {
         program: &crate::ir::RuntimeProgram,
     ) -> Result<(), SimulatorError> {
         let schema = &program.runtime_schema;
-        if schema.processes.is_empty() {
+        if schema
+            .processes
+            .iter()
+            .all(|process| process.kind == celox_design::ProcessKind::Callable)
+        {
             return Ok(());
         }
         let origin = schema.process_origins.first().cloned().unwrap_or_default();
