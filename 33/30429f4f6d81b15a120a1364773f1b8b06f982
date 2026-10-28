@@ -1,0 +1,1 @@
+Bind class signatures from a settled discovery of the scope's own declarations instead of the fixed base, and publish only class method entries, per review 4399250380; add class::method_ranges_of_scope_declarations.
