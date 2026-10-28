@@ -4567,3 +4567,163 @@ fn value_buffers_preserve_formats_and_independent_pointer_lifetimes() {
         }
     }
 }
+
+/// All writable formats must agree at narrow/wide boundaries, including
+/// truncation, signed extension and two-state conversion of X/Z bits.
+#[cfg(feature = "systemverilog")]
+#[test]
+fn deposits_preserve_formats_at_word_boundaries() {
+    let _serial = lock_vpi();
+    let widths = [1usize, 3, 8, 9, 31, 32, 33, 63, 64, 65, 129];
+    let ports = widths
+        .iter()
+        .flat_map(|width| {
+            [
+                format!("input logic [{}:0] p{width}", width - 1),
+                format!("output logic [{}:0] q{width}", width - 1),
+            ]
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let assignments = widths
+        .iter()
+        .map(|width| format!("assign q{width}=p{width};"))
+        .collect::<String>();
+    let source = format!("module Top({ports}); {assignments} endmodule");
+    for four_state in [false, true] {
+        let simulator = Simulator::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("deposit_words.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .opt_level(celox::OptLevel::O1)
+        .build()
+        .unwrap();
+        let _session = install_runtime(trusted_instance(
+            simulator.shared_code().program_image().clone(),
+        ))
+        .unwrap();
+        for width in widths {
+            let name = std::ffi::CString::new(format!("Top.p{width}")).unwrap();
+            // Safety: this session owns the live handle. Each format's input
+            // storage remains readable through the synchronous deposit.
+            unsafe {
+                let handle = vpi_handle_by_name(name.as_ptr(), ptr::null_mut());
+                assert!(!handle.is_null());
+                let check = |value: &VpiValue, expected: &str| {
+                    assert_eq!(
+                        vpi_put_value(handle, value, ptr::null(), VPI_NO_DELAY),
+                        handle
+                    );
+                    let mut read = VpiValue {
+                        format: VPI_BIN_STR_VAL,
+                        value: VpiValueData { integer: 0 },
+                    };
+                    vpi_get_value(handle, &mut read);
+                    assert_eq!(
+                        CStr::from_ptr(read.value.str_).to_str().unwrap(),
+                        expected,
+                        "width={width}, four_state={four_state}, format={}",
+                        value.format
+                    );
+                };
+                for integer in [0i32, -1, -2, 0x5a87_6543] {
+                    let expected = (0..width)
+                        .rev()
+                        .map(|bit| {
+                            let set = if bit >= 32 {
+                                integer < 0
+                            } else {
+                                (integer as u32 >> bit) & 1 != 0
+                            };
+                            if set { '1' } else { '0' }
+                        })
+                        .collect::<String>();
+                    check(
+                        &VpiValue {
+                            format: VPI_INT_VAL,
+                            value: VpiValueData { integer },
+                        },
+                        &expected,
+                    );
+                }
+                let vector = (0..width.div_ceil(32))
+                    .map(|word| VpiVecVal {
+                        aval: 0x96a5_3cf0u32.rotate_left(word as u32 * 7) as i32,
+                        bval: 0xf30c_5a96u32.rotate_right(word as u32 * 5) as i32,
+                    })
+                    .collect::<Vec<_>>();
+                let expected = (0..width)
+                    .rev()
+                    .map(|bit| {
+                        let word = vector[bit / 32];
+                        let a = ((word.aval as u32 >> (bit % 32)) & 1) != 0;
+                        let b = ((word.bval as u32 >> (bit % 32)) & 1) != 0;
+                        match (a, b, four_state) {
+                            (_, true, false) => '0',
+                            (true, true, true) => 'x',
+                            (false, true, true) => 'z',
+                            (true, false, _) => '1',
+                            _ => '0',
+                        }
+                    })
+                    .collect::<String>();
+                check(
+                    &VpiValue {
+                        format: VPI_VECTOR_VAL,
+                        value: VpiValueData {
+                            vector: vector.as_ptr().cast_mut(),
+                        },
+                    },
+                    &expected,
+                );
+                // The long strings exercise discarded prefixes as well as
+                // partial high nibbles; mixed case and separators are valid.
+                for (format, text, expanded) in [
+                    (VPI_BIN_STR_VAL, "10_xZ01".repeat(40), "10xz01".repeat(40)),
+                    (
+                        VPI_HEX_STR_VAL,
+                        "aF_xZ01".repeat(40),
+                        "10101111xxxxzzzz00000001".repeat(40),
+                    ),
+                ] {
+                    let expected = expanded[expanded.len() - width..]
+                        .chars()
+                        .map(|c| {
+                            if !four_state && matches!(c, 'x' | 'z') {
+                                '0'
+                            } else {
+                                c
+                            }
+                        })
+                        .collect::<String>();
+                    let input = std::ffi::CString::new(text).unwrap();
+                    check(
+                        &VpiValue {
+                            format,
+                            value: VpiValueData {
+                                str_: input.as_ptr().cast_mut(),
+                            },
+                        },
+                        &expected,
+                    );
+                    let invalid = std::ffi::CString::new(format!("!{}", "0".repeat(200))).unwrap();
+                    let value = VpiValue {
+                        format,
+                        value: VpiValueData {
+                            str_: invalid.as_ptr().cast_mut(),
+                        },
+                    };
+                    assert!(vpi_put_value(handle, &value, ptr::null(), VPI_NO_DELAY).is_null());
+                    let mut read = VpiValue {
+                        format: VPI_BIN_STR_VAL,
+                        value: VpiValueData { integer: 0 },
+                    };
+                    vpi_get_value(handle, &mut read);
+                    assert_eq!(CStr::from_ptr(read.value.str_).to_str().unwrap(), expected);
+                }
+                vpi_free_object(handle);
+            }
+        }
+    }
+}
