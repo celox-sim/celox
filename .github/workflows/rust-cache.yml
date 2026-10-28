@@ -1,8 +1,11 @@
 name: Warm Rust dependency cache
 
 # PR merge-ref caches cannot be reused by other PRs. Populate the default
-# branch cache on dependency changes and periodically repair eviction. Cache hits
-# skip compilation, and warming never executes the test suite.
+# branch cache of every CI job that uses rust-cache on dependency changes and
+# periodically repair eviction. Each job here has the CI job's ID, runner,
+# toolchain targets and rust-cache inputs, so it computes the same key
+# (scripts/ci-workflow.test.mjs checks this). Cache hits skip compilation, and
+# warming never executes the test suite.
 on:
   push:
     branches: [master]
@@ -101,3 +104,174 @@ jobs:
       - name: Build NAPI with the CI command
         if: steps.cache.outputs.cache-hit != 'true'
         run: pnpm run build:napi
+
+  lint:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: Populate lint dependency cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+      - name: Build Clippy dependencies with the CI command
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: >-
+          cargo clippy --locked --workspace --exclude lydite-celox --all-targets
+          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim
+          --no-deps
+      - name: Build documentation dependencies with the CI command
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo doc --locked --workspace --exclude lydite-celox --no-deps
+
+  sv-tests:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: Populate sv-tests dependency cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+      - name: Build the Celox single-case driver with the CI command
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo build --locked --release -p celox --features systemverilog --example sv_tests
+
+  common-cells:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: Populate upstream testbench dependency cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+      - name: Build the SystemVerilog CLI with the CI command
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo build --locked -p celox-vpi --features systemverilog --bin celox
+
+  napi-linux:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: Populate Linux NAPI dependency cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+        with:
+          shared-key: ci-napi-linux
+      - uses: pnpm/action-setup@v6
+        if: steps.cache.outputs.cache-hit != 'true'
+      - uses: actions/setup-node@v7
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          node-version: 26
+          cache: pnpm
+      - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build NAPI with the CI command
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: pnpm run build:napi
+
+  napi-wasm:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: Populate NAPI WASM dependency cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-rust
+        with:
+          targets: wasm32-wasip1-threads
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+        with:
+          shared-key: ci-napi-wasm
+      - uses: pnpm/action-setup@v6
+        if: steps.cache.outputs.cache-hit != 'true'
+      - uses: actions/setup-node@v7
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          node-version: 26
+          cache: pnpm
+      - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Install WASI SDK
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz | tar xz -C /opt
+          echo "WASI_SDK_PATH=/opt/wasi-sdk-25.0-x86_64-linux" >> "$GITHUB_ENV"
+          echo "CC_wasm32_wasip1_threads=/opt/wasi-sdk-25.0-x86_64-linux/bin/clang" >> "$GITHUB_ENV"
+      - name: Build NAPI WASM with the CI command
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: pnpm --filter @celox-sim/celox-napi exec napi build --platform --target wasm32-wasip1-threads --manifest-path ../../Cargo.toml -p celox-napi
+
+  arm64-backend:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: Populate ARM64 backend dependency cache
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+      - name: Build ARM64 backend lint and test dependencies with the CI commands
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          cargo clippy --locked -p celox-backend-common -p celox-backend-arm64 --all-targets --no-deps
+          cargo test --locked -p celox-backend-common -p celox-backend-arm64 --no-run
+          cargo check --locked -p celox -p celox-bench
+          cargo test --locked -p celox --lib --test native_exec --no-run
+          cargo test --locked -p celox --features systemverilog,cranelift,wasm-runtime,wasm-component,veryl-reference --test systemverilog --no-run
+          cargo check --locked -p celox -p celox-bench --no-default-features --features x86_64-codegen
+
+  napi-linux-arm64:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: Populate Linux ARM64 NAPI dependency cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-rust
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+      - uses: pnpm/action-setup@v6
+        if: steps.cache.outputs.cache-hit != 'true'
+      - uses: actions/setup-node@v7
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          node-version: 26
+          cache: pnpm
+      - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build NAPI (Linux ARM64 GNU) with the CI command
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: crates/celox-napi
+        env:
+          CARGO_BUILD_TARGET: aarch64-unknown-linux-gnu
+        run: npx napi build --platform --manifest-path ../../Cargo.toml -p celox-napi --target aarch64-unknown-linux-gnu --use-napi-cross
