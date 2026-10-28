@@ -754,10 +754,11 @@ impl StringOp {
     }
 
     /// The width and signedness of the result; a string is a 32-bit handle.
+    /// A character is a `byte`, which is signed (6.16, 6.11).
     pub fn result_type(self) -> (usize, bool) {
         match self {
             Self::Compare | Self::ICompare | Self::Len | Self::Atoi(_) => (32, true),
-            Self::Getc => (8, false),
+            Self::Getc => (8, true),
             _ => (32, false),
         }
     }

@@ -1,0 +1,29 @@
+{
+  "case": "string::characters_are_signed_bytes",
+  "source": "src/sv/cases/string.vtest",
+  "method": "Standalone source run with verilator --binary, iverilog -g2012 -s Top / vvp -n, and xezim -s Top.",
+  "standard": "IEEE 1800-2023 6.16: a single character of a string variable is of type byte; 6.11: byte is signed; 6.16.3: getc returns byte.",
+  "reduced_source": "module Top;\n    string s;\n    int n;\n    initial begin\n        s = {string'(8'hff), \"A\"};\n        n = s[0];\n        $display(\"%0d %0d %0d\", n, s[0], s[0] < 0);\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "255 255 0\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stdout": "255 255 0\n",
+      "note": "The shared case also calls getc, which Icarus does not implement (sv_icarus_string_methods)."
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "-1 -1 1\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "-1 -1 1\n"
+    }
+  ]
+}
